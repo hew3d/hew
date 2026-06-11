@@ -1,0 +1,12 @@
+[package]
+name = "wasm-api"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kernel.workspace = true
+tessellate.workspace = true
+wasm-bindgen.workspace = true

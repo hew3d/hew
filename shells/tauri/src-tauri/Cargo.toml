@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "hew-desktop"
+version = "0.1.0"
+edition = "2021"
+# edition 2024 is not yet supported by tauri-build; 2021 is current Tauri v2 default.
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.2", features = [] }

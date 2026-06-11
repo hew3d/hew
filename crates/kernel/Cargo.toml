@@ -1,0 +1,10 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+slotmap.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,7 @@
+[package]
+name = "tessellate"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kernel.workspace = true

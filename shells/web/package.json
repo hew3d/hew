@@ -1,0 +1,8 @@
+{
+  "name": "hew-web",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "build": "pnpm --dir ../../app build && rm -rf dist && cp -R ../../app/dist dist"
+  }
+}
