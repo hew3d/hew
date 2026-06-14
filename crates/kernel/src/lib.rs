@@ -15,6 +15,7 @@
 //! `tests/op_specs.rs`.
 
 mod build;
+mod geom2d;
 mod validate;
 
 pub mod error;

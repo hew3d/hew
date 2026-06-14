@@ -8,5 +8,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 kernel.workspace = true
+inference.workspace = true
 tessellate.workspace = true
+slotmap.workspace = true
 wasm-bindgen.workspace = true
+# Routes Rust panics to console.error with the real message + location, so a
+# kernel panic shows up as something diagnosable instead of bare "unreachable".
+console_error_panic_hook = "0.1"

@@ -6,7 +6,7 @@
 //! `ObjectId::default()` (the null key) is a legitimate tag here — the scene
 //! treats ids as opaque labels.
 
-use inference::{InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery};
+use inference::{ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery};
 use kernel::{Object, ObjectId, Point3, Transform, Vec3, tol};
 
 const WIDE: f64 = 0.3; // generous pick-cone half-angle (radians)
@@ -64,7 +64,6 @@ fn resolve(scene: &InferenceScene, q: SnapQuery) -> Option<Snap> {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::resolve: endpoint snap lands exactly on the vertex"]
 fn endpoint_snap_is_exact() {
     let scene = cube_scene();
     let eye = Point3::new(3.0, 3.0, 3.0);
@@ -83,7 +82,6 @@ fn endpoint_snap_is_exact() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::resolve: priority — endpoint beats everything in the cone"]
 fn endpoint_outranks_weaker_snaps() {
     let scene = cube_scene();
     // A wide cone aimed at the top face sees vertices, edges, midpoints,
@@ -100,7 +98,6 @@ fn endpoint_outranks_weaker_snaps() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::resolve: edge midpoints rank above on-edge"]
 fn midpoint_beats_on_edge() {
     let scene = cube_scene();
     // Aim at the midpoint of the top-front edge (0.5, 0, 1) with a cone
@@ -117,7 +114,6 @@ fn midpoint_beats_on_edge() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::resolve: a face interior yields an on-face snap on its plane"]
 fn face_interior_snaps_on_face() {
     let scene = cube_scene();
     // Straight down at the middle of the top face, cone too tight for any
@@ -136,7 +132,6 @@ fn face_interior_snaps_on_face() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::resolve: empty cone over empty space returns None"]
 fn nothing_in_the_cone_returns_none() {
     let scene = cube_scene();
     let eye = Point3::new(10.0, 10.0, 10.0);
@@ -148,7 +143,41 @@ fn nothing_in_the_cone_returns_none() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::resolve: an axis lock projects the result onto the locked line"]
+fn pick_face_returns_the_nearest_face_through_the_ray() {
+    let scene = cube_scene();
+    // Straight down through the cube: the ray crosses the top face (z=1, t=2)
+    // and the bottom face (z=0, t=3). pick_face must return the nearer (top),
+    // regardless of the snap-priority model (which resolve would apply).
+    let ray = ray_at(Point3::new(0.5, 0.5, 3.0), Point3::new(0.5, 0.5, 1.0));
+    let source = scene.pick_face(&ray).expect("ray crosses the cube faces");
+    match source.element {
+        ElementRef::Face(_) => {}
+        other => panic!("expected a face, got {other:?}"),
+    }
+    // It is a top-face pick: re-querying from below must instead pick the
+    // bottom face (different element), proving "nearest" is honored.
+    let from_below = ray_at(Point3::new(0.5, 0.5, -3.0), Point3::new(0.5, 0.5, 0.0));
+    let below = scene
+        .pick_face(&from_below)
+        .expect("ray crosses from below");
+    assert_ne!(source.element, below.element);
+}
+
+#[test]
+fn pick_face_misses_return_none() {
+    let scene = cube_scene();
+    // Aimed well clear of the unit cube.
+    let ray = ray_at(Point3::new(10.0, 10.0, 10.0), Point3::new(20.0, 20.0, 20.0));
+    assert!(scene.pick_face(&ray).is_none());
+    // Degenerate direction is None, not a panic.
+    let degenerate = PickRay {
+        origin: Point3::ORIGIN,
+        direction: Vec3::ZERO,
+    };
+    assert!(scene.pick_face(&degenerate).is_none());
+}
+
+#[test]
 fn axis_lock_projects_onto_the_locked_line() {
     let scene = cube_scene();
     let anchor = Point3::new(0.0, 0.0, 0.0);
@@ -167,7 +196,6 @@ fn axis_lock_projects_onto_the_locked_line() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::add_object/remove_object: removal is complete and idempotent"]
 fn remove_object_clears_candidates_idempotently() {
     let mut scene = cube_scene();
     let (p, s, f) = scene.candidate_counts();
@@ -180,7 +208,6 @@ fn remove_object_clears_candidates_idempotently() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::add_object: re-adding an id replaces, never duplicates"]
 fn re_adding_an_object_replaces_its_candidates() {
     let mut scene = cube_scene();
     let first = scene.candidate_counts();
@@ -189,7 +216,6 @@ fn re_adding_an_object_replaces_its_candidates() {
 }
 
 #[test]
-#[ignore = "spec for InferenceScene::add_object: placement transforms candidates into world space"]
 fn placement_transform_is_applied() {
     let mut scene = InferenceScene::new();
     let shift = Transform::translation(Vec3::new(10.0, 0.0, 0.0));

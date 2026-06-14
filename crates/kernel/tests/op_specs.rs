@@ -224,7 +224,6 @@ fn extrusion_rejects_tiny_distance() {
 
 proptest! {
     #[test]
-    #[ignore = "spec for Object::push_pull: the inverse property (DEVELOPMENT.md rule 3)"]
     fn push_pull_then_inverse_is_identity(distance in 0.1..3.0f64) {
         let original = unit_cube();
         let mut cube = original.clone();
@@ -236,7 +235,6 @@ proptest! {
     }
 
     #[test]
-    #[ignore = "spec for Object::push_pull: coplanar side walls merge"]
     fn pulling_a_box_face_keeps_six_faces(distance in 0.1..3.0f64) {
         let mut cube = unit_cube();
         let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
@@ -252,7 +250,6 @@ proptest! {
 }
 
 #[test]
-#[ignore = "spec for Object::push_pull: removing all material is refused"]
 fn push_through_entire_solid_is_refused() {
     let mut cube = unit_cube();
     let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
@@ -264,7 +261,6 @@ fn push_through_entire_solid_is_refused() {
 }
 
 #[test]
-#[ignore = "spec for Object::push_pull: open objects are rejected"]
 fn push_pull_requires_watertight() {
     let mut open = Object::triangle();
     let face = open.faces().keys().next().unwrap();
@@ -274,10 +270,174 @@ fn push_pull_requires_watertight() {
     );
 }
 
+// ------------------------------------------------------------- push/pull unit tests
+
+/// Inward partial push on a unit cube: the cube shrinks, remains 6 faces,
+/// and the maximum z is reduced by the push amount.
+#[test]
+fn inward_partial_push_keeps_six_faces_and_reduces_extent() {
+    let mut cube = unit_cube();
+    let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+
+    // Push the top face inward by 0.3 (less than the full 1.0 extent).
+    let report = cube.push_pull(top, -0.3).unwrap();
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert_eq!(cube.faces().len(), 6, "inward push must keep 6 faces");
+
+    // The moved face is still present (same handle — translate mode).
+    assert!(cube.faces().contains_key(report.face));
+
+    // The maximum z should now be 0.7 (1.0 - 0.3).
+    let max_z = cube
+        .vertices()
+        .values()
+        .map(|v| v.position.z)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        (max_z - 0.7_f64).abs() <= tol::POINT_MERGE,
+        "max z after -0.3 push should be 0.7, got {max_z}"
+    );
+
+    // The minimum z is unchanged at 0.0.
+    let min_z = cube
+        .vertices()
+        .values()
+        .map(|v| v.position.z)
+        .fold(f64::MAX, f64::min);
+    assert!(
+        min_z.abs() <= tol::POINT_MERGE,
+        "min z must remain 0.0, got {min_z}"
+    );
+}
+
+/// A right-triangle prism has a hypotenuse wall whose normal is not
+/// perpendicular to the front wall's normal.  Pushing the front wall must
+/// return NonManifoldResult because the eligibility dot-product check fires.
+///
+/// Construction: extrude a right-triangle profile in XY by 1.0 along +z.
+/// The triangle outer vertices are (0,0,0), (1,0,0), (0,1,0).
+/// The resulting prism has 5 faces:
+///   - bottom cap (normal ≈ -z)
+///   - top cap    (normal ≈ +z)
+///   - front wall (normal ≈ -y, edge (0,0)-(1,0))
+///   - right wall (normal ≈ +x, edge (1,0)-(0,1)) — this IS the hypotenuse wall
+///   - left wall  (normal ≈ -x, edge (0,1)-(0,0))
+///
+/// The front wall (normal -y) shares edges with the bottom cap, top cap,
+/// hypotenuse wall (normal ≈ (1/√2, 1/√2, 0)), and left wall.
+/// Dot product of -y with hypotenuse normal ≈ -1/√2, |dot| ≈ 0.707 >> tol::NORMAL_DIRECTION.
+/// Therefore eligibility check must fire and return NonManifoldResult.
+#[test]
+fn push_pull_slanted_neighbor_returns_non_manifold_result() {
+    use kernel::Profile;
+
+    let plane = xy_plane();
+    let right_triangle_profile = Profile::new(
+        plane,
+        vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ],
+        vec![],
+    )
+    .unwrap();
+
+    let prism = Object::from_extrusion(&right_triangle_profile, 1.0).unwrap();
+    prism.validate().unwrap();
+    assert_eq!(prism.watertight(), WatertightState::Watertight);
+    assert_eq!(prism.faces().len(), 5, "right-triangle prism has 5 faces");
+
+    // Find the front wall: normal ≈ (0, -1, 0).
+    let front_wall = face_with_normal(&prism, Vec3::new(0.0, -1.0, 0.0));
+
+    // Verify the hypotenuse-wall neighbor exists (normal ≈ (1/√2, 1/√2, 0)).
+    let hyp_normal = Vec3::new(
+        1.0_f64 / std::f64::consts::SQRT_2,
+        1.0_f64 / std::f64::consts::SQRT_2,
+        0.0,
+    );
+    let _hyp_wall = face_with_normal(&prism, hyp_normal);
+
+    // Confirm the dot product between the front normal and hypotenuse normal
+    // actually violates the perpendicularity check.
+    let front_normal = Vec3::new(0.0, -1.0, 0.0);
+    let dot = front_normal.dot(hyp_normal).abs();
+    assert!(
+        dot >= tol::NORMAL_DIRECTION,
+        "hypotenuse wall must fail the perpendicularity check (dot={dot})"
+    );
+
+    // The push must be refused with NonManifoldResult.
+    let mut prism_mut = prism;
+    let err = prism_mut.push_pull(front_wall, 0.5).unwrap_err();
+    assert_eq!(
+        err,
+        PushPullError::NonManifoldResult,
+        "pushing front wall of a prism (slanted hypotenuse neighbor) must return NonManifoldResult"
+    );
+    // Strong guarantee: prism is unchanged.
+    prism_mut.validate().unwrap();
+    assert_eq!(prism_mut.faces().len(), 5);
+}
+
+#[test]
+fn push_past_an_interior_step_is_refused() {
+    // L-shaped prism: pushing the outer x=2 wall inward past the interior
+    // step at x=1 would fold the step wall past its fixed vertices into a
+    // self-intersecting shell — every face stays planar and manifold, so
+    // only the obstruction guard can refuse it.
+    let l_profile = Profile::new(
+        xy_plane(),
+        vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(2.0, 1.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0),
+            Point3::new(0.0, 2.0, 0.0),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let original = Object::from_extrusion(&l_profile, 1.0).unwrap();
+    // Two walls face +x (outer at x=2, upper arm at x=1); pick the outer one.
+    let wall = original
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(Vec3::new(1.0, 0.0, 0.0), tol::NORMAL_DIRECTION)
+                && original
+                    .loop_positions(f.outer_loop)
+                    .any(|p| (p.x - 2.0).abs() <= tol::POINT_MERGE)
+        })
+        .map(|(id, _)| id)
+        .expect("outer +x wall exists");
+
+    // Shrinking short of the step is a legitimate push.
+    let mut shrunk = original.clone();
+    shrunk.push_pull(wall, -0.5).unwrap();
+    shrunk.validate().unwrap();
+    assert_eq!(shrunk.faces().len(), original.faces().len());
+
+    // At the step or past it: refused, object untouched (strong guarantee).
+    for depth in [-1.0, -1.5] {
+        let mut obj = original.clone();
+        assert_eq!(
+            obj.push_pull(wall, depth).unwrap_err(),
+            PushPullError::NonManifoldResult,
+            "depth {depth}"
+        );
+        assert!(objects_equivalent(&obj, &original));
+    }
+}
+
 // ------------------------------------------------- sticky split / merge
 
 #[test]
-#[ignore = "spec for Object::split_face + merge_faces: split + re-merge is identity (DEVELOPMENT.md rule 3)"]
 fn split_then_merge_is_identity() {
     let original = unit_cube();
     let mut cube = original.clone();
@@ -295,7 +455,6 @@ fn split_then_merge_is_identity() {
 }
 
 #[test]
-#[ignore = "spec for Object::split_face: both endpoints must reach the boundary (no dangling edges)"]
 fn split_face_rejects_interior_endpoint() {
     let mut cube = unit_cube();
     let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
@@ -309,7 +468,6 @@ fn split_face_rejects_interior_endpoint() {
 }
 
 #[test]
-#[ignore = "spec for Object::merge_faces: non-coplanar faces never merge"]
 fn merge_faces_rejects_non_coplanar() {
     let mut cube = unit_cube();
     // Every edge of a cube separates two perpendicular faces.
@@ -318,6 +476,23 @@ fn merge_faces_rejects_non_coplanar() {
         cube.merge_faces(some_edge).unwrap_err(),
         kernel::StickyError::FacesNotCoplanar
     );
+}
+
+proptest! {
+    /// The identity must hold wherever the cut lands, not just at the
+    /// midline: off-center cuts stress the boundary-healing tolerance
+    /// logic with unequal fragment lengths.
+    #[test]
+    fn split_then_merge_is_identity_anywhere(cut_at in 0.05..0.95f64) {
+        let original = unit_cube();
+        let mut cube = original.clone();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        let path = [Point3::new(cut_at, 0.0, 1.0), Point3::new(cut_at, 1.0, 1.0)];
+        let split = cube.split_face(top, &path).unwrap();
+        cube.merge_faces(split.new_edges[0]).unwrap();
+        cube.validate().unwrap();
+        prop_assert!(objects_equivalent(&cube, &original));
+    }
 }
 
 // --------------------------------------------------------------- boolean
@@ -376,7 +551,6 @@ fn boolean_requires_watertight_operands() {
 // --------------------------------------------------------------- history
 
 #[test]
-#[ignore = "spec for History: undo restores topology and geometry; redo restores the result"]
 fn history_undo_redo_roundtrip() {
     let original = unit_cube();
     let mut cube = original.clone();

@@ -33,7 +33,11 @@
 
 use slotmap::{SlotMap, new_key_type};
 
-use crate::math::{Plane, Point3};
+use crate::geom2d::{
+    boundaries_contact, plane_axes, point_inside_polygon, polygon_is_simple, signed_area_on_plane,
+};
+use crate::math::{Plane, Point3, Vec3};
+use crate::tol;
 
 new_key_type! {
     /// Handle to a [`SketchVertex`].
@@ -122,6 +126,10 @@ pub enum SketchError {
     UnknownEdge,
     /// The given region handle is not in this sketch (or already invalid).
     UnknownRegion,
+    /// The region's traced boundary does not form a valid [`Profile`] (a
+    /// kernel bug in region tracing, surfaced as a typed error rather than a
+    /// panic so it cannot brick the caller).
+    MalformedRegion,
 }
 
 impl std::fmt::Display for SketchError {
@@ -133,6 +141,9 @@ impl std::fmt::Display for SketchError {
             SketchError::DegenerateSegment => write!(f, "segment endpoints coincide"),
             SketchError::UnknownEdge => write!(f, "no such edge in this sketch"),
             SketchError::UnknownRegion => write!(f, "no such region in this sketch"),
+            SketchError::MalformedRegion => {
+                write!(f, "region boundary does not form a valid profile")
+            }
         }
     }
 }
@@ -193,9 +204,13 @@ impl Sketch {
     /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) of each other *after* vertex merging.
     ///
     /// On error the sketch is unchanged (strong guarantee).
-    #[allow(unused_variables)] // contract stub: implementation lands in M1
     pub fn add_segment(&mut self, from: Point3, to: Point3) -> Result<SegmentAdded, SketchError> {
-        todo!("M1: sticky segment insertion (see module docs and tests/op_specs.rs)")
+        // Strong guarantee: work on a clone, validate everything that can fail,
+        // then swap.
+        let mut s = self.clone();
+        let report = s.add_segment_inner(from, to)?;
+        *self = s;
+        Ok(report)
     }
 
     /// Removes one edge (the eraser tool), deleting vertices that become
@@ -204,9 +219,14 @@ impl Sketch {
     /// # Errors
     /// [`SketchError::UnknownEdge`] if the handle is stale. On error the
     /// sketch is unchanged.
-    #[allow(unused_variables)] // contract stub: implementation lands in M1
     pub fn remove_edge(&mut self, edge: SketchEdgeId) -> Result<EdgeRemoved, SketchError> {
-        todo!("M1: edge removal with region dissolution")
+        if !self.edges.contains_key(edge) {
+            return Err(SketchError::UnknownEdge);
+        }
+        let mut s = self.clone();
+        let report = s.remove_edge_inner(edge);
+        *self = s;
+        Ok(report)
     }
 
     /// Extracts a region as a validated [`Profile`] ready for extrusion.
@@ -214,11 +234,856 @@ impl Sketch {
     /// # Errors
     /// [`SketchError::UnknownRegion`] if the handle is stale (regions die
     /// whenever a mutation reshapes them — always re-query after mutating).
-    #[allow(unused_variables)] // contract stub: implementation lands in M1
     pub fn profile(&self, region: SketchRegionId) -> Result<Profile, SketchError> {
-        todo!("M1: region -> Profile extraction")
+        let r = self.regions.get(region).ok_or(SketchError::UnknownRegion)?;
+
+        // Outer boundary: CCW as stored — map vertex ids to positions.
+        let outer: Vec<Point3> = r
+            .outer
+            .iter()
+            .map(|&vid| self.vertices[vid].position)
+            .collect();
+
+        // Holes: CW as stored.
+        let holes: Vec<Vec<Point3>> = r
+            .holes
+            .iter()
+            .map(|h| h.iter().map(|&vid| self.vertices[vid].position).collect())
+            .collect();
+
+        // A region produced by the pipeline should always yield a valid
+        // Profile; if it does not, that is a kernel bug — but surface it as a
+        // typed error (rule 4) rather than panicking, since a panic at the
+        // WASM boundary leaves the Scene unusable.
+        Profile::new(self.plane, outer, holes).map_err(|_| SketchError::MalformedRegion)
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════ internals
+
+impl Sketch {
+    /// Core implementation of `add_segment`. Called on a clone so the caller
+    /// can enforce the strong guarantee.
+    fn add_segment_inner(&mut self, from: Point3, to: Point3) -> Result<SegmentAdded, SketchError> {
+        // ── Step 1: validate planarity ────────────────────────────────────────
+        if self.plane.signed_distance(from).abs() > tol::PLANE_DIST {
+            return Err(SketchError::PointOffPlane { which: 0 });
+        }
+        if self.plane.signed_distance(to).abs() > tol::PLANE_DIST {
+            return Err(SketchError::PointOffPlane { which: 1 });
+        }
+
+        // ── Step 2: snap endpoints to existing vertices (rule 1) ─────────────
+        // Returns the snapped position and whether a new vertex must be created.
+        let snap_from = self.find_or_plan_vertex(from);
+        let snap_to = self.find_or_plan_vertex(to);
+
+        // After snapping, check for degeneracy.
+        let from_pos = snap_from.map_or(from, |id| self.vertices[id].position);
+        let to_pos = snap_to.map_or(to, |id| self.vertices[id].position);
+
+        if from_pos.approx_eq(to_pos, tol::POINT_MERGE) {
+            return Err(SketchError::DegenerateSegment);
+        }
+
+        // ── Step 3: gather intersections ──────────────────────────────────────
+        // Collect all split events for existing edges and for the new segment.
+        // We work in 2D (plane-projected) coordinates throughout.
+        let normal = self.plane.normal();
+        let (u_ax, v_ax) = plane_axes(normal);
+
+        let proj = |p: Point3| -> (f64, f64) { (p.to_vec().dot(u_ax), p.to_vec().dot(v_ax)) };
+
+        let fp = proj(from_pos);
+        let tp = proj(to_pos);
+
+        // For each existing edge, find intersection parameters t (along new
+        // segment, 0..=1) and s (along existing edge, 0..=1).
+        // We'll collect:
+        //   - for existing edges: the set of interior split parameters s
+        //   - for the new segment: the set of interior split parameters t
+
+        // Represent intersections as t-parameters along the new segment plus
+        // the associated position and vertex id (to be created or reused).
+        // Also track which existing edges need to be split at which s-params.
+        struct ExistingEdgeSplit {
+            edge_id: SketchEdgeId,
+            // (s_param, position) for each interior split point on this edge.
+            splits: Vec<(f64, Point3)>,
+        }
+
+        let mut existing_splits: Vec<ExistingEdgeSplit> = Vec::new();
+        // t-params along the new segment where we need to insert a vertex
+        // (includes 0.0 and 1.0 from snap above, and interior crossings).
+        let mut new_seg_t_params: Vec<f64> = vec![0.0, 1.0];
+
+        let existing_edge_ids: Vec<SketchEdgeId> = self.edges.keys().collect();
+
+        for eid in existing_edge_ids {
+            let edge = self.edges[eid];
+            let ep = proj(self.vertices[edge.from].position);
+            let eq_ = proj(self.vertices[edge.to].position);
+
+            let mut edge_splits: Vec<(f64, Point3)> = Vec::new();
+
+            // Find all intersections between the new segment [fp,tp] and this
+            // existing edge [ep,eq_].
+            let intersections =
+                seg_seg_intersections_2d(fp, tp, ep, eq_, &self.vertices, edge, u_ax, v_ax);
+
+            for isect in intersections {
+                match isect {
+                    Intersection2D::Proper {
+                        t_new,
+                        s_existing,
+                        point,
+                    } => {
+                        // Interior crossing: splits both segments.
+                        if t_new > tol::POINT_MERGE && t_new < 1.0 - tol::POINT_MERGE {
+                            new_seg_t_params.push(t_new);
+                        }
+                        if s_existing > tol::POINT_MERGE && s_existing < 1.0 - tol::POINT_MERGE {
+                            edge_splits.push((s_existing, point));
+                        }
+                    }
+                    Intersection2D::NewEndpointOnExisting { s_existing, point } => {
+                        // New segment endpoint lands on interior of existing edge.
+                        if s_existing > tol::POINT_MERGE && s_existing < 1.0 - tol::POINT_MERGE {
+                            edge_splits.push((s_existing, point));
+                        }
+                    }
+                    Intersection2D::ExistingEndpointOnNew { t_new, .. } => {
+                        // Existing endpoint lands on interior of new segment.
+                        if t_new > tol::POINT_MERGE && t_new < 1.0 - tol::POINT_MERGE {
+                            new_seg_t_params.push(t_new);
+                        }
+                    }
+                    Intersection2D::Collinear {
+                        t_params_on_new,
+                        s_params_on_existing,
+                        points_on_new,
+                        points_on_existing,
+                    } => {
+                        // Rule 4: collinear overlap.
+                        for t in t_params_on_new {
+                            if t > tol::POINT_MERGE && t < 1.0 - tol::POINT_MERGE {
+                                new_seg_t_params.push(t);
+                            }
+                        }
+                        let _ = points_on_new; // used above via t_params_on_new
+                        for (s, p) in s_params_on_existing.into_iter().zip(points_on_existing) {
+                            if s > tol::POINT_MERGE && s < 1.0 - tol::POINT_MERGE {
+                                edge_splits.push((s, p));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !edge_splits.is_empty() {
+                existing_splits.push(ExistingEdgeSplit {
+                    edge_id: eid,
+                    splits: edge_splits,
+                });
+            }
+        }
+
+        // ── Step 4: snapshot old regions for identity diffing ─────────────────
+        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
+            self.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+
+        // ── Step 5: materialise vertices for the new segment endpoints ─────────
+        let mut report = SegmentAdded::default();
+
+        // from vertex
+        let from_vid = match snap_from {
+            Some(id) => id,
+            None => {
+                // Check one more time for snapping to an edge interior
+                // (the snapping check at step 1 only checked existing vertices).
+                // If still not found, create a fresh vertex.
+                let vid = self.vertices.insert(SketchVertex { position: from_pos });
+                report.new_vertices.push(vid);
+                vid
+            }
+        };
+
+        // to vertex
+        let to_vid = match snap_to {
+            Some(id) => id,
+            None => {
+                let vid = self.vertices.insert(SketchVertex { position: to_pos });
+                report.new_vertices.push(vid);
+                vid
+            }
+        };
+
+        // ── Step 6: split existing edges at their interior intersection points ──
+        for esplit in existing_splits {
+            // Deduplicate and sort split points by s param.
+            let mut splits = esplit.splits;
+            splits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            splits.dedup_by(|a, b| (a.0 - b.0).abs() < tol::POINT_MERGE);
+
+            // Remove zero-length fragments: skip if s is at 0 or 1 (already
+            // covered by snapping).
+            let splits: Vec<(f64, Point3)> = splits
+                .into_iter()
+                .filter(|(s, _)| *s > tol::POINT_MERGE && *s < 1.0 - tol::POINT_MERGE)
+                .collect();
+
+            if splits.is_empty() {
+                continue;
+            }
+
+            let old_edge = self.edges[esplit.edge_id];
+            let old_from_vid = old_edge.from;
+            let old_to_vid = old_edge.to;
+
+            // Create or find vertices at each split point.
+            let mut split_vids: Vec<SketchVertexId> = Vec::new();
+            for (_, pos) in &splits {
+                let vid = self.find_or_create_vertex(*pos, &mut report.new_vertices);
+                split_vids.push(vid);
+            }
+
+            // Build the chain of fragment vertices: old_from -> split[0] -> ... -> old_to
+            let mut chain: Vec<SketchVertexId> = vec![old_from_vid];
+            chain.extend_from_slice(&split_vids);
+            chain.push(old_to_vid);
+
+            // Remove the old edge.
+            self.edges.remove(esplit.edge_id);
+
+            // Insert fragment edges.  Fragments of split *existing* edges go into
+            // split_edges only, not new_edges (new_edges is for the inserted segment
+            // fragments).
+            let mut fragments: Vec<SketchEdgeId> = Vec::new();
+            for w in chain.windows(2) {
+                let frag_id = self.edges.insert(SketchEdge {
+                    from: w[0],
+                    to: w[1],
+                });
+                fragments.push(frag_id);
+            }
+            report.split_edges.push((esplit.edge_id, fragments));
+        }
+
+        // ── Step 7: collect t-params along the new segment, materialise verts ──
+        // Deduplicate and sort.
+        new_seg_t_params.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        new_seg_t_params.dedup_by(|a, b| (*a - *b).abs() < tol::POINT_MERGE);
+
+        // Build the sequence of vertex ids along the new segment.
+        let seg_dir = to_pos - from_pos;
+        let mut seg_vids: Vec<SketchVertexId> = Vec::new();
+        for &t in &new_seg_t_params {
+            let pos = from_pos + seg_dir * t;
+            // t == 0.0 -> from_vid, t == 1.0 -> to_vid
+            let vid = if (t - 0.0).abs() < tol::POINT_MERGE {
+                from_vid
+            } else if (t - 1.0).abs() < tol::POINT_MERGE {
+                to_vid
+            } else {
+                self.find_or_create_vertex(pos, &mut report.new_vertices)
+            };
+            seg_vids.push(vid);
+        }
+
+        // ── Step 8: insert fragment edges for the new segment ─────────────────
+        // Skip fragments that already have an existing edge (collinear merge).
+        for w in seg_vids.windows(2) {
+            let a = w[0];
+            let b = w[1];
+            if self.edge_exists(a, b) {
+                // Collinear merge: this sub-segment already exists; skip.
+                continue;
+            }
+            // Skip zero-length fragments.
+            if self.vertices[a]
+                .position
+                .approx_eq(self.vertices[b].position, tol::POINT_MERGE)
+            {
+                continue;
+            }
+            let eid = self.edges.insert(SketchEdge { from: a, to: b });
+            report.new_edges.push(eid);
+        }
+
+        // ── Step 9: recompute regions and diff ────────────────────────────────
+        let (regions_created, regions_removed) = self.recompute_regions_with_diff(&old_regions);
+        report.regions_created = regions_created;
+        report.regions_removed = regions_removed;
+
+        Ok(report)
+    }
+
+    /// Core implementation of `remove_edge`. Called on a clone so the strong
+    /// guarantee holds at the public method.
+    fn remove_edge_inner(&mut self, edge: SketchEdgeId) -> EdgeRemoved {
+        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
+            self.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+
+        let e = self.edges[edge];
+        self.edges.remove(edge);
+
+        // Delete vertices with no remaining incident edges.
+        let mut removed_vertices = Vec::new();
+        for vid in [e.from, e.to] {
+            if !self.vertex_has_edges(vid) {
+                self.vertices.remove(vid);
+                removed_vertices.push(vid);
+            }
+        }
+
+        let (regions_created, regions_removed) = self.recompute_regions_with_diff(&old_regions);
+
+        EdgeRemoved {
+            removed_vertices,
+            regions_removed,
+            regions_created,
+        }
+    }
+
+    // ── Vertex helpers ────────────────────────────────────────────────────────
+
+    /// Returns the id of an existing vertex within `tol::POINT_MERGE` of `pos`,
+    /// or `None` if there is none.
+    fn find_or_plan_vertex(&self, pos: Point3) -> Option<SketchVertexId> {
+        for (id, v) in &self.vertices {
+            if v.position.approx_eq(pos, tol::POINT_MERGE) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// Returns an existing vertex within `tol::POINT_MERGE` of `pos`, or
+    /// creates a new one and records it in `new_vertices`.
+    fn find_or_create_vertex(
+        &mut self,
+        pos: Point3,
+        new_vertices: &mut Vec<SketchVertexId>,
+    ) -> SketchVertexId {
+        if let Some(id) = self.find_or_plan_vertex(pos) {
+            return id;
+        }
+        let id = self.vertices.insert(SketchVertex { position: pos });
+        new_vertices.push(id);
+        id
+    }
+
+    /// True if the edge exists in either direction.
+    fn edge_exists(&self, a: SketchVertexId, b: SketchVertexId) -> bool {
+        self.edges
+            .values()
+            .any(|e| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+    }
+
+    /// True if the vertex has at least one incident edge (in either direction).
+    fn vertex_has_edges(&self, vid: SketchVertexId) -> bool {
+        self.edges.values().any(|e| e.from == vid || e.to == vid)
+    }
+
+    // ── Region computation ────────────────────────────────────────────────────
+
+    /// Recompute all regions from scratch, then diff against the previous set.
+    /// Returns `(created, removed)`.
+    fn recompute_regions_with_diff(
+        &mut self,
+        old_regions: &[(SketchRegionId, SketchRegion)],
+    ) -> (Vec<SketchRegionId>, Vec<SketchRegionId>) {
+        let new_region_data = self.compute_all_regions();
+
+        // Identity rule: a region whose outer vertex-id cycle is unchanged
+        // (cyclic equality, same orientation) KEEPS its SketchRegionId — its
+        // stored value is refreshed in place (hole sets may differ) and it
+        // appears in neither report list, so handles held by tools stay
+        // valid until a mutation actually reshapes the region. Everything
+        // else is a removal + creation.
+        let mut regions_created: Vec<SketchRegionId> = Vec::new();
+        let mut reused: std::collections::HashSet<SketchRegionId> =
+            std::collections::HashSet::new();
+
+        for new_r in new_region_data {
+            let matched = old_regions.iter().find(|(old_id, old_r)| {
+                !reused.contains(old_id) && cycles_equal(&old_r.outer, &new_r.outer)
+            });
+            match matched {
+                Some((old_id, _)) => {
+                    reused.insert(*old_id);
+                    self.regions[*old_id] = new_r;
+                }
+                None => {
+                    regions_created.push(self.regions.insert(new_r));
+                }
+            }
+        }
+
+        let mut regions_removed: Vec<SketchRegionId> = Vec::new();
+        for (old_id, _) in old_regions {
+            if !reused.contains(old_id) {
+                self.regions.remove(*old_id);
+                regions_removed.push(*old_id);
+            }
+        }
+
+        (regions_created, regions_removed)
+    }
+
+    /// Compute all regions (CCW outer cycles + their CW hole cycles) from the
+    /// current edge graph, using planar half-edge face tracing.
+    fn compute_all_regions(&self) -> Vec<SketchRegion> {
+        if self.edges.is_empty() {
+            return Vec::new();
+        }
+
+        let normal = self.plane.normal();
+        let (u_ax, v_ax) = plane_axes(normal);
+
+        let proj = |p: Point3| -> (f64, f64) { (p.to_vec().dot(u_ax), p.to_vec().dot(v_ax)) };
+
+        // Build adjacency: for each vertex, sorted list of outgoing directed
+        // half-edges by angle.
+        //
+        // A sketch edge (a, b) gives two directed half-edges: a->b and b->a.
+        // We store them as (from_vid, to_vid).
+
+        // Collect all directed half-edges.
+        let mut half_edges: Vec<(SketchVertexId, SketchVertexId)> = Vec::new();
+        for e in self.edges.values() {
+            half_edges.push((e.from, e.to));
+            half_edges.push((e.to, e.from));
+        }
+
+        // For each vertex, build sorted adjacency list by angle.
+        let mut adj: std::collections::HashMap<SketchVertexId, Vec<SketchVertexId>> =
+            std::collections::HashMap::new();
+        for &(from, to) in &half_edges {
+            adj.entry(from).or_default().push(to);
+        }
+        // Sort each adjacency list by angle of the outgoing direction.
+        for (from_vid, neighbors) in adj.iter_mut() {
+            let from_pos = self.vertices[*from_vid].position;
+            let fp = proj(from_pos);
+            neighbors.sort_by(|&a, &b| {
+                let pa = proj(self.vertices[a].position);
+                let pb = proj(self.vertices[b].position);
+                let angle_a = (pa.1 - fp.1).atan2(pa.0 - fp.0);
+                let angle_b = (pb.1 - fp.1).atan2(pb.0 - fp.0);
+                angle_a.partial_cmp(&angle_b).unwrap()
+            });
+        }
+
+        // Trace all face cycles: for each directed half-edge (a->b), the next
+        // half-edge in the face cycle is found by:
+        //   1. At vertex b, find the incoming direction = reverse of a->b = b->a.
+        //   2. Find b->a in b's sorted adjacency list.
+        //   3. Take the NEXT entry (wrapping) — the rotational successor.
+        //   4. That gives the next outgoing half-edge b->c.
+        let mut visited: std::collections::HashSet<(SketchVertexId, SketchVertexId)> =
+            std::collections::HashSet::new();
+        let mut cycles: Vec<Vec<SketchVertexId>> = Vec::new();
+
+        for &start_he in &half_edges {
+            if visited.contains(&start_he) {
+                continue;
+            }
+            let mut cycle: Vec<SketchVertexId> = Vec::new();
+            let mut current = start_he;
+            loop {
+                if visited.contains(&current) {
+                    break;
+                }
+                visited.insert(current);
+                cycle.push(current.0); // push the 'from' vertex
+
+                // Find successor: at vertex current.1, find the next outgoing
+                // direction after the reverse of current.
+                let arrive_at = current.1;
+                let reverse_dir = current.0; // the edge that brought us to arrive_at
+
+                let neighbors = match adj.get(&arrive_at) {
+                    Some(n) => n,
+                    None => break,
+                };
+
+                // Find index of reverse_dir in neighbors.
+                let idx = match neighbors.iter().position(|&n| n == reverse_dir) {
+                    Some(i) => i,
+                    None => break,
+                };
+
+                // Rotational successor: previous index (wrapping), because we
+                // want "next CCW from the reversed incoming direction".
+                // In standard planar tracing: sort CCW, successor of reverse is
+                // the one just BEFORE it in CCW order (i.e., rotate CW to find
+                // the face to the left of the current directed edge).
+                let next_idx = if idx == 0 {
+                    neighbors.len() - 1
+                } else {
+                    idx - 1
+                };
+                let next_to = neighbors[next_idx];
+                current = (arrive_at, next_to);
+            }
+
+            if cycle.len() >= 3 {
+                cycles.push(cycle);
+            }
+        }
+
+        if cycles.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute signed area for each cycle.  Positive = CCW (candidate region
+        // outer boundary); negative = CW (hole boundary or outer face).
+        let cycle_areas: Vec<f64> = cycles
+            .iter()
+            .map(|cycle| {
+                let pts: Vec<Point3> = cycle
+                    .iter()
+                    .map(|&vid| self.vertices[vid].position)
+                    .collect();
+                signed_area_on_plane(&pts, normal)
+            })
+            .collect();
+
+        // Identify the unbounded outer face: among negative-area cycles, the one
+        // whose absolute area is largest (it encircles everything).
+        // Actually for a planar graph on an infinite plane the unbounded face is
+        // the cycle with the largest *absolute* area (positive or negative).
+        // We discard the single cycle with the maximum absolute area if it has
+        // negative (CW) signed area — that's the outer unbounded face.
+        //
+        // However, some graph configurations don't produce an unbounded face
+        // cycle (e.g., a single isolated edge); in that case we just skip.
+
+        let max_abs_area = cycle_areas
+            .iter()
+            .map(|a| a.abs())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let unbounded_idx = cycle_areas
+            .iter()
+            .enumerate()
+            .filter(|&(_, a)| *a < 0.0 && (a.abs() - max_abs_area).abs() < tol::POINT_MERGE * 1e6)
+            .map(|(i, _)| i)
+            .next();
+
+        // Separate CCW outer candidates from CW hole candidates (excluding the
+        // unbounded outer face).
+        let mut outer_candidates: Vec<(usize, f64)> = Vec::new(); // (cycle_idx, area)
+        let mut hole_candidates: Vec<(usize, f64)> = Vec::new(); // (cycle_idx, abs_area)
+
+        for (i, &area) in cycle_areas.iter().enumerate() {
+            if Some(i) == unbounded_idx {
+                continue;
+            }
+            if area > 0.0 {
+                outer_candidates.push((i, area));
+            } else if area < 0.0 {
+                hole_candidates.push((i, area.abs()));
+            }
+        }
+
+        // Assign each hole cycle to the smallest-area enclosing outer cycle
+        // (point-in-polygon on one representative point of the hole).
+        // If no enclosing outer cycle is found, the hole is an island that
+        // failed to find its encloser — treat as outer with no holes (shouldn't
+        // happen with valid planar graphs).
+
+        // Build region data: one SketchRegion per outer candidate, then assign
+        // holes.
+        let mut region_outers: Vec<Vec<SketchVertexId>> = outer_candidates
+            .iter()
+            .map(|&(ci, _)| cycles[ci].clone())
+            .collect();
+        let mut region_holes: Vec<Vec<Vec<SketchVertexId>>> =
+            vec![Vec::new(); outer_candidates.len()];
+
+        for &(hole_ci, hole_area) in &hole_candidates {
+            let hole_cycle = &cycles[hole_ci];
+            // Representative point: the centroid of the hole's vertices, which
+            // lies in the hole's interior. A boundary vertex is unreliable for
+            // point-in-polygon and, being shared with neighbouring cycles,
+            // could land exactly on another cycle's edge.
+            let n = hole_cycle.len() as f64;
+            let (mut sx, mut sy, mut sz) = (0.0, 0.0, 0.0);
+            for &vid in hole_cycle {
+                let p = self.vertices[vid].position;
+                sx += p.x;
+                sy += p.y;
+                sz += p.z;
+            }
+            let rep_pos = Point3::new(sx / n, sy / n, sz / n);
+
+            // Assign the hole to the *smallest* enclosing outer cycle that is
+            // STRICTLY LARGER than the hole. The strict-area test is what makes
+            // this correct: it excludes the hole's own reverse-wound twin
+            // (same vertices, equal area — without this, a rectangle drawn
+            // inside another took its own boundary as a hole and Profile::new
+            // rejected it as self-intersecting), and it excludes any cycle
+            // nested *inside* the hole, so nested rings attach holes to their
+            // immediate encloser.
+            let mut best: Option<(usize, f64)> = None; // (region_idx, area)
+            for (ri, &(outer_ci, outer_area)) in outer_candidates.iter().enumerate() {
+                if outer_area <= hole_area {
+                    continue;
+                }
+                let outer_pts: Vec<Point3> = cycles[outer_ci]
+                    .iter()
+                    .map(|&vid| self.vertices[vid].position)
+                    .collect();
+                if point_inside_polygon(rep_pos, &outer_pts, normal) {
+                    match best {
+                        None => best = Some((ri, outer_area)),
+                        Some((_, best_area)) if outer_area < best_area => {
+                            best = Some((ri, outer_area));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if let Some((ri, _)) = best {
+                region_holes[ri].push(hole_cycle.clone());
+            }
+            // If no enclosing outer found, the hole cycle is discarded (edge
+            // case of disconnected geometry — not reachable in a well-formed sketch).
+        }
+
+        // Build SketchRegion objects.
+        let mut regions: Vec<SketchRegion> = Vec::new();
+        for (i, outer) in region_outers.drain(..).enumerate() {
+            regions.push(SketchRegion {
+                outer,
+                holes: region_holes[i].clone(),
+            });
+        }
+
+        regions
+    }
+}
+
+// ═══════════════════════════════════════════════════════════ intersection math
+
+/// Result of a 2D segment intersection query.
+#[derive(Debug)]
+enum Intersection2D {
+    /// Proper interior crossing.
+    Proper {
+        t_new: f64,
+        s_existing: f64,
+        point: Point3,
+    },
+    /// An endpoint of the *new* segment lands on the interior of the existing
+    /// segment.
+    NewEndpointOnExisting { s_existing: f64, point: Point3 },
+    /// An endpoint of the *existing* segment lands on the interior of the new
+    /// segment.
+    ExistingEndpointOnNew { t_new: f64, _point: Point3 },
+    /// The two segments are collinear and overlap (or one contains the other).
+    Collinear {
+        /// t-parameters on the new segment for the existing endpoints that
+        /// land inside it.
+        t_params_on_new: Vec<f64>,
+        /// s-parameters on the existing segment for the new endpoints that
+        /// land inside it.
+        s_params_on_existing: Vec<f64>,
+        points_on_new: Vec<Point3>,
+        points_on_existing: Vec<Point3>,
+    },
+}
+
+/// Compute all intersection events between the new segment [new_from, new_to]
+/// (given as 2D projections `nf`, `nt`) and the existing edge `e` (2D
+/// projections `ef`, `et`).
+///
+/// Returns zero or more intersection events.  The projections are passed for
+/// efficiency; world-space positions are reconstructed from parameters.
+#[allow(clippy::too_many_arguments)]
+fn seg_seg_intersections_2d(
+    nf: (f64, f64), // new segment from
+    nt: (f64, f64), // new segment to
+    ef: (f64, f64), // existing edge from
+    et: (f64, f64), // existing edge to
+    vertices: &SlotMap<SketchVertexId, SketchVertex>,
+    edge: SketchEdge,
+    u_ax: Vec3,
+    v_ax: Vec3,
+) -> Vec<Intersection2D> {
+    // Reconstruct 3D position from 2D plane coords (ignoring the out-of-plane
+    // component since we've already validated planarity).
+    let pos_from_2d = |u: f64, v: f64| -> Point3 { Point3::ORIGIN + u_ax * u + v_ax * v };
+
+    let d_new = (nt.0 - nf.0, nt.1 - nf.1);
+    let d_ext = (et.0 - ef.0, et.1 - ef.1);
+
+    // Cross product (2D): a × b = ax*by - ay*bx
+    let cross_2d = |a: (f64, f64), b: (f64, f64)| a.0 * b.1 - a.1 * b.0;
+
+    let denom = cross_2d(d_new, d_ext);
+
+    if denom.abs() < tol::POINT_MERGE * tol::POINT_MERGE {
+        // Parallel or collinear.
+        // Check if they are actually collinear (ef lies on the line through nf,nt).
+        let nf_to_ef = (ef.0 - nf.0, ef.1 - nf.1);
+        let collinear_check = cross_2d(d_new, nf_to_ef).abs();
+        // Use a length-scaled threshold.
+        let new_len = (d_new.0 * d_new.0 + d_new.1 * d_new.1).sqrt();
+        if new_len < tol::POINT_MERGE {
+            return Vec::new(); // degenerate new segment, skip
+        }
+        if collinear_check / new_len > tol::POINT_MERGE {
+            return Vec::new(); // parallel but not collinear
+        }
+
+        // Collinear: project all four endpoints onto the new segment's axis.
+        // t=0 -> nf, t=1 -> nt; also compute s=0 -> ef, s=1 -> et.
+        let project_onto_new = |p: (f64, f64)| -> f64 {
+            ((p.0 - nf.0) * d_new.0 + (p.1 - nf.1) * d_new.1) / (new_len * new_len)
+        };
+        let ext_len_sq = d_ext.0 * d_ext.0 + d_ext.1 * d_ext.1;
+        let ext_len = ext_len_sq.sqrt();
+        let project_onto_ext = |p: (f64, f64)| -> f64 {
+            if ext_len < tol::POINT_MERGE {
+                return 0.0;
+            }
+            ((p.0 - ef.0) * d_ext.0 + (p.1 - ef.1) * d_ext.1) / ext_len_sq
+        };
+
+        let t_ef = project_onto_new(ef);
+        let t_et = project_onto_new(et);
+        let s_nf = project_onto_ext(nf);
+        let s_nt = project_onto_ext(nt);
+
+        // Gather t-params on the new segment for the existing endpoints that
+        // land in its interior.
+        let mut t_params_on_new: Vec<f64> = Vec::new();
+        let mut points_on_new: Vec<Point3> = Vec::new();
+        for (t, ep2d) in [(t_ef, ef), (t_et, et)] {
+            if t > tol::POINT_MERGE && t < 1.0 - tol::POINT_MERGE {
+                t_params_on_new.push(t);
+                // Use the actual existing vertex position for accuracy.
+                let pos = if (t - t_ef).abs() < tol::POINT_MERGE {
+                    vertices[edge.from].position
+                } else {
+                    vertices[edge.to].position
+                };
+                let _ = ep2d;
+                points_on_new.push(pos);
+            }
+        }
+
+        // Gather s-params on the existing segment for the new endpoints that
+        // land in its interior.
+        let mut s_params_on_existing: Vec<f64> = Vec::new();
+        let mut points_on_existing: Vec<Point3> = Vec::new();
+        for (s, np2d) in [(s_nf, nf), (s_nt, nt)] {
+            if s > tol::POINT_MERGE && s < 1.0 - tol::POINT_MERGE {
+                s_params_on_existing.push(s);
+                points_on_existing.push(pos_from_2d(np2d.0, np2d.1));
+            }
+        }
+
+        if t_params_on_new.is_empty() && s_params_on_existing.is_empty() {
+            return Vec::new(); // no overlap or just touching at endpoints
+        }
+
+        return vec![Intersection2D::Collinear {
+            t_params_on_new,
+            s_params_on_existing,
+            points_on_new,
+            points_on_existing,
+        }];
+    }
+
+    // Non-parallel: compute parametric intersection.
+    let nf_to_ef = (ef.0 - nf.0, ef.1 - nf.1);
+    let t = cross_2d(nf_to_ef, d_ext) / denom;
+    let s = cross_2d(nf_to_ef, d_new) / denom;
+
+    let eps = tol::POINT_MERGE;
+
+    // Determine which kind of event this is based on t and s positions.
+    let t_interior = t > eps && t < 1.0 - eps;
+    let s_interior = s > eps && s < 1.0 - eps;
+    let t_at_0 = t.abs() < eps;
+    let t_at_1 = (t - 1.0).abs() < eps;
+    let s_at_0 = s.abs() < eps;
+    let s_at_1 = (s - 1.0).abs() < eps;
+
+    // The intersection point (use existing vertex pos for accuracy at endpoints).
+    let point = if s_at_0 {
+        vertices[edge.from].position
+    } else if s_at_1 {
+        vertices[edge.to].position
+    } else {
+        // Interior of existing edge: interpolate
+        let ix = ef.0 + d_ext.0 * s;
+        let iy = ef.1 + d_ext.1 * s;
+        pos_from_2d(ix, iy)
+    };
+
+    if t_interior && s_interior {
+        // Proper crossing.
+        return vec![Intersection2D::Proper {
+            t_new: t,
+            s_existing: s,
+            point,
+        }];
+    }
+
+    if (t_at_0 || t_at_1) && s_interior {
+        // New endpoint on existing interior (T-junction from new segment's side).
+        return vec![Intersection2D::NewEndpointOnExisting {
+            s_existing: s,
+            point,
+        }];
+    }
+
+    if t_interior && (s_at_0 || s_at_1) {
+        // Existing endpoint on new segment interior.
+        let pt = if s_at_0 {
+            vertices[edge.from].position
+        } else {
+            vertices[edge.to].position
+        };
+        return vec![Intersection2D::ExistingEndpointOnNew {
+            t_new: t,
+            _point: pt,
+        }];
+    }
+
+    // All other cases (both at endpoints) — handled by vertex snapping; no
+    // event needed here.
+    Vec::new()
+}
+
+// ══════════════════════════════════════════════════════════ cycle comparison
+
+/// True if two vertex-id cycles are equal under cyclic rotation and same
+/// orientation (we do NOT check reversed orientation here — outer cycles are
+/// always CCW and holes always CW, so direction is fixed).
+fn cycles_equal(a: &[SketchVertexId], b: &[SketchVertexId]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    // Try all rotations of a against b.
+    'outer: for start in 0..n {
+        for i in 0..n {
+            if a[(start + i) % n] != b[i] {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+// ══════════════════════════════════════════════════════════════════ Profile
 
 /// A validated closed planar polygon with holes: the only currency accepted
 /// by `Object::from_extrusion`.
@@ -412,177 +1277,140 @@ fn profile_check_degenerate(pts: &[Point3]) -> Result<(), ProfileError> {
     Ok(())
 }
 
-/// Signed area of a polygon against the given normal, using the 2-D cross
-/// product projected onto the plane.  Positive = CCW seen from the normal
-/// side.
-fn signed_area_on_plane(pts: &[Point3], normal: crate::math::Vec3) -> f64 {
-    // Pick two axes perpendicular to the normal via a stable cross product.
-    let (u, v) = plane_axes(normal);
-    let n = pts.len();
-    let mut area = 0.0;
-    for i in 0..n {
-        let a = pts[i];
-        let b = pts[(i + 1) % n];
-        let ax = a.to_vec().dot(u);
-        let ay = a.to_vec().dot(v);
-        let bx = b.to_vec().dot(u);
-        let by = b.to_vec().dot(v);
-        area += ax * by - bx * ay;
-    }
-    area * 0.5
-}
-
-/// Returns two orthonormal vectors (u, v) that span the plane with the given
-/// normal.  The result is stable for any non-zero normal.
-fn plane_axes(normal: crate::math::Vec3) -> (crate::math::Vec3, crate::math::Vec3) {
-    use crate::math::Vec3;
-    // Choose a reference vector not parallel to normal.
-    let reference = if normal.x.abs() <= normal.y.abs() && normal.x.abs() <= normal.z.abs() {
-        Vec3::new(1.0, 0.0, 0.0)
-    } else if normal.y.abs() <= normal.z.abs() {
-        Vec3::new(0.0, 1.0, 0.0)
-    } else {
-        Vec3::new(0.0, 0.0, 1.0)
-    };
-    let u = normal
-        .cross(reference)
-        .normalized()
-        .expect("plane_axes: normal is non-zero");
-    let v = normal
-        .cross(u)
-        .normalized()
-        .expect("plane_axes: u is non-zero");
-    (u, v)
-}
-
-/// Check that a polygon does not cross or touch itself.  Tests every pair of
-/// non-adjacent edges for intersection.
+/// Delegate to the shared geom2d helper and map the error.
 fn profile_check_simple(pts: &[Point3]) -> Result<(), ProfileError> {
-    let n = pts.len();
-    for i in 0..n {
-        let a = pts[i];
-        let b = pts[(i + 1) % n];
-        // Skip edges that share a vertex with edge i.
-        for j in (i + 2)..n {
-            if i == 0 && j == n - 1 {
-                continue; // edges 0 and n-1 share vertex 0
-            }
-            let c = pts[j];
-            let d = pts[(j + 1) % n];
-            if segments_intersect(a, b, c, d) {
-                return Err(ProfileError::SelfIntersecting);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Check whether two separate polygons share any point, cross, or touch.
-fn boundaries_contact(a: &[Point3], b: &[Point3]) -> bool {
-    let na = a.len();
-    let nb = b.len();
-    for i in 0..na {
-        let p = a[i];
-        let q = a[(i + 1) % na];
-        for j in 0..nb {
-            let r = b[j];
-            let s = b[(j + 1) % nb];
-            if segments_intersect(p, q, r, s) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// 2-D segment intersection test (using the plane projection implicitly via
-/// the signed-area / cross-product test in 3-D).  Returns true if the open
-/// segments (p,q) and (r,s) properly cross, or if any endpoint touches the
-/// other segment (closed-interval test).
-fn segments_intersect(p: Point3, q: Point3, r: Point3, s: Point3) -> bool {
-    let d1 = cross_z(r, s, p);
-    let d2 = cross_z(r, s, q);
-    let d3 = cross_z(p, q, r);
-    let d4 = cross_z(p, q, s);
-
-    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
-        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
-    {
-        return true;
-    }
-    // Collinear / endpoint cases.
-    let eps = crate::tol::POINT_MERGE;
-    if d1.abs() <= eps && on_segment(r, s, p) {
-        return true;
-    }
-    if d2.abs() <= eps && on_segment(r, s, q) {
-        return true;
-    }
-    if d3.abs() <= eps && on_segment(p, q, r) {
-        return true;
-    }
-    if d4.abs() <= eps && on_segment(p, q, s) {
-        return true;
-    }
-    false
-}
-
-/// Signed 2-D cross product of (q-p) × (r-p) using the 3-D cross product
-/// and extracting the dominant axis (which is the normal axis for coplanar
-/// points).
-fn cross_z(p: Point3, q: Point3, r: Point3) -> f64 {
-    let pq = q - p;
-    let pr = r - p;
-    let c = pq.cross(pr);
-    // Return the component along the dominant axis of the cross product.
-    if c.z.abs() >= c.x.abs() && c.z.abs() >= c.y.abs() {
-        c.z
-    } else if c.y.abs() >= c.x.abs() {
-        c.y
+    if polygon_is_simple(pts) {
+        Ok(())
     } else {
-        c.x
+        Err(ProfileError::SelfIntersecting)
     }
 }
 
-/// True if point `t` lies on the line segment `[p, q]` (collinearity assumed).
-fn on_segment(p: Point3, q: Point3, t: Point3) -> bool {
-    let min_x = p.x.min(q.x);
-    let max_x = p.x.max(q.x);
-    let min_y = p.y.min(q.y);
-    let max_y = p.y.max(q.y);
-    let min_z = p.z.min(q.z);
-    let max_z = p.z.max(q.z);
-    t.x >= min_x - crate::tol::POINT_MERGE
-        && t.x <= max_x + crate::tol::POINT_MERGE
-        && t.y >= min_y - crate::tol::POINT_MERGE
-        && t.y <= max_y + crate::tol::POINT_MERGE
-        && t.z >= min_z - crate::tol::POINT_MERGE
-        && t.z <= max_z + crate::tol::POINT_MERGE
-}
+// ═════════════════════════════════════════════════════════════════════ tests
 
-/// Point-in-polygon test using the ray-casting method projected onto the
-/// plane spanned by `normal`. Returns `true` only for strictly interior
-/// points; boundary points return `false` (strict interior required for
-/// `HoleOutsideOuter`).
-fn point_inside_polygon(pt: Point3, poly: &[Point3], normal: crate::math::Vec3) -> bool {
-    let (u, v) = plane_axes(normal);
-    let px = pt.to_vec().dot(u);
-    let py = pt.to_vec().dot(v);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::Plane;
 
-    let n = poly.len();
-    let mut inside = false;
-    let mut j = n - 1;
-    for i in 0..n {
-        let ai_x = poly[i].to_vec().dot(u);
-        let ai_y = poly[i].to_vec().dot(v);
-        let aj_x = poly[j].to_vec().dot(u);
-        let aj_y = poly[j].to_vec().dot(v);
+    fn xy_plane() -> Plane {
+        Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap()
+    }
 
-        if ((ai_y > py) != (aj_y > py)) && (px < (aj_x - ai_x) * (py - ai_y) / (aj_y - ai_y) + ai_x)
-        {
-            inside = !inside;
+    fn pt(x: f64, y: f64) -> Point3 {
+        Point3::new(x, y, 0.0)
+    }
+
+    /// Build a rectangle sketch and return the single region.
+    fn make_rect_sketch(x0: f64, y0: f64, x1: f64, y1: f64) -> Sketch {
+        let mut s = Sketch::on_plane(xy_plane());
+        let segs = [
+            (pt(x0, y0), pt(x1, y0)),
+            (pt(x1, y0), pt(x1, y1)),
+            (pt(x1, y1), pt(x0, y1)),
+            (pt(x0, y1), pt(x0, y0)),
+        ];
+        for (a, b) in &segs {
+            s.add_segment(*a, *b).unwrap();
         }
-        j = i;
+        s
     }
-    inside
+
+    // ── Angular sorting around a 4-way crossing vertex ────────────────────────
+
+    /// After inserting two crossing segments (+), the crossing vertex must have
+    /// 4 outgoing directed half-edges sorted in angular order.  We verify by
+    /// checking the region structure: a 4-way crossing of equal-length arms
+    /// produces 4 triangular regions (none actually, since the arms extend to
+    /// different lengths — we use the simpler rectangle-then-chord case).
+    #[test]
+    fn angular_sort_4way_crossing() {
+        // Draw a cross (+) with all four arms meeting at the origin.
+        // Arm segments: (-1,0)-(1,0) and (0,-1)-(0,1).
+        let mut s = Sketch::on_plane(xy_plane());
+        s.add_segment(pt(-1.0, 0.0), pt(1.0, 0.0)).unwrap();
+        s.add_segment(pt(0.0, -1.0), pt(0.0, 1.0)).unwrap();
+        // 4 arms meeting at origin — no closed region since arms are open.
+        assert_eq!(s.regions().len(), 0);
+
+        // Now close them into a square.
+        s.add_segment(pt(-1.0, -1.0), pt(1.0, -1.0)).unwrap();
+        s.add_segment(pt(1.0, -1.0), pt(1.0, 1.0)).unwrap();
+        s.add_segment(pt(1.0, 1.0), pt(-1.0, 1.0)).unwrap();
+        s.add_segment(pt(-1.0, 1.0), pt(-1.0, -1.0)).unwrap();
+        // The cross divides the square into 4 equal quadrant regions.
+        assert_eq!(s.regions().len(), 4);
+    }
+
+    // ── Triangle region (non-axis-aligned edges) ──────────────────────────────
+
+    #[test]
+    fn triangle_region_non_axis_aligned() {
+        let mut s = Sketch::on_plane(xy_plane());
+        s.add_segment(pt(0.0, 0.0), pt(3.0, 0.0)).unwrap();
+        s.add_segment(pt(3.0, 0.0), pt(1.5, 2.0)).unwrap();
+        s.add_segment(pt(1.5, 2.0), pt(0.0, 0.0)).unwrap();
+        assert_eq!(s.regions().len(), 1);
+        let region = s.regions().values().next().unwrap();
+        assert_eq!(region.outer.len(), 3);
+        assert!(region.holes.is_empty());
+        // Verify CCW winding.
+        let pts: Vec<Point3> = region
+            .outer
+            .iter()
+            .map(|&vid| s.vertices()[vid].position)
+            .collect();
+        let area = signed_area_on_plane(&pts, xy_plane().normal());
+        assert!(area > 0.0, "outer boundary should be CCW");
+    }
+
+    // ── Collinear merge: new segment entirely inside an existing edge ─────────
+
+    #[test]
+    fn collinear_new_inside_existing() {
+        let mut s = Sketch::on_plane(xy_plane());
+        // Existing edge spans [0,4].
+        s.add_segment(pt(0.0, 0.0), pt(4.0, 0.0)).unwrap();
+        // New segment is [1,3], entirely inside the existing edge.
+        s.add_segment(pt(1.0, 0.0), pt(3.0, 0.0)).unwrap();
+        // Result: three abutting edges [0,1], [1,3], [3,4].
+        // Vertices: 0, 1, 3, 4 = 4 vertices; edges: 3.
+        assert_eq!(s.vertices().len(), 4);
+        assert_eq!(s.edges().len(), 3);
+        assert_eq!(s.regions().len(), 0);
+    }
+
+    // ── Region identity: unchanged region keeps its id ────────────────────────
+
+    #[test]
+    fn region_identity_stable_across_disjoint_add() {
+        let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        let id_before: Vec<SketchRegionId> = s.regions().keys().collect();
+        assert_eq!(id_before.len(), 1);
+
+        // Add a segment far away that doesn't touch the rectangle.
+        s.add_segment(pt(10.0, 10.0), pt(11.0, 10.0)).unwrap();
+
+        // The rectangle region should still be present (same outer cycle).
+        // It will have a fresh id (our implementation re-inserts), but it
+        // should NOT appear in regions_created (since cycles_equal matched it).
+        // We verify by checking the total region count stays 1.
+        assert_eq!(s.regions().len(), 1);
+    }
+
+    // ── Chord across region produces correct diff counts ─────────────────────
+
+    #[test]
+    fn chord_diff_counts() {
+        let mut s = make_rect_sketch(0.0, 0.0, 2.0, 2.0);
+        let report = s.add_segment(pt(1.0, 0.0), pt(1.0, 2.0)).unwrap();
+        assert_eq!(report.regions_removed.len(), 1);
+        assert_eq!(report.regions_created.len(), 2);
+        assert_eq!(s.regions().len(), 2);
+    }
 }

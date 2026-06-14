@@ -39,7 +39,6 @@ fn rect_segments(x0: f64, y0: f64, x1: f64, y1: f64) -> [(Point3, Point3); 4] {
 // ------------------------------------------------------------ sticky rules
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: rule 1 — coincident endpoints merge"]
 fn shared_endpoints_merge() {
     let mut s = xy_sketch();
     s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
@@ -51,7 +50,6 @@ fn shared_endpoints_merge() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: rule 2 — endpoint on an edge interior splits it (T-junction)"]
 fn t_junction_splits_the_touched_edge() {
     let mut s = xy_sketch();
     s.add_segment(pt(0.0, 0.0), pt(2.0, 0.0)).unwrap();
@@ -63,7 +61,6 @@ fn t_junction_splits_the_touched_edge() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: rule 3 — proper crossings split both edges"]
 fn crossing_splits_both_edges() {
     let mut s = xy_sketch();
     s.add_segment(pt(-1.0, 0.0), pt(1.0, 0.0)).unwrap();
@@ -76,7 +73,6 @@ fn crossing_splits_both_edges() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: rule 4 — collinear overlap merges, never stacks"]
 fn collinear_overlap_does_not_stack_edges() {
     let mut s = xy_sketch();
     s.add_segment(pt(0.0, 0.0), pt(2.0, 0.0)).unwrap();
@@ -87,7 +83,6 @@ fn collinear_overlap_does_not_stack_edges() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: rule 5 — closing a circuit creates a region"]
 fn closing_a_rectangle_creates_one_region() {
     let mut s = xy_sketch();
     let segs = rect_segments(0.0, 0.0, 2.0, 1.0);
@@ -107,7 +102,6 @@ fn closing_a_rectangle_creates_one_region() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: a circuit inside a region becomes its hole"]
 fn inner_circuit_makes_a_hole() {
     let mut s = xy_sketch();
     for (from, to) in rect_segments(0.0, 0.0, 4.0, 4.0) {
@@ -121,10 +115,24 @@ fn inner_circuit_makes_a_hole() {
     let hole_counts: Vec<usize> = s.regions().values().map(|r| r.holes.len()).collect();
     assert!(hole_counts.contains(&1), "one region carries the hole");
     assert!(hole_counts.contains(&0), "the island has none");
+
+    // Both regions must yield VALID profiles. (Regression: the hole used to be
+    // assigned to the inner square's own region — its own reverse-wound
+    // boundary — so that region's profile was self-intersecting and extruding
+    // it panicked. The hole belongs to the larger ring, not the island.)
+    for (rid, region) in s.regions() {
+        s.profile(rid).expect("every region yields a valid profile");
+        if region.holes.is_empty() {
+            // The island is the small inner square (4 corners, ~area 4).
+            assert_eq!(region.outer.len(), 4);
+        } else {
+            // The ring's outer is the big square; its hole is the inner one.
+            assert_eq!(region.holes.len(), 1);
+        }
+    }
 }
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: a chord across a region splits it in two"]
 fn chord_across_a_region_splits_it() {
     let mut s = xy_sketch();
     for (from, to) in rect_segments(0.0, 0.0, 2.0, 2.0) {
@@ -140,7 +148,6 @@ fn chord_across_a_region_splits_it() {
 // -------------------------------------------------------------- rejections
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: off-plane points are typed errors, never projected"]
 fn off_plane_point_is_rejected_unchanged() {
     let mut s = xy_sketch();
     let err = s
@@ -151,7 +158,6 @@ fn off_plane_point_is_rejected_unchanged() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::add_segment: degenerate segments are rejected, including after merging"]
 fn degenerate_segment_is_rejected() {
     let mut s = xy_sketch();
     let err = s
@@ -164,7 +170,6 @@ fn degenerate_segment_is_rejected() {
 // ------------------------------------------------------------- remove_edge
 
 #[test]
-#[ignore = "spec for Sketch::remove_edge: removing a boundary edge dissolves its region"]
 fn removing_a_boundary_edge_dissolves_the_region() {
     let mut s = xy_sketch();
     for (from, to) in rect_segments(0.0, 0.0, 2.0, 2.0) {
@@ -179,7 +184,6 @@ fn removing_a_boundary_edge_dissolves_the_region() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::remove_edge: vertices used by nothing else are removed"]
 fn removing_a_dangling_edge_removes_its_lonely_vertex() {
     let mut s = xy_sketch();
     s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
@@ -204,7 +208,6 @@ fn removing_a_dangling_edge_removes_its_lonely_vertex() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::remove_edge: stale handles are typed errors"]
 fn remove_edge_rejects_stale_handle() {
     let mut s = xy_sketch();
     s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
@@ -216,7 +219,6 @@ fn remove_edge_rejects_stale_handle() {
 // -------------------------------------------------------- profile extraction
 
 #[test]
-#[ignore = "spec for Sketch::profile: a closed region exports as a valid Profile"]
 fn region_exports_as_profile() {
     let mut s = xy_sketch();
     let mut region = None;
@@ -236,7 +238,6 @@ fn region_exports_as_profile() {
 }
 
 #[test]
-#[ignore = "spec for Sketch::profile: region handles die when mutations reshape them"]
 fn profile_of_stale_region_is_an_error() {
     let mut s = xy_sketch();
     let mut region = None;
@@ -252,11 +253,31 @@ fn profile_of_stale_region_is_an_error() {
     assert_eq!(s.profile(region).unwrap_err(), SketchError::UnknownRegion);
 }
 
+#[test]
+fn unreshaped_region_keeps_its_handle() {
+    let mut s = xy_sketch();
+    let mut region = None;
+    for (from, to) in rect_segments(0.0, 0.0, 2.0, 2.0) {
+        let r = s.add_segment(from, to).unwrap();
+        if let Some(&id) = r.regions_created.first() {
+            region = Some(id);
+        }
+    }
+    let region = region.unwrap();
+    // A mutation elsewhere must not invalidate the untouched region's
+    // handle, and must not mention it in either report list — "regions die
+    // when reshaped" implies they LIVE when not.
+    let report = s.add_segment(pt(5.0, 5.0), pt(6.0, 5.0)).unwrap();
+    assert!(report.regions_created.is_empty());
+    assert!(report.regions_removed.is_empty());
+    assert!(s.regions().contains_key(region));
+    assert!(s.profile(region).is_ok());
+}
+
 // --------------------------------------------------- insertion-order property
 
 proptest! {
     #[test]
-    #[ignore = "spec for Sketch::add_segment: region detection is insertion-order independent"]
     fn rectangle_closes_in_any_insertion_order(order in Just(vec![0usize, 1, 2, 3]).prop_shuffle()) {
         let segs = rect_segments(0.0, 0.0, 2.0, 1.0);
         let mut s = xy_sketch();

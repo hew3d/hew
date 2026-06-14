@@ -40,10 +40,12 @@
 //! strokes are tool-layer state (the UI buffers the polyline and commits when
 //! it closes). This keeps every committed state a valid solid.
 
-use crate::ids::{EdgeId, FaceId};
+use crate::geom2d::{point_inside_polygon, segments_intersect};
+use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, VertexId};
 use crate::math::{Plane, Point3};
 use crate::sketch::Profile;
-use crate::topo::Object;
+use crate::tol;
+use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState};
 use crate::transform::Transform;
 
 /// The explicit combination modes (ARCHITECTURE.md: combining Objects is always a
@@ -109,6 +111,11 @@ pub enum ExtrudeError {
     /// |distance| below [`tol::POINT_MERGE`](crate::tol::POINT_MERGE): the result would be a
     /// zero-thickness shell, which is not a solid.
     DistanceTooSmall,
+    /// The sweep produced geometry that is degenerate or fails the topology
+    /// validator (e.g. a near-zero-area wall, or a profile shape this version
+    /// cannot extrude into a valid solid). Reported instead of panicking so
+    /// the caller surfaces a clean error rather than aborting.
+    DegenerateGeometry,
 }
 
 /// Typed failures of push/pull.
@@ -129,6 +136,10 @@ pub enum PushPullError {
     /// The swept side walls would intersect other geometry of this Object in
     /// a way that has no manifold result (e.g., sweeping past a concave
     /// neighbor). Fail loudly; never produce near-correct geometry.
+    ///
+    /// Also returned in M1 for sweeps the current implementation cannot
+    /// regenerate (side faces not perpendicular to the moved face); wall
+    /// generation for the general case lands with the boolean machinery.
     NonManifoldResult,
 }
 
@@ -192,6 +203,9 @@ impl std::fmt::Display for ExtrudeError {
         match self {
             ExtrudeError::DistanceTooSmall => {
                 write!(f, "extrusion distance below tol::POINT_MERGE")
+            }
+            ExtrudeError::DegenerateGeometry => {
+                write!(f, "extrusion produced degenerate or invalid geometry")
             }
         }
     }
@@ -352,7 +366,7 @@ impl Object {
             // Near cap plane: same as profile plane but with inverted normal.
             // Build from the reversed outer boundary.
             let rev_outer: Vec<Point3> = outer.iter().rev().copied().collect();
-            Plane::from_polygon(&rev_outer).expect("profile outer is valid")
+            Plane::from_polygon(&rev_outer).map_err(|_| ExtrudeError::DegenerateGeometry)?
         };
 
         let near_outer_reversed: Vec<usize> = (0..n_outer).rev().collect();
@@ -387,7 +401,7 @@ impl Object {
         let far_cap_plane = {
             let far_outer_pts: Vec<Point3> =
                 (0..n_outer).map(|i| positions[total_near + i]).collect();
-            Plane::from_polygon(&far_outer_pts).expect("far outer is valid")
+            Plane::from_polygon(&far_outer_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?
         };
 
         face_specs.push((far_outer, far_inner_loops, far_cap_plane));
@@ -406,7 +420,8 @@ impl Object {
                 positions[b_far],
                 positions[a_far],
             ];
-            let wall_plane = Plane::from_polygon(&wall_pts).expect("outer wall is non-degenerate");
+            let wall_plane =
+                Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
             face_specs.push((vec![a_near, b_near, b_far, a_far], vec![], wall_plane));
         }
 
@@ -429,7 +444,7 @@ impl Object {
                     positions[a_far],
                 ];
                 let wall_plane =
-                    Plane::from_polygon(&wall_pts).expect("hole wall is non-degenerate");
+                    Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
                 face_specs.push((vec![a_near, b_near, b_far, a_far], vec![], wall_plane));
             }
         }
@@ -450,14 +465,18 @@ impl Object {
                         .collect();
                     let pts: Vec<Point3> = rev_outer.iter().map(|&i| positions[i]).collect();
                     let plane =
-                        Plane::from_polygon(&pts).expect("reversed loop still spans its plane");
-                    (rev_outer, rev_inners, plane)
+                        Plane::from_polygon(&pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
+                    Ok((rev_outer, rev_inners, plane))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, ExtrudeError>>()?;
         }
 
         let obj = Object::from_faces_with_holes(&positions, &face_specs);
-        obj.check_invariants();
+        // A valid Profile should always yield a valid solid; if the sweep
+        // nonetheless produced invalid topology, return a typed error rather
+        // than tripping the debug-only validator panic at the WASM boundary.
+        obj.validate()
+            .map_err(|_| ExtrudeError::DegenerateGeometry)?;
         Ok(obj)
     }
 
@@ -478,13 +497,171 @@ impl Object {
     ///
     /// # Errors
     /// See [`PushPullError`]; all leave the object untouched.
-    #[allow(unused_variables)] // contract stub: implementation lands in M1
     pub fn push_pull(
         &mut self,
         face: FaceId,
         distance: f64,
     ) -> Result<PushPullReport, PushPullError> {
-        todo!("M1: push/pull (see tests/op_specs.rs: inverse restores topology)")
+        // --- Step 1: Validate inputs ---
+        if self.watertight != crate::topo::WatertightState::Watertight {
+            return Err(PushPullError::ObjectNotSolid);
+        }
+        if !self.faces.contains_key(face) {
+            return Err(PushPullError::UnknownFace);
+        }
+        if distance.abs() < tol::POINT_MERGE {
+            return Err(PushPullError::DistanceTooSmall);
+        }
+
+        let face_normal = self.faces[face].plane.normal();
+        let sweep = face_normal * distance;
+
+        // Collect all vertex IDs on the moved face (outer + inner loops).
+        let moved_vertices: std::collections::HashSet<VertexId> = {
+            let outer_loop = self.faces[face].outer_loop;
+            let inner_loops: Vec<LoopId> = self.faces[face].inner_loops.clone();
+            let mut verts = std::collections::HashSet::new();
+            for h in self.loop_half_edges(outer_loop) {
+                verts.insert(self.half_edges[h].origin);
+            }
+            for il in &inner_loops {
+                for h in self.loop_half_edges(*il) {
+                    verts.insert(self.half_edges[h].origin);
+                }
+            }
+            verts
+        };
+
+        // Collect neighbor faces: faces that share a boundary edge with the moved face.
+        // A boundary edge of the moved face is one where one half-edge is on the moved face
+        // and the twin is on a different face.
+        let neighbor_faces: Vec<FaceId> = {
+            let outer_loop = self.faces[face].outer_loop;
+            let inner_loops: Vec<LoopId> = self.faces[face].inner_loops.clone();
+            let mut neighbors = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+
+            let all_loops: Vec<LoopId> = std::iter::once(outer_loop)
+                .chain(inner_loops.iter().copied())
+                .collect();
+
+            for loop_id in all_loops {
+                for h in self.loop_half_edges(loop_id) {
+                    if let Some(twin_h) = self.half_edges[h].twin {
+                        let neighbor_loop = self.half_edges[twin_h].loop_id;
+                        let neighbor_face = self.loops[neighbor_loop].face;
+                        if neighbor_face != face && seen.insert(neighbor_face) {
+                            neighbors.push(neighbor_face);
+                        }
+                    }
+                }
+            }
+            neighbors
+        };
+
+        // --- Step 2: Eligibility check ---
+        // For each neighbor face, the sweep direction (face normal) must lie in
+        // the neighbor's plane: |normal_moved · normal_neighbor| < tol::NORMAL_DIRECTION.
+        for &nf in &neighbor_faces {
+            let normal_neighbor = self.faces[nf].plane.normal();
+            let dot = face_normal.dot(normal_neighbor).abs();
+            if dot >= tol::NORMAL_DIRECTION {
+                return Err(PushPullError::NonManifoldResult);
+            }
+        }
+
+        // --- Step 3: WouldVanish check (inward push only) ---
+        if distance < 0.0 {
+            // Inward push: compute extent = maximum inward signed distance from
+            // the moved face's plane over all vertices NOT on the moved face.
+            // "Inward" means in the -face_normal direction, so the signed distance
+            // from the moved face's plane to each such vertex is positive
+            // (they are on the inside of the solid relative to this face).
+            // extent is the maximum of those signed distances.
+            let moved_face_plane = self.faces[face].plane;
+            let mut extent = f64::NEG_INFINITY;
+            for (vid, vertex) in &self.vertices {
+                if !moved_vertices.contains(&vid) {
+                    let sd = moved_face_plane.signed_distance(vertex.position);
+                    // For an inward push on a watertight solid, other vertices
+                    // should be on the inside (negative sd relative to the outward normal).
+                    // The inward signed distance is -sd.
+                    let inward_dist = -sd;
+                    if inward_dist > extent {
+                        extent = inward_dist;
+                    }
+                }
+            }
+            // |distance| is the inward push magnitude (distance < 0 so |distance| = -distance).
+            if (-distance) >= extent - tol::POINT_MERGE {
+                return Err(PushPullError::WouldVanish);
+            }
+
+            // Interior-obstruction guard: translate mode moves the shared
+            // ring, so a neighbor face whose FIXED vertices sit closer along
+            // the sweep than the push depth would fold past them into a
+            // self-intersecting shell — every face stays planar and manifold,
+            // so the validator cannot see it. Refuse at the nearest fixed
+            // neighbor vertex strictly in front of the sweep.
+            let mut neighbor_limit = f64::INFINITY;
+            for &nf in &neighbor_faces {
+                let loops: Vec<LoopId> = std::iter::once(self.faces[nf].outer_loop)
+                    .chain(self.faces[nf].inner_loops.iter().copied())
+                    .collect();
+                for loop_id in loops {
+                    for h in self.loop_half_edges(loop_id) {
+                        let vid = self.half_edges[h].origin;
+                        if moved_vertices.contains(&vid) {
+                            continue;
+                        }
+                        let inward = -moved_face_plane.signed_distance(self.vertices[vid].position);
+                        if inward > tol::POINT_MERGE && inward < neighbor_limit {
+                            neighbor_limit = inward;
+                        }
+                    }
+                }
+            }
+            if (-distance) >= neighbor_limit - tol::POINT_MERGE {
+                return Err(PushPullError::NonManifoldResult);
+            }
+        }
+
+        // --- Steps 4-6: Clone, mutate, validate, swap ---
+        let mut obj = self.clone();
+
+        // Step 4: Translate vertices of the moved face's boundary.
+        for &vid in &moved_vertices {
+            obj.vertices[vid].position = obj.vertices[vid].position + sweep;
+        }
+
+        // Step 5: Refit planes for the moved face and every neighbor face.
+        // Moved face:
+        {
+            let outer_loop = obj.faces[face].outer_loop;
+            let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+            // A refit failure after the guards above is a degenerate sweep
+            // we failed to predict — refuse loudly, never skip the refit.
+            obj.faces[face].plane =
+                Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+        }
+        // Neighbor faces (their boundary vertices were moved too, since they share the ring):
+        for &nf in &neighbor_faces {
+            let outer_loop = obj.faces[nf].outer_loop;
+            let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+            obj.faces[nf].plane =
+                Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+        }
+
+        // Step 6: Validate, then swap.
+        obj.check_invariants();
+        *self = obj;
+
+        // Step 7: Report.
+        Ok(PushPullReport {
+            face,
+            created_faces: vec![],
+            removed_faces: vec![],
+        })
     }
 
     /// Sticky rule inside an Object: cuts `face` in two along `path`, whose
@@ -496,15 +673,140 @@ impl Object {
     /// the watertightness state cannot change. Partial strokes are not
     /// accepted — see the module-level "no dangling edges" decision.
     ///
+    /// M1 scope: cut endpoints anchor on the face's **outer** loop only.
+    /// If an endpoint matches an inner (hole) loop vertex or edge instead of
+    /// the outer boundary, `EndpointNotOnBoundary` is returned — M1 cuts
+    /// anchor on the outer boundary only; inner-loop endpoints are reserved
+    /// for a future milestone.
+    ///
     /// # Errors
     /// See [`StickyError`]; all leave the object untouched.
-    #[allow(unused_variables)] // contract stub: implementation lands in M1
     pub fn split_face(
         &mut self,
         face: FaceId,
         path: &[Point3],
     ) -> Result<FaceSplitReport, StickyError> {
-        todo!("M1: face split (see tests/op_specs.rs: split + merge is identity)")
+        // --- validation (before any mutation) ---
+        if !self.faces.contains_key(face) {
+            return Err(StickyError::UnknownFace);
+        }
+        if path.len() < 2 {
+            return Err(StickyError::PathTooShort);
+        }
+
+        let face_plane = self.faces[face].plane;
+        let outer_loop = self.faces[face].outer_loop;
+        let inner_loops: Vec<LoopId> = self.faces[face].inner_loops.clone();
+
+        // Collect outer loop half-edges and vertex positions.
+        let outer_hes: Vec<HalfEdgeId> = self.loop_half_edges(outer_loop).collect();
+
+        // --- classify endpoints against the outer loop ---
+        let ep0 = classify_endpoint(self, &outer_hes, path[0])?;
+        let ep1 = classify_endpoint(self, &outer_hes, *path.last().unwrap())?;
+
+        // Check: if classify returned None (not on outer loop), check inner loops;
+        // if on inner loop or truly interior, return EndpointNotOnBoundary.
+        let ep0 = match ep0 {
+            Some(ep) => ep,
+            None => {
+                // Check if it's on any inner loop — if so, EndpointNotOnBoundary (M1 scope)
+                // If it's truly interior, also EndpointNotOnBoundary.
+                return Err(StickyError::EndpointNotOnBoundary { which: 0 });
+            }
+        };
+        let ep1 = match ep1 {
+            Some(ep) => ep,
+            None => {
+                return Err(StickyError::EndpointNotOnBoundary { which: 1 });
+            }
+        };
+
+        // Two endpoints can't be the same boundary location (would produce a zero-length cut).
+        // This is caught by pathsimplicity / PathNotSimple.  But also, if they both land
+        // exactly on the same vertex, the path is degenerate.
+        // We check simplicity of interior segments below.
+
+        // --- validate interior path points ---
+        // Build outer loop vertex positions for point-in-polygon test.
+        let outer_pts: Vec<Point3> = outer_hes
+            .iter()
+            .map(|&h| self.vertices[self.half_edges[h].origin].position)
+            .collect();
+
+        // Build inner loop vertex positions for hole containment check.
+        let hole_pts: Vec<Vec<Point3>> = inner_loops
+            .iter()
+            .map(|&il| self.loop_positions(il).collect())
+            .collect();
+
+        // Validate interior points (indices 1..path.len()-1).
+        for (idx, &pt) in path.iter().enumerate().skip(1).take(path.len() - 2) {
+            // Must be on the face plane.
+            if face_plane.signed_distance(pt).abs() > tol::PLANE_DIST {
+                return Err(StickyError::PointNotOnFace { index: idx });
+            }
+            // Must be strictly inside the face (inside outer boundary, outside all holes).
+            if !point_inside_polygon(pt, &outer_pts, face_plane.normal()) {
+                return Err(StickyError::PointNotOnFace { index: idx });
+            }
+            for hole in &hole_pts {
+                if point_inside_polygon(pt, hole, face_plane.normal()) {
+                    return Err(StickyError::PointNotOnFace { index: idx });
+                }
+            }
+        }
+
+        // --- check path simplicity ---
+        // The interior polyline must not self-intersect or graze a hole boundary.
+        // Build the full path point list (using actual resolved positions for endpoints).
+        let ep0_pos = endpoint_position(self, &ep0);
+        let ep1_pos = endpoint_position(self, &ep1);
+
+        let mut resolved_path: Vec<Point3> = Vec::with_capacity(path.len());
+        resolved_path.push(ep0_pos);
+        resolved_path.extend_from_slice(&path[1..path.len() - 1]);
+        resolved_path.push(ep1_pos);
+
+        // Check path self-intersections (interior segments only — not adjacent).
+        let n_seg = resolved_path.len() - 1;
+        for i in 0..n_seg {
+            let a = resolved_path[i];
+            let b = resolved_path[i + 1];
+            for j in (i + 2)..n_seg {
+                // Skip adjacent segments.
+                if i == 0 && j == n_seg - 1 {
+                    continue;
+                }
+                let c = resolved_path[j];
+                let d = resolved_path[j + 1];
+                if segments_intersect(a, b, c, d) {
+                    return Err(StickyError::PathNotSimple);
+                }
+            }
+        }
+        // Check path segments against hole boundaries.
+        for hole in &hole_pts {
+            let nh = hole.len();
+            for i in 0..n_seg {
+                let a = resolved_path[i];
+                let b = resolved_path[i + 1];
+                for j in 0..nh {
+                    let c = hole[j];
+                    let d = hole[(j + 1) % nh];
+                    if segments_intersect(a, b, c, d) {
+                        return Err(StickyError::PathNotSimple);
+                    }
+                }
+            }
+        }
+
+        // --- all checks passed — clone and mutate ---
+        let mut obj = self.clone();
+        let report = do_split_face(&mut obj, face, path, &ep0, &ep1)?;
+        obj.check_invariants();
+        *self = obj;
+        Ok(report)
     }
 
     /// Inverse sticky rule: dissolves the boundary between the two coplanar
@@ -513,13 +815,75 @@ impl Object {
     /// face cannot have two disconnected boundaries to the same neighbor).
     ///
     /// `split_face` followed by `merge_faces` on any returned cut edge is the
-    /// identity (up to handle renaming).
+    /// identity (up to handle renaming). Chain-endpoint vertices left with
+    /// exactly two collinear edges are healed away (the edges merge), so a
+    /// split followed by a merge leaves no scar — this is what makes the
+    /// identity property hold.
     ///
     /// # Errors
     /// See [`StickyError`]; all leave the object untouched.
-    #[allow(unused_variables)] // contract stub: implementation lands in M1
     pub fn merge_faces(&mut self, edge: EdgeId) -> Result<FaceMergeReport, StickyError> {
-        todo!("M1: face merge (see tests/op_specs.rs)")
+        // --- validation ---
+        let edge_data = match self.edges.get(edge) {
+            Some(e) => *e,
+            None => return Err(StickyError::UnknownEdge),
+        };
+
+        let twin_he_id = match edge_data.twin_half_edge {
+            Some(t) => t,
+            None => return Err(StickyError::BoundaryEdge),
+        };
+
+        let he_id = edge_data.half_edge;
+        let he = self.half_edges[he_id];
+        let twin_he = self.half_edges[twin_he_id];
+
+        // Get the two loops (and thus two faces).
+        let loop_a = he.loop_id;
+        let loop_b = twin_he.loop_id;
+
+        let face_a = self.loops[loop_a].face;
+        let face_b = self.loops[loop_b].face;
+
+        if face_a == face_b {
+            return Err(StickyError::SameFaceOnBothSides);
+        }
+
+        // Both must be outer loops (inner loops cannot be merged via this op).
+        if self.loops[loop_a].kind != LoopKind::Outer || self.loops[loop_b].kind != LoopKind::Outer
+        {
+            // Edge is between inner loops — not a supported merge path.
+            return Err(StickyError::BoundaryEdge);
+        }
+
+        // Check coplanarity of the two faces.
+        let plane_a = self.faces[face_a].plane;
+        let plane_b = self.faces[face_b].plane;
+        let normal_diff = (plane_a.normal() - plane_b.normal()).length();
+        let normal_diff2 = (plane_a.normal() + plane_b.normal()).length();
+        let normals_parallel =
+            normal_diff < tol::NORMAL_DIRECTION || normal_diff2 < tol::NORMAL_DIRECTION;
+        if !normals_parallel {
+            return Err(StickyError::FacesNotCoplanar);
+        }
+        // Check that the planes are the same (not antiparallel opposite planes).
+        // For a manifold solid, coplanar faces with same normal are on the same plane.
+        // Verify via the plane distance: a vertex of face_b should be on plane_a.
+        let sample_b = {
+            let loop_id = self.faces[face_b].outer_loop;
+            let h = self.loops[loop_id].first_half_edge;
+            self.vertices[self.half_edges[h].origin].position
+        };
+        if plane_a.signed_distance(sample_b).abs() > tol::PLANE_DIST {
+            return Err(StickyError::FacesNotCoplanar);
+        }
+
+        // --- clone and mutate ---
+        let mut obj = self.clone();
+        let report = do_merge_faces(&mut obj, face_a, face_b)?;
+        obj.check_invariants();
+        *self = obj;
+        Ok(report)
     }
 
     /// Explicit combination of two solids — the only way Objects ever join
@@ -543,5 +907,1165 @@ impl Object {
         b_to_a: &Transform,
     ) -> Result<Object, BooleanError> {
         todo!("M2: boolean combination (see tests/op_specs.rs)")
+    }
+}
+
+// ============================================================== private helpers
+
+/// How a path endpoint lands on the outer loop.
+#[derive(Debug, Clone)]
+enum EndpointHit {
+    /// Snapped exactly to an existing vertex.
+    Vertex(VertexId),
+    /// Lies in the interior of a boundary edge.
+    /// `he` is the half-edge (origin → dest) that gets split; `t` is the
+    /// parameter along that half-edge (0 = origin, 1 = dest).
+    Edge { he: HalfEdgeId, t: f64 },
+}
+
+/// The resolved 3-D position of an endpoint hit.
+fn endpoint_position(obj: &Object, hit: &EndpointHit) -> Point3 {
+    match hit {
+        EndpointHit::Vertex(v) => obj.vertices[*v].position,
+        EndpointHit::Edge { he, t } => {
+            let h = obj.half_edges[*he];
+            let p = obj.vertices[h.origin].position;
+            let q = obj.vertices[obj.half_edges[h.next].origin].position;
+            p + (q - p) * *t
+        }
+    }
+}
+
+/// Try to classify `pt` against the `outer_hes` loop of an object.
+///
+/// Returns:
+/// - `Ok(Some(hit))` if on the outer loop
+/// - `Ok(None)` if not on the outer loop at all (caller handles the inner-loop case)
+fn classify_endpoint(
+    obj: &Object,
+    outer_hes: &[HalfEdgeId],
+    pt: Point3,
+) -> Result<Option<EndpointHit>, StickyError> {
+    // First check vertex hits.
+    for &h in outer_hes {
+        let v = obj.half_edges[h].origin;
+        if obj.vertices[v].position.approx_eq(pt, tol::POINT_MERGE) {
+            return Ok(Some(EndpointHit::Vertex(v)));
+        }
+    }
+    // Then check edge-interior hits.
+    for &h in outer_hes {
+        let origin = obj.vertices[obj.half_edges[h].origin].position;
+        let dest_he = obj.half_edges[h].next;
+        let dest = obj.vertices[obj.half_edges[dest_he].origin].position;
+        let edge_vec = dest - origin;
+        let edge_len_sq = edge_vec.length_squared();
+        if edge_len_sq < tol::POINT_MERGE * tol::POINT_MERGE {
+            continue;
+        }
+        // Project pt onto the edge line.
+        let t = (pt - origin).dot(edge_vec) / edge_len_sq;
+        if t > tol::POINT_MERGE && t < 1.0 - tol::POINT_MERGE {
+            let closest = origin + edge_vec * t;
+            if (pt - closest).length_squared() <= tol::POINT_MERGE * tol::POINT_MERGE {
+                return Ok(Some(EndpointHit::Edge { he: h, t }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Core split surgery on a cloned object.
+///
+/// Preconditions:
+/// - `face` exists
+/// - `ep0` and `ep1` are valid hits on `face`'s outer loop
+/// - interior path points are valid
+/// - path is simple
+fn do_split_face(
+    obj: &mut Object,
+    face: FaceId,
+    path: &[Point3],
+    ep0: &EndpointHit,
+    ep1: &EndpointHit,
+) -> Result<FaceSplitReport, StickyError> {
+    let face_plane = obj.faces[face].plane;
+    let inner_loops: Vec<LoopId> = obj.faces[face].inner_loops.clone();
+
+    // 1. If either endpoint is an edge hit, split that boundary edge.
+    //    We must split ep1 before ep0 in terms of storage, but we need to
+    //    re-resolve ep0's half-edge pointer after ep1 is split if they share
+    //    an edge (they can't share the same half-edge — the endpoints would be
+    //    the same point, which would be caught by simplicity — but let's be safe).
+    let mut split_boundary_edges: Vec<(EdgeId, [EdgeId; 2])> = Vec::new();
+
+    // Resolve both endpoints into vertices, splitting boundary edges as needed.
+    // We process ep1 first so that ep0's half-edge index (if edge hit) is not
+    // disturbed (ep0 comes first in the loop, ep1 comes later).
+    // Actually, order matters: if both are edge hits on the *same* edge, that's a
+    // degenerate case (path.len() == 2, both endpoints on same edge) — but since
+    // they must be distinct boundary points and we already checked path simplicity,
+    // this can't happen.  We process ep0 first (lower index in the outer loop)
+    // then ep1. But since edge-splitting changes half-edge IDs, we need to be
+    // careful: split ep1's edge first (it's "after" ep0 in the loop traversal),
+    // then split ep0's edge.  Actually the easiest is: split ep1 first,
+    // then re-derive ep0 if it was on the same edge (impossible by simplicity
+    // argument), then split ep0.
+    //
+    // Since both endpoints are on the OUTER loop, and the outer loop's half-edges
+    // are stored in the object, splitting one half-edge doesn't change the
+    // position of other half-edges (slotmap doesn't move things).  So we can
+    // split in any order.
+
+    let v0 = match ep0 {
+        EndpointHit::Vertex(v) => *v,
+        EndpointHit::Edge { he, t } => {
+            let pos = {
+                let h = obj.half_edges[*he];
+                let p = obj.vertices[h.origin].position;
+                let q = obj.vertices[obj.half_edges[h.next].origin].position;
+                p + (q - p) * *t
+            };
+            let (v, dead_edge, new_edges) = split_boundary_edge(obj, *he, pos);
+            split_boundary_edges.push((dead_edge, new_edges));
+            v
+        }
+    };
+
+    // Re-read the outer loop half-edges now (ep0 split may have changed the loop).
+    let outer_loop = obj.faces[face].outer_loop;
+
+    let v1 = match ep1 {
+        EndpointHit::Vertex(v) => *v,
+        EndpointHit::Edge { he, t } => {
+            // The original half-edge id is still valid (slotmap doesn't move it),
+            // but if ep0 was an edge split that inserted a new half-edge *after* ep1's
+            // half-edge in the loop, we need the original `he` pointer to still be valid.
+            // Slotmap guarantees that; the only half-edge removed is the one that was split,
+            // and ep1's `he` is a different half-edge.
+            // HOWEVER: if ep0 split the edge immediately before ep1's edge, the `t` value
+            // might now refer to the wrong portion. But `t` in EndpointHit is the original
+            // t before any splits, and we store `he` as a specific half-edge id. Since
+            // slotmap key stability: after split_boundary_edge(ep0), the half-edge `ep1.he`
+            // still refers to the same segment (it's a different half-edge). Valid.
+            let pos = {
+                let h = obj.half_edges[*he];
+                let p = obj.vertices[h.origin].position;
+                let q = obj.vertices[obj.half_edges[h.next].origin].position;
+                p + (q - p) * *t
+            };
+            let (v, dead_edge, new_edges) = split_boundary_edge(obj, *he, pos);
+            split_boundary_edges.push((dead_edge, new_edges));
+            v
+        }
+    };
+
+    // 2. Now we have vertices v0 and v1 on the outer loop.
+    //    Find the two half-edges that START at v0 and v1 on this outer loop.
+    let outer_hes: Vec<HalfEdgeId> = obj.loop_half_edges(outer_loop).collect();
+
+    let he_at_v0 = outer_hes
+        .iter()
+        .copied()
+        .find(|&h| obj.half_edges[h].origin == v0)
+        .expect("v0 is on the outer loop");
+    let he_at_v1 = outer_hes
+        .iter()
+        .copied()
+        .find(|&h| obj.half_edges[h].origin == v1)
+        .expect("v1 is on the outer loop");
+
+    // 3. Build the interior path vertices.
+    //    path[0] and path.last() are the endpoints; intermediate points are new vertices.
+    let interior_pts: Vec<Point3> = path[1..path.len() - 1].to_vec();
+    let interior_verts: Vec<VertexId> = interior_pts
+        .iter()
+        .map(|&pos| {
+            // Placeholder outgoing; will be set below.
+            obj.vertices.insert(Vertex {
+                position: pos,
+                outgoing: HalfEdgeId::default(),
+            })
+        })
+        .collect();
+
+    // 4. The cut produces two new directed half-edge chains along the path:
+    //    - "forward": v0 → ... → v1 (used in face A's loop)
+    //    - "backward": v1 → ... → v0 (used in face B's loop)
+    //
+    //    These come in twin pairs: one new Edge per path segment.
+    //
+    //    Path vertices in order: v0, interior_verts..., v1
+    let path_verts: Vec<VertexId> = {
+        let mut v = vec![v0];
+        v.extend_from_slice(&interior_verts);
+        v.push(v1);
+        v
+    };
+    let n_path_segs = path_verts.len() - 1;
+
+    // Insert the half-edges for the cut.
+    let mut cut_fwd: Vec<HalfEdgeId> = Vec::with_capacity(n_path_segs);
+    let mut cut_bwd: Vec<HalfEdgeId> = Vec::with_capacity(n_path_segs);
+    let mut new_edges: Vec<EdgeId> = Vec::with_capacity(n_path_segs);
+
+    // We'll assign loop_ids after creating the loops.
+    // Use a placeholder loop id for now.
+    let placeholder_loop = obj.faces[face].outer_loop; // will be fixed up
+
+    // First pass: create all forward and backward half-edges without wiring twins yet.
+    // cut_fwd[i]: goes from path_verts[i] to path_verts[i+1]    (0 = v0, last = v1)
+    // cut_bwd[i]: goes from path_verts[n_path_segs-i] to path_verts[n_path_segs-i-1]
+    //             i.e. cut_bwd[0] starts at v1, cut_bwd.last() ends at v0.
+    // Twin pairing: cut_fwd[i] ↔ cut_bwd[n_path_segs-1-i]
+    //   (cut_fwd[i] goes v→w, cut_bwd[n_path_segs-1-i] goes w→v).
+    for i in 0..n_path_segs {
+        let h_fwd = obj.half_edges.insert(HalfEdge {
+            origin: path_verts[i],
+            twin: None, // set in second pass
+            next: HalfEdgeId::default(),
+            prev: HalfEdgeId::default(),
+            edge: EdgeId::default(),
+            loop_id: placeholder_loop, // fixed later
+        });
+        let h_bwd = obj.half_edges.insert(HalfEdge {
+            origin: path_verts[n_path_segs - i], // reverse direction
+            twin: None,
+            next: HalfEdgeId::default(),
+            prev: HalfEdgeId::default(),
+            edge: EdgeId::default(),
+            loop_id: placeholder_loop, // fixed later
+        });
+        cut_fwd.push(h_fwd);
+        cut_bwd.push(h_bwd);
+    }
+    // Second pass: wire twin pairs and create Edge records.
+    // cut_fwd[i] (path_verts[i]→path_verts[i+1]) pairs with
+    // cut_bwd[n_path_segs-1-i] (path_verts[i+1]→path_verts[i]).
+    for (i, &h_fwd) in cut_fwd.iter().enumerate() {
+        let j = n_path_segs - 1 - i; // twin index in cut_bwd
+        let h_bwd = cut_bwd[j];
+        let edge_id = obj.edges.insert(Edge {
+            half_edge: h_fwd,
+            twin_half_edge: Some(h_bwd),
+        });
+        obj.half_edges[h_fwd].edge = edge_id;
+        obj.half_edges[h_bwd].edge = edge_id;
+        obj.half_edges[h_fwd].twin = Some(h_bwd);
+        obj.half_edges[h_bwd].twin = Some(h_fwd);
+        new_edges.push(edge_id);
+    }
+    // cut_bwd is in order v1→v0:
+    // cut_bwd[0].origin = path_verts[n_path_segs] = v1
+    // cut_bwd[1].origin = path_verts[n_path_segs - 1]
+    // cut_bwd.last().origin = path_verts[1]  (the last interior vertex or v0 if single-seg)
+    // So cut_bwd is already in the correct backward order (v1 → ... → v0).
+
+    // 5. Wire next/prev within each cut chain.
+    for i in 0..n_path_segs {
+        if i + 1 < n_path_segs {
+            obj.half_edges[cut_fwd[i]].next = cut_fwd[i + 1];
+            obj.half_edges[cut_fwd[i + 1]].prev = cut_fwd[i];
+        }
+    }
+    for i in 0..n_path_segs {
+        if i + 1 < n_path_segs {
+            obj.half_edges[cut_bwd[i]].next = cut_bwd[i + 1];
+            obj.half_edges[cut_bwd[i + 1]].prev = cut_bwd[i];
+        }
+    }
+
+    // 6. Now we need to split the outer loop into two loops around the cut.
+    //    Current outer loop: ... → he_at_v0 → [chain from v0 to v1] → he_at_v1 → [chain from v1 to v0] → he_at_v0 → ...
+    //
+    //    Face A loop: he_at_v0 → [outer chain v0→v1 (CCW)] → [predecessor of he_at_v1] → cut_bwd[0..] → (last cut_bwd) → he_at_v0
+    //    Wait, let me think again.
+    //
+    //    The outer loop goes: ... → prev(he_at_v0) → he_at_v0 → next(he_at_v0) → ... → prev(he_at_v1) → he_at_v1 → next(he_at_v1) → ... → prev(he_at_v0) → ...
+    //
+    //    Let chain_A = [he_at_v0, next(he_at_v0), ..., prev(he_at_v1)]  (from v0 toward v1 around the loop)
+    //    Let chain_B = [he_at_v1, next(he_at_v1), ..., prev(he_at_v0)]  (from v1 back to v0)
+    //
+    //    New face A loop: chain_A + cut_bwd  (outer chain v0→v1, then cut backward v1→v0)
+    //    New face B loop: chain_B + cut_fwd  (outer chain v1→v0→..., then cut forward v0→v1)
+    //
+    //    Wait: we want CCW winding to be maintained.  The original face has CCW outer loop.
+    //    Splitting with a path from v0 to v1:
+    //    - Face A's boundary = outer-chain from v0 to v1 + cut-back from v1 to v0
+    //    - Face B's boundary = outer-chain from v1 to v0 + cut-forward from v0 to v1
+    //
+    //    The winding is inherited from the original loop.
+
+    // Collect chain_A: half-edges from he_at_v0 up to (but not including) he_at_v1.
+    // Collect chain_B: half-edges from he_at_v1 up to (but not including) he_at_v0.
+    let chain_a: Vec<HalfEdgeId> = collect_chain(obj, he_at_v0, he_at_v1);
+    let chain_b: Vec<HalfEdgeId> = collect_chain(obj, he_at_v1, he_at_v0);
+
+    // 7. Create two new loops and a new face.
+    //    face_a (keeps the original FaceId? no — both are new).
+    //    Actually, to keep it simple: create loop_a and loop_b;
+    //    keep the original face id for face_a; create a new face for face_b.
+
+    // Update the original outer_loop to be loop_a (face A).
+    // Create a new loop for face B.
+    let loop_b_id = obj.loops.insert(Loop {
+        face: FaceId::default(), // set below
+        first_half_edge: HalfEdgeId::default(),
+        kind: LoopKind::Outer,
+    });
+
+    // Face B is a new face (face A reuses the original FaceId).
+    let face_b_id = obj.faces.insert(Face {
+        outer_loop: loop_b_id,
+        inner_loops: Vec::new(), // holes assigned below
+        plane: face_plane,       // same plane as original
+    });
+    obj.loops[loop_b_id].face = face_b_id;
+
+    // 8. Wire face A's loop: chain_a + cut_bwd.
+    //    Loop A uses the original loop id (outer_loop).
+    //    cut_bwd goes from v1 → v0, which is exactly what we need after chain_a.
+    //
+    //    chain_a ends at prev(he_at_v1): its last element leads TO v1.
+    //    cut_bwd[0] starts at v1 (its origin = v1).
+    //    cut_bwd last: ends at v0 (the next half-edge after the last cut_bwd would be he_at_v0).
+
+    // The full sequence for face A:
+    //   chain_a[0], chain_a[1], ..., chain_a.last(), cut_bwd[0], ..., cut_bwd.last()
+    // then wraps back to chain_a[0].
+
+    let loop_a_seq: Vec<HalfEdgeId> = chain_a
+        .iter()
+        .copied()
+        .chain(cut_bwd.iter().copied())
+        .collect();
+
+    let loop_b_seq: Vec<HalfEdgeId> = chain_b
+        .iter()
+        .copied()
+        .chain(cut_fwd.iter().copied())
+        .collect();
+
+    wire_loop_sequence(obj, &loop_a_seq, outer_loop, face);
+    wire_loop_sequence(obj, &loop_b_seq, loop_b_id, face_b_id);
+
+    // Update interior vertex outgoing pointers to cut half-edges.
+    // interior_verts[i] = path_verts[i+1]; the departing forward half-edge is cut_fwd[i+1].
+    for i in 0..interior_verts.len() {
+        obj.vertices[interior_verts[i]].outgoing = cut_fwd[i + 1];
+    }
+    // v0 and v1 outgoing: they might already have valid outgoing (if they were pre-existing
+    // vertices), but we should make sure v0's outgoing is in a valid loop.
+    // The safest update: set outgoing to the first half-edge in a loop that starts there.
+    obj.vertices[v0].outgoing = he_at_v0; // still in loop_a (chain_a starts at he_at_v0)
+    // v1: he_at_v1 is now in loop_b, cut_bwd[0] is in loop_a.
+    obj.vertices[v1].outgoing = he_at_v1; // in loop_b (chain_b starts at he_at_v1)
+
+    // 9. Assign hole loops to the two result faces.
+    let normal = face_plane.normal();
+
+    // Remove inner loops from the original face (will be re-assigned).
+    obj.faces[face].inner_loops.clear();
+
+    for il in &inner_loops {
+        let hole_pts: Vec<Point3> = obj.loop_positions(*il).collect();
+        // Use the centroid of the hole to determine which face contains it.
+        let centroid = hole_centroid(&hole_pts);
+
+        let outer_a_pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+        if point_inside_polygon(centroid, &outer_a_pts, normal) {
+            // Assign to face A.
+            obj.faces[face].inner_loops.push(*il);
+            obj.loops[*il].face = face;
+        } else {
+            // Assign to face B.
+            obj.faces[face_b_id].inner_loops.push(*il);
+            obj.loops[*il].face = face_b_id;
+        }
+    }
+
+    // 10. Update the shell to include the new face.
+    // The original face is still in the shell; add face_b_id.
+    for shell in obj.shells.values_mut() {
+        if shell.faces.contains(&face) {
+            shell.faces.push(face_b_id);
+            break;
+        }
+    }
+
+    // 11. Recompute watertightness.
+    obj.watertight = if obj.half_edges.values().all(|he| he.twin.is_some()) {
+        WatertightState::Watertight
+    } else {
+        WatertightState::Open
+    };
+
+    Ok(FaceSplitReport {
+        new_faces: [face, face_b_id],
+        new_edges,
+        split_boundary_edges,
+    })
+}
+
+/// Collect the half-edge chain starting at `start` and stopping just before `stop`.
+/// The chain includes `start` but not `stop`.
+fn collect_chain(obj: &Object, start: HalfEdgeId, stop: HalfEdgeId) -> Vec<HalfEdgeId> {
+    let mut chain = Vec::new();
+    let mut current = start;
+    loop {
+        chain.push(current);
+        current = obj.half_edges[current].next;
+        if current == stop {
+            break;
+        }
+        // Safety guard against infinite loops (shouldn't happen with valid topology).
+        if chain.len() > obj.half_edges.len() + 1 {
+            panic!("collect_chain: infinite loop detected — broken topology");
+        }
+    }
+    chain
+}
+
+/// Wire a sequence of half-edges into a closed loop, setting `next`, `prev`,
+/// and `loop_id` for each.  Also sets `first_half_edge` on the loop.
+fn wire_loop_sequence(obj: &mut Object, seq: &[HalfEdgeId], loop_id: LoopId, face_id: FaceId) {
+    let n = seq.len();
+    for i in 0..n {
+        let h = seq[i];
+        obj.half_edges[h].next = seq[(i + 1) % n];
+        obj.half_edges[h].prev = seq[(i + n - 1) % n];
+        obj.half_edges[h].loop_id = loop_id;
+    }
+    obj.loops[loop_id].first_half_edge = seq[0];
+    obj.loops[loop_id].face = face_id;
+}
+
+/// Compute the centroid of a polygon's vertices.
+fn hole_centroid(pts: &[Point3]) -> Point3 {
+    let n = pts.len() as f64;
+    let sum = pts
+        .iter()
+        .fold(crate::math::Vec3::ZERO, |acc, p| acc + p.to_vec());
+    Point3::new(sum.x / n, sum.y / n, sum.z / n)
+}
+
+/// Split a boundary (or interior) half-edge at a given position, inserting a
+/// new vertex.  The original edge is removed; two new edges replace it.  The
+/// neighbor face's loop (twin) is also split consistently.
+///
+/// Returns `(new_vertex, dead_edge_id, [edge_a_id, edge_b_id])`.
+///
+/// - `edge_a_id` covers `origin → new_vertex`
+/// - `edge_b_id` covers `new_vertex → original_dest`
+fn split_boundary_edge(
+    obj: &mut Object,
+    he: HalfEdgeId,
+    pos: Point3,
+) -> (VertexId, EdgeId, [EdgeId; 2]) {
+    let h = obj.half_edges[he];
+    let next_he = h.next;
+    let prev_he = h.prev;
+    let edge_id = h.edge;
+    let loop_id = h.loop_id;
+    let dest_v = obj.half_edges[next_he].origin;
+
+    // Insert the new vertex.
+    let new_v = obj.vertices.insert(Vertex {
+        position: pos,
+        outgoing: HalfEdgeId::default(), // set below
+    });
+
+    // Create two new half-edges for the "forward" side (in `he`'s loop).
+    // h_a: origin → new_v
+    // h_b: new_v → dest_v
+    let h_a = obj.half_edges.insert(HalfEdge {
+        origin: h.origin,
+        twin: None,
+        next: HalfEdgeId::default(),
+        prev: prev_he,
+        edge: EdgeId::default(),
+        loop_id,
+    });
+    let h_b = obj.half_edges.insert(HalfEdge {
+        origin: new_v,
+        twin: None,
+        next: next_he,
+        prev: h_a,
+        edge: EdgeId::default(),
+        loop_id,
+    });
+    obj.half_edges[h_a].next = h_b;
+    obj.half_edges[prev_he].next = h_a;
+    obj.half_edges[next_he].prev = h_b;
+    obj.vertices[new_v].outgoing = h_b;
+
+    // Handle the twin side.
+    let edge_a_id;
+    let edge_b_id;
+
+    if let Some(twin_he_id) = h.twin {
+        let t = obj.half_edges[twin_he_id];
+        let twin_next = t.next;
+        let twin_prev = t.prev;
+        let twin_loop = t.loop_id;
+
+        // Twin goes in the opposite direction: it goes from dest_v → origin.
+        // After split: t_a covers dest_v → new_v, t_b covers new_v → origin.
+        let t_a = obj.half_edges.insert(HalfEdge {
+            origin: dest_v,
+            twin: None,
+            next: HalfEdgeId::default(),
+            prev: twin_prev,
+            edge: EdgeId::default(),
+            loop_id: twin_loop,
+        });
+        let t_b = obj.half_edges.insert(HalfEdge {
+            origin: new_v,
+            twin: None,
+            next: twin_next,
+            prev: t_a,
+            edge: EdgeId::default(),
+            loop_id: twin_loop,
+        });
+        obj.half_edges[t_a].next = t_b;
+        obj.half_edges[twin_prev].next = t_a;
+        obj.half_edges[twin_next].prev = t_b;
+
+        // Pair: h_a ↔ t_b, h_b ↔ t_a.
+        // h_a goes origin → new_v; its twin should go new_v → origin = t_b.
+        // h_b goes new_v → dest_v; its twin should go dest_v → new_v = t_a.
+        edge_a_id = obj.edges.insert(Edge {
+            half_edge: h_a,
+            twin_half_edge: Some(t_b),
+        });
+        edge_b_id = obj.edges.insert(Edge {
+            half_edge: h_b,
+            twin_half_edge: Some(t_a),
+        });
+        obj.half_edges[h_a].edge = edge_a_id;
+        obj.half_edges[t_b].edge = edge_a_id;
+        obj.half_edges[h_a].twin = Some(t_b);
+        obj.half_edges[t_b].twin = Some(h_a);
+
+        obj.half_edges[h_b].edge = edge_b_id;
+        obj.half_edges[t_a].edge = edge_b_id;
+        obj.half_edges[h_b].twin = Some(t_a);
+        obj.half_edges[t_a].twin = Some(h_b);
+
+        // Remove old twin half-edge.
+        obj.half_edges.remove(twin_he_id);
+    } else {
+        // Boundary edge (no twin).
+        edge_a_id = obj.edges.insert(Edge {
+            half_edge: h_a,
+            twin_half_edge: None,
+        });
+        edge_b_id = obj.edges.insert(Edge {
+            half_edge: h_b,
+            twin_half_edge: None,
+        });
+        obj.half_edges[h_a].edge = edge_a_id;
+        obj.half_edges[h_b].edge = edge_b_id;
+    }
+
+    // Update the loop's first_half_edge if it pointed at the removed he.
+    if obj.loops[loop_id].first_half_edge == he {
+        obj.loops[loop_id].first_half_edge = h_a;
+    }
+
+    // Remove old half-edge and edge.
+    obj.half_edges.remove(he);
+    obj.edges.remove(edge_id);
+
+    (new_v, edge_id, [edge_a_id, edge_b_id])
+}
+
+/// Core merge surgery on a cloned object.
+///
+/// Merges face_a and face_b (both with known coplanar outer loops) by
+/// dissolving the entire shared boundary chain between them.
+fn do_merge_faces(
+    obj: &mut Object,
+    face_a: FaceId,
+    face_b: FaceId,
+) -> Result<FaceMergeReport, StickyError> {
+    let outer_a = obj.faces[face_a].outer_loop;
+    let outer_b = obj.faces[face_b].outer_loop;
+
+    // 1. Find all half-edges on outer_a whose twin is on outer_b.
+    //    These form the shared chain(s).  There must be at least one.
+    let hes_a: Vec<HalfEdgeId> = obj.loop_half_edges(outer_a).collect();
+    let hes_b_set: std::collections::HashSet<HalfEdgeId> = obj.loop_half_edges(outer_b).collect();
+
+    // Find the starting half-edge on outer_a that is in the shared chain,
+    // preceded by a non-shared half-edge. This ensures we start at a boundary
+    // of the shared chain.
+    let shared_on_a: Vec<HalfEdgeId> = hes_a
+        .iter()
+        .copied()
+        .filter(|&h| {
+            obj.half_edges[h]
+                .twin
+                .map(|t| hes_b_set.contains(&t))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if shared_on_a.is_empty() {
+        // No shared edges — the two faces are not adjacent.
+        return Err(StickyError::FacesNotCoplanar);
+    }
+
+    let mut removed_edges: Vec<EdgeId> = shared_on_a
+        .iter()
+        .map(|&h| obj.half_edges[h].edge)
+        .collect();
+
+    // 2. Find the entry and exit points of the shared chain on outer_a.
+    //    "entry" = first shared half-edge on outer_a (whose prev is not shared)
+    //    "exit"  = last shared half-edge on outer_a (whose next is not shared)
+    //
+    //    We may have multiple disconnected shared chains.  The contract says:
+    //    "the entire shared chain dissolves."  With two valid adjacent faces,
+    //    there's exactly one connected chain of shared edges (two manifold faces
+    //    can share a connected boundary, not multiple disconnected segments,
+    //    without being non-manifold).  We handle a single chain.
+
+    // Find the start of the chain: a shared half-edge whose prev is NOT shared.
+    let shared_set_a: std::collections::HashSet<HalfEdgeId> = shared_on_a.iter().copied().collect();
+
+    let chain_start_a = shared_on_a
+        .iter()
+        .copied()
+        .find(|&h| {
+            let prev = obj.half_edges[h].prev;
+            !shared_set_a.contains(&prev)
+        })
+        .expect("at least one half-edge has a non-shared predecessor");
+
+    // Walk the shared chain on outer_a (chain_a_seq starts at chain_start_a
+    // and continues while the next half-edge is also shared).
+    let mut chain_a_seq: Vec<HalfEdgeId> = Vec::new();
+    {
+        let mut cur = chain_start_a;
+        loop {
+            chain_a_seq.push(cur);
+            let nxt = obj.half_edges[cur].next;
+            if shared_set_a.contains(&nxt) {
+                cur = nxt;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // The corresponding chain on outer_b (in reverse order of chain_a).
+    // chain_a[0]'s twin is on outer_b; that twin goes B→A, which is the last
+    // segment of the shared portion on B.  We need the chain on B in the
+    // order they appear around outer_b.
+    //
+    // The twin of chain_a_seq[i] is on outer_b and goes in reverse direction.
+    // twin of chain_a[0] originates at dest(chain_a[0]) = origin(chain_a[1]) (or v1).
+    //
+    // chain_b in outer_b order is: twin(chain_a.last()), ..., twin(chain_a[0]).
+    let chain_b_seq: Vec<HalfEdgeId> = chain_a_seq
+        .iter()
+        .rev()
+        .map(|&h| obj.half_edges[h].twin.expect("shared edge has twin"))
+        .collect();
+
+    // 3. Collect the non-shared portions of outer_a and outer_b.
+    //    non_a = chain from next(chain_a.last()) to prev(chain_a[0]) (exclusive).
+    //    non_b = chain from next(chain_b.last()) to prev(chain_b[0]) (exclusive).
+
+    // last element of chain_a_seq: the half-edge just before re-entering non-shared territory.
+    let chain_a_last = *chain_a_seq.last().unwrap();
+    let chain_a_first = chain_a_seq[0];
+    let chain_b_last = *chain_b_seq.last().unwrap();
+    let chain_b_first = chain_b_seq[0];
+
+    let after_chain_a = obj.half_edges[chain_a_last].next; // first non-shared on A (departs chain_a_start_v)
+    let before_chain_a = obj.half_edges[chain_a_first].prev; // last non-shared on A (arrives at chain_a_start_v)
+    let after_chain_b = obj.half_edges[chain_b_last].next; // first non-shared on B (departs chain_b_start_v)
+    let before_chain_b = obj.half_edges[chain_b_first].prev; // last non-shared on B (arrives at chain_b_start_v)
+
+    // The endpoints of the shared chain: two vertices that were inserted by
+    // split_boundary_edge if endpoints landed on edge interiors.  They survive
+    // the chain dissolve and may need boundary healing (see step 7 below).
+    //   chain_a_start_v = origin of chain_a_first (= origin of the chain from face A's side)
+    //   chain_b_start_v = origin of chain_b_first (= destination of the chain from face A's side)
+    let chain_a_start_v = obj.half_edges[chain_a_first].origin;
+    let chain_b_start_v = obj.half_edges[chain_b_first].origin;
+
+    // non_a: from after_chain_a to before_chain_a (inclusive).
+    let non_a: Vec<HalfEdgeId> = collect_chain(obj, after_chain_a, chain_a_first);
+    // non_b: from after_chain_b to before_chain_b (inclusive).
+    let non_b: Vec<HalfEdgeId> = collect_chain(obj, after_chain_b, chain_b_first);
+
+    // 4. Build the merged outer loop: non_a + non_b (all on face_a's loop).
+    //    The merged boundary goes:
+    //      non_a[0] → ... → non_a.last() → non_b[0] → ... → non_b.last() → non_a[0]
+    //
+    //    Joining: non_a.last() (before_chain_a, arriving at chain_a_start_v) now
+    //             points to non_b[0] (after_chain_b, departing from chain_b_start_v).
+    //             non_b.last() (before_chain_b) now points to non_a[0] (after_chain_a).
+
+    let merged_seq: Vec<HalfEdgeId> = non_a.iter().copied().chain(non_b.iter().copied()).collect();
+
+    // 5. Wire the merged loop on outer_a.
+    wire_loop_sequence(obj, &merged_seq, outer_a, face_a);
+
+    // 6. Find interior vertices of the shared chain (those that are not the
+    //    chain endpoints and will be fully orphaned after the chain dissolves).
+    let mut candidate_orphans: std::collections::HashSet<VertexId> =
+        std::collections::HashSet::new();
+    for &h in &chain_a_seq {
+        let v = obj.half_edges[h].origin;
+        if v != chain_a_start_v && v != chain_b_start_v {
+            candidate_orphans.insert(v);
+        }
+    }
+    for &h in &chain_b_seq {
+        let v = obj.half_edges[h].origin;
+        if v != chain_a_start_v && v != chain_b_start_v {
+            candidate_orphans.insert(v);
+        }
+    }
+
+    // 7. Remove the shared half-edges and their edges.
+    for &h in chain_a_seq.iter().chain(chain_b_seq.iter()) {
+        obj.half_edges.remove(h);
+    }
+    for &e in &removed_edges {
+        obj.edges.remove(e);
+    }
+
+    // 8. Remove actually-orphaned interior chain vertices.
+    for v in &candidate_orphans {
+        let still_in_use = obj.half_edges.values().any(|he| he.origin == *v);
+        if !still_in_use {
+            obj.vertices.remove(*v);
+        }
+    }
+
+    // 9. Boundary healing: each chain-endpoint vertex now has exactly two
+    //    incident edges in the merged boundary and in its neighbor face(s).
+    //    If those two edges are collinear (their directions have a cross-product
+    //    length below tol::NORMAL_DIRECTION), the vertex is a scar from a
+    //    split_boundary_edge call and must be dissolved.
+    //
+    //    In the merged loop the two vertices appear as:
+    //      chain_a_start_v: h_in = before_chain_a (incoming), h_out = after_chain_b (outgoing)
+    //      chain_b_start_v: h_in = before_chain_b (incoming), h_out = after_chain_a (outgoing)
+    //
+    //    Note: after_chain_a and after_chain_b are still valid half-edge ids but
+    //    their loop pointers have been updated to outer_a by wire_loop_sequence.
+    //    before_chain_a and before_chain_b were already in non_a / non_b and are
+    //    now in the merged loop too.
+    let mut healing_removed_edges: Vec<EdgeId> = Vec::new();
+    for (h_in, h_out) in [
+        (before_chain_a, after_chain_b),
+        (before_chain_b, after_chain_a),
+    ] {
+        // h_in arrives at the candidate vertex V; h_out departs from V.
+        let v_pos = obj.vertices[obj.half_edges[h_out].origin].position;
+        let prev_v_pos = obj.vertices[obj.half_edges[h_in].origin].position;
+        let next_v_pos = obj.vertices[obj.half_edges[obj.half_edges[h_out].next].origin].position;
+
+        let dir_in = (v_pos - prev_v_pos).normalized();
+        let dir_out = (next_v_pos - v_pos).normalized();
+
+        let collinear = match (dir_in, dir_out) {
+            (Ok(a), Ok(b)) => a.cross(b).length() < tol::NORMAL_DIRECTION,
+            _ => false, // degenerate edge — skip healing
+        };
+        if !collinear {
+            continue;
+        }
+
+        let vertex_to_heal = obj.half_edges[h_out].origin;
+
+        // Heal only true scars: V must have exactly two departing
+        // half-edges (h_out here and h_in's twin in the neighbor loop).
+        // Any extra incidence means V is a real model vertex shared with
+        // other geometry — removing it would strand those half-edges.
+        let departing = obj
+            .half_edges
+            .values()
+            .filter(|he| he.origin == vertex_to_heal)
+            .count();
+        if departing != 2 {
+            continue;
+        }
+
+        // Twin of h_in: this half-edge departs V in the neighbor face (t_out_of_v).
+        // Twin of h_out: this half-edge arrives at V in the neighbor face (t_into_v).
+        let t_out_of_v = obj.half_edges[h_in]
+            .twin
+            .expect("manifold: twin must exist");
+        let t_into_v = obj.half_edges[h_out]
+            .twin
+            .expect("manifold: twin must exist");
+        let t_next = obj.half_edges[t_out_of_v].next; // half-edge after t_out_of_v in neighbor loop
+        let neighbor_loop = obj.half_edges[t_out_of_v].loop_id;
+
+        // In the merged loop: skip over V by connecting h_in → next(h_out).
+        let h_next = obj.half_edges[h_out].next;
+        obj.half_edges[h_in].next = h_next;
+        obj.half_edges[h_next].prev = h_in;
+        // Fix loop first_half_edge if it pointed at the removed h_out.
+        if obj.loops[outer_a].first_half_edge == h_out {
+            obj.loops[outer_a].first_half_edge = h_in;
+        }
+
+        // In the neighbor loop: skip over V by connecting t_into_v → next(t_out_of_v).
+        obj.half_edges[t_into_v].next = t_next;
+        obj.half_edges[t_next].prev = t_into_v;
+        // Fix loop first_half_edge if it pointed at the removed t_out_of_v.
+        if obj.loops[neighbor_loop].first_half_edge == t_out_of_v {
+            obj.loops[neighbor_loop].first_half_edge = t_into_v;
+        }
+
+        // Repair the Edge: keep the Edge for h_in, set its twin to t_into_v.
+        // Retire the Edge for h_out.
+        let edge_to_keep = obj.half_edges[h_in].edge;
+        let edge_to_remove = obj.half_edges[h_out].edge;
+        obj.edges[edge_to_keep].twin_half_edge = Some(t_into_v);
+        obj.half_edges[h_in].twin = Some(t_into_v);
+        obj.half_edges[t_into_v].twin = Some(h_in);
+        obj.half_edges[h_in].edge = edge_to_keep;
+        obj.half_edges[t_into_v].edge = edge_to_keep;
+        obj.edges.remove(edge_to_remove);
+        healing_removed_edges.push(edge_to_remove);
+
+        // Fix vertex outgoing pointer (if it pointed at the now-dead h_out or t_out_of_v).
+        // Vertices prev_v and next_v retain valid half-edges; just ensure outgoing is live.
+        let prev_v = obj.half_edges[h_in].origin;
+        let next_v_id = obj.half_edges[h_next].origin;
+        if !obj.half_edges.contains_key(obj.vertices[prev_v].outgoing) {
+            obj.vertices[prev_v].outgoing = h_in;
+        }
+        if !obj
+            .half_edges
+            .contains_key(obj.vertices[next_v_id].outgoing)
+        {
+            obj.vertices[next_v_id].outgoing = h_next;
+        }
+
+        // Remove the healed-away elements.
+        obj.half_edges.remove(h_out);
+        obj.half_edges.remove(t_out_of_v);
+        obj.vertices.remove(vertex_to_heal);
+    }
+
+    // 10. Fix any remaining broken outgoing pointers (shared-chain endpoints
+    //     that are still present but whose outgoing pointed into the dissolved chain).
+    let outgoing_map: std::collections::HashMap<VertexId, HalfEdgeId> = obj
+        .half_edges
+        .iter()
+        .map(|(hid, he)| (he.origin, hid))
+        .collect();
+    for (_vid, vertex) in obj.vertices.iter_mut() {
+        if !obj.half_edges.contains_key(vertex.outgoing)
+            && let Some(&new_out) = outgoing_map.get(&_vid)
+        {
+            vertex.outgoing = new_out;
+        }
+    }
+
+    // 11. Combine inner loops from face_b into face_a.
+    let inner_b: Vec<LoopId> = obj.faces[face_b].inner_loops.clone();
+    for il in inner_b {
+        obj.loops[il].face = face_a;
+        obj.faces[face_a].inner_loops.push(il);
+    }
+
+    // 12. Remove face_b and its outer loop.
+    obj.loops.remove(outer_b);
+    obj.faces.remove(face_b);
+    for shell in obj.shells.values_mut() {
+        shell.faces.retain(|&f| f != face_b);
+    }
+
+    // 13. Refit plane for the merged face over the merged boundary.
+    let boundary_pts: Vec<Point3> = obj.loop_positions(outer_a).collect();
+    if let Ok(new_plane) = Plane::from_polygon(&boundary_pts) {
+        obj.faces[face_a].plane = new_plane;
+    }
+    // (If refit fails, keep the original plane — shouldn't happen with valid geometry.)
+
+    // 14. Recompute watertightness.
+    obj.watertight = if obj.half_edges.values().all(|he| he.twin.is_some()) {
+        WatertightState::Watertight
+    } else {
+        WatertightState::Open
+    };
+
+    removed_edges.extend(healing_removed_edges);
+    Ok(FaceMergeReport {
+        merged_face: face_a,
+        removed_edges,
+    })
+}
+
+// ================================================================= unit tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::Vec3;
+    use crate::topo::WatertightState;
+
+    // ---------------------------------------------------------------- helpers
+
+    /// Build a unit cube (1×1×1) as a watertight Object.
+    fn unit_cube() -> Object {
+        Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+                Point3::new(1.0, 0.0, 1.0),
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(0.0, 1.0, 1.0),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Return the FaceId whose plane normal matches `dir`.
+    fn face_with_normal(obj: &Object, dir: Vec3) -> FaceId {
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().approx_eq(dir, tol::NORMAL_DIRECTION))
+            .map(|(id, _)| id)
+            .expect("face with that normal must exist")
+    }
+
+    // -------------------------------------------------------- classify_endpoint
+
+    /// classify_endpoint should snap to a vertex when the point coincides with
+    /// a loop vertex (within POINT_MERGE).
+    #[test]
+    fn classify_endpoint_hits_vertex() {
+        let cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        let outer_loop = cube.faces()[top].outer_loop;
+        let outer_hes: Vec<HalfEdgeId> = cube.loop_half_edges(outer_loop).collect();
+
+        // (0,0,1) is an exact corner of the top face.
+        let corner = Point3::new(0.0, 0.0, 1.0);
+        let hit = classify_endpoint(&cube, &outer_hes, corner)
+            .unwrap()
+            .expect("corner must be on the boundary");
+        assert!(
+            matches!(hit, EndpointHit::Vertex(_)),
+            "exact corner must resolve to Vertex, got {hit:?}"
+        );
+    }
+
+    /// classify_endpoint should resolve to an Edge hit when the point lies in
+    /// the strict interior of a boundary edge.
+    #[test]
+    fn classify_endpoint_hits_edge_interior() {
+        let cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        let outer_loop = cube.faces()[top].outer_loop;
+        let outer_hes: Vec<HalfEdgeId> = cube.loop_half_edges(outer_loop).collect();
+
+        // (0.5, 0.0, 1.0) is the midpoint of one boundary edge of the top face.
+        let midpoint = Point3::new(0.5, 0.0, 1.0);
+        let hit = classify_endpoint(&cube, &outer_hes, midpoint)
+            .unwrap()
+            .expect("midpoint must be on the boundary");
+        assert!(
+            matches!(hit, EndpointHit::Edge { .. }),
+            "edge midpoint must resolve to Edge hit, got {hit:?}"
+        );
+    }
+
+    /// classify_endpoint returns None (not an error) for a point strictly
+    /// interior to the face.
+    #[test]
+    fn classify_endpoint_interior_point_returns_none() {
+        let cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        let outer_loop = cube.faces()[top].outer_loop;
+        let outer_hes: Vec<HalfEdgeId> = cube.loop_half_edges(outer_loop).collect();
+
+        // (0.5, 0.5, 1.0) is the centroid — strictly interior.
+        let interior = Point3::new(0.5, 0.5, 1.0);
+        let result = classify_endpoint(&cube, &outer_hes, interior).unwrap();
+        assert!(
+            result.is_none(),
+            "interior point must return None, got {result:?}"
+        );
+    }
+
+    // ------------------------------------------------- multi-segment path split
+
+    /// A path with an interior waypoint (3 points, 2 segments) should produce a
+    /// split with 2 new edges and a valid watertight result.
+    #[test]
+    fn split_face_multi_segment_path_creates_two_new_edges() {
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+
+        // Path: bottom-edge midpoint → interior waypoint → top-edge midpoint.
+        let path = [
+            Point3::new(0.5, 0.0, 1.0), // midpoint of bottom edge (y=0)
+            Point3::new(0.5, 0.5, 1.0), // interior waypoint
+            Point3::new(0.5, 1.0, 1.0), // midpoint of top edge (y=1)
+        ];
+        let report = cube.split_face(top, &path).unwrap();
+
+        assert_eq!(
+            report.new_edges.len(),
+            2,
+            "two path segments → two new cut edges"
+        );
+        cube.validate().unwrap();
+        assert_eq!(cube.watertight(), WatertightState::Watertight);
+        // Two original boundary edges were split (one per endpoint).
+        assert_eq!(
+            report.split_boundary_edges.len(),
+            2,
+            "both endpoints land on edge interiors → two boundary splits"
+        );
+    }
+
+    /// A multi-segment split followed by merge restores the original topology.
+    #[test]
+    fn split_face_multi_segment_then_merge_is_identity() {
+        let original = unit_cube();
+        let mut cube = original.clone();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+
+        let path = [
+            Point3::new(0.5, 0.0, 1.0),
+            Point3::new(0.5, 0.5, 1.0),
+            Point3::new(0.5, 1.0, 1.0),
+        ];
+        let split = cube.split_face(top, &path).unwrap();
+        cube.validate().unwrap();
+
+        // Merge using the first cut edge.
+        cube.merge_faces(split.new_edges[0]).unwrap();
+        cube.validate().unwrap();
+
+        // After heal, the cube must be topologically equivalent to original.
+        // Verify vertex count and face count match — objects_equivalent is
+        // defined in op_specs so we check the proxy invariants here.
+        assert_eq!(
+            cube.vertices().len(),
+            original.vertices().len(),
+            "healed merge must remove split-point scars"
+        );
+        assert_eq!(cube.faces().len(), original.faces().len());
+        assert_eq!(cube.edges().len(), original.edges().len());
+        assert_eq!(cube.watertight(), WatertightState::Watertight);
+    }
+
+    // -------------------------------------- neighbor-face integrity after split
+
+    /// After split_face where both endpoints land on boundary-edge interiors,
+    /// the two neighbor faces that share those boundary edges must remain
+    /// valid: their loops must close, and their planes must still contain all
+    /// their vertices.
+    #[test]
+    fn neighbor_faces_valid_after_boundary_edge_split() {
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+
+        // Endpoint 0 lies on the boundary edge shared with the front face (y=0).
+        // Endpoint 1 lies on the boundary edge shared with the back face (y=1).
+        let path = [Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
+        cube.split_face(top, &path).unwrap();
+
+        // The full topology validator checks that all loops close,
+        // every half-edge has a valid twin (watertight), and planes are
+        // consistent (via the debug invariant check already called in split_face).
+        cube.validate().unwrap();
+
+        // Extra check: all 8 faces must have vertices that lie on their plane.
+        for (_, face) in cube.faces().iter() {
+            let plane = face.plane;
+            for pt in cube.loop_positions(face.outer_loop) {
+                assert!(
+                    plane.signed_distance(pt).abs() <= tol::PLANE_DIST * 1000.0,
+                    "vertex {pt:?} is not on face plane {plane:?}"
+                );
+            }
+        }
+
+        // The front face (normal -y) must now have 5 vertices (V0 inserted).
+        let front = face_with_normal(&cube, Vec3::new(0.0, -1.0, 0.0));
+        let front_verts: Vec<_> = cube
+            .loop_positions(cube.faces()[front].outer_loop)
+            .collect();
+        assert_eq!(
+            front_verts.len(),
+            5,
+            "front face gains the split vertex; expected 5-gon, got {front_verts:?}"
+        );
+
+        // The back face (normal +y) must also have 5 vertices.
+        let back = face_with_normal(&cube, Vec3::new(0.0, 1.0, 0.0));
+        let back_verts: Vec<_> = cube.loop_positions(cube.faces()[back].outer_loop).collect();
+        assert_eq!(
+            back_verts.len(),
+            5,
+            "back face gains the split vertex; expected 5-gon, got {back_verts:?}"
+        );
+    }
+
+    /// Endpoints that land exactly on existing vertices (vertex-to-vertex cut)
+    /// must NOT insert new boundary-edge splits.
+    #[test]
+    fn vertex_to_vertex_cut_has_no_boundary_splits() {
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+
+        // Both endpoints are exact corners of the top face.
+        let corners: Vec<Point3> = cube.loop_positions(cube.faces()[top].outer_loop).collect();
+        // corners[0] and corners[2] are opposite corners of the top square.
+        let path = [corners[0], corners[2]];
+        let report = cube.split_face(top, &path).unwrap();
+
+        assert_eq!(
+            report.split_boundary_edges.len(),
+            0,
+            "vertex-to-vertex cut must not split any boundary edges"
+        );
+        assert_eq!(report.new_edges.len(), 1, "one segment → one new edge");
+        cube.validate().unwrap();
+        assert_eq!(cube.watertight(), WatertightState::Watertight);
+    }
+
+    /// split_face must reject a path where an endpoint is strictly interior
+    /// to the face (not on any boundary).
+    #[test]
+    fn split_face_endpoint_off_boundary_is_rejected() {
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+
+        let path = [
+            Point3::new(0.5, 0.0, 1.0), // on boundary
+            Point3::new(0.5, 0.5, 1.0), // interior — not on boundary
+        ];
+        let err = cube.split_face(top, &path).unwrap_err();
+        assert_eq!(err, StickyError::EndpointNotOnBoundary { which: 1 });
+        // Strong guarantee: cube is unchanged.
+        cube.validate().unwrap();
     }
 }
