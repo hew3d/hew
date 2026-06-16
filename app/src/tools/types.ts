@@ -33,4 +33,19 @@ export interface Tool {
   cancel(): void
   /** Human-readable name shown in the status bar */
   readonly name: string
+
+  /**
+   * (optional) Return the snap anchor + axis lock the tool wants injected into
+   * the next snapService.resolve() call.  Viewport feature-detects with
+   * `'snapConstraint' in tool`.
+   */
+  snapConstraint?(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null
+
+  /**
+   * (optional) When true the tool is capturing raw keyboard input (e.g. VCB
+   * numeric entry) and the Viewport should route key events to it BEFORE any
+   * tool-switch shortcuts.  Viewport feature-detects with
+   * `'capturingInput' in tool`.
+   */
+  capturingInput?(): boolean
 }

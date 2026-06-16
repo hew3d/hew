@@ -14,10 +14,12 @@
 //! `history`, `serialize`; their executable specs live in
 //! `tests/op_specs.rs`.
 
+mod boolean;
 mod build;
 mod geom2d;
 mod validate;
 
+pub mod document;
 pub mod error;
 pub mod history;
 pub mod ids;
@@ -29,9 +31,10 @@ pub mod tol;
 pub mod topo;
 pub mod transform;
 
+pub use document::{DocChange, Document, DocumentError};
 pub use error::TopologyError;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
-pub use ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ObjectId, ShellId, VertexId};
+pub use ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ObjectId, ShellId, SketchId, VertexId};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
     BooleanError, BooleanOp, ExtrudeError, FaceMergeReport, FaceSplitReport, Operand,

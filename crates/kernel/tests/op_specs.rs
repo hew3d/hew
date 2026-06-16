@@ -499,7 +499,6 @@ proptest! {
 
 proptest! {
     #[test]
-    #[ignore = "spec for Object::boolean: all ops on overlapping solids give watertight results"]
     fn booleans_of_overlapping_cubes_are_watertight(
         dx in 0.2..0.8f64,
         dy in 0.2..0.8f64,
@@ -517,7 +516,6 @@ proptest! {
 }
 
 #[test]
-#[ignore = "spec for Object::boolean: empty results are typed errors, not empty Objects"]
 fn boolean_empty_results_are_errors() {
     let small = unit_cube();
     let big = box_object(Point3::new(-1.0, -1.0, -1.0), Point3::new(2.0, 2.0, 2.0));
@@ -535,7 +533,6 @@ fn boolean_empty_results_are_errors() {
 }
 
 #[test]
-#[ignore = "spec for Object::boolean: open operands are rejected"]
 fn boolean_requires_watertight_operands() {
     let solid = unit_cube();
     let open = Object::triangle();
@@ -546,6 +543,98 @@ fn boolean_requires_watertight_operands() {
             which: kernel::Operand::B
         }
     );
+}
+
+proptest! {
+    /// Boolean volumes obey set algebra: |A∪B| + |A∩B| = |A| + |B|, and
+    /// |A−B| = |A| − |A∩B|. This catches a watertight-but-wrong result that the
+    /// watertightness property alone would pass.
+    #[test]
+    fn boolean_volumes_obey_set_algebra(
+        dx in 0.2..0.8f64,
+        dy in 0.2..0.8f64,
+        dz in 0.2..0.8f64,
+    ) {
+        let a = unit_cube();
+        let b = unit_cube();
+        let shift = Transform::translation(Vec3::new(dx, dy, dz));
+        let vol = |op| signed_volume(&Object::boolean(op, &a, &b, &shift).unwrap());
+        let (vu, vi, vs) = (vol(BooleanOp::Union), vol(BooleanOp::Intersect), vol(BooleanOp::Subtract));
+
+        // The overlap is the box where the two unit cubes meet.
+        let overlap = (1.0 - dx) * (1.0 - dy) * (1.0 - dz);
+        prop_assert!((vi - overlap).abs() < VOLUME_TOL, "intersect {vi} vs {overlap}");
+        prop_assert!((vu + vi - 2.0).abs() < VOLUME_TOL, "union {vu} + intersect {vi} != 2");
+        prop_assert!((vs - (1.0 - vi)).abs() < VOLUME_TOL, "subtract {vs} != 1 - {vi}");
+    }
+}
+
+#[test]
+fn subtract_can_split_a_solid_into_multiple_shells() {
+    // A bar (volume 3) with a slab bitten out of its middle third becomes two
+    // disconnected unit cubes: one watertight Object, two shells.
+    let bar = box_object(Point3::ORIGIN, Point3::new(3.0, 1.0, 1.0));
+    let cutter = box_object(Point3::new(1.0, -0.5, -0.5), Point3::new(2.0, 1.5, 1.5));
+    let result = Object::boolean(BooleanOp::Subtract, &bar, &cutter, &Transform::IDENTITY).unwrap();
+    result.validate().unwrap();
+    assert_eq!(result.watertight(), WatertightState::Watertight);
+    assert_eq!(result.shells().len(), 2);
+    assert!((signed_volume(&result) - 2.0).abs() < VOLUME_TOL);
+}
+
+#[test]
+fn identical_operands_resolve_by_set_algebra() {
+    // A ∪ A ≡ A, A ∩ A ≡ A, A − A is empty — every face pair is coincident, now
+    // resolved coplanar contact (ARCHITECTURE.md #19, extends #15).
+    let a = unit_cube();
+    let u = Object::boolean(BooleanOp::Union, &a, &a, &Transform::IDENTITY).unwrap();
+    u.validate().unwrap();
+    assert!((signed_volume(&u) - 1.0).abs() < VOLUME_TOL);
+    let i = Object::boolean(BooleanOp::Intersect, &a, &a, &Transform::IDENTITY).unwrap();
+    i.validate().unwrap();
+    assert!((signed_volume(&i) - 1.0).abs() < VOLUME_TOL);
+    assert_eq!(
+        Object::boolean(BooleanOp::Subtract, &a, &a, &Transform::IDENTITY).unwrap_err(),
+        BooleanError::EmptyResult
+    );
+}
+
+proptest! {
+    /// Coplanar set algebra: force exactly one axis to share a plane (the other
+    /// two offset), so every result has coplanar contact. Volumes must still obey
+    /// |A∪B|+|A∩B|=|A|+|B| and |A−B|=|A|−|A∩B|, and every result stays watertight.
+    #[test]
+    fn coplanar_booleans_obey_set_algebra(
+        d0 in 0.2..0.8f64,
+        d1 in 0.2..0.8f64,
+        shared_axis in 0..3usize,
+    ) {
+        let mut s = [0.0; 3];
+        let offset_axes: Vec<usize> = (0..3).filter(|&i| i != shared_axis).collect();
+        s[offset_axes[0]] = d0;
+        s[offset_axes[1]] = d1;
+        let shift = Transform::translation(Vec3::new(s[0], s[1], s[2]));
+        let a = unit_cube();
+        let b = unit_cube();
+
+        let solve = |op| {
+            let r = Object::boolean(op, &a, &b, &shift).unwrap();
+            r.validate().unwrap();
+            assert_eq!(r.watertight(), WatertightState::Watertight);
+            signed_volume(&r)
+        };
+        let (vu, vi, vs) = (
+            solve(BooleanOp::Union),
+            solve(BooleanOp::Intersect),
+            solve(BooleanOp::Subtract),
+        );
+
+        // Shared axis contributes (1 - 0) = 1 to the overlap.
+        let overlap = (1.0 - s[0]) * (1.0 - s[1]) * (1.0 - s[2]);
+        prop_assert!((vi - overlap).abs() < VOLUME_TOL, "intersect {vi} vs {overlap}");
+        prop_assert!((vu + vi - 2.0).abs() < VOLUME_TOL, "union {vu} + intersect {vi} != 2");
+        prop_assert!((vs - (1.0 - vi)).abs() < VOLUME_TOL, "subtract {vs} != 1 - {vi}");
+    }
 }
 
 // --------------------------------------------------------------- history

@@ -21,6 +21,11 @@ pub enum TransformError {
     /// A rotation axis too short to define a direction
     /// (below [`tol::NORMALIZE_MIN_LENGTH`]).
     DegenerateAxis,
+    /// The linear part flips orientation (determinant < 0, e.g. a negative
+    /// scale). Baking it into a solid would invert every face's winding /
+    /// outward normal, so it is refused rather than silently producing an
+    /// inside-out object.
+    Reflection,
 }
 
 impl std::fmt::Display for TransformError {
@@ -29,6 +34,9 @@ impl std::fmt::Display for TransformError {
             TransformError::Singular => write!(f, "transform is singular"),
             TransformError::DegenerateAxis => {
                 write!(f, "rotation axis too short to define a direction")
+            }
+            TransformError::Reflection => {
+                write!(f, "transform flips orientation (negative determinant)")
             }
         }
     }
@@ -112,6 +120,23 @@ impl Transform {
             ],
             translation: Vec3::ZERO,
         })
+    }
+
+    /// Builds an affine transform from a row-major 3×4 matrix
+    /// `[m00 m01 m02 tx, m10 m11 m12 ty, m20 m21 m22 tz]`: the first three
+    /// entries of each row are the linear part, the fourth is the translation.
+    /// The UI boundary passes transforms this way (e.g. a decomposed three.js
+    /// matrix). Invertibility/orientation are checked where it is applied
+    /// ([`crate::topo::Object::apply_transform`]), not here.
+    pub fn from_affine(rows: &[f64; 12]) -> Transform {
+        Transform {
+            linear: [
+                [rows[0], rows[1], rows[2]],
+                [rows[4], rows[5], rows[6]],
+                [rows[8], rows[9], rows[10]],
+            ],
+            translation: Vec3::new(rows[3], rows[7], rows[11]),
+        }
     }
 
     /// The transform that applies `self` first, then `second`.
@@ -248,6 +273,19 @@ mod tests {
             Point3::new(-4.5, 0.25, 7.0),
             Point3::new(100.0, -50.0, 0.001),
         ]
+    }
+
+    #[test]
+    fn from_affine_packs_rows_as_linear_plus_translation() {
+        // A row-major 3x4: scale-by-2 on the diagonal + translation (7,8,9).
+        let t = Transform::from_affine(&[
+            2.0, 0.0, 0.0, 7.0, //
+            0.0, 2.0, 0.0, 8.0, //
+            0.0, 0.0, 2.0, 9.0,
+        ]);
+        let mapped = t.apply_point(Point3::new(1.0, 1.0, 1.0));
+        assert!(mapped.approx_eq(Point3::new(9.0, 10.0, 11.0), TEST_EPS));
+        assert!((t.determinant() - 8.0).abs() < TEST_EPS);
     }
 
     #[test]

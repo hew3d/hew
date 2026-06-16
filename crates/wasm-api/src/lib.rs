@@ -2,9 +2,11 @@
 //! (DEVELOPMENT.md rule 1).
 //!
 //! Surface design and decision record: `docs/DEVELOPMENT.md` (rule 8 sign-off
-//! trail). Summary: a single [`Scene`] owns the authoritative model; the UI
-//! holds opaque `u64` handles (BigInt in JS), pulls copied buffers after
-//! mutations, and receives typed errors as thrown `"CODE: message"` strings.
+//! trail). Summary: the authoritative model is the kernel [`Document`]; [`Scene`]
+//! is its FFI shim, adding only the inference scene and render-mesh caches (the
+//! concerns the kernel may not depend on). The UI holds opaque `u64` handles
+//! (BigInt in JS), pulls copied buffers after mutations, and receives typed
+//! errors as thrown `"CODE: message"` strings.
 //!
 //! Document-level undo/redo (`scene_undo`/`scene_redo`) orders all mutations
 //! and wraps per-Object [`History`]; undoing a creation hides the object
@@ -14,10 +16,11 @@
 
 use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
 use kernel::{
-    EdgeId, FaceId, History, KernelOp, KernelOpError, KernelOpReport, Object, ObjectId, Plane,
-    Point3, Sketch, SketchEdgeId, SketchRegionId, WatertightState,
+    BooleanOp, DocChange, Document, DocumentError, EdgeId, FaceId, KernelOp, KernelOpError,
+    KernelOpReport, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId, SketchRegionId,
+    Transform, WatertightState,
 };
-use slotmap::{Key, KeyData, SlotMap};
+use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
 use wasm_bindgen::prelude::*;
 
@@ -64,11 +67,30 @@ fn stale(code: &str, what: &str) -> ApiError {
     ApiError(format!("{code}: stale or unknown {what} handle"))
 }
 
-fn op_err(e: KernelOpError) -> ApiError {
+/// Maps a [`DocumentError`] to the `"CODE: message"` boundary form, choosing
+/// the *innermost* error for CODE so callers see e.g. `DistanceTooSmall` or
+/// `UnknownRegion` rather than an opaque wrapper name. The message is the
+/// `DocumentError`'s own `Display`, which delegates to the inner error.
+fn doc_err(e: DocumentError) -> ApiError {
     match &e {
-        KernelOpError::PushPull(inner) => api_err(inner, &e),
-        KernelOpError::Sticky(inner) => api_err(inner, &e),
+        DocumentError::Sketch(inner) => api_err(inner, &e),
+        DocumentError::Extrude(inner) => api_err(inner, &e),
+        DocumentError::Boolean(inner) => api_err(inner, &e),
+        DocumentError::Transform(inner) => api_err(inner, &e),
+        DocumentError::Op(KernelOpError::PushPull(inner)) => api_err(inner, &e),
+        DocumentError::Op(KernelOpError::Sticky(inner)) => api_err(inner, &e),
+        // UnknownSketch/UnknownObject/NothingTo{Undo,Redo}/InverseFailed carry no
+        // separate inner code: the variant name is the code.
+        _ => api_err(&e, &e),
     }
+}
+
+fn sketch_id(handle: u64) -> SketchId {
+    SketchId::from(KeyData::from_ffi(handle))
+}
+
+fn object_id(handle: u64) -> ObjectId {
+    ObjectId::from(KeyData::from_ffi(handle))
 }
 
 // ----------------------------------------------------------------- buffers
@@ -315,55 +337,19 @@ impl SnapJs {
 
 // ------------------------------------------------------------------- scene
 
-struct ObjectEntry {
-    object: Object,
-    history: History,
-    mesh_cache: Option<RenderMesh>,
-    /// Hidden objects are undone creations: kept in the slotmap (so their
-    /// handle stays valid for redo and for any later per-object op in the
-    /// history) but excluded from `object_ids`, rendering, and inference.
-    hidden: bool,
-}
-
-/// One document-level step on the Scene undo stack (docs/DEVELOPMENT.md: the
-/// minimal "Document command log" that wraps per-Object [`History`]).
-///
-/// Object creation is undone by HIDING the object, not deleting it, so its
-/// `ObjectId` never churns — redo just unhides, and a later `ObjectOp` in the
-/// stack keeps referring to a live handle.
-enum SceneAction {
-    /// `extrude_region` created an object from a sketch region; undo hides the
-    /// object and restores the region's extrudability, redo reverses both.
-    CreatedObject {
-        /// The created object.
-        id: ObjectId,
-        /// The sketch + region it consumed (so undo can un-consume them).
-        sketch: u64,
-        /// Region ffi key within `sketch`.
-        region: u64,
-    },
-    /// A per-object op (push/pull, split, merge) ran; undo/redo delegate to
-    /// that object's [`History`].
-    ObjectOp { object: ObjectId },
-}
-
-/// The authoritative model behind the UI (docs/DEVELOPMENT.md B1): Objects with
-/// per-Object undo, the active sketch, the inference scene, and a
-/// document-level undo/redo stack ordering all mutations.
+/// The WASM boundary shim over the authoritative [`Document`]
+/// (docs/DEVELOPMENT.md B1). The model — Sketches, Objects, per-Object undo, and
+/// the document command log — lives in the kernel `Document`. `Scene` keeps only
+/// what the kernel may not depend on (DEVELOPMENT.md rule 1): the inference scene and
+/// per-Object render-mesh caches. Every mutation delegates to `doc`, then
+/// `reconcile`s those derived caches from the returned [`DocChange`].
 #[wasm_bindgen]
 pub struct Scene {
-    objects: SlotMap<ObjectId, ObjectEntry>,
-    sketch: Option<(u64, Sketch)>,
-    next_sketch_handle: u64,
+    doc: Document,
     inference: InferenceScene,
-    undo_stack: Vec<SceneAction>,
-    redo_stack: Vec<SceneAction>,
-    /// `(sketch_handle, region_ffi)` pairs already extruded into a solid.
-    /// Such a region is "consumed" — it becomes the bottom of its box and is
-    /// dropped from `sketch_regions`, so it neither re-extrudes nor renders a
-    /// stray fill. Keyed by sketch handle too because a fresh sketch's
-    /// slotmap reuses region ffi values.
-    consumed_regions: std::collections::HashSet<(u64, u64)>,
+    /// Flat-shaded render buffers per Object, rebuilt lazily on demand and
+    /// invalidated by `reconcile` when the Object changes or is hidden.
+    mesh_cache: SecondaryMap<ObjectId, RenderMesh>,
 }
 
 impl Default for Scene {
@@ -382,53 +368,29 @@ fn ground_plane() -> Plane {
 }
 
 impl Scene {
-    fn sketch_for(&self, handle: u64) -> Result<&Sketch, ApiError> {
-        match &self.sketch {
-            Some((h, sketch)) if *h == handle => Ok(sketch),
-            _ => Err(stale("UnknownSketch", "sketch")),
-        }
-    }
-
-    fn sketch_for_mut(&mut self, handle: u64) -> Result<&mut Sketch, ApiError> {
-        match &mut self.sketch {
-            Some((h, sketch)) if *h == handle => Ok(sketch),
-            _ => Err(stale("UnknownSketch", "sketch")),
-        }
-    }
-
-    /// Post-mutation bookkeeping: drop the cached mesh and sync the object's
-    /// snap candidates. A visible object is (re-)registered with replace
-    /// semantics; a hidden one is removed from inference.
-    fn refresh_object(&mut self, id: ObjectId) {
-        let Some(entry) = self.objects.get_mut(id) else {
-            return;
-        };
-        entry.mesh_cache = None;
-        if entry.hidden {
-            self.inference.remove_object(id);
-        } else {
-            let object = &self.objects[id].object;
-            self.inference
-                .add_object(id, object, &kernel::Transform::IDENTITY);
-        }
-    }
-
-    /// Looks up a live (non-hidden) object handle.
-    fn live_object_id(&self, handle: u64) -> Result<ObjectId, ApiError> {
-        let id = ObjectId::from(KeyData::from_ffi(handle));
-        match self.objects.get(id) {
-            Some(e) if !e.hidden => Ok(id),
-            _ => Err(stale("UnknownObject", "object")),
+    /// Reconciles the inference scene and render caches with the Document after
+    /// a mutation. For each touched Object: drop its cached mesh, then register
+    /// it with inference if it is now visible or remove it if it is hidden/gone
+    /// (replace semantics, mirroring the Document's view). Sketches carry no
+    /// inference/cache state today, so `sketches_touched` needs no action here.
+    fn reconcile(&mut self, change: &DocChange) {
+        for &id in &change.objects_touched {
+            self.mesh_cache.remove(id);
+            match self.doc.object(id) {
+                Some(object) => {
+                    self.inference.add_object(id, object, &Transform::IDENTITY);
+                }
+                None => self.inference.remove_object(id),
+            }
         }
     }
 
     fn apply_op(&mut self, handle: u64, op: KernelOp) -> Result<KernelOpReport, ApiError> {
-        let id = self.live_object_id(handle)?;
-        let entry = &mut self.objects[id];
-        let report = entry.history.apply(&mut entry.object, op).map_err(op_err)?;
-        self.refresh_object(id);
-        self.undo_stack.push(SceneAction::ObjectOp { object: id });
-        self.redo_stack.clear();
+        let (report, change) = self
+            .doc
+            .apply_object_op(object_id(handle), op)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
         Ok(report)
     }
 }
@@ -439,25 +401,28 @@ impl Scene {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Scene {
         Scene {
-            objects: SlotMap::with_key(),
-            sketch: None,
-            next_sketch_handle: 1,
+            doc: Document::new(),
             inference: InferenceScene::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            consumed_regions: std::collections::HashSet::new(),
+            mesh_cache: SecondaryMap::new(),
         }
     }
 
     // ------------------------------------------------------------ sketching
 
-    /// Starts a fresh sketch on the ground plane (M1: the only sketch
-    /// surface), replacing any current sketch. Returns its handle.
+    /// Adds a fresh, empty sketch on the ground plane (M1: the only sketch
+    /// surface) and returns its handle. **Additive** — existing sketches are
+    /// untouched, so independent coplanar shapes can coexist.
     pub fn begin_ground_sketch(&mut self) -> u64 {
-        let handle = self.next_sketch_handle;
-        self.next_sketch_handle += 1;
-        self.sketch = Some((handle, Sketch::on_plane(ground_plane())));
-        handle
+        self.doc.add_sketch(ground_plane()).data().as_ffi()
+    }
+
+    /// Handles of every sketch in the document, for rendering all of them.
+    pub fn sketch_ids(&self) -> Vec<u64> {
+        self.doc
+            .sketch_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
     }
 
     /// Inserts a segment with full sticky semantics (see `kernel::sketch`).
@@ -473,7 +438,10 @@ impl Scene {
         by: f64,
         bz: f64,
     ) -> Result<SegmentAddedJs, ApiError> {
-        let s = self.sketch_for_mut(sketch)?;
+        let s = self
+            .doc
+            .sketch_mut(sketch_id(sketch))
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let report = s
             .add_segment(Point3::new(ax, ay, az), Point3::new(bx, by, bz))
             .map_err(|e| api_err(&e, &e))?;
@@ -486,7 +454,10 @@ impl Scene {
         sketch: u64,
         edge: u64,
     ) -> Result<EdgeRemovedJs, ApiError> {
-        let s = self.sketch_for_mut(sketch)?;
+        let s = self
+            .doc
+            .sketch_mut(sketch_id(sketch))
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let report = s
             .remove_edge(SketchEdgeId::from(KeyData::from_ffi(edge)))
             .map_err(|e| api_err(&e, &e))?;
@@ -495,7 +466,10 @@ impl Scene {
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
     pub fn sketch_lines(&self, sketch: u64) -> Result<Vec<f32>, ApiError> {
-        let s = self.sketch_for(sketch)?;
+        let s = self
+            .doc
+            .sketch(sketch_id(sketch))
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let mut out = Vec::with_capacity(s.edges().len() * 6);
         for edge in s.edges().values() {
             for v in [edge.from, edge.to] {
@@ -509,12 +483,11 @@ impl Scene {
     /// Handles of the sketch's current closed regions, excluding any already
     /// extruded into a solid (those are consumed — see `extrude_region`).
     pub fn sketch_regions(&self, sketch: u64) -> Result<Vec<u64>, ApiError> {
-        let s = self.sketch_for(sketch)?;
-        Ok(s.regions()
-            .keys()
-            .map(|r| r.data().as_ffi())
-            .filter(|&r| !self.consumed_regions.contains(&(sketch, r)))
-            .collect())
+        let regions = self
+            .doc
+            .extrudable_regions(sketch_id(sketch))
+            .map_err(doc_err)?;
+        Ok(regions.iter().map(|r| r.data().as_ffi()).collect())
     }
 
     // --------------------------------------------------------------- solids
@@ -527,62 +500,101 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
-        let profile = self
-            .sketch_for(sketch)?
-            .profile(SketchRegionId::from(KeyData::from_ffi(region)))
-            .map_err(|e| api_err(&e, &e))?;
-        let object = Object::from_extrusion(&profile, distance).map_err(|e| api_err(&e, &e))?;
-        let id = self.objects.insert(ObjectEntry {
-            object,
-            history: History::new(),
-            mesh_cache: None,
-            hidden: false,
-        });
-        self.refresh_object(id);
-        // The region is now the bottom of a solid: consume it so it neither
-        // re-extrudes nor leaves a stray fill.
-        self.consumed_regions.insert((sketch, region));
-        self.undo_stack
-            .push(SceneAction::CreatedObject { id, sketch, region });
-        self.redo_stack.clear();
+        let region = SketchRegionId::from(KeyData::from_ffi(region));
+        let (id, change) = self
+            .doc
+            .extrude_region(sketch_id(sketch), region, distance)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
         Ok(id.data().as_ffi())
+    }
+
+    /// Explicit combine (ARCHITECTURE.md): unions/subtracts/intersects two objects,
+    /// consuming the operands into the returned result handle. `op` is
+    /// 0 = union, 1 = subtract (`a - b`), 2 = intersect. Operands and result
+    /// stay stable handles across undo/redo.
+    pub fn boolean(&mut self, op: u8, a: u64, b: u64) -> Result<u64, ApiError> {
+        let op = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        let (id, change) = self
+            .doc
+            .boolean(op, object_id(a), object_id(b))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(id.data().as_ffi())
+    }
+
+    /// Move/rotate/scale an object by baking an affine transform into its
+    /// geometry (undoable). `affine` is a row-major 3×4 matrix (12 floats):
+    /// `[m00 m01 m02 tx, m10 m11 m12 ty, m20 m21 m22 tz]`. The object handle is
+    /// unchanged; the UI re-pulls its mesh afterward.
+    pub fn transform_object(&mut self, object: u64, affine: &[f64]) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_object(object_id(object), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
     }
 
     /// Handles of all currently visible Objects in the scene (undone
     /// creations are hidden, not listed).
     pub fn object_ids(&self) -> Vec<u64> {
-        self.objects
+        self.doc
+            .visible_object_ids()
             .iter()
-            .filter(|(_, e)| !e.hidden)
-            .map(|(id, _)| id.data().as_ffi())
+            .map(|id| id.data().as_ffi())
             .collect()
     }
 
     /// Render buffers for one Object (cached until its next mutation).
     pub fn object_mesh(&mut self, object: u64) -> Result<MeshJs, ApiError> {
-        let id = self.live_object_id(object)?;
-        let entry = &mut self.objects[id];
-        if entry.mesh_cache.is_none() {
-            let mesh = tessellate(&entry.object).map_err(|e| api_err(&e, &e))?;
-            entry.mesh_cache = Some(mesh);
+        let id = object_id(object);
+        if !self.mesh_cache.contains_key(id) {
+            let object = self
+                .doc
+                .object(id)
+                .ok_or_else(|| stale("UnknownObject", "object"))?;
+            let mesh = tessellate(object).map_err(|e| api_err(&e, &e))?;
+            self.mesh_cache.insert(id, mesh);
         }
+        let watertight = self
+            .doc
+            .object(id)
+            .ok_or_else(|| stale("UnknownObject", "object"))?
+            .watertight()
+            == WatertightState::Watertight;
         Ok(MeshJs {
-            mesh: entry.mesh_cache.clone().expect("cache filled above"),
-            watertight: entry.object.watertight() == WatertightState::Watertight,
+            mesh: self.mesh_cache[id].clone(),
+            watertight,
         })
     }
 
     /// Whether an Object encloses a volume (drives the status UI).
     pub fn object_watertight(&self, object: u64) -> Result<bool, ApiError> {
-        let id = self.live_object_id(object)?;
-        Ok(self.objects[id].object.watertight() == WatertightState::Watertight)
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        Ok(object.watertight() == WatertightState::Watertight)
     }
 
     /// World-space outer-loop vertices (flat xyz) of a sketch region — for
     /// rendering the region fill and for client-side region picking. M1
     /// sketches are planar, so this is the region's boundary polygon.
     pub fn region_boundary(&self, sketch: u64, region: u64) -> Result<Vec<f32>, ApiError> {
-        let s = self.sketch_for(sketch)?;
+        let s = self
+            .doc
+            .sketch(sketch_id(sketch))
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let rid = SketchRegionId::from(KeyData::from_ffi(region));
         let region = s
             .regions()
@@ -599,10 +611,12 @@ impl Scene {
     /// The unit normal of an Object face — the axis the push/pull tool drags
     /// along. (Exact, unlike guessing from the snap position.)
     pub fn face_normal(&self, object: u64, face: u64) -> Result<Vec<f64>, ApiError> {
-        let id = self.live_object_id(object)?;
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
         let fid = FaceId::from(KeyData::from_ffi(face));
-        let face = self.objects[id]
-            .object
+        let face = object
             .faces()
             .get(fid)
             .ok_or_else(|| stale("UnknownFace", "face"))?;
@@ -669,41 +683,20 @@ impl Scene {
 
     /// True if there is a document-level action to undo.
     pub fn can_scene_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
+        self.doc.can_undo()
     }
 
     /// True if there is a document-level action to redo.
     pub fn can_scene_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
+        self.doc.can_redo()
     }
 
     /// Reverses the most recent document action (LIFO across creations and
     /// per-object ops alike). Undoing a creation hides the object; undoing a
     /// per-object op delegates to that object's [`History`].
     pub fn scene_undo(&mut self) -> Result<(), ApiError> {
-        let action = self
-            .undo_stack
-            .pop()
-            .ok_or_else(|| ApiError("NothingToUndo: nothing to undo".to_string()))?;
-        match action {
-            SceneAction::CreatedObject { id, sketch, region } => {
-                if let Some(e) = self.objects.get_mut(id) {
-                    e.hidden = true;
-                }
-                self.refresh_object(id);
-                // Restore the region's extrudability.
-                self.consumed_regions.remove(&(sketch, region));
-            }
-            SceneAction::ObjectOp { object } => {
-                let entry = &mut self.objects[object];
-                entry
-                    .history
-                    .undo(&mut entry.object)
-                    .map_err(|e| api_err(&e, &e))?;
-                self.refresh_object(object);
-            }
-        }
-        self.redo_stack.push(action);
+        let change = self.doc.undo().map_err(doc_err)?;
+        self.reconcile(&change);
         Ok(())
     }
 
@@ -711,29 +704,8 @@ impl Scene {
     /// stable across undo/redo (undone creations are hidden, not deleted), so
     /// redo never has to remap ids.
     pub fn scene_redo(&mut self) -> Result<(), ApiError> {
-        let action = self
-            .redo_stack
-            .pop()
-            .ok_or_else(|| ApiError("NothingToRedo: nothing to redo".to_string()))?;
-        match action {
-            SceneAction::CreatedObject { id, sketch, region } => {
-                if let Some(e) = self.objects.get_mut(id) {
-                    e.hidden = false;
-                }
-                self.refresh_object(id);
-                // Re-consume the region (it is a solid's bottom again).
-                self.consumed_regions.insert((sketch, region));
-            }
-            SceneAction::ObjectOp { object } => {
-                let entry = &mut self.objects[object];
-                entry
-                    .history
-                    .redo(&mut entry.object)
-                    .map_err(|e| api_err(&e, &e))?;
-                self.refresh_object(object);
-            }
-        }
-        self.undo_stack.push(action);
+        let change = self.doc.redo().map_err(doc_err)?;
+        self.reconcile(&change);
         Ok(())
     }
 
@@ -964,9 +936,8 @@ mod tests {
         // Find the top face: object_mesh doesn't expose face ids, so we drive
         // push_pull through a known face by scanning normals.
         let top = {
-            let id = scene.live_object_id(obj).unwrap();
-            scene.objects[id]
-                .object
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
                 .faces()
                 .iter()
                 .find(|(_, f)| {
@@ -991,14 +962,17 @@ mod tests {
     }
 
     #[test]
-    fn ground_sketch_handles_are_scoped() {
+    fn ground_sketches_are_additive_and_coexist() {
         let mut scene = Scene::new();
         let first = scene.begin_ground_sketch();
         assert_eq!(scene.sketch_lines(first).unwrap().len(), 0);
         let second = scene.begin_ground_sketch();
-        // Beginning a new sketch invalidates the old handle.
-        assert!(scene.sketch_lines(first).is_err());
+        // : beginning a new sketch is additive — the first handle stays live,
+        // so independent coplanar sketches coexist.
+        assert_ne!(first, second);
+        assert!(scene.sketch_lines(first).is_ok());
         assert!(scene.sketch_regions(second).unwrap().is_empty());
+        assert_eq!(scene.sketch_ids().len(), 2);
     }
 
     #[test]
@@ -1011,5 +985,70 @@ mod tests {
         assert_eq!(mesh.positions().len(), 24 * 3);
         // Cache fills and serves the second pull identically.
         assert_eq!(scene.object_mesh(obj).unwrap().indices().len(), 12 * 3);
+    }
+
+    #[test]
+    fn boolean_of_two_coplanar_boxes_unions_into_one() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square(&mut scene);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+
+        // Two identical ground boxes share coplanar faces; the boolean now
+        // resolves coplanar contact instead of refusing. Union of
+        // coincident solids is one box — operands consumed, one object left.
+        let result = scene.boolean(0, o1, o2).unwrap();
+        assert_eq!(scene.object_ids(), vec![result]);
+    }
+
+    #[test]
+    fn boolean_rejects_bad_op_code() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let err = scene.boolean(9, o, o).unwrap_err();
+        assert!(err.0.starts_with("BadOp"), "got {}", err.0);
+    }
+
+    #[test]
+    fn transform_object_moves_and_is_undoable() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        // Row-major 3x4: identity linear, translate +X by 5.
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        scene.transform_object(o, &affine).unwrap();
+        assert_eq!(scene.object_ids(), vec![o], "same handle after transform");
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.object_ids(), vec![o], "still there after undo");
+    }
+
+    #[test]
+    fn transform_object_rejects_bad_affine_and_reflection() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+
+        let short = [1.0, 0.0, 0.0];
+        assert!(
+            scene
+                .transform_object(o, &short)
+                .unwrap_err()
+                .0
+                .starts_with("BadAffine")
+        );
+        // Negative scale on every axis flips orientation → refused.
+        let reflect = [
+            -1.0, 0.0, 0.0, 0.0, //
+            0.0, -1.0, 0.0, 0.0, //
+            0.0, 0.0, -1.0, 0.0,
+        ];
+        let err = scene.transform_object(o, &reflect).unwrap_err();
+        assert!(err.0.starts_with("Reflection"), "got {}", err.0);
     }
 }

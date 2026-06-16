@@ -46,7 +46,7 @@ use crate::math::{Plane, Point3};
 use crate::sketch::Profile;
 use crate::tol;
 use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState};
-use crate::transform::Transform;
+use crate::transform::{Transform, TransformError};
 
 /// The explicit combination modes (ARCHITECTURE.md: combining Objects is always a
 /// deliberate user action; nothing ever welds implicitly).
@@ -279,6 +279,40 @@ impl std::fmt::Display for BooleanError {
 impl std::error::Error for BooleanError {}
 
 impl Object {
+    /// Bakes an affine `transform` into this object's geometry: every vertex is
+    /// moved by `transform` and every face plane is remapped (the
+    /// inverse-transpose rule via [`Transform::apply_plane`]), in place.
+    ///
+    /// Topology is untouched — no element is added or removed — so all handles
+    /// stay valid and the watertightness state is preserved. This is what
+    /// move/rotate/scale commit, and how a boolean brings an operand into a
+    /// shared frame.
+    ///
+    /// Validated up front so the mutation is transactional (the strong
+    /// guarantee): a singular linear part is [`TransformError::Singular`] and an
+    /// orientation-flipping one (determinant < 0, e.g. a negative scale) is
+    /// [`TransformError::Reflection`] — both refused before any vertex moves, so
+    /// the object is never left half-transformed or inside-out.
+    pub fn apply_transform(&mut self, transform: &Transform) -> Result<(), TransformError> {
+        // Reject before mutating. `inverse()` fails iff the linear part is
+        // singular; a negative determinant would invert every face's winding.
+        transform.inverse()?;
+        if transform.determinant() < 0.0 {
+            return Err(TransformError::Reflection);
+        }
+        for v in self.vertices.values_mut() {
+            v.position = transform.apply_point(v.position);
+        }
+        for f in self.faces.values_mut() {
+            // Non-singular by the check above, so apply_plane cannot fail.
+            f.plane = transform
+                .apply_plane(&f.plane)
+                .expect("apply_plane on a validated non-singular transform");
+        }
+        self.check_invariants();
+        Ok(())
+    }
+
     /// The birth of every solid: sweeps a closed [`Profile`] by `distance`
     /// along its plane normal (negative = against the normal) into a discrete
     /// watertight Object.
@@ -899,14 +933,13 @@ impl Object {
     /// See [`BooleanError`]. Degenerate contact (coincident faces, tangent
     /// edges) is refused, not repaired — resolution strategies (nudging,
     /// merge-group containers) belong to M2 UX.
-    #[allow(unused_variables)] // contract stub: implementation lands in M2
     pub fn boolean(
         op: BooleanOp,
         a: &Object,
         b: &Object,
         b_to_a: &Transform,
     ) -> Result<Object, BooleanError> {
-        todo!("M2: boolean combination (see tests/op_specs.rs)")
+        crate::boolean::execute(op, a, b, b_to_a)
     }
 }
 

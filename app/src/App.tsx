@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { loadKernel, type Scene } from './wasm/loader'
-import Viewport from './viewport/Viewport'
+import Viewport, { type ViewportApi } from './viewport/Viewport'
+import { DocumentTree } from './panels/DocumentTree'
+import { nextSelection } from './panels/treeModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
@@ -18,12 +20,15 @@ interface Toast {
 
 let toastCounter = 0
 
-const TOOLS = ['Select', 'Rectangle', 'Push/Pull'] as const
+const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Move', 'Rotate', 'Scale'] as const
 type ToolName = (typeof TOOLS)[number]
 const TOOL_KEYS: Record<ToolName, string> = {
   'Select': '1',
   'Rectangle': '2',
   'Push/Pull': '3',
+  'Move': '4',
+  'Rotate': '5',
+  'Scale': '6',
 }
 
 /** Strings that signal the Scene borrow-lock after a Rust panic. */
@@ -39,6 +44,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [toolName, setToolName] = useState<string>('Select')
   const [snapKind, setSnapKind] = useState<string | null>(null)
+  const [measurement, setMeasurement] = useState<string>('')
   const [toasts, setToasts] = useState<Toast[]>([])
   /** Per-object watertight map (bigint key) */
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
@@ -46,6 +52,14 @@ export default function App() {
   const [activeTool, setActiveTool] = useState<ToolName>('Select')
   /** Sticky banner: true once a kernel panic / borrow-lock is detected */
   const [kernelPanicked, setKernelPanicked] = useState(false)
+  /** Selected entities (ordered; index 0 = primary). */
+  const [selectedIds, setSelectedIds] = useState<bigint[]>([])
+  /** Entered object (editing context), or null at top level. */
+  const [activeContext, setActiveContext] = useState<bigint | null>(null)
+  /** Bumped on any document change so the tree re-queries entity lists. */
+  const [docRev, setDocRev] = useState(0)
+  /** Imperative handle into the viewport (e.g. running a boolean). */
+  const viewportApi = useRef<ViewportApi | null>(null)
 
   // Stable ref to the Scene for undo/redo button state queries
   const sceneRef = useRef<Scene | null>(null)
@@ -81,14 +95,45 @@ export default function App() {
     setSnapKind(kind)
   }, [])
 
+  const handleMeasurement = useCallback((text: string) => {
+    setMeasurement(text)
+  }, [])
+
   const handleSceneChange = useCallback((wtMap: Map<bigint, boolean>) => {
     setWatertightMap(new Map(wtMap))
+  }, [])
+
+  const handleSelect = useCallback((id: bigint | null, additive: boolean) => {
+    setSelectedIds((cur) => nextSelection(cur, id, additive))
+  }, [])
+
+  const handleEnterContext = useCallback((objectId: bigint) => {
+    setActiveContext(objectId)
+    setSelectedIds([objectId])
+  }, [])
+
+  const handleExitContext = useCallback(() => {
+    setActiveContext(null)
+  }, [])
+
+  // Bump the tree's revision; if the entered object vanished (e.g. its creation
+  // was undone), drop back to the top-level context so nothing stays isolated
+  // around a hidden object.
+  const handleDocumentChanged = useCallback(() => {
+    setDocRev((r) => r + 1)
+    setActiveContext((ctx) => {
+      if (ctx === null) return null
+      const scene = sceneRef.current
+      if (scene === null) return ctx
+      return Array.from(scene.object_ids()).includes(ctx) ? ctx : null
+    })
   }, [])
 
   const handleToast = useCallback((message: string, code?: string) => {
     // Determine severity: error codes that are "hard" errors, vs. info/warn
     const isError = code !== undefined &&
-      ['WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry'].includes(code)
+      ['WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
+        'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform'].includes(code)
     const level = isError ? 'error' : 'warn'
     const logMessage = code !== undefined ? `[${code}] ${message}` : message
     LogStore.log[level]('tool', logMessage)
@@ -148,6 +193,17 @@ export default function App() {
   const objectCount = watertightMap.size
   const allWatertight = objectCount === 0 || Array.from(watertightMap.values()).every(Boolean)
   const leakyCount = Array.from(watertightMap.values()).filter((v) => !v).length
+
+  // The boolean operands: the selection narrowed to current objects (sketches
+  // can't be booleaned). Re-queried each render; docRev forces a refresh.
+  const objectIdSet = new Set(Array.from(state.scene.object_ids()))
+  const booleanOperands = selectedIds.filter((id) => objectIdSet.has(id))
+  const canBoolean = activeContext === null && booleanOperands.length === 2
+  const handleBoolean = (op: number) => {
+    if (booleanOperands.length === 2) {
+      viewportApi.current?.runBoolean(op, booleanOperands[0], booleanOperands[1])
+    }
+  }
 
   return (
     <main
@@ -275,6 +331,7 @@ export default function App() {
       >
         <span>Tool: <strong>{toolName}</strong></span>
         <span>Snap: {snapKind ?? '—'}</span>
+        <span>Length: {measurement !== '' ? measurement : '—'}</span>
         <span style={{ color: '#888', fontSize: '11px' }}>
           Middle-drag: orbit | Shift+Middle: pan | Scroll: zoom
         </span>
@@ -283,14 +340,23 @@ export default function App() {
         </span>
       </div>
 
-      {/* Viewport — flex-grows to fill available space above the log panel */}
-      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+      {/* Viewport + document tree — fills space above the log panel */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px' }}>
+        <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
         <Viewport
           wasmScene={state.scene}
           onStatusChange={handleStatusChange}
           onSceneChange={handleSceneChange}
           onToast={handleToast}
           activeTool={activeTool}
+          activeContext={activeContext}
+          selectedIds={selectedIds}
+          onSelect={handleSelect}
+          onEnterContext={handleEnterContext}
+          onExitContext={handleExitContext}
+          onDocumentChanged={handleDocumentChanged}
+          apiRef={viewportApi}
+          onMeasurement={handleMeasurement}
         />
 
         {/* Toast stack — positioned inside the viewport container */}
@@ -334,6 +400,20 @@ export default function App() {
             </div>
           ))}
         </div>
+        </div>
+
+        <DocumentTree
+          scene={state.scene}
+          docRev={docRev}
+          watertightMap={watertightMap}
+          selectedIds={selectedIds}
+          activeContext={activeContext}
+          onSelect={handleSelect}
+          onEnterContext={handleEnterContext}
+          onExitContext={handleExitContext}
+          canBoolean={canBoolean}
+          onBoolean={handleBoolean}
+        />
       </div>
 
       {/* Log panel — docked at bottom, never covers the viewport */}

@@ -99,18 +99,23 @@ export class PushPullTool implements Tool {
       if (pick !== undefined) {
         try {
           const objectHandle = pick.object()
-          const faceHandle = pick.face()
-          const normalArr = this.wasmScene.face_normal(objectHandle, faceHandle)
-          const normal: [number, number, number] = [normalArr[0], normalArr[1], normalArr[2]]
-          // Prefer the snap position as anchor (snapped to a real point on the
-          // surface); fall back to ground hit, then ray origin.
-          if (snap !== null) {
-            anchor = [snap.x, snap.y, snap.z]
-          } else {
-            const hit = intersectGroundPlane(ray)
-            anchor = hit !== null ? [hit.x, hit.y, hit.z] : [...ray.origin]
+          // Inside an editing context, only the entered object is editable —
+          // ignore faces of other objects so isolated editing can't disturb
+          // neighbors. Top level (null) keeps the unrestricted behavior.
+          if (this._activeContext === null || objectHandle === this._activeContext) {
+            const faceHandle = pick.face()
+            const normalArr = this.wasmScene.face_normal(objectHandle, faceHandle)
+            const normal: [number, number, number] = [normalArr[0], normalArr[1], normalArr[2]]
+            // Prefer the snap position as anchor (snapped to a real point on the
+            // surface); fall back to ground hit, then ray origin.
+            if (snap !== null) {
+              anchor = [snap.x, snap.y, snap.z]
+            } else {
+              const hit = intersectGroundPlane(ray)
+              anchor = hit !== null ? [hit.x, hit.y, hit.z] : [...ray.origin]
+            }
+            target = { kind: 'face', objectHandle, faceHandle, normal }
           }
-          target = { kind: 'face', objectHandle, faceHandle, normal }
         } finally {
           pick.free()
         }
@@ -119,7 +124,8 @@ export class PushPullTool implements Tool {
       // --- Path B: no object face hit — try picking a sketch region ---
       // Only reached when pick_face returns undefined (bare ground click, or
       // no objects in scene yet).
-      if (target === null && this._sketchHandle !== null) {
+      // Region extrusion is a top-level act; suppress it inside a context.
+      if (target === null && this._activeContext === null && this._sketchHandle !== null) {
         // Intersect the ray with the ground plane to get the hit point
         const hit = intersectGroundPlane(ray)
         if (hit !== null) {
@@ -195,6 +201,13 @@ export class PushPullTool implements Tool {
   private _sketchHandle: bigint | null = null
   setSketchHandle(handle: bigint | null): void {
     this._sketchHandle = handle
+  }
+
+  /** Set the active editing context (entered object), or null for top level.
+   *  When set, push/pull only acts on that object's faces ( scoped editing). */
+  private _activeContext: bigint | null = null
+  setActiveContext(objectId: bigint | null): void {
+    this._activeContext = objectId
   }
 
   private _commit(target: PushPullTarget, distance: number): void {

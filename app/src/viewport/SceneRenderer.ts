@@ -6,11 +6,12 @@
  *   2. Rebuild the viewport meshes (flat-shaded faces + edge LineSegments)
  *   3. Dispose old GPU buffers
  *
- * Also manages sketch line geometry (refreshed via refreshSketch).
+ * Also manages sketch geometry for every document sketch (refreshAllSketches).
  */
 
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { isDimmed } from '../panels/treeModel'
 
 const FACE_COLOR = 0xa8c8e8
 const FACE_COLOR_LEAKY = 0xe8a8a8   // reddish tint for non-watertight
@@ -19,6 +20,10 @@ const EDGE_COLOR = 0x1a1a1a
 const EDGE_COLOR_SELECTED = 0xffaa00  // orange highlight for selected object edges
 const SKETCH_LINE_COLOR = 0x2266cc
 const SKETCH_REGION_COLOR = 0x88aadd
+/** Normal translucency of a sketch region fill. */
+const SKETCH_REGION_OPACITY = 0.35
+/** Opacity of entities faded out by the active editing context (isolation). */
+const DIMMED_OPACITY = 0.15
 
 /** Disposable group for one object's faces + edges */
 interface ObjectMeshGroup {
@@ -39,14 +44,19 @@ export class SceneRenderer {
 
   private objectGroups: Map<bigint, ObjectMeshGroup> = new Map()
   private sketchLines: THREE.LineSegments | null = null
-  /** One fill mesh per sketch region (keyed by region handle) */
-  private sketchRegionMeshes: Map<bigint, THREE.Mesh> = new Map()
-  /** Current sketch handle — null if no active sketch */
+  /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
+   *  (region handles are per-sketch, so they can collide across sketches). */
+  private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
+  /** The sketch currently being drawn into (tool target) — null if none. */
   private activeSketchHandle: bigint | null = null
   /** Last known watertight state per object */
   private watertightMap: Map<bigint, boolean> = new Map()
-  /** Currently selected object id, or null */
-  private selectedObjectId: bigint | null = null
+  /** Currently selected object ids (ordered; may include non-object entities,
+   *  which simply match no group). */
+  private selectedObjectIds: bigint[] = []
+  /** Active editing context (entered object), or null at top level. When set,
+   *  every other object + all sketches are faded ( isolation). */
+  private activeContextId: bigint | null = null
 
   constructor(threeScene: THREE.Scene, wasmScene: WasmScene) {
     this.scene = threeScene
@@ -81,6 +91,9 @@ export class SceneRenderer {
       const id = ids[i]
       this._refreshObject(id)
     }
+
+    // Rebuilt objects start opaque; re-apply the isolation fade.
+    this._applyIsolation()
 
     return new Map(this.watertightMap)
   }
@@ -128,7 +141,7 @@ export class SceneRenderer {
       this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, group })
 
       // Re-apply selection highlight if this object is selected
-      if (objectId === this.selectedObjectId) {
+      if (this.selectedObjectIds.includes(objectId)) {
         this._applyObjectColors(objectId, true)
       }
     } finally {
@@ -147,21 +160,41 @@ export class SceneRenderer {
     this.objectsGroup.remove(g.group)
     this.objectGroups.delete(objectId)
     this.watertightMap.delete(objectId)
-    // If the removed object was selected, clear the selection
-    if (this.selectedObjectId === objectId) {
-      this.selectedObjectId = null
-    }
+    // If the removed object was selected, drop it from the selection
+    this.selectedObjectIds = this.selectedObjectIds.filter((id) => id !== objectId)
   }
 
-  /** Update sketch line rendering. Call after any sketch mutation. */
-  refreshSketch(sketchHandle: bigint): void {
-    this.activeSketchHandle = sketchHandle
+  /**
+   * Rebuild lines and region fills for EVERY sketch in the document (the
+   * document holds many first-class sketches). Call after any sketch mutation,
+   * extrusion, or scene undo/redo. `activeHandle`, if given, records which
+   * sketch the tools should draw into next.
+   *
+   * All sketches' edges are merged into one LineSegments buffer; each region is
+   * a triangle-fan fill keyed by `${sketchHandle}:${regionHandle}`.
+   */
+  refreshAllSketches(activeHandle?: bigint): void {
+    if (activeHandle !== undefined) {
+      this.activeSketchHandle = activeHandle
+    }
     this._clearSketchLines()
+    this._clearSketchRegions()
 
-    const linePositions = this.wasmScene.sketch_lines(sketchHandle)
-    if (linePositions.length > 0) {
+    const allLinePositions: number[] = []
+    for (const sketchHandle of this.wasmScene.sketch_ids()) {
+      const linePositions = this.wasmScene.sketch_lines(sketchHandle)
+      for (let i = 0; i < linePositions.length; i++) {
+        allLinePositions.push(linePositions[i])
+      }
+      this._buildRegionFills(sketchHandle)
+    }
+
+    if (allLinePositions.length > 0) {
       const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3))
+      geo.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(allLinePositions), 3),
+      )
       const mat = new THREE.LineBasicMaterial({
         color: SKETCH_LINE_COLOR,
         linewidth: 2,
@@ -169,19 +202,18 @@ export class SceneRenderer {
       this.sketchLines = new THREE.LineSegments(geo, mat)
       this.sketchGroup.add(this.sketchLines)
     }
+
+    // Rebuilt sketch geometry starts at full strength; re-apply the fade.
+    this._applySketchIsolation()
   }
 
   /**
-   * Refresh all sketch region fills for the given sketch.
-   *
-   * Iterates sketch_regions(), calls region_boundary() for each, and builds
-   * a separate triangle-fan mesh per region. Old region meshes are disposed
-   * first. For M1 rectangles the boundary is a simple convex polygon, so
-   * fan from vertex 0 is correct.
+   * Build translucent fill meshes for one sketch's still-extrudable regions.
+   * For M1 rectangles each boundary is a convex polygon, so a triangle fan from
+   * vertex 0 is correct. Consumed regions are absent from `sketch_regions`, so
+   * they leave no stray fill.
    */
-  showSketchRegion(sketchHandle: bigint): void {
-    this._clearSketchRegions()
-
+  private _buildRegionFills(sketchHandle: bigint): void {
     const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
     for (let i = 0; i < regionHandles.length; i++) {
       const regionHandle = regionHandles[i]
@@ -190,14 +222,10 @@ export class SceneRenderer {
       const n = Math.floor(boundary.length / 3)
       if (n < 3) continue
 
-      // Build triangle fan from vertex 0 — valid for convex polygons (M1 rectangles)
       const positions: number[] = []
       for (let t = 1; t < n - 1; t++) {
-        // vertex 0
         positions.push(boundary[0], boundary[1], 0.001)
-        // vertex t
         positions.push(boundary[t * 3], boundary[t * 3 + 1], 0.001)
-        // vertex t+1
         positions.push(boundary[(t + 1) * 3], boundary[(t + 1) * 3 + 1], 0.001)
       }
 
@@ -206,32 +234,76 @@ export class SceneRenderer {
       const mat = new THREE.MeshBasicMaterial({
         color: SKETCH_REGION_COLOR,
         transparent: true,
-        opacity: 0.35,
+        opacity: SKETCH_REGION_OPACITY,
         side: THREE.DoubleSide,
         depthWrite: false,
       })
       const mesh = new THREE.Mesh(geo, mat)
       this.sketchGroup.add(mesh)
-      this.sketchRegionMeshes.set(regionHandle, mesh)
+      this.sketchRegionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
     }
   }
 
   /**
-   * Highlight the given object (orange edges, slightly brighter faces) and
-   * restore the previously selected object to normal colors.  Pass null to
-   * clear the selection without selecting anything new.
+   * Highlight exactly the given objects (orange edges, brighter faces) and
+   * restore any others to normal colors. Ids that match no object group (e.g. a
+   * selected sketch) are simply ignored. Pass `[]` to clear the highlight.
    */
-  setSelected(objectId: bigint | null): void {
-    // Deselect the previously selected object
-    if (this.selectedObjectId !== null) {
-      this._applyObjectColors(this.selectedObjectId, false)
+  setSelected(objectIds: bigint[]): void {
+    const next = new Set(objectIds)
+    // Restore objects that are no longer selected.
+    for (const id of this.selectedObjectIds) {
+      if (!next.has(id)) {
+        this._applyObjectColors(id, false)
+      }
     }
+    // Highlight the current selection.
+    for (const id of objectIds) {
+      this._applyObjectColors(id, true)
+    }
+    this.selectedObjectIds = [...objectIds]
+  }
 
-    this.selectedObjectId = objectId
+  /**
+   * Set the active editing context (entered object), or null for top level.
+   * Inside an object, every other object and all sketches fade to a low
+   * opacity — the SketchUp "isolate" focus cue. Idempotent; safe to call
+   * with the current value.
+   */
+  setActiveContext(objectId: bigint | null): void {
+    this.activeContextId = objectId
+    this._applyIsolation()
+  }
 
-    // Select the new object
-    if (objectId !== null) {
-      this._applyObjectColors(objectId, true)
+  /** Apply the context fade to all objects and sketches. */
+  private _applyIsolation(): void {
+    for (const [id, g] of this.objectGroups) {
+      this._setObjectOpacity(g, isDimmed(id, this.activeContextId) ? DIMMED_OPACITY : 1)
+    }
+    this._applySketchIsolation()
+  }
+
+  private _setObjectOpacity(g: ObjectMeshGroup, opacity: number): void {
+    const faceMat = g.facesMesh.material as THREE.MeshPhongMaterial
+    faceMat.opacity = opacity
+    faceMat.transparent = opacity < 1
+    faceMat.depthWrite = opacity >= 1
+    const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
+    edgeMat.opacity = opacity
+    edgeMat.transparent = opacity < 1
+  }
+
+  /** Fade sketch lines + region fills whenever an object context is active. */
+  private _applySketchIsolation(): void {
+    const inside = this.activeContextId !== null
+    if (this.sketchLines !== null) {
+      const mat = this.sketchLines.material as THREE.LineBasicMaterial
+      mat.opacity = inside ? DIMMED_OPACITY : 1
+      mat.transparent = inside
+    }
+    for (const mesh of this.sketchRegionMeshes.values()) {
+      const mat = mesh.material as THREE.MeshBasicMaterial
+      mat.opacity = inside ? DIMMED_OPACITY * 0.5 : SKETCH_REGION_OPACITY
     }
   }
 

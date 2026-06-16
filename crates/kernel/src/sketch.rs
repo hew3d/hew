@@ -291,6 +291,10 @@ impl Sketch {
         // We work in 2D (plane-projected) coordinates throughout.
         let normal = self.plane.normal();
         let (u_ax, v_ax) = plane_axes(normal);
+        // A point on the plane: 2D projections drop the out-of-plane component,
+        // so reconstructing a 3D position must add it back via this anchor (the
+        // plane need not pass through the origin).
+        let anchor = Point3::ORIGIN + normal * (-self.plane.signed_distance(Point3::ORIGIN));
 
         let proj = |p: Point3| -> (f64, f64) { (p.to_vec().dot(u_ax), p.to_vec().dot(v_ax)) };
 
@@ -329,7 +333,7 @@ impl Sketch {
             // Find all intersections between the new segment [fp,tp] and this
             // existing edge [ep,eq_].
             let intersections =
-                seg_seg_intersections_2d(fp, tp, ep, eq_, &self.vertices, edge, u_ax, v_ax);
+                seg_seg_intersections_2d(fp, tp, ep, eq_, &self.vertices, edge, u_ax, v_ax, anchor);
 
             for isect in intersections {
                 match isect {
@@ -912,10 +916,12 @@ fn seg_seg_intersections_2d(
     edge: SketchEdge,
     u_ax: Vec3,
     v_ax: Vec3,
+    anchor: Point3,
 ) -> Vec<Intersection2D> {
-    // Reconstruct 3D position from 2D plane coords (ignoring the out-of-plane
-    // component since we've already validated planarity).
-    let pos_from_2d = |u: f64, v: f64| -> Point3 { Point3::ORIGIN + u_ax * u + v_ax * v };
+    // Reconstruct 3D position from 2D plane coords. `anchor` carries the
+    // out-of-plane component (the plane need not pass through the origin); the
+    // 2D coords supply the in-plane displacement.
+    let pos_from_2d = |u: f64, v: f64| -> Point3 { anchor + u_ax * u + v_ax * v };
 
     let d_new = (nt.0 - nf.0, nt.1 - nf.1);
     let d_ext = (et.0 - ef.0, et.1 - ef.1);
@@ -1345,6 +1351,46 @@ mod tests {
         s.add_segment(pt(-1.0, 1.0), pt(-1.0, -1.0)).unwrap();
         // The cross divides the square into 4 equal quadrant regions.
         assert_eq!(s.regions().len(), 4);
+    }
+
+    /// Regression: reconstructing a 3D position from 2D plane coordinates must
+    /// restore the plane's offset, not assume the plane passes through the
+    /// origin. Before the fix, the interior crossing vertex landed at z=0.
+    #[test]
+    fn intersection_vertices_lie_on_an_offset_plane() {
+        let offset = 5.0;
+        let plane = Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, offset),
+            Point3::new(1.0, 0.0, offset),
+            Point3::new(0.0, 1.0, offset),
+        ])
+        .unwrap();
+        let mut s = Sketch::on_plane(plane);
+        s.add_segment(
+            Point3::new(-1.0, 0.0, offset),
+            Point3::new(1.0, 0.0, offset),
+        )
+        .unwrap();
+        // This crosses the first segment, creating an interior vertex.
+        s.add_segment(
+            Point3::new(0.0, -1.0, offset),
+            Point3::new(0.0, 1.0, offset),
+        )
+        .unwrap();
+
+        for v in s.vertices().values() {
+            assert!(
+                (v.position.z - offset).abs() <= crate::tol::PLANE_DIST,
+                "vertex left the plane: {:?}",
+                v.position
+            );
+        }
+        assert!(
+            s.vertices().values().any(|v| v
+                .position
+                .approx_eq(Point3::new(0.0, 0.0, offset), crate::tol::POINT_MERGE)),
+            "crossing vertex not found on the offset plane"
+        );
     }
 
     // ── Triangle region (non-axis-aligned edges) ──────────────────────────────

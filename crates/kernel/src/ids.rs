@@ -18,6 +18,8 @@ new_key_type! {
     pub struct FaceId;
     /// Handle to a [`crate::topo::Shell`].
     pub struct ShellId;
-    /// Handle to an [`crate::topo::Object`] in a future Document scene graph.
+    /// Handle to an [`crate::topo::Object`] in a [`crate::document::Document`].
     pub struct ObjectId;
+    /// Handle to a [`crate::sketch::Sketch`] in a [`crate::document::Document`].
+    pub struct SketchId;
 }

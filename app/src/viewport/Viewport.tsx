@@ -26,6 +26,10 @@ import { SceneRenderer } from './SceneRenderer'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
 import { PushPullTool } from '../tools/PushPullTool'
+import { MoveTool } from '../tools/MoveTool'
+import { RotateTool } from '../tools/RotateTool'
+import { ScaleTool } from '../tools/ScaleTool'
+import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 
 interface Props {
@@ -39,6 +43,30 @@ interface Props {
   onToast?: (message: string, code?: string) => void
   /** Active tool name from parent (undefined = parent doesn't control) */
   activeTool?: string
+  /** Entered object (editing context), or null at top level. */
+  activeContext?: bigint | null
+  /** Selected entities (ordered; index 0 = primary). */
+  selectedIds?: bigint[]
+  /** Lift an in-viewport selection up to the parent. `additive` = shift-click. */
+  onSelect?: (id: bigint | null, additive: boolean) => void
+  /** Request entering an object's editing context (double-click). */
+  onEnterContext?: (objectId: bigint) => void
+  /** Request exiting to the parent context (Esc / click outside). */
+  onExitContext?: () => void
+  /** Fired after any document change so the parent can refresh the tree. */
+  onDocumentChanged?: () => void
+  /** Populated by the viewport with imperative commands the parent can call
+   *  (e.g. running a boolean, which must also refresh the viewport). */
+  apiRef?: React.MutableRefObject<ViewportApi | null>
+  /** Called with the live measurement text from tools that support VCB entry
+   *  (e.g. MoveTool). Empty string means no measurement to show. */
+  onMeasurement?: (text: string) => void
+}
+
+/** Imperative handle the viewport exposes to the parent. */
+export interface ViewportApi {
+  /** Combine two objects (0=union, 1=subtract a−b, 2=intersect). */
+  runBoolean: (op: number, a: bigint, b: bigint) => void
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -56,9 +84,9 @@ function makeWorldRay(
   }
 }
 
-/** Convert a DOM PointerEvent to NDC coordinates given the canvas element */
+/** Convert a DOM mouse/pointer event to NDC coordinates given the canvas element */
 function pointerToNDC(
-  ev: PointerEvent,
+  ev: MouseEvent,
   canvas: HTMLElement,
 ): [number, number] {
   const rect = canvas.getBoundingClientRect()
@@ -101,6 +129,14 @@ export default function Viewport({
   onSceneChange,
   onToast,
   activeTool: activeToolProp,
+  activeContext = null,
+  selectedIds = [],
+  onSelect,
+  onEnterContext,
+  onExitContext,
+  onDocumentChanged,
+  apiRef,
+  onMeasurement,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -111,6 +147,24 @@ export default function Viewport({
   onSceneChangeRef.current = onSceneChange
   const onToastRef = useRef(onToast)
   onToastRef.current = onToast
+  const onSelectRef = useRef(onSelect)
+  onSelectRef.current = onSelect
+  const onEnterContextRef = useRef(onEnterContext)
+  onEnterContextRef.current = onEnterContext
+  const onExitContextRef = useRef(onExitContext)
+  onExitContextRef.current = onExitContext
+  const onDocumentChangedRef = useRef(onDocumentChanged)
+  onDocumentChangedRef.current = onDocumentChanged
+  const apiRefRef = useRef(apiRef)
+  apiRefRef.current = apiRef
+  const onMeasurementRef = useRef(onMeasurement)
+  onMeasurementRef.current = onMeasurement
+  // Latest editing context, readable inside the stable event closures.
+  const activeContextRef = useRef<bigint | null>(activeContext)
+  // Latest selected ids, readable inside the stable event closures.
+  const selectedIdsRef = useRef<bigint[]>(selectedIds)
+  // Whether the in-flight click is a shift-click (additive multi-select).
+  const selectAdditiveRef = useRef(false)
 
   // Expose tool switch and undo/redo triggers to parent via ref-based mechanism
   const activeToolPropRef = useRef(activeToolProp)
@@ -126,6 +180,10 @@ export default function Viewport({
   // Tool instances are created inside the effect, but we need to be able to
   // switch them from outside (via activeToolProp). Use a ref for the switch fn.
   const switchToolRef = useRef<((toolName: string) => void) | null>(null)
+
+  // Last pointer ray + viewport params cached so key-driven re-lock can
+  // immediately re-resolve snap without waiting for the next pointer move.
+  const lastRayRef = useRef<{ ray: import('./math').Ray; viewportH: number; fovY: number } | null>(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -174,9 +232,18 @@ export default function Viewport({
     // ------------------------------------------------------------------ snap + tool
     const snapService = new SnapService(wasmScene)
 
-    // onSelect wired from SelectTool → SceneRenderer highlight
+    // onSelect wired from SelectTool → lifted to the parent (which owns the
+    // selection list and feeds it back via the selectedIds prop). Additive
+    // (shift) multi-select is only meaningful at top level. Inside an editing
+    // context, a plain click on anything that isn't the entered object (incl.
+    // empty space) exits the context (SketchUp behavior).
     function handleSelect(objectId: bigint | null): void {
-      sceneRenderer.setSelected(objectId)
+      const additive = selectAdditiveRef.current && activeContextRef.current === null
+      const ctx = activeContextRef.current
+      if (!additive && ctx !== null && objectId !== ctx) {
+        onExitContextRef.current?.()
+      }
+      onSelectRef.current?.(objectId, additive)
       scheduleRender()
     }
 
@@ -187,11 +254,35 @@ export default function Viewport({
     function handleSceneRefresh(): void {
       const wtMap = sceneRenderer.refresh()
       onSceneChangeRef.current?.(wtMap)
+      onDocumentChangedRef.current?.()
       scheduleRender()
     }
 
     function handleToast(message: string, code?: string): void {
       onToastRef.current?.(message, code)
+    }
+
+    // Imperative command surface for the parent (e.g. the boolean buttons in the
+    // tree, which live outside the viewport but must refresh it). A boolean
+    // mutates the Scene (consuming both operands), so it follows the same
+    // refresh path as a tool commit, then selects the result.
+    function runBoolean(op: number, a: bigint, b: bigint): void {
+      let result: bigint
+      try {
+        result = wasmScene.boolean(op, a, b)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return
+      }
+      handleSceneRefresh()
+      sceneRenderer.refreshAllSketches()
+      onSelectRef.current?.(result, false)
+      scheduleRender()
+    }
+    if (apiRefRef.current !== undefined) {
+      apiRefRef.current.current = { runBoolean }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -200,10 +291,8 @@ export default function Viewport({
         wasmScene,
         previewGroup,
         (result) => {
-          sceneRenderer.refreshSketch(result.sketchHandle)
-          if (result.regionsCreated.length > 0) {
-            sceneRenderer.showSketchRegion(result.sketchHandle)
-          }
+          sceneRenderer.refreshAllSketches(result.sketchHandle)
+          onDocumentChangedRef.current?.()
           scheduleRender()
         },
         handleToast,
@@ -218,11 +307,7 @@ export default function Viewport({
           handleSceneRefresh()
           // Refresh sketch fills so consumed regions (dropped from sketch_regions
           // after extrude_region) no longer render a stray translucent fill.
-          const sketchHandle = sceneRenderer.currentSketchHandle
-          if (sketchHandle !== null) {
-            sceneRenderer.refreshSketch(sketchHandle)
-            sceneRenderer.showSketchRegion(sketchHandle)
-          }
+          sceneRenderer.refreshAllSketches()
         },
         handleToast,
       )
@@ -231,7 +316,49 @@ export default function Viewport({
       if (sketchHandle !== null) {
         tool.setSketchHandle(sketchHandle)
       }
+      // Scope it to the current editing context, if any.
+      tool.setActiveContext(activeContextRef.current)
       return tool
+    }
+
+    function makeMoveTool(): MoveTool {
+      return new MoveTool(
+        wasmScene,
+        previewGroup,
+        sceneRenderer.objectsGroup,
+        selectedIdsRef.current[0] ?? null,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
+        handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
+    function makeRotateTool(): RotateTool {
+      return new RotateTool(
+        wasmScene,
+        previewGroup,
+        sceneRenderer.objectsGroup,
+        selectedIdsRef.current[0] ?? null,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
+        handleToast,
+      )
+    }
+
+    function makeScaleTool(): ScaleTool {
+      return new ScaleTool(
+        wasmScene,
+        previewGroup,
+        sceneRenderer.objectsGroup,
+        selectedIdsRef.current[0] ?? null,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
+        handleToast,
+      )
     }
 
     // Switch tool by name
@@ -242,6 +369,15 @@ export default function Viewport({
           break
         case 'Push/Pull':
           toolController.setTool(makePushPullTool())
+          break
+        case 'Move':
+          toolController.setTool(makeMoveTool())
+          break
+        case 'Rotate':
+          toolController.setTool(makeRotateTool())
+          break
+        case 'Scale':
+          toolController.setTool(makeScaleTool())
           break
         default:
           toolController.resetToSelect()
@@ -307,14 +443,20 @@ export default function Viewport({
       const viewportH = el.clientHeight
       const fovY = camera.fov
 
-      const { snap } = snapService.resolve(ray, viewportH, fovY)
-      toolController.activeTool.onPointerMove(snap, ray)
+      // Cache for live re-lock after key events
+      lastRayRef.current = { ray, viewportH, fovY }
+
+      const activeTool = toolController.activeTool
+      const constraint = 'snapConstraint' in activeTool
+        ? (activeTool as { snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null }).snapConstraint()
+        : null
+      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis)
+      activeTool.onPointerMove(snap, ray)
       cueLayer.update(snap)
       scheduleRender()
 
-      const sc = toolController.activeTool
-      const snapKind = 'lastSnap' in sc && sc.lastSnap !== null
-        ? (sc.lastSnap as { kind: string }).kind
+      const snapKind = 'lastSnap' in activeTool && (activeTool as { lastSnap: unknown }).lastSnap !== null
+        ? ((activeTool as { lastSnap: { kind: string } }).lastSnap).kind
         : (snap !== null ? snap.kind : null)
       onStatusChangeRef.current?.(toolController.activeToolName, snapKind)
     }
@@ -328,22 +470,90 @@ export default function Viewport({
       const viewportH = el.clientHeight
       const fovY = camera.fov
 
-      const { snap } = snapService.resolve(ray, viewportH, fovY)
-      toolController.activeTool.onPointerDown(snap, ray)
+      // Record shift state so handleSelect (driven by the tool's onSelect) can
+      // treat this click as additive multi-select.
+      selectAdditiveRef.current = ev.shiftKey
+
+      const activeTool = toolController.activeTool
+      const constraint = 'snapConstraint' in activeTool
+        ? (activeTool as { snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null }).snapConstraint()
+        : null
+      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis)
+      activeTool.onPointerDown(snap, ray)
+    }
+
+    // Double-click an object to enter its editing context (SketchUp-style).
+    function onDoubleClick(ev: MouseEvent): void {
+      if (ev.button !== 0) return
+      const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+      const ray = makeWorldRay(ndcX, ndcY, camera)
+      const pick = wasmScene.pick_face(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      if (pick !== undefined) {
+        try {
+          onEnterContextRef.current?.(pick.object())
+        } finally {
+          pick.free()
+        }
+      }
     }
 
     // ------------------------------------------------------------------ keyboard
     function onKeyDown(ev: KeyboardEvent): void {
       const isMod = ev.metaKey || ev.ctrlKey
 
+      // Esc exits the editing context first (before tool cancel).
+      if (ev.key === 'Escape' && activeContextRef.current !== null) {
+        onExitContextRef.current?.()
+        return
+      }
+
+      // If the active tool is capturing input (e.g. MoveTool VCB), route
+      // non-modifier keys to it BEFORE the tool-switch shortcuts so that digit
+      // keys feed the VCB rather than switching tools. Esc is intentionally
+      // allowed through so cancel always works (the tool handles it too).
+      if (!isMod && ev.key !== 'Escape') {
+        const activeTool = toolController.activeTool
+        if (
+          'capturingInput' in activeTool &&
+          (activeTool as { capturingInput(): boolean }).capturingInput()
+        ) {
+          activeTool.onKey(ev)
+          ev.preventDefault()
+          scheduleRender()
+
+          // Live re-lock: re-resolve snap with the updated constraint so the
+          // lock / distance display updates immediately without waiting for the
+          // next pointer move.
+          const cached = lastRayRef.current
+          if (cached !== null) {
+            const constraint = 'snapConstraint' in activeTool
+              ? (activeTool as { snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null }).snapConstraint()
+              : null
+            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.fovY, constraint?.anchor, constraint?.lockAxis)
+            activeTool.onPointerMove(snap, cached.ray)
+            cueLayer.update(snap)
+          }
+          return
+        }
+      }
+
       // Number keys / shortcuts: switch tools (SketchUp muscle memory)
-      // 1 = Select, 2 = Rectangle, 3 = Push/Pull
+      // 1 = Select, 2 = Rectangle, 3 = Push/Pull, 4 = Move, 5 = Rotate, 6 = Scale
       if (!isMod) {
         if (ev.key === '1') { switchToolRef.current?.('Select'); return }
         if (ev.key === '2') { switchToolRef.current?.('Rectangle'); return }
         if (ev.key === '3') { switchToolRef.current?.('Push/Pull'); return }
+        if (ev.key === '4') { switchToolRef.current?.('Move'); return }
+        if (ev.key === '5') { switchToolRef.current?.('Rotate'); return }
+        if (ev.key === '6') { switchToolRef.current?.('Scale'); return }
         if (ev.key === 'r' || ev.key === 'R') { switchToolRef.current?.('Rectangle'); return }
         if (ev.key === 'p' || ev.key === 'P') { switchToolRef.current?.('Push/Pull'); return }
+        if (ev.key === 'm' || ev.key === 'M') { switchToolRef.current?.('Move'); return }
+        if (ev.key === 'q' || ev.key === 'Q') { switchToolRef.current?.('Rotate'); return }
+        if (ev.key === 's' || ev.key === 'S') { switchToolRef.current?.('Scale'); return }
       }
 
       // Undo: Cmd/Ctrl+Z — document-level, covers creations + per-object ops
@@ -353,6 +563,8 @@ export default function Viewport({
           try {
             wasmSceneRef.current.scene_undo()
             handleSceneRefresh()
+            // Undoing an extrude un-consumes its region; re-show its fill.
+            sceneRenderer.refreshAllSketches()
           } catch (err) {
             console.warn('[Viewport] scene_undo failed:', err)
           }
@@ -367,6 +579,8 @@ export default function Viewport({
           try {
             wasmSceneRef.current.scene_redo()
             handleSceneRefresh()
+            // Redoing an extrude re-consumes its region; drop its fill.
+            sceneRenderer.refreshAllSketches()
           } catch (err) {
             console.warn('[Viewport] scene_redo failed:', err)
           }
@@ -379,6 +593,7 @@ export default function Viewport({
 
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerdown', onPointerDown)
+    renderer.domElement.addEventListener('dblclick', onDoubleClick)
     window.addEventListener('keydown', onKeyDown)
 
     // ------------------------------------------------------------------ resize
@@ -401,6 +616,7 @@ export default function Viewport({
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+      renderer.domElement.removeEventListener('dblclick', onDoubleClick)
       window.removeEventListener('keydown', onKeyDown)
       resizeObserver.disconnect()
       controls.dispose()
@@ -409,6 +625,9 @@ export default function Viewport({
       toolControllerRef.current = null
       switchToolRef.current = null
       sceneRendererRef.current = null
+      if (apiRefRef.current !== undefined) {
+        apiRefRef.current.current = null
+      }
       renderer.dispose()
       el.removeChild(renderer.domElement)
     }
@@ -422,6 +641,27 @@ export default function Viewport({
       switchToolRef.current(activeToolProp)
     }
   }, [activeToolProp])
+
+  // Reflect the editing context into the renderer (isolation fade) and the
+  // active tool (scoped editing) when the parent changes it.
+  useEffect(() => {
+    activeContextRef.current = activeContext
+    sceneRendererRef.current?.setActiveContext(activeContext)
+    const tool = toolControllerRef.current?.activeTool
+    if (tool !== undefined && 'setActiveContext' in tool) {
+      (tool as { setActiveContext: (id: bigint | null) => void }).setActiveContext(activeContext)
+    }
+    scheduleRenderRef.current()
+  }, [activeContext])
+
+  // Reflect the parent's selection into the renderer highlight (e.g. a click in
+  // the tree). Sketch ids match no object group and are simply ignored, which
+  // is fine pre-sketch-selection-visuals.
+  useEffect(() => {
+    selectedIdsRef.current = selectedIds
+    sceneRendererRef.current?.setSelected(selectedIds)
+    scheduleRenderRef.current()
+  }, [selectedIds])
 
   return (
     <div
