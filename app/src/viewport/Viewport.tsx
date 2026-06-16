@@ -287,7 +287,7 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ tool factories
     function makeRectTool(): RectangleTool {
-      return new RectangleTool(
+      const tool = new RectangleTool(
         wasmScene,
         previewGroup,
         (result) => {
@@ -296,7 +296,13 @@ export default function Viewport({
           scheduleRender()
         },
         handleToast,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
       )
+      // Scope the tool to the current editing context, if any.
+      tool.setActiveContext(activeContextRef.current)
+      return tool
     }
 
     function makePushPullTool(): PushPullTool {

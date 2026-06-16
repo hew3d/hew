@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import {
   rectangleCorners,
+  faceRectangleCorners,
   projectRayOntoAxis,
   parseKernelErrorCode,
   kernelErrorMessage,
   pointInPolygonXY,
   polygonAreaXY,
 } from './geoHelpers'
+import type { V3 } from './geoHelpers'
 
 describe('rectangleCorners', () => {
   it('returns four corners from two diagonal corners', () => {
@@ -178,6 +180,101 @@ describe('polygonAreaXY', () => {
     const outer = makePolygon([[0, 0], [4, 0], [4, 4], [0, 4]])
     const inner = makePolygon([[1, 1], [3, 1], [3, 3], [1, 3]])
     expect(polygonAreaXY(inner)).toBeLessThan(polygonAreaXY(outer))
+  })
+})
+
+describe('faceRectangleCorners', () => {
+  /** Dot product of two V3s */
+  function dot(a: V3, b: V3): number {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+  }
+
+  /** Signed area of triangle (a,b,c) projected onto the plane with given normal.
+   *  Positive means CCW from the +normal side. */
+  function signedTriArea(a: V3, b: V3, c: V3, n: V3): number {
+    const ab: V3 = [b[0]-a[0], b[1]-a[1], b[2]-a[2]]
+    const ac: V3 = [c[0]-a[0], c[1]-a[1], c[2]-a[2]]
+    // cross(ab, ac) · n gives signed area * 2
+    const cx = ab[1]*ac[2] - ab[2]*ac[1]
+    const cy = ab[2]*ac[0] - ab[0]*ac[2]
+    const cz = ab[0]*ac[1] - ab[1]*ac[0]
+    return cx*n[0] + cy*n[1] + cz*n[2]
+  }
+
+  it('(a) +Z normal matches ground rectangleCorners layout and is CCW from above', () => {
+    const anchor: V3 = [0, 0, 0]
+    const cursor: V3 = [2, 3, 0]
+    const normal: V3 = [0, 0, 1]
+    const corners = faceRectangleCorners(anchor, cursor, normal)
+    expect(corners).not.toBeNull()
+    const [a, b, c, d] = corners!
+
+    // Should cover the expected bounding extents like rectangleCorners([0,0],[2,3])
+    const groundCorners = rectangleCorners([0, 0], [2, 3])
+    const groundXYs = groundCorners.map(([x, y]) => [x, y]).sort().toString()
+    const faceXYs = [a, b, c, d].map(([x, y]) => [x, y]).sort().toString()
+    expect(faceXYs).toEqual(groundXYs)
+
+    // CCW from +Z: the shoelace sign should be positive for all consecutive triples
+    expect(signedTriArea(a, b, c, normal)).toBeGreaterThan(0)
+    expect(signedTriArea(a, b, d, normal)).toBeGreaterThan(0)
+  })
+
+  it('(b) +X normal: all 4 corners are coplanar with the face plane', () => {
+    const normal: V3 = [1, 0, 0]
+    const anchor: V3 = [5, 0, 0]   // on the x=5 plane
+    const cursor: V3 = [5, 2, 3]   // also on x=5 plane
+    const corners = faceRectangleCorners(anchor, cursor, normal)
+    expect(corners).not.toBeNull()
+    for (const corner of corners!) {
+      // dot(corner - anchor, normal) should be ≈ 0
+      const diff: V3 = [corner[0]-anchor[0], corner[1]-anchor[1], corner[2]-anchor[2]]
+      expect(Math.abs(dot(diff, normal))).toBeLessThan(1e-10)
+    }
+    // Also check CCW
+    const [a, b, c] = corners!
+    expect(signedTriArea(a, b, c, normal)).toBeGreaterThan(0)
+  })
+
+  it('(c) degenerate: cursor === anchor returns null', () => {
+    const anchor: V3 = [1, 2, 3]
+    const cursor: V3 = [1, 2, 3]
+    const normal: V3 = [0, 0, 1]
+    expect(faceRectangleCorners(anchor, cursor, normal)).toBeNull()
+  })
+
+  it('(c) degenerate: zero extent on u axis returns null', () => {
+    // normal = [0,0,1], u = [1,0,0], v = [0,1,0]
+    // cursor directly above anchor (only v-extent, no u-extent)
+    const anchor: V3 = [0, 0, 0]
+    const cursor: V3 = [0, 3, 0]   // du=0, dv=3
+    const normal: V3 = [0, 0, 1]
+    expect(faceRectangleCorners(anchor, cursor, normal)).toBeNull()
+  })
+
+  it('(c) degenerate: zero extent on v axis returns null', () => {
+    // cursor only moves in u direction
+    const anchor: V3 = [0, 0, 0]
+    const cursor: V3 = [2, 0, 0]   // du=2, dv=0
+    const normal: V3 = [0, 0, 1]
+    expect(faceRectangleCorners(anchor, cursor, normal)).toBeNull()
+  })
+
+  it('oblique normal: 4 corners are coplanar with the face plane', () => {
+    // normal = normalize([1,1,1])
+    const s = 1 / Math.sqrt(3)
+    const normal: V3 = [s, s, s]
+    const anchor: V3 = [0, 0, 0]
+    // cursor: move along some direction in the plane
+    // In-plane direction: any vector with dot(v, normal)=0, e.g. [1,-1,0] (normalized)
+    const t = 1 / Math.sqrt(2)
+    const cursor: V3 = [anchor[0] + t + t, anchor[1] - t + t, anchor[2] + 0]
+    const corners = faceRectangleCorners(anchor, cursor, normal)
+    if (corners === null) return // degenerate ok for this generic test
+    for (const corner of corners) {
+      const diff: V3 = [corner[0]-anchor[0], corner[1]-anchor[1], corner[2]-anchor[2]]
+      expect(Math.abs(diff[0]*normal[0] + diff[1]*normal[1] + diff[2]*normal[2])).toBeLessThan(1e-9)
+    }
   })
 })
 

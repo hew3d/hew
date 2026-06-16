@@ -624,20 +624,68 @@ impl Scene {
         Ok(vec![n.x, n.y, n.z])
     }
 
-    /// Push/pull a face (recorded in the object's undo history).
+    /// Push/pull a face (recorded in the object's undo history). A flat imprinted
+    /// sub-face (drawn inside an Object) auto-routes to wall-generating
+    /// extrude (boss/recess); any other face uses the translate-mode push/pull.
     pub fn push_pull(
         &mut self,
         object: u64,
         face: u64,
         distance: f64,
     ) -> Result<PushPullJs, ApiError> {
-        let op = KernelOp::PushPull {
-            face: FaceId::from(KeyData::from_ffi(face)),
-            distance,
+        let face_id = FaceId::from(KeyData::from_ffi(face));
+        let is_sub = self
+            .doc
+            .object(object_id(object))
+            .is_some_and(|o| o.is_flat_sub_face(face_id));
+        let op = if is_sub {
+            KernelOp::ExtrudeSubFace {
+                sub_face: face_id,
+                distance,
+            }
+        } else {
+            KernelOp::PushPull {
+                face: face_id,
+                distance,
+            }
         };
         match self.apply_op(object, op)? {
-            KernelOpReport::PushPull(inner) => Ok(PushPullJs { inner }),
+            KernelOpReport::PushPull(inner) | KernelOpReport::ExtrudeSubFace(inner) => {
+                Ok(PushPullJs { inner })
+            }
             other => Err(api_err(&other, &"unexpected report kind for push_pull")),
+        }
+    }
+
+    /// Imprint a closed loop strictly inside an object's face (within-Object
+    /// drawing): the face splits into the loop's sub-face plus the parent (now
+    /// holed). `loop_pts` is xyz triples. Returns the new sub-face handle;
+    /// push/pull it to boss/recess. Recorded in undo history.
+    pub fn split_face_inner(
+        &mut self,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+    ) -> Result<u64, ApiError> {
+        if !loop_pts.len().is_multiple_of(3) || loop_pts.len() < 9 {
+            return Err(ApiError(
+                "BadLoop: loop needs at least three xyz triples".to_string(),
+            ));
+        }
+        let points: Vec<Point3> = loop_pts
+            .chunks_exact(3)
+            .map(|c| Point3::new(c[0], c[1], c[2]))
+            .collect();
+        let op = KernelOp::SplitFaceInner {
+            face: FaceId::from(KeyData::from_ffi(face)),
+            loop_path: points,
+        };
+        match self.apply_op(object, op)? {
+            KernelOpReport::FaceSplitInner(r) => Ok(r.sub_face.data().as_ffi()),
+            other => Err(api_err(
+                &other,
+                &"unexpected report kind for split_face_inner",
+            )),
         }
     }
 
@@ -957,6 +1005,41 @@ mod tests {
         // Two document actions now: create, then push/pull.
         scene.scene_undo().unwrap(); // undo push/pull
         assert!(scene.object_ids().contains(&obj)); // object still here
+        scene.scene_undo().unwrap(); // undo create
+        assert!(scene.object_ids().is_empty());
+    }
+
+    #[test]
+    fn imprint_then_push_bosses_a_subface_and_undoes() {
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        // Imprint a rectangle inside the top, then push it (auto-routes to
+        // extrude_sub_face since it's a flat sub-face).
+        let rect = [
+            0.25, 0.25, 1.0, 0.75, 0.25, 1.0, 0.75, 0.75, 1.0, 0.25, 0.75, 1.0,
+        ];
+        let sub = scene.split_face_inner(obj, top, &rect).unwrap();
+        scene.push_pull(obj, sub, 0.5).unwrap();
+        assert_eq!(scene.object_ids(), vec![obj], "still one object");
+        // Three document actions: create, imprint, boss — each undoes.
+        scene.scene_undo().unwrap(); // undo boss
+        scene.scene_undo().unwrap(); // undo imprint
+        assert!(scene.object_ids().contains(&obj));
         scene.scene_undo().unwrap(); // undo create
         assert!(scene.object_ids().is_empty());
     }

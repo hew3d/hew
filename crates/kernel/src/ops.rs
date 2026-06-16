@@ -40,7 +40,9 @@
 //! strokes are tool-layer state (the UI buffers the polyline and commits when
 //! it closes). This keeps every committed state a valid solid.
 
-use crate::geom2d::{point_inside_polygon, segments_intersect};
+use crate::geom2d::{
+    point_inside_polygon, polygon_is_simple, segments_intersect, signed_area_on_plane,
+};
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, VertexId};
 use crate::math::{Plane, Point3};
 use crate::sketch::Profile;
@@ -96,6 +98,18 @@ pub struct FaceSplitReport {
     pub split_boundary_edges: Vec<(EdgeId, [EdgeId; 2])>,
 }
 
+/// What `split_face_inner` changed: a closed loop imprinted strictly inside a
+/// face, splitting it into a new coplanar sub-face plus the parent (now holed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaceSplitInnerReport {
+    /// The new coplanar sub-face (the loop interior).
+    pub sub_face: FaceId,
+    /// The parent face, now carrying the loop as a hole. Handle unchanged.
+    pub parent: FaceId,
+    /// The loop's new edges (each shared by `sub_face` and the parent's hole).
+    pub new_edges: Vec<EdgeId>,
+}
+
 /// What `merge_faces` changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaceMergeReport {
@@ -103,6 +117,28 @@ pub struct FaceMergeReport {
     pub merged_face: FaceId,
     /// Now-dead handles of the dissolved shared-boundary edges.
     pub removed_edges: Vec<EdgeId>,
+}
+
+/// What `merge_inner_face` changed: a sub-face dissolved back into its parent.
+/// (`loop_path` carries f64 positions, so this is `PartialEq` but not `Eq`.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceMergeInnerReport {
+    /// The parent face, now hole-free again. Handle unchanged.
+    pub parent: FaceId,
+    /// The dissolved loop's positions (parent-relative), in order — re-imprinting
+    /// them on `parent` restores the sub-face.
+    pub loop_path: Vec<Point3>,
+}
+
+/// What `collapse_sub_face` changed: a raised sub-face flattened back, its walls
+/// removed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CollapseSubFaceReport {
+    /// The now-flat sub-face (handle unchanged).
+    pub sub_face: FaceId,
+    /// The height the sub-face was raised by (signed) — re-extruding by this
+    /// restores the boss/recess.
+    pub distance: f64,
 }
 
 /// Typed failures of extrusion.
@@ -141,6 +177,9 @@ pub enum PushPullError {
     /// regenerate (side faces not perpendicular to the moved face); wall
     /// generation for the general case lands with the boolean machinery.
     NonManifoldResult,
+    /// `extrude_sub_face`/`collapse_sub_face` on a face that is not the expected
+    /// kind (a flat imprinted sub-face, or a raised one with generated walls).
+    NotASubFace,
 }
 
 /// Typed failures of the sticky surface operations.
@@ -175,6 +214,18 @@ pub enum StickyError {
     /// `merge_faces` where both sides are the same face: dissolving the edge
     /// would leave a non-manifold or punctured result.
     SameFaceOnBothSides,
+    /// `split_face_inner`: a loop vertex is not strictly inside the face (it lies
+    /// on/outside the outer boundary or inside a hole). v1 imprints only loops
+    /// strictly interior to the face.
+    LoopNotStrictlyInside {
+        /// Index of the offending loop vertex.
+        index: usize,
+    },
+    /// `split_face_inner`: the loop crosses itself.
+    LoopSelfIntersects,
+    /// `merge_inner_face`: the face is not an imprinted sub-face (its boundary is
+    /// not a single closed loop twinned entirely with one parent's hole loop).
+    NotAnInnerFace,
 }
 
 /// Typed failures of boolean combination.
@@ -221,6 +272,7 @@ impl std::fmt::Display for PushPullError {
             PushPullError::DistanceTooSmall => "push/pull distance below tol::POINT_MERGE",
             PushPullError::WouldVanish => "push/pull would remove all material",
             PushPullError::NonManifoldResult => "push/pull sweep has no manifold result",
+            PushPullError::NotASubFace => "face is not the expected imprinted sub-face",
         };
         write!(f, "{msg}")
     }
@@ -252,6 +304,13 @@ impl std::fmt::Display for StickyError {
             StickyError::BoundaryEdge => write!(f, "cannot merge across a boundary edge"),
             StickyError::SameFaceOnBothSides => {
                 write!(f, "edge has the same face on both sides")
+            }
+            StickyError::LoopNotStrictlyInside { index } => {
+                write!(f, "loop vertex {index} is not strictly inside the face")
+            }
+            StickyError::LoopSelfIntersects => write!(f, "loop crosses itself"),
+            StickyError::NotAnInnerFace => {
+                write!(f, "face is not an imprinted sub-face")
             }
         }
     }
@@ -696,6 +755,568 @@ impl Object {
             created_faces: vec![],
             removed_faces: vec![],
         })
+    }
+
+    /// Sticky rule inside an Object: imprints a closed `loop_path` strictly
+    /// inside `face`, splitting it into a new coplanar **sub-face** (the loop
+    /// interior) plus the parent face, which now carries the loop as a hole.
+    /// This is the within-Object "draw a rectangle on a face" gesture; the
+    /// sub-face can then be push/pulled (emboss/recess).
+    ///
+    /// Purely additive surgery — no existing boundary is rewired. The loop edges
+    /// become twin half-edge pairs (sub-face on one side, the parent's hole on
+    /// the other), so the mesh stays manifold and watertight. The sub-face shares
+    /// the parent's plane and outward normal.
+    ///
+    /// v1 requires a simple loop **strictly interior** to the face (on its plane,
+    /// inside the outer boundary, clear of holes); loops touching the boundary or
+    /// self-intersecting refuse cleanly.
+    ///
+    /// # Errors
+    /// See [`StickyError`]; all leave the object untouched.
+    pub fn split_face_inner(
+        &mut self,
+        face: FaceId,
+        loop_path: &[Point3],
+    ) -> Result<FaceSplitInnerReport, StickyError> {
+        // ---- validation (no mutation) ----
+        if !self.faces.contains_key(face) {
+            return Err(StickyError::UnknownFace);
+        }
+        if loop_path.len() < 3 {
+            return Err(StickyError::PathTooShort);
+        }
+        let face_plane = self.faces[face].plane;
+        let normal = face_plane.normal();
+        let n = loop_path.len();
+
+        // No zero-length edges.
+        for k in 0..n {
+            if loop_path[k].approx_eq(loop_path[(k + 1) % n], tol::POINT_MERGE) {
+                return Err(StickyError::LoopSelfIntersects);
+            }
+        }
+
+        // Every vertex on the plane and strictly inside the face region.
+        let outer_pts: Vec<Point3> = self.loop_positions(self.faces[face].outer_loop).collect();
+        let hole_pts: Vec<Vec<Point3>> = self.faces[face]
+            .inner_loops
+            .iter()
+            .map(|&il| self.loop_positions(il).collect())
+            .collect();
+        for (index, &p) in loop_path.iter().enumerate() {
+            if face_plane.signed_distance(p).abs() > tol::PLANE_DIST {
+                return Err(StickyError::PointNotOnFace { index });
+            }
+            if !point_inside_polygon(p, &outer_pts, normal)
+                || hole_pts.iter().any(|h| point_inside_polygon(p, h, normal))
+            {
+                return Err(StickyError::LoopNotStrictlyInside { index });
+            }
+        }
+
+        // Simple closed polygon.
+        if !polygon_is_simple(loop_path) {
+            return Err(StickyError::LoopSelfIntersects);
+        }
+
+        // Normalise winding to CCW seen from the face normal, so the sub-face
+        // faces the same way as the parent.
+        let mut pts = loop_path.to_vec();
+        if signed_area_on_plane(&pts, normal) < 0.0 {
+            pts.reverse();
+        }
+
+        // ---- additive surgery on a clone (strong guarantee) ----
+        let mut obj = self.clone();
+
+        let verts: Vec<VertexId> = pts
+            .iter()
+            .map(|&p| {
+                obj.vertices.insert(Vertex {
+                    position: p,
+                    outgoing: HalfEdgeId::default(),
+                })
+            })
+            .collect();
+
+        let sub_loop = obj.loops.insert(Loop {
+            face: FaceId::default(),
+            first_half_edge: HalfEdgeId::default(),
+            kind: LoopKind::Outer,
+        });
+        let hole_loop = obj.loops.insert(Loop {
+            face,
+            first_half_edge: HalfEdgeId::default(),
+            kind: LoopKind::Inner,
+        });
+        let sub_face = obj.faces.insert(Face {
+            outer_loop: sub_loop,
+            inner_loops: Vec::new(),
+            plane: face_plane,
+        });
+        obj.loops[sub_loop].face = sub_face;
+
+        // sub-face half-edges: h_sub[k] = verts[k] -> verts[k+1] (CCW).
+        let h_sub: Vec<HalfEdgeId> = (0..n)
+            .map(|k| {
+                obj.half_edges.insert(HalfEdge {
+                    origin: verts[k],
+                    twin: None,
+                    next: HalfEdgeId::default(),
+                    prev: HalfEdgeId::default(),
+                    edge: EdgeId::default(),
+                    loop_id: sub_loop,
+                })
+            })
+            .collect();
+        // hole half-edges: h_hole[k] = twin of h_sub[k] = verts[k+1] -> verts[k] (CW).
+        let h_hole: Vec<HalfEdgeId> = (0..n)
+            .map(|k| {
+                obj.half_edges.insert(HalfEdge {
+                    origin: verts[(k + 1) % n],
+                    twin: None,
+                    next: HalfEdgeId::default(),
+                    prev: HalfEdgeId::default(),
+                    edge: EdgeId::default(),
+                    loop_id: hole_loop,
+                })
+            })
+            .collect();
+
+        let mut new_edges = Vec::with_capacity(n);
+        for k in 0..n {
+            obj.half_edges[h_sub[k]].next = h_sub[(k + 1) % n];
+            obj.half_edges[h_sub[k]].prev = h_sub[(k + n - 1) % n];
+            // The hole winds opposite, so its `next` walks the array backwards.
+            obj.half_edges[h_hole[k]].next = h_hole[(k + n - 1) % n];
+            obj.half_edges[h_hole[k]].prev = h_hole[(k + 1) % n];
+
+            obj.half_edges[h_sub[k]].twin = Some(h_hole[k]);
+            obj.half_edges[h_hole[k]].twin = Some(h_sub[k]);
+            let edge = obj.edges.insert(Edge {
+                half_edge: h_sub[k],
+                twin_half_edge: Some(h_hole[k]),
+            });
+            obj.half_edges[h_sub[k]].edge = edge;
+            obj.half_edges[h_hole[k]].edge = edge;
+            new_edges.push(edge);
+
+            obj.vertices[verts[k]].outgoing = h_sub[k];
+        }
+        obj.loops[sub_loop].first_half_edge = h_sub[0];
+        obj.loops[hole_loop].first_half_edge = h_hole[0];
+        obj.faces[face].inner_loops.push(hole_loop);
+
+        // The sub-face joins the parent's shell.
+        let shell = obj
+            .shells
+            .iter()
+            .find(|(_, s)| s.faces.contains(&face))
+            .map(|(id, _)| id)
+            .expect("parent face belongs to a shell");
+        obj.shells[shell].faces.push(sub_face);
+
+        obj.check_invariants();
+        *self = obj;
+        Ok(FaceSplitInnerReport {
+            sub_face,
+            parent: face,
+            new_edges,
+        })
+    }
+
+    /// Inverse of [`split_face_inner`]: dissolves an imprinted `sub_face` back
+    /// into its parent, removing the loop and the parent's hole. Deletes the
+    /// sub-face, its loop, the parent's matching hole loop, and the shared edges,
+    /// half-edges, and vertices.
+    ///
+    /// # Errors
+    /// [`StickyError::UnknownFace`] for a stale handle, [`StickyError::NotAnInnerFace`]
+    /// if `sub_face` is not a clean imprinted island (its boundary not entirely
+    /// twinned with one parent's hole loop). All leave the object untouched.
+    pub fn merge_inner_face(
+        &mut self,
+        sub_face: FaceId,
+    ) -> Result<FaceMergeInnerReport, StickyError> {
+        if !self.faces.contains_key(sub_face) {
+            return Err(StickyError::UnknownFace);
+        }
+        if !self.faces[sub_face].inner_loops.is_empty() {
+            return Err(StickyError::NotAnInnerFace);
+        }
+        let sub_loop = self.faces[sub_face].outer_loop;
+        let h_sub: Vec<HalfEdgeId> = self.loop_half_edges(sub_loop).collect();
+
+        // Every sub-loop half-edge must be twinned onto a single Inner loop of a
+        // single other parent face.
+        let mut hole_loop: Option<LoopId> = None;
+        let mut h_hole: Vec<HalfEdgeId> = Vec::with_capacity(h_sub.len());
+        for &h in &h_sub {
+            let t = self.half_edges[h].twin.ok_or(StickyError::NotAnInnerFace)?;
+            let l = self.half_edges[t].loop_id;
+            match hole_loop {
+                None => hole_loop = Some(l),
+                Some(hl) if hl == l => {}
+                Some(_) => return Err(StickyError::NotAnInnerFace),
+            }
+            h_hole.push(t);
+        }
+        let hole_loop = hole_loop.ok_or(StickyError::NotAnInnerFace)?;
+        if self.loops[hole_loop].kind != LoopKind::Inner {
+            return Err(StickyError::NotAnInnerFace);
+        }
+        let parent = self.loops[hole_loop].face;
+        if parent == sub_face {
+            return Err(StickyError::NotAnInnerFace);
+        }
+
+        // Capture loop positions (sub-loop order) so the op is invertible (redo).
+        let loop_path: Vec<Point3> = h_sub
+            .iter()
+            .map(|&h| self.vertices[self.half_edges[h].origin].position)
+            .collect();
+
+        // ---- removal surgery on a clone ----
+        let mut obj = self.clone();
+        let verts: Vec<VertexId> = h_sub.iter().map(|&h| obj.half_edges[h].origin).collect();
+        obj.faces[parent].inner_loops.retain(|&l| l != hole_loop);
+        for &h in &h_sub {
+            obj.edges.remove(obj.half_edges[h].edge);
+        }
+        for &h in h_sub.iter().chain(h_hole.iter()) {
+            obj.half_edges.remove(h);
+        }
+        obj.loops.remove(sub_loop);
+        obj.loops.remove(hole_loop);
+        obj.faces.remove(sub_face);
+        for (_, s) in obj.shells.iter_mut() {
+            s.faces.retain(|&f| f != sub_face);
+        }
+        for &v in &verts {
+            obj.vertices.remove(v);
+        }
+
+        obj.check_invariants();
+        *self = obj;
+        Ok(FaceMergeInnerReport { parent, loop_path })
+    }
+
+    /// Whether `face` is a flat imprinted sub-face (its boundary entirely twinned
+    /// with one coplanar parent's hole loop) — the kind [`extrude_sub_face`]
+    /// raises into a boss or recess.
+    pub fn is_flat_sub_face(&self, face: FaceId) -> bool {
+        self.flat_sub_face(face).is_some()
+    }
+
+    /// `(parent, hole_loop, sub half-edges, hole half-edges)` if `face` is a flat
+    /// imprinted sub-face, else `None`. `h_hole[k]` is the twin of `h_sub[k]`.
+    fn flat_sub_face(
+        &self,
+        face: FaceId,
+    ) -> Option<(FaceId, LoopId, Vec<HalfEdgeId>, Vec<HalfEdgeId>)> {
+        if !self.faces.contains_key(face) || !self.faces[face].inner_loops.is_empty() {
+            return None;
+        }
+        let sub_loop = self.faces[face].outer_loop;
+        let h_sub: Vec<HalfEdgeId> = self.loop_half_edges(sub_loop).collect();
+        if h_sub.len() < 3 {
+            return None;
+        }
+        let mut hole_loop: Option<LoopId> = None;
+        let mut h_hole = Vec::with_capacity(h_sub.len());
+        for &h in &h_sub {
+            let t = self.half_edges[h].twin?;
+            let l = self.half_edges[t].loop_id;
+            match hole_loop {
+                None => hole_loop = Some(l),
+                Some(hl) if hl == l => {}
+                Some(_) => return None,
+            }
+            h_hole.push(t);
+        }
+        let hole_loop = hole_loop?;
+        if self.loops[hole_loop].kind != LoopKind::Inner {
+            return None;
+        }
+        let parent = self.loops[hole_loop].face;
+        if parent == face {
+            return None;
+        }
+        Some((parent, hole_loop, h_sub, h_hole))
+    }
+
+    /// Push/pull a flat imprinted sub-face by `distance` along its outward normal,
+    /// generating fresh perpendicular walls between the moved sub-face and its
+    /// parent's hole. Positive embosses a boss; negative recesses. Reversed by
+    /// [`collapse_sub_face`]; handle-stable (the sub-face keeps its id).
+    ///
+    /// # Errors
+    /// See [`PushPullError`]; [`PushPullError::NotASubFace`] if `sub_face` is not
+    /// a flat imprinted sub-face. All leave the object untouched.
+    pub fn extrude_sub_face(
+        &mut self,
+        sub_face: FaceId,
+        distance: f64,
+    ) -> Result<PushPullReport, PushPullError> {
+        if self.watertight != WatertightState::Watertight {
+            return Err(PushPullError::ObjectNotSolid);
+        }
+        if distance.abs() < tol::POINT_MERGE {
+            return Err(PushPullError::DistanceTooSmall);
+        }
+        let (parent, _hole_loop, h_sub, h_hole) = self
+            .flat_sub_face(sub_face)
+            .ok_or(PushPullError::NotASubFace)?;
+        let n = h_sub.len();
+        let normal = self.faces[sub_face].plane.normal();
+        let sweep = normal * distance;
+
+        let mut obj = self.clone();
+
+        // The shared loop vertices stay with the parent hole; the sub-face gets a
+        // fresh raised copy `vt`.
+        let a: Vec<VertexId> = h_sub.iter().map(|&h| obj.half_edges[h].origin).collect();
+        let vt: Vec<VertexId> = a
+            .iter()
+            .map(|&v| {
+                let p = obj.vertices[v].position + sweep;
+                obj.vertices.insert(Vertex {
+                    position: p,
+                    outgoing: HalfEdgeId::default(),
+                })
+            })
+            .collect();
+        // The old shared edge of each sub/hole pair: the hole keeps it, the
+        // sub-face's half-edge gets a fresh one.
+        let old_edge: Vec<EdgeId> = h_sub.iter().map(|&h| obj.half_edges[h].edge).collect();
+
+        // Re-point the sub-face loop onto the raised vertices; hand the old shared
+        // vertices to the hole loop.
+        for k in 0..n {
+            obj.half_edges[h_sub[k]].origin = vt[k];
+            obj.vertices[vt[k]].outgoing = h_sub[k];
+            obj.vertices[a[k]].outgoing = h_hole[(k + n - 1) % n];
+        }
+
+        // One quad wall per edge. wa twins the sub edge, wc the hole edge,
+        // wb/wd the verticals (shared with neighbouring walls).
+        let mut wa = vec![HalfEdgeId::default(); n];
+        let mut wb = vec![HalfEdgeId::default(); n];
+        let mut wc = vec![HalfEdgeId::default(); n];
+        let mut wd = vec![HalfEdgeId::default(); n];
+        let mut walls = Vec::with_capacity(n);
+        for k in 0..n {
+            let wloop = obj.loops.insert(Loop {
+                face: FaceId::default(),
+                first_half_edge: HalfEdgeId::default(),
+                kind: LoopKind::Outer,
+            });
+            let mk = |origin: VertexId, obj: &mut Object| {
+                obj.half_edges.insert(HalfEdge {
+                    origin,
+                    twin: None,
+                    next: HalfEdgeId::default(),
+                    prev: HalfEdgeId::default(),
+                    edge: EdgeId::default(),
+                    loop_id: wloop,
+                })
+            };
+            wa[k] = mk(vt[(k + 1) % n], &mut obj); // vt[k+1] -> vt[k]
+            wb[k] = mk(vt[k], &mut obj); // vt[k] -> a[k]
+            wc[k] = mk(a[k], &mut obj); // a[k] -> a[k+1]
+            wd[k] = mk(a[(k + 1) % n], &mut obj); // a[k+1] -> vt[k+1]
+            obj.half_edges[wa[k]].next = wb[k];
+            obj.half_edges[wb[k]].next = wc[k];
+            obj.half_edges[wc[k]].next = wd[k];
+            obj.half_edges[wd[k]].next = wa[k];
+            obj.half_edges[wb[k]].prev = wa[k];
+            obj.half_edges[wc[k]].prev = wb[k];
+            obj.half_edges[wd[k]].prev = wc[k];
+            obj.half_edges[wa[k]].prev = wd[k];
+            obj.loops[wloop].first_half_edge = wa[k];
+            let wall_pts = [
+                obj.vertices[vt[(k + 1) % n]].position,
+                obj.vertices[vt[k]].position,
+                obj.vertices[a[k]].position,
+                obj.vertices[a[(k + 1) % n]].position,
+            ];
+            let plane =
+                Plane::from_polygon(&wall_pts).map_err(|_| PushPullError::NonManifoldResult)?;
+            let wface = obj.faces.insert(Face {
+                outer_loop: wloop,
+                inner_loops: Vec::new(),
+                plane,
+            });
+            obj.loops[wloop].face = wface;
+            walls.push(wface);
+        }
+
+        // Twins + edges.
+        for k in 0..n {
+            // wa[k] ↔ h_sub[k] (new edge).
+            obj.half_edges[wa[k]].twin = Some(h_sub[k]);
+            obj.half_edges[h_sub[k]].twin = Some(wa[k]);
+            let e_top = obj.edges.insert(Edge {
+                half_edge: h_sub[k],
+                twin_half_edge: Some(wa[k]),
+            });
+            obj.half_edges[h_sub[k]].edge = e_top;
+            obj.half_edges[wa[k]].edge = e_top;
+            // wc[k] ↔ h_hole[k] (reuse the old shared edge).
+            obj.half_edges[wc[k]].twin = Some(h_hole[k]);
+            obj.half_edges[h_hole[k]].twin = Some(wc[k]);
+            obj.edges[old_edge[k]].half_edge = h_hole[k];
+            obj.edges[old_edge[k]].twin_half_edge = Some(wc[k]);
+            obj.half_edges[h_hole[k]].edge = old_edge[k];
+            obj.half_edges[wc[k]].edge = old_edge[k];
+            // wb[k] ↔ wd[k-1] (vertical, new edge).
+            let prev = (k + n - 1) % n;
+            obj.half_edges[wb[k]].twin = Some(wd[prev]);
+            obj.half_edges[wd[prev]].twin = Some(wb[k]);
+            let e_vert = obj.edges.insert(Edge {
+                half_edge: wb[k],
+                twin_half_edge: Some(wd[prev]),
+            });
+            obj.half_edges[wb[k]].edge = e_vert;
+            obj.half_edges[wd[prev]].edge = e_vert;
+        }
+
+        // Refit the moved sub-face plane (translated; same normal).
+        let pts: Vec<Point3> = obj.loop_positions(obj.faces[sub_face].outer_loop).collect();
+        obj.faces[sub_face].plane =
+            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+
+        let shell = obj
+            .shells
+            .iter()
+            .find(|(_, s)| s.faces.contains(&parent))
+            .map(|(id, _)| id)
+            .expect("parent face belongs to a shell");
+        for &w in &walls {
+            obj.shells[shell].faces.push(w);
+        }
+
+        obj.check_invariants();
+        *self = obj;
+        Ok(PushPullReport {
+            face: sub_face,
+            created_faces: walls,
+            removed_faces: vec![],
+        })
+    }
+
+    /// Inverse of [`extrude_sub_face`]: flattens a raised sub-face back into its
+    /// parent, removing the generated walls. The sub-face keeps its handle. The
+    /// reported `distance` is how far it was raised (re-extruding restores it).
+    ///
+    /// # Errors
+    /// [`PushPullError::NotASubFace`] if `sub_face` is not a raised sub-face (its
+    /// boundary twinned with quad walls that bridge to one parent's hole). Leaves
+    /// the object untouched on error.
+    pub fn collapse_sub_face(
+        &mut self,
+        sub_face: FaceId,
+    ) -> Result<CollapseSubFaceReport, PushPullError> {
+        if !self.faces.contains_key(sub_face) || !self.faces[sub_face].inner_loops.is_empty() {
+            return Err(PushPullError::NotASubFace);
+        }
+        let sub_loop = self.faces[sub_face].outer_loop;
+        let h_sub: Vec<HalfEdgeId> = self.loop_half_edges(sub_loop).collect();
+        let n = h_sub.len();
+        if n < 3 {
+            return Err(PushPullError::NotASubFace);
+        }
+
+        // Walk each wall: wa twins the sub edge; the quad is wa→wb→wc→wd; wc
+        // twins the parent's hole edge.
+        let mut wa = vec![HalfEdgeId::default(); n];
+        let mut wb = vec![HalfEdgeId::default(); n];
+        let mut wc = vec![HalfEdgeId::default(); n];
+        let mut wd = vec![HalfEdgeId::default(); n];
+        let mut walls = Vec::with_capacity(n);
+        let mut h_hole = vec![HalfEdgeId::default(); n];
+        let mut hole_loop: Option<LoopId> = None;
+        for k in 0..n {
+            let a = self.half_edges[h_sub[k]]
+                .twin
+                .ok_or(PushPullError::NotASubFace)?;
+            wa[k] = a;
+            wb[k] = self.half_edges[a].next;
+            wc[k] = self.half_edges[wb[k]].next;
+            wd[k] = self.half_edges[wc[k]].next;
+            if self.half_edges[wd[k]].next != a {
+                return Err(PushPullError::NotASubFace); // not a quad wall
+            }
+            walls.push(self.loops[self.half_edges[a].loop_id].face);
+            let hh = self.half_edges[wc[k]]
+                .twin
+                .ok_or(PushPullError::NotASubFace)?;
+            h_hole[k] = hh;
+            let l = self.half_edges[hh].loop_id;
+            match hole_loop {
+                None => hole_loop = Some(l),
+                Some(hl) if hl == l => {}
+                Some(_) => return Err(PushPullError::NotASubFace),
+            }
+        }
+        let hole_loop = hole_loop.ok_or(PushPullError::NotASubFace)?;
+        if self.loops[hole_loop].kind != LoopKind::Inner {
+            return Err(PushPullError::NotASubFace);
+        }
+        let parent = self.loops[hole_loop].face;
+        if parent == sub_face {
+            return Err(PushPullError::NotASubFace);
+        }
+
+        // a[k] (parent hole vertex) = origin of wc[k]; vt[k] = current raised
+        // sub-face vertex = origin of h_sub[k]. The raise distance is the offset
+        // along the normal.
+        let a: Vec<VertexId> = (0..n).map(|k| self.half_edges[wc[k]].origin).collect();
+        let vt: Vec<VertexId> = (0..n).map(|k| self.half_edges[h_sub[k]].origin).collect();
+        let normal = self.faces[parent].plane.normal();
+        let distance = normal.dot(self.vertices[vt[0]].position - self.vertices[a[0]].position);
+
+        // ---- removal surgery on a clone ----
+        let mut obj = self.clone();
+        for k in 0..n {
+            // Restore the shared sub/hole edge, reusing the hole's current edge.
+            let shared = obj.half_edges[h_hole[k]].edge;
+            obj.edges[shared].half_edge = h_sub[k];
+            obj.edges[shared].twin_half_edge = Some(h_hole[k]);
+            obj.half_edges[h_sub[k]].edge = shared;
+            obj.half_edges[h_sub[k]].twin = Some(h_hole[k]);
+            obj.half_edges[h_hole[k]].twin = Some(h_sub[k]);
+            obj.half_edges[h_sub[k]].origin = a[k];
+            obj.vertices[a[k]].outgoing = h_sub[k];
+
+            // Delete the sub-face's top edge and the vertical edge.
+            obj.edges.remove(obj.half_edges[wa[k]].edge);
+            obj.edges.remove(obj.half_edges[wb[k]].edge);
+        }
+        // Delete wall half-edges, loops, faces, and the raised vertices.
+        for k in 0..n {
+            for &h in &[wa[k], wb[k], wc[k], wd[k]] {
+                let lp = obj.half_edges[h].loop_id;
+                obj.half_edges.remove(h);
+                obj.loops.remove(lp);
+            }
+        }
+        for &w in &walls {
+            obj.faces.remove(w);
+        }
+        for (_, s) in obj.shells.iter_mut() {
+            s.faces.retain(|f| !walls.contains(f));
+        }
+        for &v in &vt {
+            obj.vertices.remove(v);
+        }
+        // The sub-face is flat again: same plane as the parent.
+        obj.faces[sub_face].plane = obj.faces[parent].plane;
+
+        obj.check_invariants();
+        *self = obj;
+        Ok(CollapseSubFaceReport { sub_face, distance })
     }
 
     /// Sticky rule inside an Object: cuts `face` in two along `path`, whose

@@ -1,22 +1,32 @@
 /**
- * RectangleTool — two-click ground-plane rectangle sketching.
+ * RectangleTool — two-click rectangle sketching.
  *
- * Gesture:
- *   1. First click: anchor corner (snapped)
+ * Two modes:
+ *
+ * Ground mode (activeContext === null):
+ *   1. First click: anchor corner (snapped on Z=0)
  *   2. Move: rubber-band rectangle preview on the ground plane
  *   3. Second click: commit — begin_ground_sketch() if needed, four
  *      sketch_add_segment calls forming the rectangle
  *   4. Esc between clicks: cancel stage 1
+ *   Calls onCommit() after each successful commit so the viewport can
+ *   refresh scene geometry and trigger re-render.
  *
- * Calls onCommit() after each successful commit so the viewport can
- * refresh scene geometry and trigger re-render.
+ * Face mode (activeContext !== null):
+ *   1. First click on a face of the entered object: anchor corner (on face plane)
+ *   2. Move: rubber-band rectangle preview projected onto that face plane
+ *   3. Second click: commit — split_face_inner() on the entered object face
+ *   4. Esc: cancel
+ *   Calls onFaceImprint(objectId) after each successful imprint so the viewport
+ *   can refresh the scene.
  */
 
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { rectangleCorners, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import type { V3 } from '../viewport/geoHelpers'
+import { rectangleCorners, faceRectangleCorners, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 
 export type RectangleCommitResult = {
   sketchHandle: bigint
@@ -25,67 +35,127 @@ export type RectangleCommitResult = {
 }
 
 export type OnRectangleCommit = (result: RectangleCommitResult) => void
+export type OnFaceImprint = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
 
-/** Stage 0: waiting for first click; Stage 1: waiting for second click */
-type Stage = { kind: 'idle' } | { kind: 'anchored'; anchor: [number, number] }
+/** Ground stage: waiting for first click, or waiting for second click */
+type GroundStage =
+  | { kind: 'idle' }
+  | { kind: 'anchored'; anchor: [number, number] }
+
+/** Face stage: idle, or anchored on a specific face plane */
+type FaceStage =
+  | { kind: 'idle' }
+  | {
+      kind: 'anchored'
+      object: bigint
+      face: bigint
+      normal: V3
+      /** A world-space point that lies on the face plane (the first click position) */
+      planePoint: V3
+      anchor: V3
+    }
+
+/**
+ * Intersect a ray with an arbitrary plane defined by a point and unit normal.
+ * Returns the intersection point, or null if the ray is nearly parallel to
+ * the plane (|dot(dir, normal)| < 1e-10).
+ */
+function intersectPlane(
+  rayOrigin: [number, number, number],
+  rayDir: [number, number, number],
+  planePoint: V3,
+  normal: V3,
+): V3 | null {
+  const denom = rayDir[0] * normal[0] + rayDir[1] * normal[1] + rayDir[2] * normal[2]
+  if (Math.abs(denom) < 1e-10) return null
+  const wx = planePoint[0] - rayOrigin[0]
+  const wy = planePoint[1] - rayOrigin[1]
+  const wz = planePoint[2] - rayOrigin[2]
+  const t = (wx * normal[0] + wy * normal[1] + wz * normal[2]) / denom
+  if (t < 0) return null
+  return [
+    rayOrigin[0] + t * rayDir[0],
+    rayOrigin[1] + t * rayDir[1],
+    rayOrigin[2] + t * rayDir[2],
+  ]
+}
 
 export class RectangleTool implements Tool {
   readonly name = 'Rectangle'
 
-  private stage: Stage = { kind: 'idle' }
+  private groundStage: GroundStage = { kind: 'idle' }
+  private faceStage: FaceStage = { kind: 'idle' }
   private preview: THREE.Group
   private wasmScene: WasmScene
   private onCommit: OnRectangleCommit
+  private onFaceImprint: OnFaceImprint
   private onToast: OnToast
 
   /** Handle to the current active sketch — reused across commits if not null */
   private sketchHandle: bigint | null = null
+
+  /** The currently active editing context (entered object), or null at top level. */
+  private _activeContext: bigint | null = null
 
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     onCommit: OnRectangleCommit,
     onToast: OnToast,
+    onFaceImprint: OnFaceImprint,
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
+    this.onFaceImprint = onFaceImprint
     this.onToast = onToast
   }
 
-  onPointerMove(snap: Snap | null, _ray: Ray): void {
-    if (this.stage.kind !== 'anchored' || snap === null) {
-      this._clearPreview()
-      return
-    }
-    const { anchor } = this.stage
-    const cursor: [number, number] = [snap.x, snap.y]
-    this._drawRubberBand(anchor, cursor)
+  /** Set the active editing context (entered object), or null for top level. */
+  setActiveContext(id: bigint | null): void {
+    this._activeContext = id
+    // Cancel any in-progress gesture when context changes
+    this.cancel()
   }
 
-  onPointerDown(snap: Snap | null, _ray: Ray): void {
-    if (snap === null) return
-
-    if (this.stage.kind === 'idle') {
-      // First click: set anchor
-      this.stage = { kind: 'anchored', anchor: [snap.x, snap.y] }
-    } else {
-      // Second click: commit the rectangle
-      const { anchor } = this.stage
-      const cursor: [number, number] = [snap.x, snap.y]
-
-      // Skip degenerate rectangles (same point or zero area)
-      if (
-        Math.abs(anchor[0] - cursor[0]) < 1e-8 ||
-        Math.abs(anchor[1] - cursor[1]) < 1e-8
-      ) {
+  onPointerMove(snap: Snap | null, ray: Ray): void {
+    if (this._activeContext !== null) {
+      // Face mode
+      if (this.faceStage.kind !== 'anchored') {
+        this._clearPreview()
         return
       }
+      const { anchor, normal, planePoint } = this.faceStage
+      // Project cursor ray onto face plane
+      const cursorOnPlane = intersectPlane(ray.origin, ray.direction, planePoint, normal)
+      if (cursorOnPlane === null) {
+        this._clearPreview()
+        return
+      }
+      const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
+      if (corners !== null) {
+        this._drawRubberBandFace(corners)
+      } else {
+        this._clearPreview()
+      }
+    } else {
+      // Ground mode
+      if (this.groundStage.kind !== 'anchored' || snap === null) {
+        this._clearPreview()
+        return
+      }
+      const { anchor } = this.groundStage
+      const cursor: [number, number] = [snap.x, snap.y]
+      this._drawRubberBandGround(anchor, cursor)
+    }
+  }
 
-      this._commitRectangle(anchor, cursor)
-      this.stage = { kind: 'idle' }
-      this._clearPreview()
+  onPointerDown(snap: Snap | null, ray: Ray): void {
+    if (this._activeContext !== null) {
+      this._onPointerDownFace(snap, ray)
+    } else {
+      this._onPointerDownGround(snap)
     }
   }
 
@@ -96,11 +166,39 @@ export class RectangleTool implements Tool {
   }
 
   cancel(): void {
-    this.stage = { kind: 'idle' }
+    this.groundStage = { kind: 'idle' }
+    this.faceStage = { kind: 'idle' }
     this._clearPreview()
   }
 
-  private _commitRectangle(a: [number, number], b: [number, number]): void {
+  // ------------------------------------------------------------------ ground mode
+
+  private _onPointerDownGround(snap: Snap | null): void {
+    if (snap === null) return
+
+    if (this.groundStage.kind === 'idle') {
+      // First click: set anchor
+      this.groundStage = { kind: 'anchored', anchor: [snap.x, snap.y] }
+    } else {
+      // Second click: commit the rectangle
+      const { anchor } = this.groundStage
+      const cursor: [number, number] = [snap.x, snap.y]
+
+      // Skip degenerate rectangles (same point or zero area)
+      if (
+        Math.abs(anchor[0] - cursor[0]) < 1e-8 ||
+        Math.abs(anchor[1] - cursor[1]) < 1e-8
+      ) {
+        return
+      }
+
+      this._commitGroundRectangle(anchor, cursor)
+      this.groundStage = { kind: 'idle' }
+      this._clearPreview()
+    }
+  }
+
+  private _commitGroundRectangle(a: [number, number], b: [number, number]): void {
     try {
       // Begin sketch if we don't already have one
       if (this.sketchHandle === null) {
@@ -141,19 +239,112 @@ export class RectangleTool implements Tool {
     }
   }
 
-  private _drawRubberBand(a: [number, number], b: [number, number]): void {
-    this._clearPreview()
+  // ------------------------------------------------------------------ face mode
 
+  private _onPointerDownFace(snap: Snap | null, ray: Ray): void {
+    if (this.faceStage.kind === 'idle') {
+      // First click: pick a face of the entered object
+      if (snap === null) return
+
+      const pick = this.wasmScene.pick_face(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      if (pick === undefined) return
+
+      try {
+        const objectHandle = pick.object()
+        if (objectHandle !== this._activeContext) return
+
+        const faceHandle = pick.face()
+        const normalArr = this.wasmScene.face_normal(objectHandle, faceHandle)
+        const normal: V3 = [normalArr[0], normalArr[1], normalArr[2]]
+        const anchor: V3 = [snap.x, snap.y, snap.z]
+
+        this.faceStage = {
+          kind: 'anchored',
+          object: objectHandle,
+          face: faceHandle,
+          normal,
+          planePoint: anchor,
+          anchor,
+        }
+      } finally {
+        pick.free()
+      }
+    } else {
+      // Second click: commit the face imprint
+      const { object, face, normal, planePoint, anchor } = this.faceStage
+
+      // Project the click ray onto the face plane for the cursor position
+      const cursorOnPlane = intersectPlane(ray.origin, ray.direction, planePoint, normal)
+      if (cursorOnPlane === null) return
+
+      const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
+      if (corners === null) return // degenerate — ignore
+
+      // Flatten the 4 corners into a Float64Array of xyz triples
+      const loopPts = new Float64Array(4 * 3)
+      for (let i = 0; i < 4; i++) {
+        loopPts[i * 3 + 0] = corners[i][0]
+        loopPts[i * 3 + 1] = corners[i][1]
+        loopPts[i * 3 + 2] = corners[i][2]
+      }
+
+      this.faceStage = { kind: 'idle' }
+      this._clearPreview()
+
+      try {
+        this.wasmScene.split_face_inner(object, face, loopPts)
+        this.onFaceImprint(object)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
+        this.onToast(message, code ?? undefined)
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ preview
+
+  /**
+   * Draw a rubber-band rectangle from two 2D ground-plane corners.
+   * Used in ground mode.
+   */
+  private _drawRubberBandGround(a: [number, number], b: [number, number]): void {
+    this._clearPreview()
     const corners = rectangleCorners(a, b)
-    // Build a closed loop of lines for the rectangle preview
+    this._drawRubberBandCorners(corners, /* liftZ */ true)
+  }
+
+  /**
+   * Draw a rubber-band rectangle from four explicit 3D corners.
+   * Used in face mode — corners already lie on the face plane.
+   */
+  private _drawRubberBandFace(corners: [V3, V3, V3, V3]): void {
+    this._clearPreview()
+    this._drawRubberBandCorners(corners, /* liftZ */ false)
+  }
+
+  /**
+   * Emit a LineSegments preview for a closed 4-corner loop.
+   *
+   * @param corners  Four world-space xyz corners in order.
+   * @param liftZ    When true, bump each z by +0.001 to avoid z-fighting with
+   *                 the ground plane (ground mode). False in face mode.
+   */
+  private _drawRubberBandCorners(corners: readonly [V3, V3, V3, V3], liftZ: boolean): void {
+    const [c0, c1, c2, c3] = corners
     const pts = new Float32Array([
-      ...corners[0], ...corners[1],
-      ...corners[1], ...corners[2],
-      ...corners[2], ...corners[3],
-      ...corners[3], ...corners[0],
+      ...c0, ...c1,
+      ...c1, ...c2,
+      ...c2, ...c3,
+      ...c3, ...c0,
     ])
-    // Lift slightly above ground to avoid z-fighting
-    for (let i = 2; i < pts.length; i += 3) pts[i] = 0.001
+    if (liftZ) {
+      for (let i = 2; i < pts.length; i += 3) pts[i] += 0.001
+    }
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(pts, 3))

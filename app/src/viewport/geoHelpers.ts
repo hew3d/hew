@@ -115,8 +115,79 @@ export function kernelErrorMessage(code: string, rawMsg: string): string {
     NothingToUndo: 'Nothing to undo',
     NothingToRedo: 'Nothing to redo',
     UnknownObject: 'Unknown object handle (stale reference)',
+    LoopNotStrictlyInside: 'Rectangle must lie fully inside the face',
+    LoopSelfIntersects: "Rectangle edges can't cross",
+    BadLoop: 'Need a valid rectangle on the face',
   }
   return descriptions[code] ?? `${code}: ${rawMsg}`
+}
+
+/**
+ * Build a rectangle's 4 world-space corners lying on an arbitrary plane,
+ * given two diagonal corner points and the face's unit outward normal.
+ *
+ * Algorithm:
+ *   1. Build an orthonormal in-plane basis (u, v) from the normal.
+ *   2. Project (cursor - anchor) onto u and v to get signed extents du, dv.
+ *   3. Return the 4 CCW corners (as seen from the +normal side):
+ *      anchor, anchor+u·du, anchor+u·du+v·dv, anchor+v·dv
+ *
+ * Returns null when either extent is below 1e-7 (degenerate rectangle).
+ *
+ * Winding note: the result is counter-clockwise when viewed from the +normal
+ * side, matching the ground-plane CCW convention used by `rectangleCorners`.
+ */
+export function faceRectangleCorners(
+  anchor: V3,
+  cursor: V3,
+  normal: V3,
+): [V3, V3, V3, V3] | null {
+  const [nx, ny, nz] = normal
+
+  // Choose a reference axis not parallel to the normal.
+  // If |normal.x| dominates, use [0,1,0]; otherwise use [1,0,0].
+  const refX = Math.abs(nx) > Math.abs(ny) ? 0 : 1
+  const refY = Math.abs(nx) > Math.abs(ny) ? 1 : 0
+  const refZ = 0
+
+  // u = normalize(cross(normal, ref))
+  const cx = ny * refZ - nz * refY
+  const cy = nz * refX - nx * refZ
+  const cz = nx * refY - ny * refX
+  const len = Math.sqrt(cx * cx + cy * cy + cz * cz)
+  if (len < 1e-12) return null
+  const u: V3 = [cx / len, cy / len, cz / len]
+
+  // v = cross(normal, u)  — already unit since normal and u are both unit and orthogonal
+  const v: V3 = [
+    ny * u[2] - nz * u[1],
+    nz * u[0] - nx * u[2],
+    nx * u[1] - ny * u[0],
+  ]
+
+  // Signed extents along u and v
+  const dx = cursor[0] - anchor[0]
+  const dy = cursor[1] - anchor[1]
+  const dz = cursor[2] - anchor[2]
+  const du = dx * u[0] + dy * u[1] + dz * u[2]
+  const dv = dx * v[0] + dy * v[1] + dz * v[2]
+
+  if (Math.abs(du) < 1e-7 || Math.abs(dv) < 1e-7) return null
+
+  // Four corners (positions are always the same set regardless of drag direction):
+  // A=anchor, B=anchor+u*du, C=anchor+u*du+v*dv, D=anchor+v*dv
+  const a: V3 = [...anchor]
+  const b: V3 = [anchor[0] + u[0] * du, anchor[1] + u[1] * du, anchor[2] + u[2] * du]
+  const c: V3 = [b[0] + v[0] * dv, b[1] + v[1] * dv, b[2] + v[2] * dv]
+  const d: V3 = [anchor[0] + v[0] * dv, anchor[1] + v[1] * dv, anchor[2] + v[2] * dv]
+
+  // When du and dv have opposite signs the traversal A→B→C→D is clockwise
+  // from the +normal side. Reverse the winding (swap B and D) so the result
+  // is always CCW from +normal, matching the promise in the doc comment.
+  if (du * dv < 0) {
+    return [a, d, c, b]
+  }
+  return [a, b, c, d]
 }
 
 /**

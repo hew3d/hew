@@ -175,6 +175,10 @@ pub struct SceneFace {
     pub plane: Plane,
     /// Outer boundary in cycle order (containment tests happen against it).
     pub boundary: Vec<Point3>,
+    /// Inner loops (holes) in cycle order. A ray that lands inside any of
+    /// these is NOT on the face — it passes through the hole (e.g. the annular
+    /// parent of an imprinted sub-face). Empty for ordinary faces.
+    pub holes: Vec<Vec<Point3>>,
     /// Where it came from.
     pub source: SnapSource,
 }
@@ -258,9 +262,21 @@ impl InferenceScene {
                 .loop_positions(face.outer_loop)
                 .map(|p| placement.apply_point(p))
                 .collect();
+            // Holes: each inner loop transformed into world space.
+            let holes: Vec<Vec<Point3>> = face
+                .inner_loops
+                .iter()
+                .map(|&lid| {
+                    object
+                        .loop_positions(lid)
+                        .map(|p| placement.apply_point(p))
+                        .collect()
+                })
+                .collect();
             self.faces.push(SceneFace {
                 plane: world_plane,
                 boundary,
+                holes,
                 source: SnapSource {
                     object: id,
                     element: ElementRef::Face(fid),
@@ -328,9 +344,14 @@ impl InferenceScene {
 
         // --- Face candidates: OnFace ---
         for face in &self.faces {
-            if let Some((pos, ang, depth)) =
-                face_cone_hit(origin, dir, &face.plane, &face.boundary, aperture)
-            {
+            if let Some((pos, ang, depth)) = face_cone_hit(
+                origin,
+                dir,
+                &face.plane,
+                &face.boundary,
+                &face.holes,
+                aperture,
+            ) {
                 candidates.push((SnapKind::OnFace, ang, depth, pos, Some(face.source)));
             }
         }
@@ -409,7 +430,7 @@ impl InferenceScene {
             // `face_cone_hit` ignores its aperture arg for faces (a face hit
             // is pure ray-polygon containment), so any value works here.
             if let Some((_pos, _ang, depth)) =
-                face_cone_hit(origin, dir, &face.plane, &face.boundary, 0.0)
+                face_cone_hit(origin, dir, &face.plane, &face.boundary, &face.holes, 0.0)
                 && best.as_ref().is_none_or(|(d, _)| depth < *d)
             {
                 best = Some((depth, face.source));
@@ -515,6 +536,7 @@ fn face_cone_hit(
     dir: Vec3,
     plane: &Plane,
     boundary: &[Point3],
+    holes: &[Vec<Point3>],
     _aperture: f64,
 ) -> Option<(Point3, f64, f64)> {
     let n = plane.normal();
@@ -531,6 +553,11 @@ fn face_cone_hit(
 
     // Point-in-polygon test: project to plane's local 2D axes.
     if !point_in_polygon(hit, boundary, n) {
+        return None;
+    }
+    // Reject hits that land inside a hole: the ray passes through the opening,
+    // not the face material (e.g. the annular parent of an imprinted sub-face).
+    if holes.iter().any(|hole| point_in_polygon(hit, hole, n)) {
         return None;
     }
 
@@ -766,6 +793,93 @@ mod tests {
         assert!(
             snap.position
                 .approx_eq(Point3::new(1.0, 1.0, 1.0), tol::POINT_MERGE)
+        );
+    }
+
+    /// Builds a unit cube via `from_polygons` (top face has normal +Z).
+    fn unit_cube() -> Object {
+        kernel::Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+                Point3::new(1.0, 0.0, 1.0),
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(0.0, 1.0, 1.0),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pick_face_through_a_hole_returns_the_sub_face_not_the_annular_parent() {
+        // Imprint a sub-face on a cube's top, then a ray straight down through
+        // the inner rectangle must pick the SUB-FACE — not the annular parent,
+        // whose outer boundary still contains the point but whose hole does
+        // not. (Picking the parent here was the NonManifoldResult push/pull
+        // bug: translating a holed face whose hole edges are twinned with the
+        // sub-face is non-manifold.)
+        let mut cube = unit_cube();
+        let top = cube
+            .faces()
+            .iter()
+            .find(|(_, f)| {
+                f.plane
+                    .normal()
+                    .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+            })
+            .map(|(id, _)| id)
+            .unwrap();
+        let sub_face = cube
+            .split_face_inner(
+                top,
+                &[
+                    Point3::new(0.25, 0.25, 1.0),
+                    Point3::new(0.75, 0.25, 1.0),
+                    Point3::new(0.75, 0.75, 1.0),
+                    Point3::new(0.25, 0.75, 1.0),
+                ],
+            )
+            .unwrap()
+            .sub_face;
+
+        let mut scene = InferenceScene::new();
+        scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
+
+        // Straight down through the centre of the inner rectangle.
+        let through_hole = scene
+            .pick_face(&PickRay {
+                origin: Point3::new(0.5, 0.5, 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            })
+            .expect("the ray crosses the top of the cube");
+        assert_eq!(
+            through_hole.element,
+            ElementRef::Face(sub_face),
+            "a ray through the hole picks the sub-face, not the parent"
+        );
+
+        // Through the annular ring (clear of the hole): still the parent.
+        let through_ring = scene
+            .pick_face(&PickRay {
+                origin: Point3::new(0.1, 0.1, 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            })
+            .expect("the ray crosses the annular top");
+        assert_eq!(
+            through_ring.element,
+            ElementRef::Face(top),
+            "a ray through the ring picks the annular parent"
         );
     }
 }

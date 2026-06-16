@@ -146,15 +146,18 @@ fn euler_poincare(obj: &Object) -> i64 {
     obj.vertices().len() as i64 - obj.edges().len() as i64 + obj.faces().len() as i64 - holes as i64
 }
 
-/// Divergence-theorem signed volume over fan-triangulated outer loops
-/// (hole-free objects only). Positive iff faces wind outward — twin pairing
-/// and the validator cannot detect a globally inside-out solid, this can.
+/// Divergence-theorem signed volume, fan-triangulating every loop of every face.
+/// Inner (hole) loops wind opposite to the outer, so summing their fans subtracts
+/// the hole correctly — `to_polygons` drops holes, so it can't be used once
+/// imprints/booleans produce genus > 0. Positive iff faces wind outward.
 fn signed_volume(obj: &Object) -> f64 {
     let mut six_v = 0.0;
-    for poly in polygons_of(obj) {
-        for i in 1..poly.len() - 1 {
-            let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
-            six_v += a.to_vec().dot(b.to_vec().cross(c.to_vec()));
+    for f in obj.faces().values() {
+        for lid in std::iter::once(f.outer_loop).chain(f.inner_loops.iter().copied()) {
+            let p: Vec<_> = obj.loop_positions(lid).map(|pt| pt.to_vec()).collect();
+            for i in 1..p.len().saturating_sub(1) {
+                six_v += p[0].dot(p[i].cross(p[i + 1]));
+            }
         }
     }
     six_v / 6.0
@@ -465,6 +468,162 @@ fn split_face_rejects_interior_endpoint() {
     assert_eq!(err, kernel::StickyError::EndpointNotOnBoundary { which: 1 });
     cube.validate().unwrap();
     assert!(objects_equivalent(&cube, &unit_cube()));
+}
+
+#[test]
+fn split_face_inner_imprints_a_coplanar_subface() {
+    let mut cube = unit_cube();
+    let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+    let before = cube.faces().len();
+    // A 0.5×0.5 square strictly inside the top face.
+    let rect = [
+        Point3::new(0.25, 0.25, 1.0),
+        Point3::new(0.75, 0.25, 1.0),
+        Point3::new(0.75, 0.75, 1.0),
+        Point3::new(0.25, 0.75, 1.0),
+    ];
+    let report = cube.split_face_inner(top, &rect).unwrap();
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert_eq!(cube.faces().len(), before + 1, "one new sub-face");
+    assert_eq!(report.parent, top);
+    // The parent keeps its handle and gains exactly one hole.
+    assert_eq!(cube.faces()[top].inner_loops.len(), 1);
+    // The sub-face is coplanar with the parent (outward +Z).
+    let sub_n = cube.faces()[report.sub_face].plane.normal();
+    assert!(sub_n.approx_eq(Vec3::new(0.0, 0.0, 1.0), kernel::tol::NORMAL_DIRECTION));
+    // Imprint is flat: volume unchanged.
+    assert!((signed_volume(&cube) - 1.0).abs() < VOLUME_TOL);
+}
+
+#[test]
+fn extrude_sub_face_embosses_and_recesses() {
+    // Imprint a 0.5×0.5 square on a unit cube's top, then boss it up by 0.4.
+    let rect = [
+        Point3::new(0.25, 0.25, 1.0),
+        Point3::new(0.75, 0.25, 1.0),
+        Point3::new(0.75, 0.75, 1.0),
+        Point3::new(0.25, 0.75, 1.0),
+    ];
+    let mut cube = unit_cube();
+    let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+    let report = cube.split_face_inner(top, &rect).unwrap();
+    let faces_after_imprint = cube.faces().len();
+
+    // Emboss (push out): a 0.5×0.5×0.4 boss adds 0.1 volume; 4 walls appear.
+    let r = cube.extrude_sub_face(report.sub_face, 0.4).unwrap();
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert_eq!(r.created_faces.len(), 4, "four walls");
+    assert_eq!(cube.faces().len(), faces_after_imprint + 4);
+    assert!(
+        (signed_volume(&cube) - (1.0 + 0.25 * 0.4)).abs() < VOLUME_TOL,
+        "emboss vol {}",
+        signed_volume(&cube)
+    );
+
+    // Recess (push in): removes 0.25×0.3 = 0.075.
+    let mut cube = unit_cube();
+    let report = cube.split_face_inner(top, &rect).unwrap();
+    cube.extrude_sub_face(report.sub_face, -0.3).unwrap();
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert!(
+        (signed_volume(&cube) - (1.0 - 0.25 * 0.3)).abs() < VOLUME_TOL,
+        "recess vol {}",
+        signed_volume(&cube)
+    );
+}
+
+#[test]
+fn extrude_then_collapse_sub_face_is_identity() {
+    let rect = [
+        Point3::new(0.25, 0.25, 1.0),
+        Point3::new(0.75, 0.25, 1.0),
+        Point3::new(0.75, 0.75, 1.0),
+        Point3::new(0.25, 0.75, 1.0),
+    ];
+    let mut cube = unit_cube();
+    let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+    let report = cube.split_face_inner(top, &rect).unwrap();
+    let imprinted = cube.clone();
+
+    let r = cube.extrude_sub_face(report.sub_face, 0.4).unwrap();
+    // Collapse restores the flat imprinted state, and reports the raise distance.
+    let collapsed = cube.collapse_sub_face(r.face).unwrap();
+    cube.validate().unwrap();
+    assert!((collapsed.distance - 0.4).abs() < VOLUME_TOL);
+    assert!(
+        objects_equivalent(&cube, &imprinted),
+        "collapse restores the flat imprinted face"
+    );
+}
+
+#[test]
+fn split_face_inner_then_merge_is_identity() {
+    let original = unit_cube();
+    let mut cube = original.clone();
+    let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+    let rect = [
+        Point3::new(0.25, 0.25, 1.0),
+        Point3::new(0.75, 0.25, 1.0),
+        Point3::new(0.75, 0.75, 1.0),
+        Point3::new(0.25, 0.75, 1.0),
+    ];
+    let report = cube.split_face_inner(top, &rect).unwrap();
+    // Dissolving the sub-face restores the original cube (up to handle renaming).
+    cube.merge_inner_face(report.sub_face).unwrap();
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert!(objects_equivalent(&cube, &original));
+}
+
+#[test]
+fn split_face_inner_rejects_bad_loops() {
+    let top = face_with_normal(&unit_cube(), Vec3::new(0.0, 0.0, 1.0));
+
+    // A corner on the face boundary is not strictly inside.
+    let mut c = unit_cube();
+    let touching = [
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(0.5, 0.0, 1.0),
+        Point3::new(0.5, 0.5, 1.0),
+        Point3::new(0.0, 0.5, 1.0),
+    ];
+    assert!(matches!(
+        c.split_face_inner(top, &touching).unwrap_err(),
+        kernel::StickyError::LoopNotStrictlyInside { .. }
+    ));
+    assert!(
+        objects_equivalent(&c, &unit_cube()),
+        "object untouched on error"
+    );
+
+    // A vertex off the face plane.
+    let mut c = unit_cube();
+    let off_plane = [
+        Point3::new(0.25, 0.25, 1.0),
+        Point3::new(0.75, 0.25, 1.5),
+        Point3::new(0.75, 0.75, 1.0),
+        Point3::new(0.25, 0.75, 1.0),
+    ];
+    assert!(matches!(
+        c.split_face_inner(top, &off_plane).unwrap_err(),
+        kernel::StickyError::PointNotOnFace { .. }
+    ));
+
+    // A self-intersecting (bow-tie) loop.
+    let mut c = unit_cube();
+    let bowtie = [
+        Point3::new(0.25, 0.25, 1.0),
+        Point3::new(0.75, 0.75, 1.0),
+        Point3::new(0.75, 0.25, 1.0),
+        Point3::new(0.25, 0.75, 1.0),
+    ];
+    assert_eq!(
+        c.split_face_inner(top, &bowtie).unwrap_err(),
+        kernel::StickyError::LoopSelfIntersects
+    );
 }
 
 #[test]

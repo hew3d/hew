@@ -37,8 +37,9 @@ pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, 
 pub use ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ObjectId, ShellId, SketchId, VertexId};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
-    BooleanError, BooleanOp, ExtrudeError, FaceMergeReport, FaceSplitReport, Operand,
-    PushPullError, PushPullReport, StickyError,
+    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceMergeInnerReport,
+    FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, Operand, PushPullError, PushPullReport,
+    StickyError,
 };
 pub use serialize::{DecodeError, GEOMETRY_FORMAT_VERSION};
 pub use sketch::{

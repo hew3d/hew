@@ -26,7 +26,10 @@
 
 use crate::ids::{EdgeId, FaceId, HalfEdgeId};
 use crate::math::Point3;
-use crate::ops::{FaceMergeReport, FaceSplitReport, PushPullError, PushPullReport, StickyError};
+use crate::ops::{
+    CollapseSubFaceReport, FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport,
+    FaceSplitReport, PushPullError, PushPullReport, StickyError,
+};
 use crate::topo::Object;
 
 /// A replayable, invertible mutation of one Object. Plain data — serializable
@@ -52,11 +55,36 @@ pub enum KernelOp {
         /// Edge whose two coplanar faces merge.
         edge: EdgeId,
     },
+    /// `Object::split_face_inner(face, loop_path)` — imprint a closed loop.
+    SplitFaceInner {
+        /// Face to imprint into.
+        face: FaceId,
+        /// The closed loop, strictly inside the face.
+        loop_path: Vec<Point3>,
+    },
+    /// `Object::merge_inner_face(sub_face)` — dissolve an imprinted sub-face.
+    MergeInnerFace {
+        /// The sub-face to dissolve back into its parent.
+        sub_face: FaceId,
+    },
+    /// `Object::extrude_sub_face(sub_face, distance)` — boss/recess a sub-face.
+    ExtrudeSubFace {
+        /// The flat sub-face to raise.
+        sub_face: FaceId,
+        /// Signed distance along the face normal.
+        distance: f64,
+    },
+    /// `Object::collapse_sub_face(sub_face)` — flatten a raised sub-face.
+    CollapseSubFace {
+        /// The raised sub-face to flatten.
+        sub_face: FaceId,
+    },
 }
 
 /// What an applied op reported; returned by apply/undo/redo so tools can
 /// update selections and highlights precisely.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// (`FaceMergeInner` carries f64 positions, so this is `PartialEq` but not `Eq`.)
+#[derive(Debug, Clone, PartialEq)]
 pub enum KernelOpReport {
     /// Result of a push/pull.
     PushPull(PushPullReport),
@@ -64,6 +92,14 @@ pub enum KernelOpReport {
     FaceSplit(FaceSplitReport),
     /// Result of a face merge.
     FaceMerge(FaceMergeReport),
+    /// Result of an interior-loop imprint.
+    FaceSplitInner(FaceSplitInnerReport),
+    /// Result of dissolving an imprinted sub-face.
+    FaceMergeInner(FaceMergeInnerReport),
+    /// Result of bossing/recessing a sub-face (reuses the push/pull report).
+    ExtrudeSubFace(PushPullReport),
+    /// Result of flattening a raised sub-face.
+    CollapseSubFace(CollapseSubFaceReport),
 }
 
 /// An op that failed to apply. Wraps the op-specific error unchanged.
@@ -262,6 +298,22 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             .merge_faces(*edge)
             .map(KernelOpReport::FaceMerge)
             .map_err(KernelOpError::Sticky),
+        KernelOp::SplitFaceInner { face, loop_path } => object
+            .split_face_inner(*face, loop_path)
+            .map(KernelOpReport::FaceSplitInner)
+            .map_err(KernelOpError::Sticky),
+        KernelOp::MergeInnerFace { sub_face } => object
+            .merge_inner_face(*sub_face)
+            .map(KernelOpReport::FaceMergeInner)
+            .map_err(KernelOpError::Sticky),
+        KernelOp::ExtrudeSubFace { sub_face, distance } => object
+            .extrude_sub_face(*sub_face, *distance)
+            .map(KernelOpReport::ExtrudeSubFace)
+            .map_err(KernelOpError::PushPull),
+        KernelOp::CollapseSubFace { sub_face } => object
+            .collapse_sub_face(*sub_face)
+            .map(KernelOpReport::CollapseSubFace)
+            .map_err(KernelOpError::PushPull),
     }
 }
 
@@ -290,6 +342,28 @@ fn derive_inverse(
             path: pre_merge_path
                 .expect("pre_merge_path must be provided for MergeFaces inverse derivation"),
         },
+        (KernelOp::SplitFaceInner { .. }, KernelOpReport::FaceSplitInner(r)) => {
+            KernelOp::MergeInnerFace {
+                sub_face: r.sub_face,
+            }
+        }
+        (KernelOp::MergeInnerFace { .. }, KernelOpReport::FaceMergeInner(r)) => {
+            // The merge captured the loop positions in its report (post-op state),
+            // so re-imprinting them on the restored parent redoes the split.
+            KernelOp::SplitFaceInner {
+                face: r.parent,
+                loop_path: r.loop_path.clone(),
+            }
+        }
+        (KernelOp::ExtrudeSubFace { .. }, KernelOpReport::ExtrudeSubFace(r)) => {
+            KernelOp::CollapseSubFace { sub_face: r.face }
+        }
+        (KernelOp::CollapseSubFace { .. }, KernelOpReport::CollapseSubFace(r)) => {
+            KernelOp::ExtrudeSubFace {
+                sub_face: r.sub_face,
+                distance: r.distance,
+            }
+        }
         _ => panic!("derive_inverse: op and report type mismatch — kernel bug"),
     }
 }
@@ -716,5 +790,99 @@ mod tests {
             "after second redo must equal post-merge"
         );
         assert_eq!(cube.faces().len(), 6);
+    }
+
+    /// Imprint a sub-face via History; undo dissolves it, redo restores it.
+    #[test]
+    fn double_undo_redo_cycle_split_face_inner() {
+        let original = unit_cube();
+        let mut cube = original.clone();
+        let mut history = History::new();
+
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        let rect = vec![
+            Point3::new(0.25, 0.25, 1.0),
+            Point3::new(0.75, 0.25, 1.0),
+            Point3::new(0.75, 0.75, 1.0),
+            Point3::new(0.25, 0.75, 1.0),
+        ];
+        history
+            .apply(
+                &mut cube,
+                KernelOp::SplitFaceInner {
+                    face: top,
+                    loop_path: rect,
+                },
+            )
+            .unwrap();
+        let after = cube.clone();
+        assert_eq!(cube.faces().len(), 7);
+
+        history.undo(&mut cube).unwrap();
+        cube.validate().unwrap();
+        assert!(
+            objects_equivalent(&cube, &original),
+            "undo dissolves the sub-face back to the original cube"
+        );
+
+        history.redo(&mut cube).unwrap();
+        cube.validate().unwrap();
+        assert!(objects_equivalent(&cube, &after), "redo re-imprints");
+
+        history.undo(&mut cube).unwrap();
+        assert!(objects_equivalent(&cube, &original));
+    }
+
+    /// Boss a sub-face via History; undo flattens it, redo re-raises it.
+    #[test]
+    fn double_undo_redo_cycle_extrude_sub_face() {
+        let mut cube = unit_cube();
+        let mut history = History::new();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        let rect = vec![
+            Point3::new(0.25, 0.25, 1.0),
+            Point3::new(0.75, 0.25, 1.0),
+            Point3::new(0.75, 0.75, 1.0),
+            Point3::new(0.25, 0.75, 1.0),
+        ];
+        let report = history
+            .apply(
+                &mut cube,
+                KernelOp::SplitFaceInner {
+                    face: top,
+                    loop_path: rect,
+                },
+            )
+            .unwrap();
+        let sub = match report {
+            KernelOpReport::FaceSplitInner(r) => r.sub_face,
+            _ => unreachable!(),
+        };
+        let imprinted = cube.clone();
+
+        history
+            .apply(
+                &mut cube,
+                KernelOp::ExtrudeSubFace {
+                    sub_face: sub,
+                    distance: 0.4,
+                },
+            )
+            .unwrap();
+        let bossed = cube.clone();
+
+        history.undo(&mut cube).unwrap();
+        cube.validate().unwrap();
+        assert!(
+            objects_equivalent(&cube, &imprinted),
+            "undo flattens the boss"
+        );
+
+        history.redo(&mut cube).unwrap();
+        cube.validate().unwrap();
+        assert!(
+            objects_equivalent(&cube, &bossed),
+            "redo re-raises the boss"
+        );
     }
 }
