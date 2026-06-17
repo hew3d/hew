@@ -12,12 +12,12 @@
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
 
-const FACE_COLOR = 0xa8c8e8
-const FACE_COLOR_LEAKY = 0xe8a8a8   // reddish tint for non-watertight
-const FACE_COLOR_SELECTED = 0xc8e0f8  // slightly brighter blue for selected
-const FACE_COLOR_INSTANCE = 0xb8d4f0  // slightly distinct blue for instance members
+/** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
+const FACE_COLOR_DEFAULT = 0xcccccc
+/** Edge color — dark for readability. */
 const EDGE_COLOR = 0x1a1a1a
-const EDGE_COLOR_SELECTED = 0xffaa00  // orange highlight for selected object edges
+/** Orange highlight for selected object edges (kept for selection; face fill uses material color). */
+const EDGE_COLOR_SELECTED = 0xffaa00
 const SKETCH_LINE_COLOR = 0x2266cc
 const SKETCH_REGION_COLOR = 0x88aadd
 /** Normal translucency of a sketch region fill. */
@@ -71,7 +71,23 @@ export class SceneRenderer {
    * not to the underlying TypedArray).
    * Invalidated when a component definition is edited (refreshInstances re-builds it).
    */
-  private memberGeometryCache: Map<bigint, { positions: Float32Array; normals: Float32Array; indices: Uint32Array; edgePositions: Float32Array }> = new Map()
+  private memberGeometryCache: Map<bigint, {
+    positions: Float32Array
+    normals: Float32Array
+    indices: Uint32Array
+    colors: Float32Array
+    uvs: Float32Array
+    groupMaterialIds: BigUint64Array
+    groupStarts: Uint32Array
+    groupCounts: Uint32Array
+    edgePositions: Float32Array
+  }> = new Map()
+
+  /**
+   * THREE.Texture cache, keyed by material id (as string). Built once per id
+   * and shared across instances so we never duplicate GPU texture objects.
+   */
+  private textureCache: Map<string, THREE.Texture> = new Map()
   private sketchLines: THREE.LineSegments | null = null
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
@@ -235,6 +251,11 @@ export class SceneRenderer {
             positions: mesh.positions(),
             normals: mesh.normals(),
             indices: mesh.indices(),
+            colors: mesh.colors(),
+            uvs: mesh.uvs(),
+            groupMaterialIds: BigUint64Array.from(mesh.group_material_ids()),
+            groupStarts: mesh.group_starts(),
+            groupCounts: mesh.group_counts(),
             edgePositions: mesh.edge_positions(),
           }
           this.memberGeometryCache.set(memberId, cached)
@@ -249,13 +270,18 @@ export class SceneRenderer {
       const faceGeo = new THREE.BufferGeometry()
       faceGeo.setAttribute('position', new THREE.BufferAttribute(cached.positions, 3))
       faceGeo.setAttribute('normal', new THREE.BufferAttribute(cached.normals, 3))
+      faceGeo.setAttribute('color', new THREE.BufferAttribute(cached.colors, 3))
+      faceGeo.setAttribute('uv', new THREE.BufferAttribute(cached.uvs, 2))
       faceGeo.setIndex(new THREE.BufferAttribute(cached.indices, 1))
-      const faceMat = new THREE.MeshPhongMaterial({
-        color: FACE_COLOR_INSTANCE,
-        flatShading: true,
+
+      const faceMaterials = this._buildMaterialArray(
+        cached.groupMaterialIds,
+        cached.groupStarts,
+        cached.groupCounts,
+        faceGeo,
         side,
-      })
-      const facesMesh = new THREE.Mesh(faceGeo, faceMat)
+      )
+      const facesMesh = new THREE.Mesh(faceGeo, faceMaterials)
       facesMesh.name = `InstanceFace_${instanceId}_${memberId}`
       group.add(facesMesh)
       facesMeshes.push(facesMesh)
@@ -285,8 +311,15 @@ export class SceneRenderer {
 
     // Dispose only materials (geometry is either shared from cache or per-instance)
     for (const mesh of g.facesMeshes) {
-      // Only dispose the material — geometry attribute buffers are shared
-      ;(mesh.material as THREE.Material).dispose()
+      // Material may be a single material or an array (multi-material mesh).
+      const mat = mesh.material
+      if (Array.isArray(mat)) {
+        for (const m of mat) {
+          m.dispose()
+        }
+      } else {
+        ;(mat as THREE.Material).dispose()
+      }
       // The geometry references shared attributes; just dispose the container
       mesh.geometry.dispose()
     }
@@ -298,6 +331,96 @@ export class SceneRenderer {
     this.instancesGroup.remove(g.group)
     this.instanceGroups.delete(instanceId)
     this.selectedInstanceIds = this.selectedInstanceIds.filter((id) => id !== instanceId)
+  }
+
+  /**
+   * Build the parallel THREE.Material[] for a multi-material mesh.
+   *
+   * For each group: calls `geometry.addGroup(start, count, i)` and creates a
+   * `MeshPhongMaterial` with either a solid `vertexColors` (material id ==
+   * `u64::MAX` = default) or the palette color (and an image `map` if the
+   * material has a texture, cached by material id). For the default group
+   * (id == `u64::MAX`) the material uses `vertexColors: true` so the per-vertex
+   * colors from the tessellator drive the shading; all other groups also use
+   * `vertexColors: true` since the color is baked in already.
+   */
+  private _buildMaterialArray(
+    groupMaterialIds: BigUint64Array,
+    groupStarts: Uint32Array,
+    groupCounts: Uint32Array,
+    geometry: THREE.BufferGeometry,
+    side: THREE.Side = THREE.FrontSide,
+  ): THREE.MeshPhongMaterial[] {
+    const materials: THREE.MeshPhongMaterial[] = []
+    const SENTINEL = BigInt('18446744073709551615') // u64::MAX
+
+    for (let i = 0; i < groupMaterialIds.length; i++) {
+      const mid = groupMaterialIds[i]
+      geometry.addGroup(groupStarts[i], groupCounts[i], i)
+
+      if (mid === SENTINEL) {
+        // Default group — use per-vertex colors from tessellator.
+        materials.push(
+          new THREE.MeshPhongMaterial({
+            vertexColors: true,
+            flatShading: true,
+            side,
+          }),
+        )
+      } else {
+        const midStr = mid.toString()
+        const info = this.wasmScene.material_info(mid)
+        let tex: THREE.Texture | undefined = undefined
+        if (info !== undefined && info.has_texture()) {
+          if (!this.textureCache.has(midStr)) {
+            const bytes = this.wasmScene.material_texture_bytes(mid)
+            if (bytes !== undefined) {
+              // Sniff MIME type from magic bytes: JPEG starts with FF, PNG with 89 50.
+              const mime = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8
+                ? 'image/jpeg'
+                : 'image/png'
+              const blob = new Blob([new Uint8Array(bytes)], { type: mime })
+              const url = URL.createObjectURL(blob)
+              const loader = new THREE.TextureLoader()
+              // Revoke the object URL once the image has been decoded.
+              const t = loader.load(url, () => URL.revokeObjectURL(url))
+              t.wrapS = THREE.RepeatWrapping
+              t.wrapT = THREE.RepeatWrapping
+              this.textureCache.set(midStr, t)
+            }
+          }
+          tex = this.textureCache.get(midStr)
+        }
+
+        const color = info !== undefined
+          ? new THREE.Color(info.r() / 255, info.g() / 255, info.b() / 255)
+          : new THREE.Color(FACE_COLOR_DEFAULT / 0xffffff)
+
+        const m = new THREE.MeshPhongMaterial({
+          vertexColors: tex === undefined, // use vertex colors when no texture
+          color: tex !== undefined ? color : undefined,
+          map: tex,
+          flatShading: true,
+          side,
+        })
+        materials.push(m)
+        info?.free?.()
+      }
+    }
+
+    // If palette is empty for some reason, fall back to a single default mat.
+    if (materials.length === 0) {
+      geometry.addGroup(0, Infinity, 0)
+      materials.push(
+        new THREE.MeshPhongMaterial({
+          color: FACE_COLOR_DEFAULT,
+          flatShading: true,
+          side,
+        }),
+      )
+    }
+
+    return materials
   }
 
   private _refreshObject(objectId: bigint): void {
@@ -315,18 +438,28 @@ export class SceneRenderer {
       const positions = mesh.positions()
       const normals = mesh.normals()
       const indices = mesh.indices()
+      const colors = mesh.colors()
+      const uvs = mesh.uvs()
+      const groupMaterialIds = BigUint64Array.from(mesh.group_material_ids())
+      const groupStarts = mesh.group_starts()
+      const groupCounts = mesh.group_counts()
       const edgePositions = mesh.edge_positions()
 
-      // Face mesh
+      // Face mesh — multi-material: one BufferGeometry with addGroup per material.
       const faceGeo = new THREE.BufferGeometry()
       faceGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       faceGeo.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+      faceGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+      faceGeo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
       faceGeo.setIndex(new THREE.BufferAttribute(indices, 1))
-      const faceMat = new THREE.MeshPhongMaterial({
-        color: watertight ? FACE_COLOR : FACE_COLOR_LEAKY,
-        flatShading: true,
-      })
-      const facesMesh = new THREE.Mesh(faceGeo, faceMat)
+
+      const faceMaterials = this._buildMaterialArray(
+        groupMaterialIds,
+        groupStarts,
+        groupCounts,
+        faceGeo,
+      )
+      const facesMesh = new THREE.Mesh(faceGeo, faceMaterials)
 
       // Edge lines
       const edgeGeo = new THREE.BufferGeometry()
@@ -356,7 +489,14 @@ export class SceneRenderer {
     if (g === undefined) return
 
     g.facesMesh.geometry.dispose()
-    ;(g.facesMesh.material as THREE.Material).dispose()
+    const mat = g.facesMesh.material
+    if (Array.isArray(mat)) {
+      for (const m of mat) {
+        m.dispose()
+      }
+    } else {
+      ;(mat as THREE.Material).dispose()
+    }
     g.edgesLines.geometry.dispose()
     ;(g.edgesLines.material as THREE.Material).dispose()
     this.objectsGroup.remove(g.group)
@@ -515,11 +655,20 @@ export class SceneRenderer {
   }
 
   private _setInstanceOpacity(g: InstanceMeshGroup, opacity: number): void {
+    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
+      m.opacity = opacity
+      m.transparent = opacity < 1
+      m.depthWrite = opacity >= 1
+    }
     for (const mesh of g.facesMeshes) {
-      const mat = mesh.material as THREE.MeshPhongMaterial
-      mat.opacity = opacity
-      mat.transparent = opacity < 1
-      mat.depthWrite = opacity >= 1
+      const mat = mesh.material
+      if (Array.isArray(mat)) {
+        for (const m of mat) {
+          setFaceMatOpacity(m as THREE.MeshPhongMaterial)
+        }
+      } else {
+        setFaceMatOpacity(mat as THREE.MeshPhongMaterial)
+      }
     }
     for (const lines of g.edgesLines) {
       const mat = lines.material as THREE.LineBasicMaterial
@@ -529,10 +678,19 @@ export class SceneRenderer {
   }
 
   private _setObjectOpacity(g: ObjectMeshGroup, opacity: number): void {
-    const faceMat = g.facesMesh.material as THREE.MeshPhongMaterial
-    faceMat.opacity = opacity
-    faceMat.transparent = opacity < 1
-    faceMat.depthWrite = opacity >= 1
+    const mat = g.facesMesh.material
+    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
+      m.opacity = opacity
+      m.transparent = opacity < 1
+      m.depthWrite = opacity >= 1
+    }
+    if (Array.isArray(mat)) {
+      for (const m of mat) {
+        setFaceMatOpacity(m as THREE.MeshPhongMaterial)
+      }
+    } else {
+      setFaceMatOpacity(mat as THREE.MeshPhongMaterial)
+    }
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.opacity = opacity
     edgeMat.transparent = opacity < 1
@@ -556,15 +714,8 @@ export class SceneRenderer {
     const g = this.objectGroups.get(objectId)
     if (g === undefined) return
 
-    const watertight = this.watertightMap.get(objectId) ?? true
-    const faceColor = selected
-      ? FACE_COLOR_SELECTED
-      : (watertight ? FACE_COLOR : FACE_COLOR_LEAKY)
+    // Face fill is owned by material color — only edge color changes for selection.
     const edgeColor = selected ? EDGE_COLOR_SELECTED : EDGE_COLOR
-
-    const faceMat = g.facesMesh.material as THREE.MeshPhongMaterial
-    faceMat.color.setHex(faceColor)
-
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.color.setHex(edgeColor)
   }
@@ -572,11 +723,8 @@ export class SceneRenderer {
   private _applyInstanceColors(instanceId: bigint, selected: boolean): void {
     const g = this.instanceGroups.get(instanceId)
     if (g === undefined) return
-    const faceColor = selected ? FACE_COLOR_SELECTED : FACE_COLOR_INSTANCE
+    // Face fill is owned by material color — only edge color changes for selection.
     const edgeColor = selected ? EDGE_COLOR_SELECTED : EDGE_COLOR
-    for (const mesh of g.facesMeshes) {
-      ;(mesh.material as THREE.MeshPhongMaterial).color.setHex(faceColor)
-    }
     for (const lines of g.edgesLines) {
       ;(lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
     }
@@ -625,6 +773,11 @@ export class SceneRenderer {
       this._removeInstanceGroup(id)
     }
     this.memberGeometryCache.clear()
+    // Dispose and revoke cached textures.
+    for (const tex of this.textureCache.values()) {
+      tex.dispose()
+    }
+    this.textureCache.clear()
     this._clearSketchLines()
     this._clearSketchRegions()
   }

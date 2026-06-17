@@ -23,6 +23,7 @@ pub mod document;
 pub mod error;
 pub mod history;
 pub mod ids;
+pub mod material;
 pub mod math;
 pub mod ops;
 pub mod serialize;
@@ -35,9 +36,10 @@ pub use document::{DocChange, Document, DocumentError, NodeId};
 pub use error::TopologyError;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 pub use ids::{
-    ComponentId, EdgeId, FaceId, GroupId, HalfEdgeId, InstanceId, LoopId, ObjectId, ShellId,
-    SketchId, VertexId,
+    ComponentId, EdgeId, FaceId, GroupId, HalfEdgeId, InstanceId, LoopId, MaterialId, ObjectId,
+    ShellId, SketchId, VertexId,
 };
+pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceMergeInnerReport,

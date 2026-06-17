@@ -6,8 +6,9 @@
 //! stable across undo/redo.
 
 use kernel::{
-    BooleanError, BooleanOp, Document, DocumentError, GroupId, KernelOp, NodeId, Object, Plane,
-    Point3, Transform, TransformError, Vec3, WatertightState,
+    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, KernelOp, Material,
+    MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, Transform, TransformError, Vec3,
+    WatertightState,
 };
 use std::collections::HashSet;
 
@@ -970,4 +971,202 @@ fn component_actions_round_trip_through_undo_redo() {
     );
     assert_eq!(doc.instance_def(inst), Some(comp));
     assert_eq!(doc.instance_def(i2), Some(comp));
+}
+
+// ------------------------------------------------------- materials
+
+/// The face of `obj` whose plane normal matches `n` (within a tight tolerance).
+fn face_with_normal(doc: &Document, obj: ObjectId, n: Vec3) -> FaceId {
+    let object = doc.object(obj).expect("live object");
+    object
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            let fn_ = f.plane.normal();
+            (fn_.x - n.x).abs() < 1e-9 && (fn_.y - n.y).abs() < 1e-9 && (fn_.z - n.z).abs() < 1e-9
+        })
+        .map(|(id, _)| id)
+        .expect("a face with that normal exists")
+}
+
+/// How many of `obj`'s faces currently carry `mat`.
+fn faces_painted(doc: &Document, obj: ObjectId, mat: MaterialId) -> usize {
+    doc.object(obj)
+        .expect("live object")
+        .faces()
+        .values()
+        .filter(|f| f.material == Some(mat))
+        .count()
+}
+
+#[test]
+fn paint_face_sets_and_clears_material() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+
+    assert_eq!(doc.face_material(o, top), None, "unpainted = default");
+    doc.paint_face(o, top, Some(red)).expect("paint");
+    assert_eq!(doc.face_material(o, top), Some(red));
+
+    // Painting None resets to the default material.
+    doc.paint_face(o, top, None).expect("unpaint");
+    assert_eq!(doc.face_material(o, top), None);
+}
+
+#[test]
+fn paint_face_rejects_unknown_inputs() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+
+    // Unknown material handle (from a different, empty document) is refused.
+    let mut other = Document::new();
+    let stray = other.add_material(Material::solid("X", Rgba8::rgb(0, 0, 0)));
+    assert_eq!(
+        doc.paint_face(o, top, Some(stray)),
+        Err(DocumentError::UnknownMaterial)
+    );
+
+    // Unknown face handle is refused.
+    let stray_face = FaceId::default();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    assert_eq!(
+        doc.paint_face(o, stray_face, Some(red)),
+        Err(DocumentError::UnknownFace)
+    );
+}
+
+#[test]
+fn paint_face_undo_redo_is_exact() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+
+    doc.paint_face(o, top, Some(red)).unwrap();
+    doc.paint_face(o, top, Some(blue)).unwrap();
+    assert_eq!(doc.face_material(o, top), Some(blue));
+
+    doc.undo().unwrap();
+    assert_eq!(doc.face_material(o, top), Some(red), "undo restores prev");
+    doc.undo().unwrap();
+    assert_eq!(doc.face_material(o, top), None, "undo restores default");
+
+    doc.redo().unwrap();
+    assert_eq!(doc.face_material(o, top), Some(red), "redo re-applies");
+    doc.redo().unwrap();
+    assert_eq!(doc.face_material(o, top), Some(blue));
+}
+
+// NOTE: split-then-inherit is covered by the reliable in-crate unit test
+// `ops::tests::split_face_propagates_material_to_both_halves` (on `unit_cube`).
+// A Document-level version on an *extruded* box was removed: it exposed a
+// pre-existing, seed-dependent `split_face` robustness bug (intermittent
+// dangling `vertex.outgoing` on extruded-box top faces — see DESIGN risk #1),
+// which is unrelated to materials and tracked separately.
+
+#[test]
+fn boolean_preserves_operand_face_materials() {
+    let mut doc = Document::new();
+    // Two overlapping boxes in general position (offset in z so faces aren't
+    // coplanar), so union merges them into one solid.
+    let a = extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0);
+    let b = extrude_box(&mut doc, 1.0, 1.0, 3.0, 3.0, 1.0, 3.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+
+    // Paint a face on each operand that survives onto the union boundary.
+    let a_bottom = face_with_normal(&doc, a, Vec3::new(0.0, 0.0, -1.0));
+    let b_top = face_with_normal(&doc, b, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(a, a_bottom, Some(red)).unwrap();
+    doc.paint_face(b, b_top, Some(blue)).unwrap();
+
+    let (result, _) = doc.boolean(BooleanOp::Union, a, b).expect("union");
+
+    assert!(
+        faces_painted(&doc, result, red) >= 1,
+        "operand A's material survives the boolean onto its source faces"
+    );
+    assert!(
+        faces_painted(&doc, result, blue) >= 1,
+        "operand B's material survives the boolean onto its source faces"
+    );
+}
+
+// ----------------------------------------- object base material ( follow-up)
+
+#[test]
+fn set_object_material_sets_clears_and_undo_redo() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+
+    assert_eq!(doc.object(o).unwrap().default_material(), None);
+    doc.set_object_material(o, Some(red)).expect("set base");
+    assert_eq!(doc.object(o).unwrap().default_material(), Some(red));
+
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.object(o).unwrap().default_material(),
+        None,
+        "undo clears base"
+    );
+    doc.redo().unwrap();
+    assert_eq!(
+        doc.object(o).unwrap().default_material(),
+        Some(red),
+        "redo restores"
+    );
+
+    doc.set_object_material(o, None).expect("clear base");
+    assert_eq!(doc.object(o).unwrap().default_material(), None);
+}
+
+#[test]
+fn set_object_material_rejects_unknown_material() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let mut other = Document::new();
+    let stray = other.add_material(Material::solid("X", Rgba8::rgb(0, 0, 0)));
+    assert_eq!(
+        doc.set_object_material(o, Some(stray)),
+        Err(DocumentError::UnknownMaterial)
+    );
+}
+
+#[test]
+fn explicit_face_paint_overrides_object_base() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+
+    doc.set_object_material(o, Some(red)).unwrap();
+    doc.paint_face(o, top, Some(blue)).unwrap();
+
+    // The painted face keeps its own material; the base stays red for the rest
+    // (non-destructive — face overrides win, base covers the unpainted faces).
+    assert_eq!(doc.face_material(o, top), Some(blue));
+    assert_eq!(doc.object(o).unwrap().default_material(), Some(red));
+}
+
+#[test]
+fn boolean_result_inherits_operand_a_base_material() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0);
+    let b = extrude_box(&mut doc, 1.0, 1.0, 3.0, 3.0, 1.0, 3.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    doc.set_object_material(a, Some(red)).unwrap();
+
+    let (result, _) = doc.boolean(BooleanOp::Subtract, a, b).expect("subtract");
+    assert_eq!(
+        doc.object(result).unwrap().default_material(),
+        Some(red),
+        "the subtract result inherits operand A's base material, so carved \
+         walls from an unpainted cutter resolve to A's color"
+    );
 }

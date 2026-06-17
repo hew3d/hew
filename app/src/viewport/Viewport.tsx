@@ -27,6 +27,7 @@ import { SceneRenderer } from './SceneRenderer'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
 import { PushPullTool } from '../tools/PushPullTool'
+import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
@@ -63,6 +64,10 @@ interface Props {
   apiRef?: React.MutableRefObject<ViewportApi | null>
   /** Called with the live measurement text from tools that support VCB entry. */
   onMeasurement?: (text: string) => void
+  /** Currently selected material id for the Paint tool. `u64::MAX` =
+   *  default / unpaint. The viewport keeps a stable ref so a paint tool
+   *  instantiated inside the effect always sees the latest value. */
+  currentMaterialId?: bigint
 }
 
 /** Imperative handle the viewport exposes to the parent. */
@@ -226,6 +231,7 @@ export default function Viewport({
   onDocumentChanged,
   apiRef,
   onMeasurement,
+  currentMaterialId = MATERIAL_SENTINEL,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -252,6 +258,8 @@ export default function Viewport({
   const activeContextRef = useRef<NodeRef[]>(activeContext)
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
+  // Latest current material id for the Paint tool.
+  const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
   // Whether the in-flight click is a shift-click (additive multi-select).
   const selectAdditiveRef = useRef(false)
 
@@ -536,6 +544,16 @@ export default function Viewport({
       return tool
     }
 
+    function makePaintTool(): PaintTool {
+      return new PaintTool(
+        wasmScene,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
+        handleToast,
+      )
+    }
+
     function makeMoveTool(): MoveTool {
       const sel = selectedIdsRef.current[0] ?? null
       return new MoveTool(
@@ -591,6 +609,12 @@ export default function Viewport({
         case 'Push/Pull':
           toolController.setTool(makePushPullTool())
           break
+        case 'Paint': {
+          const pt = makePaintTool()
+          pt.setCurrentMaterial(currentMaterialIdRef.current)
+          toolController.setTool(pt)
+          break
+        }
         case 'Move':
           toolController.setTool(makeMoveTool())
           break
@@ -696,6 +720,12 @@ export default function Viewport({
       selectAdditiveRef.current = ev.shiftKey
 
       const activeTool = toolController.activeTool
+
+      // ⌘/Ctrl-click on the Paint tool fills the whole object (base material).
+      if (activeTool instanceof PaintTool) {
+        activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
+      }
+
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null }).snapConstraint()
         : null
@@ -903,6 +933,15 @@ export default function Viewport({
   // in the object groups but the leaf objects inside them are highlighted via
   // the lit set / isolation mechanism. Instance refs are highlighted via
   // setSelectedInstances.
+  // Push the latest material id into a live PaintTool without re-creating it.
+  useEffect(() => {
+    currentMaterialIdRef.current = currentMaterialId
+    const tool = toolControllerRef.current?.activeTool
+    if (tool instanceof PaintTool) {
+      tool.setCurrentMaterial(currentMaterialId)
+    }
+  }, [currentMaterialId])
+
   useEffect(() => {
     selectedIdsRef.current = selectedIds
     // Collect leaf object ids and instance ids for highlighting

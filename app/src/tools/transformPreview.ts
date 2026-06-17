@@ -13,6 +13,25 @@
 import * as THREE from 'three'
 
 /**
+ * Clone a mesh's material(s) and make the clone(s) semi-transparent. Face
+ * meshes are multi-material (one entry per material group), so the
+ * material may be an array; edge meshes are single-material. Returns the same
+ * shape (array or single) so it can be assigned straight back to `.material`.
+ */
+function fadePreviewMaterial(
+  material: THREE.Material | THREE.Material[],
+): THREE.Material | THREE.Material[] {
+  const fade = (m: THREE.Material): THREE.Material => {
+    const c = m.clone()
+    c.opacity = 0.5
+    c.transparent = true
+    c.depthWrite = false
+    return c
+  }
+  return Array.isArray(material) ? material.map(fade) : fade(material)
+}
+
+/**
  * Clone the mesh sub-group for one object and make it semi-transparent.
  * Returns null if the source group is not found.
  */
@@ -32,19 +51,12 @@ function cloneObjectMesh(
     if (child instanceof THREE.Mesh) {
       // Clone geometry so dispose() on the preview does not corrupt the live object
       child.geometry = child.geometry.clone()
-      const mat = (child.material as THREE.MeshPhongMaterial).clone()
-      mat.opacity = 0.5
-      mat.transparent = true
-      mat.depthWrite = false
-      child.material = mat
+      child.material = fadePreviewMaterial(child.material)
     }
     if (child instanceof THREE.LineSegments) {
       // Clone geometry so dispose() on the preview does not corrupt the live object
       child.geometry = child.geometry.clone()
-      const mat = (child.material as THREE.LineBasicMaterial).clone()
-      mat.opacity = 0.5
-      mat.transparent = true
-      child.material = mat
+      child.material = fadePreviewMaterial(child.material)
     }
   })
   return clone
@@ -82,18 +94,11 @@ export function buildInstancePreviewClone(
   clone.traverse((child) => {
     if (child instanceof THREE.Mesh) {
       child.geometry = child.geometry.clone()
-      const mat = (child.material as THREE.MeshPhongMaterial).clone()
-      mat.opacity = 0.5
-      mat.transparent = true
-      mat.depthWrite = false
-      child.material = mat
+      child.material = fadePreviewMaterial(child.material)
     }
     if (child instanceof THREE.LineSegments) {
       child.geometry = child.geometry.clone()
-      const mat = (child.material as THREE.LineBasicMaterial).clone()
-      mat.opacity = 0.5
-      mat.transparent = true
-      child.material = mat
+      child.material = fadePreviewMaterial(child.material)
     }
   })
   return clone
@@ -129,14 +134,18 @@ export function buildMultiPreviewClone(
  * clear it.  Safe to call even when the group is empty.
  */
 export function clearPreview(previewGroup: THREE.Group): void {
+  const disposeMaterial = (m: THREE.Material | THREE.Material[]) => {
+    if (Array.isArray(m)) m.forEach((mm) => mm.dispose())
+    else if (m instanceof THREE.Material) m.dispose()
+  }
   previewGroup.traverse((child) => {
     if (child instanceof THREE.Mesh) {
       child.geometry.dispose()
-      if (child.material instanceof THREE.Material) child.material.dispose()
+      disposeMaterial(child.material)
     }
     if (child instanceof THREE.LineSegments) {
       child.geometry.dispose()
-      if (child.material instanceof THREE.Material) child.material.dispose()
+      disposeMaterial(child.material)
     }
   })
   previewGroup.clear()

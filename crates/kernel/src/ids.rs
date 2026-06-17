@@ -32,4 +32,8 @@ new_key_type! {
     /// [`ComponentId`] at a per-instance pose) in a
     /// [`crate::document::Document`] (ARCHITECTURE.md).
     pub struct InstanceId;
+    /// Handle to a [`crate::material::Material`] in a
+    /// [`crate::document::Document`]'s palette (ARCHITECTURE.md). A
+    /// [`crate::topo::Face`] references one (or `None` = default material).
+    pub struct MaterialId;
 }

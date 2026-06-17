@@ -10,6 +10,7 @@ use slotmap::SecondaryMap;
 
 use crate::error::TopologyError;
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, VertexId};
+use crate::material::FaceMaterial;
 use crate::math::{Plane, Point3};
 use crate::tol;
 use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Shell, Vertex, WatertightState};
@@ -26,6 +27,26 @@ impl Object {
     pub fn from_polygons(
         positions: &[Point3],
         faces: &[Vec<usize>],
+    ) -> Result<Object, TopologyError> {
+        Object::from_polygons_impl(positions, faces, None)
+    }
+
+    /// Like [`Object::from_polygons`], but assigns each face the material at the
+    /// same index in `materials`. Crate-internal: the boolean assembler
+    /// uses it so result faces inherit their source face's material. `materials`
+    /// must be parallel to `faces`.
+    pub(crate) fn from_polygons_with_materials(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        materials: &[FaceMaterial],
+    ) -> Result<Object, TopologyError> {
+        Object::from_polygons_impl(positions, faces, Some(materials))
+    }
+
+    fn from_polygons_impl(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        materials: Option<&[FaceMaterial]>,
     ) -> Result<Object, TopologyError> {
         if faces.is_empty() || positions.is_empty() {
             return Err(TopologyError::EmptyObject);
@@ -88,6 +109,7 @@ impl Object {
                 outer_loop: loop_id,
                 inner_loops: Vec::new(),
                 plane,
+                material: materials.and_then(|m| m.get(face_index).copied()).flatten(),
             });
             obj.loops[loop_id].face = face_id;
 
@@ -176,18 +198,18 @@ impl Object {
     /// Crate-internal construction path that supports faces with inner loops
     /// (holes). Used by [`Object::from_extrusion`].
     ///
-    /// `faces` is a list of `(outer_indices, inner_loops, plane)` tuples where
-    /// `outer_indices` and each inner-loop list are index lists into
-    /// `positions`. All winding must be consistent (outer CCW, inner CW seen
-    /// from the face normal) — this function does not validate; callers are
-    /// responsible.
+    /// `faces` is a list of `(outer_indices, inner_loops, plane, material)`
+    /// tuples where `outer_indices` and each inner-loop list are index lists
+    /// into `positions`. All winding must be consistent (outer CCW, inner CW
+    /// seen from the face normal) — this function does not validate; callers are
+    /// responsible. `material` is the face's material (`None` = default).
     ///
     /// The public signature/behaviour of [`Object::from_polygons`] is
     /// unchanged; this function is a separate, internal path.
     #[allow(clippy::type_complexity)]
     pub(crate) fn from_faces_with_holes(
         positions: &[Point3],
-        faces: &[(Vec<usize>, Vec<Vec<usize>>, Plane)],
+        faces: &[(Vec<usize>, Vec<Vec<usize>>, Plane, FaceMaterial)],
     ) -> Object {
         let mut obj = Object::empty();
 
@@ -207,7 +229,7 @@ impl Object {
         let mut directed: HashMap<(VertexId, VertexId), HalfEdgeId> = HashMap::new();
         let mut all_face_ids: Vec<FaceId> = Vec::new();
 
-        for (outer_indices, hole_index_lists, plane) in faces {
+        for (outer_indices, hole_index_lists, plane, material) in faces {
             // ---- outer loop ----
             let outer_loop_id = obj.loops.insert(Loop {
                 face: FaceId::default(),
@@ -219,6 +241,7 @@ impl Object {
                 outer_loop: outer_loop_id,
                 inner_loops: Vec::new(),
                 plane: *plane,
+                material: *material,
             });
             obj.loops[outer_loop_id].face = face_id;
             all_face_ids.push(face_id);

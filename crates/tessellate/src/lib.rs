@@ -8,7 +8,11 @@
 //! Triangulation supports non-convex faces and faces with holes via ear
 //! clipping with hole bridging (Eberly "Triangulation by Ear Clipping").
 
-use kernel::{FaceId, Object};
+use kernel::{FaceId, MaterialId, MaterialPalette, Object, Rgba8};
+
+/// Default face color when no material is assigned (or the id is stale):
+/// a neutral light gray (`0xcccccc`).
+const DEFAULT_MATERIAL_RGBA: Rgba8 = Rgba8::rgb(0xcc, 0xcc, 0xcc);
 
 /// Tessellation failed; the Object uses topology this version cannot
 /// triangulate honestly.
@@ -33,6 +37,18 @@ impl std::fmt::Display for TessellateError {
 
 impl std::error::Error for TessellateError {}
 
+/// Describes a contiguous run of the index buffer that belongs to one material.
+/// Used by the renderer to set up `THREE.BufferGeometry.addGroup(start, count, i)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterialGroup {
+    /// The material covering this index range, or `None` = default material.
+    pub material: Option<MaterialId>,
+    /// First index (into `RenderMesh::indices`) in this run.
+    pub start: u32,
+    /// Number of indices (always a multiple of 3) in this run.
+    pub count: u32,
+}
+
 /// Flat-shaded render buffers for one Object.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderMesh {
@@ -40,19 +56,46 @@ pub struct RenderMesh {
     pub positions: Vec<f32>,
     /// Per-vertex normals (constant across each face).
     pub normals: Vec<f32>,
-    /// Triangle indices into `positions`.
+    /// Triangle indices into `positions`, sorted so each material's triangles
+    /// are contiguous (see `groups`).
     pub indices: Vec<u32>,
+    /// Per-vertex RGB colors (3 floats, range 0–1), parallel to `positions`.
+    pub colors: Vec<f32>,
+    /// Per-vertex UV coordinates (2 floats), parallel to `positions`.
+    pub uvs: Vec<f32>,
+    /// Contiguous runs of the index buffer per material (used by the renderer
+    /// to build `addGroup` calls). Always at least one entry.
+    pub groups: Vec<MaterialGroup>,
     /// Line-segment endpoints (xyz pairs), one segment per unique edge.
     pub edge_positions: Vec<f32>,
 }
 
 /// Tessellates an Object into flat-shaded triangle and edge-line buffers.
 ///
+/// `palette` is the document's material palette; it is used to resolve each
+/// face's `material` field into per-vertex colors and UV coordinates.
+///
 /// Faces are triangulated via ear clipping (supports non-convex faces and
 /// faces with holes). Triangles wind counter-clockwise seen from outside —
 /// front faces under the WebGL default.
-pub fn tessellate(object: &Object) -> Result<RenderMesh, TessellateError> {
+///
+/// The index buffer is grouped by material so each material's triangles are
+/// contiguous (see `RenderMesh::groups`). Positions/normals/colors/uvs remain
+/// in face order (not sorted); only indices are reordered.
+pub fn tessellate(
+    object: &Object,
+    palette: &MaterialPalette,
+) -> Result<RenderMesh, TessellateError> {
+    // First pass: collect per-face geometry without committing index order.
+    // Each entry: (material_id, base_vertex, triangles, vertex_data).
+    struct FaceData {
+        material: Option<MaterialId>,
+        base: u32,
+        triangles: Vec<[usize; 3]>,
+    }
+
     let mut mesh = RenderMesh::default();
+    let mut face_data: Vec<FaceData> = Vec::new();
 
     for (face_id, face) in object.faces() {
         let normal = face.plane.normal();
@@ -60,6 +103,27 @@ pub fn tessellate(object: &Object) -> Result<RenderMesh, TessellateError> {
 
         // Build the orthonormal 2D basis (u, v) such that u × v = normal.
         let (u_ax, v_ax) = plane_basis(normal);
+
+        // Resolve the *effective* material for color, UV world_size, AND the
+        // group key: a face with no own material falls back to the object's
+        // base material ( follow-up), so faces grown by extrude/boolean and
+        // textured bases all render consistently.
+        let material_id = face.material.or(object.default_material());
+        let (color, world_size) = match material_id.and_then(|id| palette.get(id)) {
+            Some(mat) => {
+                let c = mat.color;
+                let ws = mat
+                    .texture
+                    .as_ref()
+                    .map(|t| t.world_size)
+                    .unwrap_or([1.0, 1.0]);
+                (c, ws)
+            }
+            None => (DEFAULT_MATERIAL_RGBA, [1.0, 1.0]),
+        };
+        let cr = color.r as f32 / 255.0;
+        let cg = color.g as f32 / 255.0;
+        let cb = color.b as f32 / 255.0;
 
         // Collect outer loop 3D positions.
         let outer_3d: Vec<[f64; 3]> = object
@@ -90,20 +154,60 @@ pub fn tessellate(object: &Object) -> Result<RenderMesh, TessellateError> {
         // Ear-clip the polygon and emit triangles.
         let base = (mesh.positions.len() / 3) as u32;
 
-        // Append polygon vertices.
-        for &[x, y, z, _, _] in &poly {
+        // Append polygon vertices (positions, normals, colors, UVs).
+        for &[x, y, z, u2d, v2d] in &poly {
             mesh.positions.extend([x as f32, y as f32, z as f32]);
             mesh.normals.extend(n);
+            mesh.colors.extend([cr, cg, cb]);
+            // UV = planar 2D coord divided by world_size.
+            mesh.uvs
+                .extend([(u2d / world_size[0]) as f32, (v2d / world_size[1]) as f32]);
         }
 
-        // Run ear clipping.
+        // Run ear clipping (local indices into poly).
         let triangles = ear_clip(&poly);
-        for [i, j, k] in triangles {
-            mesh.indices
-                .extend([base + i as u32, base + j as u32, base + k as u32]);
-        }
+
+        face_data.push(FaceData {
+            material: material_id,
+            base,
+            triangles,
+        });
     }
 
+    // Second pass: bucket each face's triangles by material so a material's
+    // indices are contiguous, then emit one group per bucket. Buckets are kept
+    // in first-seen order — distinct materials per object are few, so a
+    // linear-scan bucket list is ample and needs no ordering on `MaterialId`.
+    let mut buckets: Vec<(Option<MaterialId>, Vec<u32>)> = Vec::new();
+    for fd in &face_data {
+        let bi = match buckets.iter().position(|(m, _)| *m == fd.material) {
+            Some(i) => i,
+            None => {
+                buckets.push((fd.material, Vec::new()));
+                buckets.len() - 1
+            }
+        };
+        let run = &mut buckets[bi].1;
+        for [i, j, k] in &fd.triangles {
+            run.extend([
+                fd.base + *i as u32,
+                fd.base + *j as u32,
+                fd.base + *k as u32,
+            ]);
+        }
+    }
+    for (material, run) in buckets {
+        let start = mesh.indices.len() as u32;
+        let count = run.len() as u32;
+        mesh.indices.extend(run);
+        mesh.groups.push(MaterialGroup {
+            material,
+            start,
+            count,
+        });
+    }
+
+    // Edge lines are independent of material grouping.
     for edge in object.edges().values() {
         let he = &object.half_edges()[edge.half_edge];
         let from = object.vertices()[he.origin].position;
@@ -576,7 +680,7 @@ fn ear_clip(poly: &[[f64; 5]]) -> Vec<[usize; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kernel::{Object, Point3, Profile};
+    use kernel::{MaterialPalette, Object, Point3, Profile};
 
     /// f32 round-off allowance for unit-length checks in tests only; kernel
     /// geometric tolerances live in `kernel::tol`.
@@ -648,7 +752,7 @@ mod tests {
 
     #[test]
     fn tetrahedron_buffers_have_expected_shape() {
-        let mesh = tessellate(&Object::tetrahedron()).unwrap();
+        let mesh = tessellate(&Object::tetrahedron(), &MaterialPalette::default()).unwrap();
         // 4 triangular faces, vertices duplicated per face.
         assert_eq!(mesh.positions.len(), 4 * 3 * 3);
         assert_eq!(mesh.normals.len(), mesh.positions.len());
@@ -660,7 +764,7 @@ mod tests {
 
     #[test]
     fn quad_faces_fan_into_two_triangles() {
-        let mesh = tessellate(&unit_cube()).unwrap();
+        let mesh = tessellate(&unit_cube(), &MaterialPalette::default()).unwrap();
         // 6 quads -> 24 duplicated corners, 12 triangles, 12 unique edges.
         assert_eq!(mesh.positions.len(), 24 * 3);
         assert_eq!(mesh.indices.len(), 12 * 3);
@@ -669,7 +773,7 @@ mod tests {
 
     #[test]
     fn normals_are_unit_length() {
-        let mesh = tessellate(&Object::tetrahedron()).unwrap();
+        let mesh = tessellate(&Object::tetrahedron(), &MaterialPalette::default()).unwrap();
         for n in mesh.normals.chunks_exact(3) {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             assert!(
@@ -733,7 +837,7 @@ mod tests {
 
         let profile = Profile::new(xy_plane(), l_outer.clone(), vec![]).unwrap();
         let solid = Object::from_extrusion(&profile, 1.0).unwrap();
-        let mesh = tessellate(&solid).unwrap();
+        let mesh = tessellate(&solid, &MaterialPalette::default()).unwrap();
 
         // Find the two cap faces (those with normal along ±Z) — they are the
         // L-shaped caps with 6 vertices each.
@@ -819,7 +923,7 @@ mod tests {
         let solid = Object::from_extrusion(&profile, 2.0).unwrap();
 
         // Must tessellate without error.
-        let mesh = tessellate(&solid).unwrap();
+        let mesh = tessellate(&solid, &MaterialPalette::default()).unwrap();
         assert!(
             !mesh.indices.is_empty(),
             "washer tessellation produced no triangles"
@@ -912,5 +1016,145 @@ mod tests {
             cap_face_count, 2,
             "expected 2 cap faces, found {cap_face_count}"
         );
+    }
+
+    /// A painted face yields its material color in `colors`, and the index
+    /// buffer is grouped so the painted face's triangles are contiguous in one
+    /// group while the unpainted faces are in another.
+    #[test]
+    fn painted_face_color_and_grouped_indices() {
+        use kernel::{Document, Material, Rgba8, SketchRegionId};
+
+        // Build a unit-square extrusion via the document so we can paint a face.
+        let mut doc = Document::new();
+        let plane = kernel::Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        let sk = doc.add_sketch(plane);
+        let s = doc.sketch_mut(sk).unwrap();
+        for (ax, ay, bx, by) in [
+            (0.0f64, 0.0, 1.0, 0.0),
+            (1.0, 0.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0, 0.0),
+        ] {
+            s.add_segment(Point3::new(ax, ay, 0.0), Point3::new(bx, by, 0.0))
+                .unwrap();
+        }
+        let regions = doc.extrudable_regions(sk).unwrap();
+        let region_id: SketchRegionId = regions[0];
+        let (obj_id, _) = doc.extrude_region(sk, region_id, 1.0).unwrap();
+
+        // Add a red material and paint the top face (normal ≈ +Z).
+        let red_id = doc.add_material(Material::solid("red", Rgba8::rgb(255, 0, 0)));
+
+        let top_face_id = {
+            doc.object(obj_id)
+                .unwrap()
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid)
+                .unwrap()
+        };
+        doc.paint_face(obj_id, top_face_id, Some(red_id)).unwrap();
+
+        let object = doc.object(obj_id).unwrap();
+        let palette = doc.materials();
+        let mesh = tessellate(object, palette).unwrap();
+
+        // There must be colors and uvs parallel to positions.
+        let n_vertices = mesh.positions.len() / 3;
+        assert_eq!(
+            mesh.colors.len(),
+            n_vertices * 3,
+            "colors not parallel to positions"
+        );
+        assert_eq!(
+            mesh.uvs.len(),
+            n_vertices * 2,
+            "uvs not parallel to positions"
+        );
+
+        // There must be exactly 2 groups: one for the red material, one for None.
+        assert_eq!(mesh.groups.len(), 2, "expected 2 material groups");
+        let red_group = mesh.groups.iter().find(|g| g.material == Some(red_id));
+        let default_group = mesh.groups.iter().find(|g| g.material.is_none());
+        assert!(red_group.is_some(), "no group for red material");
+        assert!(default_group.is_some(), "no group for default material");
+
+        // The red-material vertices must have color (1,0,0).
+        let rg = red_group.unwrap();
+        assert!(rg.count > 0, "red group has no indices");
+        for idx_pos in (rg.start as usize..(rg.start + rg.count) as usize).step_by(1) {
+            let vi = mesh.indices[idx_pos] as usize;
+            let r = mesh.colors[vi * 3];
+            let g_val = mesh.colors[vi * 3 + 1];
+            let b = mesh.colors[vi * 3 + 2];
+            assert!(
+                (r - 1.0).abs() < 1e-5 && g_val < 1e-5 && b < 1e-5,
+                "red-group vertex color is ({r},{g_val},{b}), expected (1,0,0)"
+            );
+        }
+
+        // The index buffer covers all triangles exactly once.
+        let total_indices: u32 = mesh.groups.iter().map(|g| g.count).sum();
+        assert_eq!(
+            total_indices as usize,
+            mesh.indices.len(),
+            "group counts don't sum to index buffer length"
+        );
+    }
+
+    /// An object base material colors every *unpainted* face (the effective
+    /// material falls back to the base), so the whole solid is one group/color.
+    #[test]
+    fn object_base_material_colors_all_unpainted_faces() {
+        use kernel::{Document, Material, Rgba8};
+
+        let mut doc = Document::new();
+        let plane = kernel::Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        let sk = doc.add_sketch(plane);
+        let s = doc.sketch_mut(sk).unwrap();
+        for (ax, ay, bx, by) in [
+            (0.0f64, 0.0, 1.0, 0.0),
+            (1.0, 0.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0, 0.0),
+        ] {
+            s.add_segment(Point3::new(ax, ay, 0.0), Point3::new(bx, by, 0.0))
+                .unwrap();
+        }
+        let region = doc.extrudable_regions(sk).unwrap()[0];
+        let (obj_id, _) = doc.extrude_region(sk, region, 1.0).unwrap();
+
+        // Set the object base to red; no face is painted individually.
+        let red = doc.add_material(Material::solid("red", Rgba8::rgb(255, 0, 0)));
+        doc.set_object_material(obj_id, Some(red)).unwrap();
+
+        let mesh = tessellate(doc.object(obj_id).unwrap(), doc.materials()).unwrap();
+
+        // Every unpainted face resolves to the base → one group, all red.
+        assert_eq!(mesh.groups.len(), 1, "all faces share the base material");
+        assert_eq!(mesh.groups[0].material, Some(red));
+        for c in mesh.colors.chunks_exact(3) {
+            assert!(
+                (c[0] - 1.0).abs() < 1e-5 && c[1] < 1e-5 && c[2] < 1e-5,
+                "vertex color {c:?} is not the base red"
+            );
+        }
     }
 }

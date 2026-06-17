@@ -34,7 +34,8 @@ use std::collections::HashSet;
 use slotmap::SlotMap;
 
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
-use crate::ids::{ComponentId, GroupId, InstanceId, ObjectId, SketchId};
+use crate::ids::{ComponentId, FaceId, GroupId, InstanceId, MaterialId, ObjectId, SketchId};
+use crate::material::Material;
 use crate::math::Plane;
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError};
 use crate::sketch::{Sketch, SketchError, SketchRegionId};
@@ -260,6 +261,23 @@ enum DocAction {
         prev_def: ComponentId,
         new_def: ComponentId,
     },
+    /// `paint_face` reassigned a face's material. Non-topological, so it
+    /// touches no [`History`]; undo restores `prev` exactly, redo re-applies
+    /// `next`. Handle-stable (the `ObjectId`/`FaceId` are untouched).
+    PaintFace {
+        object: ObjectId,
+        face: FaceId,
+        prev: Option<MaterialId>,
+        next: Option<MaterialId>,
+    },
+    /// `set_object_material` ( follow-up) reassigned an object's base
+    /// material. Like [`DocAction::PaintFace`] but on the object default; undo
+    /// restores `prev`, redo re-applies `next`.
+    SetObjectMaterial {
+        object: ObjectId,
+        prev: Option<MaterialId>,
+        next: Option<MaterialId>,
+    },
 }
 
 /// The entities a mutation touched, so the caller (the shim) can reconcile its
@@ -292,6 +310,10 @@ pub enum DocumentError {
     UnknownSketch,
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
+    /// The face handle is not present in the target object ( paint).
+    UnknownFace,
+    /// The material handle is stale or from another Document's palette.
+    UnknownMaterial,
     /// The group handle is stale, hidden, or from another Document.
     UnknownGroup,
     /// The component-definition handle is stale, hidden, or from another
@@ -341,6 +363,8 @@ impl std::fmt::Display for DocumentError {
         match self {
             DocumentError::UnknownSketch => write!(f, "no such sketch in this document"),
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
+            DocumentError::UnknownFace => write!(f, "no such face in the target object"),
+            DocumentError::UnknownMaterial => write!(f, "no such material in this document"),
             DocumentError::UnknownGroup => write!(f, "no such group in this document"),
             DocumentError::UnknownComponent => {
                 write!(f, "no such component definition in this document")
@@ -391,6 +415,11 @@ pub struct Document {
     components: SlotMap<ComponentId, ComponentDef>,
     /// Component instances (tree nodes placing a definition at a pose).
     instances: SlotMap<InstanceId, InstanceRecord>,
+    /// The material palette: named color/texture entries that faces
+    /// reference by [`MaterialId`]. Palette additions are not individually
+    /// undoable (an unreferenced material is harmless); face *assignment* is
+    /// (see [`Document::paint_face`]).
+    materials: SlotMap<MaterialId, Material>,
     /// `(sketch, region)` pairs already extruded into a solid: such a region is
     /// the bottom of its box and is no longer offered for extrusion. Keyed by
     /// sketch too because a different sketch's slotmap reuses region keys.
@@ -453,6 +482,143 @@ impl Document {
             .keys()
             .filter(|&r| !self.consumed.contains(&(sketch, r)))
             .collect())
+    }
+
+    // -------------------------------------------------------------- materials
+
+    /// Add `material` to the palette and return its handle. Additive and
+    /// **not** undoable on its own — only face assignment ([`paint_face`]) is.
+    ///
+    /// [`paint_face`]: Document::paint_face
+    pub fn add_material(&mut self, material: Material) -> MaterialId {
+        self.materials.insert(material)
+    }
+
+    /// A palette material by handle, or `None` if stale.
+    pub fn material(&self, id: MaterialId) -> Option<&Material> {
+        self.materials.get(id)
+    }
+
+    /// All palette material handles, in unspecified but stable order.
+    pub fn material_ids(&self) -> Vec<MaterialId> {
+        self.materials.keys().collect()
+    }
+
+    /// The whole material palette, for the tessellator to resolve face
+    /// colors/textures into render buffers.
+    pub fn materials(&self) -> &crate::material::MaterialPalette {
+        &self.materials
+    }
+
+    /// The material currently on `face` of `object` (`None` = default), or
+    /// `None` if the object/face is unknown. Read path for the renderer/shim.
+    pub fn face_material(&self, object: ObjectId, face: FaceId) -> Option<MaterialId> {
+        self.objects
+            .get(object)
+            .filter(|r| !r.hidden)
+            .and_then(|r| r.object.faces().get(face))
+            .and_then(|f| f.material)
+    }
+
+    /// Paint `face` of `object` with `material` (`None` resets it to the default
+    /// material), recording an undoable [`DocAction::PaintFace`].
+    ///
+    /// Works on world objects **and** component-definition members alike;
+    /// painting a definition member repaints the face in every instance of that
+    /// definition (shared geometry). Assignment is non-topological — it
+    /// bypasses the per-Object [`History`] and never affects watertightness.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] — stale or hidden object.
+    /// - [`DocumentError::UnknownFace`] — `face` is not in the object.
+    /// - [`DocumentError::UnknownMaterial`] — `Some(id)` is not in the palette.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn paint_face(
+        &mut self,
+        object: ObjectId,
+        face: FaceId,
+        material: Option<MaterialId>,
+    ) -> Result<DocChange, DocumentError> {
+        if let Some(id) = material
+            && !self.materials.contains_key(id)
+        {
+            return Err(DocumentError::UnknownMaterial);
+        }
+        let rec = match self.objects.get_mut(object) {
+            Some(rec) if !rec.hidden => rec,
+            _ => return Err(DocumentError::UnknownObject),
+        };
+        let f = match rec.object.faces.get_mut(face) {
+            Some(f) => f,
+            None => return Err(DocumentError::UnknownFace),
+        };
+        let prev = f.material;
+        f.material = material;
+        self.undo.push(DocAction::PaintFace {
+            object,
+            face,
+            prev,
+            next: material,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(self.paint_change(object))
+    }
+
+    /// Set `object`'s **base material** (`None` clears it to the renderer's
+    /// default), recording an undoable [`DocAction::SetObjectMaterial`] (
+    /// follow-up). A face with no own material resolves to the base, so the
+    /// solid — and any faces grown from it by extrude/boolean — render
+    /// consistently. Explicitly painted faces still override the base.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] — stale or hidden object.
+    /// - [`DocumentError::UnknownMaterial`] — `Some(id)` is not in the palette.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn set_object_material(
+        &mut self,
+        object: ObjectId,
+        material: Option<MaterialId>,
+    ) -> Result<DocChange, DocumentError> {
+        if let Some(id) = material
+            && !self.materials.contains_key(id)
+        {
+            return Err(DocumentError::UnknownMaterial);
+        }
+        let rec = match self.objects.get_mut(object) {
+            Some(rec) if !rec.hidden => rec,
+            _ => return Err(DocumentError::UnknownObject),
+        };
+        let prev = rec.object.default_material;
+        rec.object.default_material = material;
+        self.undo.push(DocAction::SetObjectMaterial {
+            object,
+            prev,
+            next: material,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(self.paint_change(object))
+    }
+
+    /// The [`DocChange`] for a paint of `object`: the object itself, plus — if it
+    /// is a definition member — its component and every instance of it, since the
+    /// repaint is seen through all of them (shared geometry).
+    fn paint_change(&self, object: ObjectId) -> DocChange {
+        match self.objects.get(object).map(|r| r.owner) {
+            Some(ObjectOwner::Definition(component)) => DocChange {
+                objects_touched: vec![object],
+                components_touched: vec![component],
+                instances_touched: self.instances_of(component),
+                ..Default::default()
+            },
+            _ => DocChange {
+                objects_touched: vec![object],
+                ..Default::default()
+            },
+        }
     }
 
     // ---------------------------------------------------------------- objects
@@ -1666,6 +1832,24 @@ impl Document {
                     ..Default::default()
                 }
             }
+            &DocAction::PaintFace {
+                object, face, prev, ..
+            } => {
+                if let Some(f) = self
+                    .objects
+                    .get_mut(object)
+                    .and_then(|r| r.object.faces.get_mut(face))
+                {
+                    f.material = prev;
+                }
+                self.paint_change(object)
+            }
+            &DocAction::SetObjectMaterial { object, prev, .. } => {
+                if let Some(rec) = self.objects.get_mut(object) {
+                    rec.object.default_material = prev;
+                }
+                self.paint_change(object)
+            }
         };
         self.redo.push(action);
         self.debug_validate();
@@ -1848,6 +2032,24 @@ impl Document {
                     components_touched: vec![prev_def, new_def],
                     ..Default::default()
                 }
+            }
+            &DocAction::PaintFace {
+                object, face, next, ..
+            } => {
+                if let Some(f) = self
+                    .objects
+                    .get_mut(object)
+                    .and_then(|r| r.object.faces.get_mut(face))
+                {
+                    f.material = next;
+                }
+                self.paint_change(object)
+            }
+            &DocAction::SetObjectMaterial { object, next, .. } => {
+                if let Some(rec) = self.objects.get_mut(object) {
+                    rec.object.default_material = next;
+                }
+                self.paint_change(object)
             }
         };
         self.undo.push(action);

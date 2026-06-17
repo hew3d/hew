@@ -17,8 +17,9 @@
 use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
 use kernel::{
     BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId,
-    InstanceId, KernelOp, KernelOpError, KernelOpReport, NodeId, Object, ObjectId, Plane, Point3,
-    SketchEdgeId, SketchId, SketchRegionId, Transform, WatertightState,
+    ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, Material, MaterialId, NodeId,
+    Object, ObjectId, Plane, Point3, Rgba8, SketchEdgeId, SketchId, SketchRegionId, Texture,
+    Transform, WatertightState,
 };
 use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
@@ -79,9 +80,19 @@ fn doc_err(e: DocumentError) -> ApiError {
         DocumentError::Transform(inner) => api_err(inner, &e),
         DocumentError::Op(KernelOpError::PushPull(inner)) => api_err(inner, &e),
         DocumentError::Op(KernelOpError::Sticky(inner)) => api_err(inner, &e),
-        // UnknownSketch/UnknownObject/NothingTo{Undo,Redo}/InverseFailed carry no
-        // separate inner code: the variant name is the code.
+        // UnknownSketch/UnknownObject/UnknownFace/UnknownMaterial/NothingTo{Undo,Redo}/
+        // InverseFailed carry no separate inner code: the variant name is the code.
         _ => api_err(&e, &e),
+    }
+}
+
+/// Converts a `u64` handle to a [`MaterialId`], or `None` if the sentinel
+/// value `u64::MAX` is given (meaning "default / unpaint").
+fn material_id_opt(handle: u64) -> Option<MaterialId> {
+    if handle == u64::MAX {
+        None
+    } else {
+        Some(MaterialId::from(KeyData::from_ffi(handle)))
     }
 }
 
@@ -191,9 +202,43 @@ impl MeshJs {
         self.mesh.normals.clone()
     }
 
-    /// Triangle indices into `positions`.
+    /// Triangle indices into `positions`, grouped by material (see `group_*`).
     pub fn indices(&self) -> Vec<u32> {
         self.mesh.indices.clone()
+    }
+
+    /// Per-vertex RGB colors (3 floats, range 0–1), parallel to `positions`.
+    pub fn colors(&self) -> Vec<f32> {
+        self.mesh.colors.clone()
+    }
+
+    /// Per-vertex UV coordinates (2 floats), parallel to `positions`.
+    pub fn uvs(&self) -> Vec<f32> {
+        self.mesh.uvs.clone()
+    }
+
+    /// Material handles for each index-buffer group (`u64::MAX` = default).
+    pub fn group_material_ids(&self) -> Vec<u64> {
+        self.mesh
+            .groups
+            .iter()
+            .map(|g| match g.material {
+                Some(id) => id.data().as_ffi(),
+                None => u64::MAX,
+            })
+            .collect()
+    }
+
+    /// Start (index offset) of each index-buffer group, parallel to
+    /// `group_material_ids`.
+    pub fn group_starts(&self) -> Vec<u32> {
+        self.mesh.groups.iter().map(|g| g.start).collect()
+    }
+
+    /// Triangle-index count of each index-buffer group, parallel to
+    /// `group_material_ids`.
+    pub fn group_counts(&self) -> Vec<u32> {
+        self.mesh.groups.iter().map(|g| g.count).collect()
     }
 
     /// Line-segment endpoints (xyz pairs), one segment per unique edge.
@@ -204,6 +249,57 @@ impl MeshJs {
     /// Whether the source Object encloses a volume.
     pub fn watertight(&self) -> bool {
         self.watertight
+    }
+}
+
+/// A material palette entry, for the UI swatch panel.
+#[wasm_bindgen]
+pub struct MaterialJs {
+    name: String,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+    has_texture: bool,
+    world_w: f64,
+    world_h: f64,
+}
+
+#[wasm_bindgen]
+impl MaterialJs {
+    /// Human-facing name.
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+    /// Red channel (0–255).
+    pub fn r(&self) -> u8 {
+        self.r
+    }
+    /// Green channel (0–255).
+    pub fn g(&self) -> u8 {
+        self.g
+    }
+    /// Blue channel (0–255).
+    pub fn b(&self) -> u8 {
+        self.b
+    }
+    /// Alpha channel (0–255; 255 = opaque).
+    pub fn a(&self) -> u8 {
+        self.a
+    }
+    /// Whether this material carries an image texture.
+    pub fn has_texture(&self) -> bool {
+        self.has_texture
+    }
+    /// Texture world-size width (meters per tile). Meaningless when
+    /// `has_texture` is false.
+    pub fn world_w(&self) -> f64 {
+        self.world_w
+    }
+    /// Texture world-size height (meters per tile). Meaningless when
+    /// `has_texture` is false.
+    pub fn world_h(&self) -> f64 {
+        self.world_h
     }
 }
 
@@ -946,11 +1042,12 @@ impl Scene {
     pub fn object_mesh(&mut self, object: u64) -> Result<MeshJs, ApiError> {
         let id = object_id(object);
         if !self.mesh_cache.contains_key(id) {
+            let palette = self.doc.materials();
             let object = self
                 .doc
                 .object(id)
                 .ok_or_else(|| stale("UnknownObject", "object"))?;
-            let mesh = tessellate(object).map_err(|e| api_err(&e, &e))?;
+            let mesh = tessellate(object, palette).map_err(|e| api_err(&e, &e))?;
             self.mesh_cache.insert(id, mesh);
         }
         let watertight = self
@@ -1223,6 +1320,125 @@ impl Scene {
             _ => None,
         }
     }
+
+    // ------------------------------------------------------- materials
+
+    /// Add a solid-color material to the palette and return its handle.
+    /// Palette additions are not individually undoable — only face assignment
+    /// via [`Scene::paint_face`] is.
+    pub fn add_material(&mut self, name: String, r: u8, g: u8, b: u8, a: u8) -> u64 {
+        let mat = Material::solid(name, Rgba8::rgba(r, g, b, a));
+        self.doc.add_material(mat).data().as_ffi()
+    }
+
+    /// Add a textured material to the palette and return its handle.
+    /// `image` is the authored encoded bytes (PNG/JPEG); `format` is `0` = PNG,
+    /// `1` = JPEG. `world_w`/`world_h` are the real-world meters one tile covers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_texture_material(
+        &mut self,
+        name: String,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+        image: &[u8],
+        format: u8,
+        world_w: f64,
+        world_h: f64,
+    ) -> Result<u64, ApiError> {
+        let fmt = match format {
+            0 => ImageFormat::Png,
+            1 => ImageFormat::Jpeg,
+            _ => {
+                return Err(ApiError(
+                    "BadFormat: image format must be 0 (PNG) or 1 (JPEG)".to_string(),
+                ));
+            }
+        };
+        let texture = Texture {
+            image: image.to_vec(),
+            format: fmt,
+            world_size: [world_w, world_h],
+        };
+        let mat = Material::textured(name, Rgba8::rgba(r, g, b, a), texture);
+        Ok(self.doc.add_material(mat).data().as_ffi())
+    }
+
+    /// Handles of all palette materials, in unspecified but stable order.
+    pub fn material_ids(&self) -> Vec<u64> {
+        self.doc
+            .material_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Information about one material, or `undefined` if the handle is stale.
+    pub fn material_info(&self, id: u64) -> Option<MaterialJs> {
+        let mid = MaterialId::from(KeyData::from_ffi(id));
+        let mat = self.doc.material(mid)?;
+        let (world_w, world_h) = mat
+            .texture
+            .as_ref()
+            .map(|t| (t.world_size[0], t.world_size[1]))
+            .unwrap_or((1.0, 1.0));
+        Some(MaterialJs {
+            name: mat.name.clone(),
+            r: mat.color.r,
+            g: mat.color.g,
+            b: mat.color.b,
+            a: mat.color.a,
+            has_texture: mat.has_texture(),
+            world_w,
+            world_h,
+        })
+    }
+
+    /// The raw encoded image bytes of a textured material, or `undefined` if
+    /// the handle is stale or the material has no texture.
+    pub fn material_texture_bytes(&self, id: u64) -> Option<Vec<u8>> {
+        let mid = MaterialId::from(KeyData::from_ffi(id));
+        let mat = self.doc.material(mid)?;
+        mat.texture.as_ref().map(|t| t.image.clone())
+    }
+
+    /// Paint `face` of `object` with `material`. Sentinel `u64::MAX`
+    /// resets the face to the default (unpainted) material. Painting is
+    /// undoable; the kernel records a `PaintFace` document action. Touching a
+    /// definition member repaints the face in every instance of that definition.
+    ///
+    /// # Errors
+    /// - `UnknownObject` — stale or hidden object handle.
+    /// - `UnknownFace` — face is not in the object.
+    /// - `UnknownMaterial` — material handle is not in the palette (and is not
+    ///   the sentinel).
+    pub fn paint_face(&mut self, object: u64, face: u64, material: u64) -> Result<(), ApiError> {
+        let oid = object_id(object);
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let mid = material_id_opt(material);
+        let change = self.doc.paint_face(oid, fid, mid).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Set `object`'s **base material** ( follow-up). Sentinel `u64::MAX`
+    /// clears it to the renderer's default. A face with no explicit material
+    /// resolves to the base, so the whole solid — and faces grown later by
+    /// extrude/boolean — render consistently; explicitly painted faces still
+    /// override. Undoable; invalidates the object's render cache.
+    ///
+    /// # Errors
+    /// - `UnknownObject` — stale or hidden object handle.
+    /// - `UnknownMaterial` — material handle is not in the palette (and is not
+    ///   the sentinel).
+    pub fn set_object_material(&mut self, object: u64, material: u64) -> Result<(), ApiError> {
+        let oid = object_id(object);
+        let mid = material_id_opt(material);
+        let change = self.doc.set_object_material(oid, mid).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
 }
 
 // --------------------------------------------------------------- M0 demo
@@ -1266,8 +1482,11 @@ impl DemoMesh {
 /// Builds the M0 demo geometry: a kernel tetrahedron run through tessellate.
 #[wasm_bindgen]
 pub fn demo_mesh() -> DemoMesh {
+    use kernel::MaterialPalette;
     let object = Object::tetrahedron();
-    let mesh = tessellate(&object).expect("the demo tetrahedron is convex, planar, and hole-free");
+    let empty_palette = MaterialPalette::default();
+    let mesh = tessellate(&object, &empty_palette)
+        .expect("the demo tetrahedron is convex, planar, and hole-free");
     DemoMesh {
         mesh,
         watertight: object.watertight() == WatertightState::Watertight,

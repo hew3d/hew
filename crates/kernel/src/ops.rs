@@ -564,6 +564,11 @@ impl Object {
                 .collect::<Result<Vec<_>, ExtrudeError>>()?;
         }
 
+        // Freshly extruded faces take the default material.
+        let face_specs: Vec<_> = face_specs
+            .into_iter()
+            .map(|(outer, inners, plane)| (outer, inners, plane, None))
+            .collect();
         let obj = Object::from_faces_with_holes(&positions, &face_specs);
         // A valid Profile should always yield a valid solid; if the sweep
         // nonetheless produced invalid topology, return a typed error rather
@@ -854,6 +859,8 @@ impl Object {
             outer_loop: sub_loop,
             inner_loops: Vec::new(),
             plane: face_plane,
+            // Imprinted sub-face inherits the parent face's material.
+            material: obj.faces[face].material,
         });
         obj.loops[sub_loop].face = sub_face;
 
@@ -1147,6 +1154,9 @@ impl Object {
                 outer_loop: wloop,
                 inner_loops: Vec::new(),
                 plane,
+                // Freshly generated push/pull side walls take the default
+                // material.
+                material: None,
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);
@@ -1873,6 +1883,9 @@ fn do_split_face(
         outer_loop: loop_b_id,
         inner_loops: Vec::new(), // holes assigned below
         plane: face_plane,       // same plane as original
+        // Both halves of a split inherit the original face's material;
+        // face A keeps it implicitly by reusing the original FaceId.
+        material: obj.faces[face].material,
     });
     obj.loops[loop_b_id].face = face_b_id;
 
@@ -2504,6 +2517,67 @@ mod tests {
             .find(|(_, f)| f.plane.normal().approx_eq(dir, tol::NORMAL_DIRECTION))
             .map(|(id, _)| id)
             .expect("face with that normal must exist")
+    }
+
+    // ------------------------------------------------------ material
+
+    /// Splitting a painted face propagates its material to *both* halves: face A
+    /// keeps it by reusing the original FaceId, face B inherits it explicitly.
+    #[test]
+    fn split_face_propagates_material_to_both_halves() {
+        use crate::ids::MaterialId;
+        use slotmap::SlotMap;
+        // A throwaway palette just to mint a valid MaterialId value to compare.
+        let mut palette: SlotMap<MaterialId, ()> = SlotMap::with_key();
+        let mat = palette.insert(());
+
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        cube.faces[top].material = Some(mat);
+
+        let path = vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
+        let report = cube.split_face(top, &path).expect("split the painted top");
+        cube.validate().expect("topology valid after split");
+
+        for fid in report.new_faces {
+            assert_eq!(
+                cube.faces()[fid].material,
+                Some(mat),
+                "both split halves inherit the painted material"
+            );
+        }
+    }
+
+    /// An imprinted interior sub-face inherits the parent face's material.
+    #[test]
+    fn split_face_inner_sub_face_inherits_material() {
+        use crate::ids::MaterialId;
+        use slotmap::SlotMap;
+        let mut palette: SlotMap<MaterialId, ()> = SlotMap::with_key();
+        let mat = palette.insert(());
+
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        cube.faces[top].material = Some(mat);
+
+        // A small rectangle strictly inside the top face becomes a coplanar
+        // sub-face (additive imprint).
+        let loop_path = vec![
+            Point3::new(0.25, 0.25, 1.0),
+            Point3::new(0.75, 0.25, 1.0),
+            Point3::new(0.75, 0.75, 1.0),
+            Point3::new(0.25, 0.75, 1.0),
+        ];
+        let report = cube
+            .split_face_inner(top, &loop_path)
+            .expect("imprint interior sub-face");
+        cube.validate().expect("topology valid after imprint");
+
+        assert_eq!(
+            cube.faces()[report.sub_face].material,
+            Some(mat),
+            "imprinted sub-face inherits the parent face's material"
+        );
     }
 
     // -------------------------------------------------------- classify_endpoint

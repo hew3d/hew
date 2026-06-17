@@ -2,10 +2,12 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, { type ViewportApi } from './viewport/Viewport'
 import { DocumentTree } from './panels/DocumentTree'
+import { MaterialPalette } from './panels/MaterialPalette'
 import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, type NodeRef } from './panels/treeModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
+import { MATERIAL_SENTINEL } from './tools/PaintTool'
 
 interface AppState {
   kernelVersion: string
@@ -20,15 +22,16 @@ interface Toast {
 
 let toastCounter = 0
 
-const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Move', 'Rotate', 'Scale'] as const
+const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale'] as const
 type ToolName = (typeof TOOLS)[number]
 const TOOL_KEYS: Record<ToolName, string> = {
   'Select': '1',
   'Rectangle': '2',
   'Push/Pull': '3',
-  'Move': '4',
-  'Rotate': '5',
-  'Scale': '6',
+  'Paint': '4',
+  'Move': '5',
+  'Rotate': '6',
+  'Scale': '7',
 }
 
 /** Strings that signal the Scene borrow-lock after a Rust panic. */
@@ -58,6 +61,8 @@ export default function App() {
   const [activeContext, setActiveContext] = useState<NodeRef[]>([])
   /** Bumped on any document change so the tree re-queries entity lists. */
   const [docRev, setDocRev] = useState(0)
+  /** Currently selected material id for the Paint tool. */
+  const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
   /** Imperative handle into the viewport (e.g. running a boolean). */
   const viewportApi = useRef<ViewportApi | null>(null)
 
@@ -437,6 +442,11 @@ export default function App() {
         <span>Tool: <strong>{toolName}</strong></span>
         <span>Snap: {snapKind ?? '—'}</span>
         <span>Length: {measurement !== '' ? measurement : '—'}</span>
+        {activeTool === 'Paint' && (
+          <span style={{ color: '#aaa', fontSize: '11px' }}>
+            Click: paint face | Cmd/Ctrl+click: fill whole object
+          </span>
+        )}
         <span style={{ color: '#888', fontSize: '11px' }}>
           Middle-drag: orbit | Shift+Middle: pan | Scroll: zoom
         </span>
@@ -463,6 +473,7 @@ export default function App() {
           onDocumentChanged={handleDocumentChanged}
           apiRef={viewportApi}
           onMeasurement={handleMeasurement}
+          currentMaterialId={currentMaterialId}
         />
 
         {/* Toast stack — positioned inside the viewport container */}
@@ -530,6 +541,14 @@ export default function App() {
           onExplodeInstance={handleExplodeInstance}
           canMakeUnique={canUnique}
           onMakeUnique={handleMakeUnique}
+        />
+        <MaterialPalette
+          scene={state.scene}
+          docRev={docRev}
+          currentMaterialId={currentMaterialId}
+          onSelectMaterial={setCurrentMaterialId}
+          onDocumentChanged={handleDocumentChanged}
+          selectedIds={selectedIds}
         />
       </div>
 

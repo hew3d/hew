@@ -7,6 +7,7 @@
 use slotmap::SlotMap;
 
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
+use crate::material::FaceMaterial;
 use crate::math::{Plane, Point3};
 
 /// A mesh vertex.
@@ -75,6 +76,12 @@ pub struct Face {
     /// The supporting plane, oriented so the outer loop winds CCW seen from
     /// the normal side.
     pub plane: Plane,
+    /// The face's material in the [`crate::document::Document`] palette, or
+    /// `None` for the default (unpainted) material (ARCHITECTURE.md). Carried by
+    /// face-creating ops: a split's children inherit the parent's material; a
+    /// boolean's result faces inherit their source face's; freshly extruded
+    /// side walls default to `None`.
+    pub material: FaceMaterial,
 }
 
 /// A connected set of faces. M0 builds a single shell per Object.
@@ -107,6 +114,12 @@ pub struct Object {
     pub(crate) faces: SlotMap<FaceId, Face>,
     pub(crate) shells: SlotMap<ShellId, Shell>,
     pub(crate) watertight: WatertightState,
+    /// The object's base material ( follow-up): a face whose own `material`
+    /// is `None` resolves to this. New faces (extrude walls, boolean walls) are
+    /// created `None`, so they inherit the base — giving a solid a consistent
+    /// color/texture "throughout". `None` here means the renderer's neutral
+    /// default.
+    pub(crate) default_material: FaceMaterial,
 }
 
 impl Object {
@@ -121,6 +134,7 @@ impl Object {
             faces: SlotMap::with_key(),
             shells: SlotMap::with_key(),
             watertight: WatertightState::Open,
+            default_material: None,
         }
     }
 
@@ -157,6 +171,12 @@ impl Object {
     /// Whether this Object currently encloses a volume.
     pub fn watertight(&self) -> WatertightState {
         self.watertight
+    }
+
+    /// The object's base material ( follow-up): the material a face with no
+    /// own material resolves to. `None` = the renderer's neutral default.
+    pub fn default_material(&self) -> FaceMaterial {
+        self.default_material
     }
 
     /// The half-edges of `loop_id` in cycle order, starting at its
