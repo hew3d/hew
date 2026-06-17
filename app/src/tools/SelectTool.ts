@@ -11,7 +11,7 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 
-export type OnSelect = (objectId: bigint | null) => void
+export type OnSelect = (objectId: bigint | null, instanceId?: bigint) => void
 
 export class SelectTool implements Tool {
   readonly name = 'Select'
@@ -42,8 +42,9 @@ export class SelectTool implements Tool {
     if (pick !== undefined) {
       try {
         const objectId = pick.object()
-        console.log('[SelectTool] selected object:', objectId, 'face:', pick.face())
-        this.onSelect(objectId)
+        const instanceId = pick.instance()
+        console.log('[SelectTool] selected object:', objectId, 'instance:', instanceId, 'face:', pick.face())
+        this.onSelect(objectId, instanceId)
       } finally {
         pick.free()
       }

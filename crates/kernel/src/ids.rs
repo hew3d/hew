@@ -22,4 +22,14 @@ new_key_type! {
     pub struct ObjectId;
     /// Handle to a [`crate::sketch::Sketch`] in a [`crate::document::Document`].
     pub struct SketchId;
+    /// Handle to a merge group (non-destructive container) in a
+    /// [`crate::document::Document`].
+    pub struct GroupId;
+    /// Handle to a component definition (shared geometry, a library entry — not
+    /// a tree node) in a [`crate::document::Document`] (ARCHITECTURE.md).
+    pub struct ComponentId;
+    /// Handle to a component instance (a tree node placing a
+    /// [`ComponentId`] at a per-instance pose) in a
+    /// [`crate::document::Document`] (ARCHITECTURE.md).
+    pub struct InstanceId;
 }

@@ -1,5 +1,5 @@
 /**
- * Viewport — M1 interactive 3D viewport.
+ * Viewport — M2 interactive 3D viewport.
  *
  * Wires together:
  *   - THREE.js WebGL2 renderer + PerspectiveCamera
@@ -11,9 +11,10 @@
  *   - SnapService (wraps Scene.snap with ground-plane fallback)
  *   - SceneRenderer (live object + sketch geometry, refreshed after commits)
  *   - ToolController routing pointer events to the active Tool
- *   - RectangleTool + PushPullTool + SelectTool
+ *   - RectangleTool + PushPullTool + SelectTool + Move/Rotate/Scale
  *   - Undo/redo keyboard shortcuts (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z)
  *   - Ground grid
+ *   - : context path navigation, group-aware picking
  */
 
 import { useEffect, useRef } from 'react'
@@ -31,6 +32,7 @@ import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
+import type { NodeRef } from '../panels/treeModel'
 
 interface Props {
   /** WASM Scene — owns inference, sketches, objects */
@@ -43,23 +45,23 @@ interface Props {
   onToast?: (message: string, code?: string) => void
   /** Active tool name from parent (undefined = parent doesn't control) */
   activeTool?: string
-  /** Entered object (editing context), or null at top level. */
-  activeContext?: bigint | null
-  /** Selected entities (ordered; index 0 = primary). */
-  selectedIds?: bigint[]
+  /** Active context path. Empty = top level. */
+  activeContext?: NodeRef[]
+  /** Selected nodes (ordered; index 0 = primary). */
+  selectedIds?: NodeRef[]
+  /** Lit set for isolation rendering — null = top level. */
+  activeLitSet?: Set<bigint> | null
   /** Lift an in-viewport selection up to the parent. `additive` = shift-click. */
-  onSelect?: (id: bigint | null, additive: boolean) => void
-  /** Request entering an object's editing context (double-click). */
-  onEnterContext?: (objectId: bigint) => void
-  /** Request exiting to the parent context (Esc / click outside). */
+  onSelect?: (node: NodeRef | null, additive: boolean) => void
+  /** Request entering a node's editing context (double-click). */
+  onEnterContext?: (node: NodeRef) => void
+  /** Request popping one level off the context path (Esc). */
   onExitContext?: () => void
   /** Fired after any document change so the parent can refresh the tree. */
   onDocumentChanged?: () => void
-  /** Populated by the viewport with imperative commands the parent can call
-   *  (e.g. running a boolean, which must also refresh the viewport). */
+  /** Populated by the viewport with imperative commands the parent can call. */
   apiRef?: React.MutableRefObject<ViewportApi | null>
-  /** Called with the live measurement text from tools that support VCB entry
-   *  (e.g. MoveTool). Empty string means no measurement to show. */
+  /** Called with the live measurement text from tools that support VCB entry. */
   onMeasurement?: (text: string) => void
 }
 
@@ -67,6 +69,18 @@ interface Props {
 export interface ViewportApi {
   /** Combine two objects (0=union, 1=subtract a−b, 2=intersect). */
   runBoolean: (op: number, a: bigint, b: bigint) => void
+  /** Group the given nodes into a merge group. */
+  runGroup: (nodes: NodeRef[]) => bigint | null
+  /** Dissolve a group. */
+  runUngroup: (groupId: bigint) => void
+  /** Fold a sibling selection into a component + identity instance. Returns the instance handle. */
+  runMakeComponent: (nodes: NodeRef[]) => bigint | null
+  /** Place a second instance of the given instance's definition, offset slightly. */
+  runPlaceInstance: (instanceId: bigint) => bigint | null
+  /** Explode an instance into independent world objects. Returns their handles, or null on error. */
+  runExplodeInstance: (instanceId: bigint) => bigint[] | null
+  /** Detach an instance onto a private copy of its definition. Returns the new component handle. */
+  runMakeUnique: (instanceId: bigint) => bigint | null
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -123,14 +137,89 @@ function buildGroundGrid(): THREE.Group {
   return group
 }
 
+/**
+ * Walk the ancestor chain of a leaf object up to (and including) any groups,
+ * and return the array [objectId, ...parentGroupIds from innermost to outermost].
+ */
+function buildAncestorChain(wasmScene: WasmScene, objectId: bigint): NodeRef[] {
+  const chain: NodeRef[] = [{ kind: 'object', id: objectId }]
+  let parentId = wasmScene.node_parent(0, objectId)
+  while (parentId !== undefined) {
+    chain.push({ kind: 'group', id: parentId })
+    parentId = wasmScene.node_parent(1, parentId)
+  }
+  return chain
+}
+
+/**
+ * Resolve a pick to the selectable NodeRef given the active context path.
+ *
+ * When the pick carries an instance id (the ray hit instanced geometry), the
+ * selectable at top level is the instance node. Inside an instance's editing
+ * context the pick resolves directly to the object.
+ *
+ * For world objects the existing group-walk logic applies.
+ *
+ * - Top level (ctx empty):
+ *   - instance hit → select the instance
+ *   - world object hit → topmost ancestor (object or group)
+ * - Inside instance I (deepest ctx node is instance I):
+ *   - pick must be inside I → return the picked definition-member object
+ *   - pick is not inside I → null (out of scope)
+ * - Inside group G: selectable = direct child of G in the ancestor chain.
+ * - Inside world object O: out-of-scope picks return null.
+ */
+function resolvePickToSelectable(
+  wasmScene: WasmScene,
+  pickedObjectId: bigint,
+  activeContext: NodeRef[],
+  pickedInstanceId?: bigint,
+): NodeRef | null {
+  if (activeContext.length === 0) {
+    // Top level
+    if (pickedInstanceId !== undefined) {
+      return { kind: 'instance', id: pickedInstanceId }
+    }
+    const chain = buildAncestorChain(wasmScene, pickedObjectId)
+    return chain[chain.length - 1]
+  }
+
+  const deepest = activeContext[activeContext.length - 1]
+
+  if (deepest.kind === 'instance') {
+    // Inside a component's editing context: only that instance's members are in scope.
+    if (pickedInstanceId === deepest.id) {
+      // The pick is inside the entered instance — the selectable is the definition member.
+      return { kind: 'object', id: pickedObjectId }
+    }
+    return null
+  }
+
+  if (deepest.kind === 'object') {
+    // Inside an object's edit context: picking other objects is out of scope
+    return null
+  }
+
+  // Inside group G: find the direct child of G in the world-object ancestor chain
+  const chain = buildAncestorChain(wasmScene, pickedObjectId)
+  for (let i = 0; i < chain.length - 1; i++) {
+    if (chain[i + 1].kind === 'group' && chain[i + 1].id === deepest.id) {
+      return chain[i]
+    }
+  }
+  // G is not an ancestor of this object → click outside context
+  return null
+}
+
 export default function Viewport({
   wasmScene,
   onStatusChange,
   onSceneChange,
   onToast,
   activeTool: activeToolProp,
-  activeContext = null,
+  activeContext = [],
   selectedIds = [],
+  activeLitSet = null,
   onSelect,
   onEnterContext,
   onExitContext,
@@ -159,10 +248,10 @@ export default function Viewport({
   apiRefRef.current = apiRef
   const onMeasurementRef = useRef(onMeasurement)
   onMeasurementRef.current = onMeasurement
-  // Latest editing context, readable inside the stable event closures.
-  const activeContextRef = useRef<bigint | null>(activeContext)
+  // Latest context path, readable inside the stable event closures.
+  const activeContextRef = useRef<NodeRef[]>(activeContext)
   // Latest selected ids, readable inside the stable event closures.
-  const selectedIdsRef = useRef<bigint[]>(selectedIds)
+  const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
   // Whether the in-flight click is a shift-click (additive multi-select).
   const selectAdditiveRef = useRef(false)
 
@@ -232,18 +321,34 @@ export default function Viewport({
     // ------------------------------------------------------------------ snap + tool
     const snapService = new SnapService(wasmScene)
 
-    // onSelect wired from SelectTool → lifted to the parent (which owns the
-    // selection list and feeds it back via the selectedIds prop). Additive
-    // (shift) multi-select is only meaningful at top level. Inside an editing
-    // context, a plain click on anything that isn't the entered object (incl.
-    // empty space) exits the context (SketchUp behavior).
-    function handleSelect(objectId: bigint | null): void {
-      const additive = selectAdditiveRef.current && activeContextRef.current === null
+    // Resolve a raw pick (leaf object id + optional instance id) to a
+    // context-aware NodeRef, then lift the selection to the parent.
+    function handleSelect(pickedObjectId: bigint | null, pickedInstanceId?: bigint): void {
+      const additive = selectAdditiveRef.current && activeContextRef.current.length === 0
       const ctx = activeContextRef.current
-      if (!additive && ctx !== null && objectId !== ctx) {
-        onExitContextRef.current?.()
+
+      if (pickedObjectId === null) {
+        // Miss: if we're inside a context at top-level, exit; otherwise clear.
+        if (!additive && ctx.length > 0 && ctx[ctx.length - 1].kind !== 'object') {
+          // Click outside while inside a group → deselect but don't exit
+          // (SketchUp style: click outside within group deselects)
+        }
+        onSelectRef.current?.(null, additive)
+        scheduleRender()
+        return
       }
-      onSelectRef.current?.(objectId, additive)
+
+      const resolved = resolvePickToSelectable(wasmScene, pickedObjectId, ctx, pickedInstanceId)
+
+      // If click was outside the current group/instance context, treat as deselect
+      if (resolved === null && ctx.length > 0 && ctx[ctx.length - 1].kind !== 'object') {
+        onSelectRef.current?.(null, false)
+        scheduleRender()
+        return
+      }
+
+      // At top level, clicking something while not in context always just selects
+      onSelectRef.current?.(resolved, additive)
       scheduleRender()
     }
 
@@ -262,10 +367,7 @@ export default function Viewport({
       onToastRef.current?.(message, code)
     }
 
-    // Imperative command surface for the parent (e.g. the boolean buttons in the
-    // tree, which live outside the viewport but must refresh it). A boolean
-    // mutates the Scene (consuming both operands), so it follows the same
-    // refresh path as a tool commit, then selects the result.
+    // Imperative command surface for the parent.
     function runBoolean(op: number, a: bigint, b: bigint): void {
       let result: bigint
       try {
@@ -278,11 +380,106 @@ export default function Viewport({
       }
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
-      onSelectRef.current?.(result, false)
+      onSelectRef.current?.({ kind: 'object', id: result }, false)
       scheduleRender()
     }
+
+    function runGroup(nodes: NodeRef[]): bigint | null {
+      if (nodes.length === 0) return null
+      const kinds = new Uint8Array(nodes.map((n) => n.kind === 'group' ? 1 : 0))
+      const ids = new BigUint64Array(nodes.map((n) => n.id))
+      try {
+        const groupId = wasmScene.group_nodes(kinds, ids)
+        handleSceneRefresh()
+        return groupId
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return null
+      }
+    }
+
+    function runUngroup(groupId: bigint): void {
+      try {
+        wasmScene.ungroup(groupId)
+        handleSceneRefresh()
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      }
+    }
+
+    function runMakeComponent(nodes: NodeRef[]): bigint | null {
+      if (nodes.length === 0) return null
+      // kind: 0=object, 1=group, 2=instance
+      const kinds = new Uint8Array(nodes.map((n) =>
+        n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0,
+      ))
+      const ids = new BigUint64Array(nodes.map((n) => n.id))
+      try {
+        const instanceId = wasmScene.make_component(kinds, ids)
+        handleSceneRefresh()
+        return instanceId
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return null
+      }
+    }
+
+    function runPlaceInstance(instanceId: bigint): bigint | null {
+      const componentId = wasmScene.instance_def(instanceId)
+      if (componentId === undefined) return null
+      // Place at a small offset from the original — user can Move it.
+      const OFFSET = 0.5
+      const affine = new Float64Array([
+        1, 0, 0, OFFSET,
+        0, 1, 0, OFFSET,
+        0, 0, 1, 0,
+      ])
+      try {
+        const newInstanceId = wasmScene.place_instance(componentId, affine)
+        handleSceneRefresh()
+        return newInstanceId
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return null
+      }
+    }
+
+    function runExplodeInstance(instanceId: bigint): bigint[] | null {
+      try {
+        const objectIds = wasmScene.explode_instance(instanceId)
+        handleSceneRefresh()
+        return Array.from(objectIds)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return null
+      }
+    }
+
+    function runMakeUnique(instanceId: bigint): bigint | null {
+      try {
+        const _componentId = wasmScene.make_unique(instanceId)
+        handleSceneRefresh()
+        return instanceId
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return null
+      }
+    }
+
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -301,7 +498,10 @@ export default function Viewport({
         },
       )
       // Scope the tool to the current editing context, if any.
-      tool.setActiveContext(activeContextRef.current)
+      const ctx = activeContextRef.current
+      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
+        ? ctx[ctx.length - 1].id : null
+      tool.setActiveContext(ctxId)
       return tool
     }
 
@@ -311,8 +511,6 @@ export default function Viewport({
         previewGroup,
         (_objectId) => {
           handleSceneRefresh()
-          // Refresh sketch fills so consumed regions (dropped from sketch_regions
-          // after extrude_region) no longer render a stray translucent fill.
           sceneRenderer.refreshAllSketches()
         },
         handleToast,
@@ -323,47 +521,64 @@ export default function Viewport({
         tool.setSketchHandle(sketchHandle)
       }
       // Scope it to the current editing context, if any.
-      tool.setActiveContext(activeContextRef.current)
+      const ctx = activeContextRef.current
+      const deepest = ctx.length > 0 ? ctx[ctx.length - 1] : null
+      // For an object context (entered world object), use the object id as-is.
+      const ctxId = deepest?.kind === 'object' ? deepest.id : null
+      tool.setActiveContext(ctxId)
+      // For an instance context (entered component), get the component def id.
+      if (deepest?.kind === 'instance') {
+        const componentId = wasmScene.instance_def(deepest.id)
+        tool.setComponentContext(componentId ?? null)
+      } else {
+        tool.setComponentContext(null)
+      }
       return tool
     }
 
     function makeMoveTool(): MoveTool {
+      const sel = selectedIdsRef.current[0] ?? null
       return new MoveTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
-        selectedIdsRef.current[0] ?? null,
-        (_objectId) => {
+        sel,
+        (_node) => {
           handleSceneRefresh()
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
+        (id: bigint) => sceneRenderer.getInstanceGroup(id),
       )
     }
 
     function makeRotateTool(): RotateTool {
+      const sel = selectedIdsRef.current[0] ?? null
       return new RotateTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
-        selectedIdsRef.current[0] ?? null,
-        (_objectId) => {
+        sel,
+        (_node) => {
           handleSceneRefresh()
         },
         handleToast,
+        (id: bigint) => sceneRenderer.getInstanceGroup(id),
       )
     }
 
     function makeScaleTool(): ScaleTool {
+      const sel = selectedIdsRef.current[0] ?? null
       return new ScaleTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
-        selectedIdsRef.current[0] ?? null,
-        (_objectId) => {
+        sel,
+        (_node) => {
           handleSceneRefresh()
         },
         handleToast,
+        (id: bigint) => sceneRenderer.getInstanceGroup(id),
       )
     }
 
@@ -488,7 +703,10 @@ export default function Viewport({
       activeTool.onPointerDown(snap, ray)
     }
 
-    // Double-click an object to enter its editing context (SketchUp-style).
+    // Double-click a node to enter its context (SketchUp-style).
+    // At top level: enters the topmost ancestor group/instance/object.
+    // Inside a group: enters the direct child of that group.
+    // Inside an instance: enters the instance's definition for editing.
     function onDoubleClick(ev: MouseEvent): void {
       if (ev.button !== 0) return
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
@@ -499,7 +717,13 @@ export default function Viewport({
       )
       if (pick !== undefined) {
         try {
-          onEnterContextRef.current?.(pick.object())
+          const objectId = pick.object()
+          const instanceId = pick.instance()
+          // Resolve to the selectable node in the current context, then enter it
+          const selectable = resolvePickToSelectable(wasmScene, objectId, activeContextRef.current, instanceId)
+          if (selectable !== null) {
+            onEnterContextRef.current?.(selectable)
+          }
         } finally {
           pick.free()
         }
@@ -510,8 +734,8 @@ export default function Viewport({
     function onKeyDown(ev: KeyboardEvent): void {
       const isMod = ev.metaKey || ev.ctrlKey
 
-      // Esc exits the editing context first (before tool cancel).
-      if (ev.key === 'Escape' && activeContextRef.current !== null) {
+      // Esc pops one level off the context path before tool cancel.
+      if (ev.key === 'Escape' && activeContextRef.current.length > 0) {
         onExitContextRef.current?.()
         return
       }
@@ -648,24 +872,52 @@ export default function Viewport({
     }
   }, [activeToolProp])
 
-  // Reflect the editing context into the renderer (isolation fade) and the
+  // Reflect the editing context path into the renderer (isolation fade) and the
   // active tool (scoped editing) when the parent changes it.
   useEffect(() => {
     activeContextRef.current = activeContext
-    sceneRendererRef.current?.setActiveContext(activeContext)
+    // Compute a lit-instance set for isolation: when inside an instance, light
+    // that instance; at top level no restriction.
+    const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
+    const litInstances: Set<bigint> | null = null  // instances always draw when not isolated
+    sceneRendererRef.current?.setActiveContext(activeLitSet ?? null, litInstances)
     const tool = toolControllerRef.current?.activeTool
     if (tool !== undefined && 'setActiveContext' in tool) {
-      (tool as { setActiveContext: (id: bigint | null) => void }).setActiveContext(activeContext)
+      // For tools that need the entered object id (e.g. RectangleTool, PushPullTool)
+      const ctxId = deepestCtx?.kind === 'object' ? deepestCtx.id : null
+      ;(tool as { setActiveContext: (id: bigint | null) => void }).setActiveContext(ctxId)
+    }
+    if (tool !== undefined && 'setComponentContext' in tool) {
+      // For PushPullTool inside a component context
+      const scene = wasmSceneRef.current
+      const componentId = deepestCtx?.kind === 'instance'
+        ? scene.instance_def(deepestCtx.id) ?? null
+        : null
+      ;(tool as { setComponentContext: (id: bigint | null) => void }).setComponentContext(componentId)
     }
     scheduleRenderRef.current()
-  }, [activeContext])
+  }, [activeContext, activeLitSet])
 
   // Reflect the parent's selection into the renderer highlight (e.g. a click in
-  // the tree). Sketch ids match no object group and are simply ignored, which
-  // is fine pre-sketch-selection-visuals.
+  // the tree). Object refs are passed to setSelected; group refs match nothing
+  // in the object groups but the leaf objects inside them are highlighted via
+  // the lit set / isolation mechanism. Instance refs are highlighted via
+  // setSelectedInstances.
   useEffect(() => {
     selectedIdsRef.current = selectedIds
-    sceneRendererRef.current?.setSelected(selectedIds)
+    // Collect leaf object ids and instance ids for highlighting
+    const leafIds: bigint[] = []
+    const instanceIds: bigint[] = []
+    for (const node of selectedIds) {
+      if (node.kind === 'object') {
+        leafIds.push(node.id)
+      } else if (node.kind === 'instance') {
+        instanceIds.push(node.id)
+      }
+      // Groups: isolation/lit set covers visual feedback
+    }
+    sceneRendererRef.current?.setSelected(leafIds)
+    sceneRendererRef.current?.setSelectedInstances(instanceIds)
     scheduleRenderRef.current()
   }, [selectedIds])
 

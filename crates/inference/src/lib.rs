@@ -32,7 +32,9 @@
 //! Intersection snaps (`SnapKind::Intersection`) are M2 — the variant exists
 //! but `resolve` does not emit it yet.
 
-use kernel::{EdgeId, FaceId, Object, ObjectId, Plane, Point3, Transform, Vec3, VertexId, tol};
+use kernel::{
+    EdgeId, FaceId, InstanceId, Object, ObjectId, Plane, Point3, Transform, Vec3, VertexId, tol,
+};
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -79,10 +81,17 @@ pub enum ElementRef {
 /// Which Object (and which element of it) produced a snap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapSource {
-    /// The owning Object in the document.
+    /// The geometry-owning Object: a world solid, or — when `instance` is set —
+    /// the component definition member the element belongs to (so kernel ops
+    /// route correctly via [`kernel::Document::apply_def_op`]).
     pub object: ObjectId,
     /// The element within that Object.
     pub element: ElementRef,
+    /// The placing component instance, if this candidate came from one:
+    /// `None` for a plain world object, `Some` for instanced geometry. Lets two
+    /// instances of one definition coexist without colliding, and tells the UI
+    /// which placement was hit (for selection/highlight).
+    pub instance: Option<InstanceId>,
 }
 
 /// A resolved snap: where the cursor should land and why.
@@ -217,15 +226,44 @@ impl InferenceScene {
     pub fn add_object(&mut self, id: ObjectId, object: &Object, placement: &Transform) {
         // Replace semantics: drop any prior candidates for this id first.
         self.remove_object(id);
+        self.register(object, placement, id, None);
+    }
 
+    /// Registers the candidates of one component instance: `object` is the
+    /// definition `member` geometry, placed by the instance `pose`; every
+    /// candidate is tagged with `instance` so two instances of one definition
+    /// never collide and a pick knows which placement it hit. **Additive** — the
+    /// caller clears an instance's prior candidates with
+    /// [`InferenceScene::remove_instance`] before re-registering its members.
+    pub fn add_instance(
+        &mut self,
+        instance: InstanceId,
+        member: ObjectId,
+        object: &Object,
+        pose: &Transform,
+    ) {
+        self.register(object, pose, member, Some(instance));
+    }
+
+    /// Extracts `object`'s vertices/edges/faces into world-space candidates owned
+    /// by `owner`, each optionally tagged with the placing `instance`. Shared by
+    /// [`InferenceScene::add_object`] (world solids, `instance == None`) and
+    /// [`InferenceScene::add_instance`] (instanced geometry).
+    fn register(
+        &mut self,
+        object: &Object,
+        placement: &Transform,
+        owner: ObjectId,
+        instance: Option<InstanceId>,
+    ) {
         // --- Vertices -> ScenePoint (Endpoint source) ---
         for (vid, vertex) in object.vertices() {
-            let world_pos = placement.apply_point(vertex.position);
             self.points.push(ScenePoint {
-                position: world_pos,
+                position: placement.apply_point(vertex.position),
                 source: SnapSource {
-                    object: id,
+                    object: owner,
                     element: ElementRef::Vertex(vid),
+                    instance,
                 },
             });
         }
@@ -243,8 +281,9 @@ impl InferenceScene {
                 a,
                 b,
                 source: SnapSource {
-                    object: id,
+                    object: owner,
                     element: ElementRef::Edge(eid),
+                    instance,
                 },
             });
         }
@@ -278,19 +317,32 @@ impl InferenceScene {
                 boundary,
                 holes,
                 source: SnapSource {
-                    object: id,
+                    object: owner,
                     element: ElementRef::Face(fid),
+                    instance,
                 },
             });
         }
     }
 
-    /// Drops all candidates registered for `id`. Unknown ids are a no-op —
-    /// removal must be idempotent so document undo can call it freely.
+    /// Drops all **world-object** candidates registered for `id` (instanced
+    /// candidates are keyed by instance, see [`InferenceScene::remove_instance`]).
+    /// Unknown ids are a no-op — removal must be idempotent so document undo can
+    /// call it freely.
     pub fn remove_object(&mut self, id: ObjectId) {
-        self.points.retain(|p| p.source.object != id);
-        self.segments.retain(|s| s.source.object != id);
-        self.faces.retain(|f| f.source.object != id);
+        let world = |s: &SnapSource| s.object == id && s.instance.is_none();
+        self.points.retain(|p| !world(&p.source));
+        self.segments.retain(|s| !world(&s.source));
+        self.faces.retain(|f| !world(&f.source));
+    }
+
+    /// Drops all candidates registered for `instance` (across every definition
+    /// member it places). Idempotent, so document undo can call it freely.
+    pub fn remove_instance(&mut self, instance: InstanceId) {
+        let key = Some(instance);
+        self.points.retain(|p| p.source.instance != key);
+        self.segments.retain(|s| s.source.instance != key);
+        self.faces.retain(|f| f.source.instance != key);
     }
 
     /// Answers one inference query (see the module docs for the priority and

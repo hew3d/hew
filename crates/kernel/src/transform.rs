@@ -139,6 +139,19 @@ impl Transform {
         }
     }
 
+    /// Unpacks to a row-major 3×4 matrix `[m00 m01 m02 tx, m10 m11 m12 ty, m20
+    /// m21 m22 tz]` — the inverse of [`Transform::from_affine`]. The UI boundary
+    /// reads instance poses back this way (e.g. to build a three.js matrix).
+    pub fn to_affine(&self) -> [f64; 12] {
+        let l = &self.linear;
+        let t = self.translation;
+        [
+            l[0][0], l[0][1], l[0][2], t.x, //
+            l[1][0], l[1][1], l[1][2], t.y, //
+            l[2][0], l[2][1], l[2][2], t.z,
+        ]
+    }
+
     /// The transform that applies `self` first, then `second`.
     pub fn then(&self, second: &Transform) -> Transform {
         let a = &second.linear;
@@ -286,6 +299,16 @@ mod tests {
         let mapped = t.apply_point(Point3::new(1.0, 1.0, 1.0));
         assert!(mapped.approx_eq(Point3::new(9.0, 10.0, 11.0), TEST_EPS));
         assert!((t.determinant() - 8.0).abs() < TEST_EPS);
+    }
+
+    #[test]
+    fn to_affine_is_the_inverse_of_from_affine() {
+        let rows = [
+            2.0, 0.5, 0.0, 7.0, //
+            0.0, 3.0, 1.0, 8.0, //
+            0.0, 0.0, 0.5, 9.0,
+        ];
+        assert_eq!(Transform::from_affine(&rows).to_affine(), rows);
     }
 
     #[test]

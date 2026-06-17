@@ -31,10 +31,13 @@ pub mod tol;
 pub mod topo;
 pub mod transform;
 
-pub use document::{DocChange, Document, DocumentError};
+pub use document::{DocChange, Document, DocumentError, NodeId};
 pub use error::TopologyError;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
-pub use ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ObjectId, ShellId, SketchId, VertexId};
+pub use ids::{
+    ComponentId, EdgeId, FaceId, GroupId, HalfEdgeId, InstanceId, LoopId, ObjectId, ShellId,
+    SketchId, VertexId,
+};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceMergeInnerReport,

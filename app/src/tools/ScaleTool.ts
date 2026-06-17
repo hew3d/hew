@@ -22,9 +22,10 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { scaleAboutCenter, meshBoundingBoxCenter, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, clearPreview } from './transformPreview'
+import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
+import type { NodeRef } from '../panels/treeModel'
 
-export type OnScaleCommit = (objectId: bigint) => void
+export type OnScaleCommit = (node: NodeRef) => void
 export type OnToast = (message: string, code?: string) => void
 
 const MIN_SCALE = 0.01
@@ -33,7 +34,7 @@ type Stage =
   | { kind: 'idle' }
   | {
       kind: 'dragging'
-      objectId: bigint
+      node: NodeRef
       center: [number, number, number]
       baseDist: number
       previewMesh: THREE.Object3D | null
@@ -47,23 +48,26 @@ export class ScaleTool implements Tool {
   private wasmScene: WasmScene
   private onCommit: OnScaleCommit
   private onToast: OnToast
-  private selectedObjectId: bigint | null = null
+  private selectedNode: NodeRef | null = null
   private objectsGroup: THREE.Group | null = null
+  private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
 
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     objectsGroup: THREE.Group | null,
-    selectedObjectId: bigint | null,
+    selectedNode: NodeRef | null,
     onCommit: OnScaleCommit,
     onToast: OnToast,
+    instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.objectsGroup = objectsGroup
-    this.selectedObjectId = selectedObjectId
+    this.selectedNode = selectedNode
     this.onCommit = onCommit
     this.onToast = onToast
+    this.instanceGroupGetter = instanceGroupGetter
   }
 
   onPointerMove(snap: Snap | null, _ray: Ray): void {
@@ -79,40 +83,32 @@ export class ScaleTool implements Tool {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const objectId = this.selectedObjectId
-      if (objectId === null) {
+      const node = this.selectedNode
+      if (node === null) {
         this.onToast('Select an object first, then use Scale')
         return
       }
 
-      // Get the mesh positions to compute the bounding-box center
-      let center: [number, number, number] = [0, 0, 0]
-      try {
-        const mesh = this.wasmScene.object_mesh(objectId)
-        try {
-          center = meshBoundingBoxCenter(mesh.positions())
-        } finally {
-          mesh.free()
-        }
-      } catch {
-        // If we can't get mesh data, fall back to snap point as center
-        center = [snap.x, snap.y, snap.z]
-      }
+      // Bounding-box center to scale about. For a group this is the aggregate
+      // center across every leaf object, so the whole group scales as a unit
+      // rather than pivoting on one member.
+      const center: [number, number, number] =
+        this._nodeCenter(node) ?? [snap.x, snap.y, snap.z]
 
       const baseDist = this._dist(center, [snap.x, snap.y, snap.z])
-      const previewMesh = buildPreviewClone(this.objectsGroup, objectId)
+      const previewMesh = this._buildPreview(node)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)
       }
 
-      this.stage = { kind: 'dragging', objectId, center, baseDist, previewMesh }
+      this.stage = { kind: 'dragging', node, center, baseDist, previewMesh }
     } else if (this.stage.kind === 'dragging') {
-      const { objectId, center, baseDist } = this.stage
+      const { node, center, baseDist } = this.stage
       const f = this._computeFactor(center, [snap.x, snap.y, snap.z], baseDist)
 
       this.stage = { kind: 'idle' }
       clearPreview(this.preview)
-      this._commit(objectId, center, f)
+      this._commit(node, center, f)
     }
   }
 
@@ -145,20 +141,104 @@ export class ScaleTool implements Tool {
     return Math.max(f, MIN_SCALE)
   }
 
+  private _buildPreview(node: NodeRef): THREE.Object3D | null {
+    if (node.kind === 'group') {
+      const leafIds = Array.from(this.wasmScene.node_leaf_objects(1, node.id))
+      return buildMultiPreviewClone(this.objectsGroup, leafIds)
+    }
+    if (node.kind === 'instance') {
+      const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
+      return buildInstancePreviewClone(group)
+    }
+    return buildPreviewClone(this.objectsGroup, node.id)
+  }
+
+  /**
+   * Bounding-box center to scale about: the node's own mesh for an object, or
+   * the aggregate bbox center across all leaf meshes for a group (so a group
+   * scales about its overall center, not one member's). Null if no mesh data.
+   */
+  private _nodeCenter(node: NodeRef): [number, number, number] | null {
+    if (node.kind === 'instance') {
+      // For an instance, use the member objects' positions mapped through the pose.
+      // Simplest: fetch member meshes and average their positions (definition-local).
+      const componentId = this.wasmScene.instance_def(node.id)
+      if (componentId === undefined) return null
+      const memberIds = Array.from(this.wasmScene.component_member_objects(componentId))
+      const chunks: Float32Array[] = []
+      for (const id of memberIds) {
+        let mesh
+        try {
+          mesh = this.wasmScene.object_mesh(id)
+        } catch {
+          continue
+        }
+        try {
+          chunks.push(mesh.positions())
+        } finally {
+          mesh.free()
+        }
+      }
+      if (chunks.length === 0) return null
+      const total = chunks.reduce((n, c) => n + c.length, 0)
+      const all = new Float32Array(total)
+      let off = 0
+      for (const c of chunks) {
+        all.set(c, off)
+        off += c.length
+      }
+      return meshBoundingBoxCenter(all)
+    }
+    const leafIds = node.kind === 'group'
+      ? Array.from(this.wasmScene.node_leaf_objects(1, node.id))
+      : [node.id]
+    const chunks: Float32Array[] = []
+    for (const id of leafIds) {
+      let mesh
+      try {
+        mesh = this.wasmScene.object_mesh(id)
+      } catch {
+        continue
+      }
+      try {
+        chunks.push(mesh.positions())
+      } finally {
+        mesh.free()
+      }
+    }
+    if (chunks.length === 0) return null
+    if (chunks.length === 1) return meshBoundingBoxCenter(chunks[0])
+    const total = chunks.reduce((n, c) => n + c.length, 0)
+    const all = new Float32Array(total)
+    let off = 0
+    for (const c of chunks) {
+      all.set(c, off)
+      off += c.length
+    }
+    return meshBoundingBoxCenter(all)
+  }
+
   private _commit(
-    objectId: bigint,
+    node: NodeRef,
     center: [number, number, number],
     f: number,
   ): void {
     if (Math.abs(f - 1) < 1e-9) {
       // Near-identity scale; skip the kernel call
-      this.onCommit(objectId)
+      this.onCommit(node)
       return
     }
     try {
       const affine = scaleAboutCenter(center[0], center[1], center[2], f)
-      this.wasmScene.transform_object(objectId, affineToFloat64(affine))
-      this.onCommit(objectId)
+      const affineF64 = affineToFloat64(affine)
+      if (node.kind === 'group') {
+        this.wasmScene.transform_group(node.id, affineF64)
+      } else if (node.kind === 'instance') {
+        this.wasmScene.transform_instance(node.id, affineF64)
+      } else {
+        this.wasmScene.transform_object(node.id, affineF64)
+      }
+      this.onCommit(node)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, { type ViewportApi } from './viewport/Viewport'
 import { DocumentTree } from './panels/DocumentTree'
-import { nextSelection } from './panels/treeModel'
+import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, type NodeRef } from './panels/treeModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
@@ -52,10 +52,10 @@ export default function App() {
   const [activeTool, setActiveTool] = useState<ToolName>('Select')
   /** Sticky banner: true once a kernel panic / borrow-lock is detected */
   const [kernelPanicked, setKernelPanicked] = useState(false)
-  /** Selected entities (ordered; index 0 = primary). */
-  const [selectedIds, setSelectedIds] = useState<bigint[]>([])
-  /** Entered object (editing context), or null at top level. */
-  const [activeContext, setActiveContext] = useState<bigint | null>(null)
+  /** Selected nodes (ordered; index 0 = primary). */
+  const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
+  /** Active context path. Empty = top level. */
+  const [activeContext, setActiveContext] = useState<NodeRef[]>([])
   /** Bumped on any document change so the tree re-queries entity lists. */
   const [docRev, setDocRev] = useState(0)
   /** Imperative handle into the viewport (e.g. running a boolean). */
@@ -65,8 +65,6 @@ export default function App() {
   const sceneRef = useRef<Scene | null>(null)
 
   // Install console capture on mount, restore on unmount.
-  // The capture is set up before the kernel loads so the panic hook output
-  // (console.error) is forwarded to the LogStore immediately.
   useEffect(() => {
     installConsoleCapture()
     return () => {
@@ -103,34 +101,60 @@ export default function App() {
     setWatertightMap(new Map(wtMap))
   }, [])
 
-  const handleSelect = useCallback((id: bigint | null, additive: boolean) => {
-    setSelectedIds((cur) => nextSelection(cur, id, additive))
+  const handleSelect = useCallback((node: NodeRef | null, additive: boolean) => {
+    setSelectedIds((cur) => nextSelection(cur, node, additive))
   }, [])
 
-  const handleEnterContext = useCallback((objectId: bigint) => {
-    setActiveContext(objectId)
-    setSelectedIds([objectId])
+  const handleEnterContext = useCallback((node: NodeRef) => {
+    setActiveContext((prev) => [...prev, node])
+    setSelectedIds([node])
   }, [])
 
   const handleExitContext = useCallback(() => {
-    setActiveContext(null)
+    setActiveContext((prev) => prev.slice(0, -1))
   }, [])
 
-  // Bump the tree's revision; if the entered object vanished (e.g. its creation
-  // was undone), drop back to the top-level context so nothing stays isolated
-  // around a hidden object.
+  /** Truncate the context path to `depth` entries. */
+  const handleSetContextDepth = useCallback((depth: number) => {
+    setActiveContext((prev) => prev.slice(0, depth))
+  }, [])
+
+  /** Validate and trim the context path when the document changes. */
+  const trimContextPath = useCallback((scene: Scene, path: NodeRef[]): NodeRef[] => {
+    const objectIds = new Set(Array.from(scene.object_ids()))
+    const groupIds = new Set(Array.from(scene.group_ids()))
+    const instanceIds = new Set(Array.from(scene.instance_ids()))
+
+    let trimIndex = path.length
+    for (let i = 0; i < path.length; i++) {
+      const node = path[i]
+      let alive: boolean
+      if (node.kind === 'object') {
+        alive = objectIds.has(node.id)
+      } else if (node.kind === 'instance') {
+        alive = instanceIds.has(node.id)
+      } else {
+        alive = groupIds.has(node.id)
+      }
+      if (!alive) {
+        trimIndex = i
+        break
+      }
+    }
+    return path.slice(0, trimIndex)
+  }, [])
+
+  // Bump the tree's revision; trim stale context path entries.
   const handleDocumentChanged = useCallback(() => {
     setDocRev((r) => r + 1)
     setActiveContext((ctx) => {
-      if (ctx === null) return null
       const scene = sceneRef.current
       if (scene === null) return ctx
-      return Array.from(scene.object_ids()).includes(ctx) ? ctx : null
+      return trimContextPath(scene, ctx)
     })
-  }, [])
+  }, [trimContextPath])
 
   const handleToast = useCallback((message: string, code?: string) => {
-    // Determine severity: error codes that are "hard" errors, vs. info/warn
     const isError = code !== undefined &&
       ['WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
         'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform'].includes(code)
@@ -138,14 +162,12 @@ export default function App() {
     const logMessage = code !== undefined ? `[${code}] ${message}` : message
     LogStore.log[level]('tool', logMessage)
 
-    // Detect kernel panic signatures in the message and trip the sticky banner
     if (isPanicError(message)) {
       setKernelPanicked(true)
     }
 
     const id = ++toastCounter
     setToasts((prev) => [...prev, { id, message, code }])
-    // Auto-dismiss after 4 seconds
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
     }, 4000)
@@ -155,10 +177,6 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  // Listen for console.error messages that contain panic signatures —
-  // the Rust panic hook writes to console.error before the wasm trap.
-  // We detect them via a LogStore subscriber so we don't need to duplicate
-  // the pattern-match logic.
   useEffect(() => {
     const unsub = LogStore.subscribe((entries) => {
       const latest = entries[entries.length - 1]
@@ -194,16 +212,103 @@ export default function App() {
   const allWatertight = objectCount === 0 || Array.from(watertightMap.values()).every(Boolean)
   const leakyCount = Array.from(watertightMap.values()).filter((v) => !v).length
 
-  // The boolean operands: the selection narrowed to current objects (sketches
-  // can't be booleaned). Re-queried each render; docRev forces a refresh.
+  // Booleans require exactly two selected OBJECTS at top level.
   const objectIdSet = new Set(Array.from(state.scene.object_ids()))
-  const booleanOperands = selectedIds.filter((id) => objectIdSet.has(id))
-  const canBoolean = activeContext === null && booleanOperands.length === 2
+  const booleanOperands = selectedIds.filter(
+    (n) => n.kind === 'object' && objectIdSet.has(n.id),
+  )
+  const canBoolean = activeContext.length === 0 && booleanOperands.length === 2
+
+  // Make Component: sibling multi-selection of objects/groups (no instances).
+  const parentOf = (n: NodeRef) => {
+    const k = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
+    return state.scene.node_parent(k, n.id)
+  }
+  const canMakeComp = activeContext.length === 0 && canMakeComponent(selectedIds, parentOf)
+  const canPlace = canPlaceInstance(selectedIds)
+  const canExplode = canExplodeInstance(selectedIds)
+  const canUnique = canMakeUnique(selectedIds)
   const handleBoolean = (op: number) => {
     if (booleanOperands.length === 2) {
-      viewportApi.current?.runBoolean(op, booleanOperands[0], booleanOperands[1])
+      viewportApi.current?.runBoolean(op, booleanOperands[0].id, booleanOperands[1].id)
     }
   }
+
+  const handleGroup = () => {
+    const newGroupId = viewportApi.current?.runGroup(selectedIds)
+    if (newGroupId != null) {
+      setSelectedIds([{ kind: 'group', id: newGroupId }])
+      setDocRev((r) => r + 1)
+    }
+  }
+
+  const handleUngroup = () => {
+    if (selectedIds.length === 1 && selectedIds[0].kind === 'group') {
+      viewportApi.current?.runUngroup(selectedIds[0].id)
+      setSelectedIds([])
+      setDocRev((r) => r + 1)
+    }
+  }
+
+  const handleMakeComponent = () => {
+    const instanceId = viewportApi.current?.runMakeComponent(selectedIds)
+    if (instanceId != null) {
+      setSelectedIds([{ kind: 'instance', id: instanceId }])
+      setDocRev((r) => r + 1)
+    }
+  }
+
+  const handlePlaceInstance = () => {
+    if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
+      const newId = viewportApi.current?.runPlaceInstance(selectedIds[0].id)
+      if (newId != null) {
+        setSelectedIds([{ kind: 'instance', id: newId }])
+        setDocRev((r) => r + 1)
+      }
+    }
+  }
+
+  const handleExplodeInstance = () => {
+    if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
+      const objectIds = viewportApi.current?.runExplodeInstance(selectedIds[0].id)
+      if (objectIds != null && objectIds.length > 0) {
+        setSelectedIds(objectIds.map((id) => ({ kind: 'object' as const, id })))
+        setDocRev((r) => r + 1)
+      } else if (objectIds != null) {
+        setSelectedIds([])
+        setDocRev((r) => r + 1)
+      }
+    }
+  }
+
+  const handleMakeUnique = () => {
+    if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
+      const kept = viewportApi.current?.runMakeUnique(selectedIds[0].id)
+      if (kept != null) {
+        // Keep the same instance selected — its id is unchanged.
+        setDocRev((r) => r + 1)
+      }
+    }
+  }
+
+  // Compute the lit set for isolation.
+  // When the context is non-empty, compute the leaf objects of the deepest context node.
+  // When entering an object (deepest is an object), lit = {that object}.
+  // When entering an instance (deepest is an instance), lit = member objects of the def.
+  const activeLitSet: Set<bigint> | null = (() => {
+    if (activeContext.length === 0) return null
+    const deepest = activeContext[activeContext.length - 1]
+    if (deepest.kind === 'instance') {
+      // Light all definition member objects when inside a component
+      const componentId = state.scene.instance_def(deepest.id)
+      if (componentId === undefined) return null
+      const members = Array.from(state.scene.component_member_objects(componentId))
+      return new Set(members)
+    }
+    const kind = deepest.kind === 'group' ? 1 : 0
+    const leaves = Array.from(state.scene.node_leaf_objects(kind, deepest.id))
+    return new Set(leaves)
+  })()
 
   return (
     <main
@@ -218,7 +323,7 @@ export default function App() {
         overflow: 'hidden',
       }}
     >
-      <h1 style={{ margin: '0 0 0.5rem' }}>Hew — M1</h1>
+      <h1 style={{ margin: '0 0 0.5rem' }}>Hew — M2</h1>
       <p style={{ margin: '0 0 0.5rem', fontSize: '12px', color: '#666' }}>
         Kernel {state.kernelVersion}
       </p>
@@ -351,6 +456,7 @@ export default function App() {
           activeTool={activeTool}
           activeContext={activeContext}
           selectedIds={selectedIds}
+          activeLitSet={activeLitSet}
           onSelect={handleSelect}
           onEnterContext={handleEnterContext}
           onExitContext={handleExitContext}
@@ -411,8 +517,19 @@ export default function App() {
           onSelect={handleSelect}
           onEnterContext={handleEnterContext}
           onExitContext={handleExitContext}
+          onSetContextDepth={handleSetContextDepth}
           canBoolean={canBoolean}
           onBoolean={handleBoolean}
+          onGroup={handleGroup}
+          onUngroup={handleUngroup}
+          canMakeComponent={canMakeComp}
+          onMakeComponent={handleMakeComponent}
+          canPlaceInstance={canPlace}
+          onPlaceInstance={handlePlaceInstance}
+          canExplodeInstance={canExplode}
+          onExplodeInstance={handleExplodeInstance}
+          canMakeUnique={canUnique}
+          onMakeUnique={handleMakeUnique}
         />
       </div>
 

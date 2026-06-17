@@ -16,9 +16,9 @@
 
 use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
 use kernel::{
-    BooleanOp, DocChange, Document, DocumentError, EdgeId, FaceId, KernelOp, KernelOpError,
-    KernelOpReport, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId, SketchRegionId,
-    Transform, WatertightState,
+    BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId,
+    InstanceId, KernelOp, KernelOpError, KernelOpReport, NodeId, Object, ObjectId, Plane, Point3,
+    SketchEdgeId, SketchId, SketchRegionId, Transform, WatertightState,
 };
 use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
@@ -91,6 +91,82 @@ fn sketch_id(handle: u64) -> SketchId {
 
 fn object_id(handle: u64) -> ObjectId {
     ObjectId::from(KeyData::from_ffi(handle))
+}
+
+fn group_id(handle: u64) -> GroupId {
+    GroupId::from(KeyData::from_ffi(handle))
+}
+
+fn instance_id(handle: u64) -> InstanceId {
+    InstanceId::from(KeyData::from_ffi(handle))
+}
+
+fn component_id(handle: u64) -> ComponentId {
+    ComponentId::from(KeyData::from_ffi(handle))
+}
+
+/// Decode a row-major 3×4 affine (12 floats) from the FFI boundary.
+fn affine_transform(rows: &[f64]) -> Result<Transform, ApiError> {
+    let rows: &[f64; 12] = rows.try_into().map_err(|_| {
+        ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+    })?;
+    Ok(Transform::from_affine(rows))
+}
+
+/// Decode a `(kind, id)` FFI pair into a [`NodeId`]. `kind` is `0` = object,
+/// `1` = group, `2` = instance (matching [`NodeJs`]); any other value is
+/// rejected.
+fn node_id(kind: u8, id: u64) -> Result<NodeId, ApiError> {
+    match kind {
+        0 => Ok(NodeId::Object(object_id(id))),
+        1 => Ok(NodeId::Group(group_id(id))),
+        2 => Ok(NodeId::Instance(instance_id(id))),
+        _ => Err(ApiError(
+            "BadNodeKind: node kind must be 0 (object), 1 (group), or 2 (instance)".to_string(),
+        )),
+    }
+}
+
+// ------------------------------------------------------------------- nodes
+
+/// A document-tree node across the FFI: a `kind` tag (`"object"` or
+/// `"group"`) plus the opaque `u64` handle. The UI pairs these to address
+/// nodes for selection, picking, and grouping without conflating the two
+/// handle spaces (object and group slotmaps reuse bit patterns).
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct NodeJs {
+    kind: String,
+    id: u64,
+}
+
+#[wasm_bindgen]
+impl NodeJs {
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String {
+        self.kind.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+fn node_js(node: NodeId) -> NodeJs {
+    match node {
+        NodeId::Object(id) => NodeJs {
+            kind: "object".to_string(),
+            id: id.data().as_ffi(),
+        },
+        NodeId::Group(id) => NodeJs {
+            kind: "group".to_string(),
+            id: id.data().as_ffi(),
+        },
+        NodeId::Instance(id) => NodeJs {
+            kind: "instance".to_string(),
+            id: id.data().as_ffi(),
+        },
+    }
 }
 
 // ----------------------------------------------------------------- buffers
@@ -249,11 +325,13 @@ impl FaceMergeJs {
 pub struct FacePickJs {
     object: u64,
     face: u64,
+    instance: Option<u64>,
 }
 
 #[wasm_bindgen]
 impl FacePickJs {
-    /// Handle of the picked object.
+    /// Handle of the picked object (a world object, or the definition member
+    /// when `instance` is set — the geometry that owns the face).
     pub fn object(&self) -> u64 {
         self.object
     }
@@ -261,6 +339,12 @@ impl FacePickJs {
     /// Handle of the picked face within that object.
     pub fn face(&self) -> u64 {
         self.face
+    }
+
+    /// Handle of the placing component instance, if the pick hit instanced
+    /// geometry; `undefined` for a world object.
+    pub fn instance(&self) -> Option<u64> {
+        self.instance
     }
 }
 
@@ -303,9 +387,19 @@ impl SnapJs {
         .to_string()
     }
 
-    /// Source Object handle, if the snap came from scene geometry.
+    /// Source Object handle, if the snap came from scene geometry (a world
+    /// object, or a definition member when `instance` is set).
     pub fn object(&self) -> Option<u64> {
         self.snap.source.map(|s| s.object.data().as_ffi())
+    }
+
+    /// The placing component instance handle, if the snap came from instanced
+    /// geometry; `undefined` otherwise.
+    pub fn instance(&self) -> Option<u64> {
+        self.snap
+            .source
+            .and_then(|s| s.instance)
+            .map(|i| i.data().as_ffi())
     }
 
     /// Source element handle within the object (see `element_kind`).
@@ -374,13 +468,44 @@ impl Scene {
     /// (replace semantics, mirroring the Document's view). Sketches carry no
     /// inference/cache state today, so `sketches_touched` needs no action here.
     fn reconcile(&mut self, change: &DocChange) {
+        // Objects: drop the cached mesh, then (re)register *world* objects with
+        // inference at identity, or drop hidden/gone ones. Definition members
+        // are not world inference candidates — they reach inference only
+        // through their instances below — but their mesh cache is still dropped
+        // so a definition edit re-tessellates the shared geometry.
         for &id in &change.objects_touched {
             self.mesh_cache.remove(id);
-            match self.doc.object(id) {
-                Some(object) => {
-                    self.inference.add_object(id, object, &Transform::IDENTITY);
-                }
-                None => self.inference.remove_object(id),
+            if self.doc.is_world_object(id) {
+                let object = self.doc.object(id).expect("world object is live");
+                self.inference.add_object(id, object, &Transform::IDENTITY);
+            } else {
+                self.inference.remove_object(id);
+            }
+        }
+        // Instances: re-register each touched instance's definition geometry at
+        // its pose (clearing any prior candidates first), or drop hidden/gone
+        // ones. A definition edit lands every instance in `instances_touched`,
+        // so shared-geometry changes propagate to all placements here.
+        for &iid in &change.instances_touched {
+            self.inference.remove_instance(iid);
+            self.register_instance(iid);
+        }
+    }
+
+    /// Registers a visible instance's definition members with inference, each
+    /// placed at the instance pose. A no-op for a hidden/stale instance (its
+    /// candidates were already cleared by the caller).
+    fn register_instance(&mut self, iid: InstanceId) {
+        let (Some(def), Some(pose)) = (self.doc.instance_def(iid), self.doc.instance_pose(iid))
+        else {
+            return;
+        };
+        let Some(members) = self.doc.def_members(def) else {
+            return;
+        };
+        for m in members {
+            if let Some(object) = self.doc.object(m) {
+                self.inference.add_instance(iid, m, object, &pose);
             }
         }
     }
@@ -553,6 +678,268 @@ impl Scene {
             .iter()
             .map(|id| id.data().as_ffi())
             .collect()
+    }
+
+    // ---------------------------------------------------------------- groups
+
+    /// Non-destructively groups sibling nodes into a new merge group,
+    /// returning its handle. Unlike `boolean`, no geometry is welded and no
+    /// member is consumed. `kinds`/`ids` are parallel arrays describing each
+    /// member node (kind `0` = object, `1` = group); they must be the same
+    /// length, name live sibling nodes, and not repeat.
+    pub fn group_nodes(&mut self, kinds: &[u8], ids: &[u64]) -> Result<u64, ApiError> {
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        let members = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (group, change) = self.doc.group_nodes(&members).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(group.data().as_ffi())
+    }
+
+    /// Dissolves a group, returning its members to the group's own parent
+    /// (inverse of `group_nodes`). The members keep their geometry and handles.
+    pub fn ungroup(&mut self, group: u64) -> Result<(), ApiError> {
+        let change = self.doc.ungroup(group_id(group)).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Move/rotate/scale a group by baking the affine into every leaf object
+    /// beneath it (undoable). `affine` is the same row-major 3×4
+    /// 12-float matrix as [`Scene::transform_object`].
+    pub fn transform_group(&mut self, group: u64, affine: &[f64]) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_group(group_id(group), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Handles of all currently visible groups (ungrouped groups are hidden,
+    /// not listed).
+    pub fn group_ids(&self) -> Vec<u64> {
+        self.doc
+            .group_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// The direct members of a visible group, in order. Empty if the group is
+    /// stale or hidden.
+    pub fn group_members(&self, group: u64) -> Vec<NodeJs> {
+        self.doc
+            .group_members(group_id(group))
+            .unwrap_or_default()
+            .into_iter()
+            .map(node_js)
+            .collect()
+    }
+
+    /// The visible top-level nodes (parent `None`) — the unit of top-level
+    /// selection and picking.
+    pub fn top_level_nodes(&self) -> Vec<NodeJs> {
+        self.doc
+            .top_level_nodes()
+            .into_iter()
+            .map(node_js)
+            .collect()
+    }
+
+    /// The containing group handle of a node, or `None` if it is top-level (or
+    /// the node handle is stale/hidden). `kind` is `0` = object, `1` = group.
+    pub fn node_parent(&self, kind: u8, id: u64) -> Result<Option<u64>, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_parent(node).map(|g| g.data().as_ffi()))
+    }
+
+    /// Every visible leaf Object beneath a node (the node itself if it is an
+    /// object), recursively — the meshes that move with a group transform and
+    /// stay lit when the node is the active editing context. `kind` is
+    /// `0` = object, `1` = group.
+    pub fn node_leaf_objects(&self, kind: u8, id: u64) -> Result<Vec<u64>, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self
+            .doc
+            .leaf_objects_under(node)
+            .iter()
+            .map(|o| o.data().as_ffi())
+            .collect())
+    }
+
+    // ----------------------------------------------- components & instances
+
+    /// "Make Component": folds a selection of sibling nodes into one
+    /// shared definition plus an identity-posed instance in their place, and
+    /// returns the **instance** handle (the def is reachable via
+    /// [`Scene::instance_def`]). `kinds`/`ids` are parallel arrays (kind `0` =
+    /// object, `1` = group, `2` = instance), same as [`Scene::group_nodes`].
+    pub fn make_component(&mut self, kinds: &[u8], ids: &[u64]) -> Result<u64, ApiError> {
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        let members = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (_component, instance, change) = self.doc.make_component(&members).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(instance.data().as_ffi())
+    }
+
+    /// Stamps another instance of `component` at `affine` (row-major 3×4, 12
+    /// floats), returning the new instance handle. Reflection and
+    /// non-uniform scale are allowed; a singular pose errors.
+    pub fn place_instance(&mut self, component: u64, affine: &[f64]) -> Result<u64, ApiError> {
+        let pose = affine_transform(affine)?;
+        let (instance, change) = self
+            .doc
+            .place_instance(component_id(component), pose)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(instance.data().as_ffi())
+    }
+
+    /// Move/rotate/scale an instance by composing `affine` (row-major 3×4) into
+    /// its pose — never baked. Mirror/non-uniform allowed; singular errors.
+    pub fn transform_instance(&mut self, instance: u64, affine: &[f64]) -> Result<(), ApiError> {
+        let t = affine_transform(affine)?;
+        let change = self
+            .doc
+            .transform_instance(instance_id(instance), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// "Explode": bakes an instance's pose into independent world objects,
+    /// returning their handles. A mirrored instance errors (`CannotExplodeReflected`).
+    pub fn explode_instance(&mut self, instance: u64) -> Result<Vec<u64>, ApiError> {
+        let (created, change) = self
+            .doc
+            .explode_instance(instance_id(instance))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(created.iter().map(|o| o.data().as_ffi()).collect())
+    }
+
+    /// "Make Unique": detaches an instance onto a fresh private copy of
+    /// its definition, returning the new component handle. Later edits to this
+    /// instance's definition no longer affect its former siblings.
+    pub fn make_unique(&mut self, instance: u64) -> Result<u64, ApiError> {
+        let (new_def, change) = self
+            .doc
+            .make_unique(instance_id(instance))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(new_def.data().as_ffi())
+    }
+
+    /// Handles of all currently visible component instances.
+    pub fn instance_ids(&self) -> Vec<u64> {
+        self.doc
+            .instance_ids()
+            .iter()
+            .map(|i| i.data().as_ffi())
+            .collect()
+    }
+
+    /// The definition an instance places, or `undefined` if the instance is
+    /// stale/hidden.
+    pub fn instance_def(&self, instance: u64) -> Option<u64> {
+        self.doc
+            .instance_def(instance_id(instance))
+            .map(|c| c.data().as_ffi())
+    }
+
+    /// An instance's pose as a row-major 3×4 affine (12 floats) for building the
+    /// render node matrix, or `undefined` if the instance is stale/hidden.
+    pub fn instance_pose(&self, instance: u64) -> Option<Vec<f64>> {
+        self.doc
+            .instance_pose(instance_id(instance))
+            .map(|t| t.to_affine().to_vec())
+    }
+
+    /// The member objects of a definition (definition-local geometry), in order.
+    /// Fetch each one's mesh via [`Scene::object_mesh`] and draw it at the
+    /// instance pose. Empty if the component is stale/hidden.
+    pub fn component_member_objects(&self, component: u64) -> Vec<u64> {
+        self.doc
+            .def_members(component_id(component))
+            .unwrap_or_default()
+            .iter()
+            .map(|o| o.data().as_ffi())
+            .collect()
+    }
+
+    /// The visible instances that place a definition.
+    pub fn instances_of(&self, component: u64) -> Vec<u64> {
+        self.doc
+            .instances_of(component_id(component))
+            .iter()
+            .map(|i| i.data().as_ffi())
+            .collect()
+    }
+
+    /// Push/pull a face of a component's shared geometry — editing *inside* a
+    /// component. `object` is the definition member (from
+    /// [`Scene::component_member_objects`] or a pick's `.object()`); the edit is
+    /// seen by every instance of `component` at once. Like [`Scene::push_pull`],
+    /// a flat imprinted sub-face auto-routes to wall-generating extrude. Routed
+    /// through the kernel's `apply_def_op`, so it cannot touch world objects.
+    pub fn push_pull_in_component(
+        &mut self,
+        component: u64,
+        object: u64,
+        face: u64,
+        distance: f64,
+    ) -> Result<PushPullJs, ApiError> {
+        let oid = object_id(object);
+        let face_id = FaceId::from(KeyData::from_ffi(face));
+        let is_sub = self
+            .doc
+            .object(oid)
+            .is_some_and(|o| o.is_flat_sub_face(face_id));
+        let op = if is_sub {
+            KernelOp::ExtrudeSubFace {
+                sub_face: face_id,
+                distance,
+            }
+        } else {
+            KernelOp::PushPull {
+                face: face_id,
+                distance,
+            }
+        };
+        let (report, change) = self
+            .doc
+            .apply_def_op(component_id(component), oid, op)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        match report {
+            KernelOpReport::PushPull(inner) | KernelOpReport::ExtrudeSubFace(inner) => {
+                Ok(PushPullJs { inner })
+            }
+            other => Err(api_err(
+                &other,
+                &"unexpected report kind for push_pull_in_component",
+            )),
+        }
     }
 
     /// Render buffers for one Object (cached until its next mutation).
@@ -830,6 +1217,7 @@ impl Scene {
             ElementRef::Face(f) => Some(FacePickJs {
                 object: source.object.data().as_ffi(),
                 face: f.data().as_ffi(),
+                instance: source.instance.map(|i| i.data().as_ffi()),
             }),
             // pick_face only ever yields faces; anything else is a bug.
             _ => None,
@@ -1133,5 +1521,178 @@ mod tests {
         ];
         let err = scene.transform_object(o, &reflect).unwrap_err();
         assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+    }
+
+    /// Two top-level boxes group into one node, transform together, and ungroup
+    /// back — all non-destructively and undoably across the FFI.
+    #[test]
+    fn group_transform_ungroup_round_trip() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square(&mut scene);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+
+        // Group both objects (kind 0 = object).
+        let g = scene.group_nodes(&[0, 0], &[o1, o2]).unwrap();
+        // Both objects stay visible (non-destructive), and the group is the
+        // sole top-level node listing them both.
+        assert_eq!(scene.object_ids().len(), 2, "members stay visible");
+        let top = scene.top_level_nodes();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].kind(), "group");
+        assert_eq!(top[0].id(), g);
+        let members = scene.group_members(g);
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().all(|m| m.kind() == "object"));
+        // Both objects flatten as the group's leaves.
+        let mut leaves = scene.node_leaf_objects(1, g).unwrap();
+        leaves.sort_unstable();
+        let mut expected = vec![o1, o2];
+        expected.sort_unstable();
+        assert_eq!(leaves, expected);
+        assert_eq!(scene.node_parent(0, o1).unwrap(), Some(g));
+
+        // Transform the group: bakes into both leaves, one undoable step.
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        scene.transform_group(g, &affine).unwrap();
+        assert!(scene.can_scene_undo());
+        scene.scene_undo().unwrap();
+
+        // Ungroup: members return to the top level, group disappears.
+        scene.ungroup(g).unwrap();
+        assert!(scene.group_ids().is_empty());
+        assert_eq!(scene.top_level_nodes().len(), 2);
+        assert_eq!(scene.node_parent(0, o1).unwrap(), None);
+    }
+
+    #[test]
+    fn group_rejects_mismatched_node_lists_and_bad_kinds() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+
+        let err = scene.group_nodes(&[0, 0], &[o]).unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+
+        let err = scene.group_nodes(&[7], &[o]).unwrap_err();
+        assert!(err.0.starts_with("BadNodeKind"), "got {}", err.0);
+    }
+
+    /// Make a component, stamp a second instance, and confirm they share one
+    /// definition with the pose round-tripping across the FFI.
+    #[test]
+    fn make_component_place_and_share_a_definition() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+
+        // Make a component from the one object → returns the instance handle;
+        // the object drops out of the world set (it is now a definition member).
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        assert!(!scene.object_ids().contains(&o));
+        assert_eq!(scene.instance_ids(), vec![inst]);
+        let comp = scene.instance_def(inst).unwrap();
+        assert_eq!(scene.component_member_objects(comp), vec![o]);
+        // The shared member mesh is still fetchable (drawn at each pose).
+        assert!(scene.object_mesh(o).is_ok());
+
+        // Stamp a second instance shifted in X; both share the definition.
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let inst2 = scene.place_instance(comp, &affine).unwrap();
+        assert_eq!(scene.instance_ids().len(), 2);
+        assert_eq!(scene.instances_of(comp).len(), 2);
+        assert_eq!(scene.instance_def(inst2), Some(comp));
+        // The pose round-trips as a 3×4 affine.
+        assert_eq!(scene.instance_pose(inst2).unwrap(), affine.to_vec());
+    }
+
+    /// Transform composes into the pose; explode bakes to a world object and
+    /// undoes; make_unique detaches a sibling — all across the FFI.
+    #[test]
+    fn transform_explode_and_make_unique_round_trip() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+
+        let mv = [
+            1.0, 0.0, 0.0, 2.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        scene.transform_instance(inst, &mv).unwrap();
+        assert_eq!(scene.instance_pose(inst).unwrap(), mv.to_vec());
+
+        // Explode → one independent world object; the instance is gone.
+        let created = scene.explode_instance(inst).unwrap();
+        assert_eq!(created.len(), 1);
+        assert!(scene.object_ids().contains(&created[0]));
+        assert!(scene.instance_ids().is_empty());
+
+        // Undo explode → the instance returns, the world object disappears.
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.instance_ids(), vec![inst]);
+        assert!(!scene.object_ids().contains(&created[0]));
+
+        // make_unique detaches a placed sibling onto its own definition.
+        let inst2 = scene.place_instance(comp, &mv).unwrap();
+        let new_comp = scene.make_unique(inst2).unwrap();
+        assert_ne!(new_comp, comp);
+        assert_eq!(scene.instance_def(inst2), Some(new_comp));
+        assert_eq!(scene.instance_def(inst), Some(comp));
+    }
+
+    /// Editing inside a component (push/pull a shared member face) succeeds via
+    /// `push_pull_in_component` and is one undoable document action; both
+    /// instances keep referencing the definition.
+    #[test]
+    fn editing_inside_a_component_is_undoable() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let inst2 = scene.place_instance(comp, &affine).unwrap();
+
+        // Pull the shared member's +Z (top) face up.
+        let member = scene.component_member_objects(comp)[0];
+        let top = {
+            let object = scene.doc.object(object_id(member)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        scene
+            .push_pull_in_component(comp, member, top, 1.0)
+            .unwrap();
+
+        // One document action for the edit; undo restores it, both instances live.
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.instance_ids().len(), 2);
+        assert_eq!(scene.instance_def(inst), Some(comp));
+        assert_eq!(scene.instance_def(inst2), Some(comp));
     }
 }

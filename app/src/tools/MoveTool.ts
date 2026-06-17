@@ -30,10 +30,11 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, clearPreview } from './transformPreview'
+import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
 import { arrowToAxis, editNumericBuffer, parseDistance, pointAlong } from './moveInput'
+import type { NodeRef } from '../panels/treeModel'
 
-export type OnMoveCommit = (objectId: bigint) => void
+export type OnMoveCommit = (node: NodeRef) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
@@ -58,7 +59,7 @@ type Stage =
   | { kind: 'idle' }
   | {
       kind: 'base'
-      objectId: bigint
+      node: NodeRef
       base: [number, number, number]
       previewMesh: THREE.Object3D | null
       /** Last snapped/computed destination (updated every pointer move). */
@@ -83,27 +84,31 @@ export class MoveTool implements Tool {
   /** THREE.js LineSegments for the axis guide drawn in the preview group */
   private guideLine: THREE.LineSegments | null = null
 
-  /** The object currently selected (set by Viewport via selectedIds[0]). */
-  private selectedObjectId: bigint | null = null
+  /** The node currently selected (set by Viewport via selectedIds[0]). */
+  private selectedNode: NodeRef | null = null
   /** THREE.js object group from the SceneRenderer (read-only reference for cloning). */
   private objectsGroup: THREE.Group | null = null
+  /** THREE.js instances group from the SceneRenderer (read-only reference for cloning). */
+  private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
 
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     objectsGroup: THREE.Group | null,
-    selectedObjectId: bigint | null,
+    selectedNode: NodeRef | null,
     onCommit: OnMoveCommit,
     onToast: OnToast,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.objectsGroup = objectsGroup
-    this.selectedObjectId = selectedObjectId
+    this.selectedNode = selectedNode
     this.onCommit = onCommit
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.instanceGroupGetter = instanceGroupGetter
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
@@ -146,23 +151,23 @@ export class MoveTool implements Tool {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const objectId = this.selectedObjectId
-      if (objectId === null) {
+      const node = this.selectedNode
+      if (node === null) {
         this.onToast('Select an object first, then use Move')
         return
       }
 
-      const previewMesh = buildPreviewClone(this.objectsGroup, objectId)
+      const previewMesh = this._buildPreview(node)
       const base: [number, number, number] = [snap.x, snap.y, snap.z]
       if (previewMesh !== null) {
         previewMesh.position.set(0, 0, 0)
         this.preview.add(previewMesh)
       }
 
-      this.stage = { kind: 'base', objectId, base, previewMesh, dest: [...base] }
+      this.stage = { kind: 'base', node, base, previewMesh, dest: [...base] }
       this._updateGuideLine()
     } else if (this.stage.kind === 'base') {
-      const { objectId, base } = this.stage
+      const { node, base } = this.stage
       const tx = snap.x - base[0]
       const ty = snap.y - base[1]
       const tz = snap.z - base[2]
@@ -173,7 +178,7 @@ export class MoveTool implements Tool {
         return
       }
 
-      this._commitAndReset(objectId, tx, ty, tz)
+      this._commitAndReset(node, tx, ty, tz)
     }
   }
 
@@ -228,9 +233,9 @@ export class MoveTool implements Tool {
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   /** Commit the move via translationAffine, then reset to idle. */
-  private _commitAndReset(objectId: bigint, tx: number, ty: number, tz: number): void {
+  private _commitAndReset(node: NodeRef, tx: number, ty: number, tz: number): void {
     this._resetToIdle()
-    this._commit(objectId, tx, ty, tz)
+    this._commit(node, tx, ty, tz)
   }
 
   /**
@@ -240,7 +245,7 @@ export class MoveTool implements Tool {
    */
   private _commitFromTyped(dist: number): void {
     if (this.stage.kind !== 'base') return
-    const { objectId, base, dest } = this.stage
+    const { node, base, dest } = this.stage
 
     let dir: [number, number, number]
     if (this.lockAxis !== null) {
@@ -266,7 +271,7 @@ export class MoveTool implements Tool {
       return
     }
 
-    this._commitAndReset(objectId, tx, ty, tz)
+    this._commitAndReset(node, tx, ty, tz)
   }
 
   private _resetToIdle(): void {
@@ -278,11 +283,30 @@ export class MoveTool implements Tool {
     this.onMeasurementCb('')
   }
 
-  private _commit(objectId: bigint, tx: number, ty: number, tz: number): void {
+  private _buildPreview(node: NodeRef): THREE.Object3D | null {
+    if (node.kind === 'group') {
+      const leafIds = Array.from(this.wasmScene.node_leaf_objects(1, node.id))
+      return buildMultiPreviewClone(this.objectsGroup, leafIds)
+    }
+    if (node.kind === 'instance') {
+      const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
+      return buildInstancePreviewClone(group)
+    }
+    return buildPreviewClone(this.objectsGroup, node.id)
+  }
+
+  private _commit(node: NodeRef, tx: number, ty: number, tz: number): void {
     try {
       const affine = translationAffine(tx, ty, tz)
-      this.wasmScene.transform_object(objectId, affineToFloat64(affine))
-      this.onCommit(objectId)
+      const affineF64 = affineToFloat64(affine)
+      if (node.kind === 'group') {
+        this.wasmScene.transform_group(node.id, affineF64)
+      } else if (node.kind === 'instance') {
+        this.wasmScene.transform_instance(node.id, affineF64)
+      } else {
+        this.wasmScene.transform_object(node.id, affineF64)
+      }
+      this.onCommit(node)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

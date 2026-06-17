@@ -26,6 +26,7 @@ export class ToolController {
     this._activeTool = new SelectTool(wasmScene, onSelect)
   }
 
+
   get activeTool(): Tool {
     return this._activeTool
   }

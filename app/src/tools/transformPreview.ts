@@ -5,23 +5,21 @@
  * gives the clone its OWN BufferGeometry instances (via geometry.clone()) so
  * that `clearPreview`'s geometry.dispose() calls cannot corrupt the live
  * scene object's shared geometry.
+ *
+ * `buildMultiPreviewClone` does the same for a set of leaf-object ids (used
+ * when a group is being transformed — all leaf meshes move together).
  */
 
 import * as THREE from 'three'
 
 /**
- * Build a semi-transparent THREE.js clone of the object's rendered mesh for
- * use as a drag preview.  Returns null if the source group is not found.
- *
- * The clone owns its own BufferGeometry (cloned, not shared) so that
- * clearPreview() can safely dispose it without affecting the live object.
+ * Clone the mesh sub-group for one object and make it semi-transparent.
+ * Returns null if the source group is not found.
  */
-export function buildPreviewClone(
-  objectsGroup: THREE.Group | null,
+function cloneObjectMesh(
+  objectsGroup: THREE.Group,
   objectId: bigint,
 ): THREE.Object3D | null {
-  if (objectsGroup === null) return null
-
   const name = `Object_${objectId}`
   let sourceGroup: THREE.Object3D | undefined
   objectsGroup.traverse((child) => {
@@ -50,6 +48,80 @@ export function buildPreviewClone(
     }
   })
   return clone
+}
+
+/**
+ * Build a semi-transparent THREE.js clone of the object's rendered mesh for
+ * use as a drag preview.  Returns null if the source group is not found.
+ *
+ * The clone owns its own BufferGeometry (cloned, not shared) so that
+ * clearPreview() can safely dispose it without affecting the live object.
+ */
+export function buildPreviewClone(
+  objectsGroup: THREE.Group | null,
+  objectId: bigint,
+): THREE.Object3D | null {
+  if (objectsGroup === null) return null
+  return cloneObjectMesh(objectsGroup, objectId)
+}
+
+/**
+ * Build a semi-transparent clone of an instance's THREE.Group for use as a
+ * drag preview. Returns null if the source group is not found.
+ */
+export function buildInstancePreviewClone(
+  instanceGroup: THREE.Group | null,
+): THREE.Object3D | null {
+  if (instanceGroup === null) return null
+  const clone = instanceGroup.clone(true)
+  // Reset the clone's matrix so the preview is in world-space identity —
+  // the tool will translate it directly.
+  clone.matrixAutoUpdate = true
+  clone.matrix.identity()
+  clone.matrixWorldNeedsUpdate = true
+  clone.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.geometry = child.geometry.clone()
+      const mat = (child.material as THREE.MeshPhongMaterial).clone()
+      mat.opacity = 0.5
+      mat.transparent = true
+      mat.depthWrite = false
+      child.material = mat
+    }
+    if (child instanceof THREE.LineSegments) {
+      child.geometry = child.geometry.clone()
+      const mat = (child.material as THREE.LineBasicMaterial).clone()
+      mat.opacity = 0.5
+      mat.transparent = true
+      child.material = mat
+    }
+  })
+  return clone
+}
+
+/**
+ * Build a combined semi-transparent preview for a set of leaf object ids
+ * (used when transforming a group — all leaves must move together as one unit).
+ * Returns a THREE.Group containing all found clones, or null if none found.
+ */
+export function buildMultiPreviewClone(
+  objectsGroup: THREE.Group | null,
+  leafIds: bigint[],
+): THREE.Group | null {
+  if (objectsGroup === null || leafIds.length === 0) return null
+
+  const container = new THREE.Group()
+  container.name = 'MultiPreview'
+  let found = 0
+  for (const id of leafIds) {
+    const clone = cloneObjectMesh(objectsGroup, id)
+    if (clone !== null) {
+      container.add(clone)
+      found++
+    }
+  }
+  if (found === 0) return null
+  return container
 }
 
 /**

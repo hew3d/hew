@@ -6,9 +6,10 @@
 //! stable across undo/redo.
 
 use kernel::{
-    BooleanError, BooleanOp, Document, DocumentError, KernelOp, Object, Plane, Point3, Transform,
-    TransformError, Vec3, WatertightState,
+    BooleanError, BooleanOp, Document, DocumentError, GroupId, KernelOp, NodeId, Object, Plane,
+    Point3, Transform, TransformError, Vec3, WatertightState,
 };
+use std::collections::HashSet;
 
 // ----------------------------------------------------------------- helpers
 
@@ -461,6 +462,249 @@ fn apply_op_on_hidden_object_errors() {
     );
 }
 
+// ------------------------------------------------------------ merge groups
+
+/// The set of visible top-level nodes, order-insensitive.
+fn top_set(doc: &Document) -> HashSet<NodeId> {
+    doc.top_level_nodes().into_iter().collect()
+}
+
+/// Grouping is non-destructive: both members stay visible, watertight, and
+/// keep their handles; the group replaces them at the top level.
+#[test]
+fn group_is_non_destructive_and_contains_its_members() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group two objects");
+
+    // Geometry untouched: both objects still visible and solid (unlike union).
+    let visible: HashSet<_> = doc.visible_object_ids().into_iter().collect();
+    assert_eq!(visible, HashSet::from([a, b]), "both members stay visible");
+    assert_eq!(
+        doc.object(a).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+    assert_eq!(
+        doc.object(b).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+
+    // The group is the only top-level node and lists exactly its members.
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(g)]));
+    assert_eq!(
+        doc.group_members(g)
+            .unwrap()
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([NodeId::Object(a), NodeId::Object(b)])
+    );
+    assert_eq!(doc.node_parent(NodeId::Object(a)), Some(g));
+    assert_eq!(doc.node_parent(NodeId::Object(b)), Some(g));
+}
+
+/// Groups nest: a group may contain another group plus an object, and
+/// `leaf_objects_under` flattens the whole subtree.
+#[test]
+fn groups_nest_and_flatten_to_leaves() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+
+    let (inner, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("inner group");
+    let (outer, _) = doc
+        .group_nodes(&[NodeId::Group(inner), NodeId::Object(c)])
+        .expect("outer group nests a group and an object");
+
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(outer)]));
+    assert_eq!(doc.node_parent(NodeId::Group(inner)), Some(outer));
+    assert_eq!(
+        doc.leaf_objects_under(NodeId::Group(outer))
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([a, b, c]),
+        "leaves flatten the whole subtree"
+    );
+}
+
+/// Transforming a group bakes into every leaf beneath it (recursively) and
+/// round-trips through undo/redo with stable handles.
+#[test]
+fn transform_group_moves_all_leaves_and_round_trips() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let orig_a = doc.object(a).unwrap().clone();
+    let orig_b = doc.object(b).unwrap().clone();
+    let orig_c = doc.object(c).unwrap().clone();
+    let (ca, cb, cc) = (centroid(&orig_a), centroid(&orig_b), centroid(&orig_c));
+
+    let (inner, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let (outer, _) = doc
+        .group_nodes(&[NodeId::Group(inner), NodeId::Object(c)])
+        .unwrap();
+
+    let offset = Vec3::new(5.0, 3.0, 2.0);
+    doc.transform_group(outer, &Transform::translation(offset))
+        .expect("transform the outer group");
+
+    assert!(approx_pt(centroid(doc.object(a).unwrap()), ca + offset));
+    assert!(approx_pt(centroid(doc.object(b).unwrap()), cb + offset));
+    assert!(approx_pt(centroid(doc.object(c).unwrap()), cc + offset));
+
+    doc.undo().expect("undo group transform");
+    assert!(objects_equivalent(doc.object(a).unwrap(), &orig_a));
+    assert!(objects_equivalent(doc.object(b).unwrap(), &orig_b));
+    assert!(objects_equivalent(doc.object(c).unwrap(), &orig_c));
+
+    doc.redo().expect("redo group transform");
+    assert!(approx_pt(centroid(doc.object(a).unwrap()), ca + offset));
+    assert!(approx_pt(centroid(doc.object(c).unwrap()), cc + offset));
+}
+
+/// Group then ungroup restores the original top-level shape; the members keep
+/// their handles and geometry. Undo/redo of each step is an identity.
+#[test]
+fn group_then_ungroup_round_trips() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let before = top_set(&doc);
+    assert_eq!(
+        before,
+        HashSet::from([NodeId::Object(a), NodeId::Object(b)])
+    );
+
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    doc.ungroup(g).expect("ungroup");
+
+    assert_eq!(top_set(&doc), before, "top-level shape restored");
+    assert!(doc.group_ids().is_empty(), "the group is gone (hidden)");
+    assert_eq!(doc.node_parent(NodeId::Object(a)), None);
+
+    // Undo the ungroup → group is back; undo the group → flat again.
+    doc.undo().expect("undo ungroup");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(g)]));
+    doc.undo().expect("undo group");
+    assert_eq!(top_set(&doc), before);
+
+    // Redo both → grouped then ungrouped again.
+    doc.redo().expect("redo group");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(g)]));
+    doc.redo().expect("redo ungroup");
+    assert_eq!(top_set(&doc), before);
+}
+
+/// Ungroup returns members to the *group's own parent*, not the top level,
+/// when the group is nested.
+#[test]
+fn ungroup_returns_members_to_the_groups_parent() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let (inner, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let (outer, _) = doc
+        .group_nodes(&[NodeId::Group(inner), NodeId::Object(c)])
+        .unwrap();
+
+    doc.ungroup(inner).expect("ungroup the inner group");
+
+    // a and b now sit directly under `outer`, alongside c.
+    assert_eq!(doc.node_parent(NodeId::Object(a)), Some(outer));
+    assert_eq!(doc.node_parent(NodeId::Object(b)), Some(outer));
+    assert_eq!(
+        doc.group_members(outer)
+            .unwrap()
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([NodeId::Object(a), NodeId::Object(b), NodeId::Object(c)])
+    );
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(outer)]));
+}
+
+/// Grouping refuses degenerate selections without mutating the document.
+#[test]
+fn group_refuses_bad_selections() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+
+    assert_eq!(
+        doc.group_nodes(&[]).map(|_| ()),
+        Err(DocumentError::EmptyGroup)
+    );
+    assert_eq!(
+        doc.group_nodes(&[NodeId::Object(a), NodeId::Object(a)])
+            .map(|_| ()),
+        Err(DocumentError::DuplicateMember)
+    );
+
+    // Group a and b; now they are siblings under a group, so grouping a with
+    // the still-top-level c mixes parents.
+    let (_, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    assert_eq!(
+        doc.group_nodes(&[NodeId::Object(a), NodeId::Object(c)])
+            .map(|_| ()),
+        Err(DocumentError::MixedParents)
+    );
+
+    // A stale object handle is refused as unknown.
+    let bogus = kernel::ObjectId::default();
+    assert_eq!(
+        doc.group_nodes(&[NodeId::Object(bogus)]).map(|_| ()),
+        Err(DocumentError::UnknownObject)
+    );
+}
+
+/// A single-member group is allowed (a degenerate but valid container).
+#[test]
+fn single_member_group_is_allowed() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group of one");
+    assert_eq!(doc.group_members(g).unwrap(), vec![NodeId::Object(a)]);
+}
+
+/// Ungrouping an unknown/hidden group is refused.
+#[test]
+fn ungroup_unknown_group_errors() {
+    let mut doc = Document::new();
+    assert_eq!(
+        doc.ungroup(GroupId::default()),
+        Err(DocumentError::UnknownGroup)
+    );
+}
+
+/// Transforming an unknown group is refused without mutation.
+#[test]
+fn transform_unknown_group_errors() {
+    let mut doc = Document::new();
+    assert_eq!(
+        doc.transform_group(
+            GroupId::default(),
+            &Transform::translation(Vec3::new(1.0, 0.0, 0.0))
+        ),
+        Err(DocumentError::UnknownGroup)
+    );
+}
+
 // ----------------------------------------------------------------- helper
 
 /// The +Z (top) face of an extruded box.
@@ -470,4 +714,260 @@ fn top_face(obj: &Object) -> kernel::FaceId {
         .find(|(_, f)| f.plane.normal().approx_eq(Vec3::new(0.0, 0.0, 1.0), 1e-9))
         .map(|(id, _)| id)
         .expect("a top face exists")
+}
+
+// ------------------------------------------------- components
+//
+// Acceptance specs for the Components slice. Each is `#[ignore]`d because its
+// op is a `todo!()` stub ( stub-first); un-ignore it in the PR that
+// implements the op. The assertions are the contract — never weaken them.
+
+/// Make Component folds a selection into a flat definition plus one
+/// identity-posed instance, **without moving geometry** (def-local frame =
+/// world-at-creation): the folded object keeps its handle and shape, drops
+/// out of the world-object set, and a stand-in instance takes its place.
+#[test]
+fn make_component_folds_selection_into_a_definition_at_identity() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let before = doc.object(o).expect("object live").clone();
+
+    let (comp, inst, _change) = doc
+        .make_component(&[NodeId::Object(o)])
+        .expect("make component");
+
+    // The object is now a definition member: same handle, unchanged geometry,
+    // no longer a world object.
+    assert!(
+        !doc.visible_object_ids().contains(&o),
+        "a definition member is not a world object"
+    );
+    assert_eq!(doc.def_members(comp), Some(vec![o]));
+    assert!(
+        objects_equivalent(&before, doc.object(o).expect("member still live")),
+        "make_component moves no geometry"
+    );
+
+    // One identity-posed instance stands in its place at the top level.
+    assert_eq!(doc.instance_def(inst), Some(comp));
+    assert_eq!(doc.instance_pose(inst), Some(Transform::IDENTITY));
+    assert!(doc.top_level_nodes().contains(&NodeId::Instance(inst)));
+    assert_eq!(doc.instances_of(comp), vec![inst]);
+}
+
+/// The defining property of components: instances share one definition, so an
+/// `apply_def_op` edit to the shared geometry is seen by every instance — and
+/// the change names the component and all its instances for the shim to refresh.
+#[test]
+fn editing_a_definition_changes_every_instance() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, i1, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(5.0, 0.0, 0.0)))
+        .unwrap();
+
+    assert_eq!(doc.instance_def(i1), doc.instance_def(i2));
+    let member = doc.def_members(comp).unwrap()[0];
+    let vol_before = signed_volume(doc.object(member).unwrap());
+
+    // Edit the shared geometry: push the member's top face up.
+    let face = top_face(doc.object(member).unwrap());
+    let (_report, change) = doc
+        .apply_def_op(
+            comp,
+            member,
+            KernelOp::PushPull {
+                face,
+                distance: 1.0,
+            },
+        )
+        .unwrap();
+
+    assert!(
+        signed_volume(doc.object(member).unwrap()) > vol_before,
+        "the shared geometry grew"
+    );
+    assert!(change.components_touched.contains(&comp));
+    assert!(
+        change.instances_touched.contains(&i1) && change.instances_touched.contains(&i2),
+        "a shared-geometry edit touches every instance"
+    );
+}
+
+/// A move composes into the pose (never baked), accepts mirror and non-uniform
+/// scale, refuses a singular transform, and undoes to the exact prior pose.
+#[test]
+fn transform_instance_composes_pose_and_undo_is_exact() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (_comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let probe = Point3::new(0.3, 0.7, 0.2);
+
+    let t1 = Transform::translation(Vec3::new(2.0, 0.0, 0.0));
+    doc.transform_instance(inst, &t1).unwrap();
+    assert!(
+        doc.instance_pose(inst)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(t1.apply_point(probe), 1e-9),
+        "identity then t1 == t1"
+    );
+
+    let t2 = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.5).unwrap();
+    doc.transform_instance(inst, &t2).unwrap();
+    let composed = t1.then(&t2);
+    assert!(
+        doc.instance_pose(inst)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(composed.apply_point(probe), 1e-9),
+        "poses compose: pose' = pose.then(t)"
+    );
+
+    doc.undo().unwrap();
+    assert!(
+        doc.instance_pose(inst)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(t1.apply_point(probe), 1e-9),
+        "undo restores the exact prior pose"
+    );
+
+    // Mirror and non-uniform scale are allowed; only singular is refused.
+    assert!(
+        doc.transform_instance(inst, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+            .is_ok(),
+        "mirroring an instance is allowed"
+    );
+    assert!(
+        doc.transform_instance(inst, &Transform::scale(Vec3::new(2.0, 3.0, 0.5)))
+            .is_ok(),
+        "non-uniform scale on an instance is allowed"
+    );
+    assert_eq!(
+        doc.transform_instance(inst, &Transform::uniform_scale(0.0)),
+        Err(DocumentError::Transform(TransformError::Singular))
+    );
+}
+
+/// Explode bakes an orientation-preserving pose into independent world objects
+/// (equal to the posed instance), leaving the definition intact; a mirrored
+/// instance refuses (baking a reflection would invert winding).
+#[test]
+fn explode_bakes_pose_into_world_objects_and_refuses_mirror() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let pose = Transform::translation(Vec3::new(4.0, 0.0, 0.0));
+    doc.transform_instance(inst, &pose).unwrap();
+
+    // Expected geometry: the shared member baked by the instance pose.
+    let member = doc.def_members(comp).unwrap()[0];
+    let mut expected = doc.object(member).unwrap().clone();
+    expected.apply_transform(&pose).unwrap();
+
+    let (created, _change) = doc.explode_instance(inst).unwrap();
+    assert_eq!(created.len(), 1);
+    assert!(
+        objects_equivalent(
+            &expected,
+            doc.object(created[0]).expect("exploded object live")
+        ),
+        "exploded geometry equals the posed instance"
+    );
+    assert!(
+        doc.visible_object_ids().contains(&created[0]),
+        "the exploded result is an independent world object"
+    );
+    assert!(doc.instance_pose(inst).is_none(), "the instance is gone");
+    assert!(
+        doc.object(member).is_some(),
+        "the definition (and its member) is untouched by explode"
+    );
+
+    // A mirrored instance refuses to explode.
+    let m = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (_c2, inst2, _) = doc.make_component(&[NodeId::Object(m)]).unwrap();
+    doc.transform_instance(inst2, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+        .unwrap();
+    assert_eq!(
+        doc.explode_instance(inst2),
+        Err(DocumentError::CannotExplodeReflected)
+    );
+}
+
+/// Make Unique gives one instance its own private copy of the definition, so a
+/// later edit to it no longer affects its former siblings.
+#[test]
+fn make_unique_detaches_an_instance_from_its_siblings() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, i1, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(5.0, 0.0, 0.0)))
+        .unwrap();
+
+    let (new_comp, _change) = doc.make_unique(i2).unwrap();
+    assert_ne!(new_comp, comp);
+    assert_eq!(doc.instance_def(i1), Some(comp));
+    assert_eq!(doc.instance_def(i2), Some(new_comp));
+
+    let m1 = doc.def_members(comp).unwrap()[0];
+    let v1_before = signed_volume(doc.object(m1).unwrap());
+    let m2 = doc.def_members(new_comp).unwrap()[0];
+    let face = top_face(doc.object(m2).unwrap());
+    doc.apply_def_op(
+        new_comp,
+        m2,
+        KernelOp::PushPull {
+            face,
+            distance: 1.0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        signed_volume(doc.object(m1).unwrap()),
+        v1_before,
+        "the former sibling's definition is untouched"
+    );
+    assert!(
+        signed_volume(doc.object(m2).unwrap()) > v1_before,
+        "the unique copy grew"
+    );
+}
+
+/// make_component then place_instance round-trips through document undo/redo,
+/// restoring the original world object on undo and the *same* node handles on
+/// redo (hide-not-delete).
+#[test]
+fn component_actions_round_trip_through_undo_redo() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(3.0, 0.0, 0.0)))
+        .unwrap();
+    let top_before = top_set(&doc);
+
+    doc.undo().unwrap(); // undo place_instance
+    assert!(doc.instance_pose(i2).is_none());
+    doc.undo().unwrap(); // undo make_component
+    assert!(
+        doc.visible_object_ids().contains(&o),
+        "the folded object is a world solid again"
+    );
+    assert!(doc.instance_pose(inst).is_none());
+    assert!(doc.component_ids().is_empty());
+
+    doc.redo().unwrap(); // redo make_component
+    doc.redo().unwrap(); // redo place_instance
+    assert_eq!(
+        top_set(&doc),
+        top_before,
+        "redo restores the same top-level node set (stable handles)"
+    );
+    assert_eq!(doc.instance_def(inst), Some(comp));
+    assert_eq!(doc.instance_def(i2), Some(comp));
 }

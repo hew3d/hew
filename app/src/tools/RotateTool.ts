@@ -22,17 +22,18 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { rotateAboutPivotZ, snapAngleDeg, angleFromPivot, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, clearPreview } from './transformPreview'
+import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
+import type { NodeRef } from '../panels/treeModel'
 
-export type OnRotateCommit = (objectId: bigint) => void
+export type OnRotateCommit = (node: NodeRef) => void
 export type OnToast = (message: string, code?: string) => void
 
 type Stage =
   | { kind: 'idle' }
-  | { kind: 'pivot'; objectId: bigint; pivot: [number, number, number] }
+  | { kind: 'pivot'; node: NodeRef; pivot: [number, number, number] }
   | {
       kind: 'ref'
-      objectId: bigint
+      node: NodeRef
       pivot: [number, number, number]
       refAngle: number
       previewMesh: THREE.Object3D | null
@@ -48,23 +49,26 @@ export class RotateTool implements Tool {
   private wasmScene: WasmScene
   private onCommit: OnRotateCommit
   private onToast: OnToast
-  private selectedObjectId: bigint | null = null
+  private selectedNode: NodeRef | null = null
   private objectsGroup: THREE.Group | null = null
+  private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
 
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     objectsGroup: THREE.Group | null,
-    selectedObjectId: bigint | null,
+    selectedNode: NodeRef | null,
     onCommit: OnRotateCommit,
     onToast: OnToast,
+    instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.objectsGroup = objectsGroup
-    this.selectedObjectId = selectedObjectId
+    this.selectedNode = selectedNode
     this.onCommit = onCommit
     this.onToast = onToast
+    this.instanceGroupGetter = instanceGroupGetter
   }
 
   onPointerMove(snap: Snap | null, _ray: Ray): void {
@@ -83,23 +87,23 @@ export class RotateTool implements Tool {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const objectId = this.selectedObjectId
-      if (objectId === null) {
+      const node = this.selectedNode
+      if (node === null) {
         this.onToast('Select an object first, then use Rotate')
         return
       }
       const pivot: [number, number, number] = [snap.x, snap.y, snap.z]
-      this.stage = { kind: 'pivot', objectId, pivot }
+      this.stage = { kind: 'pivot', node, pivot }
     } else if (this.stage.kind === 'pivot') {
-      const { objectId, pivot } = this.stage
+      const { node, pivot } = this.stage
       const refAngle = angleFromPivot(pivot[0], pivot[1], snap.x, snap.y)
-      const previewMesh = buildPreviewClone(this.objectsGroup, objectId)
+      const previewMesh = this._buildPreview(node)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)
       }
-      this.stage = { kind: 'ref', objectId, pivot, refAngle, previewMesh }
+      this.stage = { kind: 'ref', node, pivot, refAngle, previewMesh }
     } else if (this.stage.kind === 'ref') {
-      const { objectId, pivot, refAngle, previewMesh } = this.stage
+      const { node, pivot, refAngle, previewMesh } = this.stage
       const currentAngle = angleFromPivot(pivot[0], pivot[1], snap.x, snap.y)
       const delta = snapAngleDeg(currentAngle - refAngle, SNAP_DEG)
 
@@ -114,7 +118,7 @@ export class RotateTool implements Tool {
         return
       }
 
-      this._commit(objectId, pivot, delta)
+      this._commit(node, pivot, delta)
     }
   }
 
@@ -129,15 +133,34 @@ export class RotateTool implements Tool {
     clearPreview(this.preview)
   }
 
+  private _buildPreview(node: NodeRef): THREE.Object3D | null {
+    if (node.kind === 'group') {
+      const leafIds = Array.from(this.wasmScene.node_leaf_objects(1, node.id))
+      return buildMultiPreviewClone(this.objectsGroup, leafIds)
+    }
+    if (node.kind === 'instance') {
+      const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
+      return buildInstancePreviewClone(group)
+    }
+    return buildPreviewClone(this.objectsGroup, node.id)
+  }
+
   private _commit(
-    objectId: bigint,
+    node: NodeRef,
     pivot: [number, number, number],
     theta: number,
   ): void {
     try {
       const affine = rotateAboutPivotZ(pivot[0], pivot[1], pivot[2], theta)
-      this.wasmScene.transform_object(objectId, affineToFloat64(affine))
-      this.onCommit(objectId)
+      const affineF64 = affineToFloat64(affine)
+      if (node.kind === 'group') {
+        this.wasmScene.transform_group(node.id, affineF64)
+      } else if (node.kind === 'instance') {
+        this.wasmScene.transform_instance(node.id, affineF64)
+      } else {
+        this.wasmScene.transform_object(node.id, affineF64)
+      }
+      this.onCommit(node)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

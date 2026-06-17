@@ -210,6 +210,17 @@ export class PushPullTool implements Tool {
     this._activeContext = objectId
   }
 
+  /**
+   * Set the active component context: when the user has double-clicked into an
+   * instance, push/pull routes face operations through `push_pull_in_component`
+   * instead of `push_pull`. `componentId` is the definition handle (from
+   * `instance_def`), or null for normal (non-instance) context.
+   */
+  private _activeComponent: bigint | null = null
+  setComponentContext(componentId: bigint | null): void {
+    this._activeComponent = componentId
+  }
+
   private _commit(target: PushPullTarget, distance: number): void {
     if (Math.abs(distance) < 1e-6) {
       this.onToast('Move more before committing push/pull')
@@ -225,11 +236,19 @@ export class PushPullTool implements Tool {
         )
         this.onCommit(objectId)
       } else {
-        const report = this.wasmScene.push_pull(
-          target.objectHandle,
-          target.faceHandle,
-          distance,
-        )
+        // Route through push_pull_in_component when inside a component editing context.
+        const report = this._activeComponent !== null
+          ? this.wasmScene.push_pull_in_component(
+              this._activeComponent,
+              target.objectHandle,
+              target.faceHandle,
+              distance,
+            )
+          : this.wasmScene.push_pull(
+              target.objectHandle,
+              target.faceHandle,
+              distance,
+            )
         try {
           this.onCommit(target.objectHandle)
         } finally {

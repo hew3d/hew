@@ -7,7 +7,7 @@
 //! treats ids as opaque labels.
 
 use inference::{ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery};
-use kernel::{Object, ObjectId, Point3, Transform, Vec3, tol};
+use kernel::{InstanceId, Object, ObjectId, Point3, Transform, Vec3, tol};
 
 const WIDE: f64 = 0.3; // generous pick-cone half-angle (radians)
 const NARROW: f64 = 0.01;
@@ -230,5 +230,51 @@ fn placement_transform_is_applied() {
     assert!(
         snap.position
             .approx_eq(Point3::new(11.0, 1.0, 1.0), tol::POINT_MERGE)
+    );
+}
+
+/// Instanced candidates are keyed by their placing instance, *separately*
+/// from world objects — so a definition's geometry placed by an instance does
+/// not collide with, or get cleared by, world-object bookkeeping (and two
+/// instances of one definition would likewise stay distinct). Here a world
+/// object and an instance deliberately share the same `ObjectId` label; the
+/// instance tag keeps them apart.
+#[test]
+fn instanced_candidates_are_keyed_separately_from_world_objects() {
+    let cube = unit_cube();
+    let mut scene = InferenceScene::new();
+    scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
+    let world = scene.candidate_counts();
+    assert!(world.0 > 0 && world.1 > 0 && world.2 > 0);
+
+    // An instance of the same geometry adds to — never replaces — the world set.
+    scene.add_instance(
+        InstanceId::default(),
+        ObjectId::default(),
+        &cube,
+        &Transform::translation(Vec3::new(10.0, 0.0, 0.0)),
+    );
+    assert_eq!(
+        scene.candidate_counts(),
+        (world.0 * 2, world.1 * 2, world.2 * 2),
+        "instance candidates coexist with the world object's"
+    );
+
+    // Removing the instance leaves the world object untouched...
+    scene.remove_instance(InstanceId::default());
+    assert_eq!(scene.candidate_counts(), world);
+
+    // ...and removing the world object leaves a re-added instance's candidates.
+    scene.add_instance(
+        InstanceId::default(),
+        ObjectId::default(),
+        &cube,
+        &Transform::IDENTITY,
+    );
+    scene.remove_object(ObjectId::default());
+    assert_eq!(
+        scene.candidate_counts(),
+        world,
+        "remove_object spares instanced candidates sharing the label"
     );
 }
