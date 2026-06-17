@@ -155,6 +155,13 @@ pub struct SnapQuery {
     /// radius in pixels and the camera FOV, keeping this crate
     /// screen-agnostic.
     pub aperture: f64,
+    /// Active drawing-plane constraint. When `Some`, only candidates whose
+    /// position lies on this plane (within [`tol::PLANE_DIST`]) are considered —
+    /// drawing on a face must not "see through" the solid and snap to occluded,
+    /// off-plane geometry (hidden edges/midpoints/vertices). `OnFace` candidates
+    /// then naturally collapse to the coplanar (active) face. `None` keeps the
+    /// unconstrained behavior (free-space / ground drawing).
+    pub constraint_plane: Option<Plane>,
 }
 
 /// A snappable point with provenance.
@@ -406,6 +413,18 @@ impl InferenceScene {
             ) {
                 candidates.push((SnapKind::OnFace, ang, depth, pos, Some(face.source)));
             }
+        }
+
+        // --- Constrain to the active drawing plane, if any. ---
+        // Drawing on a face must not snap to occluded, off-plane geometry: the
+        // pick cone is a screen-space projection that "sees through" the solid,
+        // so without this a hidden bottom-edge midpoint (which outranks OnFace)
+        // would win. Keep only candidates lying on the plane; this also collapses
+        // OnFace to the coplanar (active) face. The lock-fallback line below is
+        // intentionally NOT constrained — it's a directional inference, not a
+        // candidate snap.
+        if let Some(plane) = query.constraint_plane {
+            candidates.retain(|c| plane.signed_distance(c.3).abs() <= tol::PLANE_DIST);
         }
 
         // --- Rank: strongest SnapKind first, then smallest angular distance,
@@ -751,6 +770,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.3,
+            constraint_plane: None,
         };
         assert!(scene.resolve(&query).is_none());
     }
@@ -839,8 +859,119 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.6,
+                constraint_plane: None,
             })
             .expect("a corner is within the cone");
+        assert_eq!(snap.kind, SnapKind::Endpoint);
+        assert!(
+            snap.position
+                .approx_eq(Point3::new(1.0, 1.0, 1.0), tol::POINT_MERGE)
+        );
+    }
+
+    /// A unit cube as an inference scene, for the constraint-plane tests.
+    fn cube_scene() -> InferenceScene {
+        let cube = kernel::Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+                Point3::new(1.0, 0.0, 1.0),
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(0.0, 1.0, 1.0),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+        .unwrap();
+        let mut scene = InferenceScene::new();
+        scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
+        scene
+    }
+
+    /// Drawing on the top face must not "see through" the solid: a ray aimed
+    /// into the top face interior whose cone also catches a *hidden bottom-edge
+    /// midpoint* snaps to that off-plane midpoint when unconstrained (Midpoint
+    /// outranks OnFace), but the constraint plane excludes it and keeps the snap
+    /// on the active (top) plane. This is the rectangle-on-face abort bug.
+    #[test]
+    fn constraint_plane_excludes_occluded_off_plane_snaps() {
+        let scene = cube_scene();
+        // Straight-down ray entering the top face interior at (0.3, 0.3); the
+        // wide cone also catches the *hidden bottom corner* (0,0,0), which is
+        // nearer the axis than its top twin (0,0,1) and is an Endpoint (the
+        // strongest kind), so it wins outright when unconstrained.
+        let ray = PickRay {
+            origin: Point3::new(0.3, 0.3, 4.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+
+        // Unconstrained: snaps to occluded geometry below the top plane.
+        let free = scene
+            .resolve(&SnapQuery {
+                ray,
+                anchor: None,
+                lock: None,
+                aperture: 0.6,
+                constraint_plane: None,
+            })
+            .expect("something in the wide cone");
+        assert!(
+            free.position.z < 0.5,
+            "unconstrained snap dives to hidden bottom geometry: {:?}",
+            free.position
+        );
+
+        // Constrained to the top plane: the bottom midpoint is filtered out and
+        // the snap stays on z = 1.
+        let top =
+            Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let constrained = scene
+            .resolve(&SnapQuery {
+                ray,
+                anchor: None,
+                lock: None,
+                aperture: 0.6,
+                constraint_plane: Some(top),
+            })
+            .expect("an on-plane candidate (top face / its edges) remains");
+        assert!(
+            top.signed_distance(constrained.position).abs() <= tol::PLANE_DIST,
+            "constrained snap lies on the active plane: {:?}",
+            constrained.position
+        );
+    }
+
+    /// The constraint plane excludes only *off-plane* geometry — on-plane
+    /// vertices/edges/midpoints still snap with their proper kind.
+    #[test]
+    fn constraint_plane_keeps_on_plane_geometry() {
+        let scene = cube_scene();
+        // Aim near the top corner (1,1,1) from above-diagonal; with the top plane
+        // constraint the corner (an Endpoint, on z=1) must still win.
+        let eye = Point3::new(2.0, 2.0, 4.0);
+        let top =
+            Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: eye,
+                    direction: Point3::new(1.0, 1.0, 1.0) - eye,
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.6,
+                constraint_plane: Some(top),
+            })
+            .expect("the on-plane top corner is still snappable");
         assert_eq!(snap.kind, SnapKind::Endpoint);
         assert!(
             snap.position

@@ -56,6 +56,7 @@ fn query(ray: PickRay, aperture: f64) -> SnapQuery {
         anchor: None,
         lock: None,
         aperture,
+        constraint_plane: None,
     }
 }
 
@@ -187,6 +188,7 @@ fn axis_lock_projects_onto_the_locked_line() {
         anchor: Some(anchor),
         lock: Some(SnapLock::Axis(inference::Axis::X)),
         aperture: WIDE,
+        constraint_plane: None,
     };
     let snap = scene.resolve(&q).expect("lock with anchor always resolves");
     // On the X axis through the anchor:

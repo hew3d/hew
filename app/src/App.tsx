@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, { type ViewportApi } from './viewport/Viewport'
 import { DocumentTree } from './panels/DocumentTree'
@@ -195,6 +195,27 @@ export default function App() {
     return unsub
   }, [])
 
+  // Compute the lit set for isolation.
+  // When the context is non-empty, compute the leaf objects of the deepest context node.
+  // When entering an object (deepest is an object), lit = {that object}.
+  // When entering an instance (deepest is an instance), lit = member objects of the def.
+  // NOTE: this is a hook, so it must run on every render — keep it above the
+  // early returns below (Rules of Hooks). It guards `state === null` itself.
+  const activeLitSet: Set<bigint> | null = useMemo(() => {
+    if (state === null || activeContext.length === 0) return null
+    const deepest = activeContext[activeContext.length - 1]
+    if (deepest.kind === 'instance') {
+      // Light all definition member objects when inside a component
+      const componentId = state.scene.instance_def(deepest.id)
+      if (componentId === undefined) return null
+      const members = Array.from(state.scene.component_member_objects(componentId))
+      return new Set(members)
+    }
+    const kind = deepest.kind === 'group' ? 1 : 0
+    const leaves = Array.from(state.scene.node_leaf_objects(kind, deepest.id))
+    return new Set(leaves)
+  }, [activeContext, state])
+
   if (error !== null) {
     return (
       <main style={{ fontFamily: 'sans-serif', padding: '1rem', color: 'red' }}>
@@ -295,25 +316,6 @@ export default function App() {
       }
     }
   }
-
-  // Compute the lit set for isolation.
-  // When the context is non-empty, compute the leaf objects of the deepest context node.
-  // When entering an object (deepest is an object), lit = {that object}.
-  // When entering an instance (deepest is an instance), lit = member objects of the def.
-  const activeLitSet: Set<bigint> | null = (() => {
-    if (activeContext.length === 0) return null
-    const deepest = activeContext[activeContext.length - 1]
-    if (deepest.kind === 'instance') {
-      // Light all definition member objects when inside a component
-      const componentId = state.scene.instance_def(deepest.id)
-      if (componentId === undefined) return null
-      const members = Array.from(state.scene.component_member_objects(componentId))
-      return new Set(members)
-    }
-    const kind = deepest.kind === 'group' ? 1 : 0
-    const leaves = Array.from(state.scene.node_leaf_objects(kind, deepest.id))
-    return new Set(leaves)
-  })()
 
   return (
     <main

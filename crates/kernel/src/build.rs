@@ -299,9 +299,12 @@ impl Object {
         }
 
         // Update vertex outgoing pointers to any half-edge originating there.
-        // The directed map's key is (origin VertexId, dest VertexId).
-        for (&(a, _b), &h) in &directed {
-            obj.vertices[a].outgoing = h;
+        // Iterate the half-edge slotmap (deterministic insertion order), NOT the
+        // `directed` HashMap: a vertex's cached `outgoing` must not depend on the
+        // per-process HashMap seed, or kernel output varies run-to-run (this seed
+        // dependence previously surfaced as a flaky split_boundary_edge crash).
+        for (h, he) in obj.half_edges.iter() {
+            obj.vertices[he.origin].outgoing = h;
         }
 
         obj.shells.insert(Shell {

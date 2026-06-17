@@ -1108,6 +1108,30 @@ impl Scene {
         Ok(vec![n.x, n.y, n.z])
     }
 
+    /// An Object face's plane as `[px,py,pz, nx,ny,nz]`: a point on the face
+    /// (its first outer-loop vertex) plus the unit normal — exactly the
+    /// `constraint_plane` shape `snap` accepts. Lets a tool drawing on this face
+    /// constrain snapping to the face plane so the cursor never snaps through
+    /// the solid to occluded geometry. Like `face_normal`, this is the Object's
+    /// local frame (world Objects are identity-placed).
+    pub fn face_plane(&self, object: u64, face: u64) -> Result<Vec<f64>, ApiError> {
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let face = object
+            .faces()
+            .get(fid)
+            .ok_or_else(|| stale("UnknownFace", "face"))?;
+        let n = face.plane.normal();
+        let p = object
+            .loop_positions(face.outer_loop)
+            .next()
+            .ok_or_else(|| stale("DegenerateFace", "face"))?;
+        Ok(vec![p.x, p.y, p.z, n.x, n.y, n.z])
+    }
+
     /// Push/pull a face (recorded in the object's undo history). A flat imprinted
     /// sub-face (drawn inside an Object) auto-routes to wall-generating
     /// extrude (boss/recess); any other face uses the translate-mode push/pull.
@@ -1244,8 +1268,12 @@ impl Scene {
     // ------------------------------------------------------------ inference
 
     /// Resolves one snap query. `anchor` is an optional xyz triple;
-    /// `lock_axis` is 0/1/2 for X/Y/Z. Returns `undefined` when nothing
-    /// snaps (tools fall back to their own plane intersection).
+    /// `lock_axis` is 0/1/2 for X/Y/Z. `constraint_plane`, when present, is a
+    /// 6-tuple `[px,py,pz, nx,ny,nz]` (a point on the active drawing plane plus
+    /// its normal): only candidates lying on that plane are considered, so
+    /// drawing on a face never snaps through the solid to occluded, off-plane
+    /// geometry. Returns `undefined` when nothing snaps (tools fall back to
+    /// their own plane intersection).
     // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
@@ -1259,6 +1287,7 @@ impl Scene {
         aperture: f64,
         anchor: Option<Box<[f64]>>,
         lock_axis: Option<u8>,
+        constraint_plane: Option<Box<[f64]>>,
     ) -> Result<Option<SnapJs>, ApiError> {
         let anchor = match anchor {
             None => None,
@@ -1266,6 +1295,26 @@ impl Scene {
             Some(_) => {
                 return Err(ApiError(
                     "BadAnchor: anchor must be an xyz triple".to_string(),
+                ));
+            }
+        };
+        let constraint_plane = match constraint_plane {
+            None => None,
+            Some(p) if p.len() == 6 => {
+                let point = Point3::new(p[0], p[1], p[2]);
+                let normal = kernel::Vec3::new(p[3], p[4], p[5]);
+                match Plane::from_point_normal(point, normal) {
+                    Ok(plane) => Some(plane),
+                    Err(_) => {
+                        return Err(ApiError(
+                            "BadPlane: constraint_plane normal is degenerate".to_string(),
+                        ));
+                    }
+                }
+            }
+            Some(_) => {
+                return Err(ApiError(
+                    "BadPlane: constraint_plane must be [px,py,pz, nx,ny,nz]".to_string(),
                 ));
             }
         };
@@ -1288,6 +1337,7 @@ impl Scene {
             anchor,
             lock,
             aperture,
+            constraint_plane,
         };
         Ok(self.inference.resolve(&query).map(|snap| SnapJs { snap }))
     }
@@ -1614,6 +1664,33 @@ mod tests {
         assert!(scene.object_ids().contains(&obj)); // object still here
         scene.scene_undo().unwrap(); // undo create
         assert!(scene.object_ids().is_empty());
+    }
+
+    #[test]
+    fn face_plane_returns_point_on_face_plus_normal() {
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        let pn = scene.face_plane(obj, top).unwrap();
+        assert_eq!(pn.len(), 6);
+        // Normal is +Z.
+        assert!((pn[5] - 1.0).abs() < 1e-9 && pn[3].abs() < 1e-9 && pn[4].abs() < 1e-9);
+        // The point lies on the top plane (z = 1).
+        assert!((pn[2] - 1.0).abs() < 1e-9);
     }
 
     #[test]

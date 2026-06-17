@@ -6,9 +6,9 @@
 //! stable across undo/redo.
 
 use kernel::{
-    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, KernelOp, Material,
-    MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, Transform, TransformError, Vec3,
-    WatertightState,
+    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, KernelOp, KernelOpReport,
+    Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, Transform,
+    TransformError, Vec3, WatertightState,
 };
 use std::collections::HashSet;
 
@@ -1061,12 +1061,43 @@ fn paint_face_undo_redo_is_exact() {
     assert_eq!(doc.face_material(o, top), Some(blue));
 }
 
-// NOTE: split-then-inherit is covered by the reliable in-crate unit test
-// `ops::tests::split_face_propagates_material_to_both_halves` (on `unit_cube`).
-// A Document-level version on an *extruded* box was removed: it exposed a
-// pre-existing, seed-dependent `split_face` robustness bug (intermittent
-// dangling `vertex.outgoing` on extruded-box top faces — see DESIGN risk #1),
-// which is unrelated to materials and tracked separately.
+/// Splitting a painted top face of an *extruded* box propagates the material to
+/// both halves and produces valid topology. This previously exposed a
+/// seed-dependent `split_face` crash (dangling `vertex.outgoing` on extruded-box
+/// faces — DESIGN risk #1, fixed); it is restored here as a
+/// Document-level guard alongside the in-crate
+/// `ops::tests::split_face_propagates_material_to_both_halves` (on `unit_cube`).
+#[test]
+fn split_painted_extruded_box_face_propagates_material() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(o, top, Some(red)).expect("paint top");
+
+    let (report, _) = doc
+        .apply_object_op(
+            o,
+            KernelOp::SplitFace {
+                face: top,
+                path: vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)],
+            },
+        )
+        .expect("split the painted extruded top");
+
+    let new_faces = match report {
+        KernelOpReport::FaceSplit(r) => r.new_faces,
+        other => panic!("expected a FaceSplit report, got {other:?}"),
+    };
+    for fid in new_faces {
+        assert_eq!(
+            doc.face_material(o, fid),
+            Some(red),
+            "both halves of the split inherit the painted material"
+        );
+    }
+}
 
 #[test]
 fn boolean_preserves_operand_face_materials() {

@@ -62,6 +62,7 @@ export class SnapService {
     fovYDeg: number,
     anchor?: [number, number, number],
     lockAxis?: 0 | 1 | 2,
+    constraintPlane?: { point: [number, number, number]; normal: [number, number, number] },
   ): { snap: Snap | null; fromKernel: boolean } {
     try {
       const [ox, oy, oz] = ray.origin
@@ -73,12 +74,21 @@ export class SnapService {
         anchorArr = new Float64Array(anchor)
       }
 
+      let constraintPlaneArr: Float64Array | null = null
+      if (constraintPlane !== undefined) {
+        constraintPlaneArr = new Float64Array([
+          ...constraintPlane.point,
+          ...constraintPlane.normal,
+        ])
+      }
+
       const result = this.scene.snap(
         ox, oy, oz,
         dx, dy, dz,
         aperture,
         anchorArr,
         lockAxis ?? null,
+        constraintPlaneArr,
       )
 
       if (result !== undefined) {

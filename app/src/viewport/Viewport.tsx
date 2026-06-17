@@ -693,9 +693,9 @@ export default function Viewport({
 
       const activeTool = toolController.activeTool
       const constraint = 'snapConstraint' in activeTool
-        ? (activeTool as { snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null }).snapConstraint()
+        ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis)
+      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
       activeTool.onPointerMove(snap, ray)
       cueLayer.update(snap)
       scheduleRender()
@@ -727,9 +727,9 @@ export default function Viewport({
       }
 
       const constraint = 'snapConstraint' in activeTool
-        ? (activeTool as { snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null }).snapConstraint()
+        ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis)
+      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
       activeTool.onPointerDown(snap, ray)
     }
 
@@ -790,9 +790,9 @@ export default function Viewport({
           const cached = lastRayRef.current
           if (cached !== null) {
             const constraint = 'snapConstraint' in activeTool
-              ? (activeTool as { snapConstraint(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null }).snapConstraint()
+              ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(cached.ray)
               : null
-            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.fovY, constraint?.anchor, constraint?.lockAxis)
+            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
             activeTool.onPointerMove(snap, cached.ray)
             cueLayer.update(snap)
           }

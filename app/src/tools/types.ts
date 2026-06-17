@@ -35,11 +35,23 @@ export interface Tool {
   readonly name: string
 
   /**
-   * (optional) Return the snap anchor + axis lock the tool wants injected into
-   * the next snapService.resolve() call.  Viewport feature-detects with
+   * (optional) Return snap constraints the tool wants injected into the next
+   * snapService.resolve() call.  Viewport feature-detects with
    * `'snapConstraint' in tool`.
+   *
+   * - `anchor` + `lockAxis`: axis-lock for distance tools (e.g. MoveTool)
+   * - `constraintPlane`: restrict candidates to a plane (e.g. RectangleTool
+   *   in face mode, to avoid snapping to occluded off-plane geometry)
+   *
+   * The optional `ray` argument is the current pointer ray; tools that need to
+   * pick the hovered face (e.g. RectangleTool idle) can use it.  Tools that
+   * don't need it may omit the parameter.
    */
-  snapConstraint?(): { anchor: [number, number, number]; lockAxis?: 0 | 1 | 2 } | null
+  snapConstraint?(ray?: Ray): {
+    anchor?: [number, number, number]
+    lockAxis?: 0 | 1 | 2
+    constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }
+  } | null
 
   /**
    * (optional) When true the tool is capturing raw keyboard input (e.g. VCB

@@ -225,6 +225,19 @@ impl Plane {
         })
     }
 
+    /// Plane through `point` with the given `normal` (which need not be unit
+    /// length — it is normalized here).
+    ///
+    /// Fails with [`MathError::DegenerateVector`] if `normal` is shorter than
+    /// [`tol::NORMALIZE_MIN_LENGTH`] (no direction).
+    pub fn from_point_normal(point: Point3, normal: Vec3) -> Result<Plane, MathError> {
+        let unit = normal.normalized()?;
+        Ok(Plane {
+            normal: unit,
+            offset: unit.dot(point.to_vec()),
+        })
+    }
+
     /// The unit normal.
     pub fn normal(&self) -> Vec3 {
         self.normal
@@ -271,6 +284,30 @@ mod tests {
         );
         assert!(plane.signed_distance(Point3::new(0.5, 0.5, 2.0)) > 0.0);
         assert!(plane.signed_distance(Point3::new(0.5, 0.5, 0.0)).abs() <= tol::PLANE_DIST);
+    }
+
+    #[test]
+    fn from_point_normal_normalizes_and_passes_through_point() {
+        // Deliberately non-unit normal; the point must lie on the plane and the
+        // normal must come back unit length.
+        let p = Point3::new(2.0, 0.0, 5.0);
+        let plane = Plane::from_point_normal(p, Vec3::new(0.0, 0.0, 3.0)).unwrap();
+        assert!(
+            plane
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+        );
+        assert!(plane.signed_distance(p).abs() <= tol::PLANE_DIST);
+        // A point one unit along the normal is one unit off the plane.
+        assert!((plane.signed_distance(Point3::new(2.0, 0.0, 6.0)) - 1.0).abs() <= tol::PLANE_DIST);
+    }
+
+    #[test]
+    fn from_point_normal_rejects_zero_normal() {
+        assert_eq!(
+            Plane::from_point_normal(Point3::ORIGIN, Vec3::ZERO),
+            Err(MathError::DegenerateVector)
+        );
     }
 
     #[test]

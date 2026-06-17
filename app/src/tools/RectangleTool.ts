@@ -114,9 +114,60 @@ export class RectangleTool implements Tool {
 
   /** Set the active editing context (entered object), or null for top level. */
   setActiveContext(id: bigint | null): void {
+    if (id === this._activeContext) return  // re-asserting the same context must not abort an in-progress gesture
     this._activeContext = id
-    // Cancel any in-progress gesture when context changes
     this.cancel()
+  }
+
+  /**
+   * Provide a constraint plane for snap so off-plane/occluded geometry is
+   * excluded while snapping during face-mode drawing.
+   *
+   * - Ground mode: return null (unconstrained).
+   * - Face mode, anchored: return the already-known face plane so subsequent
+   *   snaps stay on that plane.
+   * - Face mode, idle: pick the hovered face and return its plane so the
+   *   FIRST-click anchor lands precisely on the face, preventing the kernel
+   *   from rejecting a non-planar rectangle.
+   */
+  snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null {
+    if (this._activeContext === null) {
+      // Ground mode — no constraint
+      return null
+    }
+
+    if (this.faceStage.kind === 'anchored') {
+      // Already anchored: lock to the established face plane
+      return {
+        constraintPlane: {
+          point: this.faceStage.planePoint,
+          normal: this.faceStage.normal,
+        },
+      }
+    }
+
+    // Face mode, idle: pick the face under the cursor and use its plane
+    const pick = this.wasmScene.pick_face(
+      ray.origin[0], ray.origin[1], ray.origin[2],
+      ray.direction[0], ray.direction[1], ray.direction[2],
+    )
+    if (pick === undefined) return null
+
+    try {
+      const objectHandle = pick.object()
+      if (objectHandle !== this._activeContext) return null
+
+      const faceHandle = pick.face()
+      const a = this.wasmScene.face_plane(objectHandle, faceHandle)
+      return {
+        constraintPlane: {
+          point: [a[0], a[1], a[2]],
+          normal: [a[3], a[4], a[5]],
+        },
+      }
+    } finally {
+      pick.free()
+    }
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {

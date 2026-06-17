@@ -2069,6 +2069,10 @@ fn split_boundary_edge(
     // Handle the twin side.
     let edge_a_id;
     let edge_b_id;
+    // A live half-edge originating at `dest_v` to re-point its `outgoing` to, if
+    // the split invalidates the one it currently caches (twin case only — see
+    // the outgoing repair below).
+    let mut dest_outgoing_fix: Option<HalfEdgeId> = None;
 
     if let Some(twin_he_id) = h.twin {
         let t = obj.half_edges[twin_he_id];
@@ -2119,6 +2123,10 @@ fn split_boundary_edge(
         obj.half_edges[h_b].twin = Some(t_a);
         obj.half_edges[t_a].twin = Some(h_b);
 
+        // `t_a` is the new half-edge originating at `dest_v` (dest_v → new_v);
+        // use it to heal `dest_v.outgoing` if it cached the about-to-die twin.
+        dest_outgoing_fix = Some(t_a);
+
         // Remove old twin half-edge.
         obj.half_edges.remove(twin_he_id);
     } else {
@@ -2143,6 +2151,22 @@ fn split_boundary_edge(
     // Remove old half-edge and edge.
     obj.half_edges.remove(he);
     obj.edges.remove(edge_id);
+
+    // Repair endpoint vertices' cached `outgoing`. A vertex's `outgoing` is any
+    // one valid half-edge originating there; `he` (and its twin) are gone, so a
+    // vertex that cached one of them is now dangling. The new vertex was set
+    // above; the two endpoints (`h.origin` and `dest_v`) are the only others
+    // that could have referenced the removed half-edges. Re-point them order-
+    // independently — `h_a` originates at `h.origin`, `t_a` (twin case) at
+    // `dest_v`. This mirrors the merge path's outgoing healing.
+    if !obj.half_edges.contains_key(obj.vertices[h.origin].outgoing) {
+        obj.vertices[h.origin].outgoing = h_a; // h_a.origin == h.origin
+    }
+    if let Some(t_a) = dest_outgoing_fix
+        && !obj.half_edges.contains_key(obj.vertices[dest_v].outgoing)
+    {
+        obj.vertices[dest_v].outgoing = t_a; // t_a.origin == dest_v
+    }
 
     (new_v, edge_id, [edge_a_id, edge_b_id])
 }
@@ -2670,6 +2694,70 @@ mod tests {
             2,
             "both endpoints land on edge interiors → two boundary splits"
         );
+    }
+
+    /// Regression (DESIGN risk #1): splitting a boundary edge must not leave a
+    /// dangling `vertex.outgoing`.
+    ///
+    /// A vertex's `outgoing` is an arbitrary-but-valid half-edge originating at
+    /// it. `from_faces_with_holes` (the extrude builder) assigns it via HashMap
+    /// iteration, so on an extruded box a top-cap corner's `outgoing` may point
+    /// at the very top-cap boundary half-edge that a split removes — which used
+    /// to flake the validator (~3/5) depending on the per-process HashMap seed.
+    /// Here we *force* that adversarial assignment so the case is deterministic:
+    /// every top-loop origin's `outgoing` points into the top loop, then we cut
+    /// the top face boundary-to-boundary. `split_boundary_edge` must re-point any
+    /// endpoint vertex whose `outgoing` it invalidates.
+    #[test]
+    fn split_face_repoints_dangling_outgoing_on_boundary_split() {
+        let mut box_obj = Object::from_extrusion(&rect_profile(1.0, 1.0), 1.0).unwrap();
+        let top = face_with_normal(&box_obj, Vec3::new(0.0, 0.0, 1.0));
+
+        // Adversarial: point every top-loop vertex's `outgoing` at its top-loop
+        // half-edge (the ones whose twins live on the walls). The two endpoints
+        // of the cut below land on top-loop edges, so their origin vertices'
+        // `outgoing` will reference half-edges that the split removes.
+        let top_loop = box_obj.faces[top].outer_loop;
+        let top_hes: Vec<HalfEdgeId> = box_obj.loop_half_edges(top_loop).collect();
+        for h in top_hes {
+            let origin = box_obj.half_edges[h].origin;
+            box_obj.vertices[origin].outgoing = h;
+        }
+
+        // Cut from one top edge midpoint to the opposite — both endpoints are
+        // edge-interior hits, so both trigger split_boundary_edge.
+        let path = [Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
+        box_obj
+            .split_face(top, &path)
+            .expect("boundary-to-boundary split on extruded box");
+
+        // The internal validator (run by split_face) already guards this, but
+        // assert explicitly: no vertex points at a removed half-edge.
+        box_obj
+            .validate()
+            .expect("no dangling outgoing after split");
+        assert_eq!(box_obj.watertight(), WatertightState::Watertight);
+    }
+
+    /// rect_profile mirror of the test helper in `tests/op_specs.rs`.
+    fn rect_profile(width: f64, height: f64) -> Profile {
+        let plane = crate::math::Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        Profile::new(
+            plane,
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(width, 0.0, 0.0),
+                Point3::new(width, height, 0.0),
+                Point3::new(0.0, height, 0.0),
+            ],
+            vec![],
+        )
+        .unwrap()
     }
 
     /// A multi-segment split followed by merge restores the original topology.
