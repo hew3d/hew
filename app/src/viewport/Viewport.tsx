@@ -86,6 +86,16 @@ export interface ViewportApi {
   runExplodeInstance: (instanceId: bigint) => bigint[] | null
   /** Detach an instance onto a private copy of its definition. Returns the new component handle. */
   runMakeUnique: (instanceId: bigint) => bigint | null
+  /**
+   * Call after a `scene.load()` to rebuild all viewport-side caches and
+   * propagate the new watertight state / docRev to the parent.  Mirrors the
+   * same path that undo/redo use (`handleSceneRefresh` + `refreshAllSketches`).
+   */
+  notifyLoaded: () => void
+  /** Trigger scene undo (same as Cmd/Ctrl+Z keyboard shortcut). */
+  runUndo: () => void
+  /** Trigger scene redo (same as Shift+Cmd/Ctrl+Z keyboard shortcut). */
+  runRedo: () => void
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -486,8 +496,37 @@ export default function Viewport({
       }
     }
 
+    function notifyLoaded(): void {
+      handleSceneRefresh()
+      sceneRenderer.refreshAllSketches()
+    }
+
+    function runUndo(): void {
+      if (wasmSceneRef.current.can_scene_undo()) {
+        try {
+          wasmSceneRef.current.scene_undo()
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+        } catch (err) {
+          console.warn('[Viewport] scene_undo failed:', err)
+        }
+      }
+    }
+
+    function runRedo(): void {
+      if (wasmSceneRef.current.can_scene_redo()) {
+        try {
+          wasmSceneRef.current.scene_redo()
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+        } catch (err) {
+          console.warn('[Viewport] scene_redo failed:', err)
+        }
+      }
+    }
+
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo }
     }
 
     // ------------------------------------------------------------------ tool factories

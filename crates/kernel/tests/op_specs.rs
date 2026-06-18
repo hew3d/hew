@@ -830,13 +830,20 @@ fn history_undo_redo_roundtrip() {
 
 // ------------------------------------------------------------- serialize
 
+// These objects carry no materials, so the dense-material closures are never
+// invoked (HEW_FILE_FORMAT.md). Document-level material/tree round-tripping is
+// spec'd in `tests/serialize_specs.rs`.
+
 #[test]
-#[ignore = "spec for Object::encode/decode: roundtrip identity and deterministic bytes"]
 fn serialize_roundtrip_is_identity_and_deterministic() {
     for original in [unit_cube(), Object::tetrahedron(), Object::triangle()] {
-        let bytes = original.encode();
-        assert_eq!(bytes, original.encode(), "encode must be deterministic");
-        let decoded = Object::decode(&bytes).unwrap();
+        let bytes = original.encode(&|_| 0);
+        assert_eq!(
+            bytes,
+            original.encode(&|_| 0),
+            "encode must be deterministic"
+        );
+        let decoded = Object::decode(&bytes, &|_| None).unwrap();
         decoded.validate().unwrap();
         assert!(objects_equivalent(&decoded, &original));
         assert_eq!(decoded.watertight(), original.watertight());
@@ -844,8 +851,10 @@ fn serialize_roundtrip_is_identity_and_deterministic() {
 }
 
 #[test]
-#[ignore = "spec for Object::decode: garbage is rejected with a typed error, never repaired"]
 fn decode_rejects_garbage() {
-    assert!(Object::decode(&[]).is_err());
-    assert!(Object::decode(&[0x00, 0x01, 0x02, 0x03]).is_err());
+    assert!(Object::decode(&[], &|_| None).is_err());
+    assert!(Object::decode(&[0x00, 0x01, 0x02, 0x03], &|_| None).is_err());
+    // A truncated-but-plausible header must not panic.
+    let good = unit_cube().encode(&|_| 0);
+    assert!(Object::decode(&good[..good.len() / 2], &|_| None).is_err());
 }

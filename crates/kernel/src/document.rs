@@ -38,6 +38,7 @@ use crate::ids::{ComponentId, FaceId, GroupId, InstanceId, MaterialId, ObjectId,
 use crate::material::Material;
 use crate::math::Plane;
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError};
+use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
 use crate::sketch::{Sketch, SketchError, SketchRegionId};
 use crate::topo::Object;
 use crate::transform::{Transform, TransformError};
@@ -432,6 +433,342 @@ impl Document {
     /// An empty document.
     pub fn new() -> Document {
         Document::default()
+    }
+
+    // ---------------------------------------------------------- persistence
+
+    /// Serializes the whole document to a `.hew` container (HEW_FILE_FORMAT.md):
+    /// a zip of `manifest.json` + per-object geometry buffers + texture assets.
+    ///
+    /// Pure (no I/O — DEVELOPMENT.md rule 1): bytes out, the shell writes the file.
+    /// **Deterministic** — saving the same document twice yields identical bytes
+    /// (golden-file contract). Persists only the live, visible state: undo/redo
+    /// logs and `hidden` (undone-creation) records are dropped.
+    pub fn save(&self) -> Vec<u8> {
+        // ── Collect live, visible materials (in slotmap key order) ─────────
+        let materials: Vec<(MaterialId, Material)> = self
+            .materials
+            .iter()
+            .map(|(id, m)| (id, m.clone()))
+            .collect();
+
+        // ── Collect live world objects (in slotmap key order) ──────────────
+        let world_objects: Vec<(ObjectId, Object)> = self
+            .objects
+            .iter()
+            .filter(|(_, rec)| !rec.hidden && rec.is_world())
+            .map(|(id, rec)| (id, rec.object.clone()))
+            .collect();
+
+        // ── Collect live definition objects (in slotmap key order) ─────────
+        let def_objects: Vec<(ObjectId, Object, ComponentId)> = self
+            .objects
+            .iter()
+            .filter(|(_, rec)| !rec.hidden && !rec.is_world())
+            .filter_map(|(id, rec)| {
+                if let ObjectOwner::Definition(cid) = rec.owner {
+                    Some((id, rec.object.clone(), cid))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // ── Collect live groups (in slotmap key order) ─────────────────────
+        let groups: Vec<(GroupId, Vec<NodeId>)> = self
+            .groups
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, rec)| (id, rec.members.clone()))
+            .collect();
+
+        // ── Collect live components (in slotmap key order) ─────────────────
+        let components: Vec<(ComponentId, Vec<ObjectId>)> = self
+            .components
+            .iter()
+            .filter(|(_, c)| !c.hidden)
+            .map(|(id, c)| (id, c.members.clone()))
+            .collect();
+
+        // ── Collect live instances (in slotmap key order) ──────────────────
+        let instances: Vec<(InstanceId, ComponentId, Transform)> = self
+            .instances
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, rec)| (id, rec.def, rec.pose))
+            .collect();
+
+        // ── Collect live sketches (in slotmap key order) ───────────────────
+        let sketches: Vec<(SketchId, Sketch)> = self
+            .sketches
+            .iter()
+            .map(|(id, sk)| (id, sk.clone()))
+            .collect();
+
+        // ── Collect root nodes: top-level visible world nodes ─────────────
+        // Roots = all live objects/groups/instances whose parent is None.
+        // We emit objects first, then groups, then instances (same order as
+        // `top_level_nodes`) to be deterministic.
+        let roots: Vec<NodeId> = self.top_level_nodes();
+
+        // ── Collect consumed (SketchId, SketchRegionId) pairs ─────────────
+        // Filter to only those where both the sketch and region are live.
+        let mut consumed: Vec<(SketchId, SketchRegionId)> = self
+            .consumed
+            .iter()
+            .filter(|(sid, _)| self.sketches.contains_key(*sid))
+            .copied()
+            .collect();
+        // Sort for determinism (never emit a HashSet directly — rule from plan).
+        // The slotmap keys are not directly comparable, but their iteration
+        // order from the slotmaps IS stable. We derive dense indices for the
+        // sort key by looking them up in the sketch slotmap iteration order.
+        let sketch_dense: std::collections::HashMap<SketchId, usize> = sketches
+            .iter()
+            .enumerate()
+            .map(|(i, (sid, _))| (*sid, i))
+            .collect();
+        consumed.sort_by_key(|(sid, rid)| {
+            let sdense = sketch_dense.get(sid).copied().unwrap_or(usize::MAX);
+            // dense region id = iteration order index in the sketch's region slotmap
+            let rdense = sketches
+                .iter()
+                .find(|(s, _)| s == sid)
+                .map(|(_, sk)| {
+                    sk.regions()
+                        .keys()
+                        .enumerate()
+                        .find(|(_, r)| r == rid)
+                        .map(|(i, _)| i)
+                        .unwrap_or(usize::MAX)
+                })
+                .unwrap_or(usize::MAX);
+            (sdense, rdense)
+        });
+
+        encode_document(DocSaveData {
+            materials,
+            world_objects,
+            def_objects,
+            groups,
+            components,
+            instances,
+            sketches,
+            roots,
+            consumed,
+        })
+    }
+
+    /// Reconstructs a document from a `.hew` container produced by [`save`].
+    /// Validates every rebuilt object (rule 4: reject, never repair); a corrupt
+    /// or tampered file yields a typed [`LoadError`]. The returned document has
+    /// an empty undo stack.
+    ///
+    /// [`save`]: Document::save
+    pub fn load(bytes: &[u8]) -> Result<Document, LoadError> {
+        let raw = decode_document_raw(bytes)?;
+
+        let mut doc = Document::new();
+
+        // ── 1. Insert materials → build dense→MaterialId map ──────────────
+        let mat_ids: Vec<MaterialId> = raw
+            .materials
+            .into_iter()
+            .map(|m| doc.materials.insert(m))
+            .collect();
+        let dense_to_mat = |dense: u32| -> Option<MaterialId> {
+            if dense == crate::serialize::NO_MATERIAL {
+                None
+            } else {
+                mat_ids.get(dense as usize).copied()
+            }
+        };
+
+        // ── 2. Decode objects (with live material closure) ─────────────────
+        // Dense object ids are used in the manifest. We decode all objects
+        // in dense-id order, then insert them into the document.
+        let obj_count = raw.geom_buffers.len();
+        let mut dense_obj_ids: Vec<ObjectId> = Vec::with_capacity(obj_count);
+
+        for (i, buf) in raw.geom_buffers.iter().enumerate() {
+            let mut obj = Object::decode(buf, &dense_to_mat).map_err(LoadError::Geometry)?;
+
+            // Patch base material from manifest (the geometry buffer also carries
+            // it, but we restore it from the manifest to match exactly).
+            obj.default_material = raw
+                .obj_base_materials
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(dense_to_mat);
+
+            // Determine ownership: is this a definition member?
+            let owner = if let Some(comp_dense) = raw.def_membership.get(i).copied().flatten() {
+                // We don't have the ComponentId yet — we'll patch it after
+                // inserting components. Use a placeholder World owner for now.
+                // We'll re-assign below.
+                let _ = comp_dense;
+                ObjectOwner::World { parent: None }
+            } else {
+                ObjectOwner::World { parent: None }
+            };
+
+            let oid = doc.objects.insert(ObjectRecord {
+                object: obj,
+                history: History::new(),
+                hidden: false,
+                owner,
+            });
+            dense_obj_ids.push(oid);
+        }
+
+        // ── 3. Insert sketches → build dense→SketchId map ─────────────────
+        let sketch_ids: Vec<SketchId> = raw
+            .sketches
+            .into_iter()
+            .map(|sk| doc.sketches.insert(sk))
+            .collect();
+
+        // ── 4. Insert components → build dense→ComponentId map ────────────
+        // Each component's members are dense object ids → now live ObjectIds.
+        let mut comp_ids: Vec<ComponentId> = Vec::with_capacity(raw.components.len());
+        for member_dense_ids in &raw.components {
+            let members: Vec<ObjectId> = member_dense_ids
+                .iter()
+                .map(|&di| {
+                    dense_obj_ids.get(di as usize).copied().ok_or_else(|| {
+                        LoadError::DanglingReference {
+                            what: format!("component member object dense id {di} out of range"),
+                        }
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            let cid = doc.components.insert(ComponentDef {
+                members: members.clone(),
+                hidden: false,
+            });
+            comp_ids.push(cid);
+            // Re-assign ownership for these objects.
+            for oid in members {
+                doc.objects[oid].owner = ObjectOwner::Definition(cid);
+            }
+        }
+
+        // ── 5. Insert instances → build dense→InstanceId map ─────────────
+        let mut inst_ids: Vec<InstanceId> = Vec::with_capacity(raw.instances.len());
+        for (comp_dense, pose) in raw.instances {
+            let cid =
+                *comp_ids
+                    .get(comp_dense as usize)
+                    .ok_or_else(|| LoadError::DanglingReference {
+                        what: format!("instance def component dense id {comp_dense} out of range"),
+                    })?;
+            let iid = doc.instances.insert(InstanceRecord {
+                def: cid,
+                pose,
+                parent: None,
+                hidden: false,
+            });
+            inst_ids.push(iid);
+        }
+
+        // ── 6. Insert groups → build dense→GroupId map ────────────────────
+        // Groups may reference other groups (nesting), so insert all first,
+        // then patch members.
+        let mut grp_ids: Vec<GroupId> = Vec::with_capacity(raw.groups.len());
+        for _ in &raw.groups {
+            let gid = doc.groups.insert(GroupRecord {
+                members: Vec::new(),
+                parent: None,
+                hidden: false,
+            });
+            grp_ids.push(gid);
+        }
+
+        // Helper to resolve a NodeRefDto to a NodeId.
+        let resolve_node = |dto: &NodeRefDto| -> Result<NodeId, LoadError> {
+            match dto.kind.as_str() {
+                "object" => {
+                    let oid = dense_obj_ids.get(dto.id as usize).copied().ok_or_else(|| {
+                        LoadError::DanglingReference {
+                            what: format!("node ref object id {} out of range", dto.id),
+                        }
+                    })?;
+                    Ok(NodeId::Object(oid))
+                }
+                "group" => {
+                    let gid = grp_ids.get(dto.id as usize).copied().ok_or_else(|| {
+                        LoadError::DanglingReference {
+                            what: format!("node ref group id {} out of range", dto.id),
+                        }
+                    })?;
+                    Ok(NodeId::Group(gid))
+                }
+                "instance" => {
+                    let iid = inst_ids.get(dto.id as usize).copied().ok_or_else(|| {
+                        LoadError::DanglingReference {
+                            what: format!("node ref instance id {} out of range", dto.id),
+                        }
+                    })?;
+                    Ok(NodeId::Instance(iid))
+                }
+                _ => Err(LoadError::MalformedManifest {
+                    what: format!("unknown node kind '{}'", dto.kind),
+                }),
+            }
+        };
+
+        // Patch group members and set up parent pointers.
+        for (i, member_dtos) in raw.groups.iter().enumerate() {
+            let gid = grp_ids[i];
+            let members: Vec<NodeId> = member_dtos
+                .iter()
+                .map(resolve_node)
+                .collect::<Result<_, _>>()?;
+            doc.groups[gid].members = members.clone();
+            // Set child → parent pointers.
+            for m in &members {
+                match m {
+                    NodeId::Object(oid) => {
+                        doc.objects[*oid].owner = match doc.objects[*oid].owner {
+                            ObjectOwner::World { .. } => ObjectOwner::World { parent: Some(gid) },
+                            def @ ObjectOwner::Definition(_) => def,
+                        };
+                    }
+                    NodeId::Group(child_gid) => {
+                        doc.groups[*child_gid].parent = Some(gid);
+                    }
+                    NodeId::Instance(iid) => {
+                        doc.instances[*iid].parent = Some(gid);
+                    }
+                }
+            }
+        }
+
+        // ── 7. Restore consumed set ────────────────────────────────────────
+        for [dense_sid, dense_rid] in &raw.consumed {
+            let sid = *sketch_ids.get(*dense_sid as usize).ok_or_else(|| {
+                LoadError::DanglingReference {
+                    what: format!("consumed sketch dense id {dense_sid} out of range"),
+                }
+            })?;
+            // dense_rid is the slotmap-iteration-order index of the region
+            // within the sketch. We need to map it to a live SketchRegionId.
+            let sk = &doc.sketches[sid];
+            let rid = sk
+                .regions()
+                .keys()
+                .nth(*dense_rid as usize)
+                .ok_or_else(|| LoadError::DanglingReference {
+                    what: format!(
+                        "consumed region dense id {dense_rid} in sketch {dense_sid} out of range"
+                    ),
+                })?;
+            doc.consumed.insert((sid, rid));
+        }
+
+        // Undo/redo stacks are empty by construction (Document::new() gives empty).
+        Ok(doc)
     }
 
     // --------------------------------------------------------------- sketches

@@ -17,9 +17,9 @@
 use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
 use kernel::{
     BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId,
-    ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, Material, MaterialId, NodeId,
-    Object, ObjectId, Plane, Point3, Rgba8, SketchEdgeId, SketchId, SketchRegionId, Texture,
-    Transform, WatertightState,
+    ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, LoadError, Material,
+    MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchEdgeId, SketchId,
+    SketchRegionId, Texture, Transform, WatertightState,
 };
 use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
@@ -1487,6 +1487,55 @@ impl Scene {
         let mid = material_id_opt(material);
         let change = self.doc.set_object_material(oid, mid).map_err(doc_err)?;
         self.reconcile(&change);
+        Ok(())
+    }
+
+    // --------------------------------------------------------- persistence
+
+    /// Serialise the entire document to a `.hew` zip container (HEW_FILE_FORMAT.md).
+    /// The returned bytes are a self-contained file — pass them to
+    /// [`Scene::load`] to restore the document exactly.
+    ///
+    /// wasm-bindgen marshals `Vec<u8>` to a JS `Uint8Array`.
+    pub fn save(&self) -> Vec<u8> {
+        self.doc.save()
+    }
+
+    /// Replace this scene's document with one deserialized from `bytes` (a
+    /// `.hew` container produced by [`Scene::save`]).
+    ///
+    /// On success the derived caches are fully rebuilt:
+    /// - `mesh_cache` is cleared (every object will re-tessellate on demand).
+    /// - `inference` is rebuilt from scratch: every visible world object is
+    ///   added at identity, every visible instance is registered at its pose.
+    ///
+    /// On failure the scene is left **unchanged** — the new document is built
+    /// first, and the swap only happens after a successful parse.
+    ///
+    /// # Errors
+    /// Throws a `"LOAD: <message>"` `JsError` on any parse/validation failure
+    /// (bad magic, unsupported version, malformed manifest, dangling reference,
+    /// invalid topology).
+    pub fn load(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+        let new_doc =
+            Document::load(bytes).map_err(|e: LoadError| JsError::new(&format!("LOAD: {e}")))?;
+
+        // Swap is committed only after successful parse.
+        self.doc = new_doc;
+        self.mesh_cache = SecondaryMap::new();
+        self.inference = InferenceScene::new();
+
+        // Register every visible world object.
+        for id in self.doc.visible_object_ids() {
+            if let Some(object) = self.doc.object(id) {
+                self.inference.add_object(id, object, &Transform::IDENTITY);
+            }
+        }
+        // Register every visible instance's definition members at their poses.
+        for iid in self.doc.instance_ids() {
+            self.register_instance(iid);
+        }
+
         Ok(())
     }
 }

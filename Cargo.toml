@@ -24,6 +24,9 @@ slotmap = "1"
 proptest = "1"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zip = { version = "2", default-features = false }
 
 [profile.release]
 # WASM payload size matters for the web shell.

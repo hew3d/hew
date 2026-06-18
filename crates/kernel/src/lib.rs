@@ -46,7 +46,9 @@ pub use ops::{
     FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, Operand, PushPullError, PushPullReport,
     StickyError,
 };
-pub use serialize::{DecodeError, GEOMETRY_FORMAT_VERSION};
+pub use serialize::{
+    DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,
+};
 pub use sketch::{
     EdgeRemoved, Profile, ProfileError, SegmentAdded, Sketch, SketchEdge, SketchEdgeId,
     SketchError, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,

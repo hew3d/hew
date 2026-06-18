@@ -3,11 +3,21 @@ import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, { type ViewportApi } from './viewport/Viewport'
 import { DocumentTree } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
+import { MenuBar } from './panels/MenuBar'
 import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, type NodeRef } from './panels/treeModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
+import { makeFileHost } from './io/fileHost'
+import {
+  INITIAL_SESSION,
+  deriveTitle,
+  afterMutation,
+  afterSave,
+  afterOpen,
+  type DocSessionState,
+} from './io/documentSession'
 
 interface AppState {
   kernelVersion: string
@@ -63,11 +73,24 @@ export default function App() {
   const [docRev, setDocRev] = useState(0)
   /** Currently selected material id for the Paint tool. */
   const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
+  /** Document session: currentRef + dirty flag. */
+  const [docSession, setDocSession] = useState<DocSessionState>(INITIAL_SESSION)
+
   /** Imperative handle into the viewport (e.g. running a boolean). */
   const viewportApi = useRef<ViewportApi | null>(null)
 
   // Stable ref to the Scene for undo/redo button state queries
   const sceneRef = useRef<Scene | null>(null)
+  // Bytes of a fresh blank scene, captured once after kernel load, used for New.
+  const blankBytesRef = useRef<Uint8Array | null>(null)
+  // Stable file host instance.
+  const fileHostRef = useRef(makeFileHost())
+  // Mirror of docSession kept up-to-date so callbacks can read current state
+  // without capturing stale closures or causing impure updater functions.
+  const docSessionRef = useRef<DocSessionState>(INITIAL_SESSION)
+  // When true, handleDocumentChanged suppresses the dirty-marking setState
+  // (used during programmatic loads so the post-load afterOpen wins).
+  const suppressDirtyRef = useRef(false)
 
   // Install console capture on mount, restore on unmount.
   useEffect(() => {
@@ -83,6 +106,8 @@ export default function App() {
         const kernelVersion = kernel.version()
         const scene = kernel.newScene()
         sceneRef.current = scene
+        // Snapshot blank scene bytes for "New" resets.
+        blankBytesRef.current = new Uint8Array(scene.save())
         setState({ kernelVersion, scene })
         LogStore.log.info('app', `Kernel loaded — version ${kernelVersion}`)
       })
@@ -92,6 +117,29 @@ export default function App() {
         LogStore.log.error('app', `Kernel load failed: ${msg}`)
       })
   }, [])
+
+  // Keep the ref in sync so side-effect callbacks can read current session state.
+  useEffect(() => {
+    docSessionRef.current = docSession
+  }, [docSession])
+
+  // Update document.title whenever session state changes.
+  useEffect(() => {
+    document.title = deriveTitle(docSession)
+  }, [docSession])
+
+  // Warn before unload when there are unsaved changes.
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (docSession.dirty) {
+        e.preventDefault()
+        // Legacy support
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [docSession.dirty])
 
   const handleStatusChange = useCallback((name: string, kind: string | null) => {
     setToolName(name)
@@ -149,7 +197,8 @@ export default function App() {
     return path.slice(0, trimIndex)
   }, [])
 
-  // Bump the tree's revision; trim stale context path entries.
+  // Bump the tree's revision; trim stale context path entries; mark dirty.
+  // Every scene mutation flows through here via Viewport's handleSceneRefresh.
   const handleDocumentChanged = useCallback(() => {
     setDocRev((r) => r + 1)
     setActiveContext((ctx) => {
@@ -157,6 +206,11 @@ export default function App() {
       if (scene === null) return ctx
       return trimContextPath(scene, ctx)
     })
+    // Mark the document dirty on any mutation — but NOT during programmatic
+    // loads (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
+    if (!suppressDirtyRef.current) {
+      setDocSession((s) => afterMutation(s))
+    }
   }, [trimContextPath])
 
   const handleToast = useCallback((message: string, code?: string) => {
@@ -216,6 +270,156 @@ export default function App() {
     return new Set(leaves)
   }, [activeContext, state])
 
+  // ---------------------------------------------------------------- shared reset helper
+  // Used by New, Open — loads bytes into the scene and resets all UI state.
+  const applyLoadedBytes = useCallback((bytes: Uint8Array): boolean => {
+    const scene = sceneRef.current
+    if (scene === null) return false
+    try {
+      scene.load(bytes)
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err)
+      if (isPanicError(raw)) {
+        setKernelPanicked(true)
+      }
+      handleToast(raw)
+      return false
+    }
+    setSelectedIds([])
+    setActiveContext([])
+    // Suppress dirty-marking while notifyLoaded triggers handleDocumentChanged;
+    // the caller will commit the authoritative afterOpen state (dirty=false).
+    suppressDirtyRef.current = true
+    try {
+      viewportApi.current?.notifyLoaded()
+    } finally {
+      suppressDirtyRef.current = false
+    }
+    return true
+  }, [handleToast])
+
+  // ---------------------------------------------------------------- discard guard
+  // Returns true if it's safe to proceed (no unsaved changes, or user confirms).
+  // Reads current session state from docSessionRef to stay pure-function-safe.
+  const confirmDiscard = useCallback((): boolean => {
+    if (!docSessionRef.current.dirty) return true
+    return window.confirm('You have unsaved changes. Discard them?')
+  }, [])
+
+  // ---------------------------------------------------------------- document lifecycle
+
+  const newDocument = useCallback(() => {
+    if (!confirmDiscard()) return
+    const blank = blankBytesRef.current
+    if (blank === null) return
+    if (applyLoadedBytes(blank)) setDocSession(afterOpen(null))
+  }, [confirmDiscard, applyLoadedBytes])
+
+  const openDocument = useCallback(() => {
+    if (!confirmDiscard()) return
+    fileHostRef.current.open().then((result) => {
+      if (result === null) return // user cancelled
+      const ok = applyLoadedBytes(result.bytes)
+      if (!ok) return
+      setDocSession(afterOpen(result.ref))
+    }).catch((err: unknown) => {
+      handleToast(`Open failed: ${String(err)}`)
+    })
+  }, [confirmDiscard, applyLoadedBytes, handleToast])
+
+  const saveDocument = useCallback(() => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const bytes = new Uint8Array(scene.save())
+    const ref = docSession.currentRef
+    fileHostRef.current.save(bytes, ref).then((newRef) => {
+      if (newRef === null) return // user cancelled
+      setDocSession(afterSave(newRef))
+      LogStore.log.info('app', `Saved: ${newRef.name}`)
+    }).catch((err: unknown) => {
+      handleToast(`Save failed: ${String(err)}`)
+    })
+  }, [docSession.currentRef, handleToast])
+
+  const saveAsDocument = useCallback(() => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const bytes = new Uint8Array(scene.save())
+    const suggestedName = docSession.currentRef?.name ?? 'Untitled.hew'
+    fileHostRef.current.saveAs(bytes, suggestedName).then((newRef) => {
+      if (newRef === null) return // user cancelled
+      setDocSession(afterSave(newRef))
+      LogStore.log.info('app', `Saved as: ${newRef.name}`)
+    }).catch((err: unknown) => {
+      handleToast(`Save As failed: ${String(err)}`)
+    })
+  }, [docSession.currentRef, handleToast])
+
+  // ---------------------------------------------------------------- undo/redo for Edit menu
+  const handleUndo = useCallback(() => {
+    viewportApi.current?.runUndo()
+  }, [])
+
+  const handleRedo = useCallback(() => {
+    viewportApi.current?.runRedo()
+  }, [])
+
+  // ---------------------------------------------------------------- global keyboard shortcuts
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      const isMod = ev.metaKey || ev.ctrlKey
+      if (!isMod) return
+
+      // Don't fire shortcuts while typing in an input/textarea
+      const target = ev.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+
+      if (ev.key === 's' && !ev.shiftKey) {
+        ev.preventDefault()
+        saveDocument()
+        return
+      }
+      if (ev.key === 's' && ev.shiftKey) {
+        ev.preventDefault()
+        saveAsDocument()
+        return
+      }
+      if (ev.key === 'o') {
+        ev.preventDefault()
+        openDocument()
+        return
+      }
+      if (ev.key === 'n') {
+        ev.preventDefault()
+        newDocument()
+        return
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [saveDocument, saveAsDocument, openDocument, newDocument])
+
+  // ---------------------------------------------------------------- drag-drop open
+  const handleDragOver = useCallback((ev: React.DragEvent) => {
+    ev.preventDefault()
+    ev.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const handleDrop = useCallback((ev: React.DragEvent) => {
+    ev.preventDefault()
+    const file = ev.dataTransfer.files[0]
+    if (file == null || !file.name.endsWith('.hew')) return
+    if (!confirmDiscard()) return
+    file.arrayBuffer().then((buf) => {
+      const ok = applyLoadedBytes(new Uint8Array(buf))
+      if (ok) {
+        setDocSession(afterOpen({ name: file.name, handle: null }))
+      }
+    }).catch((err: unknown) => {
+      handleToast(`Drop open failed: ${String(err)}`)
+    })
+  }, [confirmDiscard, applyLoadedBytes, handleToast])
+
   if (error !== null) {
     return (
       <main style={{ fontFamily: 'sans-serif', padding: '1rem', color: 'red' }}>
@@ -237,6 +441,10 @@ export default function App() {
   const objectCount = watertightMap.size
   const allWatertight = objectCount === 0 || Array.from(watertightMap.values()).every(Boolean)
   const leakyCount = Array.from(watertightMap.values()).filter((v) => !v).length
+
+  // Undo/redo availability (queried from scene each render for menu state)
+  const canUndo = sceneRef.current?.can_scene_undo() ?? false
+  const canRedo = sceneRef.current?.can_scene_redo() ?? false
 
   // Booleans require exactly two selected OBJECTS at top level.
   const objectIdSet = new Set(Array.from(state.scene.object_ids()))
@@ -321,19 +529,28 @@ export default function App() {
     <main
       style={{
         fontFamily: 'sans-serif',
-        padding: '1rem',
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
         height: '100vh',
         boxSizing: 'border-box',
         overflow: 'hidden',
+        background: '#1a1a1a',
       }}
     >
-      <h1 style={{ margin: '0 0 0.5rem' }}>Hew — M2</h1>
-      <p style={{ margin: '0 0 0.5rem', fontSize: '12px', color: '#666' }}>
-        Kernel {state.kernelVersion}
-      </p>
+      {/* App bar / menu bar */}
+      <MenuBar
+        title={deriveTitle(docSession)}
+        kernelVersion={state.kernelVersion}
+        onNew={newDocument}
+        onOpen={openDocument}
+        onSave={saveDocument}
+        onSaveAs={saveAsDocument}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        canUndo={canUndo}
+        canRedo={canRedo}
+      />
 
       {/* Kernel panic sticky banner */}
       {kernelPanicked && (
@@ -342,18 +559,17 @@ export default function App() {
             background: '#8b0000',
             color: '#fff',
             padding: '10px 16px',
-            marginBottom: '6px',
-            borderRadius: '4px',
             display: 'flex',
             alignItems: 'center',
             gap: '12px',
             fontFamily: 'monospace',
             fontSize: '13px',
             zIndex: 200,
+            flexShrink: 0,
           }}
         >
           <span style={{ flex: 1 }}>
-            ⚠ A kernel error occurred — the session is no longer usable. Reload the page to recover.
+            A kernel error occurred — the session is no longer usable. Reload the page to recover.
           </span>
           <button
             onClick={() => window.location.reload()}
@@ -374,16 +590,16 @@ export default function App() {
         </div>
       )}
 
-      {/* Toolbar */}
+      {/* Toolbar — tools + watertight badge */}
       <div
         style={{
           display: 'flex',
           gap: '6px',
-          marginBottom: '4px',
           padding: '4px 6px',
-          background: '#333',
-          borderRadius: '4px',
+          background: '#2a2a2a',
+          borderBottom: '1px solid #3a3a3a',
           alignItems: 'center',
+          flexShrink: 0,
         }}
       >
         {TOOLS.map((t) => (
@@ -394,9 +610,9 @@ export default function App() {
               padding: '3px 10px',
               fontSize: '12px',
               cursor: 'pointer',
-              background: activeTool === t ? '#5588cc' : '#555',
+              background: activeTool === t ? '#5588cc' : '#444',
               color: '#eee',
-              border: 'none',
+              border: activeTool === t ? '1px solid #7aaaee' : '1px solid #555',
               borderRadius: '3px',
               fontFamily: 'monospace',
             }}
@@ -430,12 +646,11 @@ export default function App() {
       <div
         style={{
           padding: '4px 8px',
-          marginBottom: '4px',
           background: '#222',
           color: '#eee',
           fontFamily: 'monospace',
           fontSize: '12px',
-          borderRadius: '3px',
+          borderBottom: '1px solid #3a3a3a',
           display: 'flex',
           gap: '1.5rem',
           flexShrink: 0,
@@ -457,68 +672,72 @@ export default function App() {
         </span>
       </div>
 
-      {/* Viewport + document tree — fills space above the log panel */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px' }}>
-        <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
-        <Viewport
-          wasmScene={state.scene}
-          onStatusChange={handleStatusChange}
-          onSceneChange={handleSceneChange}
-          onToast={handleToast}
-          activeTool={activeTool}
-          activeContext={activeContext}
-          selectedIds={selectedIds}
-          activeLitSet={activeLitSet}
-          onSelect={handleSelect}
-          onEnterContext={handleEnterContext}
-          onExitContext={handleExitContext}
-          onDocumentChanged={handleDocumentChanged}
-          apiRef={viewportApi}
-          onMeasurement={handleMeasurement}
-          currentMaterialId={currentMaterialId}
-        />
-
-        {/* Toast stack — positioned inside the viewport container */}
+      {/* Viewport + document tree — fills remaining space above the log panel */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px', padding: '8px 8px 0 8px' }}>
         <div
-          style={{
-            position: 'absolute',
-            bottom: '16px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-            pointerEvents: 'none',
-            zIndex: 100,
-          }}
+          style={{ flex: 1, minWidth: 0, position: 'relative' }}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
         >
-          {toasts.map((toast) => (
-            <div
-              key={toast.id}
-              onClick={() => dismissToast(toast.id)}
-              style={{
-                padding: '8px 16px',
-                background: toast.code !== undefined && ['WouldVanish', 'NonManifoldResult', 'ObjectNotSolid'].includes(toast.code)
-                  ? '#cc3322'
-                  : '#333',
-                color: '#fff',
-                borderRadius: '4px',
-                fontFamily: 'monospace',
-                fontSize: '13px',
-                cursor: 'pointer',
-                pointerEvents: 'auto',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-                maxWidth: '400px',
-                textAlign: 'center',
-              }}
-            >
-              {toast.code !== undefined && (
-                <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
-              )}
-              {toast.message}
-            </div>
-          ))}
-        </div>
+          <Viewport
+            wasmScene={state.scene}
+            onStatusChange={handleStatusChange}
+            onSceneChange={handleSceneChange}
+            onToast={handleToast}
+            activeTool={activeTool}
+            activeContext={activeContext}
+            selectedIds={selectedIds}
+            activeLitSet={activeLitSet}
+            onSelect={handleSelect}
+            onEnterContext={handleEnterContext}
+            onExitContext={handleExitContext}
+            onDocumentChanged={handleDocumentChanged}
+            apiRef={viewportApi}
+            onMeasurement={handleMeasurement}
+            currentMaterialId={currentMaterialId}
+          />
+
+          {/* Toast stack — positioned inside the viewport container */}
+          <div
+            style={{
+              position: 'absolute',
+              bottom: '16px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px',
+              pointerEvents: 'none',
+              zIndex: 100,
+            }}
+          >
+            {toasts.map((toast) => (
+              <div
+                key={toast.id}
+                onClick={() => dismissToast(toast.id)}
+                style={{
+                  padding: '8px 16px',
+                  background: toast.code !== undefined && ['WouldVanish', 'NonManifoldResult', 'ObjectNotSolid'].includes(toast.code)
+                    ? '#cc3322'
+                    : '#333',
+                  color: '#fff',
+                  borderRadius: '4px',
+                  fontFamily: 'monospace',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                  pointerEvents: 'auto',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+                  maxWidth: '400px',
+                  textAlign: 'center',
+                }}
+              >
+                {toast.code !== undefined && (
+                  <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
+                )}
+                {toast.message}
+              </div>
+            ))}
+          </div>
         </div>
 
         <DocumentTree

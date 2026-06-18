@@ -870,6 +870,40 @@ impl Sketch {
     }
 }
 
+// ═════════════════════════════════════════════ structural reconstruction
+
+impl Sketch {
+    /// Create an empty sketch for structural reconstruction. Unlike `on_plane`,
+    /// this is `pub(crate)` so the serializer can build a Sketch by directly
+    /// inserting pre-validated elements (bypassing the sticky-geometry pipeline).
+    pub(crate) fn reconstruct(plane: Plane) -> Sketch {
+        Sketch {
+            plane,
+            vertices: SlotMap::with_key(),
+            edges: SlotMap::with_key(),
+            regions: SlotMap::with_key(),
+        }
+    }
+
+    /// Insert a vertex directly into the slotmap (no planarity check, no merging).
+    /// For structural reconstruction only.
+    pub(crate) fn insert_vertex_raw(&mut self, v: SketchVertex) -> SketchVertexId {
+        self.vertices.insert(v)
+    }
+
+    /// Insert an edge directly into the slotmap (no intersection checks).
+    /// For structural reconstruction only.
+    pub(crate) fn insert_edge_raw(&mut self, e: SketchEdge) -> SketchEdgeId {
+        self.edges.insert(e)
+    }
+
+    /// Insert a region directly into the slotmap (no geometric check).
+    /// For structural reconstruction only.
+    pub(crate) fn insert_region_raw(&mut self, r: SketchRegion) -> SketchRegionId {
+        self.regions.insert(r)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════ intersection math
 
 /// Result of a 2D segment intersection query.
