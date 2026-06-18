@@ -292,6 +292,10 @@ export default function Viewport({
   // immediately re-resolve snap without waiting for the next pointer move.
   const lastRayRef = useRef<{ ray: import('./math').Ray; viewportH: number; fovY: number } | null>(null)
 
+  // True when a camera-navigation tool (Orbit/Pan/Zoom) is active.
+  // Used inside the mount-effect pointer handlers to suppress geometry routing.
+  const cameraModeRef = useRef(false)
+
   useEffect(() => {
     const container = containerRef.current
     if (container === null) return
@@ -643,27 +647,56 @@ export default function Viewport({
     switchToolRef.current = (toolName: string) => {
       switch (toolName) {
         case 'Rectangle':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
           toolController.setTool(makeRectTool())
           break
         case 'Push/Pull':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
           toolController.setTool(makePushPullTool())
           break
         case 'Paint': {
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
           const pt = makePaintTool()
           pt.setCurrentMaterial(currentMaterialIdRef.current)
           toolController.setTool(pt)
           break
         }
         case 'Move':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
           toolController.setTool(makeMoveTool())
           break
         case 'Rotate':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
           toolController.setTool(makeRotateTool())
           break
         case 'Scale':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
           toolController.setTool(makeScaleTool())
           break
+        case 'Orbit':
+          cameraModeRef.current = true
+          controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
+          toolController.resetToSelect()
+          break
+        case 'Pan':
+          cameraModeRef.current = true
+          controls.mouseButtons.LEFT = THREE.MOUSE.PAN
+          toolController.resetToSelect()
+          break
+        case 'Zoom':
+          cameraModeRef.current = true
+          controls.mouseButtons.LEFT = THREE.MOUSE.DOLLY
+          toolController.resetToSelect()
+          break
         default:
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
           toolController.resetToSelect()
       }
       scheduleRender()
@@ -720,6 +753,8 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ pointer move (snap + cue)
     function onPointerMove(ev: PointerEvent): void {
+      // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
+      if (cameraModeRef.current) return
       if (ev.buttons !== 0 && ev.button !== -1) return
 
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
@@ -748,6 +783,8 @@ export default function Viewport({
     // ------------------------------------------------------------------ pointer down
     function onPointerDown(ev: PointerEvent): void {
       if (ev.button !== 0) return
+      // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
+      if (cameraModeRef.current) return
 
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
       const ray = makeWorldRay(ndcX, ndcY, camera)
@@ -840,8 +877,11 @@ export default function Viewport({
       }
 
       // Number keys / shortcuts: switch tools (SketchUp muscle memory)
-      // 1 = Select, 2 = Rectangle, 3 = Push/Pull, 4 = Move, 5 = Rotate, 6 = Scale
-      if (!isMod) {
+      // Space = Select, 1 = Select, 2 = Rectangle, 3 = Push/Pull, 4 = Move, 5 = Rotate, 6 = Scale
+      const target = ev.target as HTMLElement
+      const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+      if (!isMod && !isTyping) {
+        if (ev.key === ' ') { ev.preventDefault(); switchToolRef.current?.('Select'); return }
         if (ev.key === '1') { switchToolRef.current?.('Select'); return }
         if (ev.key === '2') { switchToolRef.current?.('Rectangle'); return }
         if (ev.key === '3') { switchToolRef.current?.('Push/Pull'); return }
@@ -1002,7 +1042,7 @@ export default function Viewport({
   return (
     <div
       ref={containerRef}
-      style={{ width: '100%', height: '480px' }}
+      style={{ width: '100%', height: '100%' }}
     />
   )
 }

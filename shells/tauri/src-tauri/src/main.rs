@@ -1,8 +1,432 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Mutex;
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    Emitter, Manager,
+};
+
+// ---------------------------------------------------------------------------
+// Recent files — stored as JSON in the app config dir.
+// Max 10 entries, most-recent first, deduped by path.
+// ---------------------------------------------------------------------------
+
+const RECENTS_MAX: usize = 10;
+
+/// Load the recent-files list from the JSON store file.
+fn load_recents(app: &tauri::AppHandle) -> Vec<String> {
+    let Some(config_dir) = app.path().app_config_dir().ok() else {
+        return Vec::new();
+    };
+    let path = config_dir.join("recents.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text).unwrap_or_default()
+}
+
+/// Persist the recent-files list to the JSON store file.
+fn save_recents(app: &tauri::AppHandle, recents: &[String]) {
+    let Some(config_dir) = app.path().app_config_dir().ok() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&config_dir);
+    let path = config_dir.join("recents.json");
+    if let Ok(text) = serde_json::to_string(recents) {
+        let _ = std::fs::write(&path, text);
+    }
+}
+
+/// Extract the filename (basename) from an absolute path.
+fn basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+// ---------------------------------------------------------------------------
+// Managed state
+// ---------------------------------------------------------------------------
+
+/// Holds the mutable recents list + a handle to the "Open Recent" submenu so
+/// commands can rebuild it without recreating the whole menu bar.
+struct RecentState {
+    paths: Vec<String>,
+    submenu: tauri::menu::Submenu<tauri::Wry>,
+}
+
+/// Pending path to open on app startup (cold-start file association).
+struct PendingOpen(Option<String>);
+
+// ---------------------------------------------------------------------------
+// Custom file-I/O commands.
+//
+// These bypass the fs plugin so we need no fs capability entries — app-defined
+// commands require no capability grant.
+// ---------------------------------------------------------------------------
+
+/// Read a file from the filesystem and return its raw bytes.
+#[tauri::command]
+fn read_file(path: String) -> Result<Vec<u8>, String> {
+    std::fs::read(&path).map_err(|e| format!("read_file failed for {path:?}: {e}"))
+}
+
+/// Write raw bytes to a file, creating or overwriting it.
+#[tauri::command]
+fn write_file(path: String, contents: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, &contents).map_err(|e| format!("write_file failed for {path:?}: {e}"))
+}
+
+/// Take the pending-open path (cold-start file association) — returns Some once,
+/// then None on subsequent calls.
+#[tauri::command]
+fn take_pending_open(app: tauri::AppHandle) -> Option<String> {
+    app.state::<Mutex<PendingOpen>>().lock().ok()?.0.take()
+}
+
+/// Prepend `path` to the recents list (dedup, cap RECENTS_MAX), persist, and
+/// rebuild the "Open Recent" submenu.
+#[tauri::command]
+fn push_recent(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<Mutex<RecentState>>();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    // Dedup: remove existing entry for this path, then prepend.
+    guard.paths.retain(|p| p != &path);
+    guard.paths.insert(0, path);
+    guard.paths.truncate(RECENTS_MAX);
+    let paths = guard.paths.clone();
+    save_recents(&app, &paths);
+    rebuild_recent_submenu(&guard.submenu, &app, &paths)
+}
+
+/// Clear the recents list, persist, and rebuild the submenu.
+#[tauri::command]
+fn clear_recent(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<Mutex<RecentState>>();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.paths.clear();
+    save_recents(&app, &[]);
+    rebuild_recent_submenu(&guard.submenu, &app, &[])
+}
+
+// ---------------------------------------------------------------------------
+// Submenu rebuild helper.
+// Removes all current items from the submenu and repopulates from `paths`.
+// Layout:
+//   <path items>
+//   ----  (separator, only when paths non-empty)
+//   Clear Recent
+// ---------------------------------------------------------------------------
+fn rebuild_recent_submenu(
+    submenu: &tauri::menu::Submenu<tauri::Wry>,
+    app: &tauri::AppHandle,
+    paths: &[String],
+) -> Result<(), String> {
+    // Remove every existing item.
+    loop {
+        match submenu.remove_at(0) {
+            Ok(Some(_)) => {}
+            _ => break,
+        }
+    }
+
+    // Append one item per path.
+    for path in paths {
+        let label = basename(path);
+        let item = MenuItemBuilder::with_id(format!("recent:{path}"), label)
+            .build(app)
+            .map_err(|e| e.to_string())?;
+        submenu.append(&item).map_err(|e| e.to_string())?;
+    }
+
+    // Separator + "Clear Recent" (always present so users know there's a menu).
+    let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    submenu.append(&sep).map_err(|e| e.to_string())?;
+
+    let clear = MenuItemBuilder::with_id("recent-clear", "Clear Recent")
+        .build(app)
+        .map_err(|e| e.to_string())?;
+    submenu.append(&clear).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 fn main() {
+    // Check argv for a .hew path on Windows/Linux (best-effort, first launch).
+    // macOS uses RunEvent::Opened (Apple event), so we skip argv there.
+    let argv_path: Option<String> = {
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::env::args()
+                .skip(1)
+                .find(|a| a.to_lowercase().ends_with(".hew"))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            None
+        }
+    };
+
     tauri::Builder::default()
-        .run(tauri::generate_context!())
-        .expect("error while running Hew desktop");
+        // Register the dialog plugin (open/save native dialogs).
+        .plugin(tauri_plugin_dialog::init())
+        // Register custom file-I/O commands.
+        .invoke_handler(tauri::generate_handler![
+            read_file,
+            write_file,
+            take_pending_open,
+            push_recent,
+            clear_recent,
+        ])
+        // Build and attach the native menu bar; wire menu-item clicks to
+        // `menu-action` events emitted to the webview.
+        .setup(move |app| {
+            let handle = app.handle();
+
+            // ----------------------------------------------------------------
+            // App menu (macOS — About + Quit)
+            // ----------------------------------------------------------------
+            let app_menu = SubmenuBuilder::new(handle, "Hew")
+                .item(&PredefinedMenuItem::about(handle, None, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::services(handle, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::hide(handle, None)?)
+                .item(&PredefinedMenuItem::hide_others(handle, None)?)
+                .item(&PredefinedMenuItem::show_all(handle, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::quit(handle, None)?)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Open Recent submenu — populated from persisted recents.
+            // ----------------------------------------------------------------
+            let recents = load_recents(handle);
+
+            // Build an empty submenu first, then populate via the helper so
+            // the rebuild logic stays in one place.
+            let open_recent_submenu = SubmenuBuilder::new(handle, "Open Recent").build()?;
+            rebuild_recent_submenu(&open_recent_submenu, handle, &recents)
+                .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e)))?;
+
+            // ----------------------------------------------------------------
+            // File menu
+            // ----------------------------------------------------------------
+            let file_new = MenuItemBuilder::with_id("file-new", "New")
+                .accelerator("CmdOrCtrl+N")
+                .build(handle)?;
+            let file_open = MenuItemBuilder::with_id("file-open", "Open…")
+                .accelerator("CmdOrCtrl+O")
+                .build(handle)?;
+            let file_save = MenuItemBuilder::with_id("file-save", "Save")
+                .accelerator("CmdOrCtrl+S")
+                .build(handle)?;
+            let file_save_as = MenuItemBuilder::with_id("file-save-as", "Save As…")
+                .accelerator("Shift+CmdOrCtrl+S")
+                .build(handle)?;
+            let file_close = MenuItemBuilder::with_id("file-close", "Close")
+                .accelerator("CmdOrCtrl+W")
+                .build(handle)?;
+
+            let file_menu = SubmenuBuilder::new(handle, "File")
+                .item(&file_new)
+                .item(&file_open)
+                .item(&open_recent_submenu)
+                .separator()
+                .item(&file_save)
+                .item(&file_save_as)
+                .separator()
+                .item(&file_close)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Edit menu
+            // ----------------------------------------------------------------
+            let edit_undo = MenuItemBuilder::with_id("edit-undo", "Undo")
+                .accelerator("CmdOrCtrl+Z")
+                .build(handle)?;
+            let edit_redo = MenuItemBuilder::with_id("edit-redo", "Redo")
+                .accelerator("Shift+CmdOrCtrl+Z")
+                .build(handle)?;
+
+            let edit_menu = SubmenuBuilder::new(handle, "Edit")
+                .item(&edit_undo)
+                .item(&edit_redo)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Draw menu
+            // ----------------------------------------------------------------
+            let draw_rect = MenuItemBuilder::with_id("draw-rectangle", "Rectangle")
+                .accelerator("CmdOrCtrl+K")
+                .build(handle)?;
+
+            let draw_shapes = SubmenuBuilder::new(handle, "Shapes")
+                .item(&draw_rect)
+                .build()?;
+
+            let draw_menu = SubmenuBuilder::new(handle, "Draw")
+                .item(&draw_shapes)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Tools menu
+            // ----------------------------------------------------------------
+            let tool_select = MenuItemBuilder::with_id("tool-select", "Select")
+                .build(handle)?;
+            let tool_paint = MenuItemBuilder::with_id("tool-paint", "Paint")
+                .build(handle)?;
+            let tool_move = MenuItemBuilder::with_id("tool-move", "Move")
+                .accelerator("CmdOrCtrl+0")
+                .build(handle)?;
+            let tool_rotate = MenuItemBuilder::with_id("tool-rotate", "Rotate")
+                .accelerator("CmdOrCtrl+8")
+                .build(handle)?;
+            let tool_scale = MenuItemBuilder::with_id("tool-scale", "Scale")
+                .accelerator("CmdOrCtrl+9")
+                .build(handle)?;
+            let tool_pushpull = MenuItemBuilder::with_id("tool-pushpull", "Push/Pull")
+                .accelerator("CmdOrCtrl+=")
+                .build(handle)?;
+
+            let tools_menu = SubmenuBuilder::new(handle, "Tools")
+                .item(&tool_select)
+                .item(&tool_paint)
+                .item(&tool_move)
+                .item(&tool_rotate)
+                .item(&tool_scale)
+                .item(&tool_pushpull)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Camera menu
+            // ----------------------------------------------------------------
+            let cam_orbit = MenuItemBuilder::with_id("cam-orbit", "Orbit")
+                .accelerator("CmdOrCtrl+B")
+                .build(handle)?;
+            let cam_pan = MenuItemBuilder::with_id("cam-pan", "Pan")
+                .accelerator("CmdOrCtrl+R")
+                .build(handle)?;
+            let cam_zoom = MenuItemBuilder::with_id("cam-zoom", "Zoom")
+                .accelerator("CmdOrCtrl+\\")
+                .build(handle)?;
+
+            let camera_menu = SubmenuBuilder::new(handle, "Camera")
+                .item(&cam_orbit)
+                .item(&cam_pan)
+                .item(&cam_zoom)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Window menu
+            // ----------------------------------------------------------------
+            let win_model_info = MenuItemBuilder::with_id("win-model-info", "Model Info")
+                .accelerator("Shift+CmdOrCtrl+I")
+                .build(handle)?;
+            let win_materials = MenuItemBuilder::with_id("win-materials", "Materials")
+                .accelerator("Shift+CmdOrCtrl+C")
+                .build(handle)?;
+
+            let window_menu = SubmenuBuilder::new(handle, "Window")
+                .item(&win_model_info)
+                .item(&win_materials)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Assemble and set the menu bar
+            // ----------------------------------------------------------------
+            let menu = MenuBuilder::new(handle)
+                .item(&app_menu)
+                .item(&file_menu)
+                .item(&edit_menu)
+                .item(&draw_menu)
+                .item(&tools_menu)
+                .item(&camera_menu)
+                .item(&window_menu)
+                .build()?;
+
+            app.set_menu(menu)?;
+
+            // ----------------------------------------------------------------
+            // Managed state: recents + submenu handle
+            // ----------------------------------------------------------------
+            app.manage(Mutex::new(RecentState {
+                paths: recents,
+                submenu: open_recent_submenu,
+            }));
+
+            // ----------------------------------------------------------------
+            // Managed state: pending-open (seeded from argv on Windows/Linux)
+            // ----------------------------------------------------------------
+            app.manage(Mutex::new(PendingOpen(argv_path)));
+
+            Ok(())
+        })
+        // Map menu-item ids to action strings and emit them to the webview.
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            if id.starts_with("recent:") {
+                let path = &id["recent:".len()..];
+                let _ = app.emit("menu-open-path", path);
+                return;
+            }
+            if id == "recent-clear" {
+                let _ = clear_recent(app.clone());
+                return;
+            }
+            let action = match id {
+                "file-new" => "new",
+                "file-open" => "open",
+                "file-save" => "save",
+                "file-save-as" => "save-as",
+                "file-close" => "close",
+                "edit-undo" => "undo",
+                "edit-redo" => "redo",
+                "draw-rectangle" => "tool-rectangle",
+                "tool-select" => "tool-select",
+                "tool-paint" => "tool-paint",
+                "tool-move" => "tool-move",
+                "tool-rotate" => "tool-rotate",
+                "tool-scale" => "tool-scale",
+                "tool-pushpull" => "tool-pushpull",
+                "cam-orbit" => "tool-orbit",
+                "cam-pan" => "tool-pan",
+                "cam-zoom" => "tool-zoom",
+                "win-model-info" => "toggle-model-info",
+                "win-materials" => "toggle-materials",
+                _ => return,
+            };
+            let _ = app.emit("menu-action", action);
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Hew desktop")
+        .run(|app, event| {
+            // macOS: intercept "open document" Apple events (warm + cold start).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                for url in urls {
+                    if url.scheme() != "file" {
+                        continue;
+                    }
+                    // Convert file:// URL to filesystem path (percent-decode).
+                    let Ok(path) = url.to_file_path() else {
+                        continue;
+                    };
+                    let path_str = path.to_string_lossy().to_string();
+                    if !path_str.to_lowercase().ends_with(".hew") {
+                        continue;
+                    }
+                    // Always update the pending-open buffer (covers cold start
+                    // where the webview listener may not be registered yet).
+                    if let Ok(mut guard) = app.state::<Mutex<PendingOpen>>().lock() {
+                        guard.0 = Some(path_str.clone());
+                    }
+                    // Also emit for the warm case (app already running).
+                    let _ = app.emit("menu-open-path", &path_str);
+                }
+            }
+        });
 }

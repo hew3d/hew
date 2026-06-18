@@ -39,7 +39,7 @@ use crate::material::Material;
 use crate::math::Plane;
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
-use crate::sketch::{Sketch, SketchError, SketchRegionId};
+use crate::sketch::{Sketch, SketchEdgeId, SketchError, SketchRegionId, SketchVertexId};
 use crate::topo::Object;
 use crate::transform::{Transform, TransformError};
 
@@ -165,6 +165,14 @@ enum DocAction {
         id: ObjectId,
         sketch: SketchId,
         region: SketchRegionId,
+        /// Sketch edges exclusively bounding this region (not shared by any
+        /// surviving region); hidden from rendering after extrusion, restored
+        /// on undo. Derived index — not serialized.
+        consumed_edges: Vec<SketchEdgeId>,
+        /// Sketch vertices left isolated once `consumed_edges` are hidden;
+        /// treated as hidden from rendering after extrusion, restored on undo.
+        /// Derived index — not serialized.
+        consumed_verts: Vec<SketchVertexId>,
     },
     /// A per-Object op (push/pull, split, merge) ran; undo/redo delegate to that
     /// Object's [`History`].
@@ -425,6 +433,12 @@ pub struct Document {
     /// the bottom of its box and is no longer offered for extrusion. Keyed by
     /// sketch too because a different sketch's slotmap reuses region keys.
     consumed: HashSet<(SketchId, SketchRegionId)>,
+    /// Sketch edges hidden because their region was extruded and they are not
+    /// shared by any surviving region. Derived index — rebuilt on load.
+    consumed_sketch_edges: HashSet<(SketchId, SketchEdgeId)>,
+    /// Sketch vertices hidden because all their incident edges are in
+    /// `consumed_sketch_edges`. Derived index — rebuilt on load.
+    consumed_sketch_verts: HashSet<(SketchId, SketchVertexId)>,
     undo: Vec<DocAction>,
     redo: Vec<DocAction>,
 }
@@ -767,6 +781,21 @@ impl Document {
             doc.consumed.insert((sid, rid));
         }
 
+        // Rebuild the derived tombstone index for consumed sketch edges/verts.
+        // Collect pairs first to avoid a simultaneous borrow of `doc.consumed`
+        // and `doc.sketches`.
+        let consumed_pairs: Vec<(SketchId, SketchRegionId)> =
+            doc.consumed.iter().copied().collect();
+        for (sid, rid) in consumed_pairs {
+            let (edges, verts) = doc.sketches[sid].region_exclusive_boundary(rid);
+            for e in edges {
+                doc.consumed_sketch_edges.insert((sid, e));
+            }
+            for v in verts {
+                doc.consumed_sketch_verts.insert((sid, v));
+            }
+        }
+
         // Undo/redo stacks are empty by construction (Document::new() gives empty).
         Ok(doc)
     }
@@ -803,6 +832,12 @@ impl Document {
     /// is therefore no longer extrudable).
     pub fn is_region_consumed(&self, sketch: SketchId, region: SketchRegionId) -> bool {
         self.consumed.contains(&(sketch, region))
+    }
+
+    /// True if this sketch edge has been consumed by an extrusion (hidden from
+    /// rendering — it became part of a solid's base).
+    pub fn is_sketch_edge_consumed(&self, sketch: SketchId, edge: SketchEdgeId) -> bool {
+        self.consumed_sketch_edges.contains(&(sketch, edge))
     }
 
     /// The still-extrudable regions of `sketch` (its closed regions minus any
@@ -1258,8 +1293,25 @@ impl Document {
         // The region is now the bottom of a solid: consume it so it neither
         // re-extrudes nor leaves a stray fill.
         self.consumed.insert((sketch, region));
-        self.undo
-            .push(DocAction::CreatedObject { id, sketch, region });
+
+        // Tombstone the sketch edges/vertices that exclusively bounded this
+        // region (not shared with any surviving region). Re-borrow the sketch
+        // here — the earlier `let s = ...` borrow ended after `profile(region)`.
+        let (cons_edges, cons_verts) = self.sketches[sketch].region_exclusive_boundary(region);
+        for &e in &cons_edges {
+            self.consumed_sketch_edges.insert((sketch, e));
+        }
+        for &v in &cons_verts {
+            self.consumed_sketch_verts.insert((sketch, v));
+        }
+
+        self.undo.push(DocAction::CreatedObject {
+            id,
+            sketch,
+            region,
+            consumed_edges: cons_edges,
+            consumed_verts: cons_verts,
+        });
         self.redo.clear();
         self.debug_validate();
 
@@ -1984,11 +2036,24 @@ impl Document {
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.undo.pop().ok_or(DocumentError::NothingToUndo)?;
         let change = match &action {
-            &DocAction::CreatedObject { id, sketch, region } => {
+            DocAction::CreatedObject {
+                id,
+                sketch,
+                region,
+                consumed_edges,
+                consumed_verts,
+            } => {
+                let (id, sketch, region) = (*id, *sketch, *region);
                 if let Some(rec) = self.objects.get_mut(id) {
                     rec.hidden = true;
                 }
                 self.consumed.remove(&(sketch, region));
+                for &e in consumed_edges {
+                    self.consumed_sketch_edges.remove(&(sketch, e));
+                }
+                for &v in consumed_verts {
+                    self.consumed_sketch_verts.remove(&(sketch, v));
+                }
                 DocChange {
                     objects_touched: vec![id],
                     sketches_touched: vec![sketch],
@@ -2199,11 +2264,24 @@ impl Document {
     pub fn redo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.redo.pop().ok_or(DocumentError::NothingToRedo)?;
         let change = match &action {
-            &DocAction::CreatedObject { id, sketch, region } => {
+            DocAction::CreatedObject {
+                id,
+                sketch,
+                region,
+                consumed_edges,
+                consumed_verts,
+            } => {
+                let (id, sketch, region) = (*id, *sketch, *region);
                 if let Some(rec) = self.objects.get_mut(id) {
                     rec.hidden = false;
                 }
                 self.consumed.insert((sketch, region));
+                for &e in consumed_edges {
+                    self.consumed_sketch_edges.insert((sketch, e));
+                }
+                for &v in consumed_verts {
+                    self.consumed_sketch_verts.insert((sketch, v));
+                }
                 DocChange {
                     objects_touched: vec![id],
                     sketches_touched: vec![sketch],

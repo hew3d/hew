@@ -229,6 +229,90 @@ impl Sketch {
         Ok(report)
     }
 
+    /// The boundary edges of `region` that are NOT shared by any other region's
+    /// boundary, plus the vertices that would be left with no incident edge once
+    /// those edges are gone. Pure query — no mutation. Empty vecs if `region` is
+    /// unknown.
+    pub fn region_exclusive_boundary(
+        &self,
+        region: SketchRegionId,
+    ) -> (Vec<SketchEdgeId>, Vec<SketchVertexId>) {
+        let r = match self.regions.get(region) {
+            Some(r) => r,
+            None => return (Vec::new(), Vec::new()),
+        };
+
+        // Collect this region's boundary edge ids (outer + all holes).
+        let mut this_edges: std::collections::BTreeSet<SketchEdgeId> =
+            std::collections::BTreeSet::new();
+        // Collect this region's boundary vertex ids.
+        let mut this_verts: std::collections::BTreeSet<SketchVertexId> =
+            std::collections::BTreeSet::new();
+
+        let loops_this: Vec<&Vec<SketchVertexId>> =
+            std::iter::once(&r.outer).chain(r.holes.iter()).collect();
+        for lp in &loops_this {
+            for i in 0..lp.len() {
+                let a = lp[i];
+                let b = lp[(i + 1) % lp.len()];
+                if let Some(eid) = self.edge_between(a, b) {
+                    this_edges.insert(eid);
+                }
+                this_verts.insert(a);
+            }
+        }
+
+        // Collect the union of all OTHER regions' boundary edges.
+        let mut other_edges: std::collections::BTreeSet<SketchEdgeId> =
+            std::collections::BTreeSet::new();
+        for (rid, other_r) in &self.regions {
+            if rid == region {
+                continue;
+            }
+            let loops_other: Vec<&Vec<SketchVertexId>> = std::iter::once(&other_r.outer)
+                .chain(other_r.holes.iter())
+                .collect();
+            for lp in &loops_other {
+                for i in 0..lp.len() {
+                    let a = lp[i];
+                    let b = lp[(i + 1) % lp.len()];
+                    if let Some(eid) = self.edge_between(a, b) {
+                        other_edges.insert(eid);
+                    }
+                }
+            }
+        }
+
+        // Exclusive edges: in this region but not in any other region.
+        let exclusive_edges: Vec<SketchEdgeId> = this_edges
+            .into_iter()
+            .filter(|e| !other_edges.contains(e))
+            .collect();
+
+        // Isolated vertices: boundary vertices of this region whose every
+        // incident edge is in the exclusive-removal set (no surviving edge).
+        let removal_set: std::collections::BTreeSet<SketchEdgeId> =
+            exclusive_edges.iter().copied().collect();
+
+        let exclusive_verts: Vec<SketchVertexId> = this_verts
+            .into_iter()
+            .filter(|&vid| {
+                // A vertex is isolated iff ALL its incident edges are being removed.
+                self.edges.iter().all(|(eid, e)| {
+                    // If this edge is incident to vid...
+                    if e.from == vid || e.to == vid {
+                        // ...it must be in the removal set.
+                        removal_set.contains(&eid)
+                    } else {
+                        true // not incident — irrelevant
+                    }
+                })
+            })
+            .collect();
+
+        (exclusive_edges, exclusive_verts)
+    }
+
     /// Extracts a region as a validated [`Profile`] ready for extrusion.
     ///
     /// # Errors
@@ -582,6 +666,15 @@ impl Sketch {
         self.edges
             .values()
             .any(|e| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+    }
+
+    /// Returns the id of the edge connecting `a` and `b` (in either direction),
+    /// or `None` if no such edge exists.
+    fn edge_between(&self, a: SketchVertexId, b: SketchVertexId) -> Option<SketchEdgeId> {
+        self.edges
+            .iter()
+            .find(|(_, e)| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+            .map(|(id, _)| id)
     }
 
     /// True if the vertex has at least one incident edge (in either direction).
@@ -1492,5 +1585,88 @@ mod tests {
         assert_eq!(report.regions_removed.len(), 1);
         assert_eq!(report.regions_created.len(), 2);
         assert_eq!(s.regions().len(), 2);
+    }
+
+    // ── region_exclusive_boundary ─────────────────────────────────────────────
+
+    /// A single rectangle: all 4 edges and all 4 vertices are exclusive.
+    #[test]
+    fn exclusive_boundary_single_rect_returns_all_edges_and_verts() {
+        let s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        let region = s.regions().keys().next().expect("one region");
+        let (edges, verts) = s.region_exclusive_boundary(region);
+        assert_eq!(edges.len(), 4, "all 4 edges are exclusive");
+        assert_eq!(verts.len(), 4, "all 4 vertices are exclusive");
+    }
+
+    /// Two rectangles sharing the x=1 wall: the first region's exclusive
+    /// boundary has 3 edges (not the shared wall) and the 2 corners NOT on
+    /// the shared wall.
+    #[test]
+    fn exclusive_boundary_shared_wall_excluded() {
+        let mut s = Sketch::on_plane(xy_plane());
+        // Left rect [0,0]-[1,1].
+        let segs_left = [
+            (pt(0.0, 0.0), pt(1.0, 0.0)),
+            (pt(1.0, 0.0), pt(1.0, 1.0)),
+            (pt(1.0, 1.0), pt(0.0, 1.0)),
+            (pt(0.0, 1.0), pt(0.0, 0.0)),
+        ];
+        for (a, b) in &segs_left {
+            s.add_segment(*a, *b).unwrap();
+        }
+        // Right rect [1,0]-[2,1] — shares the x=1 wall.
+        let segs_right = [
+            (pt(1.0, 0.0), pt(2.0, 0.0)),
+            (pt(2.0, 0.0), pt(2.0, 1.0)),
+            (pt(2.0, 1.0), pt(1.0, 1.0)),
+            (pt(1.0, 1.0), pt(1.0, 0.0)),
+        ];
+        for (a, b) in &segs_right {
+            s.add_segment(*a, *b).unwrap();
+        }
+        assert_eq!(s.regions().len(), 2);
+
+        // The left region: all outer vertices are at x <= 1.
+        let left_region = s
+            .regions()
+            .iter()
+            .find(|(_, r)| {
+                r.outer.iter().all(|&vid| {
+                    let x = s.vertices()[vid].position.x;
+                    x < 1.5 // all vertices at x=0 or x=1
+                })
+            })
+            .map(|(id, _)| id)
+            .expect("left region");
+
+        let (edges, verts) = s.region_exclusive_boundary(left_region);
+        // 3 exclusive edges (bottom, top, left — not the shared x=1 wall).
+        assert_eq!(edges.len(), 3, "3 exclusive edges (not the shared wall)");
+        // 2 exclusive vertices: (0,0) and (0,1) — not the shared x=1 corners.
+        assert_eq!(
+            verts.len(),
+            2,
+            "2 exclusive vertices (not on the shared wall)"
+        );
+        // Verify the 2 exclusive vertices are at x=0.
+        for vid in &verts {
+            let x = s.vertices()[*vid].position.x;
+            assert!(
+                (x - 0.0).abs() < crate::tol::POINT_MERGE,
+                "exclusive vertex should be at x=0, got x={x}"
+            );
+        }
+    }
+
+    /// Unknown region returns empty vecs.
+    #[test]
+    fn exclusive_boundary_unknown_region_returns_empty() {
+        let s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        // The null key (default) is never inserted by slotmap and is always stale.
+        let bogus = SketchRegionId::default();
+        let (edges, verts) = s.region_exclusive_boundary(bogus);
+        assert!(edges.is_empty());
+        assert!(verts.is_empty());
     }
 }

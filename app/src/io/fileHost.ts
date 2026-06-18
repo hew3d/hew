@@ -41,21 +41,35 @@ export interface FileHost {
   saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null>
 }
 
-// Lazy import to avoid pulling WebFileHost into Tauri builds once that branch
-// exists.  For now, makeFileHost() always returns the web implementation.
+// WebFileHost is statically imported — it's always needed for the web build.
 import { WebFileHost } from './webFileHost'
+
+/**
+ * True when running inside the Tauri desktop shell.
+ * The Tauri runtime injects `window.__TAURI_INTERNALS__` before the webview loads.
+ */
+export const isTauri: boolean =
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 /**
  * Return the appropriate FileHost for the current platform.
  *
- * TODO(tauri-slice): add `if ('__TAURI__' in window) return new TauriFileHost()`
- * once the Tauri file-dialog bridge is implemented.
+ * Under Tauri, TauriFileHost is imported dynamically (lazy) so its Tauri-only
+ * imports never appear in the web bundle.  The web path always gets WebFileHost.
  */
 export function makeFileHost(): FileHost {
-  // isTauri check stub — the Tauri shell sets window.__TAURI_INTERNALS__
-  if ('__TAURI_INTERNALS__' in window) {
-    // TODO(tauri-slice): return new TauriFileHost()
-    // Fall through to WebFileHost for now.
+  if (isTauri) {
+    // Dynamic import so the web bundle never pulls in TauriFileHost or its
+    // Tauri dependencies.  makeFileHost() is called once (in a useRef) so
+    // we return a synchronous shim that defers to TauriFileHost once loaded.
+    const hostPromise = import('./tauriFileHost').then(
+      (m) => new m.TauriFileHost(),
+    )
+    return {
+      open: () => hostPromise.then((h) => h.open()),
+      save: (bytes, ref) => hostPromise.then((h) => h.save(bytes, ref)),
+      saveAs: (bytes, name) => hostPromise.then((h) => h.saveAs(bytes, name)),
+    }
   }
   return new WebFileHost()
 }

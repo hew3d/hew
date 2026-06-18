@@ -686,13 +686,18 @@ impl Scene {
     }
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
+    /// Edges consumed by an extrusion (part of a solid's base) are excluded.
     pub fn sketch_lines(&self, sketch: u64) -> Result<Vec<f32>, ApiError> {
+        let sid = sketch_id(sketch);
         let s = self
             .doc
-            .sketch(sketch_id(sketch))
+            .sketch(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let mut out = Vec::with_capacity(s.edges().len() * 6);
-        for edge in s.edges().values() {
+        for (eid, edge) in s.edges() {
+            if self.doc.is_sketch_edge_consumed(sid, eid) {
+                continue;
+            }
             for v in [edge.from, edge.to] {
                 let p = s.vertices()[v].position;
                 out.extend([p.x as f32, p.y as f32, p.z as f32]);
@@ -1660,6 +1665,11 @@ mod tests {
         assert!(scene.can_scene_undo());
         // The region is consumed: gone from the list, so it can't re-extrude.
         assert!(scene.sketch_regions(sketch).unwrap().is_empty());
+        // The outline edges are now hidden: sketch_lines is empty.
+        assert!(
+            scene.sketch_lines(sketch).unwrap().is_empty(),
+            "sketch lines must be empty after extruding the sole rectangle"
+        );
 
         // Undo the creation: the object is hidden (gone from the listing) but
         // its handle is preserved for redo.
@@ -1668,14 +1678,23 @@ mod tests {
         assert!(scene.object_watertight(obj).is_err()); // hidden = not live
         assert!(scene.can_scene_redo());
 
-        // Undo also restored the region's extrudability.
+        // Undo also restored the region's extrudability and the sketch lines.
         assert_eq!(scene.sketch_regions(sketch).unwrap(), vec![region]);
+        assert!(
+            !scene.sketch_lines(sketch).unwrap().is_empty(),
+            "sketch lines must reappear after undoing the extrusion"
+        );
 
         // Redo restores the SAME handle and re-consumes the region.
         scene.scene_redo().unwrap();
         assert_eq!(scene.object_ids(), vec![obj]);
         assert!(scene.object_watertight(obj).unwrap());
         assert!(scene.sketch_regions(sketch).unwrap().is_empty());
+        // Lines hidden again after redo.
+        assert!(
+            scene.sketch_lines(sketch).unwrap().is_empty(),
+            "sketch lines must be empty again after redo"
+        );
     }
 
     #[test]

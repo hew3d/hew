@@ -63,6 +63,8 @@ interface Props {
   canMakeUnique: boolean
   /** Detach the instance onto a private copy of its definition. */
   onMakeUnique: () => void
+  /** Called when the user closes the panel. */
+  onClose: () => void
 }
 
 const ROW_BASE: React.CSSProperties = {
@@ -99,6 +101,7 @@ export function DocumentTree({
   onExplodeInstance,
   canMakeUnique,
   onMakeUnique,
+  onClose,
 }: Props) {
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -156,6 +159,25 @@ export function DocumentTree({
         gap: '8px',
       }}
     >
+      {/* Panel header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontWeight: 'bold', fontSize: '12px', color: '#eee' }}>Model Info</span>
+        <button
+          onClick={onClose}
+          title="Close panel"
+          style={{
+            background: 'none',
+            border: 'none',
+            color: '#888',
+            cursor: 'pointer',
+            fontSize: '14px',
+            lineHeight: 1,
+            padding: '0 2px',
+          }}
+        >
+          ×
+        </button>
+      </div>
       {/* Breadcrumb */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'monospace' }}>
         {crumbs.map((c, i) => (

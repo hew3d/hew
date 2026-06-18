@@ -31,6 +31,14 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["hew"],
+        "name": "Hew Model",
+        "description": "Hew 3D model file",
+        "role": "Editor"
+      }
     ]
   }
 }

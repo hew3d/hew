@@ -3,3 +3,5 @@ packages:
   - 'shells/*'
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@tauri-apps/api@2.11.1'

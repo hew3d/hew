@@ -9,7 +9,7 @@ import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
-import { makeFileHost } from './io/fileHost'
+import { makeFileHost, isTauri } from './io/fileHost'
 import {
   INITIAL_SESSION,
   deriveTitle,
@@ -32,16 +32,24 @@ interface Toast {
 
 let toastCounter = 0
 
-const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale'] as const
+/** Extract the filename from an absolute path (cross-platform / or \). */
+function basenameOf(path: string): string {
+  return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
+}
+
+const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Orbit', 'Pan', 'Zoom'] as const
 type ToolName = (typeof TOOLS)[number]
 const TOOL_KEYS: Record<ToolName, string> = {
-  'Select': '1',
-  'Rectangle': '2',
-  'Push/Pull': '3',
+  'Select': 'Spc',
+  'Rectangle': '⌘K',
+  'Push/Pull': '⌘=',
   'Paint': '4',
-  'Move': '5',
-  'Rotate': '6',
-  'Scale': '7',
+  'Move': '⌘0',
+  'Rotate': '⌘8',
+  'Scale': '⌘9',
+  'Orbit': '⌘B',
+  'Pan': '⌘R',
+  'Zoom': '⌘\\',
 }
 
 /** Strings that signal the Scene borrow-lock after a Rust panic. */
@@ -75,6 +83,10 @@ export default function App() {
   const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
   /** Document session: currentRef + dirty flag. */
   const [docSession, setDocSession] = useState<DocSessionState>(INITIAL_SESSION)
+  /** Pane visibility: Model info (DocumentTree) */
+  const [showModelInfo, setShowModelInfo] = useState(true)
+  /** Pane visibility: Materials (MaterialPalette) */
+  const [showMaterials, setShowMaterials] = useState(true)
 
   /** Imperative handle into the viewport (e.g. running a boolean). */
   const viewportApi = useRef<ViewportApi | null>(null)
@@ -301,27 +313,37 @@ export default function App() {
   // ---------------------------------------------------------------- discard guard
   // Returns true if it's safe to proceed (no unsaved changes, or user confirms).
   // Reads current session state from docSessionRef to stay pure-function-safe.
-  const confirmDiscard = useCallback((): boolean => {
+  const confirmDiscard = useCallback(async (): Promise<boolean> => {
     if (!docSessionRef.current.dirty) return true
-    return window.confirm('You have unsaved changes. Discard them?')
+    const message = 'You have unsaved changes. Discard them?'
+    if (isTauri) {
+      const { ask } = await import('@tauri-apps/plugin-dialog')
+      return ask(message, { title: 'Unsaved Changes', kind: 'warning' })
+    }
+    return window.confirm(message)
   }, [])
 
   // ---------------------------------------------------------------- document lifecycle
 
-  const newDocument = useCallback(() => {
-    if (!confirmDiscard()) return
+  const newDocument = useCallback(async () => {
+    if (!(await confirmDiscard())) return
     const blank = blankBytesRef.current
     if (blank === null) return
     if (applyLoadedBytes(blank)) setDocSession(afterOpen(null))
   }, [confirmDiscard, applyLoadedBytes])
 
-  const openDocument = useCallback(() => {
-    if (!confirmDiscard()) return
+  const openDocument = useCallback(async () => {
+    if (!(await confirmDiscard())) return
     fileHostRef.current.open().then((result) => {
       if (result === null) return // user cancelled
       const ok = applyLoadedBytes(result.bytes)
       if (!ok) return
       setDocSession(afterOpen(result.ref))
+      if (isTauri && typeof result.ref.handle === 'string') {
+        import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke('push_recent', { path: result.ref.handle as string })
+        ).catch(() => { /* ignore */ })
+      }
     }).catch((err: unknown) => {
       handleToast(`Open failed: ${String(err)}`)
     })
@@ -336,6 +358,11 @@ export default function App() {
       if (newRef === null) return // user cancelled
       setDocSession(afterSave(newRef))
       LogStore.log.info('app', `Saved: ${newRef.name}`)
+      if (isTauri && typeof newRef.handle === 'string') {
+        import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke('push_recent', { path: newRef.handle as string })
+        ).catch(() => { /* ignore */ })
+      }
     }).catch((err: unknown) => {
       handleToast(`Save failed: ${String(err)}`)
     })
@@ -350,10 +377,28 @@ export default function App() {
       if (newRef === null) return // user cancelled
       setDocSession(afterSave(newRef))
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
+      if (isTauri && typeof newRef.handle === 'string') {
+        import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke('push_recent', { path: newRef.handle as string })
+        ).catch(() => { /* ignore */ })
+      }
     }).catch((err: unknown) => {
       handleToast(`Save As failed: ${String(err)}`)
     })
   }, [docSession.currentRef, handleToast])
+
+  // ---------------------------------------------------------------- open by path (Tauri only — used by drag-drop, recents, and file association)
+  // Reads the file at `path` via Tauri invoke, applies it, and sets session state.
+  const openPath = useCallback(async (path: string) => {
+    if (!(await confirmDiscard())) return
+    const { invoke } = await import('@tauri-apps/api/core')
+    const raw: number[] = await invoke('read_file', { path })
+    const bytes = new Uint8Array(raw)
+    if (applyLoadedBytes(bytes)) {
+      setDocSession(afterOpen({ name: basenameOf(path), handle: path }))
+      invoke('push_recent', { path }).catch(() => { /* ignore */ })
+    }
+  }, [confirmDiscard, applyLoadedBytes])
 
   // ---------------------------------------------------------------- undo/redo for Edit menu
   const handleUndo = useCallback(() => {
@@ -364,15 +409,172 @@ export default function App() {
     viewportApi.current?.runRedo()
   }, [])
 
+  // ---------------------------------------------------------------- stable refs for Tauri event listeners
+  // These refs always track the latest callbacks so Tauri event handlers
+  // (registered once) don't capture stale closures.
+  const newDocumentRef = useRef(newDocument)
+  const openDocumentRef = useRef(openDocument)
+  const saveDocumentRef = useRef(saveDocument)
+  const saveAsDocumentRef = useRef(saveAsDocument)
+  const handleUndoRef = useRef(handleUndo)
+  const handleRedoRef = useRef(handleRedo)
+  const openPathRef = useRef(openPath)
+  useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
+  useEffect(() => { openDocumentRef.current = openDocument }, [openDocument])
+  useEffect(() => { saveDocumentRef.current = saveDocument }, [saveDocument])
+  useEffect(() => { saveAsDocumentRef.current = saveAsDocument }, [saveAsDocument])
+  useEffect(() => { handleUndoRef.current = handleUndo }, [handleUndo])
+  useEffect(() => { handleRedoRef.current = handleRedo }, [handleRedo])
+  useEffect(() => { openPathRef.current = openPath }, [openPath])
+
+  // ---------------------------------------------------------------- native menu-action listener (Tauri only)
+  // Registered once; reads latest callbacks via refs so no stale-closure risk.
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      return listen<string>('menu-action', (event) => {
+        switch (event.payload) {
+          case 'new':      newDocumentRef.current(); break
+          case 'open':     openDocumentRef.current(); break
+          case 'save':     saveDocumentRef.current(); break
+          case 'save-as':  saveAsDocumentRef.current(); break
+          case 'undo':     handleUndoRef.current(); break
+          case 'redo':     handleRedoRef.current(); break
+          case 'close':
+            // Trigger the beforeunload / close-guard path by emitting the
+            // Tauri window close request — handled by the close guard effect.
+            import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+              getCurrentWindow().close().catch(() => { /* ignore */ })
+            }).catch(() => { /* ignore */ })
+            break
+          // Tool activations from native menu
+          case 'tool-select':    setActiveTool('Select'); break
+          case 'tool-rectangle': setActiveTool('Rectangle'); break
+          case 'tool-pushpull':  setActiveTool('Push/Pull'); break
+          case 'tool-paint':     setActiveTool('Paint'); break
+          case 'tool-move':      setActiveTool('Move'); break
+          case 'tool-rotate':    setActiveTool('Rotate'); break
+          case 'tool-scale':     setActiveTool('Scale'); break
+          case 'tool-orbit':     setActiveTool('Orbit'); break
+          case 'tool-pan':       setActiveTool('Pan'); break
+          case 'tool-zoom':      setActiveTool('Zoom'); break
+          // Window pane toggles — must use functional updaters (StrictMode safe)
+          case 'toggle-model-info': setShowModelInfo((v) => !v); break
+          case 'toggle-materials':  setShowMaterials((v) => !v); break
+        }
+      })
+    }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore if not in Tauri */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, []) // stable — all callbacks accessed via refs
+
+  // ---------------------------------------------------------------- menu-open-path listener (Tauri only)
+  // Emitted by Rust when a recent-file menu item is clicked, or when a file
+  // is opened via the macOS "open document" Apple event (warm case).
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      return listen<string>('menu-open-path', (event) => {
+        openPathRef.current(event.payload)
+      })
+    }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, []) // openPath accessed via openPathRef — no dep needed
+
+  // ---------------------------------------------------------------- cold-start file association (Tauri only)
+  // On first mount, check whether Rust buffered a file path from a cold-start
+  // "open with" (macOS Apple event before the webview listener existed, or
+  // argv on Windows/Linux).
+  useEffect(() => {
+    if (!isTauri) return
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      return invoke<string | null>('take_pending_open')
+    }).then((path) => {
+      if (path != null) openPathRef.current(path)
+    }).catch(() => { /* ignore */ })
+  }, []) // runs once on mount; openPath accessed via openPathRef
+
+  // ---------------------------------------------------------------- close guard (Tauri only)
+  // Intercepts the native window close to warn about unsaved changes.
+  //
+  // Tauri v2 cannot honor a non-prevent decision made *after* an await: by the
+  // time the async handler resolves, the synchronous prevent window has closed.
+  // Fix: always call event.preventDefault() immediately (synchronously), then
+  // explicitly call win.destroy() when we decide to close.  win.destroy() force-
+  // closes the window bypassing onCloseRequested, so there is no re-entrancy loop.
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+      const win = getCurrentWindow()
+      return win.onCloseRequested(async (event) => {
+        // Always prevent the default close; we decide explicitly below.
+        event.preventDefault()
+        if (docSessionRef.current.dirty) {
+          const { ask } = await import('@tauri-apps/plugin-dialog')
+          const ok = await ask(
+            'You have unsaved changes. Discard them and close?',
+            { title: 'Unsaved Changes', kind: 'warning' },
+          )
+          if (!ok) return // keep the window open
+        }
+        // Force-close, bypassing onCloseRequested (no loop).
+        await win.destroy()
+      })
+    }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, []) // reads docSessionRef (always current) — no dep needed
+
+  // ---------------------------------------------------------------- native drag-drop (Tauri only)
+  // The OS delivers file drops to Tauri's webview event bus rather than the
+  // browser's dataTransfer API, so React onDrop never fires in the desktop build.
+  // This effect subscribes to the Tauri webview drag-drop event and forwards
+  // the first .hew path to openPath.  The existing React onDrop handlers are
+  // kept for the web build and remain unchanged.
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/webview')
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type === 'drop') {
+            const hew = event.payload.paths.find((p) => p.toLowerCase().endsWith('.hew'))
+            if (hew) openPathRef.current(hew)
+          }
+        }),
+      )
+      .then((fn) => { if (cancelled) fn(); else unlisten = fn })
+      .catch(() => { /* not in Tauri */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, []) // openPath accessed via openPathRef — no dep needed
+
   // ---------------------------------------------------------------- global keyboard shortcuts
   useEffect(() => {
+    // Under Tauri, the native menu bar owns all keyboard shortcuts.
+    // The JS keydown handler must not double-fire them.
+    if (isTauri) return
+
     const onKeyDown = (ev: KeyboardEvent) => {
       const isMod = ev.metaKey || ev.ctrlKey
-      if (!isMod) return
 
       // Don't fire shortcuts while typing in an input/textarea
       const target = ev.target as HTMLElement
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return
+      const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+
+      // Space → Select (no modifier required; guard against typing contexts)
+      if (!isMod && ev.key === ' ' && !isTyping) {
+        ev.preventDefault()
+        setActiveTool('Select')
+        return
+      }
+
+      if (!isMod) return
+      if (isTyping) return
 
       if (ev.key === 's' && !ev.shiftKey) {
         ev.preventDefault()
@@ -394,6 +596,58 @@ export default function App() {
         newDocument()
         return
       }
+      // Tool shortcuts
+      if (ev.key === 'k' && !ev.shiftKey) {
+        ev.preventDefault()
+        setActiveTool('Rectangle')
+        return
+      }
+      if (ev.key === '0') {
+        ev.preventDefault()
+        setActiveTool('Move')
+        return
+      }
+      if (ev.key === '8') {
+        ev.preventDefault()
+        setActiveTool('Rotate')
+        return
+      }
+      if (ev.key === '9') {
+        ev.preventDefault()
+        setActiveTool('Scale')
+        return
+      }
+      if (ev.key === '=') {
+        ev.preventDefault()
+        setActiveTool('Push/Pull')
+        return
+      }
+      if (ev.key === 'b' && !ev.shiftKey) {
+        ev.preventDefault()
+        setActiveTool('Orbit')
+        return
+      }
+      if (ev.key === 'r' && !ev.shiftKey) {
+        ev.preventDefault()
+        setActiveTool('Pan')
+        return
+      }
+      if (ev.key === '\\') {
+        ev.preventDefault()
+        setActiveTool('Zoom')
+        return
+      }
+      // Window pane toggles
+      if (ev.key === 'i' && ev.shiftKey) {
+        ev.preventDefault()
+        setShowModelInfo((v) => !v)
+        return
+      }
+      if (ev.key === 'c' && ev.shiftKey) {
+        ev.preventDefault()
+        setShowMaterials((v) => !v)
+        return
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -405,11 +659,11 @@ export default function App() {
     ev.dataTransfer.dropEffect = 'copy'
   }, [])
 
-  const handleDrop = useCallback((ev: React.DragEvent) => {
+  const handleDrop = useCallback(async (ev: React.DragEvent) => {
     ev.preventDefault()
     const file = ev.dataTransfer.files[0]
     if (file == null || !file.name.endsWith('.hew')) return
-    if (!confirmDiscard()) return
+    if (!(await confirmDiscard())) return
     file.arrayBuffer().then((buf) => {
       const ok = applyLoadedBytes(new Uint8Array(buf))
       if (ok) {
@@ -538,10 +792,13 @@ export default function App() {
         background: '#1a1a1a',
       }}
     >
-      {/* App bar / menu bar */}
+      {/* App bar / menu bar.
+          Under Tauri, the native OS menu bar owns File/Edit; the in-app bar
+          shows only the document title + kernel version. */}
       <MenuBar
         title={deriveTitle(docSession)}
         kernelVersion={state.kernelVersion}
+        nativeMenuBar={isTauri}
         onNew={newDocument}
         onOpen={openDocument}
         onSave={saveDocument}
@@ -550,6 +807,12 @@ export default function App() {
         onRedo={handleRedo}
         canUndo={canUndo}
         canRedo={canRedo}
+        activeTool={activeTool}
+        onSelectTool={(name) => setActiveTool(name as ToolName)}
+        showModelInfo={showModelInfo}
+        showMaterials={showMaterials}
+        onToggleModelInfo={() => setShowModelInfo((v) => !v)}
+        onToggleMaterials={() => setShowMaterials((v) => !v)}
       />
 
       {/* Kernel panic sticky banner */}
@@ -740,37 +1003,43 @@ export default function App() {
           </div>
         </div>
 
-        <DocumentTree
-          scene={state.scene}
-          docRev={docRev}
-          watertightMap={watertightMap}
-          selectedIds={selectedIds}
-          activeContext={activeContext}
-          onSelect={handleSelect}
-          onEnterContext={handleEnterContext}
-          onExitContext={handleExitContext}
-          onSetContextDepth={handleSetContextDepth}
-          canBoolean={canBoolean}
-          onBoolean={handleBoolean}
-          onGroup={handleGroup}
-          onUngroup={handleUngroup}
-          canMakeComponent={canMakeComp}
-          onMakeComponent={handleMakeComponent}
-          canPlaceInstance={canPlace}
-          onPlaceInstance={handlePlaceInstance}
-          canExplodeInstance={canExplode}
-          onExplodeInstance={handleExplodeInstance}
-          canMakeUnique={canUnique}
-          onMakeUnique={handleMakeUnique}
-        />
-        <MaterialPalette
-          scene={state.scene}
-          docRev={docRev}
-          currentMaterialId={currentMaterialId}
-          onSelectMaterial={setCurrentMaterialId}
-          onDocumentChanged={handleDocumentChanged}
-          selectedIds={selectedIds}
-        />
+        {showModelInfo && (
+          <DocumentTree
+            scene={state.scene}
+            docRev={docRev}
+            watertightMap={watertightMap}
+            selectedIds={selectedIds}
+            activeContext={activeContext}
+            onSelect={handleSelect}
+            onEnterContext={handleEnterContext}
+            onExitContext={handleExitContext}
+            onSetContextDepth={handleSetContextDepth}
+            canBoolean={canBoolean}
+            onBoolean={handleBoolean}
+            onGroup={handleGroup}
+            onUngroup={handleUngroup}
+            canMakeComponent={canMakeComp}
+            onMakeComponent={handleMakeComponent}
+            canPlaceInstance={canPlace}
+            onPlaceInstance={handlePlaceInstance}
+            canExplodeInstance={canExplode}
+            onExplodeInstance={handleExplodeInstance}
+            canMakeUnique={canUnique}
+            onMakeUnique={handleMakeUnique}
+            onClose={() => setShowModelInfo(false)}
+          />
+        )}
+        {showMaterials && (
+          <MaterialPalette
+            scene={state.scene}
+            docRev={docRev}
+            currentMaterialId={currentMaterialId}
+            onSelectMaterial={setCurrentMaterialId}
+            onDocumentChanged={handleDocumentChanged}
+            selectedIds={selectedIds}
+            onClose={() => setShowMaterials(false)}
+          />
+        )}
       </div>
 
       {/* Log panel — docked at bottom, never covers the viewport */}

@@ -369,13 +369,20 @@ impl InferenceScene {
         let aperture = query.aperture;
 
         // Collect all candidates that fall inside the pick cone.
-        let mut candidates: Vec<(SnapKind, f64, f64, Point3, Option<SnapSource>)> = Vec::new();
-        // Tuple: (kind, angular_dist, depth, position, source)
+        // Tuple: (kind, angular_dist, depth, position, source, direction)
+        let mut candidates: Vec<Candidate> = Vec::new();
 
         // --- Endpoint candidates: from ScenePoints ---
         for sp in &self.points {
             if let Some((ang, depth)) = cone_test(origin, dir, sp.position, aperture) {
-                candidates.push((SnapKind::Endpoint, ang, depth, sp.position, Some(sp.source)));
+                candidates.push((
+                    SnapKind::Endpoint,
+                    ang,
+                    depth,
+                    sp.position,
+                    Some(sp.source),
+                    None,
+                ));
             }
         }
 
@@ -385,7 +392,7 @@ impl InferenceScene {
 
             // Midpoint candidate: emitted when the midpoint itself is in the cone.
             if let Some((ang, depth)) = cone_test(origin, dir, mid, aperture) {
-                candidates.push((SnapKind::Midpoint, ang, depth, mid, Some(seg.source)));
+                candidates.push((SnapKind::Midpoint, ang, depth, mid, Some(seg.source), None));
             }
 
             // OnEdge candidate: the closest point on the segment to the ray,
@@ -396,7 +403,7 @@ impl InferenceScene {
                 // a duplicate; the Midpoint candidate already covers it with
                 // the stronger kind).
                 if !pos.approx_eq(mid, tol::POINT_MERGE) {
-                    candidates.push((SnapKind::OnEdge, ang, depth, pos, Some(seg.source)));
+                    candidates.push((SnapKind::OnEdge, ang, depth, pos, Some(seg.source), None));
                 }
             }
         }
@@ -411,7 +418,21 @@ impl InferenceScene {
                 &face.holes,
                 aperture,
             ) {
-                candidates.push((SnapKind::OnFace, ang, depth, pos, Some(face.source)));
+                candidates.push((SnapKind::OnFace, ang, depth, pos, Some(face.source), None));
+            }
+        }
+
+        // --- World-origin and world-axis candidates ---
+        // The origin snaps as a strong Endpoint; the three world axes snap as
+        // OnAxis (weakest meaningful kind, so object geometry still wins).
+        if let Some((ang, depth)) = cone_test(origin, dir, Point3::ORIGIN, aperture) {
+            candidates.push((SnapKind::Endpoint, ang, depth, Point3::ORIGIN, None, None));
+        }
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            let adir = axis.unit();
+            let pos = closest_point_on_line_to_ray(Point3::ORIGIN, adir, origin, dir);
+            if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                candidates.push((SnapKind::OnAxis, ang, depth, pos, None, Some(adir)));
             }
         }
 
@@ -448,7 +469,7 @@ impl InferenceScene {
                     Err(_) => return None,
                 };
 
-                if let Some((kind, _ang, _depth, pos, source)) = candidates.first() {
+                if let Some((kind, _ang, _depth, pos, source, _cdir)) = candidates.first() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
                     Some(Snap {
@@ -474,11 +495,11 @@ impl InferenceScene {
                 candidates
                     .into_iter()
                     .next()
-                    .map(|(kind, _ang, _depth, pos, source)| Snap {
+                    .map(|(kind, _ang, _depth, pos, source, snap_dir)| Snap {
                         position: pos,
                         kind,
                         source,
-                        direction: None,
+                        direction: snap_dir,
                     })
             }
         }
@@ -510,6 +531,10 @@ impl InferenceScene {
         best.map(|(_, source)| source)
     }
 }
+
+/// Internal candidate tuple used inside `resolve`:
+/// `(kind, angular_dist, depth, position, source, direction)`.
+type Candidate = (SnapKind, f64, f64, Point3, Option<SnapSource>, Option<Vec3>);
 
 // ---------------------------------------------------------------------------
 // Geometry helpers (crate-private)
@@ -724,7 +749,7 @@ fn closest_point_on_line_to_ray(
     }
     let d = line_dir.dot(w);
     let e = ray_dir.dot(w);
-    let t = (d - b * e) / denom;
+    let t = (b * e - d) / denom;
     line_origin + line_dir * t
 }
 
@@ -1063,6 +1088,129 @@ mod tests {
             through_ring.element,
             ElementRef::Face(top),
             "a ray through the ring picks the annular parent"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // FIX A: closest_point_on_line_to_ray sign regression
+    // -----------------------------------------------------------------------
+
+    /// The closest point on the Z-axis line to a ray pointing in -X from
+    /// (10, 0, 5) must be (0, 0, 5), NOT (0, 0, -5) (which the wrong-sign
+    /// formula would return).
+    #[test]
+    fn closest_point_on_line_to_ray_correct_sign() {
+        // Line: Z axis through origin.
+        let line_origin = Point3::ORIGIN;
+        let line_dir = Vec3::new(0.0, 0.0, 1.0); // unit +Z
+
+        // Ray: starts at (10, 0, 5), points in -X.
+        let ray_origin = Point3::new(10.0, 0.0, 5.0);
+        let ray_dir = Vec3::new(-1.0, 0.0, 0.0); // unit -X
+
+        let pt = closest_point_on_line_to_ray(line_origin, line_dir, ray_origin, ray_dir);
+
+        // The Z-axis point closest to this ray is at z=5 (same height as the
+        // ray origin), i.e. (0, 0, 5). The wrong-sign formula gives (0, 0, -5).
+        assert!(
+            pt.approx_eq(Point3::new(0.0, 0.0, 5.0), tol::POINT_MERGE),
+            "expected (0,0,5) but got {:?}",
+            pt
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // FIX B: world-axis and origin snapping
+    // -----------------------------------------------------------------------
+
+    /// A ray that passes near the +X axis (but well away from the origin)
+    /// should snap to OnAxis with direction ≈ (1, 0, 0).
+    #[test]
+    fn resolve_snaps_to_x_axis() {
+        let scene = InferenceScene::new(); // empty — no objects
+
+        // Ray origin at (5, 3, 0.05), looking in the -Y direction. The
+        // closest approach to the X axis is (5, 0, 0) — well away from the
+        // world origin (0,0,0), so the origin Endpoint is not on this ray at
+        // all, and the result should be OnAxis along +X.
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(5.0, 3.0, 0.05),
+                    direction: Vec3::new(0.0, -1.0, 0.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("X-axis point (5,0,0) is within the cone");
+        assert_eq!(snap.kind, SnapKind::OnAxis, "kind should be OnAxis");
+        let dir = snap.direction.expect("OnAxis snap must carry a direction");
+        assert!(
+            dir.approx_eq(Vec3::new(1.0, 0.0, 0.0), tol::NORMAL_DIRECTION),
+            "direction should be +X, got {:?}",
+            dir
+        );
+    }
+
+    /// A ray aimed straight at the world origin should snap to
+    /// `SnapKind::Endpoint` at `Point3::ORIGIN`.
+    #[test]
+    fn resolve_snaps_to_world_origin() {
+        let scene = InferenceScene::new();
+
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(10.0, 0.0, 0.0),
+                    direction: Vec3::new(-1.0, 0.0, 0.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("origin is directly on the ray");
+        assert_eq!(snap.kind, SnapKind::Endpoint, "origin snaps as Endpoint");
+        assert!(
+            snap.position.approx_eq(Point3::ORIGIN, tol::POINT_MERGE),
+            "position should be origin, got {:?}",
+            snap.position
+        );
+    }
+
+    /// Object geometry (Endpoint at a cube vertex) outranks an axis snap even
+    /// when the vertex also lies near a world axis.
+    #[test]
+    fn object_vertex_outranks_axis_snap() {
+        // The cube has a vertex at (1, 0, 0) which lies ON the X axis.
+        // A ray aimed directly at that vertex must resolve to Endpoint, not OnAxis.
+        let scene = cube_scene();
+
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(5.0, 0.0, 0.0),
+                    direction: Vec3::new(-1.0, 0.0, 0.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("cube vertex (1,0,0) is on this ray");
+        assert_eq!(
+            snap.kind,
+            SnapKind::Endpoint,
+            "object vertex must beat axis snap, got {:?}",
+            snap
+        );
+        assert!(
+            snap.position
+                .approx_eq(Point3::new(1.0, 0.0, 0.0), tol::POINT_MERGE),
+            "position should be the cube vertex, got {:?}",
+            snap.position
         );
     }
 }

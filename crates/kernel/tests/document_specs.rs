@@ -7,8 +7,8 @@
 
 use kernel::{
     BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, KernelOp, KernelOpReport,
-    Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, Transform,
-    TransformError, Vec3, WatertightState,
+    Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchEdgeId, SketchId,
+    Transform, TransformError, Vec3, WatertightState,
 };
 use std::collections::HashSet;
 
@@ -1200,4 +1200,76 @@ fn boolean_result_inherits_operand_a_base_material() {
         "the subtract result inherits operand A's base material, so carved \
          walls from an unpainted cutter resolve to A's color"
     );
+}
+
+// ---------------------------------------- consumed-edge tombstone index
+
+/// Helper: count visible (non-consumed) edges in a sketch.
+fn visible_edge_count(doc: &Document, sid: SketchId) -> usize {
+    let sk = doc.sketch(sid).expect("sketch is live");
+    sk.edges()
+        .keys()
+        .filter(|&eid| !doc.is_sketch_edge_consumed(sid, eid))
+        .count()
+}
+
+/// After extruding the sole rectangle on a ground sketch, all 4 of its
+/// boundary edges are tombstoned (no longer visible). The count survives a
+/// save → load round-trip (tombstones are rebuilt from the consumed-region
+/// set on load).
+#[test]
+fn extruded_sketch_edges_are_tombstoned_and_survive_round_trip() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    let r = only_region(&doc, s);
+
+    // Before extrusion: all 4 edges are visible.
+    assert_eq!(visible_edge_count(&doc, s), 4);
+
+    doc.extrude_region(s, r, 1.0).expect("extrude");
+
+    // After extrusion: 0 visible edges (the outline is consumed).
+    assert_eq!(
+        visible_edge_count(&doc, s),
+        0,
+        "all 4 boundary edges should be tombstoned after extrusion"
+    );
+
+    // Undo: edges reappear.
+    doc.undo().expect("undo");
+    assert_eq!(
+        visible_edge_count(&doc, s),
+        4,
+        "edges must reappear after undoing the extrusion"
+    );
+
+    // Redo: edges hidden again.
+    doc.redo().expect("redo");
+    assert_eq!(
+        visible_edge_count(&doc, s),
+        0,
+        "edges hidden again after redo"
+    );
+
+    // Save → load: tombstones are rebuilt from the consumed-region set.
+    let bytes = doc.save();
+    let doc2 = Document::load(&bytes).expect("round-trip");
+
+    // Sketch id changes on load (different slotmap), so find by index.
+    let s2 = doc2.sketch_ids().into_iter().next().expect("one sketch");
+    assert_eq!(
+        visible_edge_count(&doc2, s2),
+        0,
+        "tombstoned edges must still be hidden after save/load"
+    );
+
+    // Verify via is_sketch_edge_consumed over every edge.
+    let sk2 = doc2.sketch(s2).expect("sketch");
+    for eid in sk2.edges().keys().collect::<Vec<SketchEdgeId>>() {
+        assert!(
+            doc2.is_sketch_edge_consumed(s2, eid),
+            "every edge of the sole extruded rectangle should be consumed"
+        );
+    }
 }
