@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SketchUp "Export Two-Sided Faces": every face appears twice, once with
+     reversed winding. The dedup step in heal.rs should collapse each pair back
+     to a single face, yielding exactly the same topology as box_closed.dae. -->
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2024-01-01</created>
+    <modified>2024-01-01</modified>
+    <unit name="meter" meter="1.0"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_geometries>
+    <geometry id="Box2S" name="Box2S">
+      <mesh>
+        <source id="Box2S-positions">
+          <float_array id="Box2S-positions-array" count="24">
+            0 0 0  1 0 0  1 1 0  0 1 0
+            0 0 1  1 0 1  1 1 1  0 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#Box2S-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="Box2S-vertices">
+          <input semantic="POSITION" source="#Box2S-positions"/>
+        </vertices>
+        <!-- 12 faces: 6 front + 6 back (reversed winding) -->
+        <polylist count="12">
+          <input semantic="VERTEX" source="#Box2S-vertices" offset="0"/>
+          <vcount>4 4 4 4 4 4 4 4 4 4 4 4</vcount>
+          <p>
+            0 3 2 1
+            1 2 3 0
+            4 5 6 7
+            7 6 5 4
+            0 1 5 4
+            4 5 1 0
+            1 2 6 5
+            5 6 2 1
+            2 3 7 6
+            6 7 3 2
+            3 0 4 7
+            7 4 0 3
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="Box2S" name="Box2S" type="NODE">
+        <instance_geometry url="#Box2S"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

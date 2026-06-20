@@ -35,12 +35,13 @@ use slotmap::SlotMap;
 
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 use crate::ids::{ComponentId, FaceId, GroupId, InstanceId, MaterialId, ObjectId, SketchId};
+use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::Material;
 use crate::math::Plane;
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
 use crate::sketch::{Sketch, SketchEdgeId, SketchError, SketchRegionId, SketchVertexId};
-use crate::topo::Object;
+use crate::topo::{Object, WatertightState};
 use crate::transform::{Transform, TransformError};
 
 /// A node in the document tree (ARCHITECTURE.md): either a solid Object or a
@@ -83,6 +84,9 @@ struct ObjectRecord {
     history: History,
     hidden: bool,
     owner: ObjectOwner,
+    /// Optional display name (e.g. carried in from an import). `None` falls back
+    /// to a positional label in the UI.
+    name: Option<String>,
 }
 
 impl ObjectRecord {
@@ -114,6 +118,9 @@ struct GroupRecord {
     members: Vec<NodeId>,
     parent: Option<GroupId>,
     hidden: bool,
+    /// Optional display name (e.g. carried in from an import). `None` falls back
+    /// to a positional label in the UI.
+    name: Option<String>,
 }
 
 /// A component definition (ARCHITECTURE.md): shared geometry as a flat set of leaf
@@ -130,6 +137,10 @@ struct GroupRecord {
 struct ComponentDef {
     members: Vec<ObjectId>,
     hidden: bool,
+    /// Optional definition name (e.g. a SketchUp component name), used as the
+    /// display name for this definition's instances. `None` falls back to a
+    /// positional label in the UI.
+    name: Option<String>,
 }
 
 /// A component instance (ARCHITECTURE.md): a tree node placing a
@@ -148,6 +159,9 @@ struct InstanceRecord {
     pose: Transform,
     parent: Option<GroupId>,
     hidden: bool,
+    /// Optional per-instance display name. `None` falls back to the def's name,
+    /// then to a positional label, in the UI.
+    name: Option<String>,
 }
 
 /// One document-level step on the undo stack.
@@ -286,6 +300,22 @@ enum DocAction {
         object: ObjectId,
         prev: Option<MaterialId>,
         next: Option<MaterialId>,
+    },
+    /// `Document::ingest` merged an imported scene into this document.
+    /// Undo hides every created node/object/group/instance/component (ids
+    /// stay stable — hide-not-delete); redo unhides them. Materials added to
+    /// the palette are not individually undone (matches `add_material`).
+    Imported {
+        /// Top-level created node ids (ordering / tree-root list).
+        roots: Vec<NodeId>,
+        /// ALL created `ObjectId`s — world objects and definition members alike.
+        objects: Vec<ObjectId>,
+        /// Created `ComponentId`s (shared definitions).
+        components: Vec<ComponentId>,
+        /// Created `InstanceId`s.
+        instances: Vec<InstanceId>,
+        /// Created `GroupId`s.
+        groups: Vec<GroupId>,
     },
 }
 
@@ -488,28 +518,36 @@ impl Document {
             })
             .collect();
 
+        // ── Per-object names (world + def members), keyed by id ────────────
+        let obj_names: std::collections::HashMap<ObjectId, Option<String>> = self
+            .objects
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, rec)| (id, rec.name.clone()))
+            .collect();
+
         // ── Collect live groups (in slotmap key order) ─────────────────────
-        let groups: Vec<(GroupId, Vec<NodeId>)> = self
+        let groups: Vec<(GroupId, Vec<NodeId>, Option<String>)> = self
             .groups
             .iter()
             .filter(|(_, rec)| !rec.hidden)
-            .map(|(id, rec)| (id, rec.members.clone()))
+            .map(|(id, rec)| (id, rec.members.clone(), rec.name.clone()))
             .collect();
 
         // ── Collect live components (in slotmap key order) ─────────────────
-        let components: Vec<(ComponentId, Vec<ObjectId>)> = self
+        let components: Vec<(ComponentId, Vec<ObjectId>, Option<String>)> = self
             .components
             .iter()
             .filter(|(_, c)| !c.hidden)
-            .map(|(id, c)| (id, c.members.clone()))
+            .map(|(id, c)| (id, c.members.clone(), c.name.clone()))
             .collect();
 
         // ── Collect live instances (in slotmap key order) ──────────────────
-        let instances: Vec<(InstanceId, ComponentId, Transform)> = self
+        let instances: Vec<(InstanceId, ComponentId, Transform, Option<String>)> = self
             .instances
             .iter()
             .filter(|(_, rec)| !rec.hidden)
-            .map(|(id, rec)| (id, rec.def, rec.pose))
+            .map(|(id, rec)| (id, rec.def, rec.pose, rec.name.clone()))
             .collect();
 
         // ── Collect live sketches (in slotmap key order) ───────────────────
@@ -570,6 +608,7 @@ impl Document {
             sketches,
             roots,
             consumed,
+            obj_names,
         })
     }
 
@@ -632,6 +671,7 @@ impl Document {
                 history: History::new(),
                 hidden: false,
                 owner,
+                name: raw.obj_names.get(i).cloned().flatten(),
             });
             dense_obj_ids.push(oid);
         }
@@ -646,7 +686,7 @@ impl Document {
         // ── 4. Insert components → build dense→ComponentId map ────────────
         // Each component's members are dense object ids → now live ObjectIds.
         let mut comp_ids: Vec<ComponentId> = Vec::with_capacity(raw.components.len());
-        for member_dense_ids in &raw.components {
+        for (ci, member_dense_ids) in raw.components.iter().enumerate() {
             let members: Vec<ObjectId> = member_dense_ids
                 .iter()
                 .map(|&di| {
@@ -660,6 +700,7 @@ impl Document {
             let cid = doc.components.insert(ComponentDef {
                 members: members.clone(),
                 hidden: false,
+                name: raw.component_names.get(ci).cloned().flatten(),
             });
             comp_ids.push(cid);
             // Re-assign ownership for these objects.
@@ -670,18 +711,18 @@ impl Document {
 
         // ── 5. Insert instances → build dense→InstanceId map ─────────────
         let mut inst_ids: Vec<InstanceId> = Vec::with_capacity(raw.instances.len());
-        for (comp_dense, pose) in raw.instances {
-            let cid =
-                *comp_ids
-                    .get(comp_dense as usize)
-                    .ok_or_else(|| LoadError::DanglingReference {
-                        what: format!("instance def component dense id {comp_dense} out of range"),
-                    })?;
+        for (ii, (comp_dense, pose)) in raw.instances.iter().enumerate() {
+            let cid = *comp_ids.get(*comp_dense as usize).ok_or_else(|| {
+                LoadError::DanglingReference {
+                    what: format!("instance def component dense id {comp_dense} out of range"),
+                }
+            })?;
             let iid = doc.instances.insert(InstanceRecord {
                 def: cid,
-                pose,
+                pose: *pose,
                 parent: None,
                 hidden: false,
+                name: raw.instance_names.get(ii).cloned().flatten(),
             });
             inst_ids.push(iid);
         }
@@ -690,11 +731,12 @@ impl Document {
         // Groups may reference other groups (nesting), so insert all first,
         // then patch members.
         let mut grp_ids: Vec<GroupId> = Vec::with_capacity(raw.groups.len());
-        for _ in &raw.groups {
+        for gi in 0..raw.groups.len() {
             let gid = doc.groups.insert(GroupRecord {
                 members: Vec::new(),
                 parent: None,
                 hidden: false,
+                name: raw.group_names.get(gi).cloned().flatten(),
             });
             grp_ids.push(gid);
         }
@@ -798,6 +840,140 @@ impl Document {
 
         // Undo/redo stacks are empty by construction (Document::new() gives empty).
         Ok(doc)
+    }
+
+    // -------------------------------------------------------------- ingest
+
+    /// Merge an imported scene (COLLADA, etc.) into this document as new
+    /// world-tree nodes. Mirrors `load`'s insertion cascade but is ADDITIVE —
+    /// existing entities are untouched.
+    ///
+    /// The entire import is atomic and undoable as ONE step
+    /// (`DocAction::Imported`): undo hides every created node/object, redo
+    /// unhides (hide-not-delete; ids stable). Added palette materials are not
+    /// individually undone (matches `add_material`).
+    ///
+    /// Per-mesh `from_polygons_with_materials` failures are recorded in the
+    /// returned `ImportReport.skipped` and the mesh is dropped — never
+    /// repaired (DEVELOPMENT.md rule 4). A scene that produces zero objects still
+    /// returns `Ok` with an empty report.
+    pub fn ingest(
+        &mut self,
+        scene: ImportScene,
+        textures_missing: Vec<String>,
+    ) -> Result<(ImportReport, DocChange), DocumentError> {
+        use crate::serialize::NO_MATERIAL;
+
+        // ── 1. Insert materials → build dense→MaterialId map ──────────────
+        let mat_ids: Vec<MaterialId> = scene
+            .materials
+            .into_iter()
+            .map(|m| self.materials.insert(m))
+            .collect();
+        let dense_to_mat = |dense: u32| -> Option<MaterialId> {
+            if dense == NO_MATERIAL {
+                None
+            } else {
+                mat_ids.get(dense as usize).copied()
+            }
+        };
+
+        // Tracking collections for the DocAction + DocChange.
+        let mut all_objects: Vec<ObjectId> = Vec::new();
+        let mut all_components: Vec<ComponentId> = Vec::new();
+        let mut all_instances: Vec<InstanceId> = Vec::new();
+        let mut all_groups: Vec<GroupId> = Vec::new();
+        let mut top_roots: Vec<NodeId> = Vec::new();
+
+        let mut watertight_count = 0usize;
+        let mut leaky_count = 0usize;
+        let mut skipped: Vec<SkippedMesh> = Vec::new();
+
+        // ── 2. Build component definitions ────────────────────────────────
+        // Map dae-import def index → ComponentId (or None if all meshes failed)
+        let mut def_cid: Vec<Option<ComponentId>> = Vec::with_capacity(scene.defs.len());
+        for def_recipe in scene.defs {
+            // Pre-allocate the component so members can reference it.
+            let cid = self.components.insert(ComponentDef {
+                members: Vec::new(),
+                hidden: false,
+                name: def_recipe.name,
+            });
+            let mut def_members: Vec<ObjectId> = Vec::new();
+            for mesh in def_recipe.meshes {
+                if let Some(oid) = ingest_build_mesh(
+                    self,
+                    mesh,
+                    ObjectOwner::Definition(cid),
+                    &mut all_objects,
+                    &mut watertight_count,
+                    &mut leaky_count,
+                    &mut skipped,
+                    &dense_to_mat,
+                ) {
+                    def_members.push(oid);
+                }
+            }
+            if def_members.is_empty() {
+                // All meshes rejected → remove the placeholder def.
+                self.components.remove(cid);
+                def_cid.push(None);
+            } else {
+                self.components[cid].members = def_members;
+                all_components.push(cid);
+                def_cid.push(Some(cid));
+            }
+        }
+
+        // ── 3. Recursively build the scene tree ───────────────────────────
+        for root_node in scene.roots {
+            if let Some(nid) = ingest_build_node(
+                self,
+                root_node,
+                None,
+                &def_cid,
+                &mut all_objects,
+                &mut all_instances,
+                &mut all_groups,
+                &mut watertight_count,
+                &mut leaky_count,
+                &mut skipped,
+                &dense_to_mat,
+            ) {
+                top_roots.push(nid);
+            }
+        }
+
+        let objects_created = all_objects.len();
+
+        // ── 4. Push action + clear redo ───────────────────────────────────
+        self.undo.push(DocAction::Imported {
+            roots: top_roots.clone(),
+            objects: all_objects.clone(),
+            components: all_components.clone(),
+            instances: all_instances.clone(),
+            groups: all_groups.clone(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        let change = DocChange {
+            objects_touched: all_objects,
+            sketches_touched: Vec::new(),
+            groups_touched: all_groups,
+            instances_touched: all_instances,
+            components_touched: all_components,
+        };
+
+        let report = ImportReport {
+            objects_created,
+            watertight: watertight_count,
+            leaky: leaky_count,
+            skipped,
+            textures_missing,
+        };
+
+        Ok((report, change))
     }
 
     // --------------------------------------------------------------- sketches
@@ -1208,6 +1384,42 @@ impl Document {
             .map(|r| r.pose)
     }
 
+    /// A visible object's display name, or `None` if it is stale/hidden or
+    /// unnamed. Callers fall back to a positional label when `None`.
+    pub fn object_name(&self, id: ObjectId) -> Option<&str> {
+        self.objects
+            .get(id)
+            .filter(|r| !r.hidden)
+            .and_then(|r| r.name.as_deref())
+    }
+
+    /// A visible group's display name, or `None` if stale/hidden or unnamed.
+    pub fn group_name(&self, id: GroupId) -> Option<&str> {
+        self.groups
+            .get(id)
+            .filter(|r| !r.hidden)
+            .and_then(|r| r.name.as_deref())
+    }
+
+    /// A visible instance's own display name, or `None` if stale/hidden or
+    /// unnamed. An unnamed instance usually displays its def's name — see
+    /// [`Document::component_name`] with [`Document::instance_def`].
+    pub fn instance_name(&self, id: InstanceId) -> Option<&str> {
+        self.instances
+            .get(id)
+            .filter(|r| !r.hidden)
+            .and_then(|r| r.name.as_deref())
+    }
+
+    /// A component definition's display name, or `None` if stale/hidden or
+    /// unnamed. Used as the fallback label for the definition's instances.
+    pub fn component_name(&self, id: ComponentId) -> Option<&str> {
+        self.components
+            .get(id)
+            .filter(|c| !c.hidden)
+            .and_then(|c| c.name.as_deref())
+    }
+
     /// The visible instances that place `component`, in stable order. Empty if
     /// the component is stale/hidden or unplaced. Drives shared-geometry
     /// propagation: a `apply_def_op` edit touches exactly these.
@@ -1289,6 +1501,7 @@ impl Document {
             history: History::new(),
             hidden: false,
             owner: ObjectOwner::World { parent: None },
+            name: None,
         });
         // The region is now the bottom of a solid: consume it so it neither
         // re-extrudes nor leaves a stray fill.
@@ -1392,6 +1605,7 @@ impl Document {
             history: History::new(),
             hidden: false,
             owner: ObjectOwner::World { parent: None },
+            name: None,
         });
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
@@ -1486,6 +1700,7 @@ impl Document {
             members: members.to_vec(),
             parent,
             hidden: false,
+            name: None,
         });
         for &m in members {
             self.set_node_parent(m, Some(group));
@@ -1686,6 +1901,7 @@ impl Document {
         let component = self.components.insert(ComponentDef {
             members: leaves.clone(),
             hidden: false,
+            name: None,
         });
         for &o in &leaves {
             self.objects[o].owner = ObjectOwner::Definition(component);
@@ -1698,6 +1914,7 @@ impl Document {
             pose: Transform::IDENTITY,
             parent,
             hidden: false,
+            name: None,
         });
         if let Some(pg) = parent {
             self.splice_in_parent(pg, members, NodeId::Instance(instance));
@@ -1746,6 +1963,7 @@ impl Document {
             pose,
             parent: None,
             hidden: false,
+            name: None,
         });
         self.undo.push(DocAction::PlacedInstance { instance });
         self.redo.clear();
@@ -1898,6 +2116,7 @@ impl Document {
                 history: History::new(),
                 hidden: false,
                 owner: ObjectOwner::World { parent },
+                name: None,
             });
             created.push(id);
         }
@@ -1947,10 +2166,13 @@ impl Document {
         };
 
         // Deep-copy each member into a fresh private definition (def-local
-        // geometry, fresh per-object history).
+        // geometry, fresh per-object history). Inherit the source def's name so
+        // a made-unique instance keeps its label.
+        let prev_name = self.components[prev_def].name.clone();
         let new_def = self.components.insert(ComponentDef {
             members: Vec::new(),
             hidden: false,
+            name: prev_name,
         });
         let mut new_members: Vec<ObjectId> = Vec::with_capacity(members.len());
         for m in members {
@@ -1960,6 +2182,7 @@ impl Document {
                 history: History::new(),
                 hidden: false,
                 owner: ObjectOwner::Definition(new_def),
+                name: None,
             });
             new_members.push(id);
         }
@@ -2252,6 +2475,43 @@ impl Document {
                 }
                 self.paint_change(object)
             }
+            DocAction::Imported {
+                objects,
+                components,
+                instances,
+                groups,
+                ..
+            } => {
+                // Undo import: hide every created entity (ids stay stable).
+                // Materials added to the palette are not hidden.
+                for &oid in objects.iter() {
+                    if let Some(rec) = self.objects.get_mut(oid) {
+                        rec.hidden = true;
+                    }
+                }
+                for &cid in components.iter() {
+                    if let Some(c) = self.components.get_mut(cid) {
+                        c.hidden = true;
+                    }
+                }
+                for &iid in instances.iter() {
+                    if let Some(rec) = self.instances.get_mut(iid) {
+                        rec.hidden = true;
+                    }
+                }
+                for &gid in groups.iter() {
+                    if let Some(rec) = self.groups.get_mut(gid) {
+                        rec.hidden = true;
+                    }
+                }
+                DocChange {
+                    objects_touched: objects.clone(),
+                    sketches_touched: Vec::new(),
+                    groups_touched: groups.clone(),
+                    instances_touched: instances.clone(),
+                    components_touched: components.clone(),
+                }
+            }
         };
         self.redo.push(action);
         self.debug_validate();
@@ -2466,6 +2726,42 @@ impl Document {
                 }
                 self.paint_change(object)
             }
+            DocAction::Imported {
+                objects,
+                components,
+                instances,
+                groups,
+                ..
+            } => {
+                // Redo import: unhide every created entity.
+                for &oid in objects.iter() {
+                    if let Some(rec) = self.objects.get_mut(oid) {
+                        rec.hidden = false;
+                    }
+                }
+                for &cid in components.iter() {
+                    if let Some(c) = self.components.get_mut(cid) {
+                        c.hidden = false;
+                    }
+                }
+                for &iid in instances.iter() {
+                    if let Some(rec) = self.instances.get_mut(iid) {
+                        rec.hidden = false;
+                    }
+                }
+                for &gid in groups.iter() {
+                    if let Some(rec) = self.groups.get_mut(gid) {
+                        rec.hidden = false;
+                    }
+                }
+                DocChange {
+                    objects_touched: objects.clone(),
+                    sketches_touched: Vec::new(),
+                    groups_touched: groups.clone(),
+                    instances_touched: instances.clone(),
+                    components_touched: components.clone(),
+                }
+            }
         };
         self.undo.push(action);
         self.debug_validate();
@@ -2580,6 +2876,145 @@ impl Document {
                 );
                 cursor = self.groups.get(g).and_then(|r| r.parent);
             }
+        }
+    }
+}
+
+// ─────────────────────────────────────── ingest helpers (module-level) ──────
+
+/// Build one `MeshRecipe` into an `Object`, insert it, and tally stats.
+/// Returns the `ObjectId` on success, or `None` + pushes `SkippedMesh` on
+/// `TopologyError` (no silent repair — DEVELOPMENT.md rule 4).
+#[allow(clippy::too_many_arguments)]
+fn ingest_build_mesh(
+    doc: &mut Document,
+    recipe: crate::import::MeshRecipe,
+    owner: ObjectOwner,
+    all_objects: &mut Vec<ObjectId>,
+    watertight_count: &mut usize,
+    leaky_count: &mut usize,
+    skipped: &mut Vec<crate::import::SkippedMesh>,
+    dense_to_mat: &dyn Fn(u32) -> Option<MaterialId>,
+) -> Option<ObjectId> {
+    let face_mats: Vec<crate::material::FaceMaterial> = recipe
+        .face_materials
+        .iter()
+        .map(|&d| dense_to_mat(d))
+        .collect();
+    // Propagate per-face UV frames from the recipe ( extension). If the
+    // recipe's face_uv_frames is empty or short, pad with None.
+    let face_uv_frames: Vec<Option<crate::material::UvFrame>> = (0..recipe.faces.len())
+        .map(|i| recipe.face_uv_frames.get(i).copied().flatten())
+        .collect();
+    // Use the holes-aware import path. For non-holed meshes face_holes is all
+    // empty vecs (byte-identical behaviour to the no-holes path).
+    match Object::from_polygons_with_holes_import(
+        &recipe.positions,
+        &recipe.faces,
+        &recipe.face_holes,
+        &face_mats,
+        &face_uv_frames,
+    ) {
+        Err(e) => {
+            skipped.push(crate::import::SkippedMesh {
+                name: recipe.name,
+                reason: e.to_string(),
+            });
+            None
+        }
+        Ok(mut obj) => {
+            obj.default_material = dense_to_mat(recipe.base_material);
+            match obj.watertight() {
+                WatertightState::Watertight => *watertight_count += 1,
+                WatertightState::Open => *leaky_count += 1,
+            }
+            let oid = doc.objects.insert(ObjectRecord {
+                object: obj,
+                history: History::new(),
+                hidden: false,
+                owner,
+                name: Some(recipe.name),
+            });
+            all_objects.push(oid);
+            Some(oid)
+        }
+    }
+}
+
+/// Recursively build one `ImportNode` into the document tree, inserting objects,
+/// groups, and instances into their respective slotmaps. Returns the created
+/// `NodeId`, or `None` if the node was entirely skipped (all meshes failed, or
+/// an `Instance` referencing a failed def).
+#[allow(clippy::too_many_arguments)]
+fn ingest_build_node(
+    doc: &mut Document,
+    node: crate::import::ImportNode,
+    parent: Option<GroupId>,
+    def_cid: &[Option<ComponentId>],
+    all_objects: &mut Vec<ObjectId>,
+    all_instances: &mut Vec<InstanceId>,
+    all_groups: &mut Vec<GroupId>,
+    watertight_count: &mut usize,
+    leaky_count: &mut usize,
+    skipped: &mut Vec<crate::import::SkippedMesh>,
+    dense_to_mat: &dyn Fn(u32) -> Option<MaterialId>,
+) -> Option<NodeId> {
+    match node {
+        crate::import::ImportNode::Mesh(recipe) => {
+            let owner = ObjectOwner::World { parent };
+            let oid = ingest_build_mesh(
+                doc,
+                recipe,
+                owner,
+                all_objects,
+                watertight_count,
+                leaky_count,
+                skipped,
+                dense_to_mat,
+            )?;
+            Some(NodeId::Object(oid))
+        }
+        crate::import::ImportNode::Instance { def, pose } => {
+            let cid = def_cid.get(def).copied().flatten()?;
+            let iid = doc.instances.insert(InstanceRecord {
+                def: cid,
+                pose,
+                parent,
+                hidden: false,
+                // Display name resolves to the def's name (set on ComponentDef).
+                name: None,
+            });
+            all_instances.push(iid);
+            Some(NodeId::Instance(iid))
+        }
+        crate::import::ImportNode::Group { name, children } => {
+            let gid = doc.groups.insert(GroupRecord {
+                members: Vec::new(),
+                parent,
+                hidden: false,
+                name: if name.is_empty() { None } else { Some(name) },
+            });
+            all_groups.push(gid);
+            let mut members: Vec<NodeId> = Vec::new();
+            for child in children {
+                if let Some(nid) = ingest_build_node(
+                    doc,
+                    child,
+                    Some(gid),
+                    def_cid,
+                    all_objects,
+                    all_instances,
+                    all_groups,
+                    watertight_count,
+                    leaky_count,
+                    skipped,
+                    dense_to_mat,
+                ) {
+                    members.push(nid);
+                }
+            }
+            doc.groups[gid].members = members;
+            Some(NodeId::Group(gid))
         }
     }
 }

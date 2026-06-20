@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A box with a texture material. The texture URI "textures/wood.png" is
+     tested twice: once resolved (via the ImageMap) and once as the same file
+     which, when NOT passed in the map, appears in textures_missing. -->
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2024-01-01</created>
+    <modified>2024-01-01</modified>
+    <unit name="meter" meter="1.0"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_images>
+    <image id="WoodImg" name="WoodImg">
+      <init_from>textures/wood.png</init_from>
+    </image>
+  </library_images>
+  <library_effects>
+    <effect id="WoodEffect">
+      <profile_COMMON>
+        <newparam sid="WoodSurface">
+          <surface type="2D">
+            <init_from>WoodImg</init_from>
+          </surface>
+        </newparam>
+        <newparam sid="WoodSampler">
+          <sampler2D>
+            <source>WoodSurface</source>
+          </sampler2D>
+        </newparam>
+        <technique sid="common">
+          <phong>
+            <diffuse>
+              <texture texture="WoodSampler" texcoord="TEX0"/>
+            </diffuse>
+          </phong>
+        </technique>
+      </profile_COMMON>
+    </effect>
+  </library_effects>
+  <library_materials>
+    <material id="WoodMat" name="WoodMat">
+      <instance_effect url="#WoodEffect"/>
+    </material>
+  </library_materials>
+  <library_geometries>
+    <geometry id="TexBox" name="TexBox">
+      <mesh>
+        <source id="TexBox-positions">
+          <float_array id="TexBox-positions-array" count="24">
+            0 0 0  1 0 0  1 1 0  0 1 0
+            0 0 1  1 0 1  1 1 1  0 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#TexBox-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="TexBox-vertices">
+          <input semantic="POSITION" source="#TexBox-positions"/>
+        </vertices>
+        <polylist count="6" material="WoodSymbol">
+          <input semantic="VERTEX" source="#TexBox-vertices" offset="0"/>
+          <vcount>4 4 4 4 4 4</vcount>
+          <p>
+            0 3 2 1
+            4 5 6 7
+            0 1 5 4
+            1 2 6 5
+            2 3 7 6
+            3 0 4 7
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="TexBox" name="TexBox" type="NODE">
+        <instance_geometry url="#TexBox">
+          <bind_material>
+            <technique_common>
+              <instance_material symbol="WoodSymbol" target="#WoodMat"/>
+            </technique_common>
+          </bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

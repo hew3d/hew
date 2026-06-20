@@ -76,6 +76,22 @@ fn write_file(path: String, contents: Vec<u8>) -> Result<(), String> {
     std::fs::write(&path, &contents).map_err(|e| format!("write_file failed for {path:?}: {e}"))
 }
 
+/// List the direct children of a directory, returning their absolute paths.
+/// Only regular files are included (directories are omitted).
+#[tauri::command]
+fn list_dir(path: String) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(&path)
+        .map_err(|e| format!("list_dir failed for {path:?}: {e}"))?;
+    let mut result = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            result.push(entry.path().to_string_lossy().to_string());
+        }
+    }
+    Ok(result)
+}
+
 /// Take the pending-open path (cold-start file association) — returns Some once,
 /// then None on subsequent calls.
 #[tauri::command]
@@ -177,6 +193,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
+            list_dir,
             take_pending_open,
             push_recent,
             clear_recent,
@@ -221,6 +238,8 @@ fn main() {
             let file_open = MenuItemBuilder::with_id("file-open", "Open…")
                 .accelerator("CmdOrCtrl+O")
                 .build(handle)?;
+            let file_import = MenuItemBuilder::with_id("file-import", "Import…")
+                .build(handle)?;
             let file_save = MenuItemBuilder::with_id("file-save", "Save")
                 .accelerator("CmdOrCtrl+S")
                 .build(handle)?;
@@ -235,6 +254,8 @@ fn main() {
                 .item(&file_new)
                 .item(&file_open)
                 .item(&open_recent_submenu)
+                .separator()
+                .item(&file_import)
                 .separator()
                 .item(&file_save)
                 .item(&file_save_as)
@@ -313,11 +334,15 @@ fn main() {
             let cam_zoom = MenuItemBuilder::with_id("cam-zoom", "Zoom")
                 .accelerator("CmdOrCtrl+\\")
                 .build(handle)?;
+            let cam_zoom_extents = MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents")
+                .build(handle)?;
 
             let camera_menu = SubmenuBuilder::new(handle, "Camera")
                 .item(&cam_orbit)
                 .item(&cam_pan)
                 .item(&cam_zoom)
+                .separator()
+                .item(&cam_zoom_extents)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -380,6 +405,7 @@ fn main() {
             let action = match id {
                 "file-new" => "new",
                 "file-open" => "open",
+                "file-import" => "import",
                 "file-save" => "save",
                 "file-save-as" => "save-as",
                 "file-close" => "close",
@@ -395,6 +421,7 @@ fn main() {
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",
+                "cam-zoom-extents" => "zoom-extents",
                 "win-model-info" => "toggle-model-info",
                 "win-materials" => "toggle-materials",
                 _ => return,

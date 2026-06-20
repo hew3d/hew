@@ -8,7 +8,6 @@
 use slotmap::SecondaryMap;
 
 use crate::error::TopologyError;
-use crate::tol;
 use crate::topo::{LoopKind, Object, WatertightState};
 
 impl Object {
@@ -19,7 +18,9 @@ impl Object {
     /// with vertex incidence; every half-edge lies in exactly one loop and
     /// every loop closes; edges and half-edges agree about each other; loops
     /// and faces agree about each other; face boundaries lie on their stored
-    /// plane (within [`tol::PLANE_DIST`]); vertices and their `outgoing`
+    /// plane (within the object's `planarity_tol` — strict `PLANE_DIST` for
+    /// native geometry, wider `IMPORT_PLANE_DIST` for imports);
+    /// vertices and their `outgoing`
     /// half-edges agree; every face is in exactly one shell; and the
     /// watertightness flag matches the actual topology.
     pub fn validate(&self) -> Result<(), TopologyError> {
@@ -166,7 +167,7 @@ impl Object {
             let loop_ids = std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied());
             for loop_id in loop_ids {
                 for p in self.loop_positions(loop_id) {
-                    if face.plane.signed_distance(p).abs() > tol::PLANE_DIST {
+                    if face.plane.signed_distance(p).abs() > self.planarity_tol {
                         return Err(TopologyError::FaceGeometryNotPlanar { face: f });
                     }
                 }

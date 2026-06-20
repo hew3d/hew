@@ -50,6 +50,29 @@ export function entityLabel(kind: EntityKind, index: number): string {
 }
 
 /**
+ * Resolve the display label for a tree row, preferring kernel-supplied names
+ * over the positional fallback.
+ *
+ * Pure — no scene access. The caller resolves kernel names and passes them in.
+ *
+ * - `kernelName`: direct name on the node (object_name / group_name /
+ *   instance_name), if any.
+ * - `defName`: for instances only, the component_name of the instance's
+ *   definition; used when the instance has no own name.
+ * - `kind` / `index`: passed to `entityLabel` as a last-resort fallback.
+ */
+export function resolveLabel(
+  kernelName: string | undefined,
+  defName: string | undefined,
+  kind: EntityKind,
+  index: number,
+): string {
+  if (kernelName !== undefined) return kernelName
+  if (kind === 'instance' && defName !== undefined) return defName
+  return entityLabel(kind, index)
+}
+
+/**
  * Breadcrumb trail for the current editing context path.
  * - Top level (empty path): `[{ label: 'Model', depth: -1 }]`
  * - Inside a group: `[Model, Group N, …]`

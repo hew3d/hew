@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 82b503a9a29d00851075d651912623c7c0b8bfceacb410672a762cdbed3aa448 # shrinks to soup = ([Point3 { x: 0.0, y: 0.0, z: 0.0 }, Point3 { x: 0.1, y: 0.0, z: 0.0 }, Point3 { x: 0.1, y: 0.1, z: 0.0 }, Point3 { x: 0.0, y: 0.1, z: 0.0 }, Point3 { x: 0.0, y: 0.0, z: 0.1 }, Point3 { x: 0.1, y: 0.0, z: 0.1 }, Point3 { x: 0.1, y: 0.1, z: 0.1 }, Point3 { x: 0.0, y: 0.1, z: 0.1 }], [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]])

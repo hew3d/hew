@@ -564,10 +564,10 @@ impl Object {
                 .collect::<Result<Vec<_>, ExtrudeError>>()?;
         }
 
-        // Freshly extruded faces take the default material.
+        // Freshly extruded faces take the default material and no UV frame.
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(outer, inners, plane)| (outer, inners, plane, None))
+            .map(|(outer, inners, plane)| (outer, inners, plane, None, None))
             .collect();
         let obj = Object::from_faces_with_holes(&positions, &face_specs);
         // A valid Profile should always yield a valid solid; if the sweep
@@ -859,8 +859,10 @@ impl Object {
             outer_loop: sub_loop,
             inner_loops: Vec::new(),
             plane: face_plane,
-            // Imprinted sub-face inherits the parent face's material.
+            // Imprinted sub-face inherits the parent face's material and UV
+            // frame ( +  extension).
             material: obj.faces[face].material,
+            uv_frame: obj.faces[face].uv_frame,
         });
         obj.loops[sub_loop].face = sub_face;
 
@@ -1155,8 +1157,9 @@ impl Object {
                 inner_loops: Vec::new(),
                 plane,
                 // Freshly generated push/pull side walls take the default
-                // material.
+                // material and no UV frame.
                 material: None,
+                uv_frame: None,
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);
@@ -1883,9 +1886,10 @@ fn do_split_face(
         outer_loop: loop_b_id,
         inner_loops: Vec::new(), // holes assigned below
         plane: face_plane,       // same plane as original
-        // Both halves of a split inherit the original face's material;
-        // face A keeps it implicitly by reusing the original FaceId.
+        // Both halves of a split inherit the original face's material and UV
+        // frame ( +  extension); face A keeps them by reusing its FaceId.
         material: obj.faces[face].material,
+        uv_frame: obj.faces[face].uv_frame,
     });
     obj.loops[loop_b_id].face = face_b_id;
 

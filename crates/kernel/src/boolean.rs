@@ -53,7 +53,7 @@ use slotmap::SecondaryMap;
 
 use crate::geom2d::{plane_axes, point_inside_polygon};
 use crate::ids::FaceId;
-use crate::material::FaceMaterial;
+use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
 use crate::ops::{BooleanError, BooleanOp, Operand};
 use crate::sketch::Sketch;
@@ -62,12 +62,14 @@ use crate::topo::{Object, Shell, WatertightState};
 use crate::transform::Transform;
 
 /// A face flattened to position lists for geometric queries: the outer boundary,
-/// any hole boundaries, the supporting (oriented) plane, and its material.
+/// any hole boundaries, the supporting (oriented) plane, its material,
+/// and its UV frame ( extension).
 struct FacePoly {
     outer: Vec<Point3>,
     holes: Vec<Vec<Point3>>,
     plane: Plane,
     material: FaceMaterial,
+    uv_frame: Option<UvFrame>,
 }
 
 /// A sub-face produced by the arrangement: oriented loops in the face's plane.
@@ -83,6 +85,7 @@ struct OrientedFace {
     holes: Vec<Vec<Point3>>,
     plane: Plane,
     material: FaceMaterial,
+    uv_frame: Option<UvFrame>,
 }
 
 /// Which operand a batch of faces comes from (selection rules differ for
@@ -157,6 +160,7 @@ fn face_polys(obj: &Object) -> Vec<FacePoly> {
                 .collect(),
             plane: f.plane,
             material: f.material,
+            uv_frame: f.uv_frame,
         })
         .collect()
 }
@@ -209,7 +213,7 @@ fn collect_faces(
                 continue;
             }
             if let Some(flip) = classify(op, this_side, na, c, a_polys, b_polys, &coplanar) {
-                let face = OrientedFace::new(region, fp.plane, flip, fp.material)?;
+                let face = OrientedFace::new(region, fp.plane, flip, fp.material, fp.uv_frame)?;
                 // A coincident shared patch is produced by both operands (e.g.
                 // a shared ground for union, or A's top vs B's flipped bottom for
                 // subtract). Both describe one boundary face — keep the first.
@@ -340,6 +344,7 @@ impl OrientedFace {
         plane: Plane,
         flip: bool,
         material: FaceMaterial,
+        uv_frame: Option<UvFrame>,
     ) -> Result<OrientedFace, BooleanError> {
         if !flip {
             return Ok(OrientedFace {
@@ -347,6 +352,7 @@ impl OrientedFace {
                 holes: region.holes,
                 plane,
                 material,
+                uv_frame,
             });
         }
         // Reverse every loop and refit the plane so its normal matches the new
@@ -367,6 +373,8 @@ impl OrientedFace {
             holes,
             plane,
             material,
+            // UV frame propagates to boolean result faces ( ext.).
+            uv_frame,
         })
     }
 }
@@ -668,9 +676,10 @@ fn assemble(faces: Vec<OrientedFace>) -> Result<Object, BooleanError> {
             .iter()
             .map(|f| f.outer.iter().map(|&p| intern(p, &mut positions)).collect())
             .collect();
-        // Result faces inherit their source face's material.
+        // Result faces inherit their source face's material and UV frame ( + ext.).
         let materials: Vec<FaceMaterial> = faces.iter().map(|f| f.material).collect();
-        Object::from_polygons_with_materials(&positions, &polys, &materials)
+        let uv_frames: Vec<Option<UvFrame>> = faces.iter().map(|f| f.uv_frame).collect();
+        Object::from_polygons_with_materials_and_frames(&positions, &polys, &materials, &uv_frames)
             .map_err(|_| BooleanError::DegenerateContact)?
     } else {
         let with_holes: Vec<_> = faces
@@ -682,7 +691,7 @@ fn assemble(faces: Vec<OrientedFace>) -> Result<Object, BooleanError> {
                     .iter()
                     .map(|h| h.iter().map(|&p| intern(p, &mut positions)).collect())
                     .collect();
-                (outer, holes, f.plane, f.material)
+                (outer, holes, f.plane, f.material, f.uv_frame)
             })
             .collect();
         Object::from_faces_with_holes(&positions, &with_holes)

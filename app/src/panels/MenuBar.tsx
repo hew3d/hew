@@ -22,6 +22,7 @@ export interface MenuBarProps {
   onOpen: () => void
   onSave: () => void
   onSaveAs: () => void
+  onImport: () => void
   onUndo: () => void
   onRedo: () => void
   canUndo: boolean
@@ -38,6 +39,8 @@ export interface MenuBarProps {
   onToggleModelInfo?: () => void
   /** Toggle the Materials pane. */
   onToggleMaterials?: () => void
+  /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
+  onZoomExtents?: () => void
 }
 
 type MenuId = 'file' | 'edit' | 'draw' | 'tools' | 'camera' | 'window' | null
@@ -173,6 +176,7 @@ export function MenuBar({
   onOpen,
   onSave,
   onSaveAs,
+  onImport,
   onUndo,
   onRedo,
   canUndo,
@@ -183,6 +187,7 @@ export function MenuBar({
   showMaterials = true,
   onToggleModelInfo,
   onToggleMaterials,
+  onZoomExtents,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -227,6 +232,8 @@ export function MenuBar({
               <div style={DROPDOWN_STYLE}>
                 <MenuItem label="New" shortcut={`${mod}N`} onClick={withClose(onNew)} />
                 <MenuItem label="Open…" shortcut={`${mod}O`} onClick={withClose(onOpen)} />
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem label="Import…" onClick={withClose(onImport)} />
                 <div style={SEPARATOR_STYLE} />
                 <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
                 <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
@@ -356,6 +363,11 @@ export function MenuBar({
                   shortcut={`${mod}\\`}
                   checked={activeTool === 'Zoom'}
                   onClick={withClose(() => onSelectTool?.('Zoom'))}
+                />
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem
+                  label="Zoom Extents"
+                  onClick={withClose(() => onZoomExtents?.())}
                 />
               </div>
             )}

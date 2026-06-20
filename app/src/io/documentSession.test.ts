@@ -5,6 +5,7 @@ import {
   afterMutation,
   afterSave,
   afterOpen,
+  afterImport,
   type DocSessionState,
 } from './documentSession'
 import type { FileRef } from './fileHost'
@@ -91,6 +92,34 @@ describe('documentSession', () => {
       const next = afterOpen(null)
       expect(next.currentRef).toBeNull()
       expect(next.dirty).toBe(false)
+    })
+  })
+
+  describe('afterImport', () => {
+    it('is dirty with no file handle (currentRef = null)', () => {
+      const next = afterImport('Kitchen.dae')
+      expect(next.currentRef).toBeNull()
+      expect(next.dirty).toBe(true)
+    })
+
+    it('strips .dae extension from importedName', () => {
+      const next = afterImport('Kitchen.dae')
+      expect(next.importedName).toBe('Kitchen')
+    })
+
+    it('strips .dae extension case-insensitively', () => {
+      const next = afterImport('Model.DAE')
+      expect(next.importedName).toBe('Model')
+    })
+
+    it('title uses importedName when currentRef is null', () => {
+      const next = afterImport('Guest House Countertops.dae')
+      expect(deriveTitle(next)).toBe('• Guest House Countertops — Hew')
+    })
+
+    it('falls back to "Untitled" when no ref and no importedName', () => {
+      // Ensures INITIAL_SESSION / afterOpen(null) still works correctly
+      expect(deriveTitle({ currentRef: null, dirty: false })).toBe('Untitled — Hew')
     })
   })
 })

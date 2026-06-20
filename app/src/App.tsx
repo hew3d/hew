@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, { type ViewportApi } from './viewport/Viewport'
 import { DocumentTree } from './panels/DocumentTree'
@@ -9,15 +10,18 @@ import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
-import { makeFileHost, isTauri } from './io/fileHost'
+import { makeFileHost, isTauri, type ImportReport } from './io/fileHost'
 import {
   INITIAL_SESSION,
   deriveTitle,
   afterMutation,
   afterSave,
   afterOpen,
+  afterImport,
   type DocSessionState,
 } from './io/documentSession'
+import { ImportReportDialog } from './panels/ImportReportDialog'
+import { ImportingOverlay } from './panels/ImportingOverlay'
 
 interface AppState {
   kernelVersion: string
@@ -87,6 +91,12 @@ export default function App() {
   const [showModelInfo, setShowModelInfo] = useState(true)
   /** Pane visibility: Materials (MaterialPalette) */
   const [showMaterials, setShowMaterials] = useState(true)
+  /** Import report to display (null = no dialog). */
+  const [importReport, setImportReport] = useState<ImportReport | null>(null)
+  /** True while import_dae is running (blocks main thread). */
+  const [isImporting, setIsImporting] = useState(false)
+  /** Display name of the file being imported (shown in the overlay). */
+  const [importingName, setImportingName] = useState('')
 
   /** Imperative handle into the viewport (e.g. running a boolean). */
   const viewportApi = useRef<ViewportApi | null>(null)
@@ -349,6 +359,89 @@ export default function App() {
     })
   }, [confirmDiscard, applyLoadedBytes, handleToast])
 
+  const importDocument = useCallback(async () => {
+    const scene = sceneRef.current
+    if (scene === null) return
+
+    // Step 1: guard unsaved changes BEFORE showing any file dialog.
+    // If the user cancels the discard prompt, we leave the current document
+    // completely untouched.
+    if (!(await confirmDiscard())) return
+
+    // Step 2: show the file-open dialog.  If the user cancels (null), we
+    // return immediately without touching the current document.
+    let result: Awaited<ReturnType<typeof fileHostRef.current.openForImport>>
+    try {
+      result = await fileHostRef.current.openForImport()
+    } catch (err: unknown) {
+      handleToast(`Import failed: ${String(err)}`)
+      return
+    }
+    if (result === null) return // user cancelled — current document unchanged
+
+    // Step 3: show the overlay BEFORE any blocking work.
+    //
+    // flushSync forces a synchronous DOM commit so the overlay card is in the
+    // DOM immediately, rather than waiting for React's next async render cycle.
+    // After the commit we wait one requestAnimationFrame so the browser has a
+    // chance to actually paint the committed DOM before we freeze the main thread.
+    //
+    // NOTE: import_dae runs synchronously on the main thread, so the CSS
+    // spinner animation will freeze while it parses.  The text message still
+    // communicates progress.  True smooth animation would require running the
+    // import in a Web Worker (future work — needs a SharedArrayBuffer channel
+    // to the WASM module).
+    flushSync(() => {
+      setImportingName(result!.name)
+      setIsImporting(true)
+    })
+    await new Promise<void>((r) => requestAnimationFrame(() => r()))
+
+    let report: ImportReport
+    try {
+      // Step 4: reset to a blank document first (replace semantics).
+      //
+      // applyLoadedBytes(blank) calls scene.load(), clears selection/context,
+      // and calls notifyLoaded() under suppressDirtyRef so the dirty mark is
+      // suppressed — the afterImport state below owns the dirty flag.
+      // We must bail if the blank load fails (should never happen in practice).
+      const blank = blankBytesRef.current
+      if (blank === null) return
+      const blankOk = applyLoadedBytes(blank)
+      if (!blankOk) return
+
+      // Step 5: import the DAE into the now-empty document.
+      report = scene.import_dae(result!.daeBytes, Object.keys(result!.images).length > 0 ? result!.images : null) as ImportReport
+    } catch (err: unknown) {
+      const raw = err instanceof Error ? err.message : String(err)
+      handleToast(`Import failed: ${raw}`)
+      return
+    } finally {
+      // Always clear the overlay — even on throw, so it can never get stuck.
+      setIsImporting(false)
+    }
+
+    // Step 6: tessellate the imported objects and update session state.
+    //
+    // notifyLoaded() calls handleSceneRefresh() which tessellates the new
+    // objects and bumps docRev.  suppressDirtyRef is false here so the dirty
+    // mark would normally fire — but we immediately set afterImport() which
+    // owns dirty=true, so the net effect is correct.
+    viewportApi.current?.notifyLoaded()
+
+    // Step 7: commit the session state.
+    //
+    // afterImport() sets currentRef=null (so Save always prompts — no silent
+    // overwrite risk on either WebFileHost or TauriFileHost) and dirty=true.
+    // The importedName is used by deriveTitle (window title) and by
+    // saveAsDocument's suggested filename.
+    setDocSession(afterImport(result!.name))
+
+    setImportReport(report)
+    LogStore.log.info('app', `Imported DAE: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
+    requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
+  }, [confirmDiscard, handleToast, applyLoadedBytes])
+
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) return
@@ -372,7 +465,11 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return
     const bytes = new Uint8Array(scene.save())
-    const suggestedName = docSession.currentRef?.name ?? 'Untitled.hew'
+    // When saving an imported model (currentRef=null, importedName set), suggest
+    // the imported filename with a .hew extension so the user sees a sensible
+    // default in the Save As dialog.
+    const baseName = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
+    const suggestedName = baseName.endsWith('.hew') ? baseName : baseName + '.hew'
     fileHostRef.current.saveAs(bytes, suggestedName).then((newRef) => {
       if (newRef === null) return // user cancelled
       setDocSession(afterSave(newRef))
@@ -385,7 +482,7 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(`Save As failed: ${String(err)}`)
     })
-  }, [docSession.currentRef, handleToast])
+  }, [docSession.currentRef, docSession.importedName, handleToast])
 
   // ---------------------------------------------------------------- open by path (Tauri only — used by drag-drop, recents, and file association)
   // Reads the file at `path` via Tauri invoke, applies it, and sets session state.
@@ -409,22 +506,31 @@ export default function App() {
     viewportApi.current?.runRedo()
   }, [])
 
+  // ---------------------------------------------------------------- zoom extents
+  const handleZoomExtents = useCallback(() => {
+    viewportApi.current?.zoomExtents()
+  }, [])
+
   // ---------------------------------------------------------------- stable refs for Tauri event listeners
   // These refs always track the latest callbacks so Tauri event handlers
   // (registered once) don't capture stale closures.
   const newDocumentRef = useRef(newDocument)
   const openDocumentRef = useRef(openDocument)
+  const importDocumentRef = useRef(importDocument)
   const saveDocumentRef = useRef(saveDocument)
   const saveAsDocumentRef = useRef(saveAsDocument)
   const handleUndoRef = useRef(handleUndo)
   const handleRedoRef = useRef(handleRedo)
+  const handleZoomExtentsRef = useRef(handleZoomExtents)
   const openPathRef = useRef(openPath)
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
   useEffect(() => { openDocumentRef.current = openDocument }, [openDocument])
+  useEffect(() => { importDocumentRef.current = importDocument }, [importDocument])
   useEffect(() => { saveDocumentRef.current = saveDocument }, [saveDocument])
   useEffect(() => { saveAsDocumentRef.current = saveAsDocument }, [saveAsDocument])
   useEffect(() => { handleUndoRef.current = handleUndo }, [handleUndo])
   useEffect(() => { handleRedoRef.current = handleRedo }, [handleRedo])
+  useEffect(() => { handleZoomExtentsRef.current = handleZoomExtents }, [handleZoomExtents])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
 
   // ---------------------------------------------------------------- native menu-action listener (Tauri only)
@@ -438,6 +544,7 @@ export default function App() {
         switch (event.payload) {
           case 'new':      newDocumentRef.current(); break
           case 'open':     openDocumentRef.current(); break
+          case 'import':   importDocumentRef.current(); break
           case 'save':     saveDocumentRef.current(); break
           case 'save-as':  saveAsDocumentRef.current(); break
           case 'undo':     handleUndoRef.current(); break
@@ -463,6 +570,7 @@ export default function App() {
           // Window pane toggles — must use functional updaters (StrictMode safe)
           case 'toggle-model-info': setShowModelInfo((v) => !v); break
           case 'toggle-materials':  setShowMaterials((v) => !v); break
+          case 'zoom-extents':      handleZoomExtentsRef.current(); break
         }
       })
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore if not in Tauri */ })
@@ -803,6 +911,7 @@ export default function App() {
         onOpen={openDocument}
         onSave={saveDocument}
         onSaveAs={saveAsDocument}
+        onImport={importDocument}
         onUndo={handleUndo}
         onRedo={handleRedo}
         canUndo={canUndo}
@@ -813,6 +922,7 @@ export default function App() {
         showMaterials={showMaterials}
         onToggleModelInfo={() => setShowModelInfo((v) => !v)}
         onToggleMaterials={() => setShowMaterials((v) => !v)}
+        onZoomExtents={handleZoomExtents}
       />
 
       {/* Kernel panic sticky banner */}
@@ -1044,6 +1154,20 @@ export default function App() {
 
       {/* Log panel — docked at bottom, never covers the viewport */}
       <LogPanel panelHeight={160} />
+
+      {/* Importing overlay — shown while import_dae blocks the main thread.
+          The overlay is painted before the blocking call via a double rAF in
+          importDocument.  isImporting is always cleared in a finally block,
+          so a thrown import error can never leave the overlay stuck. */}
+      {isImporting && <ImportingOverlay fileName={importingName} />}
+
+      {/* Import report modal — shown after a successful COLLADA import */}
+      {importReport !== null && (
+        <ImportReportDialog
+          report={importReport}
+          onClose={() => setImportReport(null)}
+        />
+      )}
     </main>
   )
 }

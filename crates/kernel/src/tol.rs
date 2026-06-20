@@ -10,6 +10,16 @@ pub const POINT_MERGE: f64 = 1e-9;
 /// (meters).
 pub const PLANE_DIST: f64 = 1e-9;
 
+/// Planarity tolerance for faces built from *imported* foreign geometry
+/// (meters). COLLADA/SketchUp coordinates are f32, so a face the user drew flat
+/// arrives up to ~1e-4 m off its best-fit plane purely from single-precision
+/// quantization — far past [`PLANE_DIST`]'s nanometer gate, which is meant for
+/// f64 geometry built by exact kernel construction. This wider gate accepts such
+/// faces as the single planar polygon they represent (preserving editability)
+/// while still rejecting genuinely warped surfaces (centimeter-scale and up).
+/// Import-only: native ops and booleans keep [`PLANE_DIST`].
+pub const IMPORT_PLANE_DIST: f64 = 1e-3;
+
 /// Vectors shorter than this cannot be meaningfully normalized (meters).
 pub const NORMALIZE_MIN_LENGTH: f64 = 1e-12;
 

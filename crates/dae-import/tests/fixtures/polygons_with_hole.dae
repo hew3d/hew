@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal COLLADA 1.4 fixture: a flat square face with a square hole.
+  Used by crates/dae-import/tests/integration.rs::polygons_with_hole_imports_inner_loop.
+
+  Geometry (Z_UP, meter scale):
+    Outer loop  – CCW quad in the XY plane (z=0):
+      v0=(0,0,0)  v1=(4,0,0)  v2=(4,4,0)  v3=(0,4,0)
+
+    Inner hole  – CW quad (opposite winding to outer, kernel convention):
+      v4=(1,1,0)  v5=(1,3,0)  v6=(3,3,0)  v7=(3,1,0)
+    (CW from the +Z normal direction = hole winding)
+
+  The <polygons> element uses <ph> with the outer loop in <p> and the hole
+  in <h>. stride=1 (VERTEX is the only input, offset=0).
+-->
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created></created>
+    <modified></modified>
+    <unit name="meter" meter="1.0"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+
+  <library_geometries>
+    <geometry id="HoledFaceGeom" name="HoledFaceGeom">
+      <mesh>
+        <!-- 8 positions: 4 outer + 4 hole -->
+        <source id="Pos">
+          <float_array id="PosArr" count="24">
+            0 0 0
+            4 0 0
+            4 4 0
+            0 4 0
+            1 1 0
+            1 3 0
+            3 3 0
+            3 1 0
+          </float_array>
+          <technique_common>
+            <accessor source="#PosArr" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+
+        <vertices id="Verts">
+          <input semantic="POSITION" source="#Pos"/>
+        </vertices>
+
+        <!--
+          <polygons> with one <ph>:
+            <p>  = outer loop   (v0,v1,v2,v3) CCW
+            <h>  = inner hole   (v4,v5,v6,v7) CW from +Z
+          stride=1, vertex offset=0.
+        -->
+        <polygons count="1" material="DefaultMat">
+          <input semantic="VERTEX" source="#Verts" offset="0"/>
+          <ph>
+            <p>0 1 2 3</p>
+            <h>4 5 6 7</h>
+          </ph>
+        </polygons>
+      </mesh>
+    </geometry>
+  </library_geometries>
+
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="HoledFaceNode" name="HoledFaceNode" type="NODE">
+        <instance_geometry url="#HoledFaceGeom"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

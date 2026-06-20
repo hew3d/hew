@@ -61,8 +61,8 @@ sentinel `0xFFFF_FFFF` = `None`.
 
 ```jsonc
 {
-  "format_version": 1,            // — bumped on any manifest-shape change
-  "geometry_version": 1,          // GEOMETRY_FORMAT_VERSION of the .bin buffers
+  "format_version": 2,            // — bumped on any manifest-shape change
+  "geometry_version": 2,          // GEOMETRY_FORMAT_VERSION of the .bin buffers
   "app": "hew",
   "app_version": "0.1.0",
 
@@ -77,22 +77,29 @@ sentinel `0xFFFF_FFFF` = `None`.
 
   // ALL live objects (both world objects and component-definition members).
   // Geometry lives in the referenced buffer; base_material is the object
-  // default material (null/omitted = None).
+  // default material (null/omitted = None). `name` (v2+) is an optional display
+  // name (e.g. carried in from an import); omitted = unnamed → positional label.
   "objects": [
-    { "id": 0, "geometry": "geometry/obj_0.bin", "base_material": 0 }
+    { "id": 0, "geometry": "geometry/obj_0.bin", "base_material": 0,
+      "name": "Counter_Base" }
   ],
 
   // Merge groups: membership only, ordered. Nesting allowed.
+  // `name` (v2+) optional, as for objects.
   "groups": [
-    { "id": 0, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ] }
+    { "id": 0, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
+      "name": "MyGroup" }
   ],
 
   // Component definitions: a flat, ordered set of definition-local objects.
+  // `name` (v2+) is the definition's display name; an instance with no own name
+  // shows its def's name.
   "components": [
-    { "id": 0, "members": [2, 3] }   // object ids that are this def's members
+    { "id": 0, "members": [2, 3], "name": "MyComponent" }   // object ids that are this def's members
   ],
 
   // Component instances: a def placed at an invertible pose.
+  // `name` (v2+) optional per-instance display name; omitted = use the def name.
   "instances": [
     { "id": 0, "def": 0,
       // row-major 3x4 affine (def-local -> world); = Transform::to_affine().
@@ -148,14 +155,18 @@ object; `Document::load` inserts the palette first, then passes the reverse.
 ```
 offset  type        field
 0       [u8; 4]     magic = b"HEWG"
-4       u32         version = GEOMETRY_FORMAT_VERSION (1)
+4       u32         version = GEOMETRY_FORMAT_VERSION (3)
 8       u8          watertight: 0 = Open (leaky), 1 = Watertight
 9       u32         base_material id (0xFFFFFFFF = None)   // mirrors manifest objects[].base_material
-13      u32         vertex_count
+13      u8          imported flag (v3+): 0 = strict native, 1 = imported   // omitted in v1/v2 → 0
+        u32         vertex_count
         f64 * 3 * vertex_count   vertex positions, in vertex-slot order (x, y, z)
         u32         face_count
         — per face, in face-slot order:
             u32       material id (0xFFFFFFFF = None)
+            u8        uv_frame flag (v2+): 0 = none, 1 = present   // omitted in v1 buffers → None
+            f64 * 8   uv_frame, only when flag = 1: s.x s.y s.z  t.x t.y t.z  u0 v0
+                      (oriented planar UV: uv = (s·p + u0, t·p + v0);  extension, imported texcoords)
             u32       outer_count
             u32 * outer_count    outer-loop vertex indices (0-based into positions, in loop order)
             u32       hole_count
@@ -176,6 +187,19 @@ Notes:
 - Index/count validation: any out-of-range index, a count that overruns the
   buffer, or a face with `outer_count < 3` → `Corrupt { offset, what }`. A buffer
   that ends early → `Truncated`.
+- **`uv_frame` (geometry v2)** carries an importer-fit oriented planar UV mapping
+  per face; faces without one (everything drawn in Hew) store flag `0` and render
+  via the  `world_size` planar projection. Decode is version-gated: a **v1**
+  buffer has no flag byte, so every face loads with `uv_frame = None` — older
+  `.hew` files round-trip unchanged.
+- **`imported` flag (geometry v3)** selects the object's
+  face-planarity invariant tolerance on load. `0` (native, the default) validates
+  faces at the strict `tol::PLANE_DIST` (1e-9 m); `1` validates at the wider
+  `tol::IMPORT_PLANE_DIST` (1e-3 m) so faces from f32-quantized imports
+  (SketchUp/COLLADA), flat only to ~0.1 mm, are accepted as the planar polygons
+  they represent instead of being rejected. Decode is version-gated: a **v1/v2**
+  buffer has no flag byte → strict. The plane is still recomputed (planes aren't
+  stored), so the gate is the only thing that differs.
 
 ## 6. Versioning
 
@@ -184,8 +208,15 @@ Two independent `u32` versions:
 - `geometry_version` (the `.bin` layout) — `GEOMETRY_FORMAT_VERSION`.
 
 Bump the relevant constant on any layout change, extend this spec **in the same
-commit**, and regenerate the golden files (). A loader rejects a version it
-does not understand with `UnsupportedVersion { found }` rather than guessing.
+commit**, and regenerate the golden files (). A loader accepts any version it
+understands — `0 < found ≤ MANIFEST_FORMAT_VERSION` — and rejects newer ones with
+`UnsupportedVersion { found }` rather than guessing. **Older** manifests still
+load: every field added in a later version is `#[serde(default)]`, so missing
+fields default (`format_version` 1 has no node `name`s → all `None`).
+
+`format_version` history:
+- **v1** — initial manifest shape.
+- **v2** — optional `name` on object/group/component/instance entries.
 
 ## 7. Conformance tests
 

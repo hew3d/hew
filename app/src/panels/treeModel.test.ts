@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   entityLabel,
+  resolveLabel,
   breadcrumb,
   isTreeRowDimmed,
   nextSelection,
@@ -25,6 +26,38 @@ describe('entityLabel', () => {
     expect(entityLabel('group', 2)).toBe('Group 3')
     expect(entityLabel('instance', 0)).toBe('Component 1')
     expect(entityLabel('instance', 2)).toBe('Component 3')
+  })
+})
+
+describe('resolveLabel', () => {
+  it('returns the kernel name when present', () => {
+    expect(resolveLabel('Counter_Base', undefined, 'object', 0)).toBe('Counter_Base')
+    expect(resolveLabel('My Group', undefined, 'group', 2)).toBe('My Group')
+    expect(resolveLabel('Chair', undefined, 'instance', 0)).toBe('Chair')
+  })
+
+  it('falls back to entityLabel when kernel name is absent', () => {
+    expect(resolveLabel(undefined, undefined, 'object', 0)).toBe('Object 1')
+    expect(resolveLabel(undefined, undefined, 'group', 2)).toBe('Group 3')
+    expect(resolveLabel(undefined, undefined, 'instance', 0)).toBe('Component 1')
+  })
+
+  it('uses the def name for an instance with no own name', () => {
+    expect(resolveLabel(undefined, 'TableDef', 'instance', 0)).toBe('TableDef')
+  })
+
+  it('prefers the instance own name over the def name', () => {
+    expect(resolveLabel('My Table', 'TableDef', 'instance', 0)).toBe('My Table')
+  })
+
+  it('ignores defName for non-instance kinds (falls through to entityLabel)', () => {
+    // defName is only meaningful for instances; other kinds fall back to positional
+    expect(resolveLabel(undefined, 'SomeDefName', 'object', 1)).toBe('Object 2')
+    expect(resolveLabel(undefined, 'SomeDefName', 'group', 1)).toBe('Group 2')
+  })
+
+  it('falls back to positional when instance has neither own name nor def name', () => {
+    expect(resolveLabel(undefined, undefined, 'instance', 3)).toBe('Component 4')
   })
 })
 

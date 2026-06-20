@@ -14,7 +14,9 @@
 //! `version()`/`demo_mesh()` remain from M0 until the viewport fully retires
 //! the demo path.
 
+use dae_import::ImageMap;
 use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
+use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
     BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId,
     ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, LoadError, Material,
@@ -976,6 +978,34 @@ impl Scene {
             .map(|t| t.to_affine().to_vec())
     }
 
+    /// A visible object's display name, or `undefined` if unnamed/stale. The UI
+    /// falls back to a positional label when this is `undefined`.
+    pub fn object_name(&self, object: u64) -> Option<String> {
+        self.doc.object_name(object_id(object)).map(str::to_string)
+    }
+
+    /// A visible group's display name, or `undefined` if unnamed/stale.
+    pub fn group_name(&self, group: u64) -> Option<String> {
+        self.doc.group_name(group_id(group)).map(str::to_string)
+    }
+
+    /// An instance's own display name, or `undefined` if unnamed/stale. An
+    /// unnamed instance should display its def's name — see
+    /// [`Scene::component_name`] with [`Scene::instance_def`].
+    pub fn instance_name(&self, instance: u64) -> Option<String> {
+        self.doc
+            .instance_name(instance_id(instance))
+            .map(str::to_string)
+    }
+
+    /// A component definition's display name, or `undefined` if unnamed/stale.
+    /// Used as the fallback label for the definition's instances.
+    pub fn component_name(&self, component: u64) -> Option<String> {
+        self.doc
+            .component_name(component_id(component))
+            .map(str::to_string)
+    }
+
     /// The member objects of a definition (definition-local geometry), in order.
     /// Fetch each one's mesh via [`Scene::object_mesh`] and draw it at the
     /// instance pose. Empty if the component is stale/hidden.
@@ -1493,6 +1523,118 @@ impl Scene {
         let change = self.doc.set_object_material(oid, mid).map_err(doc_err)?;
         self.reconcile(&change);
         Ok(())
+    }
+
+    // ------------------------------------------------------------ import
+
+    /// Import COLLADA bytes (+ host-resolved images) into the current document.
+    /// Additive: existing geometry is untouched. Returns the `ImportReport` as a
+    /// JS object with fields:
+    ///   `{ objects_created, watertight, leaky, skipped: [{name, reason}],
+    ///      textures_missing: [string] }`.
+    ///
+    /// `images` is a JS object shaped:
+    ///   `{ "<uri>": { bytes: Uint8Array, format: "png" | "jpeg" } }`
+    /// Pass `null` / `undefined` when there are no images to resolve.
+    ///
+    /// # Errors
+    /// Throws a `"DAE: <message>"` `JsError` on parse failure.
+    pub fn import_dae(&mut self, dae_bytes: &[u8], images: JsValue) -> Result<JsValue, JsError> {
+        // ── 1. Parse the images JS object into an ImageMap ────────────────────
+        let mut image_map: ImageMap = ImageMap::new();
+        if !images.is_null() && !images.is_undefined() {
+            let obj = JsObject::from(images.clone());
+            let keys = JsObject::keys(&obj);
+            for i in 0..keys.length() {
+                let key = keys.get(i);
+                let uri = key.as_string().unwrap_or_default();
+                let entry = Reflect::get(&obj, &key).unwrap_or(JsValue::UNDEFINED);
+                if entry.is_undefined() || entry.is_null() {
+                    continue;
+                }
+                // entry = { bytes: Uint8Array, format: "png"|"jpeg" }
+                let bytes_val =
+                    Reflect::get(&entry, &JsValue::from_str("bytes")).unwrap_or(JsValue::UNDEFINED);
+                let format_val = Reflect::get(&entry, &JsValue::from_str("format"))
+                    .unwrap_or(JsValue::UNDEFINED);
+                if bytes_val.is_undefined() || bytes_val.is_null() {
+                    continue;
+                }
+                let arr = Uint8Array::from(bytes_val);
+                let raw: Vec<u8> = arr.to_vec();
+                let format = match format_val.as_string().as_deref() {
+                    Some("jpeg") | Some("jpg") => ImageFormat::Jpeg,
+                    _ => ImageFormat::Png,
+                };
+                image_map.insert(uri, (raw, format));
+            }
+        }
+
+        // ── 2. Parse COLLADA ──────────────────────────────────────────────────
+        let (scene, textures_missing) = dae_import::import(dae_bytes, &image_map)
+            .map_err(|e| JsError::new(&format!("DAE: {e}")))?;
+
+        // ── 3. Ingest into the document (additive) ────────────────────────────
+        let (report, change) = self
+            .doc
+            .ingest(scene, textures_missing)
+            .map_err(|e| JsError::new(&format!("DAE: {e}")))?;
+
+        // ── 4. Reconcile caches (additive — do NOT clear like `load`) ─────────
+        self.reconcile(&change);
+
+        // ── 5. Serialize the ImportReport to a plain JS object ────────────────
+        let js_report = JsObject::new();
+        Reflect::set(
+            &js_report,
+            &JsValue::from_str("objects_created"),
+            &JsValue::from_f64(report.objects_created as f64),
+        )
+        .unwrap();
+        Reflect::set(
+            &js_report,
+            &JsValue::from_str("watertight"),
+            &JsValue::from_f64(report.watertight as f64),
+        )
+        .unwrap();
+        Reflect::set(
+            &js_report,
+            &JsValue::from_str("leaky"),
+            &JsValue::from_f64(report.leaky as f64),
+        )
+        .unwrap();
+
+        let skipped_arr = js_sys::Array::new();
+        for s in &report.skipped {
+            let entry = JsObject::new();
+            Reflect::set(
+                &entry,
+                &JsValue::from_str("name"),
+                &JsValue::from_str(&s.name),
+            )
+            .unwrap();
+            Reflect::set(
+                &entry,
+                &JsValue::from_str("reason"),
+                &JsValue::from_str(&s.reason),
+            )
+            .unwrap();
+            skipped_arr.push(&entry);
+        }
+        Reflect::set(&js_report, &JsValue::from_str("skipped"), &skipped_arr).unwrap();
+
+        let missing_arr = js_sys::Array::new();
+        for uri in &report.textures_missing {
+            missing_arr.push(&JsValue::from_str(uri));
+        }
+        Reflect::set(
+            &js_report,
+            &JsValue::from_str("textures_missing"),
+            &missing_arr,
+        )
+        .unwrap();
+
+        Ok(js_report.into())
     }
 
     // --------------------------------------------------------- persistence

@@ -42,6 +42,25 @@ interface FileSystemFileHandle {
   requestPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<'granted' | 'denied' | 'prompt'>
 }
 
+interface DirectoryPickerOptions {
+  id?: string
+  mode?: 'read' | 'readwrite'
+  startIn?: FileSystemHandle | 'desktop' | 'documents' | 'downloads' | 'music' | 'pictures' | 'videos'
+}
+
+interface FileSystemDirectoryHandle {
+  readonly name: string
+  entries(): AsyncIterableIterator<[string, FileSystemHandle]>
+  getFileHandle(name: string, options?: { create?: boolean }): Promise<FileSystemFileHandle>
+  getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<FileSystemDirectoryHandle>
+  [Symbol.asyncIterator](): AsyncIterableIterator<[string, FileSystemHandle]>
+}
+
+interface FileSystemHandle {
+  readonly kind: 'file' | 'directory'
+  readonly name: string
+}
+
 declare function showOpenFilePicker(
   options?: OpenFilePickerOptions,
 ): Promise<FileSystemFileHandle[]>
@@ -49,3 +68,7 @@ declare function showOpenFilePicker(
 declare function showSaveFilePicker(
   options?: SaveFilePickerOptions,
 ): Promise<FileSystemFileHandle>
+
+declare function showDirectoryPicker(
+  options?: DirectoryPickerOptions,
+): Promise<FileSystemDirectoryHandle>

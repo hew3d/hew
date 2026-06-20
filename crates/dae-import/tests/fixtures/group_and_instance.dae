@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A visual_scene node group containing a direct mesh child, plus an
+     instance_node referencing a library_nodes entry (component def). -->
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2024-01-01</created>
+    <modified>2024-01-01</modified>
+    <unit name="meter" meter="1.0"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_geometries>
+    <!-- Geometry used directly in the visual scene as a world mesh -->
+    <geometry id="DirectBox" name="DirectBox">
+      <mesh>
+        <source id="DirectBox-positions">
+          <float_array id="DirectBox-positions-array" count="24">
+            0 0 0  1 0 0  1 1 0  0 1 0
+            0 0 1  1 0 1  1 1 1  0 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#DirectBox-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="DirectBox-vertices">
+          <input semantic="POSITION" source="#DirectBox-positions"/>
+        </vertices>
+        <polylist count="6">
+          <input semantic="VERTEX" source="#DirectBox-vertices" offset="0"/>
+          <vcount>4 4 4 4 4 4</vcount>
+          <p>
+            0 3 2 1
+            4 5 6 7
+            0 1 5 4
+            1 2 6 5
+            2 3 7 6
+            3 0 4 7
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+    <!-- Geometry for the library component -->
+    <geometry id="CompGeom" name="CompGeom">
+      <mesh>
+        <source id="CompGeom-positions">
+          <float_array id="CompGeom-positions-array" count="24">
+            0 0 0  0.5 0 0  0.5 0.5 0  0 0.5 0
+            0 0 0.5  0.5 0 0.5  0.5 0.5 0.5  0 0.5 0.5
+          </float_array>
+          <technique_common>
+            <accessor source="#CompGeom-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="CompGeom-vertices">
+          <input semantic="POSITION" source="#CompGeom-positions"/>
+        </vertices>
+        <polylist count="6">
+          <input semantic="VERTEX" source="#CompGeom-vertices" offset="0"/>
+          <vcount>4 4 4 4 4 4</vcount>
+          <p>
+            0 3 2 1
+            4 5 6 7
+            0 1 5 4
+            1 2 6 5
+            2 3 7 6
+            3 0 4 7
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_nodes>
+    <!-- This node becomes a ComponentDef -->
+    <node id="SharedBox" name="SharedBox" type="NODE">
+      <instance_geometry url="#CompGeom"/>
+    </node>
+  </library_nodes>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <!-- Group node containing a direct mesh child -->
+      <node id="Group1" name="Group1" type="NODE">
+        <node id="DirectMesh" name="DirectMesh" type="NODE">
+          <instance_geometry url="#DirectBox"/>
+        </node>
+      </node>
+      <!-- Instance of the library node (component) -->
+      <node id="Inst1" name="Inst1" type="NODE">
+        <translate>2 0 0</translate>
+        <instance_node url="#SharedBox"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

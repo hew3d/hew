@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A box with a diffuse color material applied to its faces. -->
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2024-01-01</created>
+    <modified>2024-01-01</modified>
+    <unit name="meter" meter="1.0"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_effects>
+    <effect id="RedEffect">
+      <profile_COMMON>
+        <technique sid="common">
+          <phong>
+            <diffuse>
+              <color sid="diffuse">1.0 0.0 0.0 1.0</color>
+            </diffuse>
+          </phong>
+        </technique>
+      </profile_COMMON>
+    </effect>
+  </library_effects>
+  <library_materials>
+    <material id="RedMat" name="RedMat">
+      <instance_effect url="#RedEffect"/>
+    </material>
+  </library_materials>
+  <library_geometries>
+    <geometry id="ColorBox" name="ColorBox">
+      <mesh>
+        <source id="ColorBox-positions">
+          <float_array id="ColorBox-positions-array" count="24">
+            0 0 0  1 0 0  1 1 0  0 1 0
+            0 0 1  1 0 1  1 1 1  0 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#ColorBox-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="ColorBox-vertices">
+          <input semantic="POSITION" source="#ColorBox-positions"/>
+        </vertices>
+        <polylist count="6" material="RedMatSymbol">
+          <input semantic="VERTEX" source="#ColorBox-vertices" offset="0"/>
+          <vcount>4 4 4 4 4 4</vcount>
+          <p>
+            0 3 2 1
+            4 5 6 7
+            0 1 5 4
+            1 2 6 5
+            2 3 7 6
+            3 0 4 7
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="ColorBox" name="ColorBox" type="NODE">
+        <instance_geometry url="#ColorBox">
+          <bind_material>
+            <technique_common>
+              <instance_material symbol="RedMatSymbol" target="#RedMat"/>
+            </technique_common>
+          </bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

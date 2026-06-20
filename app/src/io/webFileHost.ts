@@ -17,7 +17,7 @@
  * The hidden <input> is created once lazily and appended to document.body.
  */
 
-import type { FileHost, FileRef } from './fileHost'
+import type { FileHost, FileRef, ImageEntry } from './fileHost'
 
 const HEW_FILE_TYPES: FilePickerAcceptType[] = [
   {
@@ -178,5 +178,111 @@ export class WebFileHost implements FileHost {
     // Return a FileRef with no handle — subsequent "Save" will download again.
     const name = suggestedName.endsWith('.hew') ? suggestedName : suggestedName + '.hew'
     return { name, handle: null }
+  }
+
+  async openForImport(): Promise<{
+    daeBytes: Uint8Array
+    images: Record<string, ImageEntry>
+    name: string
+  } | null> {
+    const DAE_FILE_TYPES: FilePickerAcceptType[] = [
+      {
+        description: 'COLLADA model',
+        accept: { 'model/vnd.collada+xml': ['.dae'] },
+      },
+    ]
+
+    let daeBytes: Uint8Array
+    let fileName: string
+
+    if (hasFSAA()) {
+      let handles: FileSystemFileHandle[]
+      try {
+        handles = await showOpenFilePicker({
+          multiple: false,
+          types: DAE_FILE_TYPES,
+          excludeAcceptAllOption: false,
+        })
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return null
+        throw err
+      }
+      const handle = handles[0]
+      if (handle === undefined) return null
+      const file = await handle.getFile()
+      daeBytes = new Uint8Array(await file.arrayBuffer())
+      fileName = file.name
+    } else {
+      // Fallback: hidden <input type=file>
+      const result = await new Promise<{ bytes: Uint8Array; name: string } | null>((resolve) => {
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.accept = '.dae'
+        input.style.display = 'none'
+        document.body.appendChild(input)
+
+        const onChange = () => {
+          input.removeEventListener('change', onChange)
+          document.body.removeChild(input)
+          const file = input.files?.[0]
+          if (file == null) {
+            resolve(null)
+            return
+          }
+          file.arrayBuffer().then((buf) => resolve({ bytes: new Uint8Array(buf), name: file.name })).catch(() => resolve(null))
+        }
+
+        input.addEventListener('change', onChange)
+        input.click()
+      })
+      if (result === null) return null
+      daeBytes = result.bytes
+      fileName = result.name
+    }
+
+    // Best-effort texture resolution via File System Access directory picker.
+    // If the API is unavailable or the user cancels the directory picker,
+    // we proceed with no images — the kernel ImportReport will list them as
+    // missing textures, which is fine.
+    const images: Record<string, ImageEntry> = {}
+
+    if (hasFSAA() && 'showDirectoryPicker' in window) {
+      try {
+        const dirHandle = await showDirectoryPicker({ mode: 'read' })
+        await collectImagesFromDirectory(dirHandle, '', images)
+      } catch {
+        // User cancelled or permission denied — proceed without images.
+      }
+    }
+
+    return { daeBytes, images, name: fileName }
+  }
+}
+
+/** Recursively collect image files from a directory handle into `out`. */
+async function collectImagesFromDirectory(
+  dir: FileSystemDirectoryHandle,
+  prefix: string,
+  out: Record<string, ImageEntry>,
+): Promise<void> {
+  for await (const [name, handle] of dir.entries()) {
+    const key = prefix !== '' ? `${prefix}/${name}` : name
+    if (handle.kind === 'file') {
+      const lower = name.toLowerCase()
+      let format: 'png' | 'jpeg' | null = null
+      if (lower.endsWith('.png')) format = 'png'
+      else if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) format = 'jpeg'
+      if (format !== null) {
+        const fileHandle = handle as FileSystemFileHandle
+        const file = await fileHandle.getFile()
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        // Register under both the bare filename and the prefixed path so
+        // COLLADA references like "textures/wood.png" and "wood.png" both hit.
+        out[key] = { bytes, format }
+        out[name] = { bytes, format }
+      }
+    } else if (handle.kind === 'directory') {
+      await collectImagesFromDirectory(handle as FileSystemDirectoryHandle, key, out)
+    }
   }
 }

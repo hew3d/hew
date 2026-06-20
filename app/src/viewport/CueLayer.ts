@@ -13,7 +13,8 @@
  *   - Dashed guide line through the snap point along direction() when present.
  *
  * The group is added to the scene once; call update() on every pointer move
- * to rebuild its children.
+ * to rebuild its children; call updateMarkerScale(camera) every render frame
+ * so the cross marker stays a constant screen size regardless of zoom.
  */
 
 import * as THREE from 'three'
@@ -33,8 +34,13 @@ const AXIS_COLORS: [number, number, number] = [0xff2222, 0x22cc22, 0x2222ff]
 /** Half-length of the dashed guide line (meters) */
 const GUIDE_HALF_LENGTH = 5
 
-/** Size of the snap marker cross glyph (meters) */
-const MARKER_HALF_SIZE = 0.04
+/**
+ * Scale factor for the screen-constant cross marker.
+ * worldSize = MARKER_SCREEN_K * distanceToCamera
+ * At k=0.008 and 4 m camera distance: half-size ≈ 0.032 m → ~24 px at 800 px
+ * viewport height (FOV 45°). Comfortable and clearly visible without dominating.
+ */
+const MARKER_SCREEN_K = 0.008
 
 function snapColor(kind: string): number {
   if (kind in SNAP_COLORS) return SNAP_COLORS[kind]
@@ -42,18 +48,22 @@ function snapColor(kind: string): number {
   return 0xffffff
 }
 
-function buildCrossMarker(pos: THREE.Vector3, color: number): THREE.LineSegments {
-  const s = MARKER_HALF_SIZE
+/**
+ * Build a unit cross marker centered at the local origin (arms ±1 along each
+ * world axis). Position and uniform scale are set via Object3D properties so
+ * the render loop can update scale without rebuilding geometry.
+ */
+function buildCrossMarker(color: number): THREE.LineSegments {
   const pts = new Float32Array([
-    // horizontal bar
-    pos.x - s, pos.y, pos.z,
-    pos.x + s, pos.y, pos.z,
-    // vertical bar
-    pos.x, pos.y - s, pos.z,
-    pos.x, pos.y + s, pos.z,
-    // depth bar
-    pos.x, pos.y, pos.z - s,
-    pos.x, pos.y, pos.z + s,
+    // horizontal bar (±X)
+    -1, 0, 0,
+     1, 0, 0,
+    // vertical bar (±Y)
+    0, -1, 0,
+    0,  1, 0,
+    // depth bar (±Z)
+    0, 0, -1,
+    0, 0,  1,
   ])
   const geo = new THREE.BufferGeometry()
   geo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
@@ -105,6 +115,10 @@ function buildGuideLine(
 
 export class CueLayer {
   readonly group: THREE.Group
+  /** The live cross marker, kept between frames to update its scale. */
+  private _marker: THREE.LineSegments | null = null
+  /** Current snap position in world space. */
+  private _snapPos: THREE.Vector3 | null = null
 
   constructor() {
     this.group = new THREE.Group()
@@ -123,10 +137,13 @@ export class CueLayer {
       }
     })
     this.group.clear()
+    this._marker = null
+    this._snapPos = null
 
     if (snap === null) return
 
     const pos = new THREE.Vector3(snap.x, snap.y, snap.z)
+    this._snapPos = pos.clone()
 
     // Determine color
     let color = snapColor(snap.kind)
@@ -138,15 +155,38 @@ export class CueLayer {
       color = AXIS_COLORS[axis]
     }
 
-    this.group.add(buildCrossMarker(pos, color))
+    // Build unit cross at origin; position+scale set by updateMarkerScale()
+    const marker = buildCrossMarker(color)
+    marker.position.copy(pos)
+    // Set a placeholder scale — updateMarkerScale() will correct it next frame
+    marker.scale.setScalar(MARKER_SCREEN_K * 4) // ~4 m fallback distance
+    this._marker = marker
+    this.group.add(marker)
 
     if (snap.direction !== undefined) {
       this.group.add(buildGuideLine(pos, snap.direction, color))
     }
   }
 
+  /**
+   * Call once per render frame (inside the animation loop, after controls.update()).
+   * Scales the cross marker so it stays a constant screen size regardless of
+   * how far the camera is from the snap point.
+   *
+   * Formula: worldHalfSize = MARKER_SCREEN_K * distanceToMarker
+   * This keeps the projected pixel footprint constant for any perspective view.
+   */
+  updateMarkerScale(camera: THREE.Camera): void {
+    if (this._marker === null || this._snapPos === null) return
+    const dist = camera.position.distanceTo(this._snapPos)
+    const scale = MARKER_SCREEN_K * dist
+    this._marker.scale.setScalar(scale)
+  }
+
   /** Clear without disposing (called on cleanup) */
   clear(): void {
+    this._marker = null
+    this._snapPos = null
     this.group.clear()
   }
 }

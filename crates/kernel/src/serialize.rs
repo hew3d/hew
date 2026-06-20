@@ -18,7 +18,7 @@ use slotmap::SecondaryMap;
 
 use crate::error::TopologyError;
 use crate::ids::{ComponentId, GroupId, InstanceId, MaterialId, ObjectId, SketchId};
-use crate::material::{ImageFormat, Material, Texture};
+use crate::material::{ImageFormat, Material, Texture, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::{
     Sketch, SketchEdge, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
@@ -29,12 +29,23 @@ use crate::transform::Transform;
 /// Version of the geometry buffer layout. Bump on any layout change and
 /// extend `docs/HEW_FILE_FORMAT.md` plus the golden-file tests in the same
 /// commit.
-pub const GEOMETRY_FORMAT_VERSION: u32 = 1;
+///
+/// v1 → v2: per-face optional `UvFrame` added after the material u32
+/// (`u8` flag + 8×f64 when present; absent in v1 files → all `uv_frame = None`).
+/// v2 → v3 (): a `u8` "imported" flag added to the buffer header after
+/// the base-material u32. `1` → the object's faces are validated
+/// at the wider [`crate::tol::IMPORT_PLANE_DIST`]; absent (v1/v2) or `0` → strict
+/// [`crate::tol::PLANE_DIST`].
+pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
 /// `docs/HEW_FILE_FORMAT.md` plus the golden files in the same commit.
-pub const MANIFEST_FORMAT_VERSION: u32 = 1;
+///
+/// v2 (): added optional `name` fields to object/group/component/
+/// instance entries. The fields are `#[serde(default)]`, so v1 files still load
+/// (names default to `None`) — see the version gate in `decode_document_raw`.
+pub const MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -198,6 +209,11 @@ impl Object {
         };
         buf.extend_from_slice(&base_mat_id.to_le_bytes());
 
+        // imported flag (v3): 1 when this object carries the wider import
+        // planarity tolerance, 0 for strict native geometry.
+        let imported: u8 = u8::from(self.planarity_tol > crate::tol::PLANE_DIST);
+        buf.push(imported);
+
         // --- vertices (in slot order) ---
         let vertex_count = self.vertices.len() as u32;
         buf.extend_from_slice(&vertex_count.to_le_bytes());
@@ -225,6 +241,22 @@ impl Object {
                 None => NO_MATERIAL,
             };
             buf.extend_from_slice(&mat_id.to_le_bytes());
+
+            // per-face UV frame (v2): u8 flag (0=none, 1=present) + 8×f64 LE
+            match face.uv_frame {
+                None => buf.push(0u8),
+                Some(f) => {
+                    buf.push(1u8);
+                    buf.extend_from_slice(&f.s.x.to_le_bytes());
+                    buf.extend_from_slice(&f.s.y.to_le_bytes());
+                    buf.extend_from_slice(&f.s.z.to_le_bytes());
+                    buf.extend_from_slice(&f.t.x.to_le_bytes());
+                    buf.extend_from_slice(&f.t.y.to_le_bytes());
+                    buf.extend_from_slice(&f.t.z.to_le_bytes());
+                    buf.extend_from_slice(&f.u0.to_le_bytes());
+                    buf.extend_from_slice(&f.v0.to_le_bytes());
+                }
+            }
 
             // outer loop
             let outer_verts: Vec<u32> = self
@@ -283,7 +315,7 @@ impl Object {
         }
 
         let version = r.read_u32()?;
-        if version != GEOMETRY_FORMAT_VERSION {
+        if version > GEOMETRY_FORMAT_VERSION || version == 0 {
             return Err(DecodeError::UnsupportedVersion { found: version });
         }
 
@@ -306,6 +338,25 @@ impl Object {
             })?)
         };
 
+        // imported flag (v3): selects the object's planarity invariant tolerance.
+        // Absent in v1/v2 → strict native default.
+        let planarity_tol = if version >= 3 {
+            let flag = r.read_u8()?;
+            if flag > 1 {
+                return Err(DecodeError::Corrupt {
+                    offset: r.pos - 1,
+                    what: "imported flag must be 0 or 1",
+                });
+            }
+            if flag == 1 {
+                crate::tol::IMPORT_PLANE_DIST
+            } else {
+                crate::tol::PLANE_DIST
+            }
+        } else {
+            crate::tol::PLANE_DIST
+        };
+
         // --- vertices ---
         let vertex_count = r.read_u32()? as usize;
         let mut positions = Vec::with_capacity(vertex_count);
@@ -322,6 +373,7 @@ impl Object {
             Vec<Vec<usize>>,
             Plane,
             crate::material::FaceMaterial,
+            Option<UvFrame>,
         );
         let face_count = r.read_u32()? as usize;
         let mut face_specs: Vec<FaceSpec> = Vec::with_capacity(face_count);
@@ -335,6 +387,36 @@ impl Object {
                     offset: r.pos - 4,
                     what: "face material id out of range",
                 })?)
+            };
+
+            // v2: per-face UV frame (flag + optional 8×f64). v1: absent → None.
+            let uv_frame: Option<UvFrame> = if version >= 2 {
+                let flag = r.read_u8()?;
+                if flag == 1 {
+                    let sx = r.read_f64()?;
+                    let sy = r.read_f64()?;
+                    let sz = r.read_f64()?;
+                    let tx = r.read_f64()?;
+                    let ty = r.read_f64()?;
+                    let tz = r.read_f64()?;
+                    let u0 = r.read_f64()?;
+                    let v0 = r.read_f64()?;
+                    Some(UvFrame::new(
+                        Vec3::new(sx, sy, sz),
+                        Vec3::new(tx, ty, tz),
+                        u0,
+                        v0,
+                    ))
+                } else if flag == 0 {
+                    None
+                } else {
+                    return Err(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "uv_frame flag must be 0 or 1",
+                    });
+                }
+            } else {
+                None // v1 files: all faces have no UV frame
             };
 
             let outer_count = r.read_u32()? as usize;
@@ -387,12 +469,16 @@ impl Object {
                 holes.push(hole);
             }
 
-            face_specs.push((outer, holes, plane, face_material));
+            face_specs.push((outer, holes, plane, face_material, uv_frame));
         }
 
         // Rebuild topology via the existing builder path.
         let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
         obj.default_material = base_material;
+        // Restore the per-object planarity gate before validating, so an imported
+        // object's near-planar faces are held to IMPORT_PLANE_DIST, not the
+        // strict default.
+        obj.planarity_tol = planarity_tol;
 
         // Validate the rebuilt topology (rule 4: validate, never repair).
         obj.validate().map_err(DecodeError::InvalidTopology)?;
@@ -462,6 +548,9 @@ pub(crate) struct ObjectDto {
     pub geometry: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_material: Option<u32>,
+    /// Optional display name (manifest v2+). Absent in v1 files → `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A merge group entry.
@@ -469,6 +558,9 @@ pub(crate) struct ObjectDto {
 pub(crate) struct GroupDto {
     pub id: u32,
     pub members: Vec<NodeRefDto>,
+    /// Optional display name (manifest v2+). Absent in v1 files → `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A component definition.
@@ -477,6 +569,9 @@ pub(crate) struct ComponentDto {
     pub id: u32,
     /// Dense object ids belonging to this definition.
     pub members: Vec<u32>,
+    /// Optional definition name (manifest v2+). Absent in v1 files → `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A component instance.
@@ -486,6 +581,9 @@ pub(crate) struct InstanceDto {
     pub def: u32,
     /// Row-major 3×4 affine: [m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz].
     pub pose: [f64; 12],
+    /// Optional per-instance display name (manifest v2+). Absent in v1 → `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A first-class sketch.
@@ -574,10 +672,12 @@ pub(crate) struct DocSaveData {
     pub materials: Vec<(MaterialId, Material)>,
     pub world_objects: Vec<(ObjectId, Object)>,
     pub def_objects: Vec<(ObjectId, Object, ComponentId)>,
-    pub groups: Vec<(GroupId, Vec<crate::document::NodeId>)>,
-    pub components: Vec<(ComponentId, Vec<ObjectId>)>,
-    pub instances: Vec<(InstanceId, ComponentId, Transform)>,
+    pub groups: Vec<(GroupId, Vec<crate::document::NodeId>, Option<String>)>,
+    pub components: Vec<(ComponentId, Vec<ObjectId>, Option<String>)>,
+    pub instances: Vec<(InstanceId, ComponentId, Transform, Option<String>)>,
     pub sketches: Vec<(SketchId, Sketch)>,
+    /// Per-object display name, keyed by id (covers world + def members).
+    pub obj_names: std::collections::HashMap<ObjectId, Option<String>>,
     /// All live world roots (objects/groups/instances with no parent).
     pub roots: Vec<crate::document::NodeId>,
     /// (sketch_id, region_id) pairs that are consumed.
@@ -608,17 +708,17 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     }
 
     let mut grp_to_dense: HashMap<GroupId, u32> = HashMap::new();
-    for (i, (gid, _)) in data.groups.iter().enumerate() {
+    for (i, (gid, ..)) in data.groups.iter().enumerate() {
         grp_to_dense.insert(*gid, i as u32);
     }
 
     let mut comp_to_dense: HashMap<ComponentId, u32> = HashMap::new();
-    for (i, (cid, _)) in data.components.iter().enumerate() {
+    for (i, (cid, ..)) in data.components.iter().enumerate() {
         comp_to_dense.insert(*cid, i as u32);
     }
 
     let mut inst_to_dense: HashMap<InstanceId, u32> = HashMap::new();
-    for (i, (iid, _, _)) in data.instances.iter().enumerate() {
+    for (i, (iid, ..)) in data.instances.iter().enumerate() {
         inst_to_dense.insert(*iid, i as u32);
     }
 
@@ -702,6 +802,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 id: i as u32,
                 geometry: format!("geometry/obj_{i}.bin"),
                 base_material: base_mat.map(&material_dense),
+                name: data.obj_names.get(oid).cloned().flatten(),
             }
         })
         .collect();
@@ -710,9 +811,10 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .groups
         .iter()
         .enumerate()
-        .map(|(i, (_, members))| GroupDto {
+        .map(|(i, (_, members, name))| GroupDto {
             id: i as u32,
             members: members.iter().map(&node_to_dto).collect(),
+            name: name.clone(),
         })
         .collect();
 
@@ -720,9 +822,10 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .components
         .iter()
         .enumerate()
-        .map(|(i, (_, members))| ComponentDto {
+        .map(|(i, (_, members, name))| ComponentDto {
             id: i as u32,
             members: members.iter().map(|oid| obj_to_dense[oid]).collect(),
+            name: name.clone(),
         })
         .collect();
 
@@ -730,10 +833,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .instances
         .iter()
         .enumerate()
-        .map(|(i, (_, def, pose))| InstanceDto {
+        .map(|(i, (_, def, pose, name))| InstanceDto {
             id: i as u32,
             def: comp_to_dense[def],
             pose: pose.to_affine(),
+            name: name.clone(),
         })
         .collect();
 
@@ -891,6 +995,12 @@ pub(crate) struct DocLoadRaw {
     pub consumed: Vec<[u32; 2]>,
     /// For each object dense id: is it a definition member? (and which component dense id)
     pub def_membership: Vec<Option<u32>>,
+    /// Optional display name per object/group/component/instance, in dense order
+    /// (manifest v2+; all `None` for v1 files).
+    pub obj_names: Vec<Option<String>>,
+    pub group_names: Vec<Option<String>>,
+    pub component_names: Vec<Option<String>>,
+    pub instance_names: Vec<Option<String>>,
 }
 
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
@@ -903,7 +1013,10 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
             what: e.to_string(),
         })?;
 
-    if manifest.format_version != MANIFEST_FORMAT_VERSION {
+    // Accept any version this build knows how to read: 0 is invalid, anything
+    // newer than we understand is rejected. Older versions (e.g. v1 without
+    // node names) still load — the missing fields default to `None`.
+    if manifest.format_version == 0 || manifest.format_version > MANIFEST_FORMAT_VERSION {
         return Err(LoadError::UnsupportedVersion {
             found: manifest.format_version,
         });
@@ -945,10 +1058,12 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Read geometry buffers.
     let mut geom_buffers: Vec<Vec<u8>> = Vec::with_capacity(obj_count);
     let mut obj_base_materials: Vec<Option<u32>> = Vec::with_capacity(obj_count);
+    let mut obj_names: Vec<Option<String>> = Vec::with_capacity(obj_count);
     for obj_dto in &manifest.objects {
         let buf = zip_read_entry(&mut zip, &obj_dto.geometry)?;
         geom_buffers.push(buf);
         obj_base_materials.push(obj_dto.base_material);
+        obj_names.push(obj_dto.name.clone());
     }
 
     // Decode sketches.
@@ -971,6 +1086,10 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         }
     }
 
+    let group_names = manifest.groups.iter().map(|g| g.name.clone()).collect();
+    let component_names = manifest.components.iter().map(|c| c.name.clone()).collect();
+    let instance_names = manifest.instances.iter().map(|i| i.name.clone()).collect();
+
     Ok(DocLoadRaw {
         materials,
         geom_buffers,
@@ -989,6 +1108,10 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketches,
         consumed: manifest.consumed.clone(),
         def_membership,
+        obj_names,
+        group_names,
+        component_names,
+        instance_names,
     })
 }
 
@@ -1250,5 +1373,95 @@ impl<'a> ByteReader<'a> {
     fn read_f64(&mut self) -> Result<f64, DecodeError> {
         let bytes = self.read_bytes::<8>()?;
         Ok(f64::from_le_bytes(bytes))
+    }
+}
+
+#[cfg(test)]
+mod name_compat_tests {
+    use super::{ComponentDto, GroupDto, InstanceDto, ObjectDto};
+
+    /// v1 manifests have no `name` field on tree entries. The `#[serde(default)]`
+    /// attributes must let them deserialize, defaulting the name to `None`, so
+    /// pre-naming `.hew` files keep loading after the v2 bump.
+    #[test]
+    fn dtos_default_name_to_none_for_v1_manifests() {
+        let obj: ObjectDto =
+            serde_json::from_str(r#"{"id":0,"geometry":"geometry/obj_0.bin"}"#).unwrap();
+        assert!(obj.name.is_none());
+
+        let grp: GroupDto = serde_json::from_str(r#"{"id":0,"members":[]}"#).unwrap();
+        assert!(grp.name.is_none());
+
+        let comp: ComponentDto = serde_json::from_str(r#"{"id":0,"members":[]}"#).unwrap();
+        assert!(comp.name.is_none());
+
+        let inst: InstanceDto =
+            serde_json::from_str(r#"{"id":0,"def":0,"pose":[1,0,0,0,0,1,0,0,0,0,1,0]}"#).unwrap();
+        assert!(inst.name.is_none());
+    }
+
+    /// A present `name` round-trips through serde.
+    #[test]
+    fn dto_name_round_trips() {
+        let obj: ObjectDto =
+            serde_json::from_str(r#"{"id":0,"geometry":"g.bin","name":"Counter_Base"}"#).unwrap();
+        assert_eq!(obj.name.as_deref(), Some("Counter_Base"));
+    }
+}
+
+#[cfg(test)]
+mod planarity_flag_tests {
+    use crate::topo::Object;
+    use crate::{Point3, tol};
+
+    /// The v3 geometry buffer round-trips an imported object's wider planarity
+    /// tolerance, so a near-planar face still validates after load (#35). A
+    /// strict native object round-trips at `PLANE_DIST`.
+    #[test]
+    fn imported_planarity_tol_round_trips() {
+        // Unit box with the top quad bent 1e-5 m (>PLANE_DIST, <IMPORT_PLANE_DIST).
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(1.0, 0.0, 1.0),
+            Point3::new(1.0, 1.0, 1.0 + 1e-5),
+            Point3::new(0.0, 1.0, 1.0),
+        ];
+        let faces = vec![
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ];
+        let mats = vec![None; faces.len()];
+        let frames = vec![None; faces.len()];
+        let imported = Object::from_polygons_with_materials_and_frames_import(
+            &positions, &faces, &mats, &frames,
+        )
+        .expect("import build");
+        assert_eq!(imported.planarity_tol, tol::IMPORT_PLANE_DIST);
+
+        let bytes = imported.encode(&|_| 0);
+        let decoded = Object::decode(&bytes, &|_| None).expect("decode v3 import buffer");
+        assert_eq!(
+            decoded.planarity_tol,
+            tol::IMPORT_PLANE_DIST,
+            "imported flag must survive save/load"
+        );
+        decoded
+            .validate()
+            .expect("decoded import object validates at its restored tolerance");
+
+        // A strict native object round-trips at PLANE_DIST (flag = 0).
+        let native = Object::tetrahedron();
+        assert_eq!(native.planarity_tol, tol::PLANE_DIST);
+        let nb = native.encode(&|_| 0);
+        let nd = Object::decode(&nb, &|_| None).unwrap();
+        assert_eq!(nd.planarity_tol, tol::PLANE_DIST);
     }
 }

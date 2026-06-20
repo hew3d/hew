@@ -20,6 +20,21 @@ export interface FileRef {
   handle: unknown
 }
 
+/** Image payload for one texture referenced by a COLLADA file. */
+export interface ImageEntry {
+  bytes: Uint8Array
+  format: 'png' | 'jpeg'
+}
+
+/** Result of a successful COLLADA import (mirrors the kernel ImportReport). */
+export interface ImportReport {
+  objects_created: number
+  watertight: number
+  leaky: number
+  skipped: Array<{ name: string; reason: string }>
+  textures_missing: string[]
+}
+
 export interface FileHost {
   /**
    * Prompt the user to choose a .hew file to open.
@@ -39,6 +54,25 @@ export interface FileHost {
    * Returns the new FileRef on success, or null on cancel.
    */
   saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null>
+
+  /**
+   * Prompt the user to choose a .dae (COLLADA) file to import.
+   * Also attempts to resolve texture images referenced inside the file.
+   * Returns null if the user cancels.
+   *
+   * The `images` record maps each image URI (as the COLLADA file would
+   * reference it) to its encoded bytes + format.  Missing images are
+   * reported by the kernel ImportReport — they are not a failure here.
+   *
+   * `name` is the display name (basename) of the chosen file, used by the
+   * importing overlay to show "Importing "<name>"…" while the parse runs.
+   */
+  openForImport(): Promise<{
+    daeBytes: Uint8Array
+    images: Record<string, ImageEntry>
+    /** Display name (basename) of the chosen .dae file. */
+    name: string
+  } | null>
 }
 
 // WebFileHost is statically imported — it's always needed for the web build.
@@ -69,6 +103,7 @@ export function makeFileHost(): FileHost {
       open: () => hostPromise.then((h) => h.open()),
       save: (bytes, ref) => hostPromise.then((h) => h.save(bytes, ref)),
       saveAs: (bytes, name) => hostPromise.then((h) => h.saveAs(bytes, name)),
+      openForImport: () => hostPromise.then((h) => h.openForImport()),
     }
   }
   return new WebFileHost()

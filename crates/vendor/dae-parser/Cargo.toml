@@ -1,0 +1,26 @@
+[package]
+name = "dae-parser"
+version = "0.11.0"
+authors = ["Mario Carneiro <di.gama@gmail.com>"]
+edition = "2018"
+description = "Parser for the Collada (DAE) format (vendored into Hew; see VENDORED.md)"
+repository = "https://github.com/digama0/dae-parser"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["collada", "3d", "format"]
+categories = ["parser-implementations", "graphics", "game-development"]
+
+# Vendored copy of dae-parser 0.11.0. The optional `nalgebra` dependency from
+# upstream is intentionally dropped — Hew uses hand-rolled math and
+# never enables that feature. Local patches are documented in VENDORED.md.
+[dependencies]
+ref-cast = "1.0"
+minidom-14 = "0.17"
+percent-encoding = "2.2"
+chrono = "0.4"
+
+# Declared but empty: upstream gates some helpers behind `nalgebra`. Hew never
+# enables it, but declaring the feature keeps `#[cfg(feature =
+# "nalgebra")]` recognized so the build stays warning-free.
+[features]
+nalgebra = []

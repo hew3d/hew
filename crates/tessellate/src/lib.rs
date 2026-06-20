@@ -159,9 +159,17 @@ pub fn tessellate(
             mesh.positions.extend([x as f32, y as f32, z as f32]);
             mesh.normals.extend(n);
             mesh.colors.extend([cr, cg, cb]);
-            // UV = planar 2D coord divided by world_size.
-            mesh.uvs
-                .extend([(u2d / world_size[0]) as f32, (v2d / world_size[1]) as f32]);
+            // UV: if the face has an oriented UV frame (imported texcoords), use
+            // it — `uv = frame.apply(p)`. Otherwise fall back to the planar
+            // projection divided by world_size. Untextured/Hew-drawn faces
+            // (no frame) produce byte-identical output to previous behaviour.
+            let (fu, fv) = if let Some(frame) = face.uv_frame {
+                let uv = frame.apply(kernel::Point3::new(x, y, z));
+                (uv[0] as f32, uv[1] as f32)
+            } else {
+                ((u2d / world_size[0]) as f32, (v2d / world_size[1]) as f32)
+            };
+            mesh.uvs.extend([fu, fv]);
         }
 
         // Run ear clipping (local indices into poly).

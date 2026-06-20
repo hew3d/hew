@@ -7,7 +7,7 @@
 use slotmap::SlotMap;
 
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
-use crate::material::FaceMaterial;
+use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3};
 
 /// A mesh vertex.
@@ -82,6 +82,12 @@ pub struct Face {
     /// boolean's result faces inherit their source face's; freshly extruded
     /// side walls default to `None`.
     pub material: FaceMaterial,
+    /// Per-face affine UV frame (ARCHITECTURE.md extension). When `Some`, the
+    /// tessellator uses `frame.apply(p)` instead of the  `world_size`
+    /// planar projection. Propagated alongside `material` in face-creating ops
+    /// (split children and boolean result faces inherit the parent/source frame;
+    /// freshly extruded side walls default to `None`).
+    pub uv_frame: Option<UvFrame>,
 }
 
 /// A connected set of faces. M0 builds a single shell per Object.
@@ -120,6 +126,14 @@ pub struct Object {
     /// color/texture "throughout". `None` here means the renderer's neutral
     /// default.
     pub(crate) default_material: FaceMaterial,
+    /// Per-object planarity invariant tolerance (meters). Native
+    /// geometry built by exact kernel construction uses [`tol::PLANE_DIST`] (the
+    /// default). Objects built from *imported* foreign geometry carry
+    /// [`tol::IMPORT_PLANE_DIST`] instead, because f32-quantized SketchUp/COLLADA
+    /// faces are flat only to ~0.1 mm. `from_polygons` and the validator both
+    /// read this, so native objects stay strict while imports are accepted as the
+    /// planar polygons they represent. Persisted in geometry buffer v3.
+    pub(crate) planarity_tol: f64, // crate::tol::PLANE_DIST by default
 }
 
 impl Object {
@@ -135,6 +149,7 @@ impl Object {
             shells: SlotMap::with_key(),
             watertight: WatertightState::Open,
             default_material: None,
+            planarity_tol: crate::tol::PLANE_DIST,
         }
     }
 

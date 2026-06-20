@@ -23,6 +23,7 @@ pub mod document;
 pub mod error;
 pub mod history;
 pub mod ids;
+pub mod import;
 pub mod material;
 pub mod math;
 pub mod ops;
@@ -39,7 +40,8 @@ pub use ids::{
     ComponentId, EdgeId, FaceId, GroupId, HalfEdgeId, InstanceId, LoopId, MaterialId, ObjectId,
     ShellId, SketchId, VertexId,
 };
-pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture};
+pub use import::{DefRecipe, ImportNode, ImportReport, ImportScene, MeshRecipe, SkippedMesh};
+pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceMergeInnerReport,

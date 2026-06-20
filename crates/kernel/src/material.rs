@@ -12,6 +12,7 @@
 //! stores them verbatim. No image-codec dependency enters the kernel.
 
 use crate::ids::MaterialId;
+use crate::math::{Point3, Vec3};
 use slotmap::SlotMap;
 
 /// The document's material palette: a generational map of [`MaterialId`] →
@@ -126,3 +127,47 @@ impl Material {
 /// A face's material reference: `None` is the default (unpainted) material,
 /// rendered with a neutral color the renderer owns.
 pub type FaceMaterial = Option<MaterialId>;
+
+// ────────────────────────────────────────────────────── UvFrame ────────────────
+
+/// Per-face affine UV map: `uv = (s·p + u0,  t·p + v0)` (ARCHITECTURE.md ext.).
+///
+/// `s` and `t` are 3D gradient vectors (dimensionless UV/meter); `u0`/`v0` are
+/// the constant offsets. The map is expressed in the same coordinate space as
+/// the face's vertex positions, so it is pose-invariant: the texture rides the
+/// geometry through any instance transformation.
+///
+/// Imported from COLLADA via a least-squares fit from source per-corner texcoords
+/// (see `crates/dae-import/src/uv.rs`). Absent on Hew-drawn faces → tessellate
+/// falls back to the  `world_size` planar projection.
+///
+/// Serialized in geometry buffer v2 (HEW_FILE_FORMAT.md, after the per-face
+/// material u32): a `u8` flag (0=absent, 1=present) + 8 × little-endian f64 in
+/// order `s.x s.y s.z t.x t.y t.z u0 v0` (64 bytes when present).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UvFrame {
+    /// UV-space gradient along the U axis, in world space.
+    pub s: Vec3,
+    /// UV-space gradient along the V axis, in world space.
+    pub t: Vec3,
+    /// U offset (constant term).
+    pub u0: f64,
+    /// V offset (constant term).
+    pub v0: f64,
+}
+
+impl UvFrame {
+    /// Create a new `UvFrame` from its components.
+    pub fn new(s: Vec3, t: Vec3, u0: f64, v0: f64) -> UvFrame {
+        UvFrame { s, t, u0, v0 }
+    }
+
+    /// Apply this frame to a 3D position, returning `[u, v]`.
+    ///
+    /// `uv = (s·p + u0,  t·p + v0)` where `·` is the dot product.
+    pub fn apply(&self, p: Point3) -> [f64; 2] {
+        let u = self.s.x * p.x + self.s.y * p.y + self.s.z * p.z + self.u0;
+        let v = self.t.x * p.x + self.t.y * p.y + self.t.z * p.z + self.v0;
+        [u, v]
+    }
+}

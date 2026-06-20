@@ -13,6 +13,7 @@ import { useMemo, useState } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   entityLabel,
+  resolveLabel,
   breadcrumb,
   isTreeRowDimmed,
   canGroup as canGroupHelper,
@@ -130,15 +131,17 @@ export function DocumentTree({
     if (node.kind === 'group') {
       const groups = Array.from(scene.group_ids())
       const idx = groups.indexOf(node.id)
-      return entityLabel('group', idx >= 0 ? idx : 0)
+      return resolveLabel(scene.group_name(node.id), undefined, 'group', idx >= 0 ? idx : 0)
     } else if (node.kind === 'instance') {
       const instances = Array.from(scene.instance_ids())
       const idx = instances.indexOf(node.id)
-      return entityLabel('instance', idx >= 0 ? idx : 0)
+      const def = scene.instance_def(node.id)
+      const defName = def !== undefined ? scene.component_name(def) : undefined
+      return resolveLabel(scene.instance_name(node.id), defName, 'instance', idx >= 0 ? idx : 0)
     } else {
       const objects = Array.from(scene.object_ids())
       const idx = objects.indexOf(node.id)
-      return entityLabel('object', idx >= 0 ? idx : 0)
+      return resolveLabel(scene.object_name(node.id), undefined, 'object', idx >= 0 ? idx : 0)
     }
   }
 
@@ -355,7 +358,7 @@ function NodeRow({
     const watertight = watertightMap.get(node.id) ?? true
     return (
       <Row
-        label={entityLabel('object', index)}
+        label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
         selected={selected}
         active={active}
         dimmed={dimmed}
@@ -368,9 +371,11 @@ function NodeRow({
   }
 
   if (node.kind === 'instance') {
+    const def = scene.instance_def(node.id)
+    const defName = def !== undefined ? scene.component_name(def) : undefined
     return (
       <Row
-        label={entityLabel('instance', index)}
+        label={resolveLabel(scene.instance_name(node.id), defName, 'instance', index)}
         selected={selected}
         active={active}
         dimmed={dimmed}
@@ -393,7 +398,7 @@ function NodeRow({
   return (
     <>
       <Row
-        label={entityLabel('group', index)}
+        label={resolveLabel(scene.group_name(node.id), undefined, 'group', index)}
         selected={selected}
         active={active}
         dimmed={dimmed}

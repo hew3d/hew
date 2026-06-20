@@ -96,6 +96,14 @@ export interface ViewportApi {
   runUndo: () => void
   /** Trigger scene redo (same as Shift+Cmd/Ctrl+Z keyboard shortcut). */
   runRedo: () => void
+  /**
+   * Frame all rendered geometry into view (View → Zoom Extents).
+   * Computes the world bounding box of objectsGroup + instancesGroup,
+   * re-targets the orbit camera to the box center, and dolly-zooms so
+   * the box fits the vertical FOV with a 1.2× margin. No-op when the
+   * scene is empty. Idempotent — safe to call multiple times.
+   */
+  zoomExtents: () => void
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -129,22 +137,25 @@ function buildGroundGrid(): THREE.Group {
   const group = new THREE.Group()
   group.name = 'GroundGrid'
 
-  // Main grid: 10x10 meters, 1m divisions
+  // Main grid: 10x10 meters, 1m divisions (person-scale: 1m squares)
   const grid = new THREE.GridHelper(10, 10, 0x888888, 0xcccccc)
   grid.rotation.x = Math.PI / 2  // GridHelper is in XZ plane; rotate to XY
   group.add(grid)
 
-  // Axes
+  // World origin axes: ~1 m, person-scale (red=+X, green=+Y, blue=+Z)
+  const AXIS_LEN = 1.0
   const axesPts = new Float32Array([
-    0, 0, 0.001,  5, 0, 0.001,   // X axis
-    0, 0, 0.001,  0, 5, 0.001,   // Y axis
+    0, 0, 0.001,  AXIS_LEN, 0, 0.001,   // +X axis
+    0, 0, 0.001,  0, AXIS_LEN, 0.001,   // +Y axis
+    0, 0, 0,      0, 0, AXIS_LEN,       // +Z axis
   ])
   const axesGeo = new THREE.BufferGeometry()
   axesGeo.setAttribute('position', new THREE.BufferAttribute(axesPts, 3))
   const axesMat = new THREE.LineBasicMaterial({ vertexColors: true })
   const colors = new Float32Array([
-    1, 0.1, 0.1,  1, 0.1, 0.1,   // X: red
-    0.1, 0.8, 0.1,  0.1, 0.8, 0.1,  // Y: green
+    1, 0.1, 0.1,  1, 0.1, 0.1,           // X: red
+    0.1, 0.8, 0.1,  0.1, 0.8, 0.1,       // Y: green
+    0.15, 0.35, 1.0,  0.15, 0.35, 1.0,   // Z: blue
   ])
   axesGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   group.add(new THREE.LineSegments(axesGeo, axesMat))
@@ -311,7 +322,9 @@ export default function Viewport({
     const threeScene = new THREE.Scene()
 
     const camera = new THREE.PerspectiveCamera(45, el.clientWidth / el.clientHeight, 0.01, 100)
-    camera.position.set(2, -2, 2)
+    // Person-scale default: frames a ~2–3 m region; classic SketchUp 3/4 angle.
+    // Distance ≈ 4.7 m; a 1.8 m figure reads as substantial, not dwarfed.
+    camera.position.set(3.5, -3.0, 2.5)
     camera.up.set(0, 0, 1)
     camera.lookAt(0, 0, 0)
 
@@ -529,8 +542,35 @@ export default function Viewport({
       }
     }
 
+    function zoomExtents(): void {
+      // Compute the world bounding box over all rendered objects and instances.
+      const box = new THREE.Box3()
+      box.expandByObject(sceneRenderer.objectsGroup)
+      box.expandByObject(sceneRenderer.instancesGroup)
+      if (box.isEmpty()) return
+
+      const center = new THREE.Vector3()
+      box.getCenter(center)
+      const size = new THREE.Vector3()
+      box.getSize(size)
+
+      // Fit the bounding sphere to the vertical FOV with a 1.2× margin.
+      const halfDiag = box.getBoundingSphere(new THREE.Sphere()).radius
+      const fovRad = (camera.fov * Math.PI) / 180
+      const distance = (halfDiag * 1.2) / Math.tan(fovRad / 2)
+
+      // Keep the current view direction; re-target at box center.
+      const dir = new THREE.Vector3()
+      dir.subVectors(camera.position, controls.target).normalize()
+      controls.target.copy(center)
+      camera.position.copy(center).addScaledVector(dir, distance)
+      camera.updateProjectionMatrix()
+      controls.update()
+      scheduleRender()
+    }
+
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -738,6 +778,8 @@ export default function Viewport({
       rafId = requestAnimationFrame(render)
       const changed = controls.update()
       if (changed || needsRender) {
+        // Keep the snap cursor at a constant screen size regardless of zoom.
+        cueLayer.updateMarkerScale(camera)
         renderer.render(threeScene, camera)
         needsRender = false
       }
