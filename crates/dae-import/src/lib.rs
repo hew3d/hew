@@ -20,6 +20,7 @@ use kernel::ImageFormat;
 
 pub mod heal;
 pub mod material;
+pub mod meta;
 pub mod parse;
 pub mod uv;
 

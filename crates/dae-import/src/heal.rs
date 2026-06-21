@@ -555,6 +555,140 @@ pub fn orient_outward(
     (out_faces, face_materials.to_vec(), out_uvs, out_holes)
 }
 
+// ── Consistent orientation (flood fill) ─────────────────────────────────────────
+
+/// True if `face`, optionally read in reverse, traverses the directed edge
+/// `a -> b` along its outer loop.
+fn outer_traverses(face: &[usize], reversed: bool, a: usize, b: usize) -> bool {
+    let m = face.len();
+    for k in 0..m {
+        let (mut x, mut y) = (face[k], face[(k + 1) % m]);
+        if reversed {
+            std::mem::swap(&mut x, &mut y);
+        }
+        if x == a && y == b {
+            return true;
+        }
+    }
+    false
+}
+
+/// Make adjacent faces *consistently* wound: across every interior (manifold)
+/// edge the two incident faces must traverse it in OPPOSITE directions. SketchUp
+/// sometimes exports a shell with a subset of faces reversed relative to their
+/// neighbours — invisible in its double-sided view, but `from_polygons` rejects
+/// it ("directed edge … traversed by more than one face"). A breadth-first flood
+/// over edge adjacency flips faces into agreement with a per-connected-component
+/// seed.
+///
+/// Only edges shared by *exactly two* faces drive propagation. Boundary edges
+/// (one face) and genuinely non-manifold edges (>2 faces) are skipped: a
+/// non-manifold mesh therefore stays inconsistent and is still reported as
+/// skipped downstream — no silent repair of non-solid input (DEVELOPMENT.md rule 4).
+///
+/// Idempotent on already-consistent meshes (the seed face is never flipped and
+/// every neighbour already agrees, so no face is reversed). Runs before
+/// [`orient_outward`], which then flips the now-consistent shell so its normals
+/// point outward. Hole loops are reversed together with their face, matching
+/// `orient_outward`; final hole winding is fixed by [`normalize_hole_winding`].
+pub fn orient_consistent(
+    faces: &[Vec<usize>],
+    face_materials: &[u32],
+    face_corner_uvs: &[Vec<[f64; 2]>],
+    face_holes: &[Vec<Vec<usize>>],
+) -> FilteredFaces {
+    use std::collections::VecDeque;
+
+    let n = faces.len();
+
+    // Undirected outer edge -> incident face indices.
+    let mut edge_faces: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (fi, face) in faces.iter().enumerate() {
+        let m = face.len();
+        for k in 0..m {
+            let a = face[k];
+            let b = face[(k + 1) % m];
+            let key = if a < b { (a, b) } else { (b, a) };
+            edge_faces.entry(key).or_default().push(fi);
+        }
+    }
+
+    let mut flip = vec![false; n];
+    let mut visited = vec![false; n];
+
+    for seed in 0..n {
+        if visited[seed] {
+            continue;
+        }
+        visited[seed] = true;
+        let mut queue = VecDeque::new();
+        queue.push_back(seed);
+        while let Some(fi) = queue.pop_front() {
+            let face = &faces[fi];
+            let m = face.len();
+            for k in 0..m {
+                // The directed edge this face (in its FINAL orientation) traverses.
+                let (mut a, mut b) = (face[k], face[(k + 1) % m]);
+                if flip[fi] {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                let key = if a < b { (a, b) } else { (b, a) };
+                let incident = &edge_faces[&key];
+                if incident.len() != 2 {
+                    continue; // boundary or non-manifold edge: don't propagate
+                }
+                let nb = if incident[0] == fi {
+                    incident[1]
+                } else {
+                    incident[0]
+                };
+                if visited[nb] {
+                    continue; // already decided; conflicts left for the kernel to reject
+                }
+                // The neighbour must traverse the reverse edge (b -> a). Pick the
+                // flip that makes it do so.
+                let nb_face = &faces[nb];
+                let need_flip = if outer_traverses(nb_face, false, b, a) {
+                    false
+                } else if outer_traverses(nb_face, true, b, a) {
+                    true
+                } else {
+                    continue; // shared vertex pair but not a shared edge; ignore
+                };
+                visited[nb] = true;
+                flip[nb] = need_flip;
+                queue.push_back(nb);
+            }
+        }
+    }
+
+    let mut out_faces: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut out_uvs: Vec<Vec<[f64; 2]>> = Vec::with_capacity(n);
+    let mut out_holes: FaceHoles = Vec::with_capacity(n);
+    for i in 0..n {
+        if flip[i] {
+            out_faces.push(faces[i].iter().rev().copied().collect());
+            out_uvs.push(face_corner_uvs[i].iter().rev().copied().collect());
+            out_holes.push(
+                face_holes
+                    .get(i)
+                    .map(|hs| {
+                        hs.iter()
+                            .map(|h| h.iter().rev().copied().collect())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            );
+        } else {
+            out_faces.push(faces[i].clone());
+            out_uvs.push(face_corner_uvs[i].clone());
+            out_holes.push(face_holes.get(i).cloned().unwrap_or_default());
+        }
+    }
+
+    (out_faces, face_materials.to_vec(), out_uvs, out_holes)
+}
+
 // ── Coplanar merge ────────────────────────────────────────────────────────────
 
 /// Unit (Newell) normal of a polygon, or `None` if degenerate.
@@ -929,14 +1063,22 @@ pub fn heal_mesh(
         &unique_positions,
     );
 
+    // 5b. Consistent orientation: flood-fill so adjacent faces agree across every
+    //    manifold edge. SketchUp occasionally reverses a subset of a shell's
+    //    faces (invisible in its double-sided view), which otherwise reads as
+    //    "directed edge traversed by more than one face" and gets the whole mesh
+    //    skipped. Non-manifold meshes are left inconsistent (still skipped).
+    let (consistent_faces, consistent_mats, consistent_uvs, consistent_holes) =
+        orient_consistent(&split_faces, &split_mats, &split_uvs, &split_holes);
+
     // 6. Orientation: flip a closed, inside-out shell to outward normals (some
     //    SketchUp source faces are reversed — invisible there, transparent +
     //    non-pushable here). Hole loops are reversed together with the outer.
     let (oriented_faces, oriented_mats, oriented_uvs, oriented_holes) = orient_outward(
-        &split_faces,
-        &split_mats,
-        &split_uvs,
-        &split_holes,
+        &consistent_faces,
+        &consistent_mats,
+        &consistent_uvs,
+        &consistent_holes,
         &unique_positions,
     );
 
@@ -1284,6 +1426,88 @@ mod tests {
         let open_holes: [Vec<Vec<usize>>; 5] = Default::default();
         let (f3, _, _, _) = orient_outward(&open, &open_mats, &open_uvs, &open_holes, &positions);
         assert_eq!(f3, open, "open shell orientation is left untouched");
+    }
+
+    /// Count directed edges traversed by more than one face — the exact condition
+    /// `from_polygons` rejects ("non-manifold or inconsistent winding").
+    fn dup_directed_edges(faces: &[Vec<usize>]) -> usize {
+        let mut dir: HashMap<(usize, usize), usize> = HashMap::new();
+        for f in faces {
+            let n = f.len();
+            for k in 0..n {
+                *dir.entry((f[k], f[(k + 1) % n])).or_default() += 1;
+            }
+        }
+        dir.values().filter(|&&c| c > 1).count()
+    }
+
+    /// A closed cube with a subset of its faces reversed (inconsistent winding —
+    /// what SketchUp sometimes exports) is flood-filled back to a single
+    /// consistent orientation, so no directed edge is traversed twice. An
+    /// already-consistent mesh is returned unchanged (idempotent).
+    #[test]
+    fn orient_consistent_repairs_mixed_winding_cube() {
+        // Topology-only: cube connectivity, no positions needed.
+        let outward = vec![
+            vec![0usize, 3, 2, 1], // bottom (−Z)
+            vec![4usize, 5, 6, 7], // top    (+Z)
+            vec![0usize, 1, 5, 4], // front  (−Y)
+            vec![1usize, 2, 6, 5], // right  (+X)
+            vec![2usize, 3, 7, 6], // back   (+Y)
+            vec![3usize, 0, 4, 7], // left   (−X)
+        ];
+        assert_eq!(
+            dup_directed_edges(&outward),
+            0,
+            "a consistently-wound cube has no duplicate directed edges"
+        );
+
+        // Reverse three of the six faces → mixed winding (some shared edges now
+        // traversed the same way by both incident faces).
+        let mut mixed = outward.clone();
+        for i in [1usize, 3, 5] {
+            mixed[i].reverse();
+        }
+        assert!(
+            dup_directed_edges(&mixed) > 0,
+            "reversing a subset breaks winding consistency"
+        );
+
+        let mats = vec![0u32; 6];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 6];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 6];
+
+        let (fixed, _, _, _) = orient_consistent(&mixed, &mats, &uvs, &holes);
+        assert_eq!(
+            dup_directed_edges(&fixed),
+            0,
+            "flood fill removes every duplicate directed edge"
+        );
+
+        // Idempotent on an already-consistent mesh: the seed is never flipped and
+        // every neighbour already agrees, so the output equals the input.
+        let (again, _, _, _) = orient_consistent(&outward, &mats, &uvs, &holes);
+        assert_eq!(again, outward, "consistent mesh is left untouched");
+    }
+
+    /// A non-manifold edge (shared by 3 faces) is excluded from propagation, so
+    /// `orient_consistent` cannot — and must not — make it consistent. The mesh
+    /// stays rejectable, which is correct: solids-first kernel refuses non-solids
+    /// rather than silently deleting a face (DEVELOPMENT.md rule 4).
+    #[test]
+    fn orient_consistent_leaves_nonmanifold_unrepaired() {
+        // Three faces all sharing the undirected edge {0,1} (vertices 2,3,4 are
+        // the three distinct apexes). `orient_consistent` is purely topological,
+        // so no positions are needed.
+        let faces = vec![vec![0usize, 1, 2], vec![0usize, 1, 3], vec![0usize, 1, 4]];
+        let mats = vec![0u32; 3];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 3];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 3];
+        let (out, _, _, _) = orient_consistent(&faces, &mats, &uvs, &holes);
+        assert!(
+            dup_directed_edges(&out) > 0,
+            "a genuinely non-manifold edge can never be made consistent"
+        );
     }
 
     /// Eight cube corners (outward-wound quads available below).

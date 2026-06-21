@@ -34,6 +34,7 @@ fn box_recipe(name: &str) -> MeshRecipe {
         face_uv_frames: vec![None; 6],
         face_holes: vec![Vec::new(); 6],
         base_material: kernel::NO_MATERIAL,
+        tags: Vec::new(),
     }
 }
 
@@ -56,6 +57,7 @@ fn degenerate_recipe(name: &str) -> MeshRecipe {
         face_uv_frames: vec![None],
         face_holes: vec![Vec::new()],
         base_material: kernel::NO_MATERIAL,
+        tags: Vec::new(),
     }
 }
 
@@ -130,6 +132,7 @@ fn ingest_is_atomic_undo_hides_all() {
             ImportNode::Group {
                 name: "g1".to_string(),
                 children: vec![ImportNode::Mesh(box_recipe("m2"))],
+                tags: Vec::new(),
             },
         ],
     };
@@ -208,10 +211,12 @@ fn ingest_instance_shares_one_def() {
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::IDENTITY,
+                tags: Vec::new(),
             },
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)),
+                tags: Vec::new(),
             },
         ],
     };
@@ -259,10 +264,12 @@ fn ingest_then_save_load_preserves_names() {
             ImportNode::Group {
                 name: "MyGroup".to_string(),
                 children: vec![ImportNode::Mesh(box_recipe("MyBox"))],
+                tags: Vec::new(),
             },
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::IDENTITY,
+                tags: Vec::new(),
             },
         ],
     };

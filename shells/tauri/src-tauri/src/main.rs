@@ -80,8 +80,8 @@ fn write_file(path: String, contents: Vec<u8>) -> Result<(), String> {
 /// Only regular files are included (directories are omitted).
 #[tauri::command]
 fn list_dir(path: String) -> Result<Vec<String>, String> {
-    let entries = std::fs::read_dir(&path)
-        .map_err(|e| format!("list_dir failed for {path:?}: {e}"))?;
+    let entries =
+        std::fs::read_dir(&path).map_err(|e| format!("list_dir failed for {path:?}: {e}"))?;
     let mut result = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -138,12 +138,7 @@ fn rebuild_recent_submenu(
     paths: &[String],
 ) -> Result<(), String> {
     // Remove every existing item.
-    loop {
-        match submenu.remove_at(0) {
-            Ok(Some(_)) => {}
-            _ => break,
-        }
-    }
+    while let Ok(Some(_)) = submenu.remove_at(0) {}
 
     // Append one item per path.
     for path in paths {
@@ -238,8 +233,7 @@ fn main() {
             let file_open = MenuItemBuilder::with_id("file-open", "Open…")
                 .accelerator("CmdOrCtrl+O")
                 .build(handle)?;
-            let file_import = MenuItemBuilder::with_id("file-import", "Import…")
-                .build(handle)?;
+            let file_import = MenuItemBuilder::with_id("file-import", "Import…").build(handle)?;
             let file_save = MenuItemBuilder::with_id("file-save", "Save")
                 .accelerator("CmdOrCtrl+S")
                 .build(handle)?;
@@ -296,10 +290,8 @@ fn main() {
             // ----------------------------------------------------------------
             // Tools menu
             // ----------------------------------------------------------------
-            let tool_select = MenuItemBuilder::with_id("tool-select", "Select")
-                .build(handle)?;
-            let tool_paint = MenuItemBuilder::with_id("tool-paint", "Paint")
-                .build(handle)?;
+            let tool_select = MenuItemBuilder::with_id("tool-select", "Select").build(handle)?;
+            let tool_paint = MenuItemBuilder::with_id("tool-paint", "Paint").build(handle)?;
             let tool_move = MenuItemBuilder::with_id("tool-move", "Move")
                 .accelerator("CmdOrCtrl+0")
                 .build(handle)?;
@@ -334,8 +326,8 @@ fn main() {
             let cam_zoom = MenuItemBuilder::with_id("cam-zoom", "Zoom")
                 .accelerator("CmdOrCtrl+\\")
                 .build(handle)?;
-            let cam_zoom_extents = MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents")
-                .build(handle)?;
+            let cam_zoom_extents =
+                MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents").build(handle)?;
 
             let camera_menu = SubmenuBuilder::new(handle, "Camera")
                 .item(&cam_orbit)
@@ -354,10 +346,18 @@ fn main() {
             let win_materials = MenuItemBuilder::with_id("win-materials", "Materials")
                 .accelerator("Shift+CmdOrCtrl+C")
                 .build(handle)?;
+            let win_tags = MenuItemBuilder::with_id("win-tags", "Tags")
+                .accelerator("Shift+CmdOrCtrl+T")
+                .build(handle)?;
+            let win_object_info = MenuItemBuilder::with_id("win-object-info", "Object Info")
+                .accelerator("Shift+CmdOrCtrl+O")
+                .build(handle)?;
 
             let window_menu = SubmenuBuilder::new(handle, "Window")
                 .item(&win_model_info)
                 .item(&win_materials)
+                .item(&win_tags)
+                .item(&win_object_info)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -393,8 +393,7 @@ fn main() {
         // Map menu-item ids to action strings and emit them to the webview.
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
-            if id.starts_with("recent:") {
-                let path = &id["recent:".len()..];
+            if let Some(path) = id.strip_prefix("recent:") {
                 let _ = app.emit("menu-open-path", path);
                 return;
             }
@@ -424,6 +423,8 @@ fn main() {
                 "cam-zoom-extents" => "zoom-extents",
                 "win-model-info" => "toggle-model-info",
                 "win-materials" => "toggle-materials",
+                "win-tags" => "toggle-tags",
+                "win-object-info" => "toggle-object-info",
                 _ => return,
             };
             let _ = app.emit("menu-action", action);

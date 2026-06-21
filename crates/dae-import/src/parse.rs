@@ -16,6 +16,7 @@ use kernel::{ImportNode, ImportScene, MeshRecipe, Point3, Transform, UvFrame, Ve
 
 use crate::heal::{heal_mesh, world_transform};
 use crate::material::build_material_table;
+use crate::meta::decode_meta;
 use crate::uv::fit_uv_frame;
 use crate::{DaeError, ImageMap};
 
@@ -71,7 +72,13 @@ pub fn parse_dae(
         if !meshes.is_empty() {
             // The library node's `name` attribute carries the friendly component
             // name (e.g. "Counter_Base"); fall back to its id.
-            let name = node.name.clone().or_else(|| node.id.clone());
+            // Decode HEWMETA/HEWTAG payload if present to get the real display name.
+            let name = node
+                .name
+                .as_deref()
+                .map(decode_meta)
+                .and_then(|m| m.name)
+                .or_else(|| node.id.clone());
             defs.push(kernel::DefRecipe { name, meshes });
             lib_node_to_def_idx.insert(node_id.clone(), def_idx);
         }
@@ -731,11 +738,14 @@ fn convert_node(
                         })
                         .collect();
 
-                    let name = node
-                        .name
-                        .clone()
+                    // Decode HEWMETA/HEWTAG payload to recover real name + tags.
+                    let node_meta = node.name.as_deref().map(decode_meta);
+                    let name = node_meta
+                        .as_ref()
+                        .and_then(|m| m.name.clone())
                         .or_else(|| node.id.clone())
                         .unwrap_or_else(|| geom_id.clone());
+                    let tags = node_meta.map(|m| m.tags).unwrap_or_default();
                     mesh_nodes.push(ImportNode::Mesh(MeshRecipe {
                         name,
                         positions,
@@ -744,6 +754,7 @@ fn convert_node(
                         face_uv_frames,
                         face_holes: healed_holes,
                         base_material: kernel::NO_MATERIAL,
+                        tags,
                     }));
                 }
             }
@@ -751,6 +762,11 @@ fn convert_node(
     }
 
     // Collect instance_node references → ImportNode::Instance.
+    // Decode the placing node's name to get instance-level tags (the Ruby script
+    // encodes the component instance's name + tags onto the node that contains the
+    // <instance_node> reference).
+    let inst_meta = node.name.as_deref().map(decode_meta);
+    let inst_tags = inst_meta.map(|m| m.tags).unwrap_or_default();
     let mut instance_nodes: Vec<ImportNode> = Vec::new();
     for inst_node in &node.instance_node {
         let node_ref_id = url_as_str(&inst_node.url);
@@ -760,6 +776,7 @@ fn convert_node(
             instance_nodes.push(ImportNode::Instance {
                 def: def_idx,
                 pose: world_bake,
+                tags: inst_tags.clone(),
             });
         }
     }
@@ -796,15 +813,18 @@ fn convert_node(
         0 => None,
         1 => Some(all.into_iter().next().unwrap()),
         _ => {
-            // Wrap in a group.
-            let name = node
-                .name
-                .clone()
+            // Wrap in a group. Decode HEWMETA/HEWTAG payload for real name + tags.
+            let group_meta = node.name.as_deref().map(decode_meta);
+            let name = group_meta
+                .as_ref()
+                .and_then(|m| m.name.clone())
                 .or_else(|| node.id.clone())
                 .unwrap_or_default();
+            let tags = group_meta.map(|m| m.tags).unwrap_or_default();
             Some(ImportNode::Group {
                 name,
                 children: all,
+                tags,
             })
         }
     }
@@ -903,11 +923,14 @@ fn collect_meshes_from_node(
                         })
                         .collect();
 
-                    let name = node
-                        .name
-                        .clone()
+                    // Decode HEWMETA/HEWTAG payload to recover real name + tags.
+                    let def_meta = node.name.as_deref().map(decode_meta);
+                    let name = def_meta
+                        .as_ref()
+                        .and_then(|m| m.name.clone())
                         .or_else(|| node.id.clone())
                         .unwrap_or_else(|| geom_id.clone());
+                    let tags = def_meta.map(|m| m.tags).unwrap_or_default();
                     meshes.push(MeshRecipe {
                         name,
                         positions,
@@ -916,6 +939,7 @@ fn collect_meshes_from_node(
                         face_uv_frames,
                         face_holes: healed_holes,
                         base_material: kernel::NO_MATERIAL,
+                        tags,
                     });
                 }
             }

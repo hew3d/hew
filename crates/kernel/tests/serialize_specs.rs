@@ -14,6 +14,7 @@ use kernel::{
     Document, ImageFormat, Material, NodeId, Object, Plane, Point3, Profile, Rgba8, Texture,
     Transform, WatertightState,
 };
+use kernel::{ImportNode, ImportScene, MeshRecipe};
 
 // ----------------------------------------------------------------- helpers
 
@@ -427,4 +428,178 @@ fn load_rejects_truncation() {
     extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let bytes = doc.save();
     assert!(Document::load(&bytes[..bytes.len() / 2]).is_err());
+}
+
+// ──────────────────────────────────────────── tags round-trip (WS3+WS4) ──────
+
+/// Helper: build a simple box MeshRecipe with given tags.
+fn box_recipe_with_tags(name: &str, tags: Vec<Vec<String>>) -> MeshRecipe {
+    let (a, b) = (Point3::ORIGIN, Point3::new(1.0, 1.0, 1.0));
+    MeshRecipe {
+        name: name.to_string(),
+        positions: vec![
+            Point3::new(a.x, a.y, a.z),
+            Point3::new(b.x, a.y, a.z),
+            Point3::new(b.x, b.y, a.z),
+            Point3::new(a.x, b.y, a.z),
+            Point3::new(a.x, a.y, b.z),
+            Point3::new(b.x, a.y, b.z),
+            Point3::new(b.x, b.y, b.z),
+            Point3::new(a.x, b.y, b.z),
+        ],
+        faces: vec![
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+        face_materials: vec![kernel::NO_MATERIAL; 6],
+        face_uv_frames: vec![None; 6],
+        face_holes: vec![Vec::new(); 6],
+        base_material: kernel::NO_MATERIAL,
+        tags,
+    }
+}
+
+/// Tags on object/group/instance survive `save`→`load` (manifest v3 round-trip).
+#[test]
+fn tags_round_trip_through_save_load() {
+    let mut doc = Document::new();
+
+    // Object with tags: import a box mesh that carries tags.
+    let obj_tags = vec![
+        vec!["Structure".to_string(), "Roof".to_string()],
+        vec!["Exported".to_string()],
+    ];
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![ImportNode::Mesh(box_recipe_with_tags(
+            "roof_box",
+            obj_tags.clone(),
+        ))],
+    };
+    let (_, _) = doc.ingest(scene, vec![]).unwrap();
+
+    // Group with tags.
+    let box2 = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 0.0, 1.0);
+    let group_tags = vec![vec!["Walls".to_string()]];
+    doc.group_nodes(&[NodeId::Object(box2)]).unwrap();
+    let gid = *doc.group_ids().first().unwrap();
+    doc.add_node_tag(NodeId::Group(gid), group_tags[0].clone())
+        .unwrap();
+
+    // Instance with tags.
+    let def_box = extrude_box(&mut doc, 6.0, 0.0, 7.0, 1.0, 0.0, 1.0);
+    let (comp, iid, _) = doc.make_component(&[NodeId::Object(def_box)]).unwrap();
+    let _ = comp;
+    let inst_tags = vec![vec!["Furniture".to_string(), "Chair".to_string()]];
+    doc.add_node_tag(NodeId::Instance(iid), inst_tags[0].clone())
+        .unwrap();
+
+    // Round-trip.
+    let bytes = doc.save();
+    let loaded = Document::load(&bytes).expect("load");
+
+    // Object tags survived.
+    let loaded_oid = *loaded
+        .visible_object_ids()
+        .iter()
+        .find(|&&id| loaded.node_tags(NodeId::Object(id)) == obj_tags.as_slice())
+        .expect("object with the expected tags should survive round-trip");
+    assert_eq!(
+        loaded.node_tags(NodeId::Object(loaded_oid)),
+        obj_tags.as_slice()
+    );
+
+    // Group tags survived.
+    let loaded_gid = *loaded.group_ids().first().unwrap();
+    assert_eq!(
+        loaded.node_tags(NodeId::Group(loaded_gid)),
+        group_tags.as_slice()
+    );
+
+    // Instance tags survived.
+    let loaded_iid = *loaded.instance_ids().first().unwrap();
+    assert_eq!(
+        loaded.node_tags(NodeId::Instance(loaded_iid)),
+        inst_tags.as_slice()
+    );
+}
+
+/// A v2-style manifest (no `tags` field) loads with empty tags — back-compat.
+#[test]
+fn v2_manifest_loads_with_empty_tags() {
+    // The name_compat_tests in serialize.rs already cover DTO deserialization
+    // defaults; this test verifies the full Document::load path.
+    // Build a doc, save it, patch the manifest to remove all `tags` keys and
+    // set format_version=2, then reload.
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    // Give the object a tag first so we can verify it's gone after the v2 load.
+    doc.add_node_tag(NodeId::Object(obj), vec!["Structure".to_string()])
+        .unwrap();
+    let bytes = doc.save();
+
+    // Re-open the zip and strip `tags` from the manifest + set format_version=2.
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+
+    // Parse as generic JSON Value, remove "tags" fields, set format_version=2.
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    manifest["format_version"] = serde_json::json!(2);
+    // Strip `tags` from objects, groups, instances.
+    for arr_key in ["objects", "groups", "instances"] {
+        if let Some(arr) = manifest[arr_key].as_array_mut() {
+            for entry in arr.iter_mut() {
+                entry.as_object_mut().map(|m| m.remove("tags"));
+            }
+        }
+    }
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    // Re-pack the zip with the patched manifest.
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    // Re-add all other entries.
+    let bytes2 = bytes.clone(); // keep the original bytes alive
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    let patched_bytes = new_zip.finish().unwrap().into_inner();
+
+    // Load should succeed and tags should be empty.
+    let loaded = Document::load(&patched_bytes).expect("v2 manifest should load");
+    for oid in loaded.visible_object_ids() {
+        assert_eq!(
+            loaded.node_tags(NodeId::Object(oid)),
+            &[] as &[Vec<String>],
+            "tags default to empty for v2 files"
+        );
+    }
 }

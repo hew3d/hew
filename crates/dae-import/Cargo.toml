@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 kernel.workspace = true
 dae-parser = { workspace = true, default-features = true, features = [] }
+serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

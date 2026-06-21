@@ -9,7 +9,7 @@
  * alongside the existing boolean buttons.
  */
 
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect, useRef } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   entityLabel,
@@ -20,6 +20,7 @@ import {
   canUngroup as canUngroupHelper,
   nodeRefFromJs,
   nodeKindToNumber,
+  nodeKey,
   type NodeRef,
 } from './treeModel'
 
@@ -66,6 +67,10 @@ interface Props {
   onMakeUnique: () => void
   /** Called when the user closes the panel. */
   onClose: () => void
+  /** Set of nodeKey strings for nodes that are currently hidden. */
+  hiddenKeys: Set<string>
+  /** Toggle hide/show for a node (and its descendants if it's a group). */
+  onToggleHidden: (node: NodeRef) => void
 }
 
 const ROW_BASE: React.CSSProperties = {
@@ -103,6 +108,8 @@ export function DocumentTree({
   canMakeUnique,
   onMakeUnique,
   onClose,
+  hiddenKeys,
+  onToggleHidden,
 }: Props) {
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -116,8 +123,43 @@ export function DocumentTree({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const instanceIds = useMemo(() => Array.from(scene.instance_ids()), [scene, docRev])
 
-  const selected = new Set(selectedIds.map((n) => `${n.kind}:${n.id}`))
-  const isSelected = (n: NodeRef) => selected.has(`${n.kind}:${n.id}`)
+  const selected = new Set(selectedIds.map((n) => nodeKey(n)))
+  const isSelected = (n: NodeRef) => selected.has(nodeKey(n))
+
+  // Primary selection for scroll-into-view: stable ref so the effect only
+  // fires when the primary selection actually changes (not on docRev bumps).
+  const primaryKey = selectedIds.length > 0 ? nodeKey(selectedIds[0]) : null
+  const primaryKeyRef = useRef<string | null>(null)
+  const selectedRowRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (primaryKey === primaryKeyRef.current) return
+    // Only advance the ref once we've actually scrolled. If the selected node is
+    // inside a collapsed group, its row isn't mounted on this pass; a child
+    // NodeRow auto-expands and re-renders, and we scroll on the next pass.
+    if (selectedRowRef.current !== null) {
+      primaryKeyRef.current = primaryKey
+      selectedRowRef.current.scrollIntoView({ block: 'nearest' })
+    } else if (primaryKey === null) {
+      primaryKeyRef.current = null
+    }
+  })
+
+  // Compute the set of group ancestor keys for the primary selected node so
+  // those groups can be auto-expanded when they're collapsed.
+  const ancestorGroupKeys = useMemo(() => {
+    const keys = new Set<string>()
+    if (selectedIds.length === 0) return keys
+    const primary = selectedIds[0]
+    // Walk up the parent chain from the primary node.
+    const kindNum = primary.kind === 'object' ? 0 : primary.kind === 'group' ? 1 : 2
+    let parentId = scene.node_parent(kindNum, primary.id)
+    while (parentId !== undefined) {
+      keys.add(nodeKey({ kind: 'group', id: parentId }))
+      parentId = scene.node_parent(1, parentId)
+    }
+    return keys
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, scene, docRev])
 
   const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
 
@@ -298,6 +340,11 @@ export function DocumentTree({
             activeContext={activeContext}
             deepestCtx={deepestCtx}
             isSelected={isSelected}
+            primaryKey={primaryKey}
+            selectedRowRef={selectedRowRef}
+            ancestorGroupKeys={ancestorGroupKeys}
+            hiddenKeys={hiddenKeys}
+            onToggleHidden={onToggleHidden}
             onSelect={onSelect}
             onEnterContext={onEnterContext}
           />
@@ -332,6 +379,11 @@ function NodeRow({
   activeContext,
   deepestCtx,
   isSelected,
+  primaryKey,
+  selectedRowRef,
+  ancestorGroupKeys,
+  hiddenKeys,
+  onToggleHidden,
   onSelect,
   onEnterContext,
 }: {
@@ -344,15 +396,28 @@ function NodeRow({
   activeContext: NodeRef[]
   deepestCtx: NodeRef | null
   isSelected: (n: NodeRef) => boolean
+  primaryKey: string | null
+  selectedRowRef: React.RefObject<HTMLDivElement>
+  ancestorGroupKeys: Set<string>
+  hiddenKeys: Set<string>
+  onToggleHidden: (node: NodeRef) => void
   onSelect: (n: NodeRef, additive: boolean) => void
   onEnterContext: (n: NodeRef) => void
 }) {
+  // Auto-expand when this group is an ancestor of the primary selected node.
+  const isAncestor = node.kind === 'group' && ancestorGroupKeys.has(nodeKey(node))
   const [expanded, setExpanded] = useState(true)
+  // Force expand when this group is in the ancestor path of the primary selection.
+  useEffect(() => {
+    if (isAncestor) setExpanded(true)
+  }, [isAncestor])
 
   const selected = isSelected(node)
+  const isPrimary = primaryKey !== null && nodeKey(node) === primaryKey
   const active = deepestCtx !== null &&
     deepestCtx.kind === node.kind && deepestCtx.id === node.id
   const dimmed = isTreeRowDimmed(activeContext, node, depth)
+  const hidden = hiddenKeys.has(nodeKey(node))
 
   if (node.kind === 'object') {
     const watertight = watertightMap.get(node.id) ?? true
@@ -360,12 +425,16 @@ function NodeRow({
       <Row
         label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
         selected={selected}
+        isPrimary={isPrimary}
         active={active}
         dimmed={dimmed}
+        hidden={hidden}
         indent={depth}
         dot={watertight ? '#1a7a3a' : '#cc3322'}
+        rowRef={isPrimary ? selectedRowRef : undefined}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
+        onToggleHidden={() => onToggleHidden(node)}
       />
     )
   }
@@ -377,12 +446,16 @@ function NodeRow({
       <Row
         label={resolveLabel(scene.instance_name(node.id), defName, 'instance', index)}
         selected={selected}
+        isPrimary={isPrimary}
         active={active}
         dimmed={dimmed}
+        hidden={hidden}
         indent={depth}
         isInstance
+        rowRef={isPrimary ? selectedRowRef : undefined}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
+        onToggleHidden={() => onToggleHidden(node)}
       />
     )
   }
@@ -400,14 +473,18 @@ function NodeRow({
       <Row
         label={resolveLabel(scene.group_name(node.id), undefined, 'group', index)}
         selected={selected}
+        isPrimary={isPrimary}
         active={active}
         dimmed={dimmed}
+        hidden={hidden}
         indent={depth}
         isGroup
         expanded={expanded}
         onToggleExpand={() => setExpanded((e) => !e)}
+        rowRef={isPrimary ? selectedRowRef : undefined}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
+        onToggleHidden={() => onToggleHidden(node)}
       />
       {expanded && members.map((child, childIdx) => (
         <NodeRow
@@ -421,6 +498,11 @@ function NodeRow({
           activeContext={activeContext}
           deepestCtx={deepestCtx}
           isSelected={isSelected}
+          primaryKey={primaryKey}
+          selectedRowRef={selectedRowRef}
+          ancestorGroupKeys={ancestorGroupKeys}
+          hiddenKeys={hiddenKeys}
+          onToggleHidden={onToggleHidden}
           onSelect={onSelect}
           onEnterContext={onEnterContext}
         />
@@ -493,38 +575,56 @@ function Section({ title, empty, children }: { title: string; empty: string; chi
 function Row({
   label,
   selected,
+  isPrimary,
   active,
   dimmed,
+  hidden,
   indent,
   dot,
   isGroup,
   isInstance,
   expanded,
   onToggleExpand,
+  rowRef,
   onClick,
   onDoubleClick,
+  onToggleHidden,
 }: {
   label: string
   selected: boolean
+  isPrimary?: boolean
   active: boolean
   dimmed: boolean
+  hidden?: boolean
   indent: number
   dot?: string
   isGroup?: boolean
   isInstance?: boolean
   expanded?: boolean
   onToggleExpand?: () => void
+  rowRef?: React.Ref<HTMLDivElement>
   onClick: (additive: boolean) => void
   onDoubleClick?: () => void
+  onToggleHidden?: () => void
 }) {
-  const background = active ? '#3a567f' : selected ? '#39507040' : 'transparent'
+  // Primary selected row gets a strong highlight; secondary selected is subtler.
+  const background = active
+    ? '#3a567f'
+    : isPrimary === true
+      ? '#4477cc'
+      : selected
+        ? '#2d4a6a'
+        : 'transparent'
+
   return (
     <div
+      ref={rowRef}
       onClick={(e) => onClick(e.shiftKey || e.ctrlKey || e.metaKey)}
       onDoubleClick={onDoubleClick}
       style={{
         ...ROW_BASE,
         paddingLeft: `${8 + indent * 16}px`,
+        paddingRight: '4px',
         background,
         opacity: dimmed ? 0.5 : 1,
         fontWeight: active ? 'bold' : 'normal',
@@ -560,8 +660,30 @@ function Row({
       {dot !== undefined && (
         <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: dot, flexShrink: 0 }} />
       )}
-      <span>{label}</span>
-      {active && <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#cfe0f5' }}>editing</span>}
+      <span style={{ flex: 1, color: hidden === true ? '#666' : undefined }}>{label}</span>
+      {active && <span style={{ fontSize: '10px', color: '#cfe0f5' }}>editing</span>}
+      {/* Eye toggle — only visible on hover via CSS would require class, so always show */}
+      {onToggleHidden !== undefined && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggleHidden()
+          }}
+          title={hidden === true ? 'Show' : 'Hide'}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: hidden === true ? '#555' : '#888',
+            cursor: 'pointer',
+            padding: '0 2px',
+            fontSize: '11px',
+            lineHeight: 1,
+            flexShrink: 0,
+          }}
+        >
+          {hidden === true ? '○' : '●'}
+        </button>
+      )}
     </div>
   )
 }

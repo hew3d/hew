@@ -61,7 +61,7 @@ sentinel `0xFFFF_FFFF` = `None`.
 
 ```jsonc
 {
-  "format_version": 2,            // — bumped on any manifest-shape change
+  "format_version": 3,            // — bumped on any manifest-shape change
   "geometry_version": 2,          // GEOMETRY_FORMAT_VERSION of the .bin buffers
   "app": "hew",
   "app_version": "0.1.0",
@@ -79,32 +79,39 @@ sentinel `0xFFFF_FFFF` = `None`.
   // Geometry lives in the referenced buffer; base_material is the object
   // default material (null/omitted = None). `name` (v2+) is an optional display
   // name (e.g. carried in from an import); omitted = unnamed → positional label.
+  // `tags` (v3+) is a list of root-first tag-path segments (e.g. SketchUp Layers
+  // hierarchy); omitted / empty = no tags.
   "objects": [
     { "id": 0, "geometry": "geometry/obj_0.bin", "base_material": 0,
-      "name": "Counter_Base" }
+      "name": "Counter_Base",
+      "tags": [["Architecture", "Walls"], ["Level", "L1"]] }
   ],
 
   // Merge groups: membership only, ordered. Nesting allowed.
   // `name` (v2+) optional, as for objects.
+  // `tags` (v3+) list of root-first tag-path segments; omitted / empty = no tags.
   "groups": [
     { "id": 0, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
-      "name": "MyGroup" }
+      "name": "MyGroup",
+      "tags": [["Architecture"]] }
   ],
 
   // Component definitions: a flat, ordered set of definition-local objects.
   // `name` (v2+) is the definition's display name; an instance with no own name
-  // shows its def's name.
+  // shows its def's name. Components carry no tags (tags live on instances).
   "components": [
     { "id": 0, "members": [2, 3], "name": "MyComponent" }   // object ids that are this def's members
   ],
 
   // Component instances: a def placed at an invertible pose.
   // `name` (v2+) optional per-instance display name; omitted = use the def name.
+  // `tags` (v3+) list of root-first tag-path segments; omitted / empty = no tags.
   "instances": [
     { "id": 0, "def": 0,
       // row-major 3x4 affine (def-local -> world); = Transform::to_affine().
       // May be reflective / non-uniform (poses are not baked).
-      "pose": [1,0,0,0, 0,1,0,0, 0,0,1,0] }
+      "pose": [1,0,0,0, 0,1,0,0, 0,0,1,0],
+      "tags": [["Furniture"]] }
   ],
 
   // First-class 2D sketches. Sub-ids are dense within the sketch.
@@ -217,6 +224,9 @@ fields default (`format_version` 1 has no node `name`s → all `None`).
 `format_version` history:
 - **v1** — initial manifest shape.
 - **v2** — optional `name` on object/group/component/instance entries.
+- **v3** — optional `tags: Vec<Vec<String>>` (root-first tag-path segments) on
+  object/group/instance entries. Components carry no tags (tags sit on instances).
+  Missing `tags` fields in older files default to `[]` via `#[serde(default)]`.
 
 ## 7. Conformance tests
 

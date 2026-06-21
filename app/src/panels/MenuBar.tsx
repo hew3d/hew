@@ -35,10 +35,18 @@ export interface MenuBarProps {
   showModelInfo?: boolean
   /** Whether the Materials pane is visible. */
   showMaterials?: boolean
+  /** Whether the Tags pane is visible. */
+  showTags?: boolean
+  /** Whether the Object Info pane is visible. */
+  showObjectInfo?: boolean
   /** Toggle the Model info pane. */
   onToggleModelInfo?: () => void
   /** Toggle the Materials pane. */
   onToggleMaterials?: () => void
+  /** Toggle the Tags pane. */
+  onToggleTags?: () => void
+  /** Toggle the Object Info pane. */
+  onToggleObjectInfo?: () => void
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
 }
@@ -185,8 +193,12 @@ export function MenuBar({
   onSelectTool,
   showModelInfo = true,
   showMaterials = true,
+  showTags = false,
+  showObjectInfo = false,
   onToggleModelInfo,
   onToggleMaterials,
+  onToggleTags,
+  onToggleObjectInfo,
   onZoomExtents,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
@@ -394,6 +406,18 @@ export function MenuBar({
                   shortcut={`⇧${mod}C`}
                   checked={showMaterials}
                   onClick={withClose(() => onToggleMaterials?.())}
+                />
+                <CheckMenuItem
+                  label="Tags"
+                  shortcut={`⇧${mod}T`}
+                  checked={showTags}
+                  onClick={withClose(() => onToggleTags?.())}
+                />
+                <CheckMenuItem
+                  label="Object Info"
+                  shortcut={`⇧${mod}O`}
+                  checked={showObjectInfo}
+                  onClick={withClose(() => onToggleObjectInfo?.())}
                 />
               </div>
             )}

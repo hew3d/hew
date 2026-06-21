@@ -542,6 +542,13 @@ pub struct Scene {
     /// Flat-shaded render buffers per Object, rebuilt lazily on demand and
     /// invalidated by `reconcile` when the Object changes or is hidden.
     mesh_cache: SecondaryMap<ObjectId, RenderMesh>,
+    /// User-hidden world objects/instances (session-only, app-driven via
+    /// [`Scene::set_hidden`]). Hidden geometry is dropped from the inference
+    /// scene so `snap`/`pick_face` never report it — hiding makes a solid both
+    /// invisible AND non-pickable/non-snappable. Not a kernel/document concept
+    /// (not persisted); the kernel's own `hidden` flag is the undo tombstone.
+    hidden_objects: std::collections::HashSet<ObjectId>,
+    hidden_instances: std::collections::HashSet<InstanceId>,
 }
 
 impl Default for Scene {
@@ -573,7 +580,9 @@ impl Scene {
         // so a definition edit re-tessellates the shared geometry.
         for &id in &change.objects_touched {
             self.mesh_cache.remove(id);
-            if self.doc.is_world_object(id) {
+            // A user-hidden object stays out of inference even when a mutation
+            // touches it, so snap/pick never resurrect hidden candidates.
+            if self.doc.is_world_object(id) && !self.hidden_objects.contains(&id) {
                 let object = self.doc.object(id).expect("world object is live");
                 self.inference.add_object(id, object, &Transform::IDENTITY);
             } else {
@@ -586,7 +595,9 @@ impl Scene {
         // so shared-geometry changes propagate to all placements here.
         for &iid in &change.instances_touched {
             self.inference.remove_instance(iid);
-            self.register_instance(iid);
+            if !self.hidden_instances.contains(&iid) {
+                self.register_instance(iid);
+            }
         }
     }
 
@@ -627,6 +638,8 @@ impl Scene {
             doc: Document::new(),
             inference: InferenceScene::new(),
             mesh_cache: SecondaryMap::new(),
+            hidden_objects: std::collections::HashSet::new(),
+            hidden_instances: std::collections::HashSet::new(),
         }
     }
 
@@ -1004,6 +1017,83 @@ impl Scene {
         self.doc
             .component_name(component_id(component))
             .map(str::to_string)
+    }
+
+    // ---------------------------------------------------------- node metadata
+
+    /// Rename a visible tree node (undoable). `name = None` clears the name so
+    /// the UI falls back to a positional label. Pass `Some("")` to set an
+    /// explicit empty string — the kernel and UI decide how to display it.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn set_node_name(
+        &mut self,
+        kind: u8,
+        id: u64,
+        name: Option<String>,
+    ) -> Result<(), ApiError> {
+        let node = node_id(kind, id)?;
+        let change = self.doc.set_node_name(node, name).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Append a tag path to a visible tree node (undoable). `path` is an
+    /// ordered list of folder-path segments (root first), e.g. `["Structure",
+    /// "Roof"]`. No-op (no undo entry) if the tag is already present.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn add_node_tag(&mut self, kind: u8, id: u64, path: Vec<String>) -> Result<(), ApiError> {
+        let node = node_id(kind, id)?;
+        let change = self.doc.add_node_tag(node, path).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Remove the first occurrence of `path` from a visible tree node's tag
+    /// list (undoable). No-op (no undo entry) if the path is not present.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn remove_node_tag(
+        &mut self,
+        kind: u8,
+        id: u64,
+        path: Vec<String>,
+    ) -> Result<(), ApiError> {
+        let node = node_id(kind, id)?;
+        let change = self.doc.remove_node_tag(node, &path).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// The tag paths of a visible tree node, encoded as `Vec<String>`.
+    ///
+    /// Each tag path (a root-first list of folder segments, e.g.
+    /// `["Structure","Roof"]`) is joined with `/` into a single string
+    /// (e.g. `"Structure/Roof"`). The UI should split on `/` to recover the
+    /// segments. **Known limitation**: tag or folder names that themselves
+    /// contain `/` will round-trip incorrectly — SketchUp tag names with `/`
+    /// are rare in practice and the extra engineering is deferred.
+    ///
+    /// Returns an empty `Vec` if the node is stale, hidden, or has no tags.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_tags(&self, kind: u8, id: u64) -> Result<Vec<String>, ApiError> {
+        let node = node_id(kind, id)?;
+        let tags = self
+            .doc
+            .node_tags(node)
+            .iter()
+            .map(|segments| segments.join("/"))
+            .collect();
+        Ok(tags)
+    }
+
+    /// Whether `object` is a live, visible, watertight (solid) object.
+    ///
+    /// Returns `false` if the id is stale, hidden, or the object is leaky/open.
+    pub fn object_solid(&self, id: u64) -> bool {
+        self.doc.object_solid(object_id(id))
     }
 
     /// The member objects of a definition (definition-local geometry), in order.
@@ -1406,6 +1496,35 @@ impl Scene {
         }
     }
 
+    /// Set the user-hidden world objects and instances (session-only; this
+    /// *replaces* the previous sets). Hidden geometry is dropped from the
+    /// inference scene, so it is neither snapped to (`snap`) nor pickable
+    /// (`pick_face`); showing it again re-registers it. This is the kernel-side
+    /// complement to the renderer hiding the meshes — together they make Hide
+    /// fully exclude a solid from interaction, so you can snap to / select the
+    /// geometry behind it. Not persisted (not a document concept).
+    pub fn set_hidden(&mut self, object_ids: &[u64], instance_ids: &[u64]) {
+        self.hidden_objects = object_ids.iter().map(|&h| object_id(h)).collect();
+        self.hidden_instances = instance_ids.iter().map(|&h| instance_id(h)).collect();
+
+        // Rebuild inference registration to match the new sets: every live world
+        // object is either (re)registered at identity or dropped; likewise each
+        // instance is re-placed at its pose or dropped.
+        for id in self.doc.visible_object_ids() {
+            if self.hidden_objects.contains(&id) {
+                self.inference.remove_object(id);
+            } else if let Some(object) = self.doc.object(id) {
+                self.inference.add_object(id, object, &Transform::IDENTITY);
+            }
+        }
+        for iid in self.doc.instance_ids() {
+            self.inference.remove_instance(iid);
+            if !self.hidden_instances.contains(&iid) {
+                self.register_instance(iid);
+            }
+        }
+    }
+
     // ------------------------------------------------------- materials
 
     /// Add a solid-color material to the palette and return its handle.
@@ -1671,6 +1790,10 @@ impl Scene {
         self.doc = new_doc;
         self.mesh_cache = SecondaryMap::new();
         self.inference = InferenceScene::new();
+        // Hidden sets key by dense ids the new document reuses; drop them so a
+        // stale id can't keep a fresh object out of inference.
+        self.hidden_objects.clear();
+        self.hidden_instances.clear();
 
         // Register every visible world object.
         for id in self.doc.visible_object_ids() {
@@ -1901,6 +2024,83 @@ mod tests {
         assert!((pn[5] - 1.0).abs() < 1e-9 && pn[3].abs() < 1e-9 && pn[4].abs() < 1e-9);
         // The point lies on the top plane (z = 1).
         assert!((pn[2] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn set_hidden_excludes_object_from_pick_and_snap() {
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 2.0).unwrap();
+
+        // A ray straight down through the box hits the top face while visible,
+        // and the box's 8 vertices / 12 edges / 6 faces are inference candidates.
+        assert!(
+            scene.pick_face(0.5, 0.5, 5.0, 0.0, 0.0, -1.0).is_some(),
+            "visible box is pickable"
+        );
+        assert_eq!(
+            scene.inference.candidate_counts(),
+            (8, 12, 6),
+            "visible box registers its full geometry with inference"
+        );
+
+        // Hiding the object drops every candidate AND makes it unpickable, so a
+        // click/hover reaches whatever lies behind it instead of the hidden solid.
+        scene.set_hidden(&[obj], &[]);
+        assert_eq!(
+            scene.inference.candidate_counts(),
+            (0, 0, 0),
+            "hidden box contributes no snap candidates"
+        );
+        assert!(
+            scene.pick_face(0.5, 0.5, 5.0, 0.0, 0.0, -1.0).is_none(),
+            "hidden box must not be pickable"
+        );
+
+        // Showing it again re-registers the full geometry.
+        scene.set_hidden(&[], &[]);
+        assert_eq!(scene.inference.candidate_counts(), (8, 12, 6));
+        assert!(
+            scene.pick_face(0.5, 0.5, 5.0, 0.0, 0.0, -1.0).is_some(),
+            "shown box is pickable again"
+        );
+    }
+
+    #[test]
+    fn hidden_object_stays_hidden_across_a_mutation() {
+        // reconcile must not resurrect a hidden object's inference candidates
+        // when a later mutation touches it.
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 2.0).unwrap();
+        scene.set_hidden(&[obj], &[]);
+
+        // A push/pull on the box touches it (objects_touched), driving reconcile.
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        scene.push_pull(obj, top, 1.0).unwrap();
+
+        assert_eq!(
+            scene.inference.candidate_counts(),
+            (0, 0, 0),
+            "a mutation must not re-register a hidden object with inference"
+        );
+        assert!(
+            scene.pick_face(0.5, 0.5, 5.0, 0.0, 0.0, -1.0).is_none(),
+            "the hidden box stays unpickable after the push/pull"
+        );
     }
 
     #[test]

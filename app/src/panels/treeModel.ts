@@ -6,6 +6,24 @@
  * unit-tested like geoHelpers. The React panel and the renderer consume these.
  */
 
+/**
+ * Delimiter injected by hew_export_tags.rb, as it survives SketchUp's name
+ * sanitization: the original `@@HEWTAG@@` arrives as a run of underscores around
+ * the `HEWTAG` token (e.g. `___HEWTAG__`), so match `_+HEWTAG_+`. See
+ * `tagModel.ts` for the full rationale.
+ */
+const HEWTAG_DELIM_RE = /_+HEWTAG_+/
+
+/**
+ * Strip the `__HEWTAG__<tag path>` suffix from a raw kernel name, returning only
+ * the human-readable display portion. If the delimiter is absent the name is
+ * returned unchanged.
+ */
+export function stripTagSuffix(name: string): string {
+  const m = HEWTAG_DELIM_RE.exec(name)
+  return m === null ? name : name.slice(0, m.index)
+}
+
 /** Kind of a document node. */
 export type NodeKind = 'object' | 'group' | 'instance'
 
@@ -18,6 +36,11 @@ export interface NodeRef {
 /** Return true when two NodeRefs refer to the same node. */
 export function nodeEq(a: NodeRef, b: NodeRef): boolean {
   return a.kind === b.kind && a.id === b.id
+}
+
+/** Stable string key for a NodeRef, usable in a Set or Map. */
+export function nodeKey(n: NodeRef): string {
+  return `${n.kind}:${n.id}`
 }
 
 /** Convert a NodeJs FFI value (has .kind and .id) to a plain NodeRef. */
@@ -67,8 +90,16 @@ export function resolveLabel(
   kind: EntityKind,
   index: number,
 ): string {
-  if (kernelName !== undefined) return kernelName
-  if (kind === 'instance' && defName !== undefined) return defName
+  // A name that is purely a tag suffix (unnamed group/object that the Ruby
+  // tagged) strips to empty → fall through to the positional label, not a blank.
+  if (kernelName !== undefined) {
+    const stripped = stripTagSuffix(kernelName)
+    if (stripped.length > 0) return stripped
+  }
+  if (kind === 'instance' && defName !== undefined) {
+    const stripped = stripTagSuffix(defName)
+    if (stripped.length > 0) return stripped
+  }
   return entityLabel(kind, index)
 }
 

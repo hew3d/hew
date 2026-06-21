@@ -44,6 +44,10 @@ pub struct MeshRecipe {
     pub face_holes: Vec<Vec<Vec<usize>>>,
     /// Dense material index for the object's base material, or `NO_MATERIAL`.
     pub base_material: u32,
+    /// Tag paths decoded from `__HEWMETA__` (or `__HEWTAG__`) in the source
+    /// node name. Root-first segment lists, e.g. `[["Structure","Roof"]]`.
+    /// Set by `dae-import` (WS2); default empty until that workstream lands.
+    pub tags: Vec<Vec<String>>,
 }
 
 /// A shared definition recipe: a flat set of meshes in definition-local coords.
@@ -66,6 +70,8 @@ pub enum ImportNode {
         name: String,
         /// Child nodes of this group.
         children: Vec<ImportNode>,
+        /// Tag paths for this group node (from `__HEWMETA__` decode, WS2).
+        tags: Vec<Vec<String>>,
     },
     /// An instance of a shared definition (index into `ImportScene::defs`).
     Instance {
@@ -73,6 +79,8 @@ pub enum ImportNode {
         def: usize,
         /// Pose (definition-local → world) for this placement.
         pose: Transform,
+        /// Tag paths for this instance node (from `__HEWMETA__` decode, WS2).
+        tags: Vec<Vec<String>>,
     },
 }
 

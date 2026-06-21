@@ -182,6 +182,32 @@ fn color_material_is_resolved() {
     assert_eq!(report.objects_created, 1);
 }
 
+// ─────────────────────── fixture (f): transparent/glass material ─────────────
+
+/// A SketchUp-style `<constant>` glass material carries its color in
+/// `<transparent>` and its opacity in the transparent alpha (A_ONE). The
+/// resolved kernel material must be the transparent color (not the old gray
+/// fallback) with a ~50% alpha.
+#[test]
+fn transparent_constant_material_resolves_color_and_alpha() {
+    let bytes = fixture("material_transparent.dae");
+    let (scene, missing) = import(&bytes, &empty_images()).expect("parse material_transparent.dae");
+    assert!(missing.is_empty(), "no textures referenced");
+    assert_eq!(scene.materials.len(), 1, "one glass material");
+
+    let mat = &scene.materials[0];
+    // color = 0.2,0.4,0.8 → 51,102,204 (rounded); alpha = 0.5 → 128.
+    assert_eq!(mat.color.r, 51, "red from <transparent> color");
+    assert_eq!(mat.color.g, 102, "green from <transparent> color");
+    assert_eq!(mat.color.b, 204, "blue from <transparent> color");
+    assert_eq!(mat.color.a, 128, "alpha = transparent.alpha · transparency");
+    assert!(mat.texture.is_none(), "flat color, no texture");
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+    assert_eq!(report.objects_created, 1);
+}
+
 // ─────────────────────────── fixture (f): texture material ───────────────────
 
 /// Texture resolved via ImageMap → Material::textured created; not in missing.
@@ -926,6 +952,34 @@ fn real_file_smoke() {
         }
     }
     eprintln!("HOLES: {holed_faces} holed faces across {objs_with_holes} objects");
+
+    // Tag-name tally (Stage 2 tags): how many node names carry the HEWTAG
+    // delimiter the Ruby encoded (what the app's parseTag reads). Match the
+    // app's tolerant `_+HEWTAG_+` form.
+    let has_hewtag = |s: &str| {
+        s.find("HEWTAG")
+            .is_some_and(|i| s[..i].ends_with('_') && s[i + "HEWTAG".len()..].starts_with('_'))
+    };
+    let mut tagged_names = 0usize;
+    let mut sample: Vec<String> = Vec::new();
+    for gid in doc.group_ids() {
+        if let Some(n) = doc.group_name(gid)
+            && has_hewtag(n)
+        {
+            tagged_names += 1;
+            if sample.len() < 5 {
+                sample.push(n.to_string());
+            }
+        }
+    }
+    for iid in doc.instance_ids() {
+        if let Some(n) = doc.instance_name(iid)
+            && has_hewtag(n)
+        {
+            tagged_names += 1;
+        }
+    }
+    eprintln!("TAGGED NAMES: {tagged_names} (sample: {sample:?})");
 
     // Dominant skip reasons.
     use std::collections::BTreeMap;

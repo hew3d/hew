@@ -112,6 +112,10 @@ export class SceneRenderer {
    * Set<bigint> = instance ids that stay fully lit; all others dim.
    */
   private activeLitInstanceSet: Set<bigint> | null = null
+  /** Object ids that are hidden (group.visible = false). Session-only. */
+  private hiddenObjectIds: Set<bigint> = new Set()
+  /** Instance ids that are hidden (group.visible = false). Session-only. */
+  private hiddenInstanceIds: Set<bigint> = new Set()
 
   constructor(threeScene: THREE.Scene, wasmScene: WasmScene) {
     this.scene = threeScene
@@ -157,6 +161,8 @@ export class SceneRenderer {
 
     // Rebuilt objects start opaque; re-apply the isolation fade.
     this._applyIsolation()
+    // Re-apply hidden visibility (groups are rebuilt by refresh).
+    this._applyHidden()
 
     return new Map(this.watertightMap)
   }
@@ -189,6 +195,10 @@ export class SceneRenderer {
     }
 
     this._applyInstanceIsolation()
+    // Re-apply hidden visibility for instances (groups rebuilt above).
+    for (const [id, g] of this.instanceGroups) {
+      g.group.visible = !this.hiddenInstanceIds.has(id)
+    }
   }
 
   /**
@@ -396,13 +406,21 @@ export class SceneRenderer {
           ? new THREE.Color(info.r() / 255, info.g() / 255, info.b() / 255)
           : new THREE.Color(FACE_COLOR_DEFAULT / 0xffffff)
 
+        // Per-material opacity (glass etc.): alpha < 255 → render transparent.
+        // Stored as userData.baseOpacity so isolation dimming multiplies into it
+        // instead of clobbering it back to opaque.
+        const baseOpacity = info !== undefined ? info.a() / 255 : 1
         const m = new THREE.MeshPhongMaterial({
           vertexColors: tex === undefined, // use vertex colors when no texture
           color: tex !== undefined ? color : undefined,
           map: tex,
           flatShading: true,
           side,
+          transparent: baseOpacity < 1,
+          opacity: baseOpacity,
+          depthWrite: baseOpacity >= 1,
         })
+        m.userData.baseOpacity = baseOpacity
         materials.push(m)
         info?.free?.()
       }
@@ -636,6 +654,27 @@ export class SceneRenderer {
     this._applyIsolation()
   }
 
+  /**
+   * Update the hidden set and apply visibility. Hidden objects are invisible and
+   * non-pickable (Viewport filters them out of pick results). Call after every
+   * hiddenKeys change in App.
+   */
+  setHidden(hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[]): void {
+    this.hiddenObjectIds = new Set(hiddenObjectIds)
+    this.hiddenInstanceIds = new Set(hiddenInstanceIds)
+    this._applyHidden()
+  }
+
+  /** Re-apply group.visible for all object / instance groups. */
+  private _applyHidden(): void {
+    for (const [id, g] of this.objectGroups) {
+      g.group.visible = !this.hiddenObjectIds.has(id)
+    }
+    for (const [id, g] of this.instanceGroups) {
+      g.group.visible = !this.hiddenInstanceIds.has(id)
+    }
+  }
+
   /** Apply the context fade to all objects, instances, and sketches. */
   private _applyIsolation(): void {
     for (const [id, g] of this.objectGroups) {
@@ -656,9 +695,10 @@ export class SceneRenderer {
 
   private _setInstanceOpacity(g: InstanceMeshGroup, opacity: number): void {
     const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
-      m.opacity = opacity
-      m.transparent = opacity < 1
-      m.depthWrite = opacity >= 1
+      const eff = opacity * ((m.userData.baseOpacity as number | undefined) ?? 1)
+      m.opacity = eff
+      m.transparent = eff < 1
+      m.depthWrite = eff >= 1
     }
     for (const mesh of g.facesMeshes) {
       const mat = mesh.material
@@ -680,9 +720,10 @@ export class SceneRenderer {
   private _setObjectOpacity(g: ObjectMeshGroup, opacity: number): void {
     const mat = g.facesMesh.material
     const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
-      m.opacity = opacity
-      m.transparent = opacity < 1
-      m.depthWrite = opacity >= 1
+      const eff = opacity * ((m.userData.baseOpacity as number | undefined) ?? 1)
+      m.opacity = eff
+      m.transparent = eff < 1
+      m.depthWrite = eff >= 1
     }
     if (Array.isArray(mat)) {
       for (const m of mat) {

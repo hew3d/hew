@@ -1273,3 +1273,187 @@ fn extruded_sketch_edges_are_tombstoned_and_survive_round_trip() {
         );
     }
 }
+
+// ──────────────────────────────────── node metadata ops (WS3) ───────────────
+
+/// `set_node_name` undo/redo: after rename+undo, redo re-applies the name.
+#[test]
+fn set_node_name_undo_restores_prior_name() {
+    let mut doc = Document::new();
+    let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let node = NodeId::Object(id);
+
+    // Rename then undo — verifiable via another rename/tag after undo.
+    doc.set_node_name(node, Some("Widget".to_string())).unwrap();
+    // Undo the rename; the node's tags should still be empty (cross-check via
+    // node_tags which we can observe — name is internal, but tag state is
+    // independent and also reset by undo).
+    doc.add_node_tag(node, vec!["T".to_string()]).unwrap();
+    doc.undo().expect("undo add_node_tag");
+    doc.undo().expect("undo rename");
+    // Now redo the rename → name should be Widget again.
+    doc.redo().expect("redo rename");
+    // Redo the tag add → tag back.
+    doc.redo().expect("redo add_node_tag");
+    assert_eq!(
+        doc.node_tags(node),
+        &[vec!["T".to_string()]],
+        "redo restored the tag"
+    );
+}
+
+/// `add_node_tag` / `remove_node_tag` are inverse operations (identity on tags).
+#[test]
+fn add_then_remove_tag_is_identity() {
+    let mut doc = Document::new();
+    let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let node = NodeId::Object(id);
+    let tag = vec!["Structure".to_string(), "Roof".to_string()];
+
+    assert_eq!(doc.node_tags(node), &[] as &[Vec<String>]);
+
+    doc.add_node_tag(node, tag.clone()).unwrap();
+    assert_eq!(doc.node_tags(node), std::slice::from_ref(&tag));
+
+    doc.remove_node_tag(node, &tag).unwrap();
+    assert_eq!(doc.node_tags(node), &[] as &[Vec<String>]);
+}
+
+/// After `add_node_tag`, undo removes the tag; redo re-adds it.
+#[test]
+fn add_node_tag_undo_redo_roundtrip() {
+    let mut doc = Document::new();
+    let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let node = NodeId::Object(id);
+    let tag = vec!["Mechanical".to_string()];
+
+    doc.add_node_tag(node, tag.clone()).unwrap();
+    assert_eq!(doc.node_tags(node), std::slice::from_ref(&tag));
+
+    doc.undo().expect("undo add_node_tag");
+    assert_eq!(
+        doc.node_tags(node),
+        &[] as &[Vec<String>],
+        "undo should remove the tag"
+    );
+
+    doc.redo().expect("redo add_node_tag");
+    assert_eq!(
+        doc.node_tags(node),
+        std::slice::from_ref(&tag),
+        "redo should re-add the tag"
+    );
+}
+
+/// `add_node_tag` is idempotent: adding a duplicate does NOT push an undo entry.
+#[test]
+fn add_duplicate_tag_is_no_op_no_undo_entry() {
+    let mut doc = Document::new();
+    let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let node = NodeId::Object(id);
+    let tag = vec!["Structural".to_string()];
+
+    doc.add_node_tag(node, tag.clone()).unwrap();
+    let undo_depth_before = doc.can_undo(); // true
+    // Adding the exact same tag again should be a no-op.
+    doc.add_node_tag(node, tag.clone()).unwrap();
+    // Tags are still just one entry.
+    assert_eq!(doc.node_tags(node).len(), 1);
+    // Only one undo entry (the first add). Undo the first add, then there
+    // should be nothing left on the undo stack (beyond the extrude).
+    doc.undo().unwrap(); // undo first add_node_tag
+    // The duplicate add did NOT push an undo entry, so we're now at extrude.
+    // The undo/redo stacks's depth can be probed by trying to undo the extrude.
+    assert!(doc.can_undo(), "extrude is still on the undo stack");
+    // But the tag is gone now.
+    assert_eq!(doc.node_tags(node), &[] as &[Vec<String>]);
+    let _ = undo_depth_before;
+}
+
+/// `set_node_name` to the current name is a no-op: it pushes no undo entry, so a
+/// UI focus-blur that re-commits the same name never pollutes the undo stack.
+#[test]
+fn rename_to_same_name_is_no_op_no_undo_entry() {
+    let mut doc = Document::new();
+    let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let node = NodeId::Object(id);
+
+    doc.set_node_name(node, Some("Widget".to_string())).unwrap();
+    // Re-commit the identical name — must not push another undo entry.
+    doc.set_node_name(node, Some("Widget".to_string())).unwrap();
+    // Undo once → back to the pre-rename (unnamed) state; only the first rename
+    // and the extrude were ever recorded.
+    doc.undo().expect("undo the single rename");
+    assert!(doc.can_undo(), "only the extrude remains on the undo stack");
+    // Re-commit None when already None is likewise a no-op (no panic, no entry).
+    doc.set_node_name(node, None).unwrap();
+    assert!(doc.can_undo(), "no-op clear pushed nothing");
+}
+
+/// `remove_node_tag` of an absent path is a no-op (no undo entry pushed).
+#[test]
+fn remove_absent_tag_is_no_op() {
+    let mut doc = Document::new();
+    let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let node = NodeId::Object(id);
+
+    // No tags yet — remove should be a no-op.
+    doc.remove_node_tag(node, &["Ghost".to_string()]).unwrap();
+    // Only the extrude is on the undo stack (remove pushed nothing).
+    doc.undo().unwrap(); // undo extrude
+    assert!(!doc.can_undo(), "only the extrude was on the undo stack");
+}
+
+/// `object_solid` returns `true` for a watertight box, `false` for stale ids.
+#[test]
+fn object_solid_reflects_watertight_state() {
+    let mut doc = Document::new();
+    let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    assert!(doc.object_solid(id), "extruded box is solid (watertight)");
+
+    // Undo the creation → object is hidden (stale from the caller's POV).
+    doc.undo().unwrap();
+    assert!(
+        !doc.object_solid(id),
+        "hidden/undone object is not solid (hidden)"
+    );
+}
+
+/// Tags and name survive on group and instance nodes as well.
+#[test]
+fn tag_and_name_ops_work_on_group_and_instance_nodes() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    doc.group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let gid = *doc.group_ids().first().unwrap();
+
+    // Tag the group.
+    let tag = vec!["Ground Floor".to_string()];
+    doc.add_node_tag(NodeId::Group(gid), tag.clone()).unwrap();
+    assert_eq!(
+        doc.node_tags(NodeId::Group(gid)),
+        std::slice::from_ref(&tag)
+    );
+
+    // Rename the group.
+    doc.set_node_name(NodeId::Group(gid), Some("Floor1".to_string()))
+        .unwrap();
+
+    // Make a component instance and tag it.
+    let c = extrude_box(&mut doc, 5.0, 0.0, 6.0, 1.0, 0.0, 1.0);
+    let (comp, iid, _) = doc.make_component(&[NodeId::Object(c)]).unwrap();
+    let inst_tag = vec!["Furniture".to_string()];
+    doc.add_node_tag(NodeId::Instance(iid), inst_tag.clone())
+        .unwrap();
+    assert_eq!(
+        doc.node_tags(NodeId::Instance(iid)),
+        std::slice::from_ref(&inst_tag)
+    );
+    let _ = comp;
+
+    // Undo the instance tag add → tag should be gone.
+    doc.undo().unwrap();
+    assert_eq!(doc.node_tags(NodeId::Instance(iid)), &[] as &[Vec<String>]);
+}

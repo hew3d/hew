@@ -104,6 +104,12 @@ export interface ViewportApi {
    * scene is empty. Idempotent — safe to call multiple times.
    */
   zoomExtents: () => void
+  /**
+   * Update the renderer's hidden object/instance sets.  Hidden groups have
+   * `.visible = false` (not raypicked by three.js tools) and are excluded from
+   * the kernel pick results in the Select tool path.
+   */
+  setHidden: (hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[]) => void
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -306,6 +312,10 @@ export default function Viewport({
   // True when a camera-navigation tool (Orbit/Pan/Zoom) is active.
   // Used inside the mount-effect pointer handlers to suppress geometry routing.
   const cameraModeRef = useRef(false)
+  // Hidden object/instance id sets — used to filter pick results so hidden
+  // objects can't be accidentally selected through a click.
+  const hiddenObjectIdsRef = useRef<Set<bigint>>(new Set())
+  const hiddenInstanceIdsRef = useRef<Set<bigint>>(new Set())
 
   useEffect(() => {
     const container = containerRef.current
@@ -368,6 +378,20 @@ export default function Viewport({
           // Click outside while inside a group → deselect but don't exit
           // (SketchUp style: click outside within group deselects)
         }
+        onSelectRef.current?.(null, additive)
+        scheduleRender()
+        return
+      }
+
+      // Filter out picks against hidden objects/instances so hidden geometry
+      // is non-selectable. The kernel pick_face() raycasts through all scene
+      // geometry regardless of three.js visibility, so we filter here.
+      if (pickedInstanceId !== undefined && hiddenInstanceIdsRef.current.has(pickedInstanceId)) {
+        onSelectRef.current?.(null, additive)
+        scheduleRender()
+        return
+      }
+      if (hiddenObjectIdsRef.current.has(pickedObjectId)) {
         onSelectRef.current?.(null, additive)
         scheduleRender()
         return
@@ -569,8 +593,15 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function setHidden(objectIds: bigint[], instanceIds: bigint[]): void {
+      hiddenObjectIdsRef.current = new Set(objectIds)
+      hiddenInstanceIdsRef.current = new Set(instanceIds)
+      sceneRenderer.setHidden(objectIds, instanceIds)
+      scheduleRender()
+    }
+
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden }
     }
 
     // ------------------------------------------------------------------ tool factories

@@ -1,8 +1,12 @@
 //! COLLADA material → Hew `Material` translation (contract).
 //!
-//! Walks `<library_effects>` → `<profile_COMMON>` → Phong/Lambert/Blinn shader
-//! to extract the diffuse channel. Unresolved texture URIs fall back to a
-//! neutral color and append the URI to `textures_missing`.
+//! Walks `<library_effects>` → `<profile_COMMON>` → Phong/Lambert/Blinn/Constant
+//! shader to extract the diffuse color (or texture) and the transparency channel
+//! (`<transparent>` + `<transparency>`, A_ONE), folding the latter into the
+//! material's alpha so glass imports semi-transparent. SketchUp's `<constant>`
+//! glass carries its color in `<transparent>`, so that becomes the base color
+//! when there is no diffuse. Unresolved texture URIs fall back to a neutral
+//! color and append the URI to `textures_missing`.
 
 use std::collections::HashMap;
 
@@ -10,6 +14,7 @@ use dae_parser::{Document as DaeDocument, Image, ParseLibrary};
 use kernel::{Material, Rgba8, Texture};
 
 use crate::ImageMap;
+use crate::meta::decode_meta;
 
 // ── Url helper ────────────────────────────────────────────────────────────────
 
@@ -101,7 +106,13 @@ pub fn build_material_table(doc: &DaeDocument, images: &ImageMap) -> MaterialTab
                 Some(id) => id.clone(),
                 None => continue,
             };
-            let mat_name = dae_mat.name.clone().unwrap_or_else(|| mat_id.clone());
+            // Decode HEWMETA/HEWTAG payload to recover the real material name.
+            // Materials have no tags — meta.tags is intentionally ignored here.
+            let mat_name = dae_mat
+                .name
+                .as_deref()
+                .and_then(|n| decode_meta(n).name)
+                .unwrap_or_else(|| mat_id.clone());
 
             // Follow material → instance_effect → effect.
             // url_as_str already strips the '#' from Fragment URLs.
@@ -185,23 +196,64 @@ fn resolve_profile(
         None => return Material::solid(name, Rgba8::rgb(200, 200, 200)),
     };
 
-    // WithSid<ColorParam> Derefs to ColorParam.
-    let diffuse = match shader {
-        dae_parser::Shader::Phong(p) => p.diffuse.as_deref(),
-        dae_parser::Shader::Lambert(l) => l.diffuse.as_deref(),
-        dae_parser::Shader::Blinn(b) => b.diffuse.as_deref(),
-        dae_parser::Shader::Constant(_) => None,
+    // Pull the diffuse color/texture and the transparency channel from whichever
+    // fixed-function shader this is. SketchUp emits `<constant>` (no diffuse) for
+    // colored-glass and unlit surfaces, carrying the color in `<transparent>`.
+    // WithSid<…> Derefs to its inner ColorParam/FloatParam.
+    let (diffuse, transparent, transparency) = match shader {
+        dae_parser::Shader::Phong(p) => (
+            p.diffuse.as_deref(),
+            p.transparent.as_deref(),
+            p.transparency.as_deref(),
+        ),
+        dae_parser::Shader::Lambert(l) => (
+            l.diffuse.as_deref(),
+            l.transparent.as_deref(),
+            l.transparency.as_deref(),
+        ),
+        dae_parser::Shader::Blinn(b) => (
+            b.diffuse.as_deref(),
+            b.transparent.as_deref(),
+            b.transparency.as_deref(),
+        ),
+        dae_parser::Shader::Constant(c) => {
+            (None, c.transparent.as_deref(), c.transparency.as_deref())
+        }
     };
 
+    // Opacity (0..1). COLLADA's transparency channel is authoritative when
+    // present; otherwise the diffuse color's own alpha is used. We assume the
+    // `A_ONE` mode (opacity = transparent.alpha · transparency) — modern
+    // SketchUp's default, and a safe fallback for its legacy `RGB_ZERO` glass
+    // (which uses a gray ramp where alpha ≈ 1 − luminance). The `opaque`
+    // attribute itself isn't surfaced by the parser, so we can't branch on it.
+    let alpha_byte = opacity_alpha(diffuse, transparent, transparency);
+
     match diffuse {
-        None => Material::solid(name, Rgba8::rgb(200, 200, 200)),
+        // No diffuse channel (typically `<constant>`): take the color from the
+        // `<transparent>` channel if it's a literal color (SketchUp's glass),
+        // else from a transparent texture, else a neutral gray.
+        None => match transparent {
+            Some(dae_parser::ColorParam::Color(rgba)) => {
+                Material::solid(name, with_alpha(float4_to_rgba8(rgba), alpha_byte))
+            }
+            Some(dae_parser::ColorParam::Texture(tex_ref)) => with_texture_alpha(
+                resolve_texture(
+                    &tex_ref.texture,
+                    profile,
+                    image_map,
+                    images,
+                    name,
+                    textures_missing,
+                ),
+                alpha_byte,
+            ),
+            _ => Material::solid(name, with_alpha(Rgba8::rgb(200, 200, 200), alpha_byte)),
+        },
         Some(dae_parser::ColorParam::Color(rgba)) => {
-            // rgba is Box<[f32; 4]>; &*rgba → &[f32; 4]
-            let color = float4_to_rgba8(rgba);
-            Material::solid(name, color)
+            Material::solid(name, with_alpha(float4_to_rgba8(rgba), alpha_byte))
         }
-        Some(dae_parser::ColorParam::Texture(tex_ref)) => {
-            // tex_ref.texture is the sampler SID.
+        Some(dae_parser::ColorParam::Texture(tex_ref)) => with_texture_alpha(
             resolve_texture(
                 &tex_ref.texture,
                 profile,
@@ -209,10 +261,58 @@ fn resolve_profile(
                 images,
                 name,
                 textures_missing,
-            )
+            ),
+            alpha_byte,
+        ),
+        Some(dae_parser::ColorParam::Param(_)) => {
+            Material::solid(name, with_alpha(Rgba8::rgb(200, 200, 200), alpha_byte))
         }
-        Some(dae_parser::ColorParam::Param(_)) => Material::solid(name, Rgba8::rgb(200, 200, 200)),
     }
+}
+
+/// Literal scalar value of a `FloatParam`, or `None` for a `<param>` reference.
+fn float_param_value(fp: &dae_parser::FloatParam) -> Option<f32> {
+    match fp {
+        dae_parser::FloatParam::Float(v) => Some(*v),
+        dae_parser::FloatParam::Param(_) => None,
+    }
+}
+
+/// Compute the 0–255 opacity byte from the COLLADA transparency channel,
+/// falling back to the diffuse color's own alpha (then fully opaque).
+fn opacity_alpha(
+    diffuse: Option<&dae_parser::ColorParam>,
+    transparent: Option<&dae_parser::ColorParam>,
+    transparency: Option<&dae_parser::FloatParam>,
+) -> u8 {
+    let t = transparency
+        .and_then(float_param_value)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    let opacity = match transparent {
+        // A_ONE: opacity = transparent.alpha · transparency.
+        Some(dae_parser::ColorParam::Color(rgba)) => rgba[3] * t,
+        // A transparent texture: treat as fully opaque tint scaled by the float.
+        Some(_) => t,
+        // No transparency channel: use the diffuse color's own alpha.
+        None => match diffuse {
+            Some(dae_parser::ColorParam::Color(rgba)) => rgba[3],
+            _ => 1.0,
+        },
+    };
+    (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Replace a color's alpha channel.
+fn with_alpha(c: Rgba8, a: u8) -> Rgba8 {
+    Rgba8::rgba(c.r, c.g, c.b, a)
+}
+
+/// Apply an alpha byte to a (possibly textured) material's modulation color so
+/// glass textures still render semi-transparent.
+fn with_texture_alpha(mut mat: Material, a: u8) -> Material {
+    mat.color = with_alpha(mat.color, a);
+    mat
 }
 
 /// Resolve sampler SID → Surface → Image → URI → kernel Material.

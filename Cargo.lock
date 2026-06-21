@@ -126,6 +126,7 @@ dependencies = [
  "dae-parser",
  "kernel",
  "proptest",
+ "serde_json",
 ]
 
 [[package]]

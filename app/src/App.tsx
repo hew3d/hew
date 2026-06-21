@@ -5,7 +5,10 @@ import Viewport, { type ViewportApi } from './viewport/Viewport'
 import { DocumentTree } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
-import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, type NodeRef } from './panels/treeModel'
+import { TagsPanel } from './panels/TagsPanel'
+import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
+import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, nodeKey, type NodeRef } from './panels/treeModel'
+import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
@@ -79,6 +82,8 @@ export default function App() {
   const [kernelPanicked, setKernelPanicked] = useState(false)
   /** Selected nodes (ordered; index 0 = primary). */
   const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
+  /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
+  const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Active context path. Empty = top level. */
   const [activeContext, setActiveContext] = useState<NodeRef[]>([])
   /** Bumped on any document change so the tree re-queries entity lists. */
@@ -90,7 +95,13 @@ export default function App() {
   /** Pane visibility: Model info (DocumentTree) */
   const [showModelInfo, setShowModelInfo] = useState(true)
   /** Pane visibility: Materials (MaterialPalette) */
-  const [showMaterials, setShowMaterials] = useState(true)
+  const [showMaterials, setShowMaterials] = useState(false)
+  /** Pane visibility: Tags */
+  const [showTags, setShowTags] = useState(false)
+  /** Pane visibility: Object Info */
+  const [showObjectInfo, setShowObjectInfo] = useState(true)
+  /** Tag-path hide set: each entry is tagPathKey(path). Cleared on load/new. */
+  const [hiddenTagPaths, setHiddenTagPaths] = useState<Set<string>>(new Set())
   /** Import report to display (null = no dialog). */
   const [importReport, setImportReport] = useState<ImportReport | null>(null)
   /** True while import_dae is running (blocks main thread). */
@@ -309,6 +320,12 @@ export default function App() {
     }
     setSelectedIds([])
     setActiveContext([])
+    setHiddenKeys(new Set())
+    setHiddenTagPaths(new Set())
+    // Also clear the renderer's hidden set: it keys by dense ids that the new
+    // document reuses, so stale ids would silently hide (and un-pick) unrelated
+    // objects after a load. (No-op if the viewport isn't mounted yet.)
+    viewportApi.current?.setHidden([], [])
     // Suppress dirty-marking while notifyLoaded triggers handleDocumentChanged;
     // the caller will commit the authoritative afterOpen state (dirty=false).
     suppressDirtyRef.current = true
@@ -533,49 +550,64 @@ export default function App() {
   useEffect(() => { handleZoomExtentsRef.current = handleZoomExtents }, [handleZoomExtents])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
 
+  // ---------------------------------------------------------------- native menu-action dispatch
+  // The dispatch switch lives in a ref refreshed every render. The listener
+  // below is registered ONCE (so it survives StrictMode and re-renders without
+  // re-subscribing), but Vite Fast Refresh re-renders this component WITHOUT
+  // re-running a []-deps effect — so a switch captured inside that effect would
+  // be frozen at its first-mount version and silently drop any case added later
+  // (e.g. a newly-added pane toggle). Routing through this ref keeps it current.
+  const menuActionRef = useRef<(payload: string) => void>(() => {})
+  menuActionRef.current = (payload: string) => {
+    switch (payload) {
+      case 'new':      newDocumentRef.current(); break
+      case 'open':     openDocumentRef.current(); break
+      case 'import':   importDocumentRef.current(); break
+      case 'save':     saveDocumentRef.current(); break
+      case 'save-as':  saveAsDocumentRef.current(); break
+      case 'undo':     handleUndoRef.current(); break
+      case 'redo':     handleRedoRef.current(); break
+      case 'close':
+        // Trigger the beforeunload / close-guard path by emitting the
+        // Tauri window close request — handled by the close guard effect.
+        import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+          getCurrentWindow().close().catch(() => { /* ignore */ })
+        }).catch(() => { /* ignore */ })
+        break
+      // Tool activations from native menu
+      case 'tool-select':    setActiveTool('Select'); break
+      case 'tool-rectangle': setActiveTool('Rectangle'); break
+      case 'tool-pushpull':  setActiveTool('Push/Pull'); break
+      case 'tool-paint':     setActiveTool('Paint'); break
+      case 'tool-move':      setActiveTool('Move'); break
+      case 'tool-rotate':    setActiveTool('Rotate'); break
+      case 'tool-scale':     setActiveTool('Scale'); break
+      case 'tool-orbit':     setActiveTool('Orbit'); break
+      case 'tool-pan':       setActiveTool('Pan'); break
+      case 'tool-zoom':      setActiveTool('Zoom'); break
+      // Window pane toggles — must use functional updaters (StrictMode safe)
+      case 'toggle-model-info':   setShowModelInfo((v) => !v); break
+      case 'toggle-materials':    setShowMaterials((v) => !v); break
+      case 'toggle-tags':         setShowTags((v) => !v); break
+      case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
+      case 'zoom-extents':        handleZoomExtentsRef.current(); break
+    }
+  }
+
   // ---------------------------------------------------------------- native menu-action listener (Tauri only)
-  // Registered once; reads latest callbacks via refs so no stale-closure risk.
+  // Registered once; dispatches through menuActionRef so the handler is always
+  // the latest one (HMR/StrictMode safe).
   useEffect(() => {
     if (!isTauri) return
     let unlisten: (() => void) | undefined
     let cancelled = false
     import('@tauri-apps/api/event').then(({ listen }) => {
       return listen<string>('menu-action', (event) => {
-        switch (event.payload) {
-          case 'new':      newDocumentRef.current(); break
-          case 'open':     openDocumentRef.current(); break
-          case 'import':   importDocumentRef.current(); break
-          case 'save':     saveDocumentRef.current(); break
-          case 'save-as':  saveAsDocumentRef.current(); break
-          case 'undo':     handleUndoRef.current(); break
-          case 'redo':     handleRedoRef.current(); break
-          case 'close':
-            // Trigger the beforeunload / close-guard path by emitting the
-            // Tauri window close request — handled by the close guard effect.
-            import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-              getCurrentWindow().close().catch(() => { /* ignore */ })
-            }).catch(() => { /* ignore */ })
-            break
-          // Tool activations from native menu
-          case 'tool-select':    setActiveTool('Select'); break
-          case 'tool-rectangle': setActiveTool('Rectangle'); break
-          case 'tool-pushpull':  setActiveTool('Push/Pull'); break
-          case 'tool-paint':     setActiveTool('Paint'); break
-          case 'tool-move':      setActiveTool('Move'); break
-          case 'tool-rotate':    setActiveTool('Rotate'); break
-          case 'tool-scale':     setActiveTool('Scale'); break
-          case 'tool-orbit':     setActiveTool('Orbit'); break
-          case 'tool-pan':       setActiveTool('Pan'); break
-          case 'tool-zoom':      setActiveTool('Zoom'); break
-          // Window pane toggles — must use functional updaters (StrictMode safe)
-          case 'toggle-model-info': setShowModelInfo((v) => !v); break
-          case 'toggle-materials':  setShowMaterials((v) => !v); break
-          case 'zoom-extents':      handleZoomExtentsRef.current(); break
-        }
+        menuActionRef.current(event.payload)
       })
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore if not in Tauri */ })
     return () => { cancelled = true; unlisten?.() }
-  }, []) // stable — all callbacks accessed via refs
+  }, [])
 
   // ---------------------------------------------------------------- menu-open-path listener (Tauri only)
   // Emitted by Rust when a recent-file menu item is clicked, or when a file
@@ -694,7 +726,7 @@ export default function App() {
         saveAsDocument()
         return
       }
-      if (ev.key === 'o') {
+      if (ev.key.toLowerCase() === 'o' && !ev.shiftKey) {
         ev.preventDefault()
         openDocument()
         return
@@ -745,15 +777,26 @@ export default function App() {
         setActiveTool('Zoom')
         return
       }
-      // Window pane toggles
-      if (ev.key === 'i' && ev.shiftKey) {
+      // Window pane toggles. Note: with Shift held, ev.key is the UPPERCASE
+      // letter, so compare case-insensitively (else these never fire).
+      if (ev.key.toLowerCase() === 'i' && ev.shiftKey) {
         ev.preventDefault()
         setShowModelInfo((v) => !v)
         return
       }
-      if (ev.key === 'c' && ev.shiftKey) {
+      if (ev.key.toLowerCase() === 'c' && ev.shiftKey) {
         ev.preventDefault()
         setShowMaterials((v) => !v)
+        return
+      }
+      if (ev.key.toLowerCase() === 't' && ev.shiftKey) {
+        ev.preventDefault()
+        setShowTags((v) => !v)
+        return
+      }
+      if (ev.key.toLowerCase() === 'o' && ev.shiftKey) {
+        ev.preventDefault()
+        setShowObjectInfo((v) => !v)
         return
       }
     }
@@ -781,6 +824,136 @@ export default function App() {
       handleToast(`Drop open failed: ${String(err)}`)
     })
   }, [confirmDiscard, applyLoadedBytes, handleToast])
+
+  // ── Hide/Show + Tags (must be declared BEFORE the early returns below so the
+  // hook count is stable across the loading and loaded renders — Rules of Hooks).
+  /** Collect all leaf object and instance ids for a node (recurse into groups). */
+  const collectLeafIds = (node: NodeRef): { objectIds: bigint[]; instanceIds: bigint[] } => {
+    if (node.kind === 'object') return { objectIds: [node.id], instanceIds: [] }
+    if (node.kind === 'instance') return { objectIds: [], instanceIds: [node.id] }
+    // Group: recurse into members; group_members() returns {kind, id} values
+    // via nodeRefFromJs. We recurse manually so instances inside groups are caught.
+    const members = state!.scene.group_members(node.id)
+    const objectIds: bigint[] = []
+    const instanceIds: bigint[] = []
+    for (let i = 0; i < members.length; i++) {
+      const m = members[i]
+      const mKind: NodeRef['kind'] = m.kind as NodeRef['kind']
+      const child: NodeRef = { kind: mKind, id: m.id }
+      const { objectIds: os, instanceIds: is_ } = collectLeafIds(child)
+      objectIds.push(...os)
+      instanceIds.push(...is_)
+    }
+    return { objectIds, instanceIds }
+  }
+
+  /**
+   * Derive the union hidden id sets from both manual-hide and tag-hide sources,
+   * then push the result to the renderer.
+   *
+   * Both sets are passed in explicitly so callers can pass the *next* set
+   * (before setState is applied) without waiting for a re-render.
+   */
+  const pushUnionHidden = useCallback(
+    (nextHiddenKeys: Set<string>, nextHiddenTagPaths: Set<string>) => {
+      const scene = state?.scene
+      if (scene === undefined) return
+
+      const hiddenObjectIds: bigint[] = []
+      const hiddenInstanceIds: bigint[] = []
+
+      // --- (a) manual per-node hides ---
+      for (const k of nextHiddenKeys) {
+        const colonIdx = k.indexOf(':')
+        const kind = k.slice(0, colonIdx) as NodeRef['kind']
+        const id = BigInt(k.slice(colonIdx + 1))
+        const n: NodeRef = { kind, id }
+        const { objectIds, instanceIds } = collectLeafIds(n)
+        hiddenObjectIds.push(...objectIds)
+        hiddenInstanceIds.push(...instanceIds)
+      }
+
+      // --- (b) tag-path hides ---
+      if (nextHiddenTagPaths.size > 0) {
+        // Build the current tag list from the scene using first-class tag data.
+        const allNodes = [
+          ...Array.from(scene.object_ids()).map((id) => ({ kind: 'object' as const, id })),
+          ...Array.from(scene.group_ids()).map((id) => ({ kind: 'group' as const, id })),
+          ...Array.from(scene.instance_ids()).map((id) => ({ kind: 'instance' as const, id })),
+        ]
+        const tagged: { node: NodeRef; path: string[] }[] = []
+        for (const raw of allNodes) {
+          const node: NodeRef = raw as NodeRef
+          const kindNum = node.kind === 'object' ? 0 : node.kind === 'group' ? 1 : 2
+          const rawTags = scene.node_tags(kindNum, node.id)
+          for (const rawTag of rawTags) {
+            const path = rawTag.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
+            if (path.length > 0) {
+              tagged.push({ node, path })
+            }
+          }
+        }
+
+        // For each hidden tag path, collect all nodes whose tag path is at or
+        // under it.  We iterate once over all tagged nodes for efficiency.
+        const hiddenAnchorPaths: string[][] = []
+        for (const key of nextHiddenTagPaths) {
+          try {
+            const parsed = JSON.parse(key)
+            if (Array.isArray(parsed)) hiddenAnchorPaths.push(parsed as string[])
+          } catch { /* invalid key — skip */ }
+        }
+
+        // A node is covered if its tag path is at or under any hidden anchor path.
+        // isPathUnder handles both exact matches and descendant paths, so hiding
+        // a parent tag automatically covers all nodes tagged further down.
+        for (const { node, path } of tagged) {
+          const covered = hiddenAnchorPaths.some((anchor) => isPathUnder(path, anchor))
+          if (!covered) continue
+          const { objectIds, instanceIds } = collectLeafIds(node)
+          hiddenObjectIds.push(...objectIds)
+          hiddenInstanceIds.push(...instanceIds)
+        }
+      }
+
+      // Deduplicate (a leaf may be covered by multiple hidden paths/tags).
+      const objIds = [...new Set(hiddenObjectIds)]
+      const instIds = [...new Set(hiddenInstanceIds)]
+      // (1) Renderer: hide the meshes. (2) Kernel inference: drop the hidden
+      // geometry so snap/pick_face skip it — otherwise you'd still snap to and
+      // be unable to click past a hidden solid's edges/faces.
+      viewportApi.current?.setHidden(objIds, instIds)
+      scene.set_hidden(new BigUint64Array(objIds), new BigUint64Array(instIds))
+    },
+    // state?.scene changes on every render; we capture it fresh via the closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state],
+  )
+
+  const handleToggleHidden = (node: NodeRef) => {
+    const key = nodeKey(node)
+    // Compute the next hidden set purely (no setState updater side effects).
+    const next = new Set(hiddenKeys)
+    if (next.has(key)) {
+      next.delete(key)
+    } else {
+      next.add(key)
+    }
+    setHiddenKeys(next)
+    pushUnionHidden(next, hiddenTagPaths)
+  }
+
+  const handleToggleTagPath = useCallback((path: string[]) => {
+    const key = tagPathKey(path)
+    const next = new Set(hiddenTagPaths)
+    if (next.has(key)) {
+      next.delete(key)
+    } else {
+      next.add(key)
+    }
+    setHiddenTagPaths(next)
+    pushUnionHidden(hiddenKeys, next)
+  }, [hiddenTagPaths, hiddenKeys, pushUnionHidden])
 
   if (error !== null) {
     return (
@@ -920,8 +1093,12 @@ export default function App() {
         onSelectTool={(name) => setActiveTool(name as ToolName)}
         showModelInfo={showModelInfo}
         showMaterials={showMaterials}
+        showTags={showTags}
+        showObjectInfo={showObjectInfo}
         onToggleModelInfo={() => setShowModelInfo((v) => !v)}
         onToggleMaterials={() => setShowMaterials((v) => !v)}
+        onToggleTags={() => setShowTags((v) => !v)}
+        onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
         onZoomExtents={handleZoomExtents}
       />
 
@@ -1137,6 +1314,8 @@ export default function App() {
             canMakeUnique={canUnique}
             onMakeUnique={handleMakeUnique}
             onClose={() => setShowModelInfo(false)}
+            hiddenKeys={hiddenKeys}
+            onToggleHidden={handleToggleHidden}
           />
         )}
         {showMaterials && (
@@ -1148,6 +1327,24 @@ export default function App() {
             onDocumentChanged={handleDocumentChanged}
             selectedIds={selectedIds}
             onClose={() => setShowMaterials(false)}
+          />
+        )}
+        {showTags && (
+          <TagsPanel
+            scene={state.scene}
+            docRev={docRev}
+            hiddenTagPaths={hiddenTagPaths}
+            onToggleTagPath={handleToggleTagPath}
+            onClose={() => setShowTags(false)}
+          />
+        )}
+        {showObjectInfo && (
+          <ObjectInfoPanel
+            scene={state.scene}
+            docRev={docRev}
+            selectedIds={selectedIds}
+            onDocumentChanged={handleDocumentChanged}
+            onClose={() => setShowObjectInfo(false)}
           />
         )}
       </div>

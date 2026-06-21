@@ -45,7 +45,12 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
 /// v2 (): added optional `name` fields to object/group/component/
 /// instance entries. The fields are `#[serde(default)]`, so v1 files still load
 /// (names default to `None`) — see the version gate in `decode_document_raw`.
-pub const MANIFEST_FORMAT_VERSION: u32 = 2;
+///
+/// v3 (): added optional `tags: Vec<Vec<String>>` to object/group/
+/// instance entries (not component — tags ride on instances, not definitions).
+/// The field is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so
+/// v1/v2 files still load (tags default to empty) — back-compatible.
+pub const MANIFEST_FORMAT_VERSION: u32 = 3;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -551,6 +556,9 @@ pub(crate) struct ObjectDto {
     /// Optional display name (manifest v2+). Absent in v1 files → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Per-node tag paths (manifest v3+). Absent in v1/v2 files → empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Vec<String>>,
 }
 
 /// A merge group entry.
@@ -561,6 +569,9 @@ pub(crate) struct GroupDto {
     /// Optional display name (manifest v2+). Absent in v1 files → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Per-node tag paths (manifest v3+). Absent in v1/v2 files → empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Vec<String>>,
 }
 
 /// A component definition.
@@ -584,6 +595,9 @@ pub(crate) struct InstanceDto {
     /// Optional per-instance display name (manifest v2+). Absent in v1 → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Per-node tag paths (manifest v3+). Absent in v1/v2 files → empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Vec<String>>,
 }
 
 /// A first-class sketch.
@@ -666,18 +680,37 @@ fn zip_read_entry(
 // Called from document.rs which owns the private fields.
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Serialization row for a merge group: (id, members, name, tags).
+pub(crate) type GroupSaveRow = (
+    GroupId,
+    Vec<crate::document::NodeId>,
+    Option<String>,
+    Vec<Vec<String>>,
+);
+
+/// Serialization row for an instance: (id, def, pose, name, tags).
+pub(crate) type InstanceSaveRow = (
+    InstanceId,
+    ComponentId,
+    Transform,
+    Option<String>,
+    Vec<Vec<String>>,
+);
+
 /// Data that document.rs extracts from its private fields and hands off to
 /// `encode_document` for serialization into zip bytes.
 pub(crate) struct DocSaveData {
     pub materials: Vec<(MaterialId, Material)>,
     pub world_objects: Vec<(ObjectId, Object)>,
     pub def_objects: Vec<(ObjectId, Object, ComponentId)>,
-    pub groups: Vec<(GroupId, Vec<crate::document::NodeId>, Option<String>)>,
+    pub groups: Vec<GroupSaveRow>,
     pub components: Vec<(ComponentId, Vec<ObjectId>, Option<String>)>,
-    pub instances: Vec<(InstanceId, ComponentId, Transform, Option<String>)>,
+    pub instances: Vec<InstanceSaveRow>,
     pub sketches: Vec<(SketchId, Sketch)>,
     /// Per-object display name, keyed by id (covers world + def members).
     pub obj_names: std::collections::HashMap<ObjectId, Option<String>>,
+    /// Per-object tag list, keyed by id (covers world + def members).
+    pub obj_tags: std::collections::HashMap<ObjectId, Vec<Vec<String>>>,
     /// All live world roots (objects/groups/instances with no parent).
     pub roots: Vec<crate::document::NodeId>,
     /// (sketch_id, region_id) pairs that are consumed.
@@ -803,6 +836,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 geometry: format!("geometry/obj_{i}.bin"),
                 base_material: base_mat.map(&material_dense),
                 name: data.obj_names.get(oid).cloned().flatten(),
+                tags: data.obj_tags.get(oid).cloned().unwrap_or_default(),
             }
         })
         .collect();
@@ -811,10 +845,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .groups
         .iter()
         .enumerate()
-        .map(|(i, (_, members, name))| GroupDto {
+        .map(|(i, (_, members, name, tags))| GroupDto {
             id: i as u32,
             members: members.iter().map(&node_to_dto).collect(),
             name: name.clone(),
+            tags: tags.clone(),
         })
         .collect();
 
@@ -833,11 +868,12 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .instances
         .iter()
         .enumerate()
-        .map(|(i, (_, def, pose, name))| InstanceDto {
+        .map(|(i, (_, def, pose, name, tags))| InstanceDto {
             id: i as u32,
             def: comp_to_dense[def],
             pose: pose.to_affine(),
             name: name.clone(),
+            tags: tags.clone(),
         })
         .collect();
 
@@ -1001,6 +1037,11 @@ pub(crate) struct DocLoadRaw {
     pub group_names: Vec<Option<String>>,
     pub component_names: Vec<Option<String>>,
     pub instance_names: Vec<Option<String>>,
+    /// Tag lists per object/group/instance, in dense order (manifest v3+; empty
+    /// for v1/v2 files — `#[serde(default)]` fills them in).
+    pub obj_tags: Vec<Vec<Vec<String>>>,
+    pub group_tags: Vec<Vec<Vec<String>>>,
+    pub instance_tags: Vec<Vec<Vec<String>>>,
 }
 
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
@@ -1089,6 +1130,11 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let group_names = manifest.groups.iter().map(|g| g.name.clone()).collect();
     let component_names = manifest.components.iter().map(|c| c.name.clone()).collect();
     let instance_names = manifest.instances.iter().map(|i| i.name.clone()).collect();
+    let obj_tags: Vec<Vec<Vec<String>>> = manifest.objects.iter().map(|o| o.tags.clone()).collect();
+    let group_tags: Vec<Vec<Vec<String>>> =
+        manifest.groups.iter().map(|g| g.tags.clone()).collect();
+    let instance_tags: Vec<Vec<Vec<String>>> =
+        manifest.instances.iter().map(|i| i.tags.clone()).collect();
 
     Ok(DocLoadRaw {
         materials,
@@ -1112,6 +1158,9 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         group_names,
         component_names,
         instance_names,
+        obj_tags,
+        group_tags,
+        instance_tags,
     })
 }
 

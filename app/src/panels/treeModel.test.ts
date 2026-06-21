@@ -14,8 +14,27 @@ import {
   canPlaceInstance,
   canExplodeInstance,
   canMakeUnique,
+  stripTagSuffix,
   type NodeRef,
 } from './treeModel'
+
+describe('stripTagSuffix', () => {
+  it('returns the name unchanged when there is no tag suffix', () => {
+    expect(stripTagSuffix('Counter Base')).toBe('Counter Base')
+    expect(stripTagSuffix('')).toBe('')
+  })
+
+  it('strips the __HEWTAG__ portion and everything after it', () => {
+    expect(stripTagSuffix('Roof Truss A__HEWTAG__Structure')).toBe('Roof Truss A')
+    expect(stripTagSuffix('Wall__HEWTAG__Exterior')).toBe('Wall')
+  })
+
+  it('handles the underscore-mangled delimiter SketchUp exports', () => {
+    // Empty display (unnamed group) → empty string.
+    expect(stripTagSuffix('___HEWTAG__Exterior_Foundation')).toBe('')
+    expect(stripTagSuffix('Wall___HEWTAG__Roof_Framing')).toBe('Wall')
+  })
+})
 
 describe('entityLabel', () => {
   it('is 1-based per kind', () => {
@@ -34,6 +53,11 @@ describe('resolveLabel', () => {
     expect(resolveLabel('Counter_Base', undefined, 'object', 0)).toBe('Counter_Base')
     expect(resolveLabel('My Group', undefined, 'group', 2)).toBe('My Group')
     expect(resolveLabel('Chair', undefined, 'instance', 0)).toBe('Chair')
+  })
+
+  it('strips __HEWTAG__ suffix from kernel names for display', () => {
+    expect(resolveLabel('Roof Truss A__HEWTAG__Structure', undefined, 'object', 0)).toBe('Roof Truss A')
+    expect(resolveLabel('Wall__HEWTAG__Exterior', undefined, 'group', 0)).toBe('Wall')
   })
 
   it('falls back to entityLabel when kernel name is absent', () => {

@@ -87,6 +87,9 @@ struct ObjectRecord {
     /// Optional display name (e.g. carried in from an import). `None` falls back
     /// to a positional label in the UI.
     name: Option<String>,
+    /// Per-node tag paths (root-first segment lists, e.g. `["Structure","Roof"]`).
+    /// Empty by default; set by import decode or user ops. No global tag registry.
+    tags: Vec<Vec<String>>,
 }
 
 impl ObjectRecord {
@@ -121,6 +124,8 @@ struct GroupRecord {
     /// Optional display name (e.g. carried in from an import). `None` falls back
     /// to a positional label in the UI.
     name: Option<String>,
+    /// Per-node tag paths (root-first segment lists). Empty by default.
+    tags: Vec<Vec<String>>,
 }
 
 /// A component definition (ARCHITECTURE.md): shared geometry as a flat set of leaf
@@ -162,6 +167,8 @@ struct InstanceRecord {
     /// Optional per-instance display name. `None` falls back to the def's name,
     /// then to a positional label, in the UI.
     name: Option<String>,
+    /// Per-node tag paths (root-first segment lists). Empty by default.
+    tags: Vec<Vec<String>>,
 }
 
 /// One document-level step on the undo stack.
@@ -300,6 +307,19 @@ enum DocAction {
         object: ObjectId,
         prev: Option<MaterialId>,
         next: Option<MaterialId>,
+    },
+    /// `set_node_name` / `add_node_tag` / `remove_node_tag` changed a tree
+    /// node's display name or tag list (or both). Undo restores `prev_name` /
+    /// `prev_tags`; redo re-applies `next_name` / `next_tags`. All three ops
+    /// share one variant so rename-plus-retag in a single edit composes
+    /// cleanly. The node handle is stable (no hide-not-delete needed here —
+    /// the node is not created/destroyed, just annotated).
+    NodeMetaChanged {
+        node: NodeId,
+        prev_name: Option<String>,
+        next_name: Option<String>,
+        prev_tags: Vec<Vec<String>>,
+        next_tags: Vec<Vec<String>>,
     },
     /// `Document::ingest` merged an imported scene into this document.
     /// Undo hides every created node/object/group/instance/component (ids
@@ -526,12 +546,20 @@ impl Document {
             .map(|(id, rec)| (id, rec.name.clone()))
             .collect();
 
+        // ── Per-object tags (world + def members), keyed by id ─────────────
+        let obj_tags: std::collections::HashMap<ObjectId, Vec<Vec<String>>> = self
+            .objects
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, rec)| (id, rec.tags.clone()))
+            .collect();
+
         // ── Collect live groups (in slotmap key order) ─────────────────────
-        let groups: Vec<(GroupId, Vec<NodeId>, Option<String>)> = self
+        let groups: Vec<crate::serialize::GroupSaveRow> = self
             .groups
             .iter()
             .filter(|(_, rec)| !rec.hidden)
-            .map(|(id, rec)| (id, rec.members.clone(), rec.name.clone()))
+            .map(|(id, rec)| (id, rec.members.clone(), rec.name.clone(), rec.tags.clone()))
             .collect();
 
         // ── Collect live components (in slotmap key order) ─────────────────
@@ -543,11 +571,11 @@ impl Document {
             .collect();
 
         // ── Collect live instances (in slotmap key order) ──────────────────
-        let instances: Vec<(InstanceId, ComponentId, Transform, Option<String>)> = self
+        let instances: Vec<crate::serialize::InstanceSaveRow> = self
             .instances
             .iter()
             .filter(|(_, rec)| !rec.hidden)
-            .map(|(id, rec)| (id, rec.def, rec.pose, rec.name.clone()))
+            .map(|(id, rec)| (id, rec.def, rec.pose, rec.name.clone(), rec.tags.clone()))
             .collect();
 
         // ── Collect live sketches (in slotmap key order) ───────────────────
@@ -609,6 +637,7 @@ impl Document {
             roots,
             consumed,
             obj_names,
+            obj_tags,
         })
     }
 
@@ -672,6 +701,7 @@ impl Document {
                 hidden: false,
                 owner,
                 name: raw.obj_names.get(i).cloned().flatten(),
+                tags: raw.obj_tags.get(i).cloned().unwrap_or_default(),
             });
             dense_obj_ids.push(oid);
         }
@@ -723,6 +753,7 @@ impl Document {
                 parent: None,
                 hidden: false,
                 name: raw.instance_names.get(ii).cloned().flatten(),
+                tags: raw.instance_tags.get(ii).cloned().unwrap_or_default(),
             });
             inst_ids.push(iid);
         }
@@ -737,6 +768,7 @@ impl Document {
                 parent: None,
                 hidden: false,
                 name: raw.group_names.get(gi).cloned().flatten(),
+                tags: raw.group_tags.get(gi).cloned().unwrap_or_default(),
             });
             grp_ids.push(gid);
         }
@@ -1169,6 +1201,217 @@ impl Document {
         }
     }
 
+    // -------------------------------------------------- node metadata ops / getters
+
+    /// Returns the tag paths of a visible tree node (`&[]` if stale or hidden).
+    ///
+    /// Each path is a root-first list of segments (e.g. `["Structure","Roof"]`).
+    pub fn node_tags(&self, node: NodeId) -> &[Vec<String>] {
+        match node {
+            NodeId::Object(id) => self
+                .objects
+                .get(id)
+                .filter(|r| !r.hidden)
+                .map_or(&[], |r| r.tags.as_slice()),
+            NodeId::Group(id) => self
+                .groups
+                .get(id)
+                .filter(|r| !r.hidden)
+                .map_or(&[], |r| r.tags.as_slice()),
+            NodeId::Instance(id) => self
+                .instances
+                .get(id)
+                .filter(|r| !r.hidden)
+                .map_or(&[], |r| r.tags.as_slice()),
+        }
+    }
+
+    /// Returns `true` when `object` is a live, visible, watertight (solid) object.
+    ///
+    /// Returns `false` if the id is stale, hidden, or the object is leaky/open.
+    pub fn object_solid(&self, object: ObjectId) -> bool {
+        self.objects
+            .get(object)
+            .filter(|r| !r.hidden)
+            .is_some_and(|r| r.object.watertight() == crate::topo::WatertightState::Watertight)
+    }
+
+    /// Rename a visible tree node, recording an undoable [`DocAction::NodeMetaChanged`].
+    ///
+    /// `name = None` clears the name (falls back to positional label in the UI).
+    /// Renaming to the current name is a no-op (no undo entry) — consistent with
+    /// [`Document::add_node_tag`] / [`Document::remove_node_tag`], so re-committing
+    /// an unchanged name (e.g. a focus blur in the UI) never pollutes the undo
+    /// stack.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — stale or hidden node.
+    pub fn set_node_name(
+        &mut self,
+        node: NodeId,
+        name: Option<String>,
+    ) -> Result<DocChange, DocumentError> {
+        let (prev_name, prev_tags) = self.node_meta(node)?;
+        if name == prev_name {
+            // No change — return a touching change without an undo entry.
+            return Ok(self.node_change(node));
+        }
+        let next_tags = prev_tags.clone();
+        self.apply_node_meta(node, name.clone(), next_tags.clone());
+        self.undo.push(DocAction::NodeMetaChanged {
+            node,
+            prev_name,
+            next_name: name,
+            prev_tags,
+            next_tags,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(self.node_change(node))
+    }
+
+    /// Append `path` to `node`'s tag list if not already present, recording an
+    /// undoable [`DocAction::NodeMetaChanged`]. Returns the change (touching the
+    /// node) whether or not the tag was new; only pushes an undo entry when the
+    /// tag list actually changed.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — stale or hidden node.
+    pub fn add_node_tag(
+        &mut self,
+        node: NodeId,
+        path: Vec<String>,
+    ) -> Result<DocChange, DocumentError> {
+        let (prev_name, prev_tags) = self.node_meta(node)?;
+        // Only add if not already present.
+        if prev_tags.contains(&path) {
+            // No change — return a touching change without an undo entry.
+            return Ok(self.node_change(node));
+        }
+        let mut next_tags = prev_tags.clone();
+        next_tags.push(path);
+        let next_name = prev_name.clone();
+        self.apply_node_meta(node, next_name.clone(), next_tags.clone());
+        self.undo.push(DocAction::NodeMetaChanged {
+            node,
+            prev_name: next_name.clone(),
+            next_name,
+            prev_tags,
+            next_tags,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(self.node_change(node))
+    }
+
+    /// Remove the first occurrence of `path` from `node`'s tag list, recording
+    /// an undoable [`DocAction::NodeMetaChanged`]. No-op (no undo entry) if the
+    /// path is not present.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — stale or hidden node.
+    pub fn remove_node_tag(
+        &mut self,
+        node: NodeId,
+        path: &[String],
+    ) -> Result<DocChange, DocumentError> {
+        let (prev_name, prev_tags) = self.node_meta(node)?;
+        let Some(pos) = prev_tags.iter().position(|t| t.as_slice() == path) else {
+            // Not present — no undo entry.
+            return Ok(self.node_change(node));
+        };
+        let mut next_tags = prev_tags.clone();
+        next_tags.remove(pos);
+        let next_name = prev_name.clone();
+        self.apply_node_meta(node, next_name.clone(), next_tags.clone());
+        self.undo.push(DocAction::NodeMetaChanged {
+            node,
+            prev_name: next_name.clone(),
+            next_name,
+            prev_tags,
+            next_tags,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(self.node_change(node))
+    }
+
+    /// Read name + tags of a live, visible node. Returns `Err` for stale/hidden.
+    fn node_meta(&self, node: NodeId) -> Result<(Option<String>, Vec<Vec<String>>), DocumentError> {
+        match node {
+            NodeId::Object(id) => {
+                let rec = self
+                    .objects
+                    .get(id)
+                    .filter(|r| !r.hidden)
+                    .ok_or(DocumentError::UnknownObject)?;
+                Ok((rec.name.clone(), rec.tags.clone()))
+            }
+            NodeId::Group(id) => {
+                let rec = self
+                    .groups
+                    .get(id)
+                    .filter(|r| !r.hidden)
+                    .ok_or(DocumentError::UnknownGroup)?;
+                Ok((rec.name.clone(), rec.tags.clone()))
+            }
+            NodeId::Instance(id) => {
+                let rec = self
+                    .instances
+                    .get(id)
+                    .filter(|r| !r.hidden)
+                    .ok_or(DocumentError::UnknownInstance)?;
+                Ok((rec.name.clone(), rec.tags.clone()))
+            }
+        }
+    }
+
+    /// Write name + tags to a node (no guards — caller has already validated).
+    fn apply_node_meta(&mut self, node: NodeId, name: Option<String>, tags: Vec<Vec<String>>) {
+        match node {
+            NodeId::Object(id) => {
+                if let Some(rec) = self.objects.get_mut(id) {
+                    rec.name = name;
+                    rec.tags = tags;
+                }
+            }
+            NodeId::Group(id) => {
+                if let Some(rec) = self.groups.get_mut(id) {
+                    rec.name = name;
+                    rec.tags = tags;
+                }
+            }
+            NodeId::Instance(id) => {
+                if let Some(rec) = self.instances.get_mut(id) {
+                    rec.name = name;
+                    rec.tags = tags;
+                }
+            }
+        }
+    }
+
+    /// Build a [`DocChange`] that marks `node` as touched (in its respective
+    /// touched vec — `objects_touched` / `groups_touched` / `instances_touched`).
+    fn node_change(&self, node: NodeId) -> DocChange {
+        match node {
+            NodeId::Object(id) => DocChange {
+                objects_touched: vec![id],
+                ..Default::default()
+            },
+            NodeId::Group(id) => DocChange {
+                groups_touched: vec![id],
+                ..Default::default()
+            },
+            NodeId::Instance(id) => DocChange {
+                instances_touched: vec![id],
+                ..Default::default()
+            },
+        }
+    }
+
     // ---------------------------------------------------------------- objects
 
     /// A visible Object by handle, or `None` if stale or hidden.
@@ -1502,6 +1745,7 @@ impl Document {
             hidden: false,
             owner: ObjectOwner::World { parent: None },
             name: None,
+            tags: Vec::new(),
         });
         // The region is now the bottom of a solid: consume it so it neither
         // re-extrudes nor leaves a stray fill.
@@ -1606,6 +1850,7 @@ impl Document {
             hidden: false,
             owner: ObjectOwner::World { parent: None },
             name: None,
+            tags: Vec::new(),
         });
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
@@ -1701,6 +1946,7 @@ impl Document {
             parent,
             hidden: false,
             name: None,
+            tags: Vec::new(),
         });
         for &m in members {
             self.set_node_parent(m, Some(group));
@@ -1915,6 +2161,7 @@ impl Document {
             parent,
             hidden: false,
             name: None,
+            tags: Vec::new(),
         });
         if let Some(pg) = parent {
             self.splice_in_parent(pg, members, NodeId::Instance(instance));
@@ -1964,6 +2211,7 @@ impl Document {
             parent: None,
             hidden: false,
             name: None,
+            tags: Vec::new(),
         });
         self.undo.push(DocAction::PlacedInstance { instance });
         self.redo.clear();
@@ -2117,6 +2365,7 @@ impl Document {
                 hidden: false,
                 owner: ObjectOwner::World { parent },
                 name: None,
+                tags: Vec::new(),
             });
             created.push(id);
         }
@@ -2183,6 +2432,7 @@ impl Document {
                 hidden: false,
                 owner: ObjectOwner::Definition(new_def),
                 name: None,
+                tags: Vec::new(),
             });
             new_members.push(id);
         }
@@ -2475,6 +2725,17 @@ impl Document {
                 }
                 self.paint_change(object)
             }
+            DocAction::NodeMetaChanged {
+                node,
+                prev_name,
+                prev_tags,
+                ..
+            } => {
+                // Undo: restore previous name and tags.
+                let node = *node;
+                self.apply_node_meta(node, prev_name.clone(), prev_tags.clone());
+                self.node_change(node)
+            }
             DocAction::Imported {
                 objects,
                 components,
@@ -2726,6 +2987,17 @@ impl Document {
                 }
                 self.paint_change(object)
             }
+            DocAction::NodeMetaChanged {
+                node,
+                next_name,
+                next_tags,
+                ..
+            } => {
+                // Redo: re-apply next name and tags.
+                let node = *node;
+                self.apply_node_meta(node, next_name.clone(), next_tags.clone());
+                self.node_change(node)
+            }
             DocAction::Imported {
                 objects,
                 components,
@@ -2934,6 +3206,7 @@ fn ingest_build_mesh(
                 hidden: false,
                 owner,
                 name: Some(recipe.name),
+                tags: recipe.tags,
             });
             all_objects.push(oid);
             Some(oid)
@@ -2974,7 +3247,7 @@ fn ingest_build_node(
             )?;
             Some(NodeId::Object(oid))
         }
-        crate::import::ImportNode::Instance { def, pose } => {
+        crate::import::ImportNode::Instance { def, pose, tags } => {
             let cid = def_cid.get(def).copied().flatten()?;
             let iid = doc.instances.insert(InstanceRecord {
                 def: cid,
@@ -2983,16 +3256,22 @@ fn ingest_build_node(
                 hidden: false,
                 // Display name resolves to the def's name (set on ComponentDef).
                 name: None,
+                tags,
             });
             all_instances.push(iid);
             Some(NodeId::Instance(iid))
         }
-        crate::import::ImportNode::Group { name, children } => {
+        crate::import::ImportNode::Group {
+            name,
+            children,
+            tags,
+        } => {
             let gid = doc.groups.insert(GroupRecord {
                 members: Vec::new(),
                 parent,
                 hidden: false,
                 name: if name.is_empty() { None } else { Some(name) },
+                tags,
             });
             all_groups.push(gid);
             let mut members: Vec<NodeId> = Vec::new();
