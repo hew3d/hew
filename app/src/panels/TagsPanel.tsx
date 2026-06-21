@@ -24,8 +24,6 @@ interface Props {
   hiddenTagPaths: Set<string>
   /** Toggle hide/show for a tag (and all its descendants). */
   onToggleTagPath: (path: string[]) => void
-  /** Called when the user closes the panel. */
-  onClose: () => void
 }
 
 const ROW_BASE: React.CSSProperties = {
@@ -38,9 +36,10 @@ const ROW_BASE: React.CSSProperties = {
   cursor: 'default',
   borderRadius: '3px',
   userSelect: 'none',
+  minWidth: 0,
 }
 
-export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onClose }: Props) {
+export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath }: Props) {
   // Re-query the scene on every docRev bump.
   const tagTree = useMemo(() => {
     // Collect all nodes (objects, groups, instances) and parse their names.
@@ -69,40 +68,7 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onCl
   }, [scene, docRev])
 
   return (
-    <aside
-      style={{
-        width: '220px',
-        flexShrink: 0,
-        background: '#2a2a2a',
-        color: '#ddd',
-        borderRadius: '4px',
-        padding: '8px',
-        overflowY: 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-      }}
-    >
-      {/* Panel header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontWeight: 'bold', fontSize: '12px', color: '#eee' }}>Tags</span>
-        <button
-          onClick={onClose}
-          title="Close panel"
-          style={{
-            background: 'none',
-            border: 'none',
-            color: '#888',
-            cursor: 'pointer',
-            fontSize: '14px',
-            lineHeight: 1,
-            padding: '0 2px',
-          }}
-        >
-          ×
-        </button>
-      </div>
-
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
       {tagTree.length === 0 ? (
         <EmptyState />
       ) : (
@@ -118,7 +84,7 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onCl
           ))}
         </div>
       )}
-    </aside>
+    </div>
   )
 }
 
@@ -187,6 +153,10 @@ function TagRow({
         <span
           style={{
             flex: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
             color: isHiddenByAncestorOrSelf ? '#555' : '#ccc',
             fontSize: '12px',
           }}

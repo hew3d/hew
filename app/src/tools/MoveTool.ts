@@ -33,6 +33,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers
 import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
 import { arrowToAxis, editNumericBuffer, parseDistance, pointAlong } from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
+import { formatLength } from '../settings/units'
 
 export type OnMoveCommit = (node: NodeRef) => void
 export type OnToast = (message: string, code?: string) => void
@@ -338,7 +339,7 @@ export class MoveTool implements Tool {
       dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
     }
 
-    this.onMeasurementCb(dist.toFixed(2))
+    this.onMeasurementCb(formatLength(dist))
   }
 
   /**

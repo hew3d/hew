@@ -35,8 +35,6 @@ interface Props {
    * update. This is the same handleDocumentChanged that all other mutations use.
    */
   onDocumentChanged: () => void
-  /** Called when the user closes the panel. */
-  onClose: () => void
 }
 
 /** Human-readable type label for each node kind. */
@@ -47,13 +45,6 @@ function kindLabel(kind: NodeRef['kind']): string {
 }
 
 const PANEL_STYLE: React.CSSProperties = {
-  width: '220px',
-  flexShrink: 0,
-  background: '#2a2a2a',
-  color: '#ddd',
-  borderRadius: '4px',
-  padding: '8px',
-  overflowY: 'auto',
   display: 'flex',
   flexDirection: 'column',
   gap: '10px',
@@ -86,7 +77,7 @@ const INPUT_STYLE: React.CSSProperties = {
   outline: 'none',
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged, onClose }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged }: Props) {
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
@@ -169,27 +160,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
   // Render
   // --------------------------------------------------------------------------
   return (
-    <aside style={PANEL_STYLE}>
-      {/* Panel header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontWeight: 'bold', fontSize: '12px', color: '#eee' }}>Object Info</span>
-        <button
-          onClick={onClose}
-          title="Close panel"
-          style={{
-            background: 'none',
-            border: 'none',
-            color: '#888',
-            cursor: 'pointer',
-            fontSize: '14px',
-            lineHeight: 1,
-            padding: '0 2px',
-          }}
-        >
-          ×
-        </button>
-      </div>
-
+    <div style={PANEL_STYLE}>
       {nodeInfo === null ? (
         <EmptyState multiSelect={selectedIds.length > 1} />
       ) : (
@@ -284,7 +255,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
           </div>
         </>
       )}
-    </aside>
+    </div>
   )
 }
 

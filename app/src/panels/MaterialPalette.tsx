@@ -28,24 +28,15 @@ interface Props {
   onDocumentChanged: () => void
   /** Currently selected document nodes — used by "Fill selected object". */
   selectedIds?: NodeRef[]
-  /** Called when the user closes the panel. */
-  onClose?: () => void
 }
 
 const PANEL_STYLE: React.CSSProperties = {
-  width: '180px',
-  minWidth: '180px',
-  background: '#2a2a2a',
-  borderRadius: '4px',
-  padding: '8px',
   display: 'flex',
   flexDirection: 'column',
   gap: '6px',
-  overflowY: 'auto',
   fontFamily: 'monospace',
   fontSize: '11px',
   color: '#ccc',
-  flexShrink: 0,
 }
 
 const SWATCH_STYLE: React.CSSProperties = {
@@ -90,7 +81,6 @@ export function MaterialPalette({
   onSelectMaterial,
   onDocumentChanged,
   selectedIds = [],
-  onClose,
 }: Props) {
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
   // re-query material_ids from the WASM scene on each document change.
@@ -180,27 +170,6 @@ export function MaterialPalette({
 
   return (
     <div style={PANEL_STYLE}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2px' }}>
-        <span style={{ fontWeight: 'bold', fontSize: '12px', color: '#eee' }}>Materials</span>
-        {onClose !== undefined && (
-          <button
-            onClick={onClose}
-            title="Close panel"
-            style={{
-              background: 'none',
-              border: 'none',
-              color: '#888',
-              cursor: 'pointer',
-              fontSize: '14px',
-              lineHeight: 1,
-              padding: '0 2px',
-            }}
-          >
-            ×
-          </button>
-        )}
-      </div>
-
       {/* Default swatch */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div

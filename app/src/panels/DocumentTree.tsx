@@ -65,8 +65,6 @@ interface Props {
   canMakeUnique: boolean
   /** Detach the instance onto a private copy of its definition. */
   onMakeUnique: () => void
-  /** Called when the user closes the panel. */
-  onClose: () => void
   /** Set of nodeKey strings for nodes that are currently hidden. */
   hiddenKeys: Set<string>
   /** Toggle hide/show for a node (and its descendants if it's a group). */
@@ -83,6 +81,7 @@ const ROW_BASE: React.CSSProperties = {
   cursor: 'pointer',
   borderRadius: '3px',
   userSelect: 'none',
+  minWidth: 0,
 }
 
 export function DocumentTree({
@@ -107,7 +106,6 @@ export function DocumentTree({
   onExplodeInstance,
   canMakeUnique,
   onMakeUnique,
-  onClose,
   hiddenKeys,
   onToggleHidden,
 }: Props) {
@@ -190,39 +188,7 @@ export function DocumentTree({
   const crumbs = breadcrumb(activeContext, labelFor)
 
   return (
-    <aside
-      style={{
-        width: '240px',
-        flexShrink: 0,
-        background: '#2a2a2a',
-        color: '#ddd',
-        borderRadius: '4px',
-        padding: '8px',
-        overflowY: 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-      }}
-    >
-      {/* Panel header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontWeight: 'bold', fontSize: '12px', color: '#eee' }}>Model Info</span>
-        <button
-          onClick={onClose}
-          title="Close panel"
-          style={{
-            background: 'none',
-            border: 'none',
-            color: '#888',
-            cursor: 'pointer',
-            fontSize: '14px',
-            lineHeight: 1,
-            padding: '0 2px',
-          }}
-        >
-          ×
-        </button>
-      </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
       {/* Breadcrumb */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'monospace' }}>
         {crumbs.map((c, i) => (
@@ -364,7 +330,7 @@ export function DocumentTree({
           />
         ))}
       </Section>
-    </aside>
+    </div>
   )
 }
 
@@ -660,7 +626,7 @@ function Row({
       {dot !== undefined && (
         <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: dot, flexShrink: 0 }} />
       )}
-      <span style={{ flex: 1, color: hidden === true ? '#666' : undefined }}>{label}</span>
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? '#666' : undefined }}>{label}</span>
       {active && <span style={{ fontSize: '10px', color: '#cfe0f5' }}>editing</span>}
       {/* Eye toggle — only visible on hover via CSS would require class, so always show */}
       {onToggleHidden !== undefined && (

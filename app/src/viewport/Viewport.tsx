@@ -770,6 +770,12 @@ export default function Viewport({
           controls.mouseButtons.LEFT = null
           toolController.resetToSelect()
       }
+      // Reflect the REQUESTED tool name immediately so the status bar doesn't
+      // lag until the next pointer-move. Camera tools (Orbit/Pan/Zoom) call
+      // resetToSelect() internally, so toolController.activeToolName would
+      // read "Select" here — use the requested toolName instead. The snap
+      // kind is reset to null since switching tools invalidates any prior snap.
+      onStatusChangeRef.current?.(toolName, null)
       scheduleRender()
     }
 

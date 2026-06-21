@@ -7,6 +7,7 @@ import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
 import { TagsPanel } from './panels/TagsPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
+import { FloatingPanel } from './panels/FloatingPanel'
 import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, nodeKey, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
@@ -23,8 +24,14 @@ import {
   afterImport,
   type DocSessionState,
 } from './io/documentSession'
+import { makeRecoveryStore, shouldPromptRecovery, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
 import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
+import { RecoveryDialog } from './panels/RecoveryDialog'
+import { UnitsPane } from './settings/UnitsPane'
+
+/** Autosave tick interval (ms). */
+const AUTOSAVE_INTERVAL_MS = 12000
 
 interface AppState {
   kernelVersion: string
@@ -100,6 +107,20 @@ export default function App() {
   const [showTags, setShowTags] = useState(false)
   /** Pane visibility: Object Info */
   const [showObjectInfo, setShowObjectInfo] = useState(true)
+  /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
+  const [showDebugLog, setShowDebugLog] = useState(false)
+  /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
+  /**
+   * Floating-panel z-order (draggable overlay panels). Each panel's
+   * z-index is its position in this array (later = on top); clicking a panel
+   * moves its id to the end. Base values stay well below the toast stack
+   * (z 100) and other fixed overlays.
+   */
+  const [panelOrder, setPanelOrder] = useState<string[]>(['modelInfo', 'materials', 'tags', 'objectInfo'])
+  const bringPanelToFront = useCallback((id: string) => {
+    setPanelOrder((cur) => (cur[cur.length - 1] === id ? cur : [...cur.filter((p) => p !== id), id]))
+  }, [])
   /** Tag-path hide set: each entry is tagPathKey(path). Cleared on load/new. */
   const [hiddenTagPaths, setHiddenTagPaths] = useState<Set<string>>(new Set())
   /** Import report to display (null = no dialog). */
@@ -108,6 +129,8 @@ export default function App() {
   const [isImporting, setIsImporting] = useState(false)
   /** Display name of the file being imported (shown in the overlay). */
   const [importingName, setImportingName] = useState('')
+  /** Recovery snapshot to offer at startup (null = no dialog). */
+  const [recoveryPrompt, setRecoveryPrompt] = useState<RecoverySnapshot | null>(null)
 
   /** Imperative handle into the viewport (e.g. running a boolean). */
   const viewportApi = useRef<ViewportApi | null>(null)
@@ -124,6 +147,15 @@ export default function App() {
   // When true, handleDocumentChanged suppresses the dirty-marking setState
   // (used during programmatic loads so the post-load afterOpen wins).
   const suppressDirtyRef = useRef(false)
+  // Stable recovery-store instance (autosave / crash recovery).
+  const recoveryStoreRef = useRef(makeRecoveryStore())
+  // True when a mutation has occurred since the last successful autosave tick
+  // (or since the last explicit Save, which also resets it). Avoids redundant
+  // writes when the document hasn't changed between ticks.
+  const dirtySinceAutosaveRef = useRef(false)
+  // Guards the startup recovery check so it runs exactly once even under
+  // StrictMode's double-invoke or Vite HMR re-renders.
+  const recoveryCheckedRef = useRef(false)
 
   // Install console capture on mount, restore on unmount.
   useEffect(() => {
@@ -156,9 +188,58 @@ export default function App() {
     docSessionRef.current = docSession
   }, [docSession])
 
-  // Update document.title whenever session state changes.
+  // ---------------------------------------------------------------- autosave
+  // Periodically snapshot the scene to the RecoveryStore so a crash or forced
+  // quit doesn't lose work. Only writes when the document is dirty AND has
+  // mutated since the last successful write (avoids redundant IO on an idle,
+  // already-autosaved document). Runs once for the component's lifetime.
   useEffect(() => {
-    document.title = deriveTitle(docSession)
+    const interval = setInterval(() => {
+      const scene = sceneRef.current
+      const session = docSessionRef.current
+      if (scene === null || !session.dirty || !dirtySinceAutosaveRef.current) return
+      const bytes = new Uint8Array(scene.save())
+      const meta: RecoveryMeta = {
+        version: 1,
+        name: session.currentRef?.name ?? session.importedName ?? 'Untitled',
+        path: typeof session.currentRef?.handle === 'string' ? session.currentRef.handle : null,
+        savedAt: Date.now(),
+      }
+      recoveryStoreRef.current.write(bytes, meta).then(() => {
+        dirtySinceAutosaveRef.current = false
+      }).catch(() => { /* ignore — try again next tick */ })
+    }, AUTOSAVE_INTERVAL_MS)
+    return () => clearInterval(interval)
+  }, [])
+
+  // ---------------------------------------------------------------- startup recovery check
+  // Runs once, after the scene first becomes available. Guarded by
+  // recoveryCheckedRef so StrictMode's double-invoke / Vite HMR re-renders
+  // can't trigger it twice or re-prompt after the user has already decided.
+  // shouldPromptRecovery suppresses the prompt if anything else (e.g. a
+  // cold-start file-association open) already populated the session.
+  useEffect(() => {
+    if (state === null) return
+    if (recoveryCheckedRef.current) return
+    recoveryCheckedRef.current = true
+    recoveryStoreRef.current.read().then((snapshot) => {
+      if (shouldPromptRecovery(docSessionRef.current, snapshot)) {
+        setRecoveryPrompt(snapshot)
+      }
+    }).catch(() => { /* ignore — no recovery prompt */ })
+  }, [state])
+
+  // Update document.title whenever session state changes. Under Tauri, also
+  // push the title to the native OS title bar — the in-app MenuBar no longer
+  // renders a title for the native case, so the title now lives solely there.
+  useEffect(() => {
+    const title = deriveTitle(docSession)
+    document.title = title
+    if (isTauri) {
+      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+        getCurrentWindow().setTitle(title).catch(() => { /* ignore */ })
+      }).catch(() => { /* ignore */ })
+    }
   }, [docSession])
 
   // Warn before unload when there are unsaved changes.
@@ -243,6 +324,7 @@ export default function App() {
     // loads (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
     if (!suppressDirtyRef.current) {
       setDocSession((s) => afterMutation(s))
+      dirtySinceAutosaveRef.current = true
     }
   }, [trimContextPath])
 
@@ -468,6 +550,9 @@ export default function App() {
       if (newRef === null) return // user cancelled
       setDocSession(afterSave(newRef))
       LogStore.log.info('app', `Saved: ${newRef.name}`)
+      // The work is now safely on disk — drop the autosave snapshot.
+      recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
+      dirtySinceAutosaveRef.current = false
       if (isTauri && typeof newRef.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: newRef.handle as string })
@@ -491,6 +576,9 @@ export default function App() {
       if (newRef === null) return // user cancelled
       setDocSession(afterSave(newRef))
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
+      // The work is now safely on disk — drop the autosave snapshot.
+      recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
+      dirtySinceAutosaveRef.current = false
       if (isTauri && typeof newRef.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: newRef.handle as string })
@@ -514,6 +602,37 @@ export default function App() {
     }
   }, [confirmDiscard, applyLoadedBytes])
 
+  // ---------------------------------------------------------------- recovery prompt actions
+  const handleRecover = useCallback(() => {
+    const snapshot = recoveryPrompt
+    if (snapshot === null) return
+    const ok = applyLoadedBytes(snapshot.bytes)
+    if (ok) {
+      const { meta } = snapshot
+      setDocSession({
+        currentRef: meta.path !== null ? { name: meta.name, handle: meta.path } : null,
+        dirty: true,
+        importedName: meta.path !== null ? undefined : meta.name,
+      })
+      // The recovered document still only exists in the recovery snapshot —
+      // leave it in place (the next autosave tick refreshes it) and mark
+      // dirty-since-autosave so a tick will actually fire if nothing else changes.
+      dirtySinceAutosaveRef.current = true
+    }
+    setRecoveryPrompt(null)
+  }, [recoveryPrompt, applyLoadedBytes])
+
+  const handleDiscardRecovery = useCallback(() => {
+    recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
+    setRecoveryPrompt(null)
+  }, [])
+
+  // Escape closes the prompt WITHOUT clearing — the snapshot survives and is
+  // re-offered next launch, so an accidental keypress can't lose work.
+  const handleDismissRecovery = useCallback(() => {
+    setRecoveryPrompt(null)
+  }, [])
+
   // ---------------------------------------------------------------- undo/redo for Edit menu
   const handleUndo = useCallback(() => {
     viewportApi.current?.runUndo()
@@ -528,6 +647,31 @@ export default function App() {
     viewportApi.current?.zoomExtents()
   }, [])
 
+  // ---------------------------------------------------------------- settings window
+  // Under Tauri: a separate, free-floating OS webview window (movable outside
+  // the main Hew window). On web: there's no concept of a second OS window,
+  // so we fall back to an in-app modal (showSettingsModal below).
+  const openSettings = useCallback(() => {
+    if (isTauri) {
+      import('@tauri-apps/api/webviewWindow').then(async ({ WebviewWindow }) => {
+        const existing = await WebviewWindow.getByLabel('settings')
+        if (existing !== null) {
+          await existing.setFocus()
+          return
+        }
+        new WebviewWindow('settings', {
+          url: 'index.html#settings',
+          title: 'Settings',
+          width: 520,
+          height: 380,
+          resizable: true,
+        })
+      }).catch(() => { /* ignore */ })
+      return
+    }
+    setShowSettingsModal(true)
+  }, [])
+
   // ---------------------------------------------------------------- stable refs for Tauri event listeners
   // These refs always track the latest callbacks so Tauri event handlers
   // (registered once) don't capture stale closures.
@@ -540,6 +684,7 @@ export default function App() {
   const handleRedoRef = useRef(handleRedo)
   const handleZoomExtentsRef = useRef(handleZoomExtents)
   const openPathRef = useRef(openPath)
+  const openSettingsRef = useRef(openSettings)
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
   useEffect(() => { openDocumentRef.current = openDocument }, [openDocument])
   useEffect(() => { importDocumentRef.current = importDocument }, [importDocument])
@@ -549,6 +694,7 @@ export default function App() {
   useEffect(() => { handleRedoRef.current = handleRedo }, [handleRedo])
   useEffect(() => { handleZoomExtentsRef.current = handleZoomExtents }, [handleZoomExtents])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
+  useEffect(() => { openSettingsRef.current = openSettings }, [openSettings])
 
   // ---------------------------------------------------------------- native menu-action dispatch
   // The dispatch switch lives in a ref refreshed every render. The listener
@@ -590,7 +736,9 @@ export default function App() {
       case 'toggle-materials':    setShowMaterials((v) => !v); break
       case 'toggle-tags':         setShowTags((v) => !v); break
       case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
+      case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
+      case 'open-settings':       openSettingsRef.current(); break
     }
   }
 
@@ -797,6 +945,11 @@ export default function App() {
       if (ev.key.toLowerCase() === 'o' && ev.shiftKey) {
         ev.preventDefault()
         setShowObjectInfo((v) => !v)
+        return
+      }
+      if (ev.key === ',') {
+        ev.preventDefault()
+        openSettingsRef.current()
         return
       }
     }
@@ -1078,7 +1231,6 @@ export default function App() {
           shows only the document title + kernel version. */}
       <MenuBar
         title={deriveTitle(docSession)}
-        kernelVersion={state.kernelVersion}
         nativeMenuBar={isTauri}
         onNew={newDocument}
         onOpen={openDocument}
@@ -1095,11 +1247,14 @@ export default function App() {
         showMaterials={showMaterials}
         showTags={showTags}
         showObjectInfo={showObjectInfo}
+        showDebugLog={showDebugLog}
         onToggleModelInfo={() => setShowModelInfo((v) => !v)}
         onToggleMaterials={() => setShowMaterials((v) => !v)}
         onToggleTags={() => setShowTags((v) => !v)}
         onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
+        onToggleDebugLog={() => setShowDebugLog((v) => !v)}
         onZoomExtents={handleZoomExtents}
+        onOpenSettings={openSettings}
       />
 
       {/* Kernel panic sticky banner */}
@@ -1192,38 +1347,9 @@ export default function App() {
         )}
       </div>
 
-      {/* Status bar */}
-      <div
-        style={{
-          padding: '4px 8px',
-          background: '#222',
-          color: '#eee',
-          fontFamily: 'monospace',
-          fontSize: '12px',
-          borderBottom: '1px solid #3a3a3a',
-          display: 'flex',
-          gap: '1.5rem',
-          flexShrink: 0,
-        }}
-      >
-        <span>Tool: <strong>{toolName}</strong></span>
-        <span>Snap: {snapKind ?? '—'}</span>
-        <span>Length: {measurement !== '' ? measurement : '—'}</span>
-        {activeTool === 'Paint' && (
-          <span style={{ color: '#aaa', fontSize: '11px' }}>
-            Click: paint face | Cmd/Ctrl+click: fill whole object
-          </span>
-        )}
-        <span style={{ color: '#888', fontSize: '11px' }}>
-          Middle-drag: orbit | Shift+Middle: pan | Scroll: zoom
-        </span>
-        <span style={{ color: '#888', fontSize: '11px', marginLeft: 'auto' }}>
-          Undo: Cmd/Ctrl+Z | Redo: Shift+Cmd/Ctrl+Z
-        </span>
-      </div>
-
-      {/* Viewport + document tree — fills remaining space above the log panel */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', gap: '8px', padding: '8px 8px 0 8px' }}>
+      {/* Viewport — fills the full width of the main area; floating panels
+          overlay it instead of sharing a flex row. */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', padding: '8px 8px 0 8px' }}>
         <div
           style={{ flex: 1, minWidth: 0, position: 'relative' }}
           onDragOver={handleDragOver}
@@ -1247,7 +1373,107 @@ export default function App() {
             currentMaterialId={currentMaterialId}
           />
 
-          {/* Toast stack — positioned inside the viewport container */}
+          {/* Floating panels — overlaid on the viewport. Free-drag with
+              magnetic docking against the container edges and sibling
+              panels (see FloatingPanel.tsx). z-index stays below the toast
+              stack (100) and other fixed overlays. */}
+          {showModelInfo && (
+            <FloatingPanel
+              panelId="modelInfo"
+              title="Model Info"
+              defaultPosition={{ x: window.innerWidth - 300, y: 16 }}
+              width={280}
+              zIndex={10 + panelOrder.indexOf('modelInfo')}
+              onFocus={() => bringPanelToFront('modelInfo')}
+              onClose={() => setShowModelInfo(false)}
+            >
+              <DocumentTree
+                scene={state.scene}
+                docRev={docRev}
+                watertightMap={watertightMap}
+                selectedIds={selectedIds}
+                activeContext={activeContext}
+                onSelect={handleSelect}
+                onEnterContext={handleEnterContext}
+                onExitContext={handleExitContext}
+                onSetContextDepth={handleSetContextDepth}
+                canBoolean={canBoolean}
+                onBoolean={handleBoolean}
+                onGroup={handleGroup}
+                onUngroup={handleUngroup}
+                canMakeComponent={canMakeComp}
+                onMakeComponent={handleMakeComponent}
+                canPlaceInstance={canPlace}
+                onPlaceInstance={handlePlaceInstance}
+                canExplodeInstance={canExplode}
+                onExplodeInstance={handleExplodeInstance}
+                canMakeUnique={canUnique}
+                onMakeUnique={handleMakeUnique}
+                hiddenKeys={hiddenKeys}
+                onToggleHidden={handleToggleHidden}
+              />
+            </FloatingPanel>
+          )}
+          {showObjectInfo && (
+            <FloatingPanel
+              panelId="objectInfo"
+              title="Object Info"
+              // Directly below Model Info by default, so the two stack vertically.
+              defaultPosition={{ x: window.innerWidth - 300, y: 250 }}
+              width={280}
+              zIndex={10 + panelOrder.indexOf('objectInfo')}
+              onFocus={() => bringPanelToFront('objectInfo')}
+              onClose={() => setShowObjectInfo(false)}
+            >
+              <ObjectInfoPanel
+                scene={state.scene}
+                docRev={docRev}
+                selectedIds={selectedIds}
+                onDocumentChanged={handleDocumentChanged}
+              />
+            </FloatingPanel>
+          )}
+          {showMaterials && (
+            <FloatingPanel
+              panelId="materials"
+              title="Materials"
+              defaultPosition={{ x: 16, y: 16 }}
+              width={260}
+              zIndex={10 + panelOrder.indexOf('materials')}
+              onFocus={() => bringPanelToFront('materials')}
+              onClose={() => setShowMaterials(false)}
+            >
+              <MaterialPalette
+                scene={state.scene}
+                docRev={docRev}
+                currentMaterialId={currentMaterialId}
+                onSelectMaterial={setCurrentMaterialId}
+                onDocumentChanged={handleDocumentChanged}
+                selectedIds={selectedIds}
+              />
+            </FloatingPanel>
+          )}
+          {showTags && (
+            <FloatingPanel
+              panelId="tags"
+              title="Tags"
+              defaultPosition={{ x: 300, y: 16 }}
+              width={260}
+              zIndex={10 + panelOrder.indexOf('tags')}
+              onFocus={() => bringPanelToFront('tags')}
+              onClose={() => setShowTags(false)}
+            >
+              <TagsPanel
+                scene={state.scene}
+                docRev={docRev}
+                hiddenTagPaths={hiddenTagPaths}
+                onToggleTagPath={handleToggleTagPath}
+              />
+            </FloatingPanel>
+          )}
+
+          {/* Toast stack — positioned inside the viewport container, above
+              floating panels (z 100 vs panel z 10-13). */}
           <div
             style={{
               position: 'absolute',
@@ -1289,68 +1515,42 @@ export default function App() {
             ))}
           </div>
         </div>
-
-        {showModelInfo && (
-          <DocumentTree
-            scene={state.scene}
-            docRev={docRev}
-            watertightMap={watertightMap}
-            selectedIds={selectedIds}
-            activeContext={activeContext}
-            onSelect={handleSelect}
-            onEnterContext={handleEnterContext}
-            onExitContext={handleExitContext}
-            onSetContextDepth={handleSetContextDepth}
-            canBoolean={canBoolean}
-            onBoolean={handleBoolean}
-            onGroup={handleGroup}
-            onUngroup={handleUngroup}
-            canMakeComponent={canMakeComp}
-            onMakeComponent={handleMakeComponent}
-            canPlaceInstance={canPlace}
-            onPlaceInstance={handlePlaceInstance}
-            canExplodeInstance={canExplode}
-            onExplodeInstance={handleExplodeInstance}
-            canMakeUnique={canUnique}
-            onMakeUnique={handleMakeUnique}
-            onClose={() => setShowModelInfo(false)}
-            hiddenKeys={hiddenKeys}
-            onToggleHidden={handleToggleHidden}
-          />
-        )}
-        {showMaterials && (
-          <MaterialPalette
-            scene={state.scene}
-            docRev={docRev}
-            currentMaterialId={currentMaterialId}
-            onSelectMaterial={setCurrentMaterialId}
-            onDocumentChanged={handleDocumentChanged}
-            selectedIds={selectedIds}
-            onClose={() => setShowMaterials(false)}
-          />
-        )}
-        {showTags && (
-          <TagsPanel
-            scene={state.scene}
-            docRev={docRev}
-            hiddenTagPaths={hiddenTagPaths}
-            onToggleTagPath={handleToggleTagPath}
-            onClose={() => setShowTags(false)}
-          />
-        )}
-        {showObjectInfo && (
-          <ObjectInfoPanel
-            scene={state.scene}
-            docRev={docRev}
-            selectedIds={selectedIds}
-            onDocumentChanged={handleDocumentChanged}
-            onClose={() => setShowObjectInfo(false)}
-          />
-        )}
       </div>
 
-      {/* Log panel — docked at bottom, never covers the viewport */}
-      <LogPanel panelHeight={160} />
+      {/* Status bar — bottom strip, above the Debug Log panel when shown.
+          Extra bottom padding avoids descender clipping under macOS Tahoe's
+          rounded window corners. */}
+      <div
+        style={{
+          padding: '4px 8px 10px 8px',
+          background: '#222',
+          color: '#eee',
+          fontFamily: 'monospace',
+          fontSize: '12px',
+          borderTop: '1px solid #3a3a3a',
+          display: 'flex',
+          gap: '1.5rem',
+          flexShrink: 0,
+        }}
+      >
+        <span>Tool: <strong>{toolName}</strong></span>
+        <span>Snap: {snapKind ?? '—'}</span>
+        <span>Length: {measurement !== '' ? measurement : '—'}</span>
+        {activeTool === 'Paint' && (
+          <span style={{ color: '#aaa', fontSize: '11px' }}>
+            Click: paint face | Cmd/Ctrl+click: fill whole object
+          </span>
+        )}
+        <span style={{ color: '#888', fontSize: '11px' }}>
+          Middle-drag: orbit | Shift+Middle: pan | Scroll: zoom
+        </span>
+        <span style={{ color: '#888', fontSize: '11px', marginLeft: 'auto' }}>
+          Undo: Cmd/Ctrl+Z | Redo: Shift+Cmd/Ctrl+Z
+        </span>
+      </div>
+
+      {/* Debug Log panel — opt-in via Window menu, default hidden. */}
+      {showDebugLog && <LogPanel panelHeight={160} />}
 
       {/* Importing overlay — shown while import_dae blocks the main thread.
           The overlay is painted before the blocking call via a double rAF in
@@ -1364,6 +1564,74 @@ export default function App() {
           report={importReport}
           onClose={() => setImportReport(null)}
         />
+      )}
+
+      {/* Recovery prompt — shown once at startup when an autosaved snapshot
+          exists and nothing else was loaded yet. */}
+      {recoveryPrompt !== null && (
+        <RecoveryDialog
+          snapshot={recoveryPrompt}
+          onRecover={handleRecover}
+          onDiscard={handleDiscardRecovery}
+          onDismiss={handleDismissRecovery}
+        />
+      )}
+
+      {/* Settings modal — web-only fallback (Tauri opens a real, separate OS
+          window instead; see openSettings in App.tsx). */}
+      {showSettingsModal && (
+        <div
+          onClick={() => setShowSettingsModal(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 300,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: '420px',
+              maxHeight: '80vh',
+              overflowY: 'auto',
+              background: '#1a1a1a',
+              color: '#ddd',
+              border: '1px solid #333',
+              borderRadius: '6px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+              padding: '16px 20px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '12px',
+              }}
+            >
+              <span style={{ fontSize: '14px', fontWeight: 600, color: '#eee' }}>Settings</span>
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#888',
+                  cursor: 'pointer',
+                  fontSize: '16px',
+                  lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <UnitsPane />
+          </div>
+        </div>
       )}
     </main>
   )

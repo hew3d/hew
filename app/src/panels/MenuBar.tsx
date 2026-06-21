@@ -4,18 +4,21 @@
  * Shows the document title (with dirty marker) in the center.
  * Keyboard shortcuts for File operations are handled in App.tsx via global
  * keydown listeners; the menu items here are the visual/click-driven path.
+ *
+ * Under Tauri (nativeMenuBar=true) the OS owns the menus AND the document
+ * title now lives in the native title bar (set via Tauri's window.setTitle —
+ * see App.tsx), so this component renders nothing in that case.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 
 export interface MenuBarProps {
-  /** Full document title (already includes dirty mark and " — Hew"). */
+  /** Full document title (already includes dirty mark and " — Hew"). Only used in the web (non-native) bar. */
   title: string
-  kernelVersion: string
   /**
-   * When true the OS provides a native menu bar (Tauri desktop).
-   * The in-app bar hides the File/Edit dropdown menus and shows
-   * only the document title + kernel version badge.
+   * When true the OS provides a native menu bar (Tauri desktop) AND the
+   * native title bar shows the document title — so this component renders
+   * nothing at all in that case.
    */
   nativeMenuBar?: boolean
   onNew: () => void
@@ -39,6 +42,8 @@ export interface MenuBarProps {
   showTags?: boolean
   /** Whether the Object Info pane is visible. */
   showObjectInfo?: boolean
+  /** Whether the Debug Log panel is visible. */
+  showDebugLog?: boolean
   /** Toggle the Model info pane. */
   onToggleModelInfo?: () => void
   /** Toggle the Materials pane. */
@@ -47,8 +52,12 @@ export interface MenuBarProps {
   onToggleTags?: () => void
   /** Toggle the Object Info pane. */
   onToggleObjectInfo?: () => void
+  /** Toggle the Debug Log panel. */
+  onToggleDebugLog?: () => void
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
+  /** Open the Settings window/modal (Window → Settings…, web only — native uses the OS app menu). */
+  onOpenSettings?: () => void
 }
 
 type MenuId = 'file' | 'edit' | 'draw' | 'tools' | 'camera' | 'window' | null
@@ -178,7 +187,6 @@ function CheckMenuItem({ label, shortcut, checked, onClick }: CheckMenuItemProps
 
 export function MenuBar({
   title,
-  kernelVersion,
   nativeMenuBar = false,
   onNew,
   onOpen,
@@ -195,11 +203,14 @@ export function MenuBar({
   showMaterials = true,
   showTags = false,
   showObjectInfo = false,
+  showDebugLog = false,
   onToggleModelInfo,
   onToggleMaterials,
   onToggleTags,
   onToggleObjectInfo,
+  onToggleDebugLog,
   onZoomExtents,
+  onOpenSettings,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -227,203 +238,214 @@ export function MenuBar({
 
   const withClose = (fn: () => void) => () => { close(); fn() }
 
+  // Under Tauri the OS owns the menus AND the title bar shows the document
+  // title (App.tsx calls the Tauri window setTitle) — so there is nothing
+  // left for the in-app bar to render.
+  if (nativeMenuBar) return null
+
   return (
     <div ref={barRef} style={BAR_STYLE} data-testid="menu-bar">
-      {/* File and Edit menus — hidden when the OS provides a native menu bar */}
-      {!nativeMenuBar && (
-        <>
-          {/* File menu */}
-          <div style={{ position: 'relative' }}>
-            <button
-              style={MENU_TRIGGER_STYLE(openMenu === 'file')}
-              onClick={() => toggle('file')}
-            >
-              File
-            </button>
-            {openMenu === 'file' && (
-              <div style={DROPDOWN_STYLE}>
-                <MenuItem label="New" shortcut={`${mod}N`} onClick={withClose(onNew)} />
-                <MenuItem label="Open…" shortcut={`${mod}O`} onClick={withClose(onOpen)} />
-                <div style={SEPARATOR_STYLE} />
-                <MenuItem label="Import…" onClick={withClose(onImport)} />
-                <div style={SEPARATOR_STYLE} />
-                <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
-                <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
-              </div>
-            )}
+      {/* File menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'file')}
+          onClick={() => toggle('file')}
+        >
+          File
+        </button>
+        {openMenu === 'file' && (
+          <div style={DROPDOWN_STYLE}>
+            <MenuItem label="New" shortcut={`${mod}N`} onClick={withClose(onNew)} />
+            <MenuItem label="Open…" shortcut={`${mod}O`} onClick={withClose(onOpen)} />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem label="Import…" onClick={withClose(onImport)} />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
+            <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
           </div>
+        )}
+      </div>
 
-          {/* Edit menu */}
-          <div style={{ position: 'relative' }}>
-            <button
-              style={MENU_TRIGGER_STYLE(openMenu === 'edit')}
-              onClick={() => toggle('edit')}
-            >
-              Edit
-            </button>
-            {openMenu === 'edit' && (
-              <div style={DROPDOWN_STYLE}>
-                <MenuItem
-                  label="Undo"
-                  shortcut={`${mod}Z`}
-                  disabled={!canUndo}
-                  onClick={withClose(onUndo)}
-                />
-                <MenuItem
-                  label="Redo"
-                  shortcut={`${mod}⇧Z`}
-                  disabled={!canRedo}
-                  onClick={withClose(onRedo)}
-                />
-              </div>
-            )}
+      {/* Edit menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'edit')}
+          onClick={() => toggle('edit')}
+        >
+          Edit
+        </button>
+        {openMenu === 'edit' && (
+          <div style={DROPDOWN_STYLE}>
+            <MenuItem
+              label="Undo"
+              shortcut={`${mod}Z`}
+              disabled={!canUndo}
+              onClick={withClose(onUndo)}
+            />
+            <MenuItem
+              label="Redo"
+              shortcut={`${mod}⇧Z`}
+              disabled={!canRedo}
+              onClick={withClose(onRedo)}
+            />
           </div>
+        )}
+      </div>
 
-          {/* Draw menu */}
-          <div style={{ position: 'relative' }}>
-            <button
-              style={MENU_TRIGGER_STYLE(openMenu === 'draw')}
-              onClick={() => toggle('draw')}
-            >
-              Draw
-            </button>
-            {openMenu === 'draw' && (
-              <div style={DROPDOWN_STYLE}>
-                <CheckMenuItem
-                  label="Rectangle"
-                  shortcut={`${mod}K`}
-                  checked={activeTool === 'Rectangle'}
-                  onClick={withClose(() => onSelectTool?.('Rectangle'))}
-                />
-              </div>
-            )}
+      {/* Draw menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'draw')}
+          onClick={() => toggle('draw')}
+        >
+          Draw
+        </button>
+        {openMenu === 'draw' && (
+          <div style={DROPDOWN_STYLE}>
+            <CheckMenuItem
+              label="Rectangle"
+              shortcut={`${mod}K`}
+              checked={activeTool === 'Rectangle'}
+              onClick={withClose(() => onSelectTool?.('Rectangle'))}
+            />
           </div>
+        )}
+      </div>
 
-          {/* Tools menu */}
-          <div style={{ position: 'relative' }}>
-            <button
-              style={MENU_TRIGGER_STYLE(openMenu === 'tools')}
-              onClick={() => toggle('tools')}
-            >
-              Tools
-            </button>
-            {openMenu === 'tools' && (
-              <div style={DROPDOWN_STYLE}>
-                <CheckMenuItem
-                  label="Select"
-                  shortcut="Space"
-                  checked={activeTool === 'Select'}
-                  onClick={withClose(() => onSelectTool?.('Select'))}
-                />
-                <CheckMenuItem
-                  label="Paint"
-                  checked={activeTool === 'Paint'}
-                  onClick={withClose(() => onSelectTool?.('Paint'))}
-                />
-                <CheckMenuItem
-                  label="Move"
-                  shortcut={`${mod}0`}
-                  checked={activeTool === 'Move'}
-                  onClick={withClose(() => onSelectTool?.('Move'))}
-                />
-                <CheckMenuItem
-                  label="Rotate"
-                  shortcut={`${mod}8`}
-                  checked={activeTool === 'Rotate'}
-                  onClick={withClose(() => onSelectTool?.('Rotate'))}
-                />
-                <CheckMenuItem
-                  label="Scale"
-                  shortcut={`${mod}9`}
-                  checked={activeTool === 'Scale'}
-                  onClick={withClose(() => onSelectTool?.('Scale'))}
-                />
-                <CheckMenuItem
-                  label="Push/Pull"
-                  shortcut={`${mod}=`}
-                  checked={activeTool === 'Push/Pull'}
-                  onClick={withClose(() => onSelectTool?.('Push/Pull'))}
-                />
-              </div>
-            )}
+      {/* Tools menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'tools')}
+          onClick={() => toggle('tools')}
+        >
+          Tools
+        </button>
+        {openMenu === 'tools' && (
+          <div style={DROPDOWN_STYLE}>
+            <CheckMenuItem
+              label="Select"
+              shortcut="Space"
+              checked={activeTool === 'Select'}
+              onClick={withClose(() => onSelectTool?.('Select'))}
+            />
+            <CheckMenuItem
+              label="Paint"
+              checked={activeTool === 'Paint'}
+              onClick={withClose(() => onSelectTool?.('Paint'))}
+            />
+            <CheckMenuItem
+              label="Move"
+              shortcut={`${mod}0`}
+              checked={activeTool === 'Move'}
+              onClick={withClose(() => onSelectTool?.('Move'))}
+            />
+            <CheckMenuItem
+              label="Rotate"
+              shortcut={`${mod}8`}
+              checked={activeTool === 'Rotate'}
+              onClick={withClose(() => onSelectTool?.('Rotate'))}
+            />
+            <CheckMenuItem
+              label="Scale"
+              shortcut={`${mod}9`}
+              checked={activeTool === 'Scale'}
+              onClick={withClose(() => onSelectTool?.('Scale'))}
+            />
+            <CheckMenuItem
+              label="Push/Pull"
+              shortcut={`${mod}=`}
+              checked={activeTool === 'Push/Pull'}
+              onClick={withClose(() => onSelectTool?.('Push/Pull'))}
+            />
           </div>
+        )}
+      </div>
 
-          {/* Camera menu */}
-          <div style={{ position: 'relative' }}>
-            <button
-              style={MENU_TRIGGER_STYLE(openMenu === 'camera')}
-              onClick={() => toggle('camera')}
-            >
-              Camera
-            </button>
-            {openMenu === 'camera' && (
-              <div style={DROPDOWN_STYLE}>
-                <CheckMenuItem
-                  label="Orbit"
-                  shortcut={`${mod}B`}
-                  checked={activeTool === 'Orbit'}
-                  onClick={withClose(() => onSelectTool?.('Orbit'))}
-                />
-                <CheckMenuItem
-                  label="Pan"
-                  shortcut={`${mod}R`}
-                  checked={activeTool === 'Pan'}
-                  onClick={withClose(() => onSelectTool?.('Pan'))}
-                />
-                <CheckMenuItem
-                  label="Zoom"
-                  shortcut={`${mod}\\`}
-                  checked={activeTool === 'Zoom'}
-                  onClick={withClose(() => onSelectTool?.('Zoom'))}
-                />
-                <div style={SEPARATOR_STYLE} />
-                <MenuItem
-                  label="Zoom Extents"
-                  onClick={withClose(() => onZoomExtents?.())}
-                />
-              </div>
-            )}
+      {/* Camera menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'camera')}
+          onClick={() => toggle('camera')}
+        >
+          Camera
+        </button>
+        {openMenu === 'camera' && (
+          <div style={DROPDOWN_STYLE}>
+            <CheckMenuItem
+              label="Orbit"
+              shortcut={`${mod}B`}
+              checked={activeTool === 'Orbit'}
+              onClick={withClose(() => onSelectTool?.('Orbit'))}
+            />
+            <CheckMenuItem
+              label="Pan"
+              shortcut={`${mod}R`}
+              checked={activeTool === 'Pan'}
+              onClick={withClose(() => onSelectTool?.('Pan'))}
+            />
+            <CheckMenuItem
+              label="Zoom"
+              shortcut={`${mod}\\`}
+              checked={activeTool === 'Zoom'}
+              onClick={withClose(() => onSelectTool?.('Zoom'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Zoom Extents"
+              onClick={withClose(() => onZoomExtents?.())}
+            />
           </div>
+        )}
+      </div>
 
-          {/* Window menu */}
-          <div style={{ position: 'relative' }}>
-            <button
-              style={MENU_TRIGGER_STYLE(openMenu === 'window')}
-              onClick={() => toggle('window')}
-            >
-              Window
-            </button>
-            {openMenu === 'window' && (
-              <div style={DROPDOWN_STYLE}>
-                <CheckMenuItem
-                  label="Model Info"
-                  shortcut={`⇧${mod}I`}
-                  checked={showModelInfo}
-                  onClick={withClose(() => onToggleModelInfo?.())}
-                />
-                <CheckMenuItem
-                  label="Materials"
-                  shortcut={`⇧${mod}C`}
-                  checked={showMaterials}
-                  onClick={withClose(() => onToggleMaterials?.())}
-                />
-                <CheckMenuItem
-                  label="Tags"
-                  shortcut={`⇧${mod}T`}
-                  checked={showTags}
-                  onClick={withClose(() => onToggleTags?.())}
-                />
-                <CheckMenuItem
-                  label="Object Info"
-                  shortcut={`⇧${mod}O`}
-                  checked={showObjectInfo}
-                  onClick={withClose(() => onToggleObjectInfo?.())}
-                />
-              </div>
-            )}
+      {/* Window menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'window')}
+          onClick={() => toggle('window')}
+        >
+          Window
+        </button>
+        {openMenu === 'window' && (
+          <div style={DROPDOWN_STYLE}>
+            <CheckMenuItem
+              label="Model Info"
+              shortcut={`⇧${mod}I`}
+              checked={showModelInfo}
+              onClick={withClose(() => onToggleModelInfo?.())}
+            />
+            <CheckMenuItem
+              label="Materials"
+              shortcut={`⇧${mod}C`}
+              checked={showMaterials}
+              onClick={withClose(() => onToggleMaterials?.())}
+            />
+            <CheckMenuItem
+              label="Tags"
+              shortcut={`⇧${mod}T`}
+              checked={showTags}
+              onClick={withClose(() => onToggleTags?.())}
+            />
+            <CheckMenuItem
+              label="Object Info"
+              shortcut={`⇧${mod}O`}
+              checked={showObjectInfo}
+              onClick={withClose(() => onToggleObjectInfo?.())}
+            />
+            <CheckMenuItem
+              label="Debug Log"
+              checked={showDebugLog}
+              onClick={withClose(() => onToggleDebugLog?.())}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Settings…"
+              shortcut={`${mod},`}
+              onClick={withClose(() => onOpenSettings?.())}
+            />
           </div>
-        </>
-      )}
+        )}
+      </div>
 
       {/* Document title — centered in bar */}
       <div
@@ -446,20 +468,6 @@ export function MenuBar({
 
       {/* Spacer */}
       <div style={{ flex: 1 }} />
-
-      {/* Kernel version — muted, right side */}
-      <span
-        style={{
-          fontSize: '10px',
-          color: '#555',
-          fontFamily: 'monospace',
-          paddingRight: '12px',
-          whiteSpace: 'nowrap',
-        }}
-        title={`Kernel version ${kernelVersion}`}
-      >
-        v{kernelVersion}
-      </span>
     </div>
   )
 }

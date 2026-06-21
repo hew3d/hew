@@ -58,6 +58,54 @@ struct RecentState {
 struct PendingOpen(Option<String>);
 
 // ---------------------------------------------------------------------------
+// Autosave / crash-recovery store.
+//
+// Two files in the app config dir: recovery.hew (geometry bytes, the same
+// format scene.save() produces) and recovery.json (the RecoveryMeta JSON
+// verbatim, opaque to Rust — we never parse it here).
+// ---------------------------------------------------------------------------
+
+/// Payload returned by `recovery_read`.
+#[derive(serde::Serialize)]
+struct RecoveryPayload {
+    contents: Vec<u8>,
+    meta: String,
+}
+
+/// Persist a recovery snapshot, overwriting any previous one.
+#[tauri::command]
+fn recovery_write(app: tauri::AppHandle, contents: Vec<u8>, meta: String) -> Result<(), String> {
+    let Some(config_dir) = app.path().app_config_dir().ok() else {
+        return Err("could not resolve app config dir".into());
+    };
+    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    std::fs::write(config_dir.join("recovery.hew"), &contents).map_err(|e| e.to_string())?;
+    std::fs::write(config_dir.join("recovery.json"), &meta).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read back the most recent recovery snapshot, or None if either file is
+/// missing/unreadable.
+#[tauri::command]
+fn recovery_read(app: tauri::AppHandle) -> Option<RecoveryPayload> {
+    let config_dir = app.path().app_config_dir().ok()?;
+    let contents = std::fs::read(config_dir.join("recovery.hew")).ok()?;
+    let meta = std::fs::read_to_string(config_dir.join("recovery.json")).ok()?;
+    Some(RecoveryPayload { contents, meta })
+}
+
+/// Discard the stored recovery snapshot, ignoring not-found errors.
+#[tauri::command]
+fn recovery_clear(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(config_dir) = app.path().app_config_dir().ok() else {
+        return Ok(());
+    };
+    let _ = std::fs::remove_file(config_dir.join("recovery.hew"));
+    let _ = std::fs::remove_file(config_dir.join("recovery.json"));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Custom file-I/O commands.
 //
 // These bypass the fs plugin so we need no fs capability entries — app-defined
@@ -192,6 +240,9 @@ fn main() {
             take_pending_open,
             push_recent,
             clear_recent,
+            recovery_write,
+            recovery_read,
+            recovery_clear,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -201,8 +252,14 @@ fn main() {
             // ----------------------------------------------------------------
             // App menu (macOS — About + Quit)
             // ----------------------------------------------------------------
+            let app_settings = MenuItemBuilder::with_id("app-settings", "Settings…")
+                .accelerator("CmdOrCtrl+,")
+                .build(handle)?;
+
             let app_menu = SubmenuBuilder::new(handle, "Hew")
                 .item(&PredefinedMenuItem::about(handle, None, None)?)
+                .separator()
+                .item(&app_settings)
                 .separator()
                 .item(&PredefinedMenuItem::services(handle, None)?)
                 .separator()
@@ -352,12 +409,15 @@ fn main() {
             let win_object_info = MenuItemBuilder::with_id("win-object-info", "Object Info")
                 .accelerator("Shift+CmdOrCtrl+O")
                 .build(handle)?;
+            let win_debug_log =
+                MenuItemBuilder::with_id("win-debug-log", "Debug Log").build(handle)?;
 
             let window_menu = SubmenuBuilder::new(handle, "Window")
                 .item(&win_model_info)
                 .item(&win_materials)
                 .item(&win_tags)
                 .item(&win_object_info)
+                .item(&win_debug_log)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -402,6 +462,7 @@ fn main() {
                 return;
             }
             let action = match id {
+                "app-settings" => "open-settings",
                 "file-new" => "new",
                 "file-open" => "open",
                 "file-import" => "import",
@@ -425,6 +486,7 @@ fn main() {
                 "win-materials" => "toggle-materials",
                 "win-tags" => "toggle-tags",
                 "win-object-info" => "toggle-object-info",
+                "win-debug-log" => "toggle-debug-log",
                 _ => return,
             };
             let _ = app.emit("menu-action", action);
