@@ -6,6 +6,10 @@ import {
   uniformScaleAffine,
   composeAffine,
   rotateAboutPivotZ,
+  rotationAxisAffine,
+  rotateAboutPivotAxis,
+  projectOntoPlane,
+  signedAngleAboutAxis,
   scaleAboutCenter,
   snapAngleDeg,
   angleFromPivot,
@@ -211,6 +215,139 @@ describe('rotateAboutPivotZ', () => {
     const a = rotateAboutPivotZ(0, 0, 0, Math.PI / 6)
     const [, , z] = applyAffine(a, 1, 2, 7)
     expect(z).toBeCloseTo(7)
+  })
+})
+
+describe('rotationAxisAffine', () => {
+  it('rotating (1,0,0) about Z by +90° → (0,1,0)', () => {
+    const a = rotationAxisAffine(0, 0, 1, Math.PI / 2)
+    const [x, y, z] = applyAffine(a, 1, 0, 0)
+    expect(x).toBeCloseTo(0)
+    expect(y).toBeCloseTo(1)
+    expect(z).toBeCloseTo(0)
+  })
+
+  it('rotating about X by +90° leaves (1,0,0) unchanged', () => {
+    const a = rotationAxisAffine(1, 0, 0, Math.PI / 2)
+    const [x, y, z] = applyAffine(a, 1, 0, 0)
+    expect(x).toBeCloseTo(1)
+    expect(y).toBeCloseTo(0)
+    expect(z).toBeCloseTo(0)
+  })
+
+  it('rotating (0,1,0) about X by +90° → (0,0,1)', () => {
+    const a = rotationAxisAffine(1, 0, 0, Math.PI / 2)
+    const [x, y, z] = applyAffine(a, 0, 1, 0)
+    expect(x).toBeCloseTo(0)
+    expect(y).toBeCloseTo(0)
+    expect(z).toBeCloseTo(1)
+  })
+
+  it('zero-length axis returns IDENTITY (no-op)', () => {
+    const a = rotationAxisAffine(0, 0, 0, Math.PI / 3)
+    const [x, y, z] = applyAffine(a, 3, -2, 5)
+    expect(x).toBeCloseTo(3)
+    expect(y).toBeCloseTo(-2)
+    expect(z).toBeCloseTo(5)
+  })
+
+  it('normalizes a non-unit axis', () => {
+    // Axis (0,0,5) should behave identically to (0,0,1)
+    const a = rotationAxisAffine(0, 0, 5, Math.PI / 2)
+    const [x, y, z] = applyAffine(a, 1, 0, 0)
+    expect(x).toBeCloseTo(0)
+    expect(y).toBeCloseTo(1)
+    expect(z).toBeCloseTo(0)
+  })
+})
+
+describe('rotateAboutPivotAxis', () => {
+  it('matches rotateAboutPivotZ when axis is (0,0,1)', () => {
+    const a = rotateAboutPivotAxis(1, 1, 0, 0, 0, 1, Math.PI / 2)
+    const b = rotateAboutPivotZ(1, 1, 0, Math.PI / 2)
+    const pa = applyAffine(a, 2, 1, 0)
+    const pb = applyAffine(b, 2, 1, 0)
+    expect(pa[0]).toBeCloseTo(pb[0])
+    expect(pa[1]).toBeCloseTo(pb[1])
+    expect(pa[2]).toBeCloseTo(pb[2])
+  })
+
+  it('keeps a non-origin pivot fixed under rotation about an arbitrary axis', () => {
+    const a = rotateAboutPivotAxis(2, 3, 4, 1, 1, 0, Math.PI / 5)
+    const [x, y, z] = applyAffine(a, 2, 3, 4)
+    expect(x).toBeCloseTo(2)
+    expect(y).toBeCloseTo(3)
+    expect(z).toBeCloseTo(4)
+  })
+
+  it('rotates a point about a pivot on the X axis by +90°', () => {
+    // Pivot at (1,0,0), axis = X. Point at (1,1,0) is 1 unit "above" pivot
+    // along Y. After +90° about +X (Y→Z), it should land at (1,0,1).
+    const a = rotateAboutPivotAxis(1, 0, 0, 1, 0, 0, Math.PI / 2)
+    const [x, y, z] = applyAffine(a, 1, 1, 0)
+    expect(x).toBeCloseTo(1)
+    expect(y).toBeCloseTo(0)
+    expect(z).toBeCloseTo(1)
+  })
+})
+
+describe('projectOntoPlane', () => {
+  it('projecting a vector already in the plane is unchanged', () => {
+    const [x, y, z] = projectOntoPlane(1, 1, 0, 0, 0, 1)
+    expect(x).toBeCloseTo(1)
+    expect(y).toBeCloseTo(1)
+    expect(z).toBeCloseTo(0)
+  })
+
+  it('projecting a vector parallel to the axis gives zero', () => {
+    const [x, y, z] = projectOntoPlane(0, 0, 5, 0, 0, 1)
+    expect(x).toBeCloseTo(0)
+    expect(y).toBeCloseTo(0)
+    expect(z).toBeCloseTo(0)
+  })
+
+  it('removes only the axis-aligned component', () => {
+    const [x, y, z] = projectOntoPlane(1, 2, 3, 0, 0, 1)
+    expect(x).toBeCloseTo(1)
+    expect(y).toBeCloseTo(2)
+    expect(z).toBeCloseTo(0)
+  })
+})
+
+describe('signedAngleAboutAxis', () => {
+  it('returns +90° for f=(1,0,0), t=(0,1,0), axis=(0,0,1)', () => {
+    const theta = signedAngleAboutAxis(0, 0, 1, 1, 0, 0, 0, 1, 0)
+    expect(theta).toBeCloseTo(Math.PI / 2)
+  })
+
+  it('returns -90° for f=(0,1,0), t=(1,0,0), axis=(0,0,1)', () => {
+    const theta = signedAngleAboutAxis(0, 0, 1, 0, 1, 0, 1, 0, 0)
+    expect(theta).toBeCloseTo(-Math.PI / 2)
+  })
+
+  it('returns the correct sign about a non-Z axis (X axis: Y→Z is +90°)', () => {
+    const theta = signedAngleAboutAxis(1, 0, 0, 0, 1, 0, 0, 0, 1)
+    expect(theta).toBeCloseTo(Math.PI / 2)
+  })
+
+  it('returns 0 when f and t are identical', () => {
+    const theta = signedAngleAboutAxis(0, 0, 1, 1, 0, 0, 1, 0, 0)
+    expect(theta).toBeCloseTo(0)
+  })
+
+  it('returns 180° for opposite vectors', () => {
+    const theta = signedAngleAboutAxis(0, 0, 1, 1, 0, 0, -1, 0, 0)
+    expect(Math.abs(theta)).toBeCloseTo(Math.PI)
+  })
+
+  it('returns 0 when the reference vector lies along the axis (degenerate)', () => {
+    const theta = signedAngleAboutAxis(0, 0, 1, 0, 0, 5, 1, 0, 0)
+    expect(theta).toBe(0)
+  })
+
+  it('returns 0 when the target vector lies along the axis (degenerate)', () => {
+    const theta = signedAngleAboutAxis(0, 0, 1, 1, 0, 0, 0, 0, 5)
+    expect(theta).toBe(0)
   })
 })
 

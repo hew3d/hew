@@ -18,6 +18,8 @@ import type { Ray } from '../viewport/math'
 import { intersectGroundPlane } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { projectRayOntoAxis, parseKernelErrorCode, kernelErrorMessage, pointInPolygonXY, polygonAreaXY } from '../viewport/geoHelpers'
+import { editNumericBuffer, parseDistance } from './moveInput'
+import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
 
 export type PushPullTarget =
   | { kind: 'region'; sketchHandle: bigint; regionHandle: bigint; normal: [number, number, number] }
@@ -25,6 +27,7 @@ export type PushPullTarget =
 
 export type OnPushPullCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
+export type OnMeasurement = (text: string) => void
 
 type Stage =
   | { kind: 'idle' }
@@ -44,6 +47,10 @@ export class PushPullTool implements Tool {
   private wasmScene: WasmScene
   private onCommit: OnPushPullCommit
   private onToast: OnToast
+  private onMeasurementCb: OnMeasurement
+
+  /** VCB buffer — raw string being typed by the user */
+  private typed: string = ''
 
   /** The snap last seen on hover (for highlight logic) */
   lastSnap: Snap | null = null
@@ -53,11 +60,19 @@ export class PushPullTool implements Tool {
     previewGroup: THREE.Group,
     onCommit: OnPushPullCommit,
     onToast: OnToast,
+    onMeasurement: OnMeasurement = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
     this.onToast = onToast
+    this.onMeasurementCb = onMeasurement
+  }
+
+  // ── Optional Tool interface extensions ─────────────────────────────────────
+
+  capturingInput(): boolean {
+    return this.stage.kind === 'dragging'
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
@@ -76,6 +91,7 @@ export class PushPullTool implements Tool {
       )
       this.stage = { ...this.stage, distance }
       this._drawGhostPreview(anchor, target.normal, distance)
+      this._reportMeasurement(distance)
     }
     // Hover highlight is handled via CueLayer for on-face snaps (M1 shortcut
     // per docs/DEVELOPMENT.md: show snap marker at face location; per-face highlight
@@ -167,12 +183,15 @@ export class PushPullTool implements Tool {
 
       if (target === null) return
 
+      this.typed = ''
       this.stage = { kind: 'dragging', target, anchor, distance: 0 }
     } else if (this.stage.kind === 'dragging') {
       // Second click: commit with current distance
       const { target, anchor, distance } = this.stage
       this.stage = { kind: 'idle' }
+      this.typed = ''
       this._clearPreview()
+      this.onMeasurementCb('')
 
       // Project ray onto axis at click point for final distance measurement
       const finalDistance = projectRayOntoAxis(
@@ -188,13 +207,62 @@ export class PushPullTool implements Tool {
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
       this.cancel()
+      return
+    }
+
+    if (this.stage.kind !== 'dragging') return
+
+    // ── Numeric VCB ──
+    if (ev.key === 'Enter') {
+      const n = parseDistance(this.typed)
+      if (n !== null) {
+        this._commitFromTyped(metersFromUnit(n))
+      }
+      return
+    }
+
+    // Feed digits, dot, minus, Backspace into the buffer
+    if (
+      (ev.key >= '0' && ev.key <= '9') ||
+      ev.key === '.' ||
+      ev.key === '-' ||
+      ev.key === 'Backspace'
+    ) {
+      this.typed = editNumericBuffer(this.typed, ev.key)
+      // Report the typed buffer as the measurement readout, tagged with the
+      // current display unit so the user knows what they're typing in.
+      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
     }
   }
 
   cancel(): void {
     this.stage = { kind: 'idle' }
+    this.typed = ''
     this._clearPreview()
+    this.onMeasurementCb('')
     this.lastSnap = null
+  }
+
+  /**
+   * Commit from the typed VCB buffer. `dist` is a signed distance in meters,
+   * already converted from the display unit. The sign matches the current
+   * drag direction (the last live-projected `distance` on the active stage),
+   * so typing a positive number continues pushing/pulling the way the cursor
+   * was already dragging; typing while dragging the opposite way flips it.
+   */
+  private _commitFromTyped(dist: number): void {
+    if (this.stage.kind !== 'dragging') return
+    const { target, distance } = this.stage
+
+    const sign = distance < 0 ? -1 : 1
+    const signed = Math.abs(dist) * sign
+
+    this.stage = { kind: 'idle' }
+    this.typed = ''
+    this._clearPreview()
+    this.onMeasurementCb('')
+
+    this._commit(target, signed)
   }
 
   /** Set the currently active sketch handle (for region extrusion) */
@@ -261,6 +329,20 @@ export class PushPullTool implements Tool {
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
       this.onToast(message, code ?? undefined)
     }
+  }
+
+  /**
+   * Report the live distance measurement while dragging.
+   * When the user has typed something, that buffer (tagged with the display
+   * unit) is the readout; otherwise show the signed live distance so a
+   * recess (pushed inward) reads negative.
+   */
+  private _reportMeasurement(distance: number): void {
+    if (this.typed !== '') {
+      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      return
+    }
+    this.onMeasurementCb(formatLength(distance))
   }
 
   private _drawGhostPreview(

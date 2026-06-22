@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest'
 import {
   arrowToAxis,
   editNumericBuffer,
+  editDimsBuffer,
   parseDistance,
+  parseDimensions,
   pointAlong,
 } from './moveInput'
 
@@ -105,6 +107,102 @@ describe('parseDistance', () => {
     // editNumericBuffer can produce ".5" only if user types dot then digits from empty
     // parseFloat('.5') === 0.5
     expect(parseDistance('.5')).toBeCloseTo(0.5)
+  })
+})
+
+describe('editDimsBuffer', () => {
+  it('appends digits', () => {
+    expect(editDimsBuffer('', '3')).toBe('3')
+    expect(editDimsBuffer('3', '4')).toBe('34')
+  })
+
+  it('appends a comma separator', () => {
+    expect(editDimsBuffer('3', ',')).toBe('3,')
+    expect(editDimsBuffer('3,', '4')).toBe('3,4')
+  })
+
+  it('appends an x/X separator', () => {
+    expect(editDimsBuffer('3', 'x')).toBe('3x')
+    expect(editDimsBuffer('3', 'X')).toBe('3X')
+  })
+
+  it('appends a space separator', () => {
+    expect(editDimsBuffer('3', ' ')).toBe('3 ')
+  })
+
+  it('rejects a separator at the start of the buffer', () => {
+    expect(editDimsBuffer('', ',')).toBe('')
+    expect(editDimsBuffer('', 'x')).toBe('')
+    expect(editDimsBuffer('', ' ')).toBe('')
+  })
+
+  it('rejects a second separator', () => {
+    expect(editDimsBuffer('3,4', ',')).toBe('3,4')
+    expect(editDimsBuffer('3x', 'x')).toBe('3x')
+    expect(editDimsBuffer('3 ', 'x')).toBe('3 ')
+  })
+
+  it('allows a dot per side, rejects a second dot on the same side', () => {
+    expect(editDimsBuffer('3.', '5')).toBe('3.5')
+    expect(editDimsBuffer('3.5', '.')).toBe('3.5')
+    // After a separator, a new dot is allowed (new "side")
+    expect(editDimsBuffer('3.5,4', '.')).toBe('3.5,4.')
+    expect(editDimsBuffer('3.5,4.', '.')).toBe('3.5,4.')
+  })
+
+  it('ignores minus (dimensions are unsigned)', () => {
+    expect(editDimsBuffer('3', '-')).toBe('3')
+  })
+
+  it('Backspace removes the last character', () => {
+    expect(editDimsBuffer('3,4', 'Backspace')).toBe('3,')
+    expect(editDimsBuffer('3', 'Backspace')).toBe('')
+    expect(editDimsBuffer('', 'Backspace')).toBe('')
+  })
+
+  it('ignores unknown keys', () => {
+    expect(editDimsBuffer('3', 'a')).toBe('3')
+    expect(editDimsBuffer('3', 'Enter')).toBe('3')
+  })
+})
+
+describe('parseDimensions', () => {
+  it('parses a single value as a square', () => {
+    expect(parseDimensions('3')).toEqual([3, 3])
+    expect(parseDimensions('2.5')).toEqual([2.5, 2.5])
+  })
+
+  it('parses comma-separated values', () => {
+    expect(parseDimensions('3,4')).toEqual([3, 4])
+  })
+
+  it('parses x-separated values', () => {
+    expect(parseDimensions('3x4')).toEqual([3, 4])
+    expect(parseDimensions('3X4')).toEqual([3, 4])
+  })
+
+  it('parses space-separated values with surrounding spaces', () => {
+    expect(parseDimensions('3 x 4')).toEqual([3, 4])
+    expect(parseDimensions('3 4')).toEqual([3, 4])
+    expect(parseDimensions(' 3 , 4 ')).toEqual([3, 4])
+  })
+
+  it('returns null for empty/malformed input', () => {
+    expect(parseDimensions('')).toBeNull()
+    expect(parseDimensions('   ')).toBeNull()
+    expect(parseDimensions(',')).toBeNull()
+    expect(parseDimensions('x')).toBeNull()
+    expect(parseDimensions('3,')).toBeNull()
+    expect(parseDimensions('3,4,5')).toBeNull()
+  })
+
+  it('returns null for non-positive or non-finite sides', () => {
+    expect(parseDimensions('0')).toBeNull()
+    expect(parseDimensions('-3')).toBeNull()
+    expect(parseDimensions('3,0')).toBeNull()
+    expect(parseDimensions('3,-4')).toBeNull()
+    expect(parseDimensions('abc')).toBeNull()
+    expect(parseDimensions('3,abc')).toBeNull()
   })
 })
 

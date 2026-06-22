@@ -51,7 +51,7 @@ function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
 }
 
-const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Orbit', 'Pan', 'Zoom'] as const
+const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Orbit', 'Pan', 'Zoom'] as const
 type ToolName = (typeof TOOLS)[number]
 const TOOL_KEYS: Record<ToolName, string> = {
   'Select': 'Spc',
@@ -61,6 +61,7 @@ const TOOL_KEYS: Record<ToolName, string> = {
   'Move': '⌘0',
   'Rotate': '⌘8',
   'Scale': '⌘9',
+  'Tape Measure': '⌘D',
   'Orbit': '⌘B',
   'Pan': '⌘R',
   'Zoom': '⌘\\',
@@ -109,6 +110,9 @@ export default function App() {
   const [showObjectInfo, setShowObjectInfo] = useState(true)
   /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
   const [showDebugLog, setShowDebugLog] = useState(false)
+  /** View ▸ Axes / Guides visibility. Default both shown. */
+  const [showAxes, setShowAxes] = useState(true)
+  const [showGuides, setShowGuides] = useState(true)
   /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
   const [showSettingsModal, setShowSettingsModal] = useState(false)
   /**
@@ -728,6 +732,7 @@ export default function App() {
       case 'tool-move':      setActiveTool('Move'); break
       case 'tool-rotate':    setActiveTool('Rotate'); break
       case 'tool-scale':     setActiveTool('Scale'); break
+      case 'tool-tape-measure': setActiveTool('Tape Measure'); break
       case 'tool-orbit':     setActiveTool('Orbit'); break
       case 'tool-pan':       setActiveTool('Pan'); break
       case 'tool-zoom':      setActiveTool('Zoom'); break
@@ -737,6 +742,9 @@ export default function App() {
       case 'toggle-tags':         setShowTags((v) => !v); break
       case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
+      case 'toggle-axes':         setShowAxes((v) => !v); break
+      case 'toggle-guides':       setShowGuides((v) => !v); break
+      case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
       case 'open-settings':       openSettingsRef.current(); break
     }
@@ -910,6 +918,11 @@ export default function App() {
         setActiveTool('Push/Pull')
         return
       }
+      if (ev.key.toLowerCase() === 'd' && !ev.shiftKey) {
+        ev.preventDefault()
+        setActiveTool('Tape Measure')
+        return
+      }
       if (ev.key === 'b' && !ev.shiftKey) {
         ev.preventDefault()
         setActiveTool('Orbit')
@@ -956,6 +969,12 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [saveDocument, saveAsDocument, openDocument, newDocument])
+
+  // Mirror the View ▸ Axes / Guides toggles into the viewport. The
+  // viewport API ref is populated once the viewport mounts; both default to
+  // visible so an early run before the ref is ready is a harmless no-op.
+  useEffect(() => { viewportApi.current?.setAxesVisible(showAxes) }, [showAxes])
+  useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
 
   // ---------------------------------------------------------------- drag-drop open
   const handleDragOver = useCallback((ev: React.DragEvent) => {
@@ -1253,6 +1272,11 @@ export default function App() {
         onToggleTags={() => setShowTags((v) => !v)}
         onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
+        showAxes={showAxes}
+        showGuides={showGuides}
+        onToggleAxes={() => setShowAxes((v) => !v)}
+        onToggleGuides={() => setShowGuides((v) => !v)}
+        onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         onZoomExtents={handleZoomExtents}
         onOpenSettings={openSettings}
       />
@@ -1535,7 +1559,7 @@ export default function App() {
       >
         <span>Tool: <strong>{toolName}</strong></span>
         <span>Snap: {snapKind ?? '—'}</span>
-        <span>Length: {measurement !== '' ? measurement : '—'}</span>
+        <span>Measurements: {measurement !== '' ? measurement : '—'}</span>
         {activeTool === 'Paint' && (
           <span style={{ color: '#aaa', fontSize: '11px' }}>
             Click: paint face | Cmd/Ctrl+click: fill whole object

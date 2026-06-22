@@ -3,6 +3,7 @@ import {
   rectangleCorners,
   faceRectangleCorners,
   projectRayOntoAxis,
+  rayPlaneIntersect,
   parseKernelErrorCode,
   kernelErrorMessage,
   pointInPolygonXY,
@@ -92,6 +93,43 @@ describe('projectRayOntoAxis', () => {
       [1, 0, 0],
     )
     expect(t).toBeCloseTo(3)
+  })
+})
+
+describe('rayPlaneIntersect', () => {
+  it('intersects a ray straight down onto the ground plane (Z=0)', () => {
+    const p = rayPlaneIntersect([0, 0, 5], [0, 0, -1], [0, 0, 0], [0, 0, 1])
+    expect(p).not.toBeNull()
+    expect(p?.[0]).toBeCloseTo(0)
+    expect(p?.[1]).toBeCloseTo(0)
+    expect(p?.[2]).toBeCloseTo(0)
+  })
+
+  it('intersects an angled ray onto an arbitrary plane', () => {
+    // Plane through (1,0,0) with normal +X (a vertical YZ plane at x=1)
+    const p = rayPlaneIntersect([0, 0, 0], [1, 1, 0], [1, 0, 0], [1, 0, 0])
+    expect(p).not.toBeNull()
+    expect(p?.[0]).toBeCloseTo(1)
+    expect(p?.[1]).toBeCloseTo(1)
+    expect(p?.[2]).toBeCloseTo(0)
+  })
+
+  it('returns null when the ray is parallel to the plane', () => {
+    const p = rayPlaneIntersect([0, 0, 5], [1, 0, 0], [0, 0, 0], [0, 0, 1])
+    expect(p).toBeNull()
+  })
+
+  it('returns null when the intersection is behind the ray origin', () => {
+    const p = rayPlaneIntersect([0, 0, -5], [0, 0, -1], [0, 0, 0], [0, 0, 1])
+    expect(p).toBeNull()
+  })
+
+  it('does not require a normalized ray direction', () => {
+    const p = rayPlaneIntersect([0, 0, 5], [0, 0, -10], [0, 0, 0], [0, 0, 1])
+    expect(p).not.toBeNull()
+    expect(p?.[0]).toBeCloseTo(0)
+    expect(p?.[1]).toBeCloseTo(0)
+    expect(p?.[2]).toBeCloseTo(0)
   })
 })
 

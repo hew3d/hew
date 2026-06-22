@@ -21,6 +21,7 @@ mod validate;
 
 pub mod document;
 pub mod error;
+pub mod guide;
 pub mod history;
 pub mod ids;
 pub mod import;
@@ -35,10 +36,11 @@ pub mod transform;
 
 pub use document::{DocChange, Document, DocumentError, NodeId};
 pub use error::TopologyError;
+pub use guide::Guide;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 pub use ids::{
-    ComponentId, EdgeId, FaceId, GroupId, HalfEdgeId, InstanceId, LoopId, MaterialId, ObjectId,
-    ShellId, SketchId, VertexId,
+    ComponentId, EdgeId, FaceId, GroupId, GuideId, HalfEdgeId, InstanceId, LoopId, MaterialId,
+    ObjectId, ShellId, SketchId, VertexId,
 };
 pub use import::{DefRecipe, ImportNode, ImportReport, ImportScene, MeshRecipe, SkippedMesh};
 pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame};

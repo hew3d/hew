@@ -121,6 +121,19 @@ export function formatLength(meters: number): string {
   return formatLengthIn(meters, currentUnit)
 }
 
+/**
+ * Convert a value expressed in `unit` (default: the current singleton unit)
+ * to meters. Inverse of dividing by `METERS_PER_UNIT` in `formatLengthIn`.
+ */
+export function metersFromUnit(value: number, unit: LengthUnit = getLengthUnit()): number {
+  return value * METERS_PER_UNIT[unit]
+}
+
+/** The short suffix for `unit` (default: the current singleton unit), e.g. 'cm'. */
+export function getLengthUnitSuffix(unit: LengthUnit = getLengthUnit()): string {
+  return UNIT_SUFFIX[unit]
+}
+
 // ---------------------------------------------------------------------------
 // Cross-window sync
 // ---------------------------------------------------------------------------

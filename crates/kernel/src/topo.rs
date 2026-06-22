@@ -215,4 +215,18 @@ impl Object {
         self.loop_half_edges(loop_id)
             .map(|h| self.vertices[self.half_edges[h].origin].position)
     }
+
+    /// An edge's two endpoint positions, in object-local space.
+    ///
+    /// Mirrors `inference::InferenceScene::register`'s edge extraction: an
+    /// `Edge` references one of its two half-edges; the origin of that
+    /// half-edge and the origin of its `next` are the edge's two endpoints.
+    /// `None` if `edge` is a stale id.
+    pub fn edge_endpoints(&self, edge: EdgeId) -> Option<(Point3, Point3)> {
+        let e = self.edges.get(edge)?;
+        let he = &self.half_edges[e.half_edge];
+        let a = self.vertices[he.origin].position;
+        let b = self.vertices[self.half_edges[he.next].origin].position;
+        Some((a, b))
+    }
 }

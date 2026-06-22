@@ -65,6 +65,98 @@ export function parseDistance(buf: string): number | null {
 }
 
 /**
+ * Immutably edit a "dimensions" string buffer — like `editNumericBuffer` but
+ * also tolerant of a separator between two values: comma, `x`/`X`, or a
+ * space (e.g. while typing "3,4", "3x4", "3 x 4").
+ *
+ * Kept deliberately forgiving — this is only responsible for letting the
+ * user type freely; `parseDimensions` does the real validation at commit
+ * time (Enter).
+ *
+ * Rules:
+ * - Digits 0–9 are appended.
+ * - `.` is appended, rejected if the buffer already has a dot since the last
+ *   separator (i.e. within the current side being typed).
+ * - `,`, `x`, `X`, and ` ` are all accepted as a separator and appended
+ *   verbatim (so the buffer can be reformatted/parsed later); a second
+ *   separator is rejected once one is already present.
+ * - `-` is ignored (dimensions must be positive; no sign toggling).
+ * - `Backspace` removes the last character.
+ * - Any other key is ignored.
+ */
+export function editDimsBuffer(buf: string, key: string): string {
+  if (key === 'Backspace') {
+    return buf.slice(0, -1)
+  }
+
+  const hasSeparator = /[,xX ]/.test(buf)
+
+  if (key === ',' || key === 'x' || key === 'X' || key === ' ') {
+    if (hasSeparator) return buf  // reject a second separator
+    if (buf === '') return buf    // can't start with a separator
+    return buf + key
+  }
+
+  if (key === '.') {
+    // Reject a second dot within the current side (i.e. since the last separator)
+    const sideStart = Math.max(
+      buf.lastIndexOf(','),
+      buf.lastIndexOf('x'),
+      buf.lastIndexOf('X'),
+      buf.lastIndexOf(' '),
+    )
+    const currentSide = buf.slice(sideStart + 1)
+    if (currentSide.includes('.')) return buf
+    return buf + '.'
+  }
+
+  if (key >= '0' && key <= '9') {
+    return buf + key
+  }
+
+  return buf
+}
+
+/**
+ * Parse a typed dimensions buffer into `[width, depth]` (both raw
+ * display-unit numbers — NOT converted to meters).
+ *
+ * Accepts a single value ("3" → [3, 3], a square) or two values separated by
+ * a comma, `x`/`X`, or space, with optional surrounding spaces
+ * ("3,4" / "3x4" / "3 x 4" → [3, 4]).
+ *
+ * Returns null if the buffer is empty/malformed, or if either side is not a
+ * finite number > 0.
+ */
+export function parseDimensions(buf: string): [number, number] | null {
+  const trimmed = buf.trim()
+  if (trimmed === '') return null
+
+  // Split on a single comma/x/X (with optional surrounding spaces) OR plain
+  // whitespace. Deliberately NOT filtering empty segments — a leading,
+  // trailing, or doubled separator (e.g. "3,", ",4", "3,,4") must produce an
+  // empty part so it's rejected below, rather than silently treated as a
+  // single value.
+  const parts = trimmed.split(/\s*[,xX]\s*|\s+/)
+
+  if (parts.length === 1) {
+    const n = parseFloat(parts[0])
+    if (!isFinite(n) || n <= 0) return null
+    return [n, n]
+  }
+
+  if (parts.length === 2) {
+    if (parts[0] === '' || parts[1] === '') return null
+    const w = parseFloat(parts[0])
+    const d = parseFloat(parts[1])
+    if (!isFinite(w) || w <= 0 || !isFinite(d) || d <= 0) return null
+    return [w, d]
+  }
+
+  return null
+}
+
+/**
  * Compute base + normalize(dir) * distance.
  *
  * If `dir` is ~zero (length < 1e-12), returns `base` unchanged.

@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use slotmap::SecondaryMap;
 
 use crate::error::TopologyError;
-use crate::ids::{ComponentId, GroupId, InstanceId, MaterialId, ObjectId, SketchId};
+use crate::guide::Guide;
+use crate::ids::{ComponentId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId};
 use crate::material::{ImageFormat, Material, Texture, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::{
@@ -50,7 +51,13 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
 /// instance entries (not component — tags ride on instances, not definitions).
 /// The field is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so
 /// v1/v2 files still load (tags default to empty) — back-compatible.
-pub const MANIFEST_FORMAT_VERSION: u32 = 3;
+///
+/// v4 (): added an optional top-level `guides: Vec<GuideDto>` —
+/// construction lines + points. The field is
+/// `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so v1-v3 files
+/// still load (guides default to empty) — back-compatible. The geometry buffer
+/// is unchanged by this bump (`GEOMETRY_FORMAT_VERSION` stays 3).
+pub const MANIFEST_FORMAT_VERSION: u32 = 4;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -521,6 +528,23 @@ pub(crate) struct Manifest {
     pub roots: Vec<NodeRefDto>,
     /// Sorted ascending for determinism.
     pub consumed: Vec<[u32; 2]>,
+    /// Construction guides (manifest v4+). Absent/empty in v1-v3 files →
+    /// no guides.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guides: Vec<GuideDto>,
+}
+
+/// A construction-geometry guide entry.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct GuideDto {
+    pub id: u32,
+    /// `"line"` | `"point"`.
+    pub kind: String,
+    /// line: origin; point: position.
+    pub p: [f64; 3],
+    /// line only: unit direction (omitted for points).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<[f64; 3]>,
 }
 
 /// A material palette entry.
@@ -707,6 +731,8 @@ pub(crate) struct DocSaveData {
     pub components: Vec<(ComponentId, Vec<ObjectId>, Option<String>)>,
     pub instances: Vec<InstanceSaveRow>,
     pub sketches: Vec<(SketchId, Sketch)>,
+    /// Construction guides, in slotmap key order.
+    pub guides: Vec<(GuideId, Guide)>,
     /// Per-object display name, keyed by id (covers world + def members).
     pub obj_names: std::collections::HashMap<ObjectId, Option<String>>,
     /// Per-object tag list, keyed by id (covers world + def members).
@@ -892,6 +918,28 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         })
         .collect();
 
+    // Guides: dense ids in enumerate order (their own slotmap-derived
+    // order from `Document::save`).
+    let guide_dtos: Vec<GuideDto> = data
+        .guides
+        .iter()
+        .enumerate()
+        .map(|(i, (_, guide))| match guide {
+            Guide::Line { origin, direction } => GuideDto {
+                id: i as u32,
+                kind: "line".to_string(),
+                p: [origin.x, origin.y, origin.z],
+                dir: Some([direction.x, direction.y, direction.z]),
+            },
+            Guide::Point { position } => GuideDto {
+                id: i as u32,
+                kind: "point".to_string(),
+                p: [position.x, position.y, position.z],
+                dir: None,
+            },
+        })
+        .collect();
+
     let root_dtos: Vec<NodeRefDto> = data.roots.iter().map(&node_to_dto).collect();
 
     // consumed: sort ascending (first by sketch dense id, then region dense id).
@@ -931,6 +979,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         sketches: sketch_dtos,
         roots: root_dtos,
         consumed: consumed_pairs,
+        guides: guide_dtos,
     };
 
     let manifest_json =
@@ -1028,6 +1077,8 @@ pub(crate) struct DocLoadRaw {
     pub components: Vec<Vec<u32>>,
     pub instances: Vec<(u32, Transform)>,
     pub sketches: Vec<Sketch>,
+    /// Construction guides (manifest v4+), in manifest dense-id order.
+    pub guides: Vec<Guide>,
     pub consumed: Vec<[u32; 2]>,
     /// For each object dense id: is it a definition member? (and which component dense id)
     pub def_membership: Vec<Option<u32>>,
@@ -1114,6 +1165,12 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketches.push(sk);
     }
 
+    // Decode guides (manifest v4+; absent in v1-v3 files → empty).
+    let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
+    for guide_dto in &manifest.guides {
+        guides.push(decode_guide(guide_dto)?);
+    }
+
     // Validate manifest references.
     validate_manifest_references(&manifest, obj_count, mat_count)?;
 
@@ -1152,6 +1209,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
             .map(|i| (i.def, Transform::from_affine(&i.pose)))
             .collect(),
         sketches,
+        guides,
         consumed: manifest.consumed.clone(),
         def_membership,
         obj_names,
@@ -1380,6 +1438,48 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
     }
 
     Ok(sk)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Guide reconstruction
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Decodes one [`GuideDto`] into a [`Guide`], rejecting (never repairing) a
+/// malformed entry: an unknown `kind`, a non-finite coordinate, or a `"line"`
+/// with a missing/non-unit-normalizable `dir`.
+fn decode_guide(dto: &GuideDto) -> Result<Guide, LoadError> {
+    let p = Point3::new(dto.p[0], dto.p[1], dto.p[2]);
+    if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+        return Err(LoadError::MalformedManifest {
+            what: format!("guide {} has a non-finite coordinate", dto.id),
+        });
+    }
+    match dto.kind.as_str() {
+        "line" => {
+            let dir = dto.dir.ok_or_else(|| LoadError::MalformedManifest {
+                what: format!("guide {} is a line but has no direction", dto.id),
+            })?;
+            let direction = Vec3::new(dir[0], dir[1], dir[2]);
+            if !direction.x.is_finite() || !direction.y.is_finite() || !direction.z.is_finite() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("guide {} has a non-finite direction", dto.id),
+                });
+            }
+            let direction = direction
+                .normalized()
+                .map_err(|_| LoadError::MalformedManifest {
+                    what: format!("guide {} has a zero-length direction", dto.id),
+                })?;
+            Ok(Guide::Line {
+                origin: p,
+                direction,
+            })
+        }
+        "point" => Ok(Guide::Point { position: p }),
+        other => Err(LoadError::MalformedManifest {
+            what: format!("guide {} has unknown kind '{other}'", dto.id),
+        }),
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

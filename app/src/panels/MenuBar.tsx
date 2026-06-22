@@ -54,13 +54,23 @@ export interface MenuBarProps {
   onToggleObjectInfo?: () => void
   /** Toggle the Debug Log panel. */
   onToggleDebugLog?: () => void
+  /** Whether the world axes/grid are shown (View ▸ Axes). */
+  showAxes?: boolean
+  /** Whether construction guides are shown (View ▸ Guides). */
+  showGuides?: boolean
+  /** Toggle the world axes/grid. */
+  onToggleAxes?: () => void
+  /** Toggle construction-guide visibility. */
+  onToggleGuides?: () => void
+  /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
+  onDeleteGuides?: () => void
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
   /** Open the Settings window/modal (Window → Settings…, web only — native uses the OS app menu). */
   onOpenSettings?: () => void
 }
 
-type MenuId = 'file' | 'edit' | 'draw' | 'tools' | 'camera' | 'window' | null
+type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | null
 
 const BAR_STYLE: React.CSSProperties = {
   display: 'flex',
@@ -209,6 +219,11 @@ export function MenuBar({
   onToggleTags,
   onToggleObjectInfo,
   onToggleDebugLog,
+  showAxes = true,
+  showGuides = true,
+  onToggleAxes,
+  onToggleGuides,
+  onDeleteGuides,
   onZoomExtents,
   onOpenSettings,
 }: MenuBarProps) {
@@ -288,6 +303,35 @@ export function MenuBar({
               disabled={!canRedo}
               onClick={withClose(onRedo)}
             />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Delete Guide Lines"
+              onClick={withClose(() => onDeleteGuides?.())}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* View menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'view')}
+          onClick={() => toggle('view')}
+        >
+          View
+        </button>
+        {openMenu === 'view' && (
+          <div style={DROPDOWN_STYLE}>
+            <CheckMenuItem
+              label="Axes"
+              checked={showAxes}
+              onClick={withClose(() => onToggleAxes?.())}
+            />
+            <CheckMenuItem
+              label="Guides"
+              checked={showGuides}
+              onClick={withClose(() => onToggleGuides?.())}
+            />
           </div>
         )}
       </div>
@@ -356,6 +400,13 @@ export function MenuBar({
               shortcut={`${mod}=`}
               checked={activeTool === 'Push/Pull'}
               onClick={withClose(() => onSelectTool?.('Push/Pull'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Tape Measure"
+              shortcut={`${mod}D`}
+              checked={activeTool === 'Tape Measure'}
+              onClick={withClose(() => onSelectTool?.('Tape Measure'))}
             />
           </div>
         )}

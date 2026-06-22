@@ -31,6 +31,7 @@ import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
+import { TapeMeasureTool } from '../tools/TapeMeasureTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 import type { NodeRef } from '../panels/treeModel'
@@ -110,6 +111,12 @@ export interface ViewportApi {
    * the kernel pick results in the Select tool path.
    */
   setHidden: (hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[]) => void
+  /** Show/hide the ground grid + origin axes (View ▸ Axes). */
+  setAxesVisible: (visible: boolean) => void
+  /** Show/hide all construction guides (View ▸ Guides). */
+  setGuidesVisible: (visible: boolean) => void
+  /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
+  deleteAllGuides: () => void
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -345,14 +352,16 @@ export default function Viewport({
     dirLight.position.set(3, -5, 8)
     threeScene.add(dirLight)
 
-    // Ground grid
-    threeScene.add(buildGroundGrid())
+    // Ground grid (named group so View ▸ Axes can toggle its visibility)
+    const groundGrid = buildGroundGrid()
+    threeScene.add(groundGrid)
 
     // ------------------------------------------------------------------ scene renderer
     const sceneRenderer = new SceneRenderer(threeScene, wasmScene)
     sceneRendererRef.current = sceneRenderer
     // Initial refresh (empty scene is fine — just populates nothing)
     sceneRenderer.refresh()
+    sceneRenderer.refreshGuides()
 
     // ------------------------------------------------------------------ cue layer
     const cueLayer = new CueLayer()
@@ -439,6 +448,7 @@ export default function Viewport({
       }
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
+      sceneRenderer.refreshGuides()
       onSelectRef.current?.({ kind: 'object', id: result }, false)
       scheduleRender()
     }
@@ -540,6 +550,7 @@ export default function Viewport({
     function notifyLoaded(): void {
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
+      sceneRenderer.refreshGuides()
     }
 
     function runUndo(): void {
@@ -548,6 +559,7 @@ export default function Viewport({
           wasmSceneRef.current.scene_undo()
           handleSceneRefresh()
           sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
         } catch (err) {
           console.warn('[Viewport] scene_undo failed:', err)
         }
@@ -560,6 +572,7 @@ export default function Viewport({
           wasmSceneRef.current.scene_redo()
           handleSceneRefresh()
           sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
         } catch (err) {
           console.warn('[Viewport] scene_redo failed:', err)
         }
@@ -600,8 +613,34 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function setAxesVisible(visible: boolean): void {
+      groundGrid.visible = visible
+      // Hidden axes must not snap or flash a cue — gate inference too.
+      wasmScene.set_axes_snappable(visible)
+      scheduleRender()
+    }
+
+    function setGuidesVisible(visible: boolean): void {
+      sceneRenderer.setGuidesVisible(visible)
+      // Hidden guides must not snap or flash a cue — gate inference too.
+      wasmScene.set_guides_snappable(visible)
+      scheduleRender()
+    }
+
+    function deleteAllGuides(): void {
+      try {
+        wasmScene.delete_all_guides()
+      } catch (err) {
+        handleToast(err instanceof Error ? err.message : String(err))
+        return
+      }
+      sceneRenderer.refreshGuides()
+      onDocumentChangedRef.current?.()
+      scheduleRender()
+    }
+
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -611,6 +650,7 @@ export default function Viewport({
         previewGroup,
         (result) => {
           sceneRenderer.refreshAllSketches(result.sketchHandle)
+          sceneRenderer.refreshGuides()
           onDocumentChangedRef.current?.()
           scheduleRender()
         },
@@ -618,6 +658,7 @@ export default function Viewport({
         (_objectId) => {
           handleSceneRefresh()
         },
+        (text: string) => { onMeasurementRef.current?.(text) },
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -634,8 +675,10 @@ export default function Viewport({
         (_objectId) => {
           handleSceneRefresh()
           sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
         },
         handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
       )
       // Give it the current sketch handle if one exists
       const sketchHandle = sceneRenderer.currentSketchHandle
@@ -696,6 +739,7 @@ export default function Viewport({
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
+        (text: string) => { onMeasurementRef.current?.(text) },
       )
     }
 
@@ -711,6 +755,21 @@ export default function Viewport({
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
+    function makeTapeMeasureTool(): TapeMeasureTool {
+      return new TapeMeasureTool(
+        wasmScene,
+        previewGroup,
+        () => {
+          sceneRenderer.refreshGuides()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
       )
     }
 
@@ -749,6 +808,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeScaleTool())
+          break
+        case 'Tape Measure':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeTapeMeasureTool())
           break
         case 'Orbit':
           cameraModeRef.current = true
@@ -817,6 +881,8 @@ export default function Viewport({
       if (changed || needsRender) {
         // Keep the snap cursor at a constant screen size regardless of zoom.
         cueLayer.updateMarkerScale(camera)
+        // Keep guide-line dashes screen-constant too (see updateGuideDashScale).
+        sceneRenderer.updateGuideDashScale(controls.getDistance())
         renderer.render(threeScene, camera)
         needsRender = false
       }
@@ -983,6 +1049,7 @@ export default function Viewport({
             handleSceneRefresh()
             // Undoing an extrude un-consumes its region; re-show its fill.
             sceneRenderer.refreshAllSketches()
+            sceneRenderer.refreshGuides()
           } catch (err) {
             console.warn('[Viewport] scene_undo failed:', err)
           }
@@ -999,6 +1066,7 @@ export default function Viewport({
             handleSceneRefresh()
             // Redoing an extrude re-consumes its region; drop its fill.
             sceneRenderer.refreshAllSketches()
+            sceneRenderer.refreshGuides()
           } catch (err) {
             console.warn('[Viewport] scene_redo failed:', err)
           }

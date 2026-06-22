@@ -93,6 +93,34 @@ export function projectRayOntoAxis(
 }
 
 /**
+ * Intersect a ray with an arbitrary plane defined by a point and unit normal.
+ * Returns the intersection point, or null if the ray is nearly parallel to
+ * the plane (|dot(dir, normal)| < 1e-10) or the intersection is behind the
+ * ray origin (t < 0).
+ *
+ * `rayDir` need not be normalized; `normal` is assumed to be a unit vector.
+ */
+export function rayPlaneIntersect(
+  rayOrigin: V3,
+  rayDir: V3,
+  planePoint: V3,
+  normal: V3,
+): V3 | null {
+  const denom = rayDir[0] * normal[0] + rayDir[1] * normal[1] + rayDir[2] * normal[2]
+  if (Math.abs(denom) < 1e-10) return null
+  const wx = planePoint[0] - rayOrigin[0]
+  const wy = planePoint[1] - rayOrigin[1]
+  const wz = planePoint[2] - rayOrigin[2]
+  const t = (wx * normal[0] + wy * normal[1] + wz * normal[2]) / denom
+  if (t < 0) return null
+  return [
+    rayOrigin[0] + t * rayDir[0],
+    rayOrigin[1] + t * rayDir[1],
+    rayOrigin[2] + t * rayDir[2],
+  ]
+}
+
+/**
  * Parse a "CODE: message" thrown error string, returning the code prefix.
  * Returns null if the format doesn't match.
  */
@@ -123,25 +151,14 @@ export function kernelErrorMessage(code: string, rawMsg: string): string {
 }
 
 /**
- * Build a rectangle's 4 world-space corners lying on an arbitrary plane,
- * given two diagonal corner points and the face's unit outward normal.
+ * Build an orthonormal in-plane basis (u, v) for the plane with unit normal
+ * `normal`, such that (u, v, normal) is right-handed — i.e. cross(u, v) ==
+ * normal. Used to project points onto an arbitrary face plane.
  *
- * Algorithm:
- *   1. Build an orthonormal in-plane basis (u, v) from the normal.
- *   2. Project (cursor - anchor) onto u and v to get signed extents du, dv.
- *   3. Return the 4 CCW corners (as seen from the +normal side):
- *      anchor, anchor+u·du, anchor+u·du+v·dv, anchor+v·dv
- *
- * Returns null when either extent is below 1e-7 (degenerate rectangle).
- *
- * Winding note: the result is counter-clockwise when viewed from the +normal
- * side, matching the ground-plane CCW convention used by `rectangleCorners`.
+ * Returns null only in the degenerate case where `normal` is not a finite
+ * unit-ish vector (length < 1e-12).
  */
-export function faceRectangleCorners(
-  anchor: V3,
-  cursor: V3,
-  normal: V3,
-): [V3, V3, V3, V3] | null {
+export function facePlaneBasis(normal: V3): { u: V3; v: V3 } | null {
   const [nx, ny, nz] = normal
 
   // Choose a reference axis not parallel to the normal.
@@ -164,6 +181,34 @@ export function faceRectangleCorners(
     nz * u[0] - nx * u[2],
     nx * u[1] - ny * u[0],
   ]
+
+  return { u, v }
+}
+
+/**
+ * Build a rectangle's 4 world-space corners lying on an arbitrary plane,
+ * given two diagonal corner points and the face's unit outward normal.
+ *
+ * Algorithm:
+ *   1. Build an orthonormal in-plane basis (u, v) from the normal (see
+ *      `facePlaneBasis`).
+ *   2. Project (cursor - anchor) onto u and v to get signed extents du, dv.
+ *   3. Return the 4 CCW corners (as seen from the +normal side):
+ *      anchor, anchor+u·du, anchor+u·du+v·dv, anchor+v·dv
+ *
+ * Returns null when either extent is below 1e-7 (degenerate rectangle).
+ *
+ * Winding note: the result is counter-clockwise when viewed from the +normal
+ * side, matching the ground-plane CCW convention used by `rectangleCorners`.
+ */
+export function faceRectangleCorners(
+  anchor: V3,
+  cursor: V3,
+  normal: V3,
+): [V3, V3, V3, V3] | null {
+  const basis = facePlaneBasis(normal)
+  if (basis === null) return null
+  const { u, v } = basis
 
   // Signed extents along u and v
   const dx = cursor[0] - anchor[0]

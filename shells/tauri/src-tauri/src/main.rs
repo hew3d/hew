@@ -323,10 +323,26 @@ fn main() {
             let edit_redo = MenuItemBuilder::with_id("edit-redo", "Redo")
                 .accelerator("Shift+CmdOrCtrl+Z")
                 .build(handle)?;
+            let edit_delete_guides =
+                MenuItemBuilder::with_id("edit-delete-guides", "Delete Guide Lines")
+                    .build(handle)?;
 
             let edit_menu = SubmenuBuilder::new(handle, "Edit")
                 .item(&edit_undo)
                 .item(&edit_redo)
+                .separator()
+                .item(&edit_delete_guides)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // View menu
+            // ----------------------------------------------------------------
+            let view_axes = MenuItemBuilder::with_id("view-axes", "Axes").build(handle)?;
+            let view_guides = MenuItemBuilder::with_id("view-guides", "Guides").build(handle)?;
+
+            let view_menu = SubmenuBuilder::new(handle, "View")
+                .item(&view_axes)
+                .item(&view_guides)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -361,6 +377,9 @@ fn main() {
             let tool_pushpull = MenuItemBuilder::with_id("tool-pushpull", "Push/Pull")
                 .accelerator("CmdOrCtrl+=")
                 .build(handle)?;
+            let tool_tape_measure = MenuItemBuilder::with_id("tool-tape-measure", "Tape Measure")
+                .accelerator("CmdOrCtrl+D")
+                .build(handle)?;
 
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
@@ -369,6 +388,8 @@ fn main() {
                 .item(&tool_rotate)
                 .item(&tool_scale)
                 .item(&tool_pushpull)
+                .separator()
+                .item(&tool_tape_measure)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -427,6 +448,7 @@ fn main() {
                 .item(&app_menu)
                 .item(&file_menu)
                 .item(&edit_menu)
+                .item(&view_menu)
                 .item(&draw_menu)
                 .item(&tools_menu)
                 .item(&camera_menu)
@@ -471,6 +493,9 @@ fn main() {
                 "file-close" => "close",
                 "edit-undo" => "undo",
                 "edit-redo" => "redo",
+                "edit-delete-guides" => "edit-delete-guides",
+                "view-axes" => "toggle-axes",
+                "view-guides" => "toggle-guides",
                 "draw-rectangle" => "tool-rectangle",
                 "tool-select" => "tool-select",
                 "tool-paint" => "tool-paint",
@@ -478,6 +503,7 @@ fn main() {
                 "tool-rotate" => "tool-rotate",
                 "tool-scale" => "tool-scale",
                 "tool-pushpull" => "tool-pushpull",
+                "tool-tape-measure" => "tool-tape-measure",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",

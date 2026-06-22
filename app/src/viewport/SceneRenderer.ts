@@ -24,6 +24,19 @@ const SKETCH_REGION_COLOR = 0x88aadd
 const SKETCH_REGION_OPACITY = 0.35
 /** Opacity of entities faded out by the active editing context (isolation). */
 const DIMMED_OPACITY = 0.15
+/** Muted grey for construction guides — distinct from edges/axes/sketch lines. */
+const GUIDE_COLOR = 0x555555
+/** Half-length of a rendered line guide (meters) — long enough to read as "infinite" at person scale. */
+const GUIDE_LINE_HALF_LENGTH = 50
+/** Half-size of a point guide's cross marker (meters). */
+const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
+/**
+ * Guide-line dash/gap size as a fraction of the camera-to-target distance.
+ * For a perspective camera the on-screen size of a world length L is ∝ L /
+ * distance, so scaling the dash with distance holds the dash pattern roughly
+ * constant in pixels regardless of zoom (screen-constant, like the cursor).
+ */
+const GUIDE_DASH_SCREEN_K = 0.01
 
 /** Disposable group for one object's faces + edges */
 interface ObjectMeshGroup {
@@ -58,6 +71,8 @@ export class SceneRenderer {
   readonly sketchGroup: THREE.Group
   /** Parent group for all instance geometry */
   readonly instancesGroup: THREE.Group
+  /** Parent group for construction guide geometry */
+  readonly guidesGroup: THREE.Group
 
   private objectGroups: Map<bigint, ObjectMeshGroup> = new Map()
   /** Rendered instance groups, keyed by instance id */
@@ -92,6 +107,12 @@ export class SceneRenderer {
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
   private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
+  /** Merged LineSegments for every dashed line guide. */
+  private guideLines: THREE.LineSegments | null = null
+  /** Last dash size applied to `guideLines` (screen-constant); -1 = none yet. */
+  private lastGuideDashSize = -1
+  /** Merged LineSegments for every point guide's cross marker. */
+  private guideMarkers: THREE.LineSegments | null = null
   /** The sketch currently being drawn into (tool target) — null if none. */
   private activeSketchHandle: bigint | null = null
   /** Last known watertight state per object */
@@ -132,6 +153,10 @@ export class SceneRenderer {
     this.sketchGroup = new THREE.Group()
     this.sketchGroup.name = 'Sketch'
     threeScene.add(this.sketchGroup)
+
+    this.guidesGroup = new THREE.Group()
+    this.guidesGroup.name = 'Guides'
+    threeScene.add(this.guidesGroup)
   }
 
   /** Rebuild all object geometry from the WASM scene. Returns watertight map. */
@@ -605,6 +630,122 @@ export class SceneRenderer {
   }
 
   /**
+   * Rebuild all construction-guide geometry from the WASM scene.
+   * Call after any guide mutation (add/delete/delete-all) — mirrors
+   * `refreshAllSketches`'s "clear and rebuild from scratch" approach since
+   * guide counts are small and this is cheap.
+   *
+   * Line guides render as a long dashed segment (±[GUIDE_LINE_HALF_LENGTH])
+   * through `origin` along `direction`; point guides render as a small
+   * dashed-free cross marker centered at `position`. Both use the muted
+   * construction color GUIDE_COLOR, distinct from edges/axes/sketch lines.
+   */
+  refreshGuides(): void {
+    this._clearGuides()
+
+    const linePositions: number[] = []
+    const markerPositions: number[] = []
+
+    for (const guideId of this.wasmScene.guide_ids()) {
+      const kind = this.wasmScene.guide_kind(guideId)
+      const geometry = this.wasmScene.guide_geometry(guideId)
+      if (kind === undefined || geometry === undefined) continue
+
+      if (kind === 'line') {
+        // [ox, oy, oz, dx, dy, dz]
+        const [ox, oy, oz, dx, dy, dz] = geometry
+        const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
+        if (len < 1e-9) continue
+        const nx = (dx / len) * GUIDE_LINE_HALF_LENGTH
+        const ny = (dy / len) * GUIDE_LINE_HALF_LENGTH
+        const nz = (dz / len) * GUIDE_LINE_HALF_LENGTH
+
+        // One solid segment per guide; the dashed look comes from a
+        // LineDashedMaterial whose dash/gap sizes are kept screen-constant
+        // (updateGuideDashScale) so dashes don't balloon to metres when zoomed
+        // out. computeLineDistances() below makes the dashing work.
+        linePositions.push(
+          ox - nx, oy - ny, oz - nz,
+          ox + nx, oy + ny, oz + nz,
+        )
+      } else if (kind === 'point') {
+        // [x, y, z] — a small 3-axis cross marker.
+        const [x, y, z] = geometry
+        const k = GUIDE_POINT_MARKER_HALF_SIZE
+        markerPositions.push(
+          x - k, y, z,  x + k, y, z,
+          x, y - k, z,  x, y + k, z,
+          x, y, z - k,  x, y, z + k,
+        )
+      }
+    }
+
+    if (linePositions.length > 0) {
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(linePositions), 3))
+      // dashSize/gapSize are placeholders — updateGuideDashScale() sets the
+      // screen-constant values every frame from the camera distance.
+      const mat = new THREE.LineDashedMaterial({ color: GUIDE_COLOR, dashSize: 0.05, gapSize: 0.05 })
+      this.guideLines = new THREE.LineSegments(geo, mat)
+      this.guideLines.computeLineDistances()
+      this.guidesGroup.add(this.guideLines)
+    }
+
+    if (markerPositions.length > 0) {
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(markerPositions), 3))
+      const mat = new THREE.LineBasicMaterial({ color: GUIDE_COLOR })
+      this.guideMarkers = new THREE.LineSegments(geo, mat)
+      this.guidesGroup.add(this.guideMarkers)
+    }
+  }
+
+  /** Dispose and clear the current guide line/marker geometry, if any. */
+  private _clearGuides(): void {
+    if (this.guideLines !== null) {
+      this.guideLines.geometry.dispose()
+      ;(this.guideLines.material as THREE.Material).dispose()
+      this.guidesGroup.remove(this.guideLines)
+      this.guideLines = null
+      this.lastGuideDashSize = -1
+    }
+    if (this.guideMarkers !== null) {
+      this.guideMarkers.geometry.dispose()
+      ;(this.guideMarkers.material as THREE.Material).dispose()
+      this.guidesGroup.remove(this.guideMarkers)
+      this.guideMarkers = null
+    }
+  }
+
+  /** Show/hide all construction guides (View ▸ Guides toggle). */
+  setGuidesVisible(visible: boolean): void {
+    this.guidesGroup.visible = visible
+  }
+
+  /**
+   * Keep the dashed guide lines at a constant on-screen dash size regardless
+   * of zoom (mirrors CueLayer's screen-constant cursor). `cameraDistance` is
+   * the orbit camera-to-target distance. Call once per frame from the render
+   * loop; cheap and a no-op when there are no line guides.
+   */
+  updateGuideDashScale(cameraDistance: number): void {
+    if (this.guideLines === null) return
+    const size = Math.max(cameraDistance, 0.001) * GUIDE_DASH_SCREEN_K
+    // Skip sub-1% changes (static camera) so we don't churn the material every
+    // frame; on a real change, bump needsUpdate so three.js re-uploads the dash
+    // uniforms (a property change alone isn't reliably picked up; the program
+    // cache key is unchanged so this does NOT recompile the shader).
+    if (this.lastGuideDashSize > 0 && Math.abs(size - this.lastGuideDashSize) < this.lastGuideDashSize * 0.01) {
+      return
+    }
+    this.lastGuideDashSize = size
+    const mat = this.guideLines.material as THREE.LineDashedMaterial
+    mat.dashSize = size
+    mat.gapSize = size
+    mat.needsUpdate = true
+  }
+
+  /**
    * Highlight exactly the given objects (orange edges, brighter faces) and
    * restore any others to normal colors. Ids that match no object group (e.g. a
    * selected sketch) are simply ignored. Pass `[]` to clear the highlight.
@@ -821,5 +962,6 @@ export class SceneRenderer {
     this.textureCache.clear()
     this._clearSketchLines()
     this._clearSketchRegions()
+    this._clearGuides()
   }
 }

@@ -18,8 +18,8 @@ use dae_import::ImageMap;
 use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
-    BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId,
-    ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, LoadError, Material,
+    BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId, Guide,
+    GuideId, ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, LoadError, Material,
     MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchEdgeId, SketchId,
     SketchRegionId, Texture, Transform, WatertightState,
 };
@@ -116,6 +116,10 @@ fn instance_id(handle: u64) -> InstanceId {
 
 fn component_id(handle: u64) -> ComponentId {
     ComponentId::from(KeyData::from_ffi(handle))
+}
+
+fn guide_id(handle: u64) -> GuideId {
+    GuideId::from(KeyData::from_ffi(handle))
 }
 
 /// Decode a row-major 3×4 affine (12 floats) from the FFI boundary.
@@ -470,7 +474,7 @@ impl SnapJs {
     }
 
     /// Snap kind for cue styling: "endpoint", "midpoint", "intersection",
-    /// "on-edge", "on-face", "on-axis", "parallel", "perpendicular".
+    /// "on-edge", "on-face", "on-guide", "on-axis", "parallel", "perpendicular".
     pub fn kind(&self) -> String {
         match self.snap.kind {
             SnapKind::Endpoint => "endpoint",
@@ -478,6 +482,7 @@ impl SnapJs {
             SnapKind::Intersection => "intersection",
             SnapKind::OnEdge => "on-edge",
             SnapKind::OnFace => "on-face",
+            SnapKind::OnGuide => "on-guide",
             SnapKind::OnAxis => "on-axis",
             SnapKind::Parallel => "parallel",
             SnapKind::Perpendicular => "perpendicular",
@@ -572,6 +577,10 @@ impl Scene {
     /// it with inference if it is now visible or remove it if it is hidden/gone
     /// (replace semantics, mirroring the Document's view). Sketches carry no
     /// inference/cache state today, so `sketches_touched` needs no action here.
+    /// `guides_touched`: each touched guide is re-registered with
+    /// inference if still live (visible), or unregistered if hidden/gone —
+    /// guides are now real snap targets ([`SnapKind::OnGuide`] /
+    /// [`SnapKind::Endpoint`] for a guide point).
     fn reconcile(&mut self, change: &DocChange) {
         // Objects: drop the cached mesh, then (re)register *world* objects with
         // inference at identity, or drop hidden/gone ones. Definition members
@@ -597,6 +606,15 @@ impl Scene {
             self.inference.remove_instance(iid);
             if !self.hidden_instances.contains(&iid) {
                 self.register_instance(iid);
+            }
+        }
+        // Guides: re-register if still live, else unregister.
+        // Guides have no session-only hidden-set (unlike objects/instances) —
+        // `Document::guide` already returns `None` for a hidden/deleted guide.
+        for &gid in &change.guides_touched {
+            match self.doc.guide(gid) {
+                Some(g) => self.inference.add_guide(gid, g),
+                None => self.inference.remove_guide(gid),
             }
         }
     }
@@ -1257,6 +1275,23 @@ impl Scene {
         Ok(vec![p.x, p.y, p.z, n.x, n.y, n.z])
     }
 
+    /// A world Object edge's two endpoint positions in world space, as
+    /// `[ax,ay,az, bx,by,bz]` — the geometry the Tape Measure tool needs to
+    /// build a parallel guide line. `undefined` if `object` isn't a live world
+    /// object (world Objects are identity-placed, so local space == world
+    /// space) or `edge` is stale; the tool falls back to point-to-point
+    /// measuring in that case.
+    pub fn edge_endpoints(&self, object: u64, edge: u64) -> Option<Vec<f64>> {
+        let oid = object_id(object);
+        if !self.doc.is_world_object(oid) {
+            return None;
+        }
+        let object = self.doc.object(oid)?;
+        let eid = EdgeId::from(KeyData::from_ffi(edge));
+        let (a, b) = object.edge_endpoints(eid)?;
+        Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
+    }
+
     /// Push/pull a face (recorded in the object's undo history). A flat imprinted
     /// sub-face (drawn inside an Object) auto-routes to wall-generating
     /// extrude (boss/recess); any other face uses the translate-mode push/pull.
@@ -1644,6 +1679,120 @@ impl Scene {
         Ok(())
     }
 
+    // ------------------------------------------------------------- guides
+
+    /// Adds a construction line: infinite, through `(ox, oy, oz)` along
+    /// `(dx, dy, dz)` (normalized on store; need not be unit length as given).
+    /// Non-solid, non-sketch — never affects watertightness or rendering as
+    /// geometry.
+    ///
+    /// # Errors
+    /// - `DegenerateGuide` — a non-finite coordinate, or a zero-length direction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_guide_line(
+        &mut self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Result<u64, ApiError> {
+        let id = self
+            .doc
+            .add_guide_line(Point3::new(ox, oy, oz), kernel::Vec3::new(dx, dy, dz))
+            .map_err(doc_err)?;
+        self.reconcile(&DocChange {
+            guides_touched: vec![id],
+            ..Default::default()
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Adds a construction point at `(x, y, z)`.
+    ///
+    /// # Errors
+    /// - `DegenerateGuide` — a non-finite coordinate.
+    pub fn add_guide_point(&mut self, x: f64, y: f64, z: f64) -> Result<u64, ApiError> {
+        let id = self
+            .doc
+            .add_guide_point(Point3::new(x, y, z))
+            .map_err(doc_err)?;
+        self.reconcile(&DocChange {
+            guides_touched: vec![id],
+            ..Default::default()
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Deletes (hides) one construction guide. Undoable; the handle stays
+    /// valid for redo, mirroring object/instance delete semantics.
+    ///
+    /// # Errors
+    /// - `UnknownGuide` — stale, already-hidden, or foreign handle.
+    pub fn delete_guide(&mut self, guide: u64) -> Result<(), ApiError> {
+        let change = self.doc.delete_guide(guide_id(guide)).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Deletes (hides) every currently visible construction guide in one undo
+    /// step (Edit ▸ Delete Guide Lines). A no-op (and not a separate undo
+    /// entry) when there are no guides.
+    pub fn delete_all_guides(&mut self) -> Result<(), ApiError> {
+        let change = self.doc.delete_all_guides().map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Enable/disable snapping to construction guides (View ▸ Guides). A hidden
+    /// guide must not snap or flash a cue, so toggling its visibility off also
+    /// suppresses its inference candidates. The guides stay registered;
+    /// only candidate emission is gated, so re-enabling is instant.
+    pub fn set_guides_snappable(&mut self, enabled: bool) {
+        self.inference.set_guides_enabled(enabled);
+    }
+
+    /// Enable/disable snapping to the world origin/axes (View ▸ Axes). As with
+    /// guides, hidden axes must not snap or cue.
+    pub fn set_axes_snappable(&mut self, enabled: bool) {
+        self.inference.set_axes_enabled(enabled);
+    }
+
+    /// Handles of every currently visible construction guide.
+    pub fn guide_ids(&self) -> Vec<u64> {
+        self.doc
+            .guide_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// `"line"` | `"point"`, or `undefined` if `guide` is stale/hidden.
+    pub fn guide_kind(&self, guide: u64) -> Option<String> {
+        match self.doc.guide(guide_id(guide))? {
+            Guide::Line { .. } => Some("line".to_string()),
+            Guide::Point { .. } => Some("point".to_string()),
+        }
+    }
+
+    /// `guide`'s geometry, or `undefined` if stale/hidden: a line yields
+    /// `[ox, oy, oz, dx, dy, dz]` (origin + unit direction); a point yields
+    /// `[x, y, z]`. Check [`Scene::guide_kind`] to know which shape to expect.
+    pub fn guide_geometry(&self, guide: u64) -> Option<Vec<f64>> {
+        match self.doc.guide(guide_id(guide))? {
+            Guide::Line { origin, direction } => Some(vec![
+                origin.x,
+                origin.y,
+                origin.z,
+                direction.x,
+                direction.y,
+                direction.z,
+            ]),
+            Guide::Point { position } => Some(vec![position.x, position.y, position.z]),
+        }
+    }
+
     // ------------------------------------------------------------ import
 
     /// Import COLLADA bytes (+ host-resolved images) into the current document.
@@ -1804,6 +1953,12 @@ impl Scene {
         // Register every visible instance's definition members at their poses.
         for iid in self.doc.instance_ids() {
             self.register_instance(iid);
+        }
+        // Register every visible construction guide.
+        for id in self.doc.guide_ids() {
+            if let Some(g) = self.doc.guide(id) {
+                self.inference.add_guide(id, g);
+            }
         }
 
         Ok(())
@@ -2400,5 +2555,92 @@ mod tests {
         assert_eq!(scene.instance_ids().len(), 2);
         assert_eq!(scene.instance_def(inst), Some(comp));
         assert_eq!(scene.instance_def(inst2), Some(comp));
+    }
+
+    // -------------------------------------------------------------------
+    // : guides as inference snap targets
+    // -------------------------------------------------------------------
+
+    /// After `add_guide_line`, a ray crossing it snaps with kind `"on-guide"`.
+    #[test]
+    fn add_guide_line_is_snappable_as_on_guide() {
+        let mut scene = Scene::new();
+        scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+
+        let snap = scene
+            .snap(
+                5.0, 5.0, 3.0, // ray origin
+                0.0, 0.0, -1.0, // ray direction (-Z)
+                0.05, None, None, None,
+            )
+            .unwrap()
+            .expect("ray crosses the guide line");
+        assert_eq!(snap.kind(), "on-guide");
+    }
+
+    /// After `delete_all_guides`, the same ray no longer snaps.
+    #[test]
+    fn delete_all_guides_unregisters_them_from_inference() {
+        let mut scene = Scene::new();
+        scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        scene.delete_all_guides().unwrap();
+
+        let snap = scene
+            .snap(5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None)
+            .unwrap();
+        assert!(
+            snap.is_none(),
+            "deleted guide must no longer snap, got {:?}",
+            snap.map(|s| s.kind())
+        );
+    }
+
+    /// Undoing a guide creation unregisters it from inference; redoing
+    /// re-registers it. Mirrors `extrude_then_scene_undo_redo_hides_and_restores_the_object`.
+    #[test]
+    fn guide_creation_undo_redo_round_trips_through_inference() {
+        let mut scene = Scene::new();
+        scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+
+        let ray = (5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05);
+        let snaps = |scene: &Scene| {
+            scene
+                .snap(
+                    ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None,
+                )
+                .unwrap()
+        };
+
+        assert_eq!(
+            snaps(&scene).map(|s| s.kind()),
+            Some("on-guide".to_string())
+        );
+
+        scene.scene_undo().unwrap();
+        assert!(
+            snaps(&scene).is_none(),
+            "undone guide creation must unregister from inference"
+        );
+
+        scene.scene_redo().unwrap();
+        assert_eq!(
+            snaps(&scene).map(|s| s.kind()),
+            Some("on-guide".to_string()),
+            "redone guide creation must re-register with inference"
+        );
+    }
+
+    /// A guide point registers as an `"endpoint"` snap (Endpoint-tier, like a
+    /// real vertex) through the same wasm `snap` surface.
+    #[test]
+    fn add_guide_point_is_snappable_as_endpoint() {
+        let mut scene = Scene::new();
+        scene.add_guide_point(2.0, 3.0, 0.0).unwrap();
+
+        let snap = scene
+            .snap(2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None)
+            .unwrap()
+            .expect("ray points straight at the guide point");
+        assert_eq!(snap.kind(), "endpoint");
     }
 }

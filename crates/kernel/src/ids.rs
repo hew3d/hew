@@ -36,4 +36,7 @@ new_key_type! {
     /// [`crate::document::Document`]'s palette (ARCHITECTURE.md). A
     /// [`crate::topo::Face`] references one (or `None` = default material).
     pub struct MaterialId;
+    /// Handle to a [`crate::guide::Guide`] construction-geometry entity in a
+    /// [`crate::document::Document`] (ARCHITECTURE.md).
+    pub struct GuideId;
 }

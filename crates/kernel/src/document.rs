@@ -33,11 +33,14 @@ use std::collections::HashSet;
 
 use slotmap::SlotMap;
 
+use crate::guide::Guide;
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
-use crate::ids::{ComponentId, FaceId, GroupId, InstanceId, MaterialId, ObjectId, SketchId};
+use crate::ids::{
+    ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
+};
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::Material;
-use crate::math::Plane;
+use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
 use crate::sketch::{Sketch, SketchEdgeId, SketchError, SketchRegionId, SketchVertexId};
@@ -171,6 +174,15 @@ struct InstanceRecord {
     tags: Vec<Vec<String>>,
 }
 
+/// A construction guide plus its visibility. `hidden` marks an undone
+/// creation or a delete, kept so the [`GuideId`] stays valid for redo —
+/// exactly the tombstone pattern used for objects/groups/instances.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GuideRecord {
+    guide: Guide,
+    hidden: bool,
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -261,6 +273,16 @@ enum DocAction {
     /// `place_instance` stamped another instance of an existing
     /// definition. Undo hides it; redo unhides. The `InstanceId` stays stable.
     PlacedInstance { instance: InstanceId },
+    /// `add_guide_line`/`add_guide_point` created a construction guide.
+    /// Undo hides it; redo unhides. The `GuideId` stays stable.
+    CreatedGuide { guide: GuideId },
+    /// `delete_guide` hid one construction guide (tombstone, not a real
+    /// delete). Undo unhides it; redo re-hides it. The `GuideId` stays stable.
+    DeletedGuide { guide: GuideId },
+    /// `delete_all_guides` (Edit ▸ Delete Guide Lines) hid every
+    /// then-visible guide in one step. Undo unhides exactly these; redo
+    /// re-hides them.
+    DeletedGuides { guides: Vec<GuideId> },
     /// `transform_instance` changed an instance's pose. Undo restores
     /// `prev` exactly; redo re-applies `next`. No bake — the pose is mutable
     /// instance state, so this is exact rather than an inverse-transform.
@@ -360,6 +382,8 @@ pub struct DocChange {
     /// too (shared geometry) — those instances appear in
     /// `instances_touched`.
     pub components_touched: Vec<ComponentId>,
+    /// Guides whose geometry or visibility may have changed.
+    pub guides_touched: Vec<GuideId>,
 }
 
 /// Typed failures of document operations. Nothing is repaired silently.
@@ -380,6 +404,11 @@ pub enum DocumentError {
     UnknownComponent,
     /// The instance handle is stale, hidden, or from another Document.
     UnknownInstance,
+    /// The guide handle is stale, hidden, or from another Document.
+    UnknownGuide,
+    /// Guide geometry is degenerate: a zero-length/non-finite direction, or a
+    /// non-finite coordinate. Nothing is silently repaired or guessed.
+    DegenerateGuide,
     /// `group_nodes` was called with no members.
     EmptyGroup,
     /// `make_component` was called with no nodes selected.
@@ -429,6 +458,11 @@ impl std::fmt::Display for DocumentError {
                 write!(f, "no such component definition in this document")
             }
             DocumentError::UnknownInstance => write!(f, "no such instance in this document"),
+            DocumentError::UnknownGuide => write!(f, "no such guide in this document"),
+            DocumentError::DegenerateGuide => write!(
+                f,
+                "guide geometry is degenerate (zero-length direction or non-finite coordinate)"
+            ),
             DocumentError::EmptyGroup => write!(f, "cannot group an empty selection"),
             DocumentError::EmptyComponent => {
                 write!(f, "cannot make a component from an empty selection")
@@ -479,6 +513,8 @@ pub struct Document {
     /// undoable (an unreferenced material is harmless); face *assignment* is
     /// (see [`Document::paint_face`]).
     materials: SlotMap<MaterialId, Material>,
+    /// Construction guides: non-solid alignment helpers (lines + points).
+    guides: SlotMap<GuideId, GuideRecord>,
     /// `(sketch, region)` pairs already extruded into a solid: such a region is
     /// the bottom of its box and is no longer offered for extrusion. Keyed by
     /// sketch too because a different sketch's slotmap reuses region keys.
@@ -585,6 +621,14 @@ impl Document {
             .map(|(id, sk)| (id, sk.clone()))
             .collect();
 
+        // ── Collect live guides (in slotmap key order) ─────────────────
+        let guides: Vec<(GuideId, Guide)> = self
+            .guides
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, rec)| (id, rec.guide))
+            .collect();
+
         // ── Collect root nodes: top-level visible world nodes ─────────────
         // Roots = all live objects/groups/instances whose parent is None.
         // We emit objects first, then groups, then instances (same order as
@@ -634,6 +678,7 @@ impl Document {
             components,
             instances,
             sketches,
+            guides,
             roots,
             consumed,
             obj_names,
@@ -712,6 +757,16 @@ impl Document {
             .into_iter()
             .map(|sk| doc.sketches.insert(sk))
             .collect();
+
+        // ── 3b. Insert guides — order among independent collections
+        // doesn't matter; after sketches is fine, and is deterministic since
+        // `raw.guides` is already in dense (save-time) order.
+        for guide in raw.guides {
+            doc.guides.insert(GuideRecord {
+                guide,
+                hidden: false,
+            });
+        }
 
         // ── 4. Insert components → build dense→ComponentId map ────────────
         // Each component's members are dense object ids → now live ObjectIds.
@@ -995,6 +1050,7 @@ impl Document {
             groups_touched: all_groups,
             instances_touched: all_instances,
             components_touched: all_components,
+            guides_touched: Vec::new(),
         };
 
         let report = ImportReport {
@@ -1199,6 +1255,127 @@ impl Document {
                 ..Default::default()
             },
         }
+    }
+
+    // ------------------------------------------------------------------ guides
+
+    /// Add an infinite construction guide line. `direction` is normalized; a
+    /// zero-length/non-finite direction or non-finite `origin` →
+    /// [`DocumentError::DegenerateGuide`]. Undoable ([`DocAction::CreatedGuide`]);
+    /// the returned [`GuideId`] is stable across undo/redo. Clears the redo
+    /// stack.
+    ///
+    /// # Errors
+    /// - [`DocumentError::DegenerateGuide`] — non-finite `origin`, or `direction`
+    ///   that fails to normalize (zero-length/non-finite).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn add_guide_line(
+        &mut self,
+        origin: Point3,
+        direction: Vec3,
+    ) -> Result<GuideId, DocumentError> {
+        if !point_is_finite(origin) || !vec_is_finite(direction) {
+            return Err(DocumentError::DegenerateGuide);
+        }
+        let direction = direction
+            .normalized()
+            .map_err(|_: MathError| DocumentError::DegenerateGuide)?;
+        let guide = Guide::Line { origin, direction };
+        let id = self.guides.insert(GuideRecord {
+            guide,
+            hidden: false,
+        });
+        self.undo.push(DocAction::CreatedGuide { guide: id });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(id)
+    }
+
+    /// Add a construction guide point. Non-finite coordinate →
+    /// [`DocumentError::DegenerateGuide`]. Undoable
+    /// ([`DocAction::CreatedGuide`]).
+    ///
+    /// # Errors
+    /// - [`DocumentError::DegenerateGuide`] — non-finite `position`.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn add_guide_point(&mut self, position: Point3) -> Result<GuideId, DocumentError> {
+        if !point_is_finite(position) {
+            return Err(DocumentError::DegenerateGuide);
+        }
+        let guide = Guide::Point { position };
+        let id = self.guides.insert(GuideRecord {
+            guide,
+            hidden: false,
+        });
+        self.undo.push(DocAction::CreatedGuide { guide: id });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(id)
+    }
+
+    /// Delete one guide (hide-not-delete; the id stays valid for redo). Stale
+    /// or already-hidden id → [`DocumentError::UnknownGuide`]. Undoable
+    /// ([`DocAction::DeletedGuide`]).
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownGuide`] — stale, hidden, or from another
+    ///   Document.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn delete_guide(&mut self, guide: GuideId) -> Result<DocChange, DocumentError> {
+        match self.guides.get_mut(guide) {
+            Some(rec) if !rec.hidden => rec.hidden = true,
+            _ => return Err(DocumentError::UnknownGuide),
+        }
+        self.undo.push(DocAction::DeletedGuide { guide });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange {
+            guides_touched: vec![guide],
+            ..Default::default()
+        })
+    }
+
+    /// Delete every currently-visible guide in one undoable step (Edit ▸
+    /// Delete Guide Lines). No visible guides → `Ok` with an empty [`DocChange`]
+    /// and NO undo entry pushed. Otherwise pushes one
+    /// [`DocAction::DeletedGuides`].
+    pub fn delete_all_guides(&mut self) -> Result<DocChange, DocumentError> {
+        let live: Vec<GuideId> = self.guide_ids();
+        if live.is_empty() {
+            return Ok(DocChange::default());
+        }
+        for &id in &live {
+            self.guides[id].hidden = true;
+        }
+        self.undo.push(DocAction::DeletedGuides {
+            guides: live.clone(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange {
+            guides_touched: live,
+            ..Default::default()
+        })
+    }
+
+    /// Live (visible) guide ids in slotmap key order (deterministic).
+    pub fn guide_ids(&self) -> Vec<GuideId> {
+        self.guides
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The guide behind a live (visible) id, else `None`.
+    pub fn guide(&self, id: GuideId) -> Option<&Guide> {
+        self.guides
+            .get(id)
+            .filter(|rec| !rec.hidden)
+            .map(|rec| &rec.guide)
     }
 
     // -------------------------------------------------- node metadata ops / getters
@@ -1778,6 +1955,7 @@ impl Document {
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
+            guides_touched: Vec::new(),
         };
         Ok((id, change))
     }
@@ -1810,6 +1988,7 @@ impl Document {
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
+            guides_touched: Vec::new(),
         };
         Ok((report, change))
     }
@@ -1864,6 +2043,7 @@ impl Document {
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
+            guides_touched: Vec::new(),
         };
         Ok((id, change))
     }
@@ -1901,6 +2081,7 @@ impl Document {
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
+            guides_touched: Vec::new(),
         })
     }
 
@@ -2052,6 +2233,7 @@ impl Document {
             groups_touched: vec![group],
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
+            guides_touched: Vec::new(),
         })
     }
 
@@ -2533,6 +2715,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             &DocAction::ObjectOp { object } => {
@@ -2544,6 +2727,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             &DocAction::Boolean { result, a, b } => {
@@ -2559,6 +2743,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             DocAction::Transform {
@@ -2577,6 +2762,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             DocAction::Grouped {
@@ -2648,6 +2834,35 @@ impl Document {
                 DocChange {
                     instances_touched: vec![instance],
                     components_touched: vec![def],
+                    ..Default::default()
+                }
+            }
+            &DocAction::CreatedGuide { guide } => {
+                if let Some(rec) = self.guides.get_mut(guide) {
+                    rec.hidden = true;
+                }
+                DocChange {
+                    guides_touched: vec![guide],
+                    ..Default::default()
+                }
+            }
+            &DocAction::DeletedGuide { guide } => {
+                if let Some(rec) = self.guides.get_mut(guide) {
+                    rec.hidden = false;
+                }
+                DocChange {
+                    guides_touched: vec![guide],
+                    ..Default::default()
+                }
+            }
+            DocAction::DeletedGuides { guides } => {
+                for &id in guides {
+                    if let Some(rec) = self.guides.get_mut(id) {
+                        rec.hidden = false;
+                    }
+                }
+                DocChange {
+                    guides_touched: guides.clone(),
                     ..Default::default()
                 }
             }
@@ -2771,6 +2986,7 @@ impl Document {
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
                     components_touched: components.clone(),
+                    guides_touched: Vec::new(),
                 }
             }
         };
@@ -2809,6 +3025,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             &DocAction::ObjectOp { object } => {
@@ -2820,6 +3037,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             &DocAction::Boolean { result, a, b } => {
@@ -2835,6 +3053,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             DocAction::Transform {
@@ -2853,6 +3072,7 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
                 }
             }
             &DocAction::Grouped { group, parent, .. } => {
@@ -2912,6 +3132,35 @@ impl Document {
                 DocChange {
                     instances_touched: vec![instance],
                     components_touched: vec![def],
+                    ..Default::default()
+                }
+            }
+            &DocAction::CreatedGuide { guide } => {
+                if let Some(rec) = self.guides.get_mut(guide) {
+                    rec.hidden = false;
+                }
+                DocChange {
+                    guides_touched: vec![guide],
+                    ..Default::default()
+                }
+            }
+            &DocAction::DeletedGuide { guide } => {
+                if let Some(rec) = self.guides.get_mut(guide) {
+                    rec.hidden = true;
+                }
+                DocChange {
+                    guides_touched: vec![guide],
+                    ..Default::default()
+                }
+            }
+            DocAction::DeletedGuides { guides } => {
+                for &id in guides {
+                    if let Some(rec) = self.guides.get_mut(id) {
+                        rec.hidden = true;
+                    }
+                }
+                DocChange {
+                    guides_touched: guides.clone(),
                     ..Default::default()
                 }
             }
@@ -3032,6 +3281,7 @@ impl Document {
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
                     components_touched: components.clone(),
+                    guides_touched: Vec::new(),
                 }
             }
         };
@@ -3298,6 +3548,20 @@ fn ingest_build_node(
     }
 }
 
+/// True if every coordinate of `p` is finite (no NaN/∞) — the no-silent-repair
+/// guard for guide geometry: a non-finite input is rejected, never
+/// clamped or guessed.
+fn point_is_finite(p: Point3) -> bool {
+    p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
+}
+
+/// True if every component of `v` is finite (no NaN/∞) — see
+/// [`point_is_finite`]; `Vec3::normalized` alone does not reject a non-finite
+/// input (a NaN length compares false against the minimum-length tolerance).
+fn vec_is_finite(v: Vec3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
 /// The [`DocChange`] for a group/ungroup: the group, its parent, and any member
 /// groups changed structurally; member objects changed their top-level
 /// container. The shim re-derives the rest from current [`Document`] state.
@@ -3319,6 +3583,7 @@ fn group_change(group: GroupId, parent: Option<GroupId>, members: &[NodeId]) -> 
         groups_touched,
         instances_touched,
         components_touched: Vec::new(),
+        guides_touched: Vec::new(),
     }
 }
 
@@ -3342,6 +3607,7 @@ fn made_component_change(
         groups_touched,
         instances_touched: vec![instance],
         components_touched: vec![component],
+        guides_touched: Vec::new(),
     }
 }
 

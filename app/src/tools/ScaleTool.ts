@@ -23,10 +23,12 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { scaleAboutCenter, meshBoundingBoxCenter, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
+import { editNumericBuffer, parseDistance } from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
 
 export type OnScaleCommit = (node: NodeRef) => void
 export type OnToast = (message: string, code?: string) => void
+export type OnMeasurement = (text: string) => void
 
 const MIN_SCALE = 0.01
 
@@ -48,9 +50,12 @@ export class ScaleTool implements Tool {
   private wasmScene: WasmScene
   private onCommit: OnScaleCommit
   private onToast: OnToast
+  private onMeasurementCb: OnMeasurement
   private selectedNode: NodeRef | null = null
   private objectsGroup: THREE.Group | null = null
   private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
+  /** VCB buffer — raw string being typed by the user (unitless factor) */
+  private typed: string = ''
 
   constructor(
     wasmScene: WasmScene,
@@ -60,6 +65,7 @@ export class ScaleTool implements Tool {
     onCommit: OnScaleCommit,
     onToast: OnToast,
     instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
+    onMeasurement: OnMeasurement = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -68,6 +74,7 @@ export class ScaleTool implements Tool {
     this.onCommit = onCommit
     this.onToast = onToast
     this.instanceGroupGetter = instanceGroupGetter
+    this.onMeasurementCb = onMeasurement
   }
 
   onPointerMove(snap: Snap | null, _ray: Ray): void {
@@ -77,6 +84,9 @@ export class ScaleTool implements Tool {
 
     const f = this._computeFactor(center, [snap.x, snap.y, snap.z], baseDist)
     this._applyPreviewScale(previewMesh, center, f)
+    if (this.typed === '') {
+      this.onMeasurementCb(`×${f.toFixed(2)}`)
+    }
   }
 
   onPointerDown(snap: Snap | null, _ray: Ray): void {
@@ -102,25 +112,68 @@ export class ScaleTool implements Tool {
       }
 
       this.stage = { kind: 'dragging', node, center, baseDist, previewMesh }
+      this.onMeasurementCb('×1.00')
     } else if (this.stage.kind === 'dragging') {
       const { node, center, baseDist } = this.stage
       const f = this._computeFactor(center, [snap.x, snap.y, snap.z], baseDist)
 
       this.stage = { kind: 'idle' }
+      this.typed = ''
       clearPreview(this.preview)
+      this.onMeasurementCb('')
       this._commit(node, center, f)
     }
+  }
+
+  capturingInput(): boolean {
+    return this.stage.kind === 'dragging'
   }
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
       this.cancel()
+      return
+    }
+
+    if (this.stage.kind !== 'dragging') return
+
+    // ── Numeric VCB (a unitless scale factor — no unit conversion) ──
+    if (ev.key === 'Enter') {
+      const n = parseDistance(this.typed)
+      if (n !== null && n > 0) {
+        this._commitFromTyped(Math.max(n, MIN_SCALE))
+      }
+      return
+    }
+
+    if (
+      (ev.key >= '0' && ev.key <= '9') ||
+      ev.key === '.' ||
+      ev.key === '-' ||
+      ev.key === 'Backspace'
+    ) {
+      this.typed = editNumericBuffer(this.typed, ev.key)
+      this.onMeasurementCb(`×${this.typed}`)
     }
   }
 
   cancel(): void {
     this.stage = { kind: 'idle' }
+    this.typed = ''
     clearPreview(this.preview)
+    this.onMeasurementCb('')
+  }
+
+  /** Commit the scale from the typed VCB buffer, then reset to idle. */
+  private _commitFromTyped(f: number): void {
+    if (this.stage.kind !== 'dragging') return
+    const { node, center } = this.stage
+
+    this.stage = { kind: 'idle' }
+    this.typed = ''
+    clearPreview(this.preview)
+    this.onMeasurementCb('')
+    this._commit(node, center, f)
   }
 
   private _dist(a: [number, number, number], b: [number, number, number]): number {

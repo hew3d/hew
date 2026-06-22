@@ -11,8 +11,8 @@
 //! poses, materials, and the consumed set are not.
 
 use kernel::{
-    Document, ImageFormat, Material, NodeId, Object, Plane, Point3, Profile, Rgba8, Texture,
-    Transform, WatertightState,
+    Document, Guide, ImageFormat, Material, NodeId, Object, Plane, Point3, Profile, Rgba8, Texture,
+    Transform, Vec3, WatertightState,
 };
 use kernel::{ImportNode, ImportScene, MeshRecipe};
 
@@ -602,4 +602,185 @@ fn v2_manifest_loads_with_empty_tags() {
             "tags default to empty for v2 files"
         );
     }
+}
+
+// ─────────────────────────────────────────── guides round-trip (v4) ─────
+
+/// A document with one construction line and one construction point survives
+/// `save`→`load` intact (manifest v4).
+#[test]
+fn guides_round_trip_through_save_load() {
+    let mut doc = Document::new();
+    // Non-unit input direction to also exercise normalize-on-store across the
+    // save/load boundary (the in-memory normalization is covered separately
+    // in document_specs.rs; here we only care that the *stored* unit vector
+    // round-trips byte-for-byte through the manifest).
+    let line_origin = Point3::new(1.0, 2.0, 3.0);
+    let line_dir = Vec3::new(1.0, 0.0, 0.0);
+    doc.add_guide_line(line_origin, line_dir).unwrap();
+    let point_pos = Point3::new(-4.0, 5.5, 6.25);
+    doc.add_guide_point(point_pos).unwrap();
+
+    let bytes = doc.save();
+    let loaded = Document::load(&bytes).expect("load");
+
+    let ids = loaded.guide_ids();
+    assert_eq!(ids.len(), 2, "both guides round-trip");
+
+    let mut saw_line = false;
+    let mut saw_point = false;
+    for id in ids {
+        match loaded.guide(id).unwrap() {
+            Guide::Line { origin, direction } => {
+                saw_line = true;
+                assert!(origin.approx_eq(line_origin, 1e-9));
+                assert!(direction.approx_eq(line_dir, 1e-9));
+                assert!(
+                    (direction.length() - 1.0).abs() < 1e-9,
+                    "stored direction is unit length"
+                );
+            }
+            Guide::Point { position } => {
+                saw_point = true;
+                assert!(position.approx_eq(point_pos, 1e-9));
+            }
+        }
+    }
+    assert!(saw_line && saw_point, "both guide kinds round-trip");
+}
+
+/// `save` is byte-deterministic with guides present (same as the existing
+/// `save_is_byte_deterministic` coverage, but exercising the guides array).
+#[test]
+fn guides_save_is_byte_deterministic() {
+    let mut doc = Document::new();
+    doc.add_guide_line(Point3::ORIGIN, Vec3::new(0.0, 1.0, 0.0))
+        .unwrap();
+    doc.add_guide_point(Point3::new(1.0, 1.0, 1.0)).unwrap();
+
+    let bytes_a = doc.save();
+    let bytes_b = doc.save();
+    assert_eq!(bytes_a, bytes_b, "save() is deterministic with guides");
+}
+
+/// A manifest entry for a `"line"` guide with no `dir` field is a typed load
+/// error, never a panic and never silently repaired (DEVELOPMENT.md rule 4).
+#[test]
+fn load_rejects_line_guide_missing_direction() {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let mut doc = Document::new();
+    doc.add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let bytes = doc.save();
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let guides = manifest["guides"]
+        .as_array_mut()
+        .expect("guides array present");
+    assert_eq!(guides.len(), 1);
+    guides[0].as_object_mut().unwrap().remove("dir");
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    let bytes2 = bytes.clone();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    let patched_bytes = new_zip.finish().unwrap().into_inner();
+
+    // Must be a typed load error, never a panic.
+    let result = Document::load(&patched_bytes);
+    assert!(
+        result.is_err(),
+        "a line guide missing `dir` must be rejected, not silently repaired"
+    );
+}
+
+/// A pre-v4 manifest (no `guides` key at all) still loads, with zero guides —
+/// back-compat, mirroring `v2_manifest_loads_with_empty_tags`.
+#[test]
+fn pre_v4_manifest_loads_with_no_guides() {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let _ = obj;
+    let bytes = doc.save();
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    manifest["format_version"] = serde_json::json!(3);
+    // This doc has no guides, so `skip_serializing_if = "Vec::is_empty"` already
+    // omitted the key — exactly the pre-v4 shape we want to test. Assert that
+    // omission here (rather than removing the key ourselves) so the test fails
+    // loudly if that serde attribute is ever dropped.
+    assert!(
+        manifest.as_object().unwrap().get("guides").is_none(),
+        "an empty guides Vec should be omitted from the manifest entirely"
+    );
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    let bytes2 = bytes.clone();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    let patched_bytes = new_zip.finish().unwrap().into_inner();
+
+    let loaded =
+        Document::load(&patched_bytes).expect("pre-v4 manifest (no guides key) should load");
+    assert!(
+        loaded.guide_ids().is_empty(),
+        "guides default to empty when the manifest predates v4"
+    );
 }

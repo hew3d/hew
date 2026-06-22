@@ -42,8 +42,8 @@ wall clock.
 
 On **save**, each live entity is assigned a dense `u32` id by iterating its
 slotmap in key order (ascending slot — deterministic). Separate id spaces per
-kind: objects, groups, components, instances, sketches, materials, and — *within
-a sketch* — sketch-vertices, sketch-edges, sketch-regions.
+kind: objects, groups, components, instances, sketches, materials, guides, and
+— *within a sketch* — sketch-vertices, sketch-edges, sketch-regions.
 
 **Not persisted** (a save is the live, visible state, like SketchUp):
 - the undo/redo logs (after load the undo stack is empty);
@@ -61,7 +61,7 @@ sentinel `0xFFFF_FFFF` = `None`.
 
 ```jsonc
 {
-  "format_version": 3,            // — bumped on any manifest-shape change
+  "format_version": 4,            // — bumped on any manifest-shape change
   "geometry_version": 2,          // GEOMETRY_FORMAT_VERSION of the .bin buffers
   "app": "hew",
   "app_version": "0.1.0",
@@ -122,6 +122,15 @@ sentinel `0xFFFF_FFFF` = `None`.
       "edges":    [ {"id":0, "from":0, "to":1} ],
       "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ]
     }
+  ],
+
+  // Construction guides (format_version 4+): non-solid alignment helpers,
+  // never rendered as geometry, never affecting watertightness. `kind` is
+  // "line" | "point". A line's `p` is its origin and `dir` its unit direction
+  // (omitted for points). Missing/omitted entirely (v1-v3 files) = no guides.
+  "guides": [
+    { "id": 0, "kind": "line", "p": [0.0, 0.0, 0.0], "dir": [1.0, 0.0, 0.0] },
+    { "id": 1, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
 
   // The document's top-level nodes, in order (NodeRef into objects/groups/instances).
@@ -227,6 +236,8 @@ fields default (`format_version` 1 has no node `name`s → all `None`).
 - **v3** — optional `tags: Vec<Vec<String>>` (root-first tag-path segments) on
   object/group/instance entries. Components carry no tags (tags sit on instances).
   Missing `tags` fields in older files default to `[]` via `#[serde(default)]`.
+- **v4** — optional `guides` array — construction lines + points; missing
+  ⇒ none.
 
 ## 7. Conformance tests
 
@@ -236,7 +247,8 @@ Living in `crates/kernel/tests/`:
 - **Determinism**: `save(doc) == save(doc)`, byte-for-byte.
 - **Golden files**: committed `.hew` fixtures (a holed solid, a merge group, an
   instanced component incl. a mirrored pose, painted + textured + base-material
-  objects, a sketch with a consumed region) that must save bit-identically and
-  re-load. Regenerated only on an intentional version bump.
+  objects, a sketch with a consumed region, a construction guide line + point)
+  that must save bit-identically and re-load. Regenerated only on an
+  intentional version bump.
 - **Negative**: truncated / garbage / tampered buffers and dangling manifest
   references → the typed errors above, never a panic, never silent repair.

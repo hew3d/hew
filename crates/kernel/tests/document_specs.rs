@@ -6,9 +6,9 @@
 //! stable across undo/redo.
 
 use kernel::{
-    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, KernelOp, KernelOpReport,
-    Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchEdgeId, SketchId,
-    Transform, TransformError, Vec3, WatertightState,
+    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, KernelOp,
+    KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
+    SketchEdgeId, SketchId, Transform, TransformError, Vec3, WatertightState,
 };
 use std::collections::HashSet;
 
@@ -1456,4 +1456,171 @@ fn tag_and_name_ops_work_on_group_and_instance_nodes() {
     // Undo the instance tag add → tag should be gone.
     doc.undo().unwrap();
     assert_eq!(doc.node_tags(NodeId::Instance(iid)), &[] as &[Vec<String>]);
+}
+
+// ------------------------------------------------------------------- guides
+
+#[test]
+fn add_guide_line_normalizes_direction_and_is_queryable() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_guide_line(Point3::new(1.0, 2.0, 3.0), Vec3::new(2.0, 0.0, 0.0))
+        .expect("add guide line");
+
+    assert_eq!(doc.guide_ids(), vec![id]);
+    match doc.guide(id).expect("guide is live") {
+        Guide::Line { origin, direction } => {
+            assert!(origin.approx_eq(Point3::new(1.0, 2.0, 3.0), 1e-12));
+            // Stored direction is normalized, not the raw (2,0,0) input.
+            assert!(direction.approx_eq(Vec3::new(1.0, 0.0, 0.0), 1e-12));
+            assert!((direction.length() - 1.0).abs() < 1e-12);
+        }
+        Guide::Point { .. } => panic!("expected a Line guide"),
+    }
+}
+
+#[test]
+fn add_guide_point_is_queryable() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_guide_point(Point3::new(4.0, 5.0, 6.0))
+        .expect("add guide point");
+
+    assert_eq!(doc.guide_ids(), vec![id]);
+    match doc.guide(id).expect("guide is live") {
+        Guide::Point { position } => {
+            assert!(position.approx_eq(Point3::new(4.0, 5.0, 6.0), 1e-12));
+        }
+        Guide::Line { .. } => panic!("expected a Point guide"),
+    }
+}
+
+#[test]
+fn add_guide_line_rejects_degenerate_direction() {
+    let mut doc = Document::new();
+    assert_eq!(
+        doc.add_guide_line(Point3::ORIGIN, Vec3::ZERO),
+        Err(DocumentError::DegenerateGuide)
+    );
+    assert!(doc.guide_ids().is_empty(), "document untouched on Err");
+    assert!(!doc.can_undo(), "no undo entry pushed on Err");
+}
+
+#[test]
+fn add_guide_line_rejects_non_finite_coordinates() {
+    let mut doc = Document::new();
+    let nan = f64::NAN;
+    let inf = f64::INFINITY;
+
+    // Non-finite origin, otherwise-valid direction.
+    assert_eq!(
+        doc.add_guide_line(Point3::new(nan, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+        Err(DocumentError::DegenerateGuide)
+    );
+    // Non-finite direction.
+    assert_eq!(
+        doc.add_guide_line(Point3::ORIGIN, Vec3::new(inf, 0.0, 0.0)),
+        Err(DocumentError::DegenerateGuide)
+    );
+    assert!(doc.guide_ids().is_empty());
+}
+
+#[test]
+fn add_guide_point_rejects_non_finite_coordinates() {
+    let mut doc = Document::new();
+    assert_eq!(
+        doc.add_guide_point(Point3::new(0.0, f64::NAN, 0.0)),
+        Err(DocumentError::DegenerateGuide)
+    );
+    assert_eq!(
+        doc.add_guide_point(Point3::new(0.0, 0.0, f64::INFINITY)),
+        Err(DocumentError::DegenerateGuide)
+    );
+    assert!(doc.guide_ids().is_empty());
+}
+
+#[test]
+fn add_guide_undo_redo_preserves_id() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_guide_line(Point3::ORIGIN, Vec3::new(0.0, 1.0, 0.0))
+        .unwrap();
+    assert_eq!(doc.guide_ids(), vec![id]);
+
+    doc.undo().unwrap();
+    assert!(doc.guide_ids().is_empty(), "undo hides the created guide");
+    assert!(doc.guide(id).is_none(), "hidden guide is not queryable");
+
+    doc.redo().unwrap();
+    assert_eq!(
+        doc.guide_ids(),
+        vec![id],
+        "redo unhides with the SAME GuideId"
+    );
+    assert!(doc.guide(id).is_some());
+}
+
+#[test]
+fn delete_guide_undo_redo_round_trips() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::new(1.0, 1.0, 1.0)).unwrap();
+
+    let change = doc.delete_guide(id).expect("delete");
+    assert_eq!(change.guides_touched, vec![id]);
+    assert!(doc.guide_ids().is_empty(), "deleted guide is hidden");
+
+    doc.undo().unwrap();
+    assert_eq!(doc.guide_ids(), vec![id], "undo unhides it");
+
+    doc.redo().unwrap();
+    assert!(doc.guide_ids().is_empty(), "redo re-hides it");
+}
+
+#[test]
+fn delete_guide_rejects_unknown_or_already_hidden() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    doc.delete_guide(id).unwrap();
+    // Already hidden — deleting again is refused.
+    assert_eq!(doc.delete_guide(id), Err(DocumentError::UnknownGuide));
+
+    // Stale handle from another document.
+    let mut other = Document::new();
+    let stray = other.add_guide_point(Point3::ORIGIN).unwrap();
+    assert_eq!(doc.delete_guide(stray), Err(DocumentError::UnknownGuide));
+}
+
+#[test]
+fn delete_all_guides_is_one_undo_step_and_restores_all() {
+    let mut doc = Document::new();
+    let l = doc
+        .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let p = doc.add_guide_point(Point3::new(1.0, 1.0, 1.0)).unwrap();
+    assert_eq!(doc.guide_ids().len(), 2);
+
+    let change = doc.delete_all_guides().expect("delete all");
+    let mut touched = change.guides_touched.clone();
+    touched.sort_by_key(|g| format!("{g:?}"));
+    let mut expected = vec![l, p];
+    expected.sort_by_key(|g| format!("{g:?}"));
+    assert_eq!(touched, expected);
+    assert!(doc.guide_ids().is_empty());
+
+    // One undo step restores both.
+    doc.undo().unwrap();
+    let mut restored = doc.guide_ids();
+    restored.sort_by_key(|g| format!("{g:?}"));
+    assert_eq!(restored, expected, "undo restores exactly these guides");
+
+    doc.redo().unwrap();
+    assert!(doc.guide_ids().is_empty(), "redo re-hides them");
+}
+
+#[test]
+fn delete_all_guides_on_empty_document_is_a_no_op() {
+    let mut doc = Document::new();
+    let change = doc.delete_all_guides().expect("no-op delete");
+    assert_eq!(change, kernel::DocChange::default());
+    assert!(!doc.can_undo(), "an empty delete-all pushes NO undo entry");
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatLengthIn } from './units'
+import { formatLengthIn, metersFromUnit, getLengthUnitSuffix } from './units'
 
 describe('formatLengthIn', () => {
   it('formats meters with trimmed precision', () => {
@@ -36,5 +36,37 @@ describe('formatLengthIn', () => {
     expect(formatLengthIn(0.3048, 'ft')).toBe('1 ft')
     // 0.0254 m == exactly 1 in
     expect(formatLengthIn(0.0254, 'in')).toBe('1 in')
+  })
+})
+
+describe('metersFromUnit', () => {
+  it('converts centimeters to meters', () => {
+    expect(metersFromUnit(30, 'cm')).toBeCloseTo(0.3, 10)
+  })
+
+  it('converts meters to meters (identity)', () => {
+    expect(metersFromUnit(1.5, 'm')).toBeCloseTo(1.5, 10)
+  })
+
+  it('converts feet to meters', () => {
+    expect(metersFromUnit(1, 'ft')).toBeCloseTo(0.3048, 10)
+  })
+
+  it('converts inches to meters', () => {
+    expect(metersFromUnit(2, 'in')).toBeCloseTo(0.0508, 10)
+  })
+
+  it('converts millimeters to meters', () => {
+    expect(metersFromUnit(1000, 'mm')).toBeCloseTo(1, 10)
+  })
+})
+
+describe('getLengthUnitSuffix', () => {
+  it('returns the suffix for each unit', () => {
+    expect(getLengthUnitSuffix('m')).toBe('m')
+    expect(getLengthUnitSuffix('cm')).toBe('cm')
+    expect(getLengthUnitSuffix('mm')).toBe('mm')
+    expect(getLengthUnitSuffix('ft')).toBe('ft')
+    expect(getLengthUnitSuffix('in')).toBe('in')
   })
 })

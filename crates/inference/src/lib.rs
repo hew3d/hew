@@ -33,7 +33,8 @@
 //! but `resolve` does not emit it yet.
 
 use kernel::{
-    EdgeId, FaceId, InstanceId, Object, ObjectId, Plane, Point3, Transform, Vec3, VertexId, tol,
+    EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, Transform, Vec3,
+    VertexId, tol,
 };
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
@@ -59,6 +60,11 @@ pub enum SnapKind {
     OnEdge,
     /// Anywhere on a face.
     OnFace,
+    /// On a construction guide: a line or point the user placed
+    /// deliberately as a drawing aid. Beats the ambient world axes (it's a
+    /// real, user-placed reference) but loses to actual solid geometry
+    /// (faces/edges/vertices) — a guide is an aid, not material.
+    OnGuide,
     /// On a model axis (or locked direction) through the anchor.
     OnAxis,
     /// Direction parallel to a reference edge (M2; needs a reference).
@@ -199,22 +205,74 @@ pub struct SceneFace {
     pub source: SnapSource,
 }
 
+/// A construction guide registered with the inference engine, in world
+/// space. Guides carry no topology and have no `SnapSource` — like the world
+/// origin/axes, they snap with `source: None` (see [`SnapKind::OnGuide`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SceneGuide {
+    id: GuideId,
+    geom: SceneGuideGeom,
+}
+
+/// The geometry of a [`SceneGuide`], mirroring [`kernel::Guide`] in world
+/// space (guides carry no placement/instance — they're authored directly in
+/// world coordinates, unlike Object geometry).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SceneGuideGeom {
+    /// An infinite construction line through `origin` along unit `direction`.
+    Line { origin: Point3, direction: Vec3 },
+    /// A single construction point.
+    Point { position: Point3 },
+}
+
 /// The engine's view of the scene: world-space snap candidates extracted
 /// from every Object, refreshed incrementally as Objects change.
 ///
 /// The spatial index lives behind this type; the public API exposes
 /// only candidates and queries so the indexing strategy stays swappable.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct InferenceScene {
     points: Vec<ScenePoint>,
     segments: Vec<SceneSegment>,
     faces: Vec<SceneFace>,
+    guides: Vec<SceneGuide>,
+    /// When `false`, guide candidates are suppressed (View ▸ Guides off): a
+    /// hidden guide must not snap or flash a cue. Defaults to `true`.
+    guides_enabled: bool,
+    /// When `false`, the world-origin/axis candidates are suppressed (View ▸
+    /// Axes off): hidden axes must not snap or flash a cue. Defaults to `true`.
+    axes_enabled: bool,
+}
+
+impl Default for InferenceScene {
+    fn default() -> Self {
+        InferenceScene {
+            points: Vec::new(),
+            segments: Vec::new(),
+            faces: Vec::new(),
+            guides: Vec::new(),
+            guides_enabled: true,
+            axes_enabled: true,
+        }
+    }
 }
 
 impl InferenceScene {
     /// An empty scene.
     pub fn new() -> InferenceScene {
         InferenceScene::default()
+    }
+
+    /// Enable/disable guide snapping (View ▸ Guides). Hidden guides must not
+    /// snap or flash a cue; the registered guides are kept, only their
+    /// candidate emission is gated.
+    pub fn set_guides_enabled(&mut self, enabled: bool) {
+        self.guides_enabled = enabled;
+    }
+
+    /// Enable/disable world-origin/axis snapping (View ▸ Axes).
+    pub fn set_axes_enabled(&mut self, enabled: bool) {
+        self.axes_enabled = enabled;
     }
 
     /// Candidate counts as (points, segments, faces) — cheap introspection
@@ -352,6 +410,33 @@ impl InferenceScene {
         self.faces.retain(|f| f.source.instance != key);
     }
 
+    /// Registers (or re-registers) one construction guide as a
+    /// snap target. Replace semantics, mirroring [`InferenceScene::add_object`]:
+    /// drops any prior candidate for `id` first, so callers can call this on
+    /// every guide creation/edit without tracking whether it's new.
+    pub fn add_guide(&mut self, id: GuideId, guide: &Guide) {
+        self.remove_guide(id);
+        let geom = match *guide {
+            Guide::Line { origin, direction } => SceneGuideGeom::Line { origin, direction },
+            Guide::Point { position } => SceneGuideGeom::Point { position },
+        };
+        self.guides.push(SceneGuide { id, geom });
+    }
+
+    /// Drops the candidate registered for guide `id`. Unknown ids are a
+    /// no-op — removal must be idempotent so document undo/redo can call it
+    /// freely (mirroring [`InferenceScene::remove_object`]).
+    pub fn remove_guide(&mut self, id: GuideId) {
+        self.guides.retain(|g| g.id != id);
+    }
+
+    /// Number of guides currently registered — cheap introspection for tests
+    /// (kept separate from [`InferenceScene::candidate_counts`] so that
+    /// existing callers of the points/segments/faces tuple are unaffected).
+    pub fn guide_count(&self) -> usize {
+        self.guides.len()
+    }
+
     /// Answers one inference query (see the module docs for the priority and
     /// locking model). Returns `None` when nothing falls inside the pick
     /// cone and no lock/anchor produces a directional snap — the tool then
@@ -425,14 +510,45 @@ impl InferenceScene {
         // --- World-origin and world-axis candidates ---
         // The origin snaps as a strong Endpoint; the three world axes snap as
         // OnAxis (weakest meaningful kind, so object geometry still wins).
-        if let Some((ang, depth)) = cone_test(origin, dir, Point3::ORIGIN, aperture) {
-            candidates.push((SnapKind::Endpoint, ang, depth, Point3::ORIGIN, None, None));
+        // Suppressed when axes are hidden (View ▸ Axes off) so a hidden axis
+        // never snaps or flashes a cue.
+        if self.axes_enabled {
+            if let Some((ang, depth)) = cone_test(origin, dir, Point3::ORIGIN, aperture) {
+                candidates.push((SnapKind::Endpoint, ang, depth, Point3::ORIGIN, None, None));
+            }
+            for axis in [Axis::X, Axis::Y, Axis::Z] {
+                let adir = axis.unit();
+                let pos = closest_point_on_line_to_ray(Point3::ORIGIN, adir, origin, dir);
+                if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                    candidates.push((SnapKind::OnAxis, ang, depth, pos, None, Some(adir)));
+                }
+            }
         }
-        for axis in [Axis::X, Axis::Y, Axis::Z] {
-            let adir = axis.unit();
-            let pos = closest_point_on_line_to_ray(Point3::ORIGIN, adir, origin, dir);
-            if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
-                candidates.push((SnapKind::OnAxis, ang, depth, pos, None, Some(adir)));
+
+        // --- Construction guide candidates ---
+        // A guide point is a precise snap (Endpoint-tier, like the world
+        // origin); a guide line snaps as OnGuide, carrying its direction for
+        // the dashed cue exactly like an axis snap. Source is always None —
+        // guides carry no topology to highlight. Suppressed when guides are
+        // hidden (View ▸ Guides off) so a hidden guide never snaps or cues.
+        if self.guides_enabled {
+            for guide in &self.guides {
+                match guide.geom {
+                    SceneGuideGeom::Point { position } => {
+                        if let Some((ang, depth)) = cone_test(origin, dir, position, aperture) {
+                            candidates.push((SnapKind::Endpoint, ang, depth, position, None, None));
+                        }
+                    }
+                    SceneGuideGeom::Line {
+                        origin: go,
+                        direction: gd,
+                    } => {
+                        let pos = closest_point_on_line_to_ray(go, gd, origin, dir);
+                        if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                            candidates.push((SnapKind::OnGuide, ang, depth, pos, None, Some(gd)));
+                        }
+                    }
+                }
             }
         }
 
@@ -764,7 +880,8 @@ mod tests {
         assert!(SnapKind::Midpoint < SnapKind::Intersection);
         assert!(SnapKind::Intersection < SnapKind::OnEdge);
         assert!(SnapKind::OnEdge < SnapKind::OnFace);
-        assert!(SnapKind::OnFace < SnapKind::OnAxis);
+        assert!(SnapKind::OnFace < SnapKind::OnGuide);
+        assert!(SnapKind::OnGuide < SnapKind::OnAxis);
         assert!(SnapKind::OnAxis < SnapKind::Parallel);
         assert!(SnapKind::Parallel < SnapKind::Perpendicular);
     }
@@ -1212,5 +1329,223 @@ mod tests {
             "position should be the cube vertex, got {:?}",
             snap.position
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // : construction guide snapping
+    // -----------------------------------------------------------------------
+
+    /// A registered guide line resolves to `SnapKind::OnGuide`, carrying the
+    /// guide's direction, at a position on the line near the ray.
+    #[test]
+    fn resolve_snaps_to_guide_line() {
+        let mut scene = InferenceScene::new();
+        let guide_dir = Vec3::new(0.0, 1.0, 0.0); // +Y
+        let guide = Guide::Line {
+            origin: Point3::new(2.0, 0.0, 0.0),
+            direction: guide_dir,
+        };
+        scene.add_guide(GuideId::default(), &guide);
+        assert_eq!(scene.guide_count(), 1);
+
+        // Ray crosses the guide line (the Y axis through x=2, z=0) from the side.
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(2.0, 5.0, 3.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("ray passes through the guide line");
+        assert_eq!(snap.kind, SnapKind::OnGuide);
+        assert_eq!(snap.direction, Some(guide_dir));
+        // The snapped position must lie on the guide line (x=2, z=0).
+        assert!((snap.position.x - 2.0).abs() < tol::POINT_MERGE);
+        assert!(snap.position.z.abs() < tol::POINT_MERGE);
+    }
+
+    /// A registered guide point resolves to `SnapKind::Endpoint` at that
+    /// point — a guide point is a precise snap, same tier as a real vertex.
+    #[test]
+    fn resolve_snaps_to_guide_point() {
+        let mut scene = InferenceScene::new();
+        let guide_pos = Point3::new(3.0, 4.0, 0.0);
+        scene.add_guide(
+            GuideId::default(),
+            &Guide::Point {
+                position: guide_pos,
+            },
+        );
+
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(3.0, 4.0, 10.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("ray points straight at the guide point");
+        assert_eq!(snap.kind, SnapKind::Endpoint);
+        assert!(snap.position.approx_eq(guide_pos, tol::POINT_MERGE));
+    }
+
+    /// Real object geometry coincident with a guide still wins: Endpoint and
+    /// OnEdge both outrank OnGuide.
+    #[test]
+    fn object_geometry_outranks_coincident_guide() {
+        let mut scene = cube_scene();
+        // A guide line running along the cube's vertical edge through (1,1,*),
+        // which coincides with the cube's edge from (1,1,0) to (1,1,1).
+        scene.add_guide(
+            GuideId::default(),
+            &Guide::Line {
+                origin: Point3::new(1.0, 1.0, 0.0),
+                direction: Vec3::new(0.0, 0.0, 1.0),
+            },
+        );
+
+        // Aim straight at the cube vertex (1,1,1), which also lies exactly on
+        // the guide line: the vertex Endpoint must win over OnGuide.
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(1.0, 1.0, 5.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("cube vertex and guide line are both on this ray");
+        assert_eq!(
+            snap.kind,
+            SnapKind::Endpoint,
+            "a coincident object vertex must outrank the guide, got {:?}",
+            snap
+        );
+
+        // Aim at the midpoint of that same edge (0.5 up) from a ray that does
+        // NOT pass through either vertex (offset to the side and angled), so
+        // only the midpoint and the guide line (both within the cone, at
+        // very different angles from the vertices) compete.
+        let mid_snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(1.5, 1.0, 0.5),
+                    direction: Vec3::new(-1.0, 0.0, 0.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.05,
+                constraint_plane: None,
+            })
+            .expect("cube edge midpoint and guide line are both on this ray");
+        assert_eq!(
+            mid_snap.kind,
+            SnapKind::Midpoint,
+            "a coincident edge midpoint must outrank the guide, got {:?}",
+            mid_snap
+        );
+    }
+
+    /// `constraint_plane` drops an off-plane guide candidate exactly like any
+    /// other off-plane candidate.
+    #[test]
+    fn constraint_plane_drops_off_plane_guide() {
+        let mut scene = InferenceScene::new();
+        // A horizontal guide line at z=5, well off the z=0 constraint plane.
+        scene.add_guide(
+            GuideId::default(),
+            &Guide::Line {
+                origin: Point3::new(0.0, 0.0, 5.0),
+                direction: Vec3::new(1.0, 0.0, 0.0),
+            },
+        );
+
+        let ray = PickRay {
+            origin: Point3::new(0.0, 5.0, 5.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+        };
+
+        // Unconstrained: the guide line snaps.
+        let free = scene
+            .resolve(&SnapQuery {
+                ray,
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("the guide line is on this ray");
+        assert_eq!(free.kind, SnapKind::OnGuide);
+
+        // Constrained to the ground plane (z=0): the off-plane guide is
+        // filtered out, leaving nothing to snap to.
+        let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let constrained = scene.resolve(&SnapQuery {
+            ray,
+            anchor: None,
+            lock: None,
+            aperture: 0.3,
+            constraint_plane: Some(ground),
+        });
+        assert!(
+            constrained.is_none(),
+            "off-plane guide must be filtered out, got {:?}",
+            constrained
+        );
+    }
+
+    /// `remove_guide` is idempotent and unregisters: a removed guide no
+    /// longer snaps, and removing an unknown id is a no-op (no panic).
+    #[test]
+    fn remove_guide_is_idempotent_and_unregisters() {
+        let mut scene = InferenceScene::new();
+        let id = GuideId::default();
+        // Placed well away from the world origin/axes (x=20,y=20) so the
+        // tight aperture below can't pick up the ambient origin/axis
+        // candidates once the guide itself is removed.
+        scene.add_guide(
+            id,
+            &Guide::Point {
+                position: Point3::new(20.0, 20.0, 1.0),
+            },
+        );
+        assert_eq!(scene.guide_count(), 1);
+
+        let query = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(20.0, 20.0, 10.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.05,
+            constraint_plane: None,
+        };
+        assert!(scene.resolve(&query).is_some());
+
+        scene.remove_guide(id);
+        assert_eq!(scene.guide_count(), 0);
+        let after = scene.resolve(&query);
+        assert!(
+            after.is_none(),
+            "removed guide must no longer snap, got {:?}",
+            after
+        );
+
+        // Idempotent: removing again (and removing an id that was never
+        // registered) must not panic.
+        scene.remove_guide(id);
+        scene.remove_guide(GuideId::default());
     }
 }

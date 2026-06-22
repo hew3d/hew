@@ -26,7 +26,9 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { rectangleCorners, faceRectangleCorners, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { rectangleCorners, faceRectangleCorners, facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
+import { editDimsBuffer, parseDimensions } from './moveInput'
 
 export type RectangleCommitResult = {
   sketchHandle: bigint
@@ -37,6 +39,7 @@ export type RectangleCommitResult = {
 export type OnRectangleCommit = (result: RectangleCommitResult) => void
 export type OnFaceImprint = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
+export type OnMeasurement = (text: string) => void
 
 /** Ground stage: waiting for first click, or waiting for second click */
 type GroundStage =
@@ -91,6 +94,7 @@ export class RectangleTool implements Tool {
   private onCommit: OnRectangleCommit
   private onFaceImprint: OnFaceImprint
   private onToast: OnToast
+  private onMeasurementCb: OnMeasurement
 
   /** Handle to the current active sketch — reused across commits if not null */
   private sketchHandle: bigint | null = null
@@ -98,18 +102,27 @@ export class RectangleTool implements Tool {
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
 
+  /** VCB buffer — raw string being typed by the user (W,D in display units) */
+  private typed: string = ''
+
+  /** Last rubber-band cursor positions, tracked for typed-entry sign/direction */
+  private _lastGroundCursor: [number, number] | null = null
+  private _lastFaceCursor: V3 | null = null
+
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     onCommit: OnRectangleCommit,
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
+    onMeasurement: OnMeasurement = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
+    this.onMeasurementCb = onMeasurement
   }
 
   /** Set the active editing context (entered object), or null for top level. */
@@ -175,6 +188,7 @@ export class RectangleTool implements Tool {
       // Face mode
       if (this.faceStage.kind !== 'anchored') {
         this._clearPreview()
+        this.onMeasurementCb('')
         return
       }
       const { anchor, normal, planePoint } = this.faceStage
@@ -182,23 +196,30 @@ export class RectangleTool implements Tool {
       const cursorOnPlane = intersectPlane(ray.origin, ray.direction, planePoint, normal)
       if (cursorOnPlane === null) {
         this._clearPreview()
+        this.onMeasurementCb('')
         return
       }
+      this._lastFaceCursor = cursorOnPlane
       const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
       if (corners !== null) {
         this._drawRubberBandFace(corners)
+        this._reportMeasurement(corners)
       } else {
         this._clearPreview()
+        if (this.typed === '') this.onMeasurementCb('')
       }
     } else {
       // Ground mode
       if (this.groundStage.kind !== 'anchored' || snap === null) {
         this._clearPreview()
+        this.onMeasurementCb('')
         return
       }
       const { anchor } = this.groundStage
       const cursor: [number, number] = [snap.x, snap.y]
+      this._lastGroundCursor = cursor
       this._drawRubberBandGround(anchor, cursor)
+      this._reportMeasurement(rectangleCorners(anchor, cursor))
     }
   }
 
@@ -210,16 +231,123 @@ export class RectangleTool implements Tool {
     }
   }
 
+  /**
+   * Typed VCB entry is available once the first corner has been placed
+   * (either ground or face mode) — see the Viewport key router, which
+   * routes digit/letter/arrow keys here instead of tool-switch shortcuts
+   * while this returns true.
+   */
+  capturingInput(): boolean {
+    return this.groundStage.kind === 'anchored' || this.faceStage.kind === 'anchored'
+  }
+
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
       this.cancel()
+      return
+    }
+
+    if (!this.capturingInput()) return
+
+    if (ev.key === 'Enter') {
+      const dims = parseDimensions(this.typed)
+      if (dims !== null) {
+        const w = metersFromUnit(dims[0])
+        const d = metersFromUnit(dims[1])
+        this._commitTyped(w, d)
+      }
+      return
+    }
+
+    // Feed digits, dot, separators, Backspace into the buffer
+    if (
+      (ev.key >= '0' && ev.key <= '9') ||
+      ev.key === '.' ||
+      ev.key === ',' ||
+      ev.key === 'x' ||
+      ev.key === 'X' ||
+      ev.key === ' ' ||
+      ev.key === 'Backspace'
+    ) {
+      this.typed = editDimsBuffer(this.typed, ev.key)
+      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
     }
   }
 
   cancel(): void {
     this.groundStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
+    this.typed = ''
+    this._lastGroundCursor = null
+    this._lastFaceCursor = null
     this._clearPreview()
+    this.onMeasurementCb('')
+  }
+
+  /** Report the live W × D measurement from the four rubber-band corners. */
+  private _reportMeasurement(corners: readonly [V3, V3, V3, V3]): void {
+    if (this.typed !== '') {
+      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      return
+    }
+    const [c0, c1, c2] = corners
+    const width = Math.hypot(c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2])
+    const depth = Math.hypot(c2[0] - c1[0], c2[1] - c1[1], c2[2] - c1[2])
+    this.onMeasurementCb(`${formatLength(width)} × ${formatLength(depth)}`)
+  }
+
+  /**
+   * Commit an exact width × depth rectangle from the typed VCB buffer, using
+   * the current rubber-band cursor side (or +,+ default) to pick the growth
+   * direction along each axis. Dispatches to ground or face mode depending
+   * on which stage is anchored.
+   */
+  private _commitTyped(w: number, d: number): void {
+    if (this.groundStage.kind === 'anchored') {
+      const { anchor } = this.groundStage
+      // Sign of growth along each axis follows the last rubber-band cursor
+      // position (so typing matches the direction the user was dragging);
+      // default +,+ if the cursor hasn't moved yet.
+      const cursor = this._lastGroundCursor ?? anchor
+      const signX = cursor[0] - anchor[0] < 0 ? -1 : 1
+      const signY = cursor[1] - anchor[1] < 0 ? -1 : 1
+      const farCorner: [number, number] = [anchor[0] + signX * w, anchor[1] + signY * d]
+
+      this._commitGroundRectangle(anchor, farCorner)
+      this.groundStage = { kind: 'idle' }
+      this.typed = ''
+      this._lastGroundCursor = null
+      this._clearPreview()
+      this.onMeasurementCb('')
+    } else if (this.faceStage.kind === 'anchored') {
+      const { object, face, normal, anchor } = this.faceStage
+      const basis = facePlaneBasis(normal)
+      if (basis === null) {
+        this.cancel()
+        return
+      }
+      const { u, v } = basis
+      const cursor = this._lastFaceCursor ?? anchor
+      const dx = cursor[0] - anchor[0]
+      const dy = cursor[1] - anchor[1]
+      const dz = cursor[2] - anchor[2]
+      const du = dx * u[0] + dy * u[1] + dz * u[2]
+      const dv = dx * v[0] + dy * v[1] + dz * v[2]
+      const signU = du < 0 ? -1 : 1
+      const signV = dv < 0 ? -1 : 1
+
+      const b: V3 = [anchor[0] + u[0] * signU * w, anchor[1] + u[1] * signU * w, anchor[2] + u[2] * signU * w]
+      const c: V3 = [b[0] + v[0] * signV * d, b[1] + v[1] * signV * d, b[2] + v[2] * signV * d]
+      const dd: V3 = [anchor[0] + v[0] * signV * d, anchor[1] + v[1] * signV * d, anchor[2] + v[2] * signV * d]
+      const corners: [V3, V3, V3, V3] = [anchor, b, c, dd]
+
+      this.faceStage = { kind: 'idle' }
+      this.typed = ''
+      this._lastFaceCursor = null
+      this._clearPreview()
+      this.onMeasurementCb('')
+      this._commitFaceCorners(object, face, corners)
+    }
   }
 
   // ------------------------------------------------------------------ ground mode
@@ -230,6 +358,7 @@ export class RectangleTool implements Tool {
     if (this.groundStage.kind === 'idle') {
       // First click: set anchor
       this.groundStage = { kind: 'anchored', anchor: [snap.x, snap.y] }
+      this._lastGroundCursor = null
     } else {
       // Second click: commit the rectangle
       const { anchor } = this.groundStage
@@ -245,7 +374,10 @@ export class RectangleTool implements Tool {
 
       this._commitGroundRectangle(anchor, cursor)
       this.groundStage = { kind: 'idle' }
+      this.typed = ''
+      this._lastGroundCursor = null
       this._clearPreview()
+      this.onMeasurementCb('')
     }
   }
 
@@ -320,6 +452,7 @@ export class RectangleTool implements Tool {
           planePoint: anchor,
           anchor,
         }
+        this._lastFaceCursor = null
       } finally {
         pick.free()
       }
@@ -334,26 +467,34 @@ export class RectangleTool implements Tool {
       const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
       if (corners === null) return // degenerate — ignore
 
-      // Flatten the 4 corners into a Float64Array of xyz triples
-      const loopPts = new Float64Array(4 * 3)
-      for (let i = 0; i < 4; i++) {
-        loopPts[i * 3 + 0] = corners[i][0]
-        loopPts[i * 3 + 1] = corners[i][1]
-        loopPts[i * 3 + 2] = corners[i][2]
-      }
-
       this.faceStage = { kind: 'idle' }
+      this.typed = ''
+      this._lastFaceCursor = null
       this._clearPreview()
+      this.onMeasurementCb('')
 
-      try {
-        this.wasmScene.split_face_inner(object, face, loopPts)
-        this.onFaceImprint(object)
-      } catch (err) {
-        const code = parseKernelErrorCode(err)
-        const rawMsg = err instanceof Error ? err.message : String(err)
-        const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-        this.onToast(message, code ?? undefined)
-      }
+      this._commitFaceCorners(object, face, corners)
+    }
+  }
+
+  /** Split the given face with a rectangle loop defined by 4 explicit world-space corners. */
+  private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3]): void {
+    // Flatten the 4 corners into a Float64Array of xyz triples
+    const loopPts = new Float64Array(4 * 3)
+    for (let i = 0; i < 4; i++) {
+      loopPts[i * 3 + 0] = corners[i][0]
+      loopPts[i * 3 + 1] = corners[i][1]
+      loopPts[i * 3 + 2] = corners[i][2]
+    }
+
+    try {
+      this.wasmScene.split_face_inner(object, face, loopPts)
+      this.onFaceImprint(object)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
+      this.onToast(message, code ?? undefined)
     }
   }
 

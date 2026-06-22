@@ -7,6 +7,7 @@
  *       midpoint   → cyan    #00cccc
  *       on-edge    → red     #cc2200
  *       on-face    → blue    #0055cc
+ *       on-guide   → purple  #9933cc  (construction guide)
  *       on-axis    → axis color (X=red, Y=green, Z=blue; unknown=magenta)
  *       ground     → gray    #888888  (fallback — no kernel snap)
  *       other      → white   #ffffff
@@ -26,6 +27,7 @@ const SNAP_COLORS: Record<string, number> = {
   intersection: 0xffaa00,
   'on-edge': 0xcc2200,
   'on-face': 0x0055cc,
+  'on-guide': 0x9933cc,
   ground: 0x888888,
 }
 

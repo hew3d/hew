@@ -90,12 +90,62 @@ export function composeAffine(A: Affine, B: Affine): Affine {
 }
 
 /**
- * Build a rotation-about-pivot affine (world +Z, ground-plane spin):
+ * Rotation about an arbitrary axis through the origin by angle θ (radians),
+ * via Rodrigues' rotation formula. The axis (ax, ay, az) is normalized
+ * internally; if it is ~zero length, returns IDENTITY (no-op).
+ */
+export function rotationAxisAffine(
+  ax: number,
+  ay: number,
+  az: number,
+  theta: number,
+): Affine {
+  const len = Math.sqrt(ax * ax + ay * ay + az * az)
+  if (len < 1e-12) return IDENTITY
+
+  const x = ax / len
+  const y = ay / len
+  const z = az / len
+  const c = Math.cos(theta)
+  const s = Math.sin(theta)
+  const t = 1 - c
+
+  return [
+    c + x * x * t,        x * y * t - z * s,    x * z * t + y * s,    0,
+    y * x * t + z * s,    c + y * y * t,        y * z * t - x * s,    0,
+    z * x * t - y * s,    z * y * t + x * s,    c + z * z * t,        0,
+  ]
+}
+
+/**
+ * Build a rotation-about-pivot affine for an arbitrary axis:
  *   1. Translate pivot to origin: T(-pivot)
- *   2. Rotate by θ radians: R(θ)
+ *   2. Rotate by θ radians about the (normalized) axis: R(θ)
  *   3. Translate back: T(+pivot)
  *
  * Resulting transform: T(pivot) * R(θ) * T(-pivot)
+ */
+export function rotateAboutPivotAxis(
+  pivotX: number,
+  pivotY: number,
+  pivotZ: number,
+  axisX: number,
+  axisY: number,
+  axisZ: number,
+  theta: number,
+): Affine {
+  const toPivot = translationAffine(-pivotX, -pivotY, -pivotZ)
+  const rot = rotationAxisAffine(axisX, axisY, axisZ, theta)
+  const fromPivot = translationAffine(pivotX, pivotY, pivotZ)
+  // Apply in order: toPivot → rot → fromPivot
+  return composeAffine(composeAffine(toPivot, rot), fromPivot)
+}
+
+/**
+ * Build a rotation-about-pivot affine (world +Z, ground-plane spin).
+ * Delegates to `rotateAboutPivotAxis` with axis (0, 0, 1).
+ *
+ * Resulting transform: T(pivot) * R_Z(θ) * T(-pivot)
  */
 export function rotateAboutPivotZ(
   pivotX: number,
@@ -103,11 +153,63 @@ export function rotateAboutPivotZ(
   pivotZ: number,
   theta: number,
 ): Affine {
-  const toPivot = translationAffine(-pivotX, -pivotY, -pivotZ)
-  const rot = rotationZAffine(theta)
-  const fromPivot = translationAffine(pivotX, pivotY, pivotZ)
-  // Apply in order: toPivot → rot → fromPivot
-  return composeAffine(composeAffine(toPivot, rot), fromPivot)
+  return rotateAboutPivotAxis(pivotX, pivotY, pivotZ, 0, 0, 1, theta)
+}
+
+/**
+ * Project a vector onto the plane perpendicular to a unit axis:
+ * v - (v·a)a. The caller is responsible for passing a normalized axis
+ * (ax, ay, az); the result is not renormalized.
+ */
+export function projectOntoPlane(
+  vx: number,
+  vy: number,
+  vz: number,
+  ax: number,
+  ay: number,
+  az: number,
+): [number, number, number] {
+  const d = vx * ax + vy * ay + vz * az
+  return [vx - d * ax, vy - d * ay, vz - d * az]
+}
+
+/**
+ * Signed angle (radians) from vector f to vector t, measured in the plane
+ * perpendicular to the unit axis a (right-hand rule about a).
+ *
+ * Both f and t are projected onto the plane ⊥ a before measuring. If either
+ * projection is ~zero (degenerate — the vector lies along the axis), returns
+ * 0 since no reference direction can be formed.
+ *
+ * Axis (ax, ay, az) is assumed to already be a unit vector (callers
+ * typically pass a normalized faceAxis / world axis).
+ */
+export function signedAngleAboutAxis(
+  ax: number,
+  ay: number,
+  az: number,
+  fx: number,
+  fy: number,
+  fz: number,
+  tx: number,
+  ty: number,
+  tz: number,
+): number {
+  const [fpx, fpy, fpz] = projectOntoPlane(fx, fy, fz, ax, ay, az)
+  const [tpx, tpy, tpz] = projectOntoPlane(tx, ty, tz, ax, ay, az)
+
+  const fLen = Math.sqrt(fpx * fpx + fpy * fpy + fpz * fpz)
+  const tLen = Math.sqrt(tpx * tpx + tpy * tpy + tpz * tpz)
+  if (fLen < 1e-9 || tLen < 1e-9) return 0
+
+  const dot = fpx * tpx + fpy * tpy + fpz * tpz
+  // cross(fProj, tProj) · a
+  const cx = fpy * tpz - fpz * tpy
+  const cy = fpz * tpx - fpx * tpz
+  const cz = fpx * tpy - fpy * tpx
+  const crossDotAxis = cx * ax + cy * ay + cz * az
+
+  return Math.atan2(crossDotAxis, dot)
 }
 
 /**

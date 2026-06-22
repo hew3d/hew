@@ -2,8 +2,9 @@
 //!
 //! Builds a representative document exercising the full feature surface
 //! (a box, a group, a component with a mirrored instance, painted + textured +
-//! base-material objects, a sketch with a consumed region), saves it, and
-//! asserts bytes equal a committed fixture. Also asserts it re-loads.
+//! base-material objects, a sketch with a consumed region, a construction
+//! guide line + point), saves it, and asserts bytes equal a committed
+//! fixture. Also asserts it re-loads.
 //!
 //! The golden file is generated from the serializer itself on first run (via
 //! `REGENERATE_GOLDEN=1 cargo test`). From then on, any drift from the spec is
@@ -15,7 +16,7 @@
 use std::path::PathBuf;
 
 use kernel::{
-    Document, ImageFormat, Material, NodeId, Plane, Point3, Rgba8, Texture, Transform,
+    Document, ImageFormat, Material, NodeId, Plane, Point3, Rgba8, Texture, Transform, Vec3,
     WatertightState,
 };
 
@@ -165,6 +166,11 @@ fn build_representative_doc() -> Document {
     doc.extrude_region(sd, regions_d[0], 0.5).unwrap();
     assert_eq!(doc.extrudable_regions(sd).unwrap().len(), 1);
 
+    // ── Guides: one construction line + one construction point ───
+    doc.add_guide_line(Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    doc.add_guide_point(Point3::new(2.0, 3.0, 0.0)).unwrap();
+
     doc
 }
 
@@ -263,6 +269,26 @@ fn golden_file_save_load_and_determinism() {
         single_ext, 1,
         "exactly one sketch should have 1 extrudable region (the consumed-region sketch)"
     );
+
+    // Guides: one line + one point round-trip.
+    let guide_ids = loaded.guide_ids();
+    assert_eq!(guide_ids.len(), 2, "two guides round-trip");
+    let mut saw_line = false;
+    let mut saw_point = false;
+    for gid in guide_ids {
+        match loaded.guide(gid).unwrap() {
+            kernel::Guide::Line { origin, direction } => {
+                saw_line = true;
+                assert!(origin.approx_eq(Point3::new(0.0, 0.0, 0.0), 1e-9));
+                assert!(direction.approx_eq(Vec3::new(1.0, 0.0, 0.0), 1e-9));
+            }
+            kernel::Guide::Point { position } => {
+                saw_point = true;
+                assert!(position.approx_eq(Point3::new(2.0, 3.0, 0.0), 1e-9));
+            }
+        }
+    }
+    assert!(saw_line && saw_point, "both guide kinds round-trip");
 
     // No undo history in loaded doc.
     assert!(!loaded.can_undo(), "loaded doc has empty undo stack");

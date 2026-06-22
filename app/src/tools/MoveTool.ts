@@ -33,7 +33,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers
 import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
 import { arrowToAxis, editNumericBuffer, parseDistance, pointAlong } from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
-import { formatLength } from '../settings/units'
+import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
 
 export type OnMoveCommit = (node: NodeRef) => void
 export type OnToast = (message: string, code?: string) => void
@@ -207,9 +207,11 @@ export class MoveTool implements Tool {
 
     // ── Numeric VCB ──
     if (ev.key === 'Enter') {
-      const dist = parseDistance(this.typed)
-      if (dist !== null) {
-        this._commitFromTyped(dist)
+      const n = parseDistance(this.typed)
+      if (n !== null) {
+        // The typed buffer is in the user's DISPLAY unit (e.g. cm); convert
+        // to meters before using it as a kernel distance.
+        this._commitFromTyped(metersFromUnit(n))
       }
       return
     }
@@ -222,8 +224,9 @@ export class MoveTool implements Tool {
       ev.key === 'Backspace'
     ) {
       this.typed = editNumericBuffer(this.typed, ev.key)
-      // Report the typed buffer as the measurement readout
-      this.onMeasurementCb(this.typed)
+      // Report the typed buffer as the measurement readout, tagged with the
+      // current display unit so the user knows what they're typing in.
+      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
     }
   }
 
@@ -322,7 +325,7 @@ export class MoveTool implements Tool {
    */
   private _reportMeasurement(base: [number, number, number], dest: [number, number, number]): void {
     if (this.typed !== '') {
-      this.onMeasurementCb(this.typed)
+      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
       return
     }
 
