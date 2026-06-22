@@ -11,6 +11,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { modLabel } from '../platform'
 
 export interface MenuBarProps {
   /** Full document title (already includes dirty mark and " — Hew"). Only used in the web (non-native) bar. */
@@ -230,8 +231,7 @@ export function MenuBar({
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
 
-  const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform)
-  const mod = isMac ? '⌘' : 'Ctrl+'
+  const mod = modLabel
 
   const close = useCallback(() => setOpenMenu(null), [])
 
@@ -407,6 +407,11 @@ export function MenuBar({
               shortcut={`${mod}D`}
               checked={activeTool === 'Tape Measure'}
               onClick={withClose(() => onSelectTool?.('Tape Measure'))}
+            />
+            <CheckMenuItem
+              label="Protractor"
+              checked={activeTool === 'Protractor'}
+              onClick={withClose(() => onSelectTool?.('Protractor'))}
             />
           </div>
         )}

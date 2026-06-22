@@ -380,6 +380,8 @@ fn main() {
             let tool_tape_measure = MenuItemBuilder::with_id("tool-tape-measure", "Tape Measure")
                 .accelerator("CmdOrCtrl+D")
                 .build(handle)?;
+            let tool_protractor =
+                MenuItemBuilder::with_id("tool-protractor", "Protractor").build(handle)?;
 
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
@@ -390,6 +392,7 @@ fn main() {
                 .item(&tool_pushpull)
                 .separator()
                 .item(&tool_tape_measure)
+                .item(&tool_protractor)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -455,7 +458,18 @@ fn main() {
                 .item(&window_menu)
                 .build()?;
 
+            // Attach the menu. macOS shows a single global menu bar owned by the
+            // app, so the app-level menu is correct there. On GTK/Windows the
+            // menu bar lives *inside* each window, so an app-wide menu would also
+            // appear on secondary windows (e.g. the floating Settings window).
+            // Scope it to the primary window instead; windows created later
+            // (Settings) then have no menu bar of their own.
+            #[cfg(target_os = "macos")]
             app.set_menu(menu)?;
+            #[cfg(not(target_os = "macos"))]
+            if let Some(main_window) = app.webview_windows().values().next() {
+                main_window.set_menu(menu)?;
+            }
 
             // ----------------------------------------------------------------
             // Managed state: recents + submenu handle
@@ -504,6 +518,7 @@ fn main() {
                 "tool-scale" => "tool-scale",
                 "tool-pushpull" => "tool-pushpull",
                 "tool-tape-measure" => "tool-tape-measure",
+                "tool-protractor" => "tool-protractor",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",
@@ -520,6 +535,11 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Hew desktop")
         .run(|app, event| {
+            // `app`/`event` are only read in the macOS Apple-event path below;
+            // on every other platform this closure is a no-op, so mark them used
+            // to keep `clippy -D warnings` (verify.sh) green on Linux/Windows.
+            #[cfg(not(target_os = "macos"))]
+            let _ = (&app, &event);
             // macOS: intercept "open document" Apple events (warm + cold start).
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &event {

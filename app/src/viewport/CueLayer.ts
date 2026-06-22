@@ -20,6 +20,7 @@
 
 import * as THREE from 'three'
 import type { Snap } from '../tools/types'
+import { AXIS_COLORS } from './axisColors'
 
 const SNAP_COLORS: Record<string, number> = {
   endpoint: 0x00cc44,
@@ -30,8 +31,6 @@ const SNAP_COLORS: Record<string, number> = {
   'on-guide': 0x9933cc,
   ground: 0x888888,
 }
-
-const AXIS_COLORS: [number, number, number] = [0xff2222, 0x22cc22, 0x2222ff]
 
 /** Half-length of the dashed guide line (meters) */
 const GUIDE_HALF_LENGTH = 5

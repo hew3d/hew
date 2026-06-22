@@ -32,9 +32,39 @@ import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
 import { TapeMeasureTool } from '../tools/TapeMeasureTool'
+import { ProtractorTool } from '../tools/ProtractorTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 import type { NodeRef } from '../panels/treeModel'
+import { cursorFor } from '../tools/toolIcons'
+
+/**
+ * Centered message overlay shown over the viewport when the WebGL2 context is
+ * unavailable or has been lost. WebKitGTK (the Linux/Tauri webview) drops the GL
+ * context more readily than Chromium does — on suspend/resume or a GPU/driver
+ * reset — and a dropped context otherwise leaves a frozen grey canvas with no
+ * explanation. The node is absolutely positioned, so its container must be
+ * `position: relative`.
+ */
+function buildViewportOverlay(title: string, detail: string): HTMLDivElement {
+  const overlay = document.createElement('div')
+  overlay.className = 'viewport-overlay'
+  overlay.style.cssText = [
+    'position:absolute', 'inset:0', 'display:flex', 'flex-direction:column',
+    'align-items:center', 'justify-content:center', 'gap:8px', 'padding:24px',
+    'text-align:center', 'background:#d0d0d0', 'color:#333',
+    'font-family:system-ui,sans-serif', 'z-index:10', 'pointer-events:none',
+  ].join(';')
+  const h = document.createElement('div')
+  h.textContent = title
+  h.style.cssText = 'font-size:16px;font-weight:600'
+  const p = document.createElement('div')
+  p.textContent = detail
+  p.style.cssText = 'font-size:13px;max-width:36em;line-height:1.4;opacity:0.8'
+  overlay.appendChild(h)
+  overlay.appendChild(p)
+  return overlay
+}
 
 interface Props {
   /** WASM Scene — owns inference, sketches, objects */
@@ -328,9 +358,32 @@ export default function Viewport({
     const container = containerRef.current
     if (container === null) return
     const el: HTMLDivElement = container
+    // Anchor absolutely-positioned overlays (WebGL-loss / unavailable messages).
+    el.style.position = 'relative'
 
     // ------------------------------------------------------------------ renderer
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    //
+    // WebGL2 context creation can fail outright on WebKitGTK (no GPU, software
+    // GL disabled, or a headless session). three throws in that case; catch it
+    // and show a readable message instead of an unhandled error + blank grey
+    // panel, then bail out of setup.
+    let renderer: THREE.WebGLRenderer
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true })
+    } catch (err) {
+      console.error('[viewport] WebGL2 renderer creation failed:', err)
+      el.appendChild(
+        buildViewportOverlay(
+          'WebGL2 is unavailable',
+          'Hew needs a WebGL2-capable GPU to render. On Linux, check that ' +
+            'hardware acceleration is enabled and your graphics drivers are installed.',
+        ),
+      )
+      return () => {
+        el.style.position = ''
+        el.replaceChildren()
+      }
+    }
     renderer.setPixelRatio(window.devicePixelRatio)
     renderer.setClearColor(0xd0d0d0)
     renderer.setSize(el.clientWidth, el.clientHeight)
@@ -773,8 +826,32 @@ export default function Viewport({
       )
     }
 
+    function makeProtractorTool(): ProtractorTool {
+      return new ProtractorTool(
+        wasmScene,
+        previewGroup,
+        () => {
+          sceneRenderer.refreshGuides()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
+    // Shift-in-Orbit temporarily swaps to Pan, mirroring SketchUp.
+    // Tracked here (not in switchToolRef's closure alone) so the keydown/keyup
+    // handlers and the tool switch can all see/clear the same flag.
+    let shiftPanActive = false
+
     // Switch tool by name
     switchToolRef.current = (toolName: string) => {
+      // A tool switch always wins over a stale shift-pan state: if the user
+      // changes tools while Shift happens to be held, the explicit
+      // mouseButtons.LEFT/cursor this switch sets below must not later be
+      // clobbered by onShiftKeyUp restoring the *previous* tool's Orbit state.
+      shiftPanActive = false
       switch (toolName) {
         case 'Rectangle':
           cameraModeRef.current = false
@@ -814,6 +891,11 @@ export default function Viewport({
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeTapeMeasureTool())
           break
+        case 'Protractor':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeProtractorTool())
+          break
         case 'Orbit':
           cameraModeRef.current = true
           controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
@@ -840,6 +922,11 @@ export default function Viewport({
       // read "Select" here — use the requested toolName instead. The snap
       // kind is reset to null since switching tools invalidates any prior snap.
       onStatusChangeRef.current?.(toolName, null)
+      // Tool-aware cursor: derived from the same Material Symbols
+      // icon as the toolbar button, so the active tool is readable from the
+      // pointer. The canvas owns its cursor — nothing else should set
+      // renderer.domElement.style.cursor outside this switch.
+      renderer.domElement.style.cursor = cursorFor(toolName)
       scheduleRender()
     }
 
@@ -865,9 +952,28 @@ export default function Viewport({
     }
     renderer.domElement.addEventListener('contextmenu', onContextMenu)
 
-    // Shift key tracking kept for potential future use (currently harmless).
-    function onShiftKeyDown(_ev: KeyboardEvent): void { /* no-op */ }
-    function onShiftKeyUp(_ev: KeyboardEvent): void { /* no-op */ }
+    // Shift-in-Orbit -> temporary Pan. OrbitControls already handles
+    // this natively: with mouseButtons.LEFT === MOUSE.ROTATE, holding
+    // Shift/Ctrl/Meta during onMouseDown makes it pan instead of rotate (see
+    // OrbitControls.js). So we must NOT touch controls.mouseButtons.LEFT here
+    // — doing so would fight that built-in inversion. These handlers only
+    // swap the cursor to match. Only Orbit is affected; every other tool
+    // behaves exactly as before. Guarded by shiftPanActive so keydown
+    // autorepeat doesn't re-apply the same state repeatedly, and so keyup
+    // only restores the Orbit cursor if we're the ones who changed it.
+    function onShiftKeyDown(ev: KeyboardEvent): void {
+      if (ev.key !== 'Shift') return
+      if (shiftPanActive) return
+      if (activeToolPropRef.current !== 'Orbit') return
+      shiftPanActive = true
+      renderer.domElement.style.cursor = cursorFor('Pan')
+    }
+    function onShiftKeyUp(ev: KeyboardEvent): void {
+      if (!shiftPanActive) return
+      if (ev.key !== 'Shift' && ev.shiftKey) return
+      shiftPanActive = false
+      renderer.domElement.style.cursor = cursorFor('Orbit')
+    }
     window.addEventListener('keydown', onShiftKeyDown)
     window.addEventListener('keyup', onShiftKeyUp)
 
@@ -883,6 +989,12 @@ export default function Viewport({
         cueLayer.updateMarkerScale(camera)
         // Keep guide-line dashes screen-constant too (see updateGuideDashScale).
         sceneRenderer.updateGuideDashScale(controls.getDistance())
+        // Protractor's plane-preview disk is a virtual construct too — keep
+        // it screen-constant the same way (see ProtractorTool.updateDiskScale).
+        const activeToolForScale = toolController.activeTool
+        if ('updateDiskScale' in activeToolForScale) {
+          ;(activeToolForScale as { updateDiskScale(c: THREE.Camera): void }).updateDiskScale(camera)
+        }
         renderer.render(threeScene, camera)
         needsRender = false
       }
@@ -895,6 +1007,39 @@ export default function Viewport({
     scheduleRenderRef.current = scheduleRender
 
     controls.addEventListener('change', scheduleRender)
+
+    // ------------------------------------------------------------------ context loss
+    // WebKitGTK drops the GL context more readily than Chromium (suspend/resume,
+    // GPU/driver reset). Without these handlers the canvas freezes grey with no
+    // recovery. preventDefault on 'lost' lets the browser fire 'restored'; on
+    // restore we rebuild GPU geometry — three does not re-upload buffers dropped
+    // with the old context — and resume the loop.
+    let contextLostOverlay: HTMLDivElement | null = null
+    function onContextLost(ev: Event): void {
+      ev.preventDefault()
+      cancelAnimationFrame(rafId)
+      console.warn('[viewport] WebGL context lost')
+      if (contextLostOverlay === null) {
+        contextLostOverlay = buildViewportOverlay(
+          'Rendering paused',
+          'The graphics context was lost (this can follow sleep/resume or a ' +
+            'driver reset on Linux). Recovering automatically when it returns…',
+        )
+        el.appendChild(contextLostOverlay)
+      }
+    }
+    function onContextRestored(): void {
+      console.info('[viewport] WebGL context restored')
+      if (contextLostOverlay !== null) {
+        contextLostOverlay.remove()
+        contextLostOverlay = null
+      }
+      sceneRenderer.refresh()
+      needsRender = true
+      render()
+    }
+    renderer.domElement.addEventListener('webglcontextlost', onContextLost)
+    renderer.domElement.addEventListener('webglcontextrestored', onContextRestored)
 
     // ------------------------------------------------------------------ pointer move (snap + cue)
     function onPointerMove(ev: PointerEvent): void {
@@ -1099,6 +1244,9 @@ export default function Viewport({
       controls.removeEventListener('change', scheduleRender)
       window.removeEventListener('keydown', onShiftKeyDown)
       window.removeEventListener('keyup', onShiftKeyUp)
+      renderer.domElement.removeEventListener('webglcontextlost', onContextLost)
+      renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored)
+      contextLostOverlay?.remove()
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
@@ -1116,6 +1264,7 @@ export default function Viewport({
       }
       renderer.dispose()
       el.removeChild(renderer.domElement)
+      el.style.position = ''
     }
   // wasmScene is stable for the lifetime of the app; no re-init on each change
   // eslint-disable-next-line react-hooks/exhaustive-deps

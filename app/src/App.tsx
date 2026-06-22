@@ -29,6 +29,8 @@ import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { UnitsPane } from './settings/UnitsPane'
+import { TOOL_ICON_SVG } from './tools/toolIcons'
+import { modLabel } from './platform'
 
 /** Autosave tick interval (ms). */
 const AUTOSAVE_INTERVAL_MS = 12000
@@ -51,8 +53,10 @@ function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
 }
 
-const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Orbit', 'Pan', 'Zoom'] as const
+const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Orbit', 'Pan', 'Zoom'] as const
 type ToolName = (typeof TOOLS)[number]
+// Canonical shortcuts use the ⌘ glyph; the toolbar-button tooltip swaps it for
+// `modLabel` ('Ctrl+') on non-Mac hosts (e.g. Linux/WebKitGTK).
 const TOOL_KEYS: Record<ToolName, string> = {
   'Select': 'Spc',
   'Rectangle': '⌘K',
@@ -62,6 +66,7 @@ const TOOL_KEYS: Record<ToolName, string> = {
   'Rotate': '⌘8',
   'Scale': '⌘9',
   'Tape Measure': '⌘D',
+  'Protractor': '',
   'Orbit': '⌘B',
   'Pan': '⌘R',
   'Zoom': '⌘\\',
@@ -73,6 +78,27 @@ const PANIC_SIGNATURES = ['recursive use of an object', 'unreachable']
 function isPanicError(message: string): boolean {
   const lower = message.toLowerCase()
   return PANIC_SIGNATURES.some((sig) => lower.includes(sig))
+}
+
+/** Inline Material Symbols icon. The source SVGs carry no `fill`
+ * attribute, so `fill="currentColor"` is spliced onto the root `<svg>` tag
+ * here — letting the button's `color` style (active vs. idle) drive icon
+ * color without a stylesheet (this codebase is inline-styles-only). */
+function ToolIcon({ name }: { name: ToolName }) {
+  // Material Symbols SVGs carry intrinsic width="48" height="48" attributes.
+  // Strip those and inject the size we actually want, otherwise the glyph
+  // renders at 48px inside an 18px span and bleeds into neighboring buttons.
+  const svg = TOOL_ICON_SVG[name]
+    .replace(/\swidth="[^"]*"/, '')
+    .replace(/\sheight="[^"]*"/, '')
+    .replace('<svg ', '<svg fill="currentColor" width="18" height="18" ')
+  return (
+    <span
+      aria-hidden="true"
+      style={{ width: '18px', height: '18px', display: 'block', overflow: 'hidden' }}
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  )
 }
 
 export default function App() {
@@ -733,6 +759,7 @@ export default function App() {
       case 'tool-rotate':    setActiveTool('Rotate'); break
       case 'tool-scale':     setActiveTool('Scale'); break
       case 'tool-tape-measure': setActiveTool('Tape Measure'); break
+      case 'tool-protractor': setActiveTool('Protractor'); break
       case 'tool-orbit':     setActiveTool('Orbit'); break
       case 'tool-pan':       setActiveTool('Pan'); break
       case 'tool-zoom':      setActiveTool('Zoom'); break
@@ -1335,18 +1362,22 @@ export default function App() {
           <button
             key={t}
             onClick={() => setActiveTool(t)}
+            title={TOOL_KEYS[t] === '' ? t : `${t} (${TOOL_KEYS[t].replace('⌘', modLabel)})`}
             style={{
-              padding: '3px 10px',
-              fontSize: '12px',
+              width: '30px',
+              height: '30px',
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
               cursor: 'pointer',
               background: activeTool === t ? '#5588cc' : '#444',
-              color: '#eee',
+              color: activeTool === t ? '#fff' : '#ccc',
               border: activeTool === t ? '1px solid #7aaaee' : '1px solid #555',
               borderRadius: '3px',
-              fontFamily: 'monospace',
             }}
           >
-            [{TOOL_KEYS[t]}] {t}
+            <ToolIcon name={t} />
           </button>
         ))}
 
