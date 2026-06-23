@@ -41,7 +41,7 @@ use crate::ids::{
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::Material;
 use crate::math::{MathError, Plane, Point3, Vec3};
-use crate::ops::{BooleanError, BooleanOp, ExtrudeError};
+use crate::ops::{BooleanError, BooleanOp, ExtrudeError, SliceError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
 use crate::sketch::{Sketch, SketchEdgeId, SketchError, SketchRegionId, SketchVertexId};
 use crate::topo::{Object, WatertightState};
@@ -218,6 +218,22 @@ enum DocAction {
         a: ObjectId,
         b: ObjectId,
     },
+    /// A slice cut one solid into two. Undo hides both pieces and unhides
+    /// the source; redo reverses. Like `Boolean`, all three handles stay stable
+    /// (hide-not-delete).
+    Sliced {
+        source: ObjectId,
+        a: ObjectId,
+        b: ObjectId,
+    },
+    /// A push-through subtract removed material from one solid, replacing
+    /// it with one or more result shells (`results` — more than one when the cut
+    /// severed the solid). Undo hides the results and unhides the source; redo
+    /// reverses. All handles stay stable (hide-not-delete).
+    PushThrough {
+        source: ObjectId,
+        results: Vec<ObjectId>,
+    },
     /// A move/rotate/scale baked into one or more objects' geometry. A single
     /// object carries one target; a group transform carries every leaf object
     /// beneath it. Undo bakes `inverse` into each, redo bakes `forward`;
@@ -244,6 +260,26 @@ enum DocAction {
         group: GroupId,
         parent: Option<GroupId>,
         prev_parent_members: Option<Vec<NodeId>>,
+    },
+    /// `delete_node` hid a whole tree node — an Object, Group, or
+    /// Instance — and its entire subtree in one undoable step (tombstone, not a
+    /// real delete: every id stays valid for redo). Unlike [`DocAction::Ungrouped`],
+    /// a deleted Group's members are hidden along with it rather than reparented
+    /// up — the whole subtree disappears. Deleting an Instance never touches its
+    /// shared [`ComponentDef`] or sibling instances. Undo unhides exactly
+    /// `hidden_subtree` and re-splices `node` back into `parent` at its original
+    /// position; redo re-hides the subtree and splices it out again.
+    Deleted {
+        node: NodeId,
+        parent: Option<GroupId>,
+        /// The parent group's member list immediately before the delete, for an
+        /// exact undo (mirrors [`DocAction::Ungrouped::prev_parent_members`]);
+        /// `None` at the top level.
+        prev_parent_members: Option<Vec<NodeId>>,
+        /// Every node hidden by this delete — `node` itself plus every live
+        /// descendant (groups, objects, instances) beneath it — captured so
+        /// undo unhides exactly this set and nothing else.
+        hidden_subtree: Vec<NodeId>,
     },
     /// `make_component` folded a selection into a new definition plus
     /// one identity-posed instance. Undo dissolves it: each def member returns
@@ -434,6 +470,9 @@ pub enum DocumentError {
     /// A boolean combine failed (non-solid operand, empty result, degenerate
     /// contact, …).
     Boolean(BooleanError),
+    /// A slice failed (non-solid source, plane missing the solid, degenerate
+    /// or tangent cut) —.
+    Slice(SliceError),
     /// A move/rotate/scale failed (singular or orientation-flipping transform).
     Transform(TransformError),
     /// A per-Object op failed to apply.
@@ -486,6 +525,7 @@ impl std::fmt::Display for DocumentError {
             DocumentError::Sketch(e) => write!(f, "{e}"),
             DocumentError::Extrude(e) => write!(f, "{e}"),
             DocumentError::Boolean(e) => write!(f, "{e}"),
+            DocumentError::Slice(e) => write!(f, "{e}"),
             DocumentError::Transform(e) => write!(f, "{e}"),
             DocumentError::Op(e) => write!(f, "{e}"),
             DocumentError::NothingToUndo => write!(f, "nothing to undo"),
@@ -1089,7 +1129,28 @@ impl Document {
 
     /// All sketch handles, in unspecified but stable order.
     pub fn sketch_ids(&self) -> Vec<SketchId> {
-        self.sketches.keys().collect()
+        self.sketches
+            .keys()
+            .filter(|&s| !self.is_sketch_fully_consumed(s))
+            .collect()
+    }
+
+    /// Whether every edge of `sketch` has been consumed by an extrusion — i.e.
+    /// the sketch has been wholly subsumed into one or more solids and no longer
+    /// exists as an actionable sketch (it draws nothing and offers no snap or
+    /// extrudable region). Such a sketch is dropped from [`Document::sketch_ids`]
+    /// so it vanishes from the UI the moment its last region is extruded; undo
+    /// un-consumes the edges (the consumed set is undo-aware) and it reappears.
+    /// An edge-less (freshly created, still-empty) sketch is NOT consumed.
+    fn is_sketch_fully_consumed(&self, sketch: SketchId) -> bool {
+        let Some(sk) = self.sketches.get(sketch) else {
+            return false;
+        };
+        let edges = sk.edges();
+        !edges.is_empty()
+            && edges
+                .keys()
+                .all(|e| self.consumed_sketch_edges.contains(&(sketch, e)))
     }
 
     /// Whether `region` of `sketch` has already been extruded into a solid (and
@@ -1764,6 +1825,25 @@ impl Document {
         }
     }
 
+    /// Every live node at or beneath `node` (the node itself, plus every live
+    /// descendant), recursively, in pre-order. Used by `delete_node` to
+    /// capture the exact set of node ids a whole-subtree delete hides — unlike
+    /// [`Document::collect_groups`] (groups only) or [`Document::leaf_objects_under`]
+    /// (leaf objects only), this names every kind of node in the subtree so undo
+    /// can unhide precisely what was hidden.
+    fn collect_subtree(&self, node: NodeId, out: &mut Vec<NodeId>) {
+        if !self.node_is_live(node) {
+            return;
+        }
+        out.push(node);
+        if let NodeId::Group(id) = node {
+            let members = self.groups[id].members.clone();
+            for m in members {
+                self.collect_subtree(m, out);
+            }
+        }
+    }
+
     // ----------------------------------------------- components & instances
 
     /// Handles of all currently visible component instances (undone
@@ -2048,6 +2128,121 @@ impl Document {
         Ok((id, change))
     }
 
+    /// Slice a visible world solid by `plane` into two independent watertight
+    /// Objects. The source is hidden (tombstone) and the two pieces are
+    /// inserted as top-level world objects; re-joining is an explicit Union.
+    /// Undoable; all three handles stay stable. `Err` (document untouched) if
+    /// the object is unknown/hidden, not a solid, or the cut is degenerate /
+    /// misses the solid — see [`SliceError`].
+    ///
+    /// Returns `((positive, negative), DocChange)` — the piece on the plane's
+    /// normal side first.
+    pub fn slice_node(
+        &mut self,
+        object: ObjectId,
+        plane: &Plane,
+    ) -> Result<((ObjectId, ObjectId), DocChange), DocumentError> {
+        let source = match self.objects.get(object) {
+            Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
+            _ => return Err(DocumentError::UnknownObject),
+        };
+        let (positive, negative) = source.slice(plane).map_err(DocumentError::Slice)?;
+
+        let a = self.objects.insert(ObjectRecord {
+            object: positive,
+            history: History::new(),
+            hidden: false,
+            owner: ObjectOwner::World { parent: None },
+            name: None,
+            tags: Vec::new(),
+        });
+        let b = self.objects.insert(ObjectRecord {
+            object: negative,
+            history: History::new(),
+            hidden: false,
+            owner: ObjectOwner::World { parent: None },
+            name: None,
+            tags: Vec::new(),
+        });
+        self.objects[object].hidden = true;
+        self.undo.push(DocAction::Sliced {
+            source: object,
+            a,
+            b,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        let change = DocChange {
+            objects_touched: vec![object, a, b],
+            sketches_touched: Vec::new(),
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        };
+        Ok(((a, b), change))
+    }
+
+    /// Push `face` of a visible world solid inward by `distance` *past* opposing
+    /// material, as a subtract: material the swept face passes through is
+    /// removed — a recess that breaks the far wall becomes a through-hole, and a
+    /// cut that fully severs the solid yields two (or more) independent Objects.
+    /// The source is hidden (tombstone); the result pieces become top-level
+    /// world objects. Undoable; handles stable. Routed to by the push/pull entry
+    /// when [`Object::push_pull_overshoots`] reports the through case.
+    ///
+    /// Returns `(result_ids, DocChange)`. `Err` (document untouched) if the
+    /// object is unknown/hidden or the subtract is degenerate / removes all
+    /// material — see [`PushPullError`](crate::ops::PushPullError).
+    pub fn push_pull_through(
+        &mut self,
+        object: ObjectId,
+        face: crate::ids::FaceId,
+        distance: f64,
+    ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
+        let src = match self.objects.get(object) {
+            Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
+            _ => return Err(DocumentError::UnknownObject),
+        };
+        let result = src
+            .push_through(face, distance)
+            .map_err(|e| DocumentError::Op(KernelOpError::PushPull(e)))?;
+        let pieces = result.split_connected_components();
+
+        let mut results: Vec<ObjectId> = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            let id = self.objects.insert(ObjectRecord {
+                object: piece,
+                history: History::new(),
+                hidden: false,
+                owner: ObjectOwner::World { parent: None },
+                name: None,
+                tags: Vec::new(),
+            });
+            results.push(id);
+        }
+        self.objects[object].hidden = true;
+        self.undo.push(DocAction::PushThrough {
+            source: object,
+            results: results.clone(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        let mut objects_touched = results.clone();
+        objects_touched.push(object);
+        let change = DocChange {
+            objects_touched,
+            sketches_touched: Vec::new(),
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        };
+        Ok((results, change))
+    }
+
     /// Move / rotate / scale a visible object by baking `t` into its geometry.
     /// Undoable via the exact inverse; the object keeps its handle. `Err` if the
     /// object is unknown/hidden or `t` is singular or orientation-flipping —
@@ -2176,6 +2371,62 @@ impl Document {
         self.debug_validate();
 
         Ok(group_change(group, parent, &members))
+    }
+
+    /// Removes a whole tree node — an Object, Group, or Instance — from the
+    /// document. Whole-node delete only: single-face/edge delete is
+    /// out of scope (it would open a watertight solid) and guide selections are
+    /// routed elsewhere ('s `delete_guide`/`delete_all_guides`).
+    ///
+    /// Like every other document mutation, this is a tombstone, not a real
+    /// delete: `node` and its entire live subtree are hidden (never erased), so
+    /// every id stays valid for redo. Deleting a Group hides the group shell
+    /// *and* its whole subtree in one step — unlike [`Document::ungroup`], which
+    /// reparents members up, a delete makes the whole subtree disappear.
+    /// Deleting an Instance hides only that instance node; its shared
+    /// [`ComponentDef`] and sibling instances are untouched. `node` is spliced
+    /// out of its parent's member list (or the top-level order, which needs no
+    /// bookkeeping); the exact position is captured for undo.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — `node` is stale or already hidden.
+    ///
+    /// On `Err` the document is untouched (the strong guarantee).
+    pub fn delete_node(&mut self, node: NodeId) -> Result<DocChange, DocumentError> {
+        if !self.node_is_live(node) {
+            return Err(match node {
+                NodeId::Object(_) => DocumentError::UnknownObject,
+                NodeId::Group(_) => DocumentError::UnknownGroup,
+                NodeId::Instance(_) => DocumentError::UnknownInstance,
+            });
+        }
+        let parent = self.node_parent(node);
+        let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
+
+        let mut hidden_subtree = Vec::new();
+        self.collect_subtree(node, &mut hidden_subtree);
+        for &n in &hidden_subtree {
+            match n {
+                NodeId::Object(id) => self.objects[id].hidden = true,
+                NodeId::Group(id) => self.groups[id].hidden = true,
+                NodeId::Instance(id) => self.instances[id].hidden = true,
+            }
+        }
+        if let Some(pg) = parent {
+            self.splice_out_parent(pg, node, &[]);
+        }
+
+        self.undo.push(DocAction::Deleted {
+            node,
+            parent,
+            prev_parent_members,
+            hidden_subtree: hidden_subtree.clone(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(delete_change(node, parent, &hidden_subtree))
     }
 
     /// Move / rotate / scale a group: **bake** `t` into every world leaf object
@@ -2746,6 +2997,45 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            &DocAction::Sliced { source, a, b } => {
+                // Undo a slice: hide both pieces, bring the source back.
+                if let Some(rec) = self.objects.get_mut(a) {
+                    rec.hidden = true;
+                }
+                if let Some(rec) = self.objects.get_mut(b) {
+                    rec.hidden = true;
+                }
+                self.objects[source].hidden = false;
+                DocChange {
+                    objects_touched: vec![source, a, b],
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::PushThrough { source, results } => {
+                // Undo a push-through: hide the result pieces, bring the source back.
+                let source = *source;
+                let results = results.clone();
+                for &r in &results {
+                    if let Some(rec) = self.objects.get_mut(r) {
+                        rec.hidden = true;
+                    }
+                }
+                self.objects[source].hidden = false;
+                let mut objects_touched = results;
+                objects_touched.push(source);
+                DocChange {
+                    objects_touched,
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             DocAction::Transform {
                 objects, inverse, ..
             } => {
@@ -2800,6 +3090,27 @@ impl Document {
                     self.groups[pg].members = prev.clone();
                 }
                 group_change(group, parent, &members)
+            }
+            DocAction::Deleted {
+                node,
+                parent,
+                prev_parent_members,
+                hidden_subtree,
+            } => {
+                // Undo delete = unhide exactly the hidden subtree and re-splice
+                // `node` back into its parent at the original position.
+                let (node, parent) = (*node, *parent);
+                for &n in hidden_subtree {
+                    match n {
+                        NodeId::Object(id) => self.objects[id].hidden = false,
+                        NodeId::Group(id) => self.groups[id].hidden = false,
+                        NodeId::Instance(id) => self.instances[id].hidden = false,
+                    }
+                }
+                if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
+                    self.groups[pg].members = prev.clone();
+                }
+                delete_change(node, parent, hidden_subtree)
             }
             DocAction::MadeComponent {
                 component,
@@ -3056,6 +3367,45 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            &DocAction::Sliced { source, a, b } => {
+                // Redo a slice: hide the source again, show both pieces.
+                self.objects[source].hidden = true;
+                if let Some(rec) = self.objects.get_mut(a) {
+                    rec.hidden = false;
+                }
+                if let Some(rec) = self.objects.get_mut(b) {
+                    rec.hidden = false;
+                }
+                DocChange {
+                    objects_touched: vec![source, a, b],
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::PushThrough { source, results } => {
+                // Redo a push-through: hide the source again, show the pieces.
+                let source = *source;
+                let results = results.clone();
+                self.objects[source].hidden = true;
+                for &r in &results {
+                    if let Some(rec) = self.objects.get_mut(r) {
+                        rec.hidden = false;
+                    }
+                }
+                let mut objects_touched = results;
+                objects_touched.push(source);
+                DocChange {
+                    objects_touched,
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             DocAction::Transform {
                 objects, forward, ..
             } => {
@@ -3098,6 +3448,26 @@ impl Document {
                 }
                 self.groups[group].hidden = true;
                 group_change(group, parent, &members)
+            }
+            DocAction::Deleted {
+                node,
+                parent,
+                hidden_subtree,
+                ..
+            } => {
+                // Redo delete: re-hide the subtree and splice `node` out again.
+                let (node, parent) = (*node, *parent);
+                for &n in hidden_subtree {
+                    match n {
+                        NodeId::Object(id) => self.objects[id].hidden = true,
+                        NodeId::Group(id) => self.groups[id].hidden = true,
+                        NodeId::Instance(id) => self.instances[id].hidden = true,
+                    }
+                }
+                if let Some(pg) = parent {
+                    self.splice_out_parent(pg, node, &[]);
+                }
+                delete_change(node, parent, hidden_subtree)
             }
             DocAction::MadeComponent {
                 component,
@@ -3577,6 +3947,38 @@ fn group_change(group: GroupId, parent: Option<GroupId>, members: &[NodeId]) -> 
             NodeId::Instance(i) => instances_touched.push(i),
         }
     }
+    DocChange {
+        objects_touched,
+        sketches_touched: Vec::new(),
+        groups_touched,
+        instances_touched,
+        components_touched: Vec::new(),
+        guides_touched: Vec::new(),
+    }
+}
+
+/// The [`DocChange`] for `delete_node`/its undo/redo: every node in the hidden
+/// (or re-hidden/unhidden) subtree changed visibility, plus the shared parent's
+/// membership changed. `subtree` already includes `node` itself (it is the
+/// first element collected by [`Document::collect_subtree`]).
+fn delete_change(node: NodeId, parent: Option<GroupId>, subtree: &[NodeId]) -> DocChange {
+    let mut groups_touched = Vec::new();
+    groups_touched.extend(parent);
+    let mut objects_touched = Vec::new();
+    let mut instances_touched = Vec::new();
+    for &n in subtree {
+        match n {
+            NodeId::Object(o) => objects_touched.push(o),
+            NodeId::Group(g) => groups_touched.push(g),
+            NodeId::Instance(i) => instances_touched.push(i),
+        }
+    }
+    // `node` itself is always in `subtree` (collect_subtree's first push), but
+    // guard the invariant explicitly in case that ever changes.
+    debug_assert!(
+        subtree.contains(&node),
+        "delete_change: node not in its own subtree"
+    );
     DocChange {
         objects_touched,
         sketches_touched: Vec::new(),

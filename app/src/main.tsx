@@ -1,6 +1,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import './index.css'
 import App from './App.tsx'
+import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { SettingsWindow } from './settings/SettingsWindow.tsx'
 import { isTauri } from './io/fileHost'
 
@@ -8,6 +10,14 @@ import { isTauri } from './io/fileHost'
 // fallback renders inline in App) loads this same entry with a `#settings`
 // hash so it gets its own render root without a second HTML file.
 const isSettingsWindow = window.location.hash.startsWith('#settings')
+
+// Clear any panic recorded by a previous session so the error boundary only
+// ever shows a panic from the *current* run (the wasm hook re-records on panic).
+try {
+  localStorage.removeItem('hew:lastPanic')
+} catch {
+  /* ignore */
+}
 
 // Register the PWA service worker only in production web builds, and only
 // for the main app window.
@@ -32,6 +42,8 @@ if (!isSettingsWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in 
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    {isSettingsWindow ? <SettingsWindow /> : <App />}
+    <ErrorBoundary>
+      {isSettingsWindow ? <SettingsWindow /> : <App />}
+    </ErrorBoundary>
   </React.StrictMode>,
 )

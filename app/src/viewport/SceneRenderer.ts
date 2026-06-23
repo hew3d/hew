@@ -113,6 +113,10 @@ export class SceneRenderer {
   private lastGuideDashSize = -1
   /** Merged LineSegments for every point guide's cross marker. */
   private guideMarkers: THREE.LineSegments | null = null
+  /** The currently selected guide, drawn as a bright overlay. */
+  private selectedGuideId: bigint | null = null
+  /** Highlight overlay (solid bright line/cross) for `selectedGuideId`. */
+  private guideHighlight: THREE.LineSegments | null = null
   /** The sketch currently being drawn into (tool target) — null if none. */
   private activeSketchHandle: bigint | null = null
   /** Last known watertight state per object */
@@ -698,6 +702,10 @@ export class SceneRenderer {
       this.guideMarkers = new THREE.LineSegments(geo, mat)
       this.guidesGroup.add(this.guideMarkers)
     }
+
+    // Re-assert the selection overlay after a rebuild (the selected guide's
+    // geometry may have changed; a deleted one drops out).
+    this._rebuildGuideHighlight()
   }
 
   /** Dispose and clear the current guide line/marker geometry, if any. */
@@ -715,6 +723,52 @@ export class SceneRenderer {
       this.guidesGroup.remove(this.guideMarkers)
       this.guideMarkers = null
     }
+  }
+
+  /** Mark `id` as the selected guide and redraw its bright overlay;
+   * `null` clears it. The caller schedules the render. */
+  setSelectedGuide(id: bigint | null): void {
+    this.selectedGuideId = id
+    this._rebuildGuideHighlight()
+  }
+
+  /** (Re)build the bright overlay for the selected guide — a solid line/cross in
+   * the selection color, drawn on top so it reads as picked over the dashed
+   * grey. Cleared if nothing is selected or the guide no longer exists. */
+  private _rebuildGuideHighlight(): void {
+    if (this.guideHighlight !== null) {
+      this.guideHighlight.geometry.dispose()
+      ;(this.guideHighlight.material as THREE.Material).dispose()
+      this.guidesGroup.remove(this.guideHighlight)
+      this.guideHighlight = null
+    }
+    if (this.selectedGuideId === null) return
+    const kind = this.wasmScene.guide_kind(this.selectedGuideId)
+    const geometry = this.wasmScene.guide_geometry(this.selectedGuideId)
+    if (kind === undefined || geometry === undefined) return
+
+    const pts: number[] = []
+    if (kind === 'line') {
+      const [ox, oy, oz, dx, dy, dz] = geometry
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (len < 1e-9) return
+      const nx = (dx / len) * GUIDE_LINE_HALF_LENGTH
+      const ny = (dy / len) * GUIDE_LINE_HALF_LENGTH
+      const nz = (dz / len) * GUIDE_LINE_HALF_LENGTH
+      pts.push(ox - nx, oy - ny, oz - nz, ox + nx, oy + ny, oz + nz)
+    } else if (kind === 'point') {
+      const [x, y, z] = geometry
+      const k = GUIDE_POINT_MARKER_HALF_SIZE
+      pts.push(x - k, y, z, x + k, y, z, x, y - k, z, x, y + k, z, x, y, z - k, x, y, z + k)
+    } else {
+      return
+    }
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
+    const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false })
+    this.guideHighlight = new THREE.LineSegments(geo, mat)
+    this.guideHighlight.renderOrder = 999
+    this.guidesGroup.add(this.guideHighlight)
   }
 
   /** Show/hide all construction guides (View ▸ Guides toggle). */

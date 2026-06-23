@@ -1,0 +1,18 @@
+/* Global reset so the app fills the whole window.
+ *
+ * Without this the browser's default 8px <body> margin insets the app, which is
+ * invisible with native window decorations but shows as a thick light border on
+ * the Linux borderless shell (and lets `height: 100%` overshoot at the bottom).
+ */
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: #1a1a1a;
+  overflow: hidden;
+}

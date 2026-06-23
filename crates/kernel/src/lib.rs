@@ -48,7 +48,7 @@ pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceMergeInnerReport,
     FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, Operand, PushPullError, PushPullReport,
-    StickyError,
+    SliceError, StickyError,
 };
 pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,

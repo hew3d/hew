@@ -7,8 +7,8 @@
 
 use kernel::{
     BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, KernelOp,
-    KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
-    SketchEdgeId, SketchId, Transform, TransformError, Vec3, WatertightState,
+    KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchId,
+    Transform, TransformError, Vec3, WatertightState,
 };
 use std::collections::HashSet;
 
@@ -706,6 +706,161 @@ fn transform_unknown_group_errors() {
     );
 }
 
+// --------------------------------------------------------- whole-node delete
+
+/// Deleting an object hides it (it disappears from `top_level_nodes`); undo
+/// restores the identical top-level tree (same ids, same order); redo removes
+/// it again.
+#[test]
+fn delete_object_removes_then_undo_restores_top_level_order() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let before = doc.top_level_nodes();
+    assert_eq!(before, vec![NodeId::Object(a), NodeId::Object(b)]);
+
+    let change = doc.delete_node(NodeId::Object(a)).expect("delete a");
+    assert_eq!(doc.top_level_nodes(), vec![NodeId::Object(b)]);
+    assert!(change.objects_touched.contains(&a));
+
+    doc.undo().expect("undo delete");
+    assert_eq!(
+        doc.top_level_nodes(),
+        before,
+        "undo restores the identical top-level tree"
+    );
+
+    doc.redo().expect("redo delete");
+    assert_eq!(doc.top_level_nodes(), vec![NodeId::Object(b)]);
+}
+
+/// Deleting a group hides the group and every leaf object beneath it in one
+/// undoable step; undo restores the whole subtree (group + members, same
+/// parent/child relationships).
+#[test]
+fn delete_group_hides_whole_subtree_and_undo_restores_it() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let before = top_set(&doc);
+    assert_eq!(before, HashSet::from([NodeId::Group(g), NodeId::Object(c)]));
+
+    let change = doc.delete_node(NodeId::Group(g)).expect("delete group");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(c)]));
+    assert!(doc.group_ids().is_empty(), "the group is hidden");
+    assert!(
+        change.objects_touched.contains(&a) && change.objects_touched.contains(&b),
+        "deleting a group touches its leaf objects too"
+    );
+    assert!(change.groups_touched.contains(&g));
+
+    doc.undo().expect("undo delete group");
+    assert_eq!(top_set(&doc), before, "the whole subtree reappears");
+    assert_eq!(doc.node_parent(NodeId::Object(a)), Some(g));
+    assert_eq!(doc.node_parent(NodeId::Object(b)), Some(g));
+    assert_eq!(
+        doc.group_members(g)
+            .unwrap()
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([NodeId::Object(a), NodeId::Object(b)]),
+        "member order/membership is restored exactly"
+    );
+
+    doc.redo().expect("redo delete group");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(c)]));
+    assert!(doc.group_ids().is_empty());
+}
+
+/// Deleting a component instance hides only that instance; its definition and
+/// sibling instances are completely untouched. Undo restores it.
+#[test]
+fn delete_instance_leaves_definition_and_siblings_untouched() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, i1, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(5.0, 0.0, 0.0)))
+        .unwrap();
+
+    let change = doc.delete_node(NodeId::Instance(i1)).expect("delete i1");
+    assert_eq!(
+        doc.instance_ids().into_iter().collect::<HashSet<_>>(),
+        HashSet::from([i2]),
+        "only i1 is hidden"
+    );
+    assert!(
+        doc.component_ids().contains(&comp),
+        "the shared definition survives"
+    );
+    assert_eq!(
+        doc.instance_def(i2),
+        Some(comp),
+        "the sibling instance is untouched"
+    );
+    assert!(change.instances_touched.contains(&i1));
+    assert!(
+        !change.components_touched.contains(&comp),
+        "deleting an instance must not touch the shared ComponentDef"
+    );
+
+    doc.undo().expect("undo delete instance");
+    assert_eq!(
+        doc.instance_ids().into_iter().collect::<HashSet<_>>(),
+        HashSet::from([i1, i2]),
+        "both instances are back"
+    );
+    assert_eq!(doc.instance_def(i1), Some(comp));
+}
+
+/// delete → undo round-trips to a byte-identical document (undo history is not
+/// persisted, so `save()` before the delete must equal `save()` after
+/// delete-then-undo).
+#[test]
+fn delete_then_undo_round_trips_to_byte_identical_save() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let before = doc.save();
+
+    doc.delete_node(NodeId::Object(a)).expect("delete a");
+    doc.undo().expect("undo delete");
+
+    assert_eq!(
+        doc.save(),
+        before,
+        "delete-then-undo must be byte-identical to the pre-delete document"
+    );
+}
+
+/// Deleting an unknown/stale/hidden node is refused without mutating the
+/// document (the strong guarantee); a deleted node cannot be deleted again.
+#[test]
+fn delete_unknown_or_already_deleted_node_errors() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+
+    assert_eq!(
+        doc.delete_node(NodeId::Object(ObjectId::default())),
+        Err(DocumentError::UnknownObject)
+    );
+    assert_eq!(
+        doc.delete_node(NodeId::Group(GroupId::default())),
+        Err(DocumentError::UnknownGroup)
+    );
+
+    doc.delete_node(NodeId::Object(a)).expect("delete a");
+    assert_eq!(
+        doc.delete_node(NodeId::Object(a)),
+        Err(DocumentError::UnknownObject),
+        "deleting an already-hidden node is refused, not a no-op success"
+    );
+}
+
 // ----------------------------------------------------------------- helper
 
 /// The +Z (top) face of an extruded box.
@@ -1227,51 +1382,63 @@ fn extruded_sketch_edges_are_tombstoned_and_survive_round_trip() {
     // Before extrusion: all 4 edges are visible.
     assert_eq!(visible_edge_count(&doc, s), 4);
 
+    // Before extrusion the sketch is an actionable entity.
+    assert!(doc.sketch_ids().contains(&s));
+
     doc.extrude_region(s, r, 1.0).expect("extrude");
 
-    // After extrusion: 0 visible edges (the outline is consumed).
+    // After extrusion: 0 visible edges (the outline is consumed) AND the sketch
+    // itself no longer exists as an actionable entity — once wholly subsumed
+    // into the solid it drops out of `sketch_ids` entirely (the user can't do
+    // anything with a fully-consumed sketch, so it must not linger).
     assert_eq!(
         visible_edge_count(&doc, s),
         0,
         "all 4 boundary edges should be tombstoned after extrusion"
     );
+    assert!(
+        !doc.sketch_ids().contains(&s),
+        "a fully-consumed sketch must vanish from sketch_ids"
+    );
 
-    // Undo: edges reappear.
+    // Undo: edges reappear and the sketch is actionable again.
     doc.undo().expect("undo");
     assert_eq!(
         visible_edge_count(&doc, s),
         4,
         "edges must reappear after undoing the extrusion"
     );
+    assert!(
+        doc.sketch_ids().contains(&s),
+        "the sketch must come back after undoing the extrusion"
+    );
 
-    // Redo: edges hidden again.
+    // Redo: edges hidden again and the sketch vanishes again.
     doc.redo().expect("redo");
     assert_eq!(
         visible_edge_count(&doc, s),
         0,
         "edges hidden again after redo"
     );
-
-    // Save → load: tombstones are rebuilt from the consumed-region set.
-    let bytes = doc.save();
-    let doc2 = Document::load(&bytes).expect("round-trip");
-
-    // Sketch id changes on load (different slotmap), so find by index.
-    let s2 = doc2.sketch_ids().into_iter().next().expect("one sketch");
-    assert_eq!(
-        visible_edge_count(&doc2, s2),
-        0,
-        "tombstoned edges must still be hidden after save/load"
+    assert!(
+        !doc.sketch_ids().contains(&s),
+        "sketch gone again after redo"
     );
 
-    // Verify via is_sketch_edge_consumed over every edge.
-    let sk2 = doc2.sketch(s2).expect("sketch");
-    for eid in sk2.edges().keys().collect::<Vec<SketchEdgeId>>() {
-        assert!(
-            doc2.is_sketch_edge_consumed(s2, eid),
-            "every edge of the sole extruded rectangle should be consumed"
-        );
-    }
+    // Save → load: the consumed state is rebuilt from the consumed-region set,
+    // so the fully-consumed sketch stays gone (not resurrected as actionable)
+    // and only the solid survives.
+    let bytes = doc.save();
+    let doc2 = Document::load(&bytes).expect("round-trip");
+    assert!(
+        doc2.sketch_ids().is_empty(),
+        "the fully-consumed sketch must not reappear after save/load"
+    );
+    assert_eq!(
+        doc2.visible_object_ids().len(),
+        1,
+        "the extruded solid survives the round-trip"
+    );
 }
 
 // ──────────────────────────────────── node metadata ops (WS3) ───────────────
@@ -1623,4 +1790,110 @@ fn delete_all_guides_on_empty_document_is_a_no_op() {
     let change = doc.delete_all_guides().expect("no-op delete");
     assert_eq!(change, kernel::DocChange::default());
     assert!(!doc.can_undo(), "an empty delete-all pushes NO undo entry");
+}
+
+// ------------------------------------------------------------------ slice
+
+#[test]
+fn slice_node_splits_solid_and_round_trips() {
+    let mut doc = Document::new();
+    let src = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    assert_eq!(doc.visible_object_ids(), vec![src]);
+
+    let plane =
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 0.5), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+    let ((a, b), _) = doc.slice_node(src, &plane).expect("slice");
+
+    let visible = doc.visible_object_ids();
+    assert_eq!(visible.len(), 2, "two pieces visible");
+    assert!(visible.contains(&a) && visible.contains(&b));
+    assert!(doc.object(src).is_none(), "source hidden");
+    for id in [a, b] {
+        assert_eq!(
+            doc.object(id).unwrap().watertight(),
+            WatertightState::Watertight
+        );
+    }
+
+    doc.undo().expect("undo slice");
+    assert_eq!(doc.visible_object_ids(), vec![src], "source restored");
+    assert!(
+        doc.object(a).is_none() && doc.object(b).is_none(),
+        "pieces hidden"
+    );
+
+    doc.redo().expect("redo slice");
+    let v = doc.visible_object_ids();
+    assert_eq!(v.len(), 2);
+    assert!(v.contains(&a) && v.contains(&b), "stable piece ids");
+}
+
+#[test]
+fn slice_node_missing_plane_refused_and_untouched() {
+    use kernel::SliceError;
+    let mut doc = Document::new();
+    let src = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let outside =
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+    assert!(matches!(
+        doc.slice_node(src, &outside),
+        Err(DocumentError::Slice(SliceError::PlaneMissesSolid))
+    ));
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![src],
+        "refused slice leaves the document untouched"
+    );
+}
+
+// -------------------------------------------------- push-through subtract
+
+#[test]
+fn push_through_sub_face_punches_hole_and_round_trips() {
+    let mut doc = Document::new();
+    // 4×4×1 slab.
+    let src = extrude_box(&mut doc, 0.0, 0.0, 4.0, 4.0, 0.0, 1.0);
+    let top = top_face(doc.object(src).unwrap());
+
+    // Imprint a centred 1×1 sub-face on top.
+    let report = match doc
+        .apply_object_op(
+            src,
+            KernelOp::SplitFaceInner {
+                face: top,
+                loop_path: vec![
+                    Point3::new(1.5, 1.5, 1.0),
+                    Point3::new(2.5, 1.5, 1.0),
+                    Point3::new(2.5, 2.5, 1.0),
+                    Point3::new(1.5, 2.5, 1.0),
+                ],
+            },
+        )
+        .expect("imprint sub-face")
+        .0
+    {
+        KernelOpReport::FaceSplitInner(r) => r,
+        other => panic!("unexpected report {other:?}"),
+    };
+    let sub = report.sub_face;
+    assert!(doc.object(src).unwrap().push_pull_overshoots(sub, -2.0));
+
+    let (results, _) = doc.push_pull_through(src, sub, -2.0).expect("through");
+    assert_eq!(results.len(), 1, "a centred hole leaves one solid");
+    let holed = results[0];
+    assert!(doc.object(src).is_none(), "source consumed");
+    assert_eq!(doc.visible_object_ids(), vec![holed]);
+    assert_eq!(
+        doc.object(holed).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+
+    // Undo restores exactly the imprinted source (still a valid solid); redo
+    // re-punches.
+    doc.undo().expect("undo through");
+    assert_eq!(doc.visible_object_ids(), vec![src], "source restored");
+    assert!(doc.object(holed).is_none());
+
+    doc.redo().expect("redo through");
+    assert_eq!(doc.visible_object_ids(), vec![holed]);
 }

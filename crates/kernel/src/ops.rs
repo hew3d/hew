@@ -44,7 +44,7 @@ use crate::geom2d::{
     point_inside_polygon, polygon_is_simple, segments_intersect, signed_area_on_plane,
 };
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, VertexId};
-use crate::math::{Plane, Point3};
+use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::Profile;
 use crate::tol;
 use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState};
@@ -248,6 +248,34 @@ pub enum BooleanError {
     /// merge-group container instead.
     DegenerateContact,
 }
+
+/// Typed failures of [`Object::slice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceError {
+    /// The source object is not a watertight solid; there is no volume to cut.
+    NotSolid,
+    /// The cutting plane does not pass through the solid's interior (the whole
+    /// object lies on one side, or only grazes the plane), so a cut would
+    /// produce nothing on one side. Nothing is changed.
+    PlaneMissesSolid,
+    /// The cut is degenerate or tangent — coincident with an existing face, or
+    /// grazing an edge/vertex with no transverse area. Refused, not repaired,
+    /// exactly as booleans refuse [`BooleanError::DegenerateContact`].
+    Degenerate,
+}
+
+impl std::fmt::Display for SliceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            SliceError::NotSolid => "slice requires a watertight solid",
+            SliceError::PlaneMissesSolid => "cutting plane does not pass through the solid",
+            SliceError::Degenerate => "cut is degenerate or tangent to the solid",
+        };
+        write!(f, "{msg}")
+    }
+}
+
+impl std::error::Error for SliceError {}
 
 impl std::fmt::Display for ExtrudeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1574,6 +1602,365 @@ impl Object {
         b_to_a: &Transform,
     ) -> Result<Object, BooleanError> {
         crate::boolean::execute(op, a, b, b_to_a)
+    }
+
+    /// Partition this Object's faces into connected components by shared-edge
+    /// (twin) adjacency, rebuilding each component as its own independent
+    /// Object.
+    ///
+    /// Two faces are in the same component iff a chain of shared edges connects
+    /// them; a vertex-only touch does not connect them (and never arises in a
+    /// valid manifold). A connected Object yields a single-element `Vec`
+    /// (returned as a clone, untouched). A multi-shell Object — e.g. the result
+    /// of a cut that severed a solid into disjoint pieces — yields one Object
+    /// per shell.
+    ///
+    /// Each split-out component is rebuilt via [`Object::from_faces_with_holes`]
+    /// so per-face material / UV frames and the outer+inner loop structure are
+    /// preserved; this object's `default_material` and `planarity_tol` carry
+    /// over. Results are validated in debug builds before return.
+    ///
+    /// This is the shared primitive behind Slice and a push-through
+    /// subtract that fully severs a solid: the boolean/cut machinery may
+    /// leave one Object holding two disjoint watertight shells, which this
+    /// splits back into independent solids the document can own separately.
+    pub fn split_connected_components(&self) -> Vec<Object> {
+        // Faces in deterministic slotmap order, with a dense index for union-find.
+        let face_ids: Vec<FaceId> = self.faces.keys().collect();
+        if face_ids.len() <= 1 {
+            return vec![self.clone()];
+        }
+        let index_of: std::collections::HashMap<FaceId, usize> =
+            face_ids.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+
+        // Union-find with path compression. `find` is iterative (no recursion).
+        let mut parent: Vec<usize> = (0..face_ids.len()).collect();
+        fn find(parent: &mut [usize], x: usize) -> usize {
+            let mut root = x;
+            while parent[root] != root {
+                root = parent[root];
+            }
+            let mut cur = x;
+            while parent[cur] != root {
+                let next = parent[cur];
+                parent[cur] = root;
+                cur = next;
+            }
+            root
+        }
+
+        // Union faces that share an edge (a half-edge with its twin on the other
+        // face). Iterate half-edges in slotmap order for determinism.
+        for he in self.half_edges.values() {
+            if let Some(twin) = he.twin {
+                let fa = self.loops[he.loop_id].face;
+                let fb = self.loops[self.half_edges[twin].loop_id].face;
+                let ra = find(&mut parent, index_of[&fa]);
+                let rb = find(&mut parent, index_of[&fb]);
+                if ra != rb {
+                    parent[ra] = rb;
+                }
+            }
+        }
+
+        // Group faces by root, preserving first-appearance order of roots so the
+        // output ordering is deterministic.
+        let mut component_of_root: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        let mut components: Vec<Vec<FaceId>> = Vec::new();
+        for (i, &fid) in face_ids.iter().enumerate() {
+            let root = find(&mut parent, i);
+            let comp = *component_of_root.entry(root).or_insert_with(|| {
+                components.push(Vec::new());
+                components.len() - 1
+            });
+            components[comp].push(fid);
+        }
+
+        if components.len() <= 1 {
+            return vec![self.clone()];
+        }
+
+        components
+            .into_iter()
+            .map(|faces| self.rebuild_component(&faces))
+            .collect()
+    }
+
+    /// Rebuild the subset of faces `faces` (all from `self`) as a standalone
+    /// Object, remapping only the vertices those faces reference. Helper for
+    /// [`Object::split_connected_components`]; `faces` must form a closed shell
+    /// for the result to be watertight (the splitter guarantees this for a
+    /// valid manifold).
+    #[allow(clippy::type_complexity)] // mirrors from_faces_with_holes' spec tuple
+    fn rebuild_component(&self, faces: &[FaceId]) -> Object {
+        // Remap a loop's vertices to dense local indices, appending unseen
+        // positions in first-encounter order (deterministic given the loop and
+        // face iteration order).
+        fn loop_indices(
+            obj: &Object,
+            lid: LoopId,
+            positions: &mut Vec<Point3>,
+            local_index: &mut std::collections::HashMap<VertexId, usize>,
+        ) -> Vec<usize> {
+            obj.loop_half_edges(lid)
+                .map(|h| {
+                    let v = obj.half_edges[h].origin;
+                    *local_index.entry(v).or_insert_with(|| {
+                        positions.push(obj.vertices[v].position);
+                        positions.len() - 1
+                    })
+                })
+                .collect()
+        }
+
+        let mut positions: Vec<Point3> = Vec::new();
+        let mut local_index: std::collections::HashMap<VertexId, usize> =
+            std::collections::HashMap::new();
+        let mut specs: Vec<(
+            Vec<usize>,
+            Vec<Vec<usize>>,
+            Plane,
+            crate::material::FaceMaterial,
+            Option<crate::material::UvFrame>,
+        )> = Vec::with_capacity(faces.len());
+        for &fid in faces {
+            let face = &self.faces[fid];
+            let outer = loop_indices(self, face.outer_loop, &mut positions, &mut local_index);
+            let inner: Vec<Vec<usize>> = face
+                .inner_loops
+                .iter()
+                .map(|&il| loop_indices(self, il, &mut positions, &mut local_index))
+                .collect();
+            specs.push((outer, inner, face.plane, face.material, face.uv_frame));
+        }
+
+        let mut obj = Object::from_faces_with_holes(&positions, &specs);
+        // Carry over object-level state the rebuild path does not know about.
+        obj.default_material = self.default_material;
+        obj.planarity_tol = self.planarity_tol;
+        obj.check_invariants();
+        obj
+    }
+
+    /// Cut this watertight solid by `plane` into the two pieces on either side
+    /// (ARCHITECTURE.md  — the Fusion *Split Body* / Onshape *Split Part* model).
+    ///
+    /// Returns `(positive, negative)`: the piece on the plane's normal side and
+    /// the piece on the opposite side, each an independent watertight Object
+    /// sharing the (coincident) cut face. The cut reuses the boolean machinery
+    ///: the solid is intersected with the closed half-space on each
+    /// side, realized as a box whose only face passing through the interior is
+    /// the cut plane (its other five faces sit a margin outside the solid's
+    /// extent, so they meet nothing — general position). A plane coincident
+    /// with an existing face, or merely grazing an edge/vertex, is refused as
+    /// [`SliceError::Degenerate`], exactly as booleans refuse degenerate
+    /// contact. A plane the solid does not straddle is
+    /// [`SliceError::PlaneMissesSolid`]. Materials, per-face UV frames, and the
+    /// object base material propagate through the boolean unchanged.
+    ///
+    /// On any `Err`, nothing is produced (the caller's source object is
+    /// untouched).
+    pub fn slice(&self, plane: &Plane) -> Result<(Object, Object), SliceError> {
+        if self.watertight != WatertightState::Watertight {
+            return Err(SliceError::NotSolid);
+        }
+
+        // In-plane orthonormal basis (u, v) with u × v = n, plus a point on the
+        // plane (closest point to the origin: n * offset).
+        let n = plane.normal();
+        let pp = plane.point();
+        let pp_v = pp.to_vec();
+        // A reference vector not parallel to n, so the cross product is stable.
+        let aux = if n.x.abs() < 0.9 {
+            Vec3::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3::new(0.0, 1.0, 0.0)
+        };
+        let u = aux
+            .cross(n)
+            .normalized()
+            .map_err(|_| SliceError::Degenerate)?;
+        let v = n.cross(u); // unit by construction (n ⟂ u, both unit)
+
+        // Object extent in the (u, v, n) frame, relative to pp.
+        let (mut u_lo, mut u_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut v_lo, mut v_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut n_lo, mut n_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for vert in self.vertices.values() {
+            let d = vert.position.to_vec() - pp_v;
+            let (du, dv, dn) = (d.dot(u), d.dot(v), d.dot(n));
+            u_lo = u_lo.min(du);
+            u_hi = u_hi.max(du);
+            v_lo = v_lo.min(dv);
+            v_hi = v_hi.max(dv);
+            n_lo = n_lo.min(dn);
+            n_hi = n_hi.max(dn);
+        }
+
+        // The plane must pass through the interior with real material on both
+        // sides; a graze (extent within tolerance on either side) is no cut.
+        let cut = tol::POINT_MERGE;
+        if n_hi <= cut || n_lo >= -cut {
+            return Err(SliceError::PlaneMissesSolid);
+        }
+
+        // Half-space boxes: a rectangle on the cut plane, oversized in u/v so the
+        // whole cross-section fits, extruded past the solid on each side. The
+        // margin pushes every non-cut box face clear of the solid (general
+        // position); it scales with the extent so it is never swamped by f64.
+        let span = (u_hi - u_lo).max(v_hi - v_lo).max(n_hi - n_lo);
+        let m = (span * 0.5).max(1.0);
+        let (ru_lo, ru_hi) = (u_lo - m, u_hi + m);
+        let (rv_lo, rv_hi) = (v_lo - m, v_hi + m);
+        let corner = |du: f64, dv: f64| {
+            let w = pp_v + u * du + v * dv;
+            Point3::new(w.x, w.y, w.z)
+        };
+        // CCW about +n (u × v = n): (lo,lo) → (hi,lo) → (hi,hi) → (lo,hi).
+        let rect = vec![
+            corner(ru_lo, rv_lo),
+            corner(ru_hi, rv_lo),
+            corner(ru_hi, rv_hi),
+            corner(ru_lo, rv_hi),
+        ];
+        let face_plane = Plane::from_point_normal(pp, n).map_err(|_| SliceError::Degenerate)?;
+        let profile = Profile::new(face_plane, rect, vec![]).map_err(|_| SliceError::Degenerate)?;
+
+        // +n box extends from the plane to past the solid's far +n extent; the
+        // −n box extends the other way (negative distance sweeps along −n).
+        let plus_box =
+            Object::from_extrusion(&profile, n_hi + m).map_err(|_| SliceError::Degenerate)?;
+        let minus_box =
+            Object::from_extrusion(&profile, n_lo - m).map_err(|_| SliceError::Degenerate)?;
+
+        let map_bool = |e: BooleanError| match e {
+            BooleanError::EmptyResult => SliceError::PlaneMissesSolid,
+            BooleanError::OperandNotSolid { .. } => SliceError::NotSolid,
+            _ => SliceError::Degenerate,
+        };
+        let positive = Object::boolean(BooleanOp::Intersect, self, &plus_box, &Transform::IDENTITY)
+            .map_err(map_bool)?;
+        let negative =
+            Object::boolean(BooleanOp::Intersect, self, &minus_box, &Transform::IDENTITY)
+                .map_err(map_bool)?;
+
+        positive.check_invariants();
+        negative.check_invariants();
+        Ok((positive, negative))
+    }
+
+    /// Whether an inward push/pull of `face` by `distance` drives it into or
+    /// past opposing material — the through case that must become a subtract
+    /// rather than a translate.
+    ///
+    /// Returns `false` for outward pulls (which never remove material),
+    /// non-solids, or stale faces. Otherwise it finds the nearest opposing
+    /// wall: a face that front-faces `face` (its outward normal points back
+    /// toward `face`) and whose projected footprint overlaps `face`'s, and
+    /// reports the push as through once `|distance|` reaches that wall. This is
+    /// the wall the swept face would punch through; it is detected by the wall
+    /// *face* (not its vertices), so a small imprint over a large opposite wall
+    /// — the hole-punch case — is caught even though no wall vertex lies in the
+    /// imprint's column.
+    pub fn push_pull_overshoots(&self, face: FaceId, distance: f64) -> bool {
+        match self.opposing_wall_depth(face) {
+            Some(depth) if distance < 0.0 => (-distance) >= depth - tol::POINT_MERGE,
+            _ => false,
+        }
+    }
+
+    /// The inward distance from `face`'s plane to the nearest opposing wall
+    /// directly across from it — the depth at which an inward push punches
+    /// through. `None` if `face` is stale, the object is not solid, or nothing
+    /// faces it across the swept column. See [`Object::push_pull_overshoots`].
+    fn opposing_wall_depth(&self, face: FaceId) -> Option<f64> {
+        if self.watertight != WatertightState::Watertight {
+            return None;
+        }
+        let f = self.faces.get(face)?;
+        let mplane = f.plane;
+        let mnormal = mplane.normal();
+        let mouter: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+
+        let mut nearest = f64::INFINITY;
+        for (fid, other) in &self.faces {
+            if fid == face {
+                continue;
+            }
+            // Only walls that front-face this one (normals roughly opposed) can
+            // be punched through; skip co-facing and perpendicular faces.
+            if mnormal.dot(other.plane.normal()) >= -tol::NORMAL_DIRECTION {
+                continue;
+            }
+            let oouter: Vec<Point3> = self.loop_positions(other.outer_loop).collect();
+            // Footprint overlap (projected along the sweep): a corner of either
+            // loop inside the other. Sufficient for the axis-aligned faces and
+            // imprint-over-wall cases that arise here.
+            let overlaps = mouter
+                .iter()
+                .any(|&p| point_inside_polygon(p, &oouter, mnormal))
+                || oouter
+                    .iter()
+                    .any(|&p| point_inside_polygon(p, &mouter, mnormal));
+            if !overlaps {
+                continue;
+            }
+            // Nearest part of this opposing wall along the inward normal.
+            for &p in &oouter {
+                let inward = -mplane.signed_distance(p);
+                if inward > tol::POINT_MERGE {
+                    nearest = nearest.min(inward);
+                }
+            }
+        }
+        nearest.is_finite().then_some(nearest)
+    }
+
+    /// Push `face` inward by `distance` (negative) past opposing material,
+    /// realized as a subtract: the face's profile swept inward by
+    /// `distance` is removed from the solid — a recess that breaks the far wall
+    /// becomes a through-hole, and a cut that fully severs the solid leaves a
+    /// multi-shell result (the caller splits it with
+    /// [`Object::split_connected_components`]). Per-face materials and UV frames
+    /// propagate through the boolean. The source is borrowed, not mutated.
+    ///
+    /// # Errors
+    /// - [`PushPullError::ObjectNotSolid`] — not watertight.
+    /// - [`PushPullError::UnknownFace`] — stale `face`.
+    /// - [`PushPullError::DistanceTooSmall`] — `|distance|` below tolerance.
+    /// - [`PushPullError::WouldVanish`] — the subtract removes all material.
+    /// - [`PushPullError::NonManifoldResult`] — the swept tool is degenerate or
+    ///   the cut is tangent (refused, not repaired).
+    pub fn push_through(&self, face: FaceId, distance: f64) -> Result<Object, PushPullError> {
+        if self.watertight != WatertightState::Watertight {
+            return Err(PushPullError::ObjectNotSolid);
+        }
+        let f = self.faces.get(face).ok_or(PushPullError::UnknownFace)?;
+        if distance.abs() < tol::POINT_MERGE {
+            return Err(PushPullError::DistanceTooSmall);
+        }
+        // Swept prism: the face's loops extruded inward by `distance`. The face
+        // outer loop is CCW and inner loops CW seen from the normal — exactly the
+        // winding Profile::new expects for outer + holes.
+        let outer: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+        let holes: Vec<Vec<Point3>> = f
+            .inner_loops
+            .iter()
+            .map(|&il| self.loop_positions(il).collect())
+            .collect();
+        let profile =
+            Profile::new(f.plane, outer, holes).map_err(|_| PushPullError::NonManifoldResult)?;
+        let tool = Object::from_extrusion(&profile, distance)
+            .map_err(|_| PushPullError::NonManifoldResult)?;
+        match Object::boolean(BooleanOp::Subtract, self, &tool, &Transform::IDENTITY) {
+            Ok(result) => {
+                result.check_invariants();
+                Ok(result)
+            }
+            Err(BooleanError::EmptyResult) => Err(PushPullError::WouldVanish),
+            Err(_) => Err(PushPullError::NonManifoldResult),
+        }
     }
 }
 

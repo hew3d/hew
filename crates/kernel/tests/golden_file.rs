@@ -255,10 +255,17 @@ fn golden_file_save_load_and_determinism() {
     assert_eq!(loaded.component_ids().len(), 1, "one component round-trips");
     assert_eq!(loaded.instance_ids().len(), 2, "two instances round-trip");
 
-    // Sketch: one sketch with one remaining extrudable region.
+    // Sketch: the representative doc stores 4 sketches (sa, sb, sc, sd) and all
+    // 4 round-trip in the file, but `sketch_ids` lists only the ones that still
+    // EXIST as actionable sketches: a wholly-extruded sketch is consumed into
+    // its solid and drops out (sketch-lifecycle fix). sa/sb/sc are fully
+    // consumed; only sd (which kept an unextruded region) remains.
     let sketch_ids = loaded.sketch_ids();
-    // The representative doc has 4 sketches (sa, sb, sc, sd).
-    assert_eq!(sketch_ids.len(), 4, "four sketches round-trip");
+    assert_eq!(
+        sketch_ids.len(),
+        1,
+        "only the sketch with a surviving region is still actionable"
+    );
     // The last sketch (sd) has 1 extrudable region after consuming one.
     // We find it by checking which sketch has exactly 1 extrudable region.
     let single_ext = sketch_ids

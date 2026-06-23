@@ -162,6 +162,15 @@ fn push_recent(path: String, app: tauri::AppHandle) -> Result<(), String> {
     rebuild_recent_submenu(&guard.submenu, &app, &paths)
 }
 
+/// Return the recents list (most-recent first) for the in-app web menu (Linux,
+/// where the native "Open Recent" submenu isn't used).
+#[tauri::command]
+fn get_recents(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let state = app.state::<Mutex<RecentState>>();
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    Ok(guard.paths.clone())
+}
+
 /// Clear the recents list, persist, and rebuild the submenu.
 #[tauri::command]
 fn clear_recent(app: tauri::AppHandle) -> Result<(), String> {
@@ -239,6 +248,7 @@ fn main() {
             list_dir,
             take_pending_open,
             push_recent,
+            get_recents,
             clear_recent,
             recovery_write,
             recovery_read,
@@ -325,6 +335,13 @@ fn main() {
             let edit_redo = MenuItemBuilder::with_id("edit-redo", "Redo")
                 .accelerator("Shift+CmdOrCtrl+Z")
                 .build(handle)?;
+            // No accelerator: a bare Backspace/Delete binding here would be a
+            // global OS-level shortcut that fires even while typing in a text
+            // field or dialog, unlike the JS keydown handler (App.tsx), which
+            // is scoped to the Select tool and guards typing contexts. Relying
+            // on the JS handler for the keyboard path is the documented
+            // fallback when the menu lib's accelerator can't be scoped.
+            let edit_delete = MenuItemBuilder::with_id("edit-delete", "Delete").build(handle)?;
             let edit_delete_guides =
                 MenuItemBuilder::with_id("edit-delete-guides", "Delete Guide Lines")
                     .build(handle)?;
@@ -333,6 +350,7 @@ fn main() {
                 .item(&edit_undo)
                 .item(&edit_redo)
                 .separator()
+                .item(&edit_delete)
                 .item(&edit_delete_guides)
                 .build()?;
 
@@ -384,6 +402,7 @@ fn main() {
                 .build(handle)?;
             let tool_protractor =
                 MenuItemBuilder::with_id("tool-protractor", "Protractor").build(handle)?;
+            let tool_slice = MenuItemBuilder::with_id("tool-slice", "Slice").build(handle)?;
 
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
@@ -395,6 +414,7 @@ fn main() {
                 .separator()
                 .item(&tool_tape_measure)
                 .item(&tool_protractor)
+                .item(&tool_slice)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -523,6 +543,7 @@ fn main() {
                 "file-close" => "close",
                 "edit-undo" => "undo",
                 "edit-redo" => "redo",
+                "edit-delete" => "edit-delete",
                 "edit-delete-guides" => "edit-delete-guides",
                 "view-axes" => "toggle-axes",
                 "view-guides" => "toggle-guides",
@@ -535,6 +556,7 @@ fn main() {
                 "tool-pushpull" => "tool-pushpull",
                 "tool-tape-measure" => "tool-tape-measure",
                 "tool-protractor" => "tool-protractor",
+                "tool-slice" => "tool-slice",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",

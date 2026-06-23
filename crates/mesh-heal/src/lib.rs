@@ -770,7 +770,7 @@ pub fn normalize_hole_winding(
 /// loop's best-fit (Newell normal + centroid) plane — i.e. planar to the same
 /// tolerance the kernel's `from_polygons` enforces. A degenerate normal → not
 /// planar (caller falls back).
-fn loop_is_planar(loop_verts: &[usize], positions: &[Point3]) -> bool {
+fn loop_is_planar(loop_verts: &[usize], positions: &[Point3], plane_tol: f64) -> bool {
     let normal = match face_normal(loop_verts, positions) {
         Some(n) => n,
         None => return false,
@@ -783,7 +783,7 @@ fn loop_is_planar(loop_verts: &[usize], positions: &[Point3]) -> bool {
     centroid = centroid / n;
     loop_verts
         .iter()
-        .all(|&v| normal.dot(positions[v].to_vec() - centroid).abs() <= tol::PLANE_DIST)
+        .all(|&v| normal.dot(positions[v].to_vec() - centroid).abs() <= plane_tol)
 }
 
 /// Minimal union-find over `0..n`.
@@ -840,6 +840,7 @@ pub fn merge_coplanar(
     face_corner_uvs: &[Vec<[f64; 2]>],
     face_holes: &[Vec<Vec<usize>>],
     positions: &[Point3],
+    plane_tol: f64,
 ) -> FilteredFaces {
     let nf = faces.len();
     if nf == 0 {
@@ -990,13 +991,15 @@ pub fn merge_coplanar(
             continue;
         }
 
-        // Planarity gate: COLLADA coords are f32 (~1e-5 noise) but the kernel's
-        // `from_polygons` rejects a face with any vertex past `tol::PLANE_DIST`
-        // (1e-9). A single triangle is always exactly planar; a merged polygon
-        // off an angled face may not be. If the merged loop isn't planar to the
-        // kernel's tolerance, fall back to triangles so the object still imports
-        // (true non-regression — never trade an importable mesh for a skipped one).
-        if !loop_is_planar(&loop_verts, positions) {
+        // Planarity gate: a single triangle is always exactly planar, but a
+        // merged polygon off an angled face may not be. `plane_tol` must match
+        // what the kernel will accept for this source: 1 nm (`PLANE_DIST`) for
+        // exact f64 (COLLADA text), but ~1 mm (`IMPORT_PLANE_DIST`) for f32
+        // (glTF) where coincident-plane vertices land microns off — otherwise
+        // every flat surface falls back to triangles, exploding face count and
+        // memory. Falling back to triangles is always safe (never trades an
+        // importable mesh for a skipped one).
+        if !loop_is_planar(&loop_verts, positions, plane_tol) {
             keep_original(&mut out_faces, &mut out_mats, &mut out_uvs, &mut out_holes);
             continue;
         }
@@ -1037,7 +1040,7 @@ pub fn heal_mesh(
     FaceCornerUvs,
     FaceHoles,
 ) {
-    heal_mesh_with_weld_tol(
+    heal_mesh_with_tol(
         raw_positions,
         raw_faces,
         raw_face_materials,
@@ -1045,15 +1048,22 @@ pub fn heal_mesh(
         raw_face_holes,
         bake_tf,
         tol::POINT_MERGE,
+        tol::PLANE_DIST,
     )
 }
 
-/// Like [`heal_mesh`] but welds at `weld_tol` instead of the native 1 nm
-/// `POINT_MERGE`. Use a scale-appropriate tolerance for f32-quantised sources
-/// (glTF), where coincident vertices land microns apart and the 1 nm weld would
-/// fail to merge them — leaving every shared edge split and the shell "leaky".
+/// Like [`heal_mesh`] but with explicit tolerances for f32-quantised sources
+/// (glTF `POSITION` is float32, so coincident vertices land microns apart at
+/// metre scale):
+/// - `weld_tol`: vertices within this distance merge. The native 1 nm
+///   `POINT_MERGE` is far too tight for f32 and leaves every shared edge split
+///   (a "leaky" shell).
+/// - `merge_plane_tol`: a merged coplanar polygon must be planar to this. The
+///   native 1 nm `PLANE_DIST` rejects every f32 flat surface, so coplanar
+///   triangles never coalesce — exploding face count and memory. Pass the
+///   kernel's import planarity (`IMPORT_PLANE_DIST`, 1 mm).
 #[allow(clippy::too_many_arguments)]
-pub fn heal_mesh_with_weld_tol(
+pub fn heal_mesh_with_tol(
     raw_positions: &[Point3],
     raw_faces: &[Vec<usize>],
     raw_face_materials: &[u32],
@@ -1061,6 +1071,7 @@ pub fn heal_mesh_with_weld_tol(
     raw_face_holes: &[Vec<Vec<usize>>],
     bake_tf: &Transform,
     weld_tol: f64,
+    merge_plane_tol: f64,
 ) -> (
     Vec<Point3>,
     Vec<Vec<usize>>,
@@ -1147,6 +1158,7 @@ pub fn heal_mesh_with_weld_tol(
         &oriented_uvs,
         &oriented_holes,
         &unique_positions,
+        merge_plane_tol,
     );
 
     // 7b. Normalize hole winding so every inner loop winds OPPOSITE its outer
@@ -1617,7 +1629,7 @@ mod tests {
         let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); tris.len()];
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); tris.len()];
 
-        let (f, m, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions);
+        let (f, m, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions, tol::PLANE_DIST);
         assert_eq!(f.len(), 6, "cube merges to 6 faces");
         assert!(
             f.iter().all(|face| face.len() == 4),
@@ -1642,7 +1654,7 @@ mod tests {
         let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 2];
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 2];
 
-        let (f, _, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions);
+        let (f, _, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions, tol::PLANE_DIST);
         assert_eq!(f.len(), 2, "non-coplanar faces are not merged");
     }
 
@@ -1665,7 +1677,7 @@ mod tests {
         let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 2];
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 2];
 
-        let (f, _, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions);
+        let (f, _, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions, tol::PLANE_DIST);
         assert_eq!(
             f.len(),
             2,
@@ -1689,7 +1701,7 @@ mod tests {
         let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 2];
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 2];
 
-        let (f, _, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions);
+        let (f, _, _, _) = merge_coplanar(&tris, &mats, &uvs, &holes, &positions, tol::PLANE_DIST);
         assert_eq!(f.len(), 2, "different materials are not merged");
     }
 

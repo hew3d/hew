@@ -8,6 +8,8 @@
 //! The resulting `materials` vec is dense and parallel to `document.materials()`,
 //! so a primitive's `material().index()` is also its kernel material index.
 
+use std::collections::HashMap;
+
 use gltf::Gltf;
 use gltf::image::Source as ImageSource;
 use kernel::{ImageFormat, Material, Rgba8, Texture};
@@ -16,25 +18,46 @@ use crate::buffers::decode_data_uri;
 
 /// Built materials plus any image URIs that could not be resolved in-memory.
 pub struct MaterialTable {
-    /// Dense materials, parallel to `document.materials()`.
+    /// Deduplicated materials.
     pub materials: Vec<Material>,
+    /// Maps each glTF material index → dense index into `materials`.
+    pub remap: Vec<u32>,
     /// External image URIs / unsupported codecs that were skipped.
     pub missing: Vec<String>,
 }
 
-/// Build the dense material table from a parsed glTF document.
+/// Build the deduplicated material table from a parsed glTF document.
+///
+/// SketchUp→glTF (and many exporters) emit a separate material per object even
+/// when they share the same color + texture image — here, 748 materials over
+/// just 17 images. Resolving a texture per material copies the (often large)
+/// encoded image bytes once *per material*, ballooning a 21 MB file to ~1.5 GB
+/// resident. We dedup by (color, image): each distinct (color, image) pair
+/// becomes one kernel material (image resolved once), and `remap` rewrites each
+/// glTF material index onto it.
 pub fn build(gltf: &Gltf, buffers: &[Option<Vec<u8>>]) -> MaterialTable {
-    let mut materials = Vec::new();
+    let mut materials: Vec<Material> = Vec::new();
     let mut missing = Vec::new();
+    let mut remap: Vec<u32> = Vec::new();
+    let mut seen: HashMap<(u32, Option<usize>), u32> = HashMap::new();
 
     for (i, mat) in gltf.document.materials().enumerate() {
+        let pbr = mat.pbr_metallic_roughness();
+        let color = factor_to_rgba8(pbr.base_color_factor());
+        let img_idx = pbr
+            .base_color_texture()
+            .map(|info| info.texture().source().index());
+
+        let key = (pack_rgba(color), img_idx);
+        if let Some(&dense) = seen.get(&key) {
+            remap.push(dense);
+            continue;
+        }
+
         let name = mat
             .name()
             .map(str::to_string)
             .unwrap_or_else(|| format!("material_{i}"));
-        let pbr = mat.pbr_metallic_roughness();
-        let color = factor_to_rgba8(pbr.base_color_factor());
-
         let texture = pbr.base_color_texture().and_then(|info| {
             let image = info.texture().source();
             match resolve_image(image.source(), buffers) {
@@ -52,13 +75,25 @@ pub fn build(gltf: &Gltf, buffers: &[Option<Vec<u8>>]) -> MaterialTable {
             }
         });
 
+        let dense = materials.len() as u32;
         materials.push(match texture {
             Some(tex) => Material::textured(name, color, tex),
             None => Material::solid(name, color),
         });
+        seen.insert(key, dense);
+        remap.push(dense);
     }
 
-    MaterialTable { materials, missing }
+    MaterialTable {
+        materials,
+        remap,
+        missing,
+    }
+}
+
+/// Pack an `Rgba8` into a `u32` for use as a hash key.
+fn pack_rgba(c: Rgba8) -> u32 {
+    (c.r as u32) << 24 | (c.g as u32) << 16 | (c.b as u32) << 8 | c.a as u32
 }
 
 /// Resolve an image source to `(encoded bytes, format)` if it is embedded and a

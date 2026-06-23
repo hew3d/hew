@@ -34,6 +34,7 @@ import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
 import { TapeMeasureTool } from '../tools/TapeMeasureTool'
 import { ProtractorTool } from '../tools/ProtractorTool'
+import { SliceTool } from '../tools/SliceTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 import type { NodeRef } from '../panels/treeModel'
@@ -86,6 +87,10 @@ interface Props {
   activeLitSet?: Set<bigint> | null
   /** Lift an in-viewport selection up to the parent. `additive` = shift-click. */
   onSelect?: (node: NodeRef | null, additive: boolean) => void
+  /** Lift a construction-guide pick to the parent; `null` clears. */
+  onSelectGuide?: (id: bigint | null) => void
+  /** The currently selected guide, reflected into the renderer highlight. */
+  selectedGuide?: bigint | null
   /** Request entering a node's editing context (double-click). */
   onEnterContext?: (node: NodeRef) => void
   /** Request popping one level off the context path (Esc). */
@@ -110,6 +115,8 @@ export interface ViewportApi {
   runGroup: (nodes: NodeRef[]) => bigint | null
   /** Dissolve a group. */
   runUngroup: (groupId: bigint) => void
+  /** Delete whole tree nodes (Object/Group/Instance), undoably. */
+  runDelete: (nodes: NodeRef[]) => void
   /** Fold a sibling selection into a component + identity instance. Returns the instance handle. */
   runMakeComponent: (nodes: NodeRef[]) => bigint | null
   /** Place a second instance of the given instance's definition, offset slightly. */
@@ -148,6 +155,8 @@ export interface ViewportApi {
   setGuidesVisible: (visible: boolean) => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   deleteAllGuides: () => void
+  /** Delete a single picked construction guide. */
+  runDeleteGuide: (id: bigint) => void
   /**
    * Serialize the current solid geometry (objects + instances) to a binary
    * glTF (.glb) buffer. Resolves null when the model has no solids.
@@ -296,6 +305,8 @@ export default function Viewport({
   selectedIds = [],
   activeLitSet = null,
   onSelect,
+  onSelectGuide,
+  selectedGuide = null,
   onEnterContext,
   onExitContext,
   onDocumentChanged,
@@ -314,6 +325,8 @@ export default function Viewport({
   onToastRef.current = onToast
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
+  const onSelectGuideRef = useRef(onSelectGuide)
+  onSelectGuideRef.current = onSelectGuide
   const onEnterContextRef = useRef(onEnterContext)
   onEnterContextRef.current = onEnterContext
   const onExitContextRef = useRef(onExitContext)
@@ -539,6 +552,24 @@ export default function Viewport({
       }
     }
 
+    function runDelete(nodes: NodeRef[]): void {
+      if (nodes.length === 0) return
+      // kind: 0=object, 1=group, 2=instance
+      for (const n of nodes) {
+        const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
+        try {
+          wasmScene.delete_node(kind, n.id)
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          const rawMsg = err instanceof Error ? err.message : String(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        }
+      }
+      handleSceneRefresh()
+      sceneRenderer.refreshAllSketches()
+      sceneRenderer.refreshGuides()
+    }
+
     function runMakeComponent(nodes: NodeRef[]): bigint | null {
       if (nodes.length === 0) return null
       // kind: 0=object, 1=group, 2=instance
@@ -698,12 +729,24 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function runDeleteGuide(id: bigint): void {
+      try {
+        wasmScene.delete_guide(id)
+      } catch (err) {
+        handleToast(err instanceof Error ? err.message : String(err))
+        return
+      }
+      sceneRenderer.refreshGuides()
+      onDocumentChangedRef.current?.()
+      scheduleRender()
+    }
+
     async function exportGlb(): Promise<Uint8Array | null> {
       return exportSceneToGlb(sceneRenderer)
     }
 
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, exportGlb }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -850,6 +893,23 @@ export default function Viewport({
       )
     }
 
+    function makeSliceTool(): SliceTool {
+      return new SliceTool(
+        wasmScene,
+        previewGroup,
+        // A slice consumes the source object and yields two new ones; refresh
+        // the scene and select the returned (positive) piece so highlight lands
+        // on live geometry, mirroring how runBoolean reports its result.
+        (objectId: bigint) => {
+          handleSceneRefresh()
+          sceneRenderer.refreshGuides()
+          onSelectRef.current?.({ kind: 'object', id: objectId }, false)
+        },
+        handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
     // Shift-in-Orbit temporarily swaps to Pan, mirroring SketchUp.
     // Tracked here (not in switchToolRef's closure alone) so the keydown/keyup
     // handlers and the tool switch can all see/clear the same flag.
@@ -905,6 +965,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeProtractorTool())
+          break
+        case 'Slice':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeSliceTool())
           break
         case 'Orbit':
           cameraModeRef.current = true
@@ -1081,6 +1146,87 @@ export default function Viewport({
     }
 
     // ------------------------------------------------------------------ pointer down
+    // --- construction-guide picking ---------------------------------
+    const GUIDE_PICK_PX = 8
+    // Matches SceneRenderer's GUIDE_LINE_HALF_LENGTH (the rendered extent).
+    const GUIDE_LINE_SAMPLE_HALF = 50
+
+    function worldToPixels(p: THREE.Vector3): { x: number; y: number; behind: boolean } {
+      const v = p.clone().project(camera)
+      const w = renderer.domElement.clientWidth
+      const h = renderer.domElement.clientHeight
+      return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, behind: v.z > 1 }
+    }
+
+    function pointSegPx(
+      px: number, py: number,
+      ax: number, ay: number, bx: number, by: number,
+    ): number {
+      const dx = bx - ax, dy = by - ay
+      const len2 = dx * dx + dy * dy
+      if (len2 < 1e-9) return Math.hypot(px - ax, py - ay)
+      let t = ((px - ax) * dx + (py - ay) * dy) / len2
+      t = Math.max(0, Math.min(1, t))
+      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+    }
+
+    /** Nearest construction guide within GUIDE_PICK_PX of the NDC click, or null.
+     * Hidden guides (View ▸ Guides off) are not pickable. */
+    function pickGuide(ndcX: number, ndcY: number): bigint | null {
+      if (!sceneRenderer.guidesGroup.visible) return null
+      const w = renderer.domElement.clientWidth
+      const h = renderer.domElement.clientHeight
+      const clickX = (ndcX * 0.5 + 0.5) * w
+      const clickY = (-ndcY * 0.5 + 0.5) * h
+      let best: bigint | null = null
+      let bestDist = GUIDE_PICK_PX
+      for (const id of wasmScene.guide_ids()) {
+        const kind = wasmScene.guide_kind(id)
+        const geom = wasmScene.guide_geometry(id)
+        if (kind === undefined || geom === undefined) continue
+        let d: number
+        if (kind === 'line') {
+          const [ox, oy, oz, dx, dy, dz] = geom
+          const len = Math.hypot(dx, dy, dz)
+          if (len < 1e-9) continue
+          const ux = dx / len, uy = dy / len, uz = dz / len
+          // Sample along the line and measure pixel distance segment-by-segment
+          // between consecutive IN-FRONT samples. (Projecting the bare ±50 m
+          // endpoints breaks when one is behind the camera — its projection is
+          // garbage — so a near guide could never be picked.)
+          const N = 64
+          d = Infinity
+          let prev: { x: number; y: number; behind: boolean } | null = null
+          for (let i = 0; i <= N; i++) {
+            const t = -GUIDE_LINE_SAMPLE_HALF + (2 * GUIDE_LINE_SAMPLE_HALF) * (i / N)
+            const p = worldToPixels(new THREE.Vector3(ox + ux * t, oy + uy * t, oz + uz * t))
+            if (!p.behind) {
+              const dp = Math.hypot(p.x - clickX, p.y - clickY)
+              if (dp < d) d = dp
+              if (prev !== null && !prev.behind) {
+                const ds = pointSegPx(clickX, clickY, prev.x, prev.y, p.x, p.y)
+                if (ds < d) d = ds
+              }
+            }
+            prev = p
+          }
+          if (!Number.isFinite(d)) continue
+        } else if (kind === 'point') {
+          const [x, y, z] = geom
+          const p = worldToPixels(new THREE.Vector3(x, y, z))
+          if (p.behind) continue
+          d = Math.hypot(p.x - clickX, p.y - clickY)
+        } else {
+          continue
+        }
+        if (d < bestDist) {
+          bestDist = d
+          best = id
+        }
+      }
+      return best
+    }
+
     function onPointerDown(ev: PointerEvent): void {
       if (ev.button !== 0) return
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
@@ -1094,6 +1240,18 @@ export default function Viewport({
       // Record shift state so handleSelect (driven by the tool's onSelect) can
       // treat this click as additive multi-select.
       selectAdditiveRef.current = ev.shiftKey
+
+      // Guide pick: when selecting, a click near a construction guide
+      // selects that guide (thin deliberate targets take priority over the
+      // object beneath). Other tools ignore guides.
+      if (toolController.activeToolName === 'Select') {
+        const g = pickGuide(ndcX, ndcY)
+        if (g !== null) {
+          onSelectGuideRef.current?.(g)
+          scheduleRender()
+          return
+        }
+      }
 
       const activeTool = toolController.activeTool
 
@@ -1344,6 +1502,12 @@ export default function Viewport({
     sceneRendererRef.current?.setSelectedInstances(instanceIds)
     scheduleRenderRef.current()
   }, [selectedIds])
+
+  // Reflect the selected construction guide into the renderer highlight.
+  useEffect(() => {
+    sceneRendererRef.current?.setSelectedGuide(selectedGuide)
+    scheduleRenderRef.current()
+  }, [selectedGuide])
 
   return (
     <div

@@ -27,13 +27,29 @@ use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
 use wasm_bindgen::prelude::*;
 
-/// Module-init hook: routes Rust panics to `console.error` with the real
-/// message and source location. Without it, a panic surfaces only as the
-/// opaque wasm "unreachable" trap. (A panic still traps and leaves the Scene
-/// unusable — reload to recover — but at least it is now diagnosable.)
+// Persist a panic message where the UI can read it after the wasm instance is
+// poisoned. `console_error_panic_hook` writes through a web-sys console binding
+// that bypasses the app's `console.error` capture, so a kernel panic was
+// invisible to the in-app error surface — we route it to `localStorage` (and
+// `console.error`, in a try/catch so a failure here can't re-panic) instead.
+#[wasm_bindgen(inline_js = "export function __hew_record_panic(msg) { \
+  try { localStorage.setItem('hew:lastPanic', new Date().toISOString() + '\\n' + msg); } catch (e) {} \
+  try { console.error(msg); } catch (e) {} \
+}")]
+extern "C" {
+    fn __hew_record_panic(msg: &str);
+}
+
+/// Module-init hook: install a panic hook that records the real message +
+/// source location to `localStorage['hew:lastPanic']` (and `console.error`).
+/// Without it, a kernel panic surfaces only as the opaque wasm "unreachable"
+/// trap on the *next* call. (The panic still poisons the instance — reload to
+/// recover — but the cause is now diagnosable from the UI.)
 #[wasm_bindgen(start)]
 pub fn start() {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(|info| {
+        __hew_record_panic(&info.to_string());
+    }));
 }
 
 /// Kernel crate version, for smoke tests and an about box.
@@ -79,6 +95,7 @@ fn doc_err(e: DocumentError) -> ApiError {
         DocumentError::Sketch(inner) => api_err(inner, &e),
         DocumentError::Extrude(inner) => api_err(inner, &e),
         DocumentError::Boolean(inner) => api_err(inner, &e),
+        DocumentError::Slice(inner) => api_err(inner, &e),
         DocumentError::Transform(inner) => api_err(inner, &e),
         DocumentError::Op(KernelOpError::PushPull(inner)) => api_err(inner, &e),
         DocumentError::Op(KernelOpError::Sticky(inner)) => api_err(inner, &e),
@@ -422,17 +439,37 @@ impl EdgeRemovedJs {
     }
 }
 
-/// What `push_pull` did (mirrors `kernel::PushPullReport`).
+/// What `push_pull` did. A normal translate carries a [`kernel::PushPullReport`]
+/// (`inner`); a **through-cut** ( — push past the opposite wall becomes a
+/// subtract) instead carries the resulting object handles in `through`, since
+/// the source object was consumed and there is no single "moved face".
 #[wasm_bindgen]
 pub struct PushPullJs {
-    inner: kernel::PushPullReport,
+    inner: Option<kernel::PushPullReport>,
+    through: Vec<u64>,
 }
 
 #[wasm_bindgen]
 impl PushPullJs {
-    /// The moved face in its new position (handle may differ from input).
+    /// The moved face in its new position (handle may differ from input). `0`
+    /// for a through-cut, which has no moved face — check [`Self::is_through`].
     pub fn face(&self) -> u64 {
-        self.inner.face.data().as_ffi()
+        self.inner
+            .as_ref()
+            .map(|r| r.face.data().as_ffi())
+            .unwrap_or(0)
+    }
+
+    /// Whether this push/pull became a through-cut subtract: the source
+    /// object was consumed and replaced by [`Self::result_objects`].
+    pub fn is_through(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    /// The object handles produced by a through-cut (one normally; two or more
+    /// if the cut severed the solid). Empty for a normal translate.
+    pub fn result_objects(&self) -> Vec<u64> {
+        self.through.clone()
     }
 }
 
@@ -844,6 +881,29 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// Slice a watertight solid by a plane into two independent watertight
+    /// solids. `plane` is 6 floats `[px,py,pz,nx,ny,nz]` — a point on the
+    /// cut plane and its (unnormalized) normal. Returns the two new object
+    /// handles `[positive, negative]`, the positive piece on the normal side;
+    /// the source is consumed (hidden, undoable). Handles stay stable across
+    /// undo/redo. Errors if the object is unknown/hidden, not a solid, or the
+    /// cut is degenerate or misses the solid.
+    pub fn slice_object(&mut self, object: u64, plane: &[f64]) -> Result<Vec<u64>, ApiError> {
+        let p: &[f64; 6] = plane.try_into().map_err(|_| {
+            ApiError("BadPlane: slice plane must be 6 floats [px,py,pz,nx,ny,nz]".to_string())
+        })?;
+        let point = Point3::new(p[0], p[1], p[2]);
+        let normal = kernel::Vec3::new(p[3], p[4], p[5]);
+        let plane = Plane::from_point_normal(point, normal)
+            .map_err(|_| ApiError("DegeneratePlane: slice normal has no direction".to_string()))?;
+        let ((a, b), change) = self
+            .doc
+            .slice_node(object_id(object), &plane)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(vec![a.data().as_ffi(), b.data().as_ffi()])
+    }
+
     /// Move/rotate/scale an object by baking an affine transform into its
     /// geometry (undoable). `affine` is a row-major 3×4 matrix (12 floats):
     /// `[m00 m01 m02 tx, m10 m11 m12 ty, m20 m21 m22 tz]`. The object handle is
@@ -898,6 +958,21 @@ impl Scene {
     /// (inverse of `group_nodes`). The members keep their geometry and handles.
     pub fn ungroup(&mut self, group: u64) -> Result<(), ApiError> {
         let change = self.doc.ungroup(group_id(group)).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Removes a whole tree node — Object, Group, or Instance — from the scene
+    ///. Tombstone, not a real delete: undoable, and the handle
+    /// stays valid for redo. `kind` is `0` = object, `1` = group, `2` =
+    /// instance. Deleting a group hides its whole subtree in one step;
+    /// deleting an instance never touches its shared definition or sibling
+    /// instances. Whole-node delete only — single-face/edge delete and guide
+    /// selections are out of scope here ( routes guides to
+    /// `delete_guide`/`delete_all_guides`).
+    pub fn delete_node(&mut self, kind: u8, id: u64) -> Result<(), ApiError> {
+        let node = node_id(kind, id)?;
+        let change = self.doc.delete_node(node).map_err(doc_err)?;
         self.reconcile(&change);
         Ok(())
     }
@@ -1229,7 +1304,10 @@ impl Scene {
         self.reconcile(&change);
         match report {
             KernelOpReport::PushPull(inner) | KernelOpReport::ExtrudeSubFace(inner) => {
-                Ok(PushPullJs { inner })
+                Ok(PushPullJs {
+                    inner: Some(inner),
+                    through: Vec::new(),
+                })
             }
             other => Err(api_err(
                 &other,
@@ -1352,6 +1430,12 @@ impl Scene {
     /// Push/pull a face (recorded in the object's undo history). A flat imprinted
     /// sub-face (drawn inside an Object) auto-routes to wall-generating
     /// extrude (boss/recess); any other face uses the translate-mode push/pull.
+    ///
+    /// An inward push that reaches **past the opposite wall** auto-routes to a
+    /// through-cut subtract: material is removed (a recess that breaks the
+    /// far wall becomes a through-hole) and a cut that severs the solid yields
+    /// two objects. The returned report then has [`PushPullJs::is_through`] set
+    /// and carries the new object handles in [`PushPullJs::result_objects`].
     pub fn push_pull(
         &mut self,
         object: u64,
@@ -1359,9 +1443,29 @@ impl Scene {
         distance: f64,
     ) -> Result<PushPullJs, ApiError> {
         let face_id = FaceId::from(KeyData::from_ffi(face));
+        let oid = object_id(object);
+
+        // Through-cut detection: an inward push past the opposite wall
+        // becomes a subtract, not a translate.
+        if self
+            .doc
+            .object(oid)
+            .is_some_and(|o| o.push_pull_overshoots(face_id, distance))
+        {
+            let (results, change) = self
+                .doc
+                .push_pull_through(oid, face_id, distance)
+                .map_err(doc_err)?;
+            self.reconcile(&change);
+            return Ok(PushPullJs {
+                inner: None,
+                through: results.iter().map(|id| id.data().as_ffi()).collect(),
+            });
+        }
+
         let is_sub = self
             .doc
-            .object(object_id(object))
+            .object(oid)
             .is_some_and(|o| o.is_flat_sub_face(face_id));
         let op = if is_sub {
             KernelOp::ExtrudeSubFace {
@@ -1376,7 +1480,10 @@ impl Scene {
         };
         match self.apply_op(object, op)? {
             KernelOpReport::PushPull(inner) | KernelOpReport::ExtrudeSubFace(inner) => {
-                Ok(PushPullJs { inner })
+                Ok(PushPullJs {
+                    inner: Some(inner),
+                    through: Vec::new(),
+                })
             }
             other => Err(api_err(&other, &"unexpected report kind for push_pull")),
         }

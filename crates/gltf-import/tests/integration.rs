@@ -216,6 +216,106 @@ fn f32_scale_cube_welds_to_a_watertight_solid() {
     assert_eq!(report.leaky, 0, "no leaky shell");
 }
 
+/// Two triangles forming a quad, in two primitives that reference *different*
+/// glTF materials which nonetheless share the same color + texture image. The
+/// importer must deduplicate them to a single kernel material (so the image is
+/// stored once, not per-material — the fix for the OOM on large SketchUp→glTF
+/// models where hundreds of materials shared a handful of images).
+fn shared_texture_gltf() -> Vec<u8> {
+    // Quad in the XY plane.
+    let pos: [[f32; 3]; 4] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+    let idx_a: [u32; 3] = [0, 1, 2];
+    let idx_b: [u32; 3] = [0, 2, 3];
+    let image: [u8; 16] = *b"\x89PNG\r\n\x1a\n_faketex"; // bytes are opaque to the kernel
+
+    let mut buf = Vec::new();
+    for p in &pos {
+        for v in p {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    let off_a = buf.len();
+    for i in &idx_a {
+        buf.extend_from_slice(&i.to_le_bytes());
+    }
+    let off_b = buf.len();
+    for i in &idx_b {
+        buf.extend_from_slice(&i.to_le_bytes());
+    }
+    let off_img = buf.len();
+    buf.extend_from_slice(&image);
+    let total = buf.len();
+    let b64 = base64_encode(&buf);
+
+    let tex_mat = r#"{ "pbrMetallicRoughness": { "baseColorFactor": [1,1,1,1], "baseColorTexture": { "index": 0 } } }"#;
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0] }}],
+  "nodes": [{{ "mesh": 0 }}],
+  "meshes": [{{ "primitives": [
+    {{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "material": 0, "mode": 4 }},
+    {{ "attributes": {{ "POSITION": 0 }}, "indices": 2, "material": 1, "mode": 4 }}
+  ] }}],
+  "materials": [{tex_mat}, {tex_mat}, {tex_mat}],
+  "textures": [{{ "source": 0 }}],
+  "images": [{{ "bufferView": 3, "mimeType": "image/png" }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0,0,0], "max": [1,1,0] }},
+    {{ "bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR" }},
+    {{ "bufferView": 2, "componentType": 5125, "count": 3, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": {off_a} }},
+    {{ "buffer": 0, "byteOffset": {off_a}, "byteLength": 12 }},
+    {{ "buffer": 0, "byteOffset": {off_b}, "byteLength": 12 }},
+    {{ "buffer": 0, "byteOffset": {off_img}, "byteLength": 16 }}
+  ],
+  "buffers": [{{ "byteLength": {total}, "uri": "data:application/octet-stream;base64,{b64}" }}]
+}}"#
+    )
+    .into_bytes()
+}
+
+#[test]
+fn materials_sharing_a_texture_are_deduplicated() {
+    let bytes = shared_texture_gltf();
+    let (scene, _missing) = gltf_import::import(&bytes).expect("import");
+
+    // Three glTF materials, one shared image → a single kernel material.
+    assert_eq!(
+        scene.materials.len(),
+        1,
+        "shared color+image deduped to one material"
+    );
+    assert!(
+        scene.materials[0].has_texture(),
+        "the deduped material keeps its texture"
+    );
+
+    // Both triangles (different glTF materials, remapped to the same one) merge
+    // into the single quad face.
+    let kernel::ImportNode::Mesh(recipe) = &scene.roots[0] else {
+        panic!("expected a Mesh root");
+    };
+    assert_eq!(
+        recipe.faces.len(),
+        1,
+        "coplanar same-material triangles merge to one face"
+    );
+    assert_eq!(
+        recipe.face_materials,
+        vec![0],
+        "face references the deduped material 0"
+    );
+}
+
 #[test]
 fn cube_imports_as_one_watertight_object_with_six_faces() {
     let bytes = cube_gltf();

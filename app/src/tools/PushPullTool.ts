@@ -21,6 +21,18 @@ import { projectRayOntoAxis, parseKernelErrorCode, kernelErrorMessage, pointInPo
 import { editNumericBuffer, parseDistance } from './moveInput'
 import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
 
+/** Snap kinds whose point is a deliberate depth reference for push/pull — the
+ * cursor was parked on a real feature. `on-face` is excluded on purpose: it
+ * fires continuously during a drag and would hijack the free-drag depth. */
+const HARD_SNAP_KINDS = new Set([
+  'endpoint',
+  'midpoint',
+  'intersection',
+  'on-edge',
+  'on-guide',
+  'on-axis',
+])
+
 export type PushPullTarget =
   | { kind: 'region'; sketchHandle: bigint; regionHandle: bigint; normal: [number, number, number] }
   | { kind: 'face'; objectHandle: bigint; faceHandle: bigint; normal: [number, number, number] }
@@ -80,15 +92,7 @@ export class PushPullTool implements Tool {
 
     if (this.stage.kind === 'dragging') {
       const { target, anchor } = this.stage
-
-      // Always project the ray onto the normal axis during drag — snap may be
-      // null when the cursor is over empty space, but we still need the distance.
-      const distance = projectRayOntoAxis(
-        ray.origin,
-        ray.direction,
-        anchor,
-        target.normal,
-      )
+      const distance = this._axisDistance(snap, ray, anchor, target.normal)
       this.stage = { ...this.stage, distance }
       this._drawGhostPreview(anchor, target.normal, distance)
       this._reportMeasurement(distance)
@@ -193,13 +197,11 @@ export class PushPullTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
 
-      // Project ray onto axis at click point for final distance measurement
-      const finalDistance = projectRayOntoAxis(
-        ray.origin,
-        ray.direction,
-        anchor,
-        target.normal,
-      )
+      // Final depth at the click — perpendicular to the face, projecting the
+      // snapped reference point onto the axis when one is present (see
+      // _axisDistance) so e.g. clicking an edge midpoint cuts to exactly that
+      // depth rather than the cursor ray's diagonal closest-approach.
+      const finalDistance = this._axisDistance(snap, ray, anchor, target.normal)
       this._commit(target, finalDistance === 0 ? distance : finalDistance)
     }
   }
@@ -289,6 +291,38 @@ export class PushPullTool implements Tool {
     this._activeComponent = componentId
   }
 
+  /**
+   * Signed perpendicular depth along the push axis. When the cursor is snapped
+   * to a real reference (vertex / midpoint / edge / on-face point), project THAT
+   * POINT onto the axis through `anchor` so the depth is the perpendicular
+   * distance to it — e.g. snapping the midpoint of an object's vertical edge
+   * pushes exactly half-way. Push/pull is always a straight move along the face
+   * normal, so the diagonal distance to the reference is never what we want.
+   * Falls back to the cursor ray's axis projection over empty space (no snap).
+   * `normal` is unit (kernel face/profile normals are).
+   */
+  private _axisDistance(
+    snap: Snap | null,
+    ray: Ray,
+    anchor: [number, number, number],
+    normal: [number, number, number],
+  ): number {
+    // Only a DELIBERATE point inference (an endpoint / midpoint / edge / axis /
+    // guide / intersection the user parked the cursor on) borrows its depth.
+    // A bare `on-face` snap fires almost continuously during a drag — the cursor
+    // is always over *some* face — so using it would kill the free drag and make
+    // the depth jump to whatever face got snapped (e.g. the far/bottom wall).
+    // Free drag (and on-face) follows the cursor ray projected onto the axis.
+    if (snap !== null && HARD_SNAP_KINDS.has(snap.kind)) {
+      return (
+        (snap.x - anchor[0]) * normal[0] +
+        (snap.y - anchor[1]) * normal[1] +
+        (snap.z - anchor[2]) * normal[2]
+      )
+    }
+    return projectRayOntoAxis(ray.origin, ray.direction, anchor, normal)
+  }
+
   private _commit(target: PushPullTarget, distance: number): void {
     if (Math.abs(distance) < 1e-6) {
       this.onToast('Move more before committing push/pull')
@@ -318,7 +352,15 @@ export class PushPullTool implements Tool {
               distance,
             )
         try {
-          this.onCommit(target.objectHandle)
+          // A through-cut consumes the source object and replaces it with
+          // one or more new objects; commit the first of those so selection/
+          // highlight lands on real geometry instead of the now-gone source.
+          if (this._activeComponent === null && report.is_through()) {
+            const results = report.result_objects()
+            this.onCommit(results.length > 0 ? results[0] : target.objectHandle)
+          } else {
+            this.onCommit(target.objectHandle)
+          }
         } finally {
           report.free()
         }

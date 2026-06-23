@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use gltf::mesh::Mode;
 use gltf::{Gltf, Mesh, Node};
 use kernel::{DefRecipe, ImportNode, ImportScene, MeshRecipe, NO_MATERIAL, Point3, Transform};
-use mesh_heal::heal_mesh_with_weld_tol;
+use mesh_heal::heal_mesh_with_tol;
 use mesh_heal::uv::fit_uv_frame;
 
 use crate::GltfError;
@@ -37,6 +37,8 @@ struct RawMesh {
 /// Shared context for the node walk.
 struct Ctx<'a> {
     buffers: &'a [Option<Vec<u8>>],
+    /// glTF material index → dense (deduped) kernel material index.
+    mat_remap: &'a [u32],
     mesh_to_def: &'a HashMap<usize, usize>,
     world_tf: Transform,
 }
@@ -62,7 +64,7 @@ pub fn build_scene(
         if refcount.get(&mesh.index()).copied().unwrap_or(0) < 2 {
             continue;
         }
-        let raw = extract_raw_mesh(&mesh, buffers);
+        let raw = extract_raw_mesh(&mesh, buffers, &mat_table.remap);
         // Definition geometry stays mesh-local (IDENTITY bake); the per-instance
         // pose carries the node world transform + Y-up→Z-up.
         if let Some(recipe) = build_recipe(&raw, &Transform::IDENTITY, mesh_name(&mesh)) {
@@ -77,6 +79,7 @@ pub fn build_scene(
     // Pass 3: walk the node forest into world-space roots.
     let ctx = Ctx {
         buffers,
+        mat_remap: &mat_table.remap,
         mesh_to_def: &mesh_to_def,
         world_tf,
     };
@@ -110,7 +113,7 @@ impl Ctx<'_> {
                     tags: Vec::new(),
                 })
             } else {
-                let raw = extract_raw_mesh(&mesh, self.buffers);
+                let raw = extract_raw_mesh(&mesh, self.buffers, self.mat_remap);
                 let name = node_name(node).unwrap_or_else(|| mesh_name(&mesh));
                 build_recipe(&raw, &node_world.then(&self.world_tf), name).map(ImportNode::Mesh)
             }
@@ -148,7 +151,7 @@ impl Ctx<'_> {
 /// per-face UV frame from healed corner UVs. `None` if nothing survives heal.
 fn build_recipe(raw: &RawMesh, bake: &Transform, name: String) -> Option<MeshRecipe> {
     let no_holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); raw.faces.len()];
-    let (positions, faces, face_materials, healed_uvs, face_holes) = heal_mesh_with_weld_tol(
+    let (positions, faces, face_materials, healed_uvs, face_holes) = heal_mesh_with_tol(
         &raw.positions,
         &raw.faces,
         &raw.face_materials,
@@ -156,6 +159,11 @@ fn build_recipe(raw: &RawMesh, bake: &Transform, name: String) -> Option<MeshRec
         &no_holes,
         bake,
         gltf_weld_tol(&raw.positions),
+        // Merge coplanar triangles at the kernel's import planarity (1 mm), not
+        // the 1 nm native tolerance — f32 flat surfaces sit microns off-plane,
+        // so the strict gate would leave every wall/floor as triangle soup
+        // (huge face count + memory; D-fix for the OOM crash).
+        kernel::tol::IMPORT_PLANE_DIST,
     );
     if faces.is_empty() {
         return None;
@@ -201,7 +209,7 @@ fn gltf_weld_tol(positions: &[Point3]) -> f64 {
 }
 
 /// Merge every triangle primitive of a glTF mesh into one raw position/face list.
-fn extract_raw_mesh(mesh: &Mesh, buffers: &[Option<Vec<u8>>]) -> RawMesh {
+fn extract_raw_mesh(mesh: &Mesh, buffers: &[Option<Vec<u8>>], mat_remap: &[u32]) -> RawMesh {
     let mut rm = RawMesh::default();
     for prim in mesh.primitives() {
         if prim.mode() != Mode::Triangles {
@@ -227,7 +235,7 @@ fn extract_raw_mesh(mesh: &Mesh, buffers: &[Option<Vec<u8>>]) -> RawMesh {
         let mat = prim
             .material()
             .index()
-            .map(|i| i as u32)
+            .and_then(|i| mat_remap.get(i).copied())
             .unwrap_or(NO_MATERIAL);
 
         let indices: Vec<u32> = match reader.read_indices() {

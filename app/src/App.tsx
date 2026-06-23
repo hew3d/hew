@@ -55,7 +55,7 @@ function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
 }
 
-const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Orbit', 'Pan', 'Zoom'] as const
+const TOOLS = ['Select', 'Rectangle', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Slice', 'Orbit', 'Pan', 'Zoom'] as const
 type ToolName = (typeof TOOLS)[number]
 // Canonical shortcuts use the ⌘ glyph; the toolbar-button tooltip swaps it for
 // `modLabel` ('Ctrl+') on non-Mac hosts (e.g. Linux/WebKitGTK).
@@ -69,6 +69,7 @@ const TOOL_KEYS: Record<ToolName, string> = {
   'Scale': '⌘9',
   'Tape Measure': '⌘D',
   'Protractor': '',
+  'Slice': '',
   'Orbit': '⌘B',
   'Pan': '⌘R',
   'Zoom': '⌘\\',
@@ -118,6 +119,9 @@ export default function App() {
   const [kernelPanicked, setKernelPanicked] = useState(false)
   /** Selected nodes (ordered; index 0 = primary). */
   const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
+  /** Selected construction guide, mutually exclusive with node
+   * selection. Deleted via the same Edit ▸ Delete / Delete-key path as nodes. */
+  const [selectedGuide, setSelectedGuide] = useState<bigint | null>(null)
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Active context path. Empty = top level. */
@@ -301,7 +305,15 @@ export default function App() {
   }, [])
 
   const handleSelect = useCallback((node: NodeRef | null, additive: boolean) => {
+    // Node and guide selection are mutually exclusive.
+    setSelectedGuide(null)
     setSelectedIds((cur) => nextSelection(cur, node, additive))
+  }, [])
+
+  /** Lift a guide pick from the viewport; clears node selection. */
+  const handleSelectGuide = useCallback((id: bigint | null) => {
+    setSelectedGuide(id)
+    if (id !== null) setSelectedIds([])
   }, [])
 
   const handleEnterContext = useCallback((node: NodeRef) => {
@@ -640,6 +652,30 @@ export default function App() {
     }
   }, [confirmDiscard, applyLoadedBytes])
 
+  // ---------------------------------------------------------------- Open Recent (in-app menu; Linux web menu,  port)
+  // The recents list is owned by the Rust shell (recents.json). The native
+  // macOS/Windows menu has its own "Open Recent" submenu; the in-app web menu
+  // (used on Linux + web) reads the list via `get_recents` and re-fetches after
+  // any open/save/import (those change the session AND call `push_recent`).
+  const [recentFiles, setRecentFiles] = useState<string[]>([])
+  useEffect(() => {
+    if (!isTauri) return
+    let cancelled = false
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<string[]>('get_recents'))
+      .then((list) => { if (!cancelled) setRecentFiles(list) })
+      .catch(() => { /* ignore */ })
+    return () => { cancelled = true }
+  }, [docSession.currentRef, docSession.importedName])
+
+  const openRecent = useCallback((path: string) => { void openPath(path) }, [openPath])
+  const clearRecent = useCallback(() => {
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke('clear_recent'))
+      .then(() => setRecentFiles([]))
+      .catch(() => { /* ignore */ })
+  }, [])
+
   // ---------------------------------------------------------------- recovery prompt actions
   const handleRecover = useCallback(() => {
     const snapshot = recoveryPrompt
@@ -760,6 +796,10 @@ export default function App() {
   const exportGltfRef = useRef(exportGltf)
   const openPathRef = useRef(openPath)
   const openSettingsRef = useRef(openSettings)
+  // Tracks the latest active tool name for the keydown effect below (fixed
+  // dep array — see its Delete/Backspace handling), so it never sees a stale
+  // tool from the render it mounted in.
+  const activeToolRef = useRef(activeTool)
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
   useEffect(() => { openDocumentRef.current = openDocument }, [openDocument])
   useEffect(() => { importDocumentRef.current = importDocument }, [importDocument])
@@ -771,6 +811,7 @@ export default function App() {
   useEffect(() => { exportGltfRef.current = exportGltf }, [exportGltf])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
   useEffect(() => { openSettingsRef.current = openSettings }, [openSettings])
+  useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
 
   // ---------------------------------------------------------------- native menu-action dispatch
   // The dispatch switch lives in a ref refreshed every render. The listener
@@ -779,6 +820,27 @@ export default function App() {
   // re-running a []-deps effect — so a switch captured inside that effect would
   // be frozen at its first-mount version and silently drop any case added later
   // (e.g. a newly-added pane toggle). Routing through this ref keeps it current.
+  // Whole-node delete: deletes every currently-selected node
+  // (Object/Group/Instance) and clears the selection. Shared by the Edit ▸
+  // Delete menu item and the Delete/Backspace key handler below — both
+  // dispatch through `menuActionRef.current('edit-delete')` so this always
+  // sees the current `selectedIds` (the ref is reassigned fresh every render;
+  // see the Fast-Refresh note above `menuActionRef`).
+  const deleteSelection = () => {
+    // A selected guide deletes via the same path; mutually exclusive
+    // with node selection.
+    if (selectedGuide !== null) {
+      viewportApi.current?.runDeleteGuide(selectedGuide)
+      setSelectedGuide(null)
+      setDocRev((r) => r + 1)
+      return
+    }
+    if (selectedIds.length === 0) return
+    viewportApi.current?.runDelete(selectedIds)
+    setSelectedIds([])
+    setDocRev((r) => r + 1)
+  }
+
   const menuActionRef = useRef<(payload: string) => void>(() => {})
   menuActionRef.current = (payload: string) => {
     switch (payload) {
@@ -790,6 +852,7 @@ export default function App() {
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
       case 'redo':     handleRedoRef.current(); break
+      case 'edit-delete': deleteSelection(); break
       case 'close':
         // Trigger the beforeunload / close-guard path by emitting the
         // Tauri window close request — handled by the close guard effect.
@@ -807,6 +870,7 @@ export default function App() {
       case 'tool-scale':     setActiveTool('Scale'); break
       case 'tool-tape-measure': setActiveTool('Tape Measure'); break
       case 'tool-protractor': setActiveTool('Protractor'); break
+      case 'tool-slice':     setActiveTool('Slice'); break
       case 'tool-orbit':     setActiveTool('Orbit'); break
       case 'tool-pan':       setActiveTool('Pan'); break
       case 'tool-zoom':      setActiveTool('Zoom'); break
@@ -945,6 +1009,9 @@ export default function App() {
         return
       }
 
+      // (Delete/Backspace handled by a dedicated always-on effect below, since
+      // this whole handler is disabled under Tauri.)
+
       if (!isMod) return
       if (isTyping) return
 
@@ -1045,6 +1112,33 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [saveDocument, saveAsDocument, openDocument, newDocument])
+
+  // Delete / Backspace → delete the current selection (guides).
+  // Registered SEPARATELY from the global-shortcut effect above because that one
+  // is disabled under Tauri (the native menu owns accelerators) — but Edit ▸
+  // Delete has *no* native accelerator (a bare Delete/Backspace would bypass the
+  // typing + Select-tool guards and collide with the tools' VCB Backspace), so
+  // the key must be handled in JS on BOTH web and desktop. Gating to the Select
+  // tool keeps it from stealing Backspace mid-typed-entry in other tools.
+  useEffect(() => {
+    const onDeleteKey = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Delete' && ev.key !== 'Backspace') return
+      const target = ev.target as HTMLElement
+      const isTyping =
+        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+      if (isTyping) return // let the focused field edit text normally
+      // ALWAYS swallow Delete/Backspace outside text fields: the webview
+      // otherwise treats Backspace as "navigate back", which silently wedges
+      // the whole app until restart. (This is why delete "stopped working" after
+      // a stray Backspace in a non-Select tool.) Only the Select tool deletes.
+      ev.preventDefault()
+      if (activeToolRef.current === 'Select') {
+        menuActionRef.current('edit-delete')
+      }
+    }
+    window.addEventListener('keydown', onDeleteKey)
+    return () => window.removeEventListener('keydown', onDeleteKey)
+  }, [])
 
   // Mirror the View ▸ Axes / Guides toggles into the viewport. The
   // viewport API ref is populated once the viewport mounts; both default to
@@ -1315,7 +1409,7 @@ export default function App() {
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
-        height: '100vh',
+        height: '100%',
         boxSizing: 'border-box',
         overflow: 'hidden',
         background: '#1a1a1a',
@@ -1340,6 +1434,9 @@ export default function App() {
         onSaveAs={saveAsDocument}
         onImport={importDocument}
         onExport={exportGltf}
+        recentFiles={recentFiles}
+        onOpenRecent={openRecent}
+        onClearRecent={clearRecent}
         onUndo={handleUndo}
         onRedo={handleRedo}
         canUndo={canUndo}
@@ -1361,6 +1458,7 @@ export default function App() {
         onToggleAxes={() => setShowAxes((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
+        onDelete={deleteSelection}
         onZoomExtents={handleZoomExtents}
         onOpenSettings={openSettings}
       />
@@ -1477,6 +1575,8 @@ export default function App() {
             selectedIds={selectedIds}
             activeLitSet={activeLitSet}
             onSelect={handleSelect}
+            onSelectGuide={handleSelectGuide}
+            selectedGuide={selectedGuide}
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
             onDocumentChanged={handleDocumentChanged}

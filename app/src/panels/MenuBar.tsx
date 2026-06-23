@@ -32,6 +32,12 @@ export interface MenuBarProps {
   onImport: () => void
   /** Export the model (glTF/GLB — format chosen in the file dialog). */
   onExport: () => void
+  /** Recent file paths (most-recent first), shown under File ▸ Open Recent. */
+  recentFiles?: string[]
+  /** Open a recent file by its path. */
+  onOpenRecent?: (path: string) => void
+  /** Clear the recent-files list. */
+  onClearRecent?: () => void
   onUndo: () => void
   onRedo: () => void
   canUndo: boolean
@@ -70,6 +76,8 @@ export interface MenuBarProps {
   onToggleGuides?: () => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   onDeleteGuides?: () => void
+  /** Delete the current selection — whole Object/Group/Instance nodes only (Edit ▸ Delete). */
+  onDelete?: () => void
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
   /** Open the Settings window/modal (Window → Settings…, web only — native uses the OS app menu). */
@@ -77,6 +85,11 @@ export interface MenuBarProps {
 }
 
 type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | null
+
+/** Filename portion of a path (handles / and \ separators). */
+function baseName(path: string): string {
+  return path.replace(/[/\\]+$/, '').split(/[/\\]/).pop() ?? path
+}
 
 const BAR_STYLE: React.CSSProperties = {
   display: 'flex',
@@ -170,6 +183,33 @@ function MenuItem({ label, shortcut, disabled = false, onClick }: MenuItemProps)
   )
 }
 
+/** A menu row that opens a nested flyout to its right on hover. */
+function SubMenu({ label, children }: { label: string; children: React.ReactNode }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <div
+      style={{ position: 'relative' }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div
+        style={{
+          ...MENU_ITEM_STYLE(false),
+          background: hovered ? '#3a5e9e' : 'transparent',
+        }}
+      >
+        <span>{label}</span>
+        <span style={SHORTCUT_STYLE}>▸</span>
+      </div>
+      {hovered && (
+        <div style={{ ...DROPDOWN_STYLE, top: -4, left: '100%', borderRadius: '4px' }}>
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface CheckMenuItemProps {
   label: string
   shortcut?: string
@@ -211,6 +251,9 @@ export function MenuBar({
   onSaveAs,
   onImport,
   onExport,
+  recentFiles,
+  onOpenRecent,
+  onClearRecent,
   onUndo,
   onRedo,
   canUndo,
@@ -232,6 +275,7 @@ export function MenuBar({
   onToggleAxes,
   onToggleGuides,
   onDeleteGuides,
+  onDelete,
   onZoomExtents,
   onOpenSettings,
 }: MenuBarProps) {
@@ -279,6 +323,25 @@ export function MenuBar({
           <div style={DROPDOWN_STYLE}>
             <MenuItem label="New" shortcut={`${mod}N`} onClick={withClose(onNew)} />
             <MenuItem label="Open…" shortcut={`${mod}O`} onClick={withClose(onOpen)} />
+            {recentFiles !== undefined && (
+              <SubMenu label="Open Recent">
+                {recentFiles.length === 0 ? (
+                  <MenuItem label="No Recent Files" disabled onClick={() => {}} />
+                ) : (
+                  <>
+                    {recentFiles.map((p) => (
+                      <MenuItem
+                        key={p}
+                        label={baseName(p)}
+                        onClick={withClose(() => onOpenRecent?.(p))}
+                      />
+                    ))}
+                    <div style={SEPARATOR_STYLE} />
+                    <MenuItem label="Clear Recent" onClick={withClose(() => onClearRecent?.())} />
+                  </>
+                )}
+              </SubMenu>
+            )}
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Import…" onClick={withClose(onImport)} />
             <MenuItem label="Export…" onClick={withClose(onExport)} />
@@ -312,6 +375,11 @@ export function MenuBar({
               onClick={withClose(onRedo)}
             />
             <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Delete"
+              shortcut="⌫"
+              onClick={withClose(() => onDelete?.())}
+            />
             <MenuItem
               label="Delete Guide Lines"
               onClick={withClose(() => onDeleteGuides?.())}
@@ -420,6 +488,11 @@ export function MenuBar({
               label="Protractor"
               checked={activeTool === 'Protractor'}
               onClick={withClose(() => onSelectTool?.('Protractor'))}
+            />
+            <CheckMenuItem
+              label="Slice"
+              checked={activeTool === 'Slice'}
+              onClick={withClose(() => onSelectTool?.('Slice'))}
             />
           </div>
         )}

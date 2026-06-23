@@ -247,6 +247,13 @@ impl Plane {
     pub fn signed_distance(&self, p: Point3) -> f64 {
         self.normal.dot(p.to_vec()) - self.offset
     }
+
+    /// A representative point on the plane: the foot of the perpendicular from
+    /// the origin (`normal * offset`). Handy for building an in-plane frame.
+    pub fn point(&self) -> Point3 {
+        let v = self.normal * self.offset;
+        Point3::new(v.x, v.y, v.z)
+    }
 }
 
 #[cfg(test)]
