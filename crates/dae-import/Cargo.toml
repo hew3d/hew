@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 kernel.workspace = true
+mesh-heal.workspace = true
 dae-parser = { workspace = true, default-features = true, features = [] }
 serde_json.workspace = true
 

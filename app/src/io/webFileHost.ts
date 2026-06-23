@@ -17,7 +17,7 @@
  * The hidden <input> is created once lazily and appended to document.body.
  */
 
-import type { FileHost, FileRef, ImageEntry } from './fileHost'
+import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick } from './fileHost'
 
 const HEW_FILE_TYPES: FilePickerAcceptType[] = [
   {
@@ -54,6 +54,17 @@ function anchorDownload(bytes: Uint8Array, name: string): void {
   const a = document.createElement('a')
   a.href = url
   a.download = name.endsWith('.hew') ? name : name + '.hew'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/** Trigger an anchor-download of bytes with an explicit filename + MIME type. */
+function anchorDownloadAs(bytes: Uint8Array, name: string, mime: string): void {
+  const blob = new Blob([new Uint8Array(bytes)], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -180,19 +191,49 @@ export class WebFileHost implements FileHost {
     return { name, handle: null }
   }
 
-  async openForImport(): Promise<{
-    daeBytes: Uint8Array
-    images: Record<string, ImageEntry>
-    name: string
-  } | null> {
-    const DAE_FILE_TYPES: FilePickerAcceptType[] = [
+  async exportBinary(
+    bytes: Uint8Array,
+    suggestedName: string,
+    fileType: ExportFileType,
+  ): Promise<boolean> {
+    const dotExt = '.' + fileType.ext
+    const name = suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt
+    if (hasFSAA()) {
+      let handle: FileSystemFileHandle
+      try {
+        handle = await showSaveFilePicker({
+          suggestedName: name,
+          types: [{ description: fileType.description, accept: { [fileType.mime]: [dotExt] } }],
+          excludeAcceptAllOption: false,
+        })
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return false
+        throw err
+      }
+      const writable = await handle.createWritable()
+      await writable.write(new Uint8Array(bytes))
+      await writable.close()
+      return true
+    }
+
+    // Fallback: anchor-download.
+    anchorDownloadAs(bytes, name, fileType.mime)
+    return true
+  }
+
+  async openForImport(): Promise<ImportPick | null> {
+    const FILE_TYPES: FilePickerAcceptType[] = [
       {
-        description: 'COLLADA model',
-        accept: { 'model/vnd.collada+xml': ['.dae'] },
+        description: 'Model files (COLLADA, glTF)',
+        accept: {
+          'model/vnd.collada+xml': ['.dae'],
+          'model/gltf-binary': ['.glb'],
+          'model/gltf+json': ['.gltf'],
+        },
       },
     ]
 
-    let daeBytes: Uint8Array
+    let bytes: Uint8Array
     let fileName: string
 
     if (hasFSAA()) {
@@ -200,7 +241,7 @@ export class WebFileHost implements FileHost {
       try {
         handles = await showOpenFilePicker({
           multiple: false,
-          types: DAE_FILE_TYPES,
+          types: FILE_TYPES,
           excludeAcceptAllOption: false,
         })
       } catch (err) {
@@ -210,14 +251,14 @@ export class WebFileHost implements FileHost {
       const handle = handles[0]
       if (handle === undefined) return null
       const file = await handle.getFile()
-      daeBytes = new Uint8Array(await file.arrayBuffer())
+      bytes = new Uint8Array(await file.arrayBuffer())
       fileName = file.name
     } else {
       // Fallback: hidden <input type=file>
       const result = await new Promise<{ bytes: Uint8Array; name: string } | null>((resolve) => {
         const input = document.createElement('input')
         input.type = 'file'
-        input.accept = '.dae'
+        input.accept = '.dae,.glb,.gltf'
         input.style.display = 'none'
         document.body.appendChild(input)
 
@@ -236,16 +277,19 @@ export class WebFileHost implements FileHost {
         input.click()
       })
       if (result === null) return null
-      daeBytes = result.bytes
+      bytes = result.bytes
       fileName = result.name
     }
 
-    // Best-effort texture resolution via File System Access directory picker.
-    // If the API is unavailable or the user cancels the directory picker,
-    // we proceed with no images — the kernel ImportReport will list them as
-    // missing textures, which is fine.
-    const images: Record<string, ImageEntry> = {}
+    // glTF embeds its own buffers/images — no external resolution needed.
+    if (/\.(glb|gltf)$/i.test(fileName)) {
+      return { kind: 'gltf', name: fileName, bytes }
+    }
 
+    // COLLADA: best-effort texture resolution via a directory picker. If the
+    // API is unavailable or the user cancels, proceed with no images — the
+    // kernel ImportReport will list them as missing textures, which is fine.
+    const images: Record<string, ImageEntry> = {}
     if (hasFSAA() && 'showDirectoryPicker' in window) {
       try {
         const dirHandle = await showDirectoryPicker({ mode: 'read' })
@@ -254,8 +298,7 @@ export class WebFileHost implements FileHost {
         // User cancelled or permission denied — proceed without images.
       }
     }
-
-    return { daeBytes, images, name: fileName }
+    return { kind: 'dae', name: fileName, bytes, images }
   }
 }
 

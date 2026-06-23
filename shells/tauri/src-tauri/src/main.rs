@@ -291,6 +291,7 @@ fn main() {
                 .accelerator("CmdOrCtrl+O")
                 .build(handle)?;
             let file_import = MenuItemBuilder::with_id("file-import", "Import…").build(handle)?;
+            let file_export = MenuItemBuilder::with_id("file-export", "Export…").build(handle)?;
             let file_save = MenuItemBuilder::with_id("file-save", "Save")
                 .accelerator("CmdOrCtrl+S")
                 .build(handle)?;
@@ -307,6 +308,7 @@ fn main() {
                 .item(&open_recent_submenu)
                 .separator()
                 .item(&file_import)
+                .item(&file_export)
                 .separator()
                 .item(&file_save)
                 .item(&file_save_as)
@@ -466,9 +468,22 @@ fn main() {
             // (Settings) then have no menu bar of their own.
             #[cfg(target_os = "macos")]
             app.set_menu(menu)?;
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
             if let Some(main_window) = app.webview_windows().values().next() {
                 main_window.set_menu(menu)?;
+            }
+            // Linux/WebKitGTK: KWin's titlebar decoration does not repaint the
+            // window title after the webview sets it, so we go borderless and
+            // draw our own title bar + menu in the web layer (App renders the
+            // custom TitleBar + the in-app MenuBar when isLinux). Skip the GTK
+            // menu (it would otherwise sit above our HTML chrome) and drop the
+            // server-side decorations.
+            #[cfg(target_os = "linux")]
+            {
+                let _ = menu; // built for parity; not attached on Linux.
+                if let Some(main_window) = app.webview_windows().values().next() {
+                    let _ = main_window.set_decorations(false);
+                }
             }
 
             // ----------------------------------------------------------------
@@ -502,6 +517,7 @@ fn main() {
                 "file-new" => "new",
                 "file-open" => "open",
                 "file-import" => "import",
+                "file-export" => "export",
                 "file-save" => "save",
                 "file-save-as" => "save-as",
                 "file-close" => "close",

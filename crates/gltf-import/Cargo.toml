@@ -1,0 +1,16 @@
+[package]
+name = "gltf-import"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kernel.workspace = true
+mesh-heal.workspace = true
+# default-features = false drops the `import` feature (filesystem loading + the
+# heavy `image` pixel decoder). gltf-import is I/O-free and WASM-bound, so it
+# parses in memory (`Gltf::from_slice`), reads vertex data via `utils`, and keeps
+# texture bytes *encoded* (never decoded) — see ARCHITECTURE.md WASM-size note.
+gltf = { version = "1.4", default-features = false, features = ["utils", "names"] }
+
+[dev-dependencies]
+kernel.workspace = true

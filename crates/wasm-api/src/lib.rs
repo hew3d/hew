@@ -88,6 +88,63 @@ fn doc_err(e: DocumentError) -> ApiError {
     }
 }
 
+/// Serialize a kernel `ImportReport` to the plain JS object the import UI
+/// consumes: `{ objects_created, watertight, leaky, skipped: [{name, reason}],
+/// textures_missing: [string] }`. Shared by `import_dae` and `import_gltf`.
+fn import_report_to_js(report: &kernel::ImportReport) -> JsValue {
+    let js_report = JsObject::new();
+    Reflect::set(
+        &js_report,
+        &JsValue::from_str("objects_created"),
+        &JsValue::from_f64(report.objects_created as f64),
+    )
+    .unwrap();
+    Reflect::set(
+        &js_report,
+        &JsValue::from_str("watertight"),
+        &JsValue::from_f64(report.watertight as f64),
+    )
+    .unwrap();
+    Reflect::set(
+        &js_report,
+        &JsValue::from_str("leaky"),
+        &JsValue::from_f64(report.leaky as f64),
+    )
+    .unwrap();
+
+    let skipped_arr = js_sys::Array::new();
+    for s in &report.skipped {
+        let entry = JsObject::new();
+        Reflect::set(
+            &entry,
+            &JsValue::from_str("name"),
+            &JsValue::from_str(&s.name),
+        )
+        .unwrap();
+        Reflect::set(
+            &entry,
+            &JsValue::from_str("reason"),
+            &JsValue::from_str(&s.reason),
+        )
+        .unwrap();
+        skipped_arr.push(&entry);
+    }
+    Reflect::set(&js_report, &JsValue::from_str("skipped"), &skipped_arr).unwrap();
+
+    let missing_arr = js_sys::Array::new();
+    for uri in &report.textures_missing {
+        missing_arr.push(&JsValue::from_str(uri));
+    }
+    Reflect::set(
+        &js_report,
+        &JsValue::from_str("textures_missing"),
+        &missing_arr,
+    )
+    .unwrap();
+
+    js_report.into()
+}
+
 /// Converts a `u64` handle to a [`MaterialId`], or `None` if the sentinel
 /// value `u64::MAX` is given (meaning "default / unpaint").
 fn material_id_opt(handle: u64) -> Option<MaterialId> {
@@ -1852,57 +1909,31 @@ impl Scene {
         self.reconcile(&change);
 
         // ── 5. Serialize the ImportReport to a plain JS object ────────────────
-        let js_report = JsObject::new();
-        Reflect::set(
-            &js_report,
-            &JsValue::from_str("objects_created"),
-            &JsValue::from_f64(report.objects_created as f64),
-        )
-        .unwrap();
-        Reflect::set(
-            &js_report,
-            &JsValue::from_str("watertight"),
-            &JsValue::from_f64(report.watertight as f64),
-        )
-        .unwrap();
-        Reflect::set(
-            &js_report,
-            &JsValue::from_str("leaky"),
-            &JsValue::from_f64(report.leaky as f64),
-        )
-        .unwrap();
+        Ok(import_report_to_js(&report))
+    }
 
-        let skipped_arr = js_sys::Array::new();
-        for s in &report.skipped {
-            let entry = JsObject::new();
-            Reflect::set(
-                &entry,
-                &JsValue::from_str("name"),
-                &JsValue::from_str(&s.name),
-            )
-            .unwrap();
-            Reflect::set(
-                &entry,
-                &JsValue::from_str("reason"),
-                &JsValue::from_str(&s.reason),
-            )
-            .unwrap();
-            skipped_arr.push(&entry);
-        }
-        Reflect::set(&js_report, &JsValue::from_str("skipped"), &skipped_arr).unwrap();
+    /// Import glTF 2.0 / GLB bytes into the current document. Additive: existing
+    /// geometry is untouched. Returns the same `ImportReport` JS shape as
+    /// [`Scene::import_dae`].
+    ///
+    /// Resources must be embedded (GLB binary chunk or `data:` URIs); external
+    /// file URIs cannot be fetched here and are surfaced in `textures_missing`.
+    ///
+    /// # Errors
+    /// Throws a `"glTF: <message>"` `JsError` on parse failure.
+    pub fn import_gltf(&mut self, gltf_bytes: &[u8]) -> Result<JsValue, JsError> {
+        let (scene, missing) =
+            gltf_import::import(gltf_bytes).map_err(|e| JsError::new(&format!("glTF: {e}")))?;
 
-        let missing_arr = js_sys::Array::new();
-        for uri in &report.textures_missing {
-            missing_arr.push(&JsValue::from_str(uri));
-        }
-        Reflect::set(
-            &js_report,
-            &JsValue::from_str("textures_missing"),
-            &missing_arr,
-        )
-        .unwrap();
+        let (report, change) = self
+            .doc
+            .ingest(scene, missing)
+            .map_err(|e| JsError::new(&format!("glTF: {e}")))?;
 
-        Ok(js_report.into())
+        // Additive — do NOT clear caches like `load`.
+        self.reconcile(&change);
+
+        Ok(import_report_to_js(&report))
     }
 
     // --------------------------------------------------------- persistence

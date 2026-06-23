@@ -24,6 +24,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
 import { SnapService } from './snapService'
 import { SceneRenderer } from './SceneRenderer'
+import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
 import { PushPullTool } from '../tools/PushPullTool'
@@ -147,6 +148,11 @@ export interface ViewportApi {
   setGuidesVisible: (visible: boolean) => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   deleteAllGuides: () => void
+  /**
+   * Serialize the current solid geometry (objects + instances) to a binary
+   * glTF (.glb) buffer. Resolves null when the model has no solids.
+   */
+  exportGlb: () => Promise<Uint8Array | null>
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -692,8 +698,12 @@ export default function Viewport({
       scheduleRender()
     }
 
+    async function exportGlb(): Promise<Uint8Array | null> {
+      return exportSceneToGlb(sceneRenderer)
+    }
+
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, exportGlb }
     }
 
     // ------------------------------------------------------------------ tool factories

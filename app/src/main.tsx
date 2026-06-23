@@ -17,6 +17,17 @@ if (!isSettingsWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in 
   import('virtual:pwa-register').then(({ registerSW }) =>
     registerSW({ immediate: true }),
   )
+} else if (isTauri && 'serviceWorker' in navigator) {
+  // Defensive: the desktop webview must never be controlled by a PWA service
+  // worker. A stale SW left in the webview profile (e.g. from an earlier build)
+  // would serve its cached app shell over the dev/bundled assets and blank the
+  // window. Proactively unregister any SW and drop its caches.
+  navigator.serviceWorker.getRegistrations().then((regs) => {
+    for (const reg of regs) void reg.unregister()
+  }).catch(() => { /* ignore */ })
+  if ('caches' in window) {
+    caches.keys().then((keys) => keys.forEach((k) => void caches.delete(k))).catch(() => { /* ignore */ })
+  }
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

@@ -22,11 +22,16 @@ export interface MenuBarProps {
    * nothing at all in that case.
    */
   nativeMenuBar?: boolean
+  /** Hide the centered document title (a custom TitleBar above shows it). */
+  hideTitle?: boolean
   onNew: () => void
   onOpen: () => void
   onSave: () => void
   onSaveAs: () => void
+  /** Import a model file (COLLADA / glTF — chosen in the file dialog). */
   onImport: () => void
+  /** Export the model (glTF/GLB — format chosen in the file dialog). */
+  onExport: () => void
   onUndo: () => void
   onRedo: () => void
   canUndo: boolean
@@ -199,11 +204,13 @@ function CheckMenuItem({ label, shortcut, checked, onClick }: CheckMenuItemProps
 export function MenuBar({
   title,
   nativeMenuBar = false,
+  hideTitle = false,
   onNew,
   onOpen,
   onSave,
   onSaveAs,
   onImport,
+  onExport,
   onUndo,
   onRedo,
   canUndo,
@@ -274,6 +281,7 @@ export function MenuBar({
             <MenuItem label="Open…" shortcut={`${mod}O`} onClick={withClose(onOpen)} />
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Import…" onClick={withClose(onImport)} />
+            <MenuItem label="Export…" onClick={withClose(onExport)} />
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
             <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
@@ -503,24 +511,27 @@ export function MenuBar({
         )}
       </div>
 
-      {/* Document title — centered in bar */}
-      <div
-        style={{
-          position: 'absolute',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          fontSize: '13px',
-          color: '#bbb',
-          fontFamily: 'system-ui, sans-serif',
-          pointerEvents: 'none',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          maxWidth: '50%',
-          textOverflow: 'ellipsis',
-        }}
-      >
-        {title}
-      </div>
+      {/* Document title — centered in bar (hidden when a custom TitleBar above
+          already shows it, e.g. the Linux borderless shell). */}
+      {!hideTitle && (
+        <div
+          style={{
+            position: 'absolute',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            fontSize: '13px',
+            color: '#bbb',
+            fontFamily: 'system-ui, sans-serif',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            maxWidth: '50%',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {title}
+        </div>
+      )}
 
       {/* Spacer */}
       <div style={{ flex: 1 }} />

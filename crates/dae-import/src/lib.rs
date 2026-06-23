@@ -18,11 +18,15 @@ use std::collections::HashMap;
 
 use kernel::ImageFormat;
 
-pub mod heal;
+/// Geometry healing now lives in the shared `mesh-heal` crate; this
+/// re-export keeps `dae_import::heal::…` paths (incl. tests) working unchanged.
+pub use mesh_heal as heal;
+/// UV-frame fitting also moved to `mesh-heal`; re-exported so
+/// `dae_import::uv::…` / `crate::uv::…` paths keep working unchanged.
+pub use mesh_heal::uv;
 pub mod material;
 pub mod meta;
 pub mod parse;
-pub mod uv;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 

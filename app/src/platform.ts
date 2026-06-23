@@ -13,5 +13,17 @@
 export const isMac: boolean =
   typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform)
 
+/**
+ * True on Linux (incl. the WebKitGTK desktop webview, where `navigator.platform`
+ * reports "Linux x86_64"). Used to switch the desktop shell to custom window
+ * chrome: KWin/WebKitGTK won't repaint the server-side titlebar after
+ * `setTitle`, so on Linux we go borderless and draw our own title bar + in-app
+ * menu (see `TitleBar.tsx`). macOS/Windows keep native decorations + menu.
+ */
+export const isLinux: boolean =
+  typeof navigator !== 'undefined' &&
+  /Linux|X11/.test(navigator.platform) &&
+  !/Android/.test(navigator.userAgent)
+
 /** Modifier prefix shown in shortcut hints: '⌘' on macOS, 'Ctrl+' elsewhere. */
 export const modLabel: string = isMac ? '⌘' : 'Ctrl+'

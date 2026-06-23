@@ -11,7 +11,7 @@
  * FileRef.handle is the absolute file path string.
  */
 
-import type { FileHost, FileRef, ImageEntry } from './fileHost'
+import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick } from './fileHost'
 
 /** Extract the basename from a path that may use / or \ separators. */
 function basename(path: string): string {
@@ -81,28 +81,52 @@ export class TauriFileHost implements FileHost {
     return { name: basename(path), handle: path }
   }
 
-  async openForImport(): Promise<{
-    daeBytes: Uint8Array
-    images: Record<string, ImageEntry>
-    name: string
-  } | null> {
+  async exportBinary(
+    bytes: Uint8Array,
+    suggestedName: string,
+    fileType: ExportFileType,
+  ): Promise<boolean> {
+    const dotExt = '.' + fileType.ext
+    const { save } = await import('@tauri-apps/plugin-dialog')
+    const result = await save({
+      defaultPath: suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt,
+      filters: [{ name: fileType.description, extensions: [fileType.ext] }],
+    })
+    if (result === null) return false
+    const path = result as string
+
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('write_file', { path, contents: Array.from(bytes) })
+    return true
+  }
+
+  async openForImport(): Promise<ImportPick | null> {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const result = await open({
-      filters: [{ name: 'COLLADA model', extensions: ['dae'] }],
+      filters: [
+        { name: 'Model files (COLLADA, glTF)', extensions: ['dae', 'glb', 'gltf'] },
+        { name: 'COLLADA model', extensions: ['dae'] },
+        { name: 'glTF model', extensions: ['glb', 'gltf'] },
+      ],
       multiple: false,
     })
     if (result === null) return null
-    const daePath = result as string
+    const filePath = result as string
 
     const { invoke } = await import('@tauri-apps/api/core')
-    const rawDae: number[] = await invoke('read_file', { path: daePath })
-    const daeBytes = new Uint8Array(rawDae)
+    const rawFile: number[] = await invoke('read_file', { path: filePath })
+    const fileBytes = new Uint8Array(rawFile)
+
+    // glTF embeds its own buffers/images — return the bytes, skip texture scan.
+    if (/\.(glb|gltf)$/i.test(filePath)) {
+      return { kind: 'gltf', name: basename(filePath), bytes: fileBytes }
+    }
 
     // Scan the sibling directory (and a <stem>_textures / textures subfolder
     // if present) for PNG/JPEG images.  Best-effort — failures are silently
     // ignored; the kernel ImportReport will list missing textures.
     const images: Record<string, ImageEntry> = {}
-    const dir = dirname(daePath)
+    const dir = dirname(filePath)
 
     try {
       const rawList: string[] = await invoke('list_dir', { path: dir })
@@ -123,7 +147,7 @@ export class TauriFileHost implements FileHost {
       // Also scan known texture sub-directories.
       // Includes the SketchUp-style "<stem>/" sibling folder (named after the
       // .dae file without extension), "<stem>_textures", "textures", "Textures".
-      const stem = basename(daePath).replace(/\.dae$/i, '')
+      const stem = basename(filePath).replace(/\.dae$/i, '')
       const textureDirs = [`${dir}/${stem}`, `${dir}/${stem}_textures`, `${dir}/textures`, `${dir}/Textures`]
       for (const texDir of textureDirs) {
         let subList: string[]
@@ -154,6 +178,6 @@ export class TauriFileHost implements FileHost {
       // list_dir not available or permission error — proceed without images.
     }
 
-    return { daeBytes, images, name: basename(daePath) }
+    return { kind: 'dae', name: basename(filePath), bytes: fileBytes, images }
   }
 }

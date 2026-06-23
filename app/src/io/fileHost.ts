@@ -35,6 +35,14 @@ export interface ImportReport {
   textures_missing: string[]
 }
 
+/**
+ * A successfully-picked import file. `kind` selects the kernel importer:
+ * COLLADA carries host-resolved `images`; glTF embeds its own resources.
+ */
+export type ImportPick =
+  | { kind: 'dae'; name: string; bytes: Uint8Array; images: Record<string, ImageEntry> }
+  | { kind: 'gltf'; name: string; bytes: Uint8Array }
+
 export interface FileHost {
   /**
    * Prompt the user to choose a .hew file to open.
@@ -56,23 +64,42 @@ export interface FileHost {
   saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null>
 
   /**
-   * Prompt the user to choose a .dae (COLLADA) file to import.
-   * Also attempts to resolve texture images referenced inside the file.
-   * Returns null if the user cancels.
+   * Prompt the user to choose a model file to import — COLLADA (`.dae`) or
+   * glTF (`.glb` / `.gltf`) — the format is chosen by the file the user picks
+   * (the dialog offers a filter for each). Returns null if the user cancels.
    *
-   * The `images` record maps each image URI (as the COLLADA file would
-   * reference it) to its encoded bytes + format.  Missing images are
-   * reported by the kernel ImportReport — they are not a failure here.
+   * The returned `kind` tells the caller which kernel importer to run. For
+   * COLLADA, `images` maps each referenced image URI to its encoded bytes +
+   * format (missing images are reported by the kernel ImportReport, not an
+   * error here); glTF embeds its own resources, so it carries only the bytes.
    *
    * `name` is the display name (basename) of the chosen file, used by the
    * importing overlay to show "Importing "<name>"…" while the parse runs.
    */
-  openForImport(): Promise<{
-    daeBytes: Uint8Array
-    images: Record<string, ImageEntry>
-    /** Display name (basename) of the chosen .dae file. */
-    name: string
-  } | null>
+  openForImport(): Promise<ImportPick | null>
+
+  /**
+   * Write arbitrary bytes out to a user-chosen location (e.g. a `.glb`).
+   *
+   * Unlike save/saveAs this is a one-shot "write a copy out" — it never tracks
+   * a handle for in-place re-save and carries its own file-type filter.
+   * Returns true on success, false if the user cancels.
+   */
+  exportBinary(
+    bytes: Uint8Array,
+    suggestedName: string,
+    fileType: ExportFileType,
+  ): Promise<boolean>
+}
+
+/** Describes the file type offered in an export dialog. */
+export interface ExportFileType {
+  /** Human label for the dialog filter, e.g. "glTF Binary". */
+  description: string
+  /** File extension without the dot, e.g. "glb". */
+  ext: string
+  /** MIME type, e.g. "model/gltf-binary". */
+  mime: string
 }
 
 // WebFileHost is statically imported — it's always needed for the web build.
@@ -104,6 +131,8 @@ export function makeFileHost(): FileHost {
       save: (bytes, ref) => hostPromise.then((h) => h.save(bytes, ref)),
       saveAs: (bytes, name) => hostPromise.then((h) => h.saveAs(bytes, name)),
       openForImport: () => hostPromise.then((h) => h.openForImport()),
+      exportBinary: (bytes, name, fileType) =>
+        hostPromise.then((h) => h.exportBinary(bytes, name, fileType)),
     }
   }
   return new WebFileHost()

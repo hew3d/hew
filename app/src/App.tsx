@@ -5,6 +5,8 @@ import Viewport, { type ViewportApi } from './viewport/Viewport'
 import { DocumentTree } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
+import { TitleBar } from './TitleBar'
+import { isLinux } from './platform'
 import { TagsPanel } from './panels/TagsPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { FloatingPanel } from './panels/FloatingPanel'
@@ -539,8 +541,13 @@ export default function App() {
       const blankOk = applyLoadedBytes(blank)
       if (!blankOk) return
 
-      // Step 5: import the DAE into the now-empty document.
-      report = scene.import_dae(result!.daeBytes, Object.keys(result!.images).length > 0 ? result!.images : null) as ImportReport
+      // Step 5: import into the now-empty document, dispatched by format.
+      report = (result!.kind === 'gltf'
+        ? scene.import_gltf(result!.bytes)
+        : scene.import_dae(
+            result!.bytes,
+            Object.keys(result!.images).length > 0 ? result!.images : null,
+          )) as ImportReport
     } catch (err: unknown) {
       const raw = err instanceof Error ? err.message : String(err)
       handleToast(`Import failed: ${raw}`)
@@ -567,7 +574,8 @@ export default function App() {
     setDocSession(afterImport(result!.name))
 
     setImportReport(report)
-    LogStore.log.info('app', `Imported DAE: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
+    const fmt = result!.kind === 'gltf' ? 'glTF' : 'DAE'
+    LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
   }, [confirmDiscard, handleToast, applyLoadedBytes])
 
@@ -677,6 +685,42 @@ export default function App() {
     viewportApi.current?.zoomExtents()
   }, [])
 
+  // ---------------------------------------------------------------- glTF export
+  const exportGltf = useCallback(async () => {
+    const api = viewportApi.current
+    if (api === null) {
+      handleToast('Export failed: viewport not ready.')
+      return
+    }
+    let bytes: Uint8Array | null
+    try {
+      bytes = await api.exportGlb()
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${String(err)}`)
+      return
+    }
+    if (bytes === null) {
+      handleToast('Nothing to export — the model has no solids.')
+      return
+    }
+    // Suggest a name derived from the current document, dropping any .hew suffix.
+    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
+    const base = rawBase.replace(/\.hew$/i, '')
+    try {
+      const ok = await fileHostRef.current.exportBinary(bytes, base, {
+        description: 'glTF Binary',
+        ext: 'glb',
+        mime: 'model/gltf-binary',
+      })
+      if (ok) {
+        handleToast('Exported glTF.')
+        LogStore.log.info('app', `Exported glTF (${bytes.length} bytes)`)
+      }
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${String(err)}`)
+    }
+  }, [docSession.currentRef, docSession.importedName, handleToast])
+
   // ---------------------------------------------------------------- settings window
   // Under Tauri: a separate, free-floating OS webview window (movable outside
   // the main Hew window). On web: there's no concept of a second OS window,
@@ -713,6 +757,7 @@ export default function App() {
   const handleUndoRef = useRef(handleUndo)
   const handleRedoRef = useRef(handleRedo)
   const handleZoomExtentsRef = useRef(handleZoomExtents)
+  const exportGltfRef = useRef(exportGltf)
   const openPathRef = useRef(openPath)
   const openSettingsRef = useRef(openSettings)
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
@@ -723,6 +768,7 @@ export default function App() {
   useEffect(() => { handleUndoRef.current = handleUndo }, [handleUndo])
   useEffect(() => { handleRedoRef.current = handleRedo }, [handleRedo])
   useEffect(() => { handleZoomExtentsRef.current = handleZoomExtents }, [handleZoomExtents])
+  useEffect(() => { exportGltfRef.current = exportGltf }, [exportGltf])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
   useEffect(() => { openSettingsRef.current = openSettings }, [openSettings])
 
@@ -739,6 +785,7 @@ export default function App() {
       case 'new':      newDocumentRef.current(); break
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
+      case 'export':   exportGltfRef.current(); break
       case 'save':     saveDocumentRef.current(); break
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
@@ -878,9 +925,11 @@ export default function App() {
 
   // ---------------------------------------------------------------- global keyboard shortcuts
   useEffect(() => {
-    // Under Tauri, the native menu bar owns all keyboard shortcuts.
-    // The JS keydown handler must not double-fire them.
-    if (isTauri) return
+    // macOS/Windows Tauri use the native menu bar, which owns all keyboard
+    // shortcuts — the JS handler must not double-fire them. On Linux the shell
+    // is borderless with the in-app web menu (no native accelerators), so the
+    // JS handler is the only shortcut source there (as on the web).
+    if (isTauri && !isLinux) return
 
     const onKeyDown = (ev: KeyboardEvent) => {
       const isMod = ev.metaKey || ev.ctrlKey
@@ -1272,17 +1321,25 @@ export default function App() {
         background: '#1a1a1a',
       }}
     >
+      {/* Linux desktop shell: borderless window → draw our own title bar
+          (KWin won't repaint the native one after setTitle). */}
+      {isTauri && isLinux && <TitleBar title={deriveTitle(docSession)} />}
+
       {/* App bar / menu bar.
-          Under Tauri, the native OS menu bar owns File/Edit; the in-app bar
-          shows only the document title + kernel version. */}
+          On macOS/Windows Tauri the native OS menu bar owns File/Edit (this
+          renders nothing). On the web and the Linux borderless shell, the in-app
+          bar renders the menus; the centered title is shown by TitleBar on Linux
+          so it is hidden here in that case. */}
       <MenuBar
         title={deriveTitle(docSession)}
-        nativeMenuBar={isTauri}
+        nativeMenuBar={isTauri && !isLinux}
+        hideTitle={isTauri && isLinux}
         onNew={newDocument}
         onOpen={openDocument}
         onSave={saveDocument}
         onSaveAs={saveAsDocument}
         onImport={importDocument}
+        onExport={exportGltf}
         onUndo={handleUndo}
         onRedo={handleRedo}
         canUndo={canUndo}

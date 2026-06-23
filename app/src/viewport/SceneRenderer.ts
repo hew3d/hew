@@ -817,6 +817,99 @@ export class SceneRenderer {
   }
 
   /** Apply the context fade to all objects, instances, and sketches. */
+  /** True when there is any solid geometry (objects or instances) to export. */
+  hasExportableGeometry(): boolean {
+    return this.objectGroups.size > 0 || this.instanceGroups.size > 0
+  }
+
+  /**
+   * Build a throwaway THREE scene graph holding only the solid geometry —
+   * object + instance *face* meshes, never edges, sketch, or guides — for
+   * handing to a glTF exporter.
+   *
+   * Face materials are rebuilt as clean `MeshStandardMaterial` (metalness 0 /
+   * roughness 1) carrying the true base color / texture / per-vertex colors,
+   * with opacity reset to each material's real alpha (`userData.baseOpacity`)
+   * so transient isolation dimming never leaks into the export. Selection
+   * highlight only recolors edges (excluded here), so it cannot leak either.
+   * Geometry buffers and textures are *shared by reference* with the live scene
+   * (the exporter only reads them); the returned materials are fresh and must
+   * be released by the caller via `disposeExportScene`.
+   *
+   * Instance nodes carry their pose as a node transform, so the exporter emits
+   * real glTF node hierarchy + per-instance transforms.
+   */
+  buildExportScene(): THREE.Group {
+    const root = new THREE.Group()
+    root.name = 'HewModel'
+    // Hew's world (and this three.js scene — camera.up = +Z) is Z-up, but glTF
+    // is defined Y-up. Rotate the export root −90° about X so the emitted file is
+    // a spec-compliant Y-up document (correct in Blender and round-tripping
+    // through our own Y-up importer, which applies the inverse y_up_to_z_up).
+    root.matrixAutoUpdate = false
+    root.matrix.makeRotationX(-Math.PI / 2)
+    root.matrixWorldNeedsUpdate = true
+
+    const toStandard = (m: THREE.MeshPhongMaterial): THREE.MeshStandardMaterial => {
+      const baseOpacity = (m.userData.baseOpacity as number | undefined) ?? 1
+      return new THREE.MeshStandardMaterial({
+        color: m.color.clone(),
+        map: m.map ?? null,
+        vertexColors: m.vertexColors,
+        side: m.side,
+        metalness: 0,
+        roughness: 1,
+        transparent: baseOpacity < 1,
+        opacity: baseOpacity,
+      })
+    }
+
+    const exportMesh = (src: THREE.Mesh, name: string): THREE.Mesh => {
+      const mat = src.material
+      const newMat = Array.isArray(mat)
+        ? mat.map((m) => toStandard(m as THREE.MeshPhongMaterial))
+        : toStandard(mat as THREE.MeshPhongMaterial)
+      const out = new THREE.Mesh(src.geometry, newMat)
+      out.name = name
+      return out
+    }
+
+    for (const [id, g] of this.objectGroups) {
+      root.add(exportMesh(g.facesMesh, `Object_${id}`))
+    }
+
+    for (const [id, g] of this.instanceGroups) {
+      const node = new THREE.Group()
+      node.name = `Instance_${id}`
+      node.matrixAutoUpdate = false
+      node.matrix.copy(g.group.matrix)
+      node.matrixWorldNeedsUpdate = true
+      g.facesMeshes.forEach((fm, i) => {
+        node.add(exportMesh(fm, `Instance_${id}_member_${g.memberIds[i]}`))
+      })
+      root.add(node)
+    }
+
+    return root
+  }
+
+  /**
+   * Release the fresh materials created by `buildExportScene`. Geometry and
+   * textures are shared with the live scene and are intentionally left intact.
+   */
+  disposeExportScene(root: THREE.Group): void {
+    root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh
+      if (mesh.isMesh !== true) return
+      const mat = mesh.material
+      if (Array.isArray(mat)) {
+        for (const m of mat) m.dispose()
+      } else {
+        mat.dispose()
+      }
+    })
+  }
+
   private _applyIsolation(): void {
     for (const [id, g] of this.objectGroups) {
       const dimmed = this.activeLitSet !== null && !this.activeLitSet.has(id)

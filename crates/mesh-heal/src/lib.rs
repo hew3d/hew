@@ -1,10 +1,16 @@
-//! Geometry healing for COLLADA import (contract).
+//! Geometry healing for mesh import (shared by `dae-import`  and
+//! `gltf-import`; contract).
 //!
-//! Operates per-mesh, producing the deduplicated `(positions, faces)` for a
-//! `MeshRecipe`. Passes, in order:
+//! UI-, I/O-, and format-free (DEVELOPMENT.md rule 1 — kernel-only dependency): the
+//! caller hands in raw positions/faces/material refs already extracted from its
+//! own format, and gets back welded, deduped, oriented, watertight-where-possible
+//! geometry ready for a `kernel::MeshRecipe`.
 //!
-//! 1. **Unit + up-axis transform** — apply COLLADA `unit.meter` scale and
-//!    rotate the up-axis onto Hew's +Z. Positions land in meters, Z-up.
+//! Operates per-mesh, producing the deduplicated `(positions, faces)`. Passes,
+//! in order:
+//!
+//! 1. **Unit + up-axis transform** — apply a `unit.meter` scale and rotate the
+//!    source up-axis onto Hew's +Z. Positions land in meters, Z-up.
 //! 2. **Weld** — bucket by quantized cell; merge positions within
 //!    `tol::POINT_MERGE`; remap face indices; drop degenerate (collapsed) faces.
 //! 3. **Drop zero-area faces** — collinear sliver triangles from SketchUp
@@ -24,6 +30,9 @@
 //! reports them as skipped (DEVELOPMENT.md rule 4).
 
 use kernel::{Point3, Transform, Vec3, tol};
+
+/// Per-face affine UV-frame fitting from corner positions + corner UVs.
+pub mod uv;
 
 // ── Internal type aliases ─────────────────────────────────────────────────────
 
@@ -89,28 +98,41 @@ pub fn world_transform(unit_meter: f32, up_axis: &str) -> Transform {
 
 /// Quantize a single coordinate to a bucket key.
 #[inline]
-fn bucket(v: f64) -> i64 {
-    (v / tol::POINT_MERGE).floor() as i64
+fn bucket(v: f64, weld_tol: f64) -> i64 {
+    (v / weld_tol).floor() as i64
 }
 
 /// Bucket key for a point (3 i64s packed into a tuple).
 #[inline]
-fn bucket_key(p: Point3) -> (i64, i64, i64) {
-    (bucket(p.x), bucket(p.y), bucket(p.z))
+fn bucket_key(p: Point3, weld_tol: f64) -> (i64, i64, i64) {
+    (
+        bucket(p.x, weld_tol),
+        bucket(p.y, weld_tol),
+        bucket(p.z, weld_tol),
+    )
 }
 
-/// Weld near-coincident positions together.
+/// Weld near-coincident positions together at the kernel's native `POINT_MERGE`
+/// (1 nm) tolerance — appropriate for high-precision sources (COLLADA stores
+/// arbitrary-precision text). For f32-quantised sources (glTF `POSITION` is
+/// float32, so coincident vertices land microns apart at metre scale) use
+/// [`weld_with_tol`] with a scale-appropriate tolerance instead.
 ///
 /// Returns `(unique_positions, old_to_new)` where `old_to_new[i]` is the index
 /// in `unique_positions` that position `i` mapped to.
 pub fn weld(positions: &[Point3]) -> (Vec<Point3>, Vec<usize>) {
+    weld_with_tol(positions, tol::POINT_MERGE)
+}
+
+/// Weld positions, merging any two within `weld_tol` (Euclidean). See [`weld`].
+pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<usize>) {
     // Map (bucket_key) → index in the representative list.
     let mut cell_to_rep: HashMap<(i64, i64, i64), usize> = HashMap::new();
     let mut unique: Vec<Point3> = Vec::new();
     let mut old_to_new: Vec<usize> = Vec::with_capacity(positions.len());
 
     for &p in positions {
-        let key = bucket_key(p);
+        let key = bucket_key(p, weld_tol);
         // Probe the 3×3×3 neighbourhood for an existing representative within
         // tol::POINT_MERGE (Euclidean).
         let mut found = None;
@@ -123,7 +145,7 @@ pub fn weld(positions: &[Point3]) -> (Vec<Point3>, Vec<usize>) {
                         let dx = p.x - rep.x;
                         let dy = p.y - rep.y;
                         let dz = p.z - rep.z;
-                        if (dx * dx + dy * dy + dz * dz).sqrt() <= tol::POINT_MERGE {
+                        if (dx * dx + dy * dy + dz * dz).sqrt() <= weld_tol {
                             found = Some(rep_idx);
                             break 'outer;
                         }
@@ -1015,6 +1037,37 @@ pub fn heal_mesh(
     FaceCornerUvs,
     FaceHoles,
 ) {
+    heal_mesh_with_weld_tol(
+        raw_positions,
+        raw_faces,
+        raw_face_materials,
+        raw_face_corner_uvs,
+        raw_face_holes,
+        bake_tf,
+        tol::POINT_MERGE,
+    )
+}
+
+/// Like [`heal_mesh`] but welds at `weld_tol` instead of the native 1 nm
+/// `POINT_MERGE`. Use a scale-appropriate tolerance for f32-quantised sources
+/// (glTF), where coincident vertices land microns apart and the 1 nm weld would
+/// fail to merge them — leaving every shared edge split and the shell "leaky".
+#[allow(clippy::too_many_arguments)]
+pub fn heal_mesh_with_weld_tol(
+    raw_positions: &[Point3],
+    raw_faces: &[Vec<usize>],
+    raw_face_materials: &[u32],
+    raw_face_corner_uvs: &[Vec<[f64; 2]>],
+    raw_face_holes: &[Vec<Vec<usize>>],
+    bake_tf: &Transform,
+    weld_tol: f64,
+) -> (
+    Vec<Point3>,
+    Vec<Vec<usize>>,
+    Vec<u32>,
+    FaceCornerUvs,
+    FaceHoles,
+) {
     // 1. Apply bake transform (unit + up-axis for world meshes; identity for defs).
     let transformed: Vec<Point3> = raw_positions
         .iter()
@@ -1022,7 +1075,7 @@ pub fn heal_mesh(
         .collect();
 
     // 2. Weld.
-    let (unique_positions, old_to_new) = weld(&transformed);
+    let (unique_positions, old_to_new) = weld_with_tol(&transformed, weld_tol);
     let (remapped_faces, remapped_mats, remapped_uvs, remapped_holes) = remap_faces(
         raw_faces,
         raw_face_materials,
@@ -1185,6 +1238,24 @@ fn drop_zero_area_faces(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// glTF positions are f32, so vertices coincident in the source land
+    /// microns apart at metre scale. The native 1 nm weld must NOT merge such a
+    /// gap (it can't, by design), but `weld_with_tol` at a scale-appropriate
+    /// tolerance must — otherwise the shell reads as "leaky". Guards.
+    #[test]
+    fn weld_with_tol_merges_f32_scale_gap() {
+        // ~3 µm apart at 30 m — representative of an f32 round-trip gap.
+        let a = Point3::new(30.0, 0.0, 0.0);
+        let b = Point3::new(30.0 + 3e-6, 0.0, 0.0);
+
+        let (tight, _) = weld(&[a, b]);
+        assert_eq!(tight.len(), 2, "1 nm weld must not merge a 3 µm gap");
+
+        let (coarse, map) = weld_with_tol(&[a, b], 1e-5);
+        assert_eq!(coarse.len(), 1, "10 µm weld merges the f32-scale gap");
+        assert_eq!(map[0], map[1]);
+    }
 
     /// Weld is idempotent: running it twice gives the same result.
     #[test]
