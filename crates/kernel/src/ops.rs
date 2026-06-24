@@ -182,6 +182,18 @@ pub enum PushPullError {
     NotASubFace,
 }
 
+/// How a moved face's boundary half-edge relates to its neighbor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundaryEdgeKind {
+    /// Neighbor's normal is ~perpendicular to the sweep — an ordinary
+    /// side wall that stretches as the moved face translates.
+    Transverse,
+    /// Neighbor's normal is ~parallel to the sweep — a coplanar sibling
+    /// (a `split_face` cut edge); a wall is built along the shared edge
+    /// instead of translating it.
+    Coplanar,
+}
+
 /// Typed failures of the sticky surface operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StickyError {
@@ -226,6 +238,13 @@ pub enum StickyError {
     /// `merge_inner_face`: the face is not an imprinted sub-face (its boundary is
     /// not a single closed loop twinned entirely with one parent's hole loop).
     NotAnInnerFace,
+    /// The operation's result failed topology validation. The object is left
+    /// exactly as it was (strong guarantee). This is the release-safe backstop:
+    /// the debug validator (`check_invariants`) is compiled out of release
+    /// builds, so a cut that would corrupt topology (e.g. a near-degenerate
+    /// path from a noisy UI snap) is refused here with a typed error rather
+    /// than committing invalid geometry that panics on a later access.
+    WouldCorrupt,
 }
 
 /// Typed failures of boolean combination.
@@ -339,6 +358,9 @@ impl std::fmt::Display for StickyError {
             StickyError::LoopSelfIntersects => write!(f, "loop crosses itself"),
             StickyError::NotAnInnerFace => {
                 write!(f, "face is not an imprinted sub-face")
+            }
+            StickyError::WouldCorrupt => {
+                write!(f, "operation would produce invalid topology")
             }
         }
     }
@@ -615,6 +637,14 @@ impl Object {
     ///   where a new wall lands coplanar with an existing neighbor face
     ///   (within [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)/[`tol::NORMAL_DIRECTION`](crate::tol::NORMAL_DIRECTION)), they merge —
     ///   pulling a box's top up yields a taller box with 6 faces, not 10.
+    /// - If the moved face shares an edge with a **coplanar neighbor** — a
+    ///   sibling sub-face produced by [`Object::split_face`] — a wall is built
+    ///   along that shared edge and the shared vertices are **unwelded** (the
+    ///   sibling stays put), so pushing one half of a bisected face steps it up
+    ///   or down. Side walls that straddle the cut reshape into stepped
+    ///   (still planar) polygons. A neighbor that is *not* coplanar and whose
+    ///   normal is not perpendicular to the sweep is still refused as
+    ///   [`PushPullError::NonManifoldResult`].
     /// - Pushing inward until the moved face lands on the opposite face's
     ///   plane dissolves both ("push through"): material is subtracted, and
     ///   the object may split into multiple shells (still one Object).
@@ -642,16 +672,15 @@ impl Object {
         let face_normal = self.faces[face].plane.normal();
         let sweep = face_normal * distance;
 
+        let boundary_loops: Vec<LoopId> = std::iter::once(self.faces[face].outer_loop)
+            .chain(self.faces[face].inner_loops.iter().copied())
+            .collect();
+
         // Collect all vertex IDs on the moved face (outer + inner loops).
         let moved_vertices: std::collections::HashSet<VertexId> = {
-            let outer_loop = self.faces[face].outer_loop;
-            let inner_loops: Vec<LoopId> = self.faces[face].inner_loops.clone();
             let mut verts = std::collections::HashSet::new();
-            for h in self.loop_half_edges(outer_loop) {
-                verts.insert(self.half_edges[h].origin);
-            }
-            for il in &inner_loops {
-                for h in self.loop_half_edges(*il) {
+            for &loop_id in &boundary_loops {
+                for h in self.loop_half_edges(loop_id) {
                     verts.insert(self.half_edges[h].origin);
                 }
             }
@@ -662,16 +691,9 @@ impl Object {
         // A boundary edge of the moved face is one where one half-edge is on the moved face
         // and the twin is on a different face.
         let neighbor_faces: Vec<FaceId> = {
-            let outer_loop = self.faces[face].outer_loop;
-            let inner_loops: Vec<LoopId> = self.faces[face].inner_loops.clone();
             let mut neighbors = Vec::new();
             let mut seen = std::collections::HashSet::new();
-
-            let all_loops: Vec<LoopId> = std::iter::once(outer_loop)
-                .chain(inner_loops.iter().copied())
-                .collect();
-
-            for loop_id in all_loops {
+            for &loop_id in &boundary_loops {
                 for h in self.loop_half_edges(loop_id) {
                     if let Some(twin_h) = self.half_edges[h].twin {
                         let neighbor_loop = self.half_edges[twin_h].loop_id;
@@ -686,18 +708,66 @@ impl Object {
         };
 
         // --- Step 2: Eligibility check ---
-        // For each neighbor face, the sweep direction (face normal) must lie in
-        // the neighbor's plane: |normal_moved · normal_neighbor| < tol::NORMAL_DIRECTION.
-        for &nf in &neighbor_faces {
-            let normal_neighbor = self.faces[nf].plane.normal();
-            let dot = face_normal.dot(normal_neighbor).abs();
-            if dot >= tol::NORMAL_DIRECTION {
-                return Err(PushPullError::NonManifoldResult);
+        // Classify each boundary half-edge of the moved face by how its
+        // neighbor's plane relates to the sweep direction:
+        // - dot ~ 0: transverse neighbor (a perpendicular side wall) — translate
+        //   the shared vertices in place, exactly as before.
+        // - dot ~ 1: coplanar sibling (a `split_face` cut edge) — build a wall
+        //   along the shared edge instead of refusing.
+        // - otherwise: a genuinely slanted neighbor — still refused.
+        let mut edge_kinds: std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind> =
+            std::collections::HashMap::new();
+        for &loop_id in &boundary_loops {
+            for h in self.loop_half_edges(loop_id) {
+                let Some(twin_h) = self.half_edges[h].twin else {
+                    // No twin means an open boundary edge; ObjectNotSolid above
+                    // should have already refused this, but guard anyway.
+                    return Err(PushPullError::NonManifoldResult);
+                };
+                let neighbor_loop = self.half_edges[twin_h].loop_id;
+                let neighbor_face = self.loops[neighbor_loop].face;
+                let normal_neighbor = self.faces[neighbor_face].plane.normal();
+                let dot = face_normal.dot(normal_neighbor).abs();
+                let kind = if dot <= tol::NORMAL_DIRECTION {
+                    BoundaryEdgeKind::Transverse
+                } else if dot >= 1.0 - tol::NORMAL_DIRECTION {
+                    BoundaryEdgeKind::Coplanar
+                } else {
+                    return Err(PushPullError::NonManifoldResult);
+                };
+                edge_kinds.insert(h, kind);
             }
         }
 
+        // Endpoints of a Coplanar boundary edge (a `split_face` cut shared
+        // with a sibling sub-face): the coplanar-aware mutation unwelds along
+        // these on purpose, so a "fixed" occurrence of either endpoint on a
+        // neighbor wall is never an obstruction.
+        let coplanar_adjacent_vertices: std::collections::HashSet<VertexId> = boundary_loops
+            .iter()
+            .flat_map(|&loop_id| self.loop_half_edges(loop_id))
+            .filter(|h| matches!(edge_kinds[h], BoundaryEdgeKind::Coplanar))
+            .flat_map(|h| {
+                let origin = self.half_edges[h].origin;
+                let dest = self.half_edges[self.half_edges[h].next].origin;
+                [origin, dest]
+            })
+            .collect();
+
+        // This sweep may exactly close a step built by an earlier
+        // coplanar-aware push ( inverse) — detected structurally, the same
+        // way `try_collapse_coplanar_step` will apply it below. When it does,
+        // the candidate walls' far corners (e.g. an L-shaped wall's original
+        // far end) are part of the step machinery being collapsed away, not a
+        // genuine fixed obstruction, so the interior-obstruction guard below
+        // must not see them as blocking — and indeed must not run for THIS
+        // sweep at all: collapsing is the structural inverse of a previously
+        // accepted push, so it cannot newly self-intersect.
+        let is_collapse =
+            !find_collapse_plans(self, face, &boundary_loops, &edge_kinds, sweep).is_empty();
+
         // --- Step 3: WouldVanish check (inward push only) ---
-        if distance < 0.0 {
+        if distance < 0.0 && !is_collapse {
             // Inward push: compute extent = maximum inward signed distance from
             // the moved face's plane over all vertices NOT on the moved face.
             // "Inward" means in the -face_normal direction, so the signed distance
@@ -737,7 +807,9 @@ impl Object {
                 for loop_id in loops {
                     for h in self.loop_half_edges(loop_id) {
                         let vid = self.half_edges[h].origin;
-                        if moved_vertices.contains(&vid) {
+                        if moved_vertices.contains(&vid)
+                            || coplanar_adjacent_vertices.contains(&vid)
+                        {
                             continue;
                         }
                         let inward = -moved_face_plane.signed_distance(self.vertices[vid].position);
@@ -748,45 +820,103 @@ impl Object {
                 }
             }
             if (-distance) >= neighbor_limit - tol::POINT_MERGE {
+                eprintln!(
+                    "DEBUG obstruction guard refuse: distance={distance} neighbor_limit={neighbor_limit}"
+                );
                 return Err(PushPullError::NonManifoldResult);
             }
         }
 
+        let has_coplanar = edge_kinds
+            .values()
+            .any(|k| matches!(k, BoundaryEdgeKind::Coplanar));
+
         // --- Steps 4-6: Clone, mutate, validate, swap ---
         let mut obj = self.clone();
+        let mut created_faces: Vec<FaceId> = Vec::new();
+        let mut removed_faces: Vec<FaceId> = Vec::new();
 
-        // Step 4: Translate vertices of the moved face's boundary.
-        for &vid in &moved_vertices {
-            obj.vertices[vid].position = obj.vertices[vid].position + sweep;
-        }
-
-        // Step 5: Refit planes for the moved face and every neighbor face.
-        // Moved face:
-        {
+        if is_collapse {
+            // The sweep exactly closes a coplanar step built by an earlier
+            // coplanar-aware push ( inverse): weld the moved face straight
+            // back onto the sibling it was raised from, removing the wall and
+            // un-stepping the straddling transverse walls, instead of raising
+            // a new copy that would immediately coincide with one already
+            // there (which `push_pull_coplanar_aware` cannot represent: it
+            // always mints a fresh vertex). Checked BEFORE `has_coplanar`:
+            // once a step exists, its cut edge classifies as Transverse (the
+            // wall built to bridge it is perpendicular to the moved face), so
+            // `has_coplanar` alone can no longer detect this case.
+            removed_faces =
+                try_collapse_coplanar_step(&mut obj, face, &boundary_loops, &edge_kinds, sweep)?
+                    .expect("is_collapse implies find_collapse_plans is non-empty");
+        } else if !has_coplanar {
+            // Fast path: pure translate mode (no coplanar siblings on this
+            // boundary) — exactly the pre- behavior.
+            for &vid in &moved_vertices {
+                obj.vertices[vid].position = obj.vertices[vid].position + sweep;
+            }
             let outer_loop = obj.faces[face].outer_loop;
             let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-            // A refit failure after the guards above is a degenerate sweep
-            // we failed to predict — refuse loudly, never skip the refit.
             obj.faces[face].plane =
                 Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
-        }
-        // Neighbor faces (their boundary vertices were moved too, since they share the ring):
-        for &nf in &neighbor_faces {
-            let outer_loop = obj.faces[nf].outer_loop;
-            let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-            obj.faces[nf].plane =
-                Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+            for &nf in &neighbor_faces {
+                let outer_loop = obj.faces[nf].outer_loop;
+                let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+                obj.faces[nf].plane =
+                    Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+            }
+        } else {
+            created_faces = push_pull_coplanar_aware(
+                &mut obj,
+                face,
+                &boundary_loops,
+                &edge_kinds,
+                &neighbor_faces,
+                sweep,
+            )?;
         }
 
-        // Step 6: Validate, then swap.
+        if std::env::var("HEW_DEBUG_DUMP").is_ok() {
+            for (vid, v) in &obj.vertices {
+                eprintln!("V {:?} pos={:?}", vid, v.position);
+            }
+            for (fid, f) in &obj.faces {
+                eprintln!(
+                    "F {:?} outer_loop={:?} normal={:?}",
+                    fid,
+                    f.outer_loop,
+                    f.plane.normal()
+                );
+            }
+            for (l, lp) in &obj.loops {
+                eprintln!(
+                    "L {:?} face={:?} first={:?}",
+                    l, lp.face, lp.first_half_edge
+                );
+            }
+            for (h, he) in &obj.half_edges {
+                eprintln!(
+                    "HE {:?} origin={:?} twin={:?} next={:?} prev={:?} edge={:?} loop={:?}",
+                    h, he.origin, he.twin, he.next, he.prev, he.edge, he.loop_id
+                );
+            }
+        }
+        // Step 6: Validate (debug) and the always-on release-safe backstop
+        //: a near-degenerate sweep that slips past the guards above yet
+        // produces invalid topology must be refused, not committed.
         obj.check_invariants();
+        obj.validate().map_err(|e| {
+            eprintln!("DEBUG final validate failed: {:?}", e);
+            PushPullError::NonManifoldResult
+        })?;
         *self = obj;
 
         // Step 7: Report.
         Ok(PushPullReport {
             face,
-            created_faces: vec![],
-            removed_faces: vec![],
+            created_faces,
+            removed_faces,
         })
     }
 
@@ -1501,6 +1631,12 @@ impl Object {
         let mut obj = self.clone();
         let report = do_split_face(&mut obj, face, path, &ep0, &ep1)?;
         obj.check_invariants();
+        // Release-safe backstop: `check_invariants` is compiled out of release
+        // builds (the shipped wasm), so a path that slips past the up-front
+        // checks yet corrupts topology (a near-degenerate cut from a noisy UI
+        // snap) would otherwise commit and panic on a later access. The
+        // always-on validator refuses it here, leaving `self` untouched.
+        obj.validate().map_err(|_| StickyError::WouldCorrupt)?;
         *self = obj;
         Ok(report)
     }
@@ -1965,6 +2101,731 @@ impl Object {
 }
 
 // ============================================================== private helpers
+
+/// Detects and undoes the exact inverse of [`push_pull_coplanar_aware`]'s
+/// unweld: a push whose sweep exactly closes a coplanar step it (or an
+/// earlier coplanar-aware push) built. A previously built cut wall is itself
+/// perpendicular to the moved face, so it classifies as an ordinary
+/// `Transverse` boundary edge ('s dot-product test cannot tell "an
+/// original side wall" from "a wall straddling a cut" apart — both are
+/// perpendicular); this scan instead recognizes the wall by shape: a quad
+/// whose far edge (two hops around from the moved face's edge) is itself
+/// twinned with a face that IS coplanar with the moved face — the sibling the
+/// wall was built to bridge to.
+///
+/// Returns `Ok(Some(removed_faces))` if every such wall's far edge sits
+/// exactly `sweep` away (within [`tol::POINT_MERGE`]) — i.e. the wall is
+/// collapsing to zero height — after welding `face`'s boundary straight back
+/// onto the sibling the wall was bridging to and removing the wall and its
+/// spliced junction steps. Returns `Ok(None)` (object untouched, no Transverse
+/// edge qualifies) so the caller falls back to [`push_pull_coplanar_aware`]'s
+/// raise path — including the ordinary case where every neighbor really is
+/// just an unrelated side wall.
+///
+/// Scope: this only ever welds a step shut. It never merges `face`
+/// into a flush single face with its sibling (the cut edge persists, exactly
+/// reversing the unweld) and never attempts push-through.
+struct CollapsePlan {
+    h: HalfEdgeId,
+    h_hole: HalfEdgeId,
+    hb: HalfEdgeId,
+    hc: HalfEdgeId,
+    hd: HalfEdgeId,
+    wall_face: FaceId,
+    far_a: VertexId,
+    far_b: VertexId,
+}
+
+/// Pure (non-mutating) detection half of `try_collapse_coplanar_step`: finds
+/// every Transverse boundary half-edge `h` (moved face, origin `va`, twin
+/// `h_hole` on a candidate wall `w`) where `w`'s loop is a quad
+/// `h_hole(vb) -> hb(va) -> hc(far_a) -> hd(far_b) -> h_hole`, `hc`'s far-side
+/// twin is coplanar with the moved face (the telltale sign `w` is a cut wall,
+/// not an ordinary side wall), and both `position(va) + sweep ==
+/// position(far_a)` and `position(vb) + sweep == position(far_b)` — i.e. this
+/// sweep exactly closes a step built by an earlier coplanar-aware push.
+///
+/// Read-only: callers use this both to decide whether to apply the collapse
+/// (`try_collapse_coplanar_step`) and to know — *before* Step 3's
+/// interior-obstruction guard runs — that vertices on these candidate walls
+/// are part of the step machinery, not a genuine fixed obstruction.
+fn find_collapse_plans(
+    obj: &Object,
+    face: FaceId,
+    boundary_loops: &[LoopId],
+    edge_kinds: &std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind>,
+    sweep: Vec3,
+) -> Vec<CollapsePlan> {
+    let face_normal = obj.faces[face].plane.normal();
+    let mut plans = Vec::new();
+    for &loop_id in boundary_loops {
+        for h in obj.loop_half_edges(loop_id) {
+            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Transverse) {
+                continue;
+            }
+            let va = obj.half_edges[h].origin;
+            let h_hole = obj.half_edges[h].twin.expect("watertight boundary edge");
+            let vb = obj.half_edges[h_hole].origin;
+            let hb = obj.half_edges[h_hole].next;
+            let hc = obj.half_edges[hb].next;
+            let hd = obj.half_edges[hc].next;
+            if obj.half_edges[hd].next != h_hole {
+                continue; // wall isn't a quad — not a cut wall built by us.
+            }
+            let Some(hc_twin) = obj.half_edges[hc].twin else {
+                continue;
+            };
+            let far_face = obj.loops[obj.half_edges[hc_twin].loop_id].face;
+            let far_normal = obj.faces[far_face].plane.normal();
+            // A step sibling shares the moved face's normal DIRECTION (dot ≈ +1):
+            // it came from the same `split_face`d face. The opposite side of the
+            // solid is antiparallel (dot ≈ -1); collapsing onto it is push-THROUGH,
+            // not a step re-merge, and must fall through to the WouldVanish path.
+            if face_normal.dot(far_normal) < 1.0 - tol::NORMAL_DIRECTION {
+                continue; // far side isn't a same-facing coplanar sibling.
+            }
+            let far_a = obj.half_edges[hc].origin;
+            let far_b = obj.half_edges[hd].origin;
+            let target_a = obj.vertices[va].position + sweep;
+            let target_b = obj.vertices[vb].position + sweep;
+            if !target_a.approx_eq(obj.vertices[far_a].position, tol::POINT_MERGE)
+                || !target_b.approx_eq(obj.vertices[far_b].position, tol::POINT_MERGE)
+            {
+                continue; // shape matches a cut wall, but this push doesn't close it exactly.
+            }
+            let wall_face = obj.loops[obj.half_edges[h_hole].loop_id].face;
+            plans.push(CollapsePlan {
+                h,
+                h_hole,
+                hb,
+                hc,
+                hd,
+                wall_face,
+                far_a,
+                far_b,
+            });
+        }
+    }
+    plans
+}
+
+fn try_collapse_coplanar_step(
+    obj: &mut Object,
+    face: FaceId,
+    boundary_loops: &[LoopId],
+    edge_kinds: &std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind>,
+    sweep: Vec3,
+) -> Result<Option<Vec<FaceId>>, PushPullError> {
+    let plans = find_collapse_plans(obj, face, boundary_loops, edge_kinds, sweep);
+    if plans.is_empty() {
+        return Ok(None);
+    }
+
+    // Every vertex on the moved face's boundary that ISN'T a junction welded
+    // back onto a sibling below (i.e. every corner Pass 1 of the original
+    // push translated in place rather than raising, because both its incident
+    // edges were Transverse) still needs to translate back by `sweep` now —
+    // exactly mirroring the fast (pure-translate) path. Collected up front,
+    // before any welding below changes the loops' membership.
+    let welded: std::collections::HashSet<VertexId> =
+        plans.iter().flat_map(|p| [p.far_a, p.far_b]).collect();
+    let mut to_translate: Vec<VertexId> = Vec::new();
+    for &loop_id in boundary_loops {
+        for h in obj.loop_half_edges(loop_id) {
+            let v = obj.half_edges[h].origin;
+            if !welded.contains(&v) && !to_translate.contains(&v) {
+                to_translate.push(v);
+            }
+        }
+    }
+    for v in to_translate {
+        obj.vertices[v].position = obj.vertices[v].position + sweep;
+    }
+
+    let mut removed_faces = Vec::new();
+    // The raised junction copies retired by the re-weld below. They are still
+    // referenced by the straddling transverse side walls (their step vertices),
+    // so after the per-plan surgery every remaining reference to a raised copy
+    // is welded onto its surviving sibling vertex — otherwise a side-wall edge
+    // keeps starting at a vertex the moved face no longer shares, breaking the
+    // twin-origin involution (validate.rs `twin.origin == next.origin`).
+    let mut welds: Vec<(VertexId, VertexId)> = Vec::new();
+    for plan in &plans {
+        // Weld `h` directly onto whatever the wall's far edge (`hc`) was
+        // twinned with — exactly reversing `build_coplanar_wall`'s "wc
+        // reuses the old shared edge" move. `h`'s origin retires the raised
+        // copy in favor of `far_a` (mirrors Pass 2's repoint in reverse); its
+        // DESTINATION — `h.next`'s origin, currently the other raised copy —
+        // must likewise retire to `far_b`, or that raised vertex is left
+        // dangling once the wall (its only other referrer) is removed below.
+        let hc_twin = obj.half_edges[plan.hc].twin;
+        let h_next = obj.half_edges[plan.h].next;
+        let raised_a = obj.half_edges[plan.h].origin;
+        let raised_b = obj.half_edges[h_next].origin;
+        if raised_a != plan.far_a {
+            welds.push((raised_a, plan.far_a));
+        }
+        if raised_b != plan.far_b {
+            welds.push((raised_b, plan.far_b));
+        }
+        obj.half_edges[plan.h].origin = plan.far_a;
+        obj.vertices[plan.far_a].outgoing = plan.h;
+        obj.half_edges[h_next].origin = plan.far_b;
+        match hc_twin {
+            Some(t) => {
+                let edge = obj.half_edges[t].edge;
+                obj.half_edges[plan.h].twin = Some(t);
+                obj.half_edges[plan.h].edge = edge;
+                obj.half_edges[t].twin = Some(plan.h);
+                obj.half_edges[t].edge = edge;
+                obj.edges[edge].half_edge = t;
+                obj.edges[edge].twin_half_edge = Some(plan.h);
+            }
+            None => return Err(PushPullError::NonManifoldResult),
+        }
+        obj.vertices[plan.far_b].outgoing = obj.half_edges[plan.h].twin.expect("just set");
+
+        // Un-splice the two junction steps (`hb`/`hd`) from the straddling
+        // transverse walls, undoing whichever of `splice_after`/`splice_before`
+        // created each one.
+        for &step in &[plan.hb, plan.hd] {
+            let step_twin = obj.half_edges[step].twin.expect("junction step is twinned");
+            unsplice_step(obj, step_twin);
+        }
+
+        // Remove the wall face, its loop, its 4 half-edges, and the 2 edges
+        // that belonged solely to it (the verticals; the far edge's `Edge`
+        // was just reassigned above, and `h`'s old edge is removed with it).
+        let h_edge = obj.half_edges[plan.h_hole].edge;
+        let hb_edge = obj.half_edges[plan.hb].edge;
+        let hd_edge = obj.half_edges[plan.hd].edge;
+        obj.edges.remove(h_edge);
+        obj.edges.remove(hb_edge);
+        obj.edges.remove(hd_edge);
+        let wall_loop = obj.half_edges[plan.h_hole].loop_id;
+        obj.loops.remove(wall_loop);
+        for &he in &[plan.h_hole, plan.hb, plan.hc, plan.hd] {
+            obj.half_edges.remove(he);
+        }
+        let shell = obj
+            .shells
+            .iter()
+            .find(|(_, s)| s.faces.contains(&plan.wall_face))
+            .map(|(id, _)| id)
+            .expect("wall face belongs to a shell");
+        obj.shells[shell].faces.retain(|&f| f != plan.wall_face);
+        obj.faces.remove(plan.wall_face);
+        removed_faces.push(plan.wall_face);
+    }
+
+    // Weld every retired raised junction copy onto its surviving sibling: any
+    // half-edge still starting at a raised copy (the straddling side walls'
+    // step vertices) is repointed to the original, then the raised vertex is
+    // removed. This restores the twin-origin involution at the junctions.
+    for (raised, survivor) in welds {
+        if raised == survivor || !obj.vertices.contains_key(raised) {
+            continue;
+        }
+        let hes: Vec<HalfEdgeId> = obj
+            .half_edges
+            .iter()
+            .filter(|(_, he)| he.origin == raised)
+            .map(|(h, _)| h)
+            .collect();
+        for h in hes {
+            obj.half_edges[h].origin = survivor;
+        }
+        // `survivor` already has a valid outgoing from the re-weld; the raised
+        // copy is now unreferenced.
+        obj.vertices.remove(raised);
+    }
+
+    // Refit the moved face's plane (its Coplanar edges now sit on the
+    // sibling's old boundary again).
+    let outer_loop = obj.faces[face].outer_loop;
+    let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+    obj.faces[face].plane =
+        Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+
+    // Refit the straddling transverse walls' planes too (they un-stepped
+    // back to quads/pentagons and the planarity check must see the new
+    // boundary, never a hand-translated one). Refit every current neighbor
+    // of the moved face — cheap, and correct regardless of which walls were
+    // actually touched.
+    let mut refit_faces: Vec<FaceId> = Vec::new();
+    for &loop_id in boundary_loops {
+        for h in obj.loop_half_edges(loop_id) {
+            if let Some(t) = obj.half_edges[h].twin {
+                let nf = obj.loops[obj.half_edges[t].loop_id].face;
+                if !refit_faces.contains(&nf) {
+                    refit_faces.push(nf);
+                }
+            }
+        }
+    }
+    for nf in refit_faces {
+        let outer_loop = obj.faces[nf].outer_loop;
+        let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+        obj.faces[nf].plane =
+            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    }
+
+    Ok(Some(removed_faces))
+}
+
+/// Undoes whichever of `splice_after`/`splice_before` created the junction
+/// step half-edge twinned with `step_twin` (the moved face's now-removed
+/// vertical, i.e. `step_twin` is the half-edge actually embedded in the
+/// straddling transverse wall's loop). Two shapes, distinguished by whether
+/// `step_twin`'s origin is the raised vertex (a `splice_after` "down" step,
+/// origin never repointed — just unlink and remove) or the original vertex
+/// (impossible here, since `splice_after` never repoints; kept for the
+/// `splice_before` "up" step, where the step's `next` was repointed to the
+/// raised copy and must be repointed back).
+fn unsplice_step(obj: &mut Object, step_twin: HalfEdgeId) {
+    let prev = obj.half_edges[step_twin].prev;
+    let next = obj.half_edges[step_twin].next;
+    // `splice_after` shape: `step_twin` was inserted between `prev` and
+    // `next`, origin untouched elsewhere — just unlink it.
+    // `splice_before` shape: `step_twin` was inserted between `prev` and
+    // `next`, and `next`'s origin was repointed to the raised copy that is
+    // about to vanish — repoint it back to `step_twin`'s own origin (the
+    // original vertex, which both share).
+    if obj.half_edges[next].origin != obj.half_edges[step_twin].origin {
+        let v_orig = obj.half_edges[step_twin].origin;
+        obj.half_edges[next].origin = v_orig;
+        obj.vertices[v_orig].outgoing = next;
+    }
+    obj.half_edges[prev].next = next;
+    obj.half_edges[next].prev = prev;
+    // `prev` (and `next`, in the splice_before shape) already have valid
+    // `outgoing` half-edges that survive this removal — `step_twin` was
+    // never anyone's recorded `outgoing` except possibly transiently, and
+    // a quad wall's other three half-edges always include one starting at
+    // each of `step_twin`'s endpoints.
+    obj.half_edges.remove(step_twin);
+}
+
+/// The hybrid surgery behind `push_pull`'s coplanar-aware mode: walks
+/// every boundary loop of the moved face, translating vertices in place where
+/// every incident edge is transverse (the pre- behavior), and unwelding +
+/// building a wall where an edge is coplanar (a `split_face` cut edge shared
+/// with a sibling sub-face).
+///
+/// At a **junction** — a vertex where a coplanar edge meets a transverse one,
+/// i.e. a cut endpoint `split_face` planted on the moved face's outer
+/// boundary — the vertex is shared by the moved face, the sibling, and one
+/// straddling transverse wall. It is unwelded: the moved face gets a raised
+/// copy, while the sibling and a new "step" edge spliced into the straddling
+/// wall's loop keep the original. The straddling wall thereby reshapes from a
+/// quad into an L-shaped (still planar) polygon; its plane is refit from its
+/// new boundary, never translated by hand (KERNEL_GUIDE "Traps").
+///
+/// Mirrors `extrude_sub_face`'s per-edge wall construction (`wa`/`wb`/`wc`/`wd`)
+/// one coplanar edge at a time instead of over a whole imprinted sub-face, so
+/// the wall's two "vertical" half-edges are shared either with the next
+/// coplanar wall around an interior cut vertex (exactly as `extrude_sub_face`
+/// shares them between consecutive walls), or with the spliced step inside a
+/// straddling transverse wall at a junction.
+///
+/// Returns the newly created wall faces, or refuses with a typed
+/// [`PushPullError`] (never partially mutates: the caller validates and swaps
+/// only on success).
+fn push_pull_coplanar_aware(
+    obj: &mut Object,
+    face: FaceId,
+    boundary_loops: &[LoopId],
+    edge_kinds: &std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind>,
+    neighbor_faces: &[FaceId],
+    sweep: Vec3,
+) -> Result<Vec<FaceId>, PushPullError> {
+    // Snapshot each boundary loop's half-edges AND original vertices up front
+    // — every later pass mutates origins/positions, so the un-raised vertex
+    // at each position must be read once, before any of that happens.
+    struct LoopWalk {
+        /// Boundary half-edges of the moved face, in cycle order.
+        hes: Vec<HalfEdgeId>,
+        /// `verts[k]` is the ORIGINAL vertex at `hes[k]`'s origin.
+        verts: Vec<VertexId>,
+    }
+    let walks: Vec<LoopWalk> = boundary_loops
+        .iter()
+        .map(|&loop_id| {
+            let hes: Vec<HalfEdgeId> = obj.loop_half_edges(loop_id).collect();
+            let verts: Vec<VertexId> = hes.iter().map(|&h| obj.half_edges[h].origin).collect();
+            LoopWalk { hes, verts }
+        })
+        .collect();
+
+    // --- Pass 1: classify each boundary vertex and create raised copies. ---
+    // A vertex is "raised" (gets a fresh copy at +sweep; the original stays
+    // put for whoever doesn't move) iff at least one of its two incident
+    // boundary half-edges in the moved face's loop is Coplanar. A vertex with
+    // both edges Transverse translates in place, exactly as pre-.
+    let mut raised: std::collections::HashMap<VertexId, VertexId> =
+        std::collections::HashMap::new();
+    for walk in &walks {
+        let n = walk.hes.len();
+        for k in 0..n {
+            let h = walk.hes[k];
+            let h_prev = walk.hes[(k + n - 1) % n];
+            let needs_raise = matches!(edge_kinds[&h], BoundaryEdgeKind::Coplanar)
+                || matches!(edge_kinds[&h_prev], BoundaryEdgeKind::Coplanar);
+            let v = walk.verts[k];
+            if needs_raise {
+                raised.entry(v).or_insert_with(|| {
+                    let p = obj.vertices[v].position + sweep;
+                    obj.vertices.insert(Vertex {
+                        position: p,
+                        outgoing: HalfEdgeId::default(),
+                    })
+                });
+            } else {
+                // Pure transverse corner: translate in place (shared with the
+                // unmodified neighbor wall, which stretches).
+                obj.vertices[v].position = obj.vertices[v].position + sweep;
+            }
+        }
+    }
+
+    // --- Pass 2: repoint the moved face's own boundary onto raised copies. ---
+    // The original vertex keeps its identity (the sibling/wall still uses
+    // it), so if its `outgoing` happened to be this now-repointed half-edge,
+    // it must be repatched to something that still starts there — a sibling
+    // or wall half-edge sharing the same original vertex always exists,
+    // since a raised vertex is by definition shared with at least one other
+    // face that did not move.
+    for walk in &walks {
+        let n = walk.hes.len();
+        for (k, &h) in walk.hes.iter().enumerate() {
+            let v_orig = walk.verts[k];
+            if let Some(&v_raised) = raised.get(&v_orig) {
+                if obj.vertices[v_orig].outgoing == h {
+                    let h_prev = walk.hes[(k + n - 1) % n];
+                    let fallback = obj.half_edges[h_prev]
+                        .twin
+                        .expect("watertight boundary edge");
+                    obj.vertices[v_orig].outgoing = fallback;
+                }
+                obj.half_edges[h].origin = v_raised;
+                obj.vertices[v_raised].outgoing = h;
+            }
+        }
+    }
+
+    // --- Pass 3: per junction (a raised vertex where a Transverse edge meets
+    // a Coplanar one in the moved face's loop), splice a "step" half-edge
+    // into the straddling transverse wall's loop, connecting the raised copy
+    // to the original. Exactly one direction is created here — `down`
+    // (raised -> original) if the junction sits at a Transverse half-edge's
+    // ORIGIN, `up` (original -> raised) if it sits at its DESTINATION — the
+    // opposite direction is the new coplanar wall's vertical (Pass 4), twinned
+    // to this one.
+    //
+    // Reasoning (mirroring `extrude_sub_face`'s wb[k] <-> wd[k-1] sharing):
+    // the wall's existing half-edge already agrees with the moved face on the
+    // non-junction end (translated in place in Pass 1), so only the junction
+    // end needs a new vertex spliced into the wall's loop.
+    let mut steps: std::collections::HashMap<VertexId, StepEdges> =
+        std::collections::HashMap::new();
+    for walk in &walks {
+        let n = walk.hes.len();
+        for k in 0..n {
+            let h = walk.hes[k];
+            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Transverse) {
+                continue;
+            }
+            let twin_h = obj.half_edges[h].twin.expect("watertight boundary edge");
+            let wall_loop = obj.half_edges[twin_h].loop_id;
+
+            // Junction at `h`'s origin (walk.verts[k]): `twin_h`'s
+            // DESTINATION is this vertex (twin_h runs dest_of_h -> origin_of_h).
+            // Splice a `down` step (raised -> original) right after `twin_h`.
+            if let Some(&v_raised) = raised.get(&walk.verts[k]) {
+                let v = walk.verts[k];
+                steps
+                    .entry(v)
+                    .or_default()
+                    .down
+                    .get_or_insert_with(|| splice_after(obj, wall_loop, twin_h, v_raised, v));
+            }
+            // Junction at `h`'s destination (walk.verts[(k+1)%n]): `twin_h`'s
+            // ORIGIN is this vertex. Splice an `up` step (original -> raised)
+            // right before `twin_h`, then repoint `twin_h`'s origin to raised.
+            let v_dest = walk.verts[(k + 1) % n];
+            if let Some(&v_raised) = raised.get(&v_dest) {
+                steps
+                    .entry(v_dest)
+                    .or_default()
+                    .up
+                    .get_or_insert_with(|| splice_before(obj, wall_loop, twin_h, v_dest, v_raised));
+            }
+        }
+    }
+
+    // --- Pass 4: build a wall along each Coplanar boundary edge, mirroring
+    // `extrude_sub_face`'s per-edge construction. The two verticals at each
+    // end either reuse a Pass-3 step (junction) or are created fresh here and
+    // shared with the next coplanar wall around an interior cut vertex
+    // (exactly as `extrude_sub_face`'s `wb[k]`/`wd[k-1]` share one).
+    let shell = obj
+        .shells
+        .iter()
+        .find(|(_, s)| s.faces.contains(&face))
+        .map(|(id, _)| id)
+        .expect("moved face belongs to a shell");
+    let mut created_faces = Vec::new();
+    for walk in &walks {
+        let n = walk.hes.len();
+        for k in 0..n {
+            let h = walk.hes[k];
+            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Coplanar) {
+                continue;
+            }
+            let v_a = walk.verts[k]; // edge origin, original vertex
+            let v_b = walk.verts[(k + 1) % n]; // edge dest, original vertex
+            let va_raised = raised[&v_a];
+            let vb_raised = raised[&v_b];
+            let h_sub = h; // already repointed to va_raised by Pass 2
+            let h_hole = obj.half_edges[h].twin.expect("watertight boundary edge");
+
+            // `wb = down(v_a)` (va_raised -> v_a), this wall's own half-edge.
+            // Its twin is `up(v_a)`: either Pass 3's junction splice, an
+            // earlier Pass-4 wall's `wd` at this same interior-cut vertex, or
+            // freshly created now (registered under `.down` for a later wall
+            // to find as ITS `up(v_a)` partner).
+            let wb = obj.new_half_edge(va_raised);
+            match steps.entry(v_a).or_default().up.take() {
+                Some(partner) => twin_half_edges(obj, wb, partner),
+                None => steps.entry(v_a).or_default().down = Some(wb),
+            }
+            // `wd = up(v_b)` (v_b -> vb_raised), this wall's own half-edge.
+            // Its twin is `down(v_b)`: Pass 3's junction splice, an earlier
+            // Pass-4 wall's `wb` at this vertex, or created now.
+            let wd = obj.new_half_edge(v_b);
+            match steps.entry(v_b).or_default().down.take() {
+                Some(partner) => twin_half_edges(obj, wd, partner),
+                None => steps.entry(v_b).or_default().up = Some(wd),
+            }
+
+            let wface =
+                build_coplanar_wall(obj, h_sub, h_hole, wb, wd, va_raised, vb_raised, v_a, v_b)?;
+            obj.shells[shell].faces.push(wface);
+            created_faces.push(wface);
+        }
+    }
+
+    // --- Pass 5: refit planes. ---
+    // Moved face.
+    {
+        let outer_loop = obj.faces[face].outer_loop;
+        let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+        obj.faces[face].plane =
+            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    }
+    // Every original neighbor face — transverse walls (stretched or
+    // reshaped) and the coplanar sibling(s) are all unaffected in count here;
+    // `neighbor_faces` already excludes the moved face itself.
+    for &nf in neighbor_faces {
+        let outer_loop = obj.faces[nf].outer_loop;
+        let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+        obj.faces[nf].plane =
+            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    }
+
+    Ok(created_faces)
+}
+
+/// Per-original-vertex bookkeeping for `push_pull_coplanar_aware`'s unweld:
+/// `down` is a half-edge `raised(v) -> v`; `up` is `v -> raised(v)`. Each is
+/// filled by whichever pass (junction splice, or an earlier coplanar wall at
+/// an interior cut vertex) creates that direction first; the next consumer
+/// twins against it instead of creating a duplicate.
+#[derive(Default)]
+struct StepEdges {
+    down: Option<HalfEdgeId>,
+    up: Option<HalfEdgeId>,
+}
+
+impl Object {
+    /// A bare half-edge with `origin` set and everything else left as a
+    /// placeholder, for callers that wire `next`/`prev`/`loop_id`/`edge`/`twin`
+    /// themselves afterward (mirrors the `mk` closure in `extrude_sub_face`).
+    fn new_half_edge(&mut self, origin: VertexId) -> HalfEdgeId {
+        self.half_edges.insert(HalfEdge {
+            origin,
+            twin: None,
+            next: HalfEdgeId::default(),
+            prev: HalfEdgeId::default(),
+            edge: EdgeId::default(),
+            loop_id: LoopId::default(),
+        })
+    }
+}
+
+/// Links two half-edges as twins of a shared (new) `Edge`. Does not touch
+/// `next`/`prev`/`loop_id` — callers that need this freshly created (the
+/// interior-cut case) wire those themselves; callers consuming an
+/// already-spliced step (the junction case) leave them as spliced.
+fn twin_half_edges(obj: &mut Object, a: HalfEdgeId, b: HalfEdgeId) {
+    let edge = obj.edges.insert(Edge {
+        half_edge: a,
+        twin_half_edge: Some(b),
+    });
+    obj.half_edges[a].twin = Some(b);
+    obj.half_edges[a].edge = edge;
+    obj.half_edges[b].twin = Some(a);
+    obj.half_edges[b].edge = edge;
+}
+
+/// Splices a fresh half-edge `origin -> existing_next.origin` into `loop_id`
+/// immediately after `after`, i.e. between `after` and its current `next`.
+/// Returns the new half-edge (still twin-less; the caller links it).
+fn splice_after(
+    obj: &mut Object,
+    loop_id: LoopId,
+    after: HalfEdgeId,
+    origin: VertexId,
+    _dest_hint: VertexId,
+) -> HalfEdgeId {
+    let old_next = obj.half_edges[after].next;
+    let h = obj.half_edges.insert(HalfEdge {
+        origin,
+        twin: None,
+        next: old_next,
+        prev: after,
+        edge: EdgeId::default(),
+        loop_id,
+    });
+    obj.half_edges[after].next = h;
+    obj.half_edges[old_next].prev = h;
+    obj.vertices[origin].outgoing = h;
+    h
+}
+
+/// Splices a fresh half-edge `origin -> raised` into `loop_id` immediately
+/// before `before`, then repoints `before`'s own origin to `raised` (the
+/// junction vertex moves with the moved face from this point in the wall's
+/// loop onward). Returns the new half-edge (still twin-less).
+fn splice_before(
+    obj: &mut Object,
+    loop_id: LoopId,
+    before: HalfEdgeId,
+    origin: VertexId,
+    raised: VertexId,
+) -> HalfEdgeId {
+    let old_prev = obj.half_edges[before].prev;
+    let h = obj.half_edges.insert(HalfEdge {
+        origin,
+        twin: None,
+        next: before,
+        prev: old_prev,
+        edge: EdgeId::default(),
+        loop_id,
+    });
+    obj.half_edges[old_prev].next = h;
+    obj.half_edges[before].prev = h;
+    obj.half_edges[before].origin = raised;
+    obj.vertices[raised].outgoing = before;
+    obj.vertices[origin].outgoing = h;
+    h
+}
+
+/// Builds the quad wall along one coplanar boundary edge of the moved face,
+/// mirroring `extrude_sub_face`'s per-edge construction (`wa`/`wb`/`wc`/`wd`).
+///
+/// `h_sub` is the moved face's edge, already repointed by Pass 2 to run
+/// `va_raised -> vb_raised`. `h_hole` is the sibling's existing boundary
+/// half-edge, untouched, running `v_b -> v_a`. `wb` (`va_raised -> v_a`) and
+/// `wd` (`v_b -> vb_raised`) are the two verticals: already minted and
+/// already twinned by the caller (either against a Pass-3 junction splice
+/// embedded in a transverse wall's loop, or against a sibling coplanar wall's
+/// own vertical at an interior cut vertex) — this function only wires their
+/// `next`/`prev`/`loop_id` into the new wall's own quad loop, never their
+/// `twin`/`edge`.
+#[allow(clippy::too_many_arguments)]
+fn build_coplanar_wall(
+    obj: &mut Object,
+    h_sub: HalfEdgeId,
+    h_hole: HalfEdgeId,
+    wb: HalfEdgeId,
+    wd: HalfEdgeId,
+    va_raised: VertexId,
+    vb_raised: VertexId,
+    v_a: VertexId,
+    v_b: VertexId,
+) -> Result<FaceId, PushPullError> {
+    debug_assert!(obj.half_edges[wb].twin.is_some(), "wb must be pre-twinned");
+    debug_assert!(obj.half_edges[wd].twin.is_some(), "wd must be pre-twinned");
+
+    // wa twins h_sub: h_sub runs va_raised -> vb_raised, so wa runs the
+    // opposite direction, vb_raised -> va_raised.
+    let wa = obj.new_half_edge(vb_raised);
+    // wc twins h_hole: h_hole runs v_b -> v_a, so wc runs v_a -> v_b.
+    let wc = obj.new_half_edge(v_a);
+
+    let wloop = obj.loops.insert(Loop {
+        face: FaceId::default(),
+        first_half_edge: HalfEdgeId::default(),
+        kind: LoopKind::Outer,
+    });
+    // Quad order: wa (vb_raised -> va_raised) -> wb (va_raised -> v_a) ->
+    // wc (v_a -> v_b) -> wd (v_b -> vb_raised) -> back to wa.
+    for &h in &[wa, wb, wc, wd] {
+        obj.half_edges[h].loop_id = wloop;
+    }
+    obj.half_edges[wa].next = wb;
+    obj.half_edges[wb].next = wc;
+    obj.half_edges[wc].next = wd;
+    obj.half_edges[wd].next = wa;
+    obj.half_edges[wb].prev = wa;
+    obj.half_edges[wc].prev = wb;
+    obj.half_edges[wd].prev = wc;
+    obj.half_edges[wa].prev = wd;
+    obj.loops[wloop].first_half_edge = wa;
+
+    // wa <-> h_sub (new edge; h_sub keeps the moved face's side).
+    obj.half_edges[wa].twin = Some(h_sub);
+    obj.half_edges[h_sub].twin = Some(wa);
+    let e_top = obj.edges.insert(Edge {
+        half_edge: h_sub,
+        twin_half_edge: Some(wa),
+    });
+    obj.half_edges[h_sub].edge = e_top;
+    obj.half_edges[wa].edge = e_top;
+
+    // wc <-> h_hole (reuse the old shared edge — the sibling's boundary
+    // half-edge is untouched, just re-twinned onto the wall instead of the
+    // moved face).
+    let old_edge = obj.half_edges[h_hole].edge;
+    obj.half_edges[wc].twin = Some(h_hole);
+    obj.half_edges[h_hole].twin = Some(wc);
+    obj.edges[old_edge].half_edge = h_hole;
+    obj.edges[old_edge].twin_half_edge = Some(wc);
+    obj.half_edges[h_hole].edge = old_edge;
+    obj.half_edges[wc].edge = old_edge;
+
+    obj.vertices[vb_raised].outgoing = wa;
+    obj.vertices[va_raised].outgoing = wb;
+    obj.vertices[v_a].outgoing = wc;
+
+    let wall_pts = [
+        obj.vertices[vb_raised].position,
+        obj.vertices[va_raised].position,
+        obj.vertices[v_a].position,
+        obj.vertices[v_b].position,
+    ];
+    let plane = Plane::from_polygon(&wall_pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    let wface = obj.faces.insert(Face {
+        outer_loop: wloop,
+        inner_loops: Vec::new(),
+        plane,
+        material: None,
+        uv_frame: None,
+    });
+    obj.loops[wloop].face = wface;
+    Ok(wface)
+}
 
 /// How a path endpoint lands on the outer loop.
 #[derive(Debug, Clone)]

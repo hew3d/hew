@@ -385,6 +385,187 @@ fn push_pull_slanted_neighbor_returns_non_manifold_result() {
     assert_eq!(prism_mut.faces().len(), 5);
 }
 
+// ----------------------------------------------- coplanar-aware push/pull
+//
+// The kernel half of the on-face Line workflow: a line drawn edge-to-edge
+// on a face `split_face`s it into two COPLANAR siblings; push/pull of ONE sibling
+// must build a wall along the shared cut edge instead of refusing it
+// (pre- this returned PushPullError::NonManifoldResult — see
+// `push_pull_slanted_neighbor_returns_non_manifold_result`, which still holds for
+// a genuinely slanted neighbor). These are the acceptance criteria for the K2
+// kernel lane; un-ignore each in the PR that implements it (docs/DEVELOPMENT.md).
+
+/// Mean x of a face's outer-loop vertices — picks a specific sub-face when
+/// `split_face`'s `new_faces` order isn't guaranteed.
+fn face_centroid_x(obj: &Object, face: FaceId) -> f64 {
+    let outer = obj
+        .faces()
+        .iter()
+        .find(|(id, _)| *id == face)
+        .map(|(_, f)| f.outer_loop)
+        .expect("face is live");
+    let pts: Vec<Point3> = obj.loop_positions(outer).collect();
+    pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64
+}
+
+/// Unit cube with its top bisected along x = 0.5; returns the object and the
+/// `[left (x∈[0,0.5]), right (x∈[0.5,1])]` coplanar top sub-faces.
+fn bisected_top_cube() -> (Object, [FaceId; 2]) {
+    let mut cube = unit_cube();
+    let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+    let report = cube
+        .split_face(
+            top,
+            &[Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)],
+        )
+        .expect("edge-to-edge bisect of the top face");
+    let [a, b] = report.new_faces;
+    if face_centroid_x(&cube, a) < face_centroid_x(&cube, b) {
+        (cube, [a, b])
+    } else {
+        (cube, [b, a])
+    }
+}
+
+/// Pushing one bisected half outward builds a wall along the shared cut edge and
+/// reshapes the straddling side walls into stepped (still planar) faces.
+#[test]
+fn push_a_bisected_half_outward_walls_along_the_cut() {
+    let (mut cube, halves) = bisected_top_cube();
+    cube.push_pull(halves[0], 0.5)
+        .expect("step the left half up");
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+
+    // F1, F2, bottom, west, east, L-shaped south, L-shaped north, new cut-wall.
+    assert_eq!(cube.faces().len(), 8, "stepped solid has 8 faces");
+    assert_eq!(cube.vertices().len(), 12);
+    assert_eq!(cube.edges().len(), 18);
+    assert_eq!(euler_poincare(&cube), 2, "genus 0, single shell");
+
+    // Volume = cube (1.0) + raised step (0.5 area × 0.5 height = 0.25).
+    assert!((signed_volume(&cube) - 1.25).abs() <= tol::POINT_MERGE);
+
+    // Stepped: moved half at z=1.5, sibling still at 1.0, base at 0.0.
+    let zs: Vec<f64> = cube.vertices().values().map(|v| v.position.z).collect();
+    let has = |z: f64| zs.iter().any(|&q| (q - z).abs() <= tol::POINT_MERGE);
+    assert!(has(1.5) && has(1.0) && has(0.0), "z levels 0/1/1.5 present");
+}
+
+/// Inverse property: stepping a half up by `d` then pushing the moved face back
+/// down by `d` restores the bisected cube exactly.
+#[test]
+fn push_bisected_half_then_inverse_restores_bisected_top() {
+    let (reference, _) = bisected_top_cube();
+    let (mut cube, halves) = bisected_top_cube();
+    let report = cube.push_pull(halves[0], 0.5).unwrap();
+    cube.push_pull(report.face, -0.5).unwrap();
+    cube.validate().unwrap();
+    assert!(objects_equivalent(&cube, &reference));
+}
+
+/// Pushing one bisected half inward (partial — not through the base) carves a
+/// stepped notch; still watertight, 8 faces.
+#[test]
+fn push_a_bisected_half_inward_makes_a_notch() {
+    let (mut cube, halves) = bisected_top_cube();
+    cube.push_pull(halves[0], -0.5)
+        .expect("notch the left half down");
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert_eq!(cube.faces().len(), 8);
+    // Volume = cube (1.0) − removed step (0.5 × 0.5 = 0.25) = 0.75.
+    assert!((signed_volume(&cube) - 0.75).abs() <= tol::POINT_MERGE);
+}
+
+proptest! {
+    /// Bisecting a cube top at any interior x and stepping a half by any
+    /// partial ±depth yields a watertight 8-face stepped solid of the expected
+    /// volume ( wall-build, both directions, random geometry).
+    #[test]
+    fn step_a_bisected_half_is_watertight_8_faces(
+        c in 0.2..0.8f64,
+        d in 0.2..0.8f64,
+        up in proptest::bool::ANY,
+    ) {
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        let r = cube
+            .split_face(top, &[Point3::new(c, 0.0, 1.0), Point3::new(c, 1.0, 1.0)])
+            .unwrap();
+        // The left half spans x ∈ [0, c]; its base area is `c`.
+        let left = if face_centroid_x(&cube, r.new_faces[0]) < face_centroid_x(&cube, r.new_faces[1]) {
+            r.new_faces[0]
+        } else {
+            r.new_faces[1]
+        };
+        let dist = if up { d } else { -d };
+        cube.push_pull(left, dist).unwrap();
+        cube.validate().unwrap();
+        prop_assert_eq!(cube.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(cube.faces().len(), 8);
+        // Volume = unit cube (1.0) + signed step (area c × signed depth).
+        prop_assert!((signed_volume(&cube) - (1.0 + c * dist)).abs() <= VOLUME_TOL);
+    }
+}
+
+/// K3 ( follow-on — already works via the existing through-cut): pushing a
+/// bisected half ALL the way down through the bottom removes that column. The
+/// wasm `push_pull` routes an overshoot to `push_through`; here we exercise
+/// `push_through` directly. Unit cube, top bisected at x=0.5, left half punched
+/// out → the right box [0.5,1]×[0,1]×[0,1]: 6 faces, watertight, volume 0.5.
+#[test]
+fn push_through_a_bisected_half_deletes_the_column() {
+    let (cube, halves) = bisected_top_cube();
+    assert!(
+        cube.push_pull_overshoots(halves[0], -1.0),
+        "pushing the half to the bottom is a through-cut"
+    );
+    let result = cube
+        .push_through(halves[0], -1.0)
+        .expect("punch the column out");
+    result.validate().unwrap();
+    assert_eq!(result.watertight(), WatertightState::Watertight);
+    assert_eq!(result.faces().len(), 6, "remaining box has 6 faces");
+    assert!((signed_volume(&result) - 0.5).abs() <= VOLUME_TOL);
+}
+
+// ------------------------------------------------------ split_face robustness (K1)
+
+proptest! {
+    /// An edge-to-edge cut across a cube's top at ANY interior x is valid: no
+    /// panic (the topo.rs:207 stale-key crash), watertight, 7 faces.
+    #[test]
+    fn split_top_at_any_x_is_valid(c in 0.05..0.95f64) {
+        let mut cube = unit_cube();
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        cube.split_face(top, &[Point3::new(c, 0.0, 1.0), Point3::new(c, 1.0, 1.0)])
+            .unwrap();
+        cube.validate().unwrap();
+        prop_assert_eq!(cube.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(cube.faces().len(), 7);
+    }
+}
+
+/// Re-splitting a sub-face whose boundary INCLUDES a prior cut edge must
+/// succeed: a horizontal cut on the left half, from the west boundary (x=0) to
+/// the prior cut edge (x=0.5), is boundary-to-boundary for that half. Today this
+/// wrongly returns `EndpointNotOnBoundary` (the endpoint on the prior cut edge
+/// isn't recognized as boundary); K1 must fix it.
+#[test]
+fn second_split_of_a_subface_is_valid() {
+    let (mut cube, halves) = bisected_top_cube();
+    let left = halves[0]; // x ∈ [0, 0.5]
+    cube.split_face(
+        left,
+        &[Point3::new(0.0, 0.5, 1.0), Point3::new(0.5, 0.5, 1.0)],
+    )
+    .expect("boundary-to-boundary cut on the sub-face");
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert_eq!(cube.faces().len(), 8, "top now in 3 pieces (6 + 2 extra)");
+}
+
 #[test]
 fn push_past_an_interior_step_is_refused() {
     // L-shaped prism: pushing the outer x=2 wall inward past the interior
@@ -426,16 +607,25 @@ fn push_past_an_interior_step_is_refused() {
     shrunk.validate().unwrap();
     assert_eq!(shrunk.faces().len(), original.faces().len());
 
-    // At the step or past it: refused, object untouched (strong guarantee).
-    for depth in [-1.0, -1.5] {
-        let mut obj = original.clone();
-        assert_eq!(
-            obj.push_pull(wall, depth).unwrap_err(),
-            PushPullError::NonManifoldResult,
-            "depth {depth}"
-        );
-        assert!(objects_equivalent(&obj, &original));
-    }
+    // Exactly AT the step (x=2 → x=1): the outer wall lands flush against the
+    // coplanar interior step wall, merging the notch away — a valid collapse
+    // (the L becomes a rectangular prism), not a fold. Stays watertight.
+    let mut flush = original.clone();
+    flush
+        .push_pull(wall, -1.0)
+        .expect("flush-at-step merge is valid");
+    flush.validate().unwrap();
+    assert_eq!(flush.watertight(), WatertightState::Watertight);
+
+    // PAST the step (x → 0.5) would fold the step wall past its fixed vertices
+    // into a self-intersecting shell — every face stays planar and manifold, so
+    // only the obstruction guard can refuse it. Object left untouched.
+    let mut obj = original.clone();
+    assert_eq!(
+        obj.push_pull(wall, -1.5).unwrap_err(),
+        PushPullError::NonManifoldResult,
+    );
+    assert!(objects_equivalent(&obj, &original));
 }
 
 // ------------------------------------------------- sticky split / merge
