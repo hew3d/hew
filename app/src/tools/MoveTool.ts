@@ -39,10 +39,10 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
-import { arrowToAxis, editNumericBuffer, parseDistance, pointAlong } from './moveInput'
+import { arrowToAxis, editLengthBuffer, pointAlong } from './moveInput'
 import type { NodeRef, NodeKind } from '../panels/treeModel'
 import { nodeRefFromJs } from '../panels/treeModel'
-import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
+import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 
 /** FFI node-kind code matching `wasm-api`'s `node_id` (0=object, 1=group, 2=instance). */
 function kindCode(kind: NodeKind): number {
@@ -280,27 +280,37 @@ export class MoveTool implements Tool {
 
     // ── Numeric VCB ──
     if (ev.key === 'Enter') {
-      const n = parseDistance(this.typed)
-      if (n !== null) {
-        // The typed buffer is in the user's DISPLAY unit (e.g. cm); convert
-        // to meters before using it as a kernel distance.
-        this._commitFromTyped(metersFromUnit(n))
+      const meters = parseLengthToMeters(this.typed)
+      if (meters !== null) {
+        this._commitFromTyped(meters)
       }
       return
     }
 
-    // Feed digits, dot, minus, Backspace into the buffer
+    // Feed digits, dot, minus, Backspace, and (in imperial formats) the
+    // feet/inch/fraction grammar tokens into the buffer.
     if (
       (ev.key >= '0' && ev.key <= '9') ||
       ev.key === '.' ||
       ev.key === '-' ||
-      ev.key === 'Backspace'
+      ev.key === 'Backspace' ||
+      ev.key === "'" ||
+      ev.key === '"' ||
+      ev.key === '/' ||
+      ev.key === ' '
     ) {
-      this.typed = editNumericBuffer(this.typed, ev.key)
+      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       // Report the typed buffer as the measurement readout, tagged with the
       // current display unit so the user knows what they're typing in.
-      this.onMeasurementCb(this._decorate(`${this.typed} ${getLengthUnitSuffix()}`))
+      this.onMeasurementCb(this._decorate(this._typedReadout()))
     }
+  }
+
+  /** The typed-buffer readout, suffixed for metric formats (imperial tokens
+   * like `'`/`"` are already visible in the buffer itself). */
+  private _typedReadout(): string {
+    const suffix = getLengthUnitSuffix()
+    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
   }
 
   cancel(): void {
@@ -407,7 +417,7 @@ export class MoveTool implements Tool {
    */
   private _reportMeasurement(base: [number, number, number], dest: [number, number, number]): void {
     if (this.typed !== '') {
-      this.onMeasurementCb(this._decorate(`${this.typed} ${getLengthUnitSuffix()}`))
+      this.onMeasurementCb(this._decorate(this._typedReadout()))
       return
     }
 

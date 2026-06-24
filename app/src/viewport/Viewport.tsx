@@ -27,6 +27,7 @@ import { SceneRenderer } from './SceneRenderer'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
+import { LineTool } from '../tools/LineTool'
 import { PushPullTool } from '../tools/PushPullTool'
 import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { MoveTool } from '../tools/MoveTool'
@@ -37,6 +38,7 @@ import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
+import type { Snap } from '../tools/types'
 import type { NodeRef } from '../panels/treeModel'
 import { cursorFor } from '../tools/toolIcons'
 
@@ -672,6 +674,13 @@ export default function Viewport({
     }
 
     function notifyLoaded(): void {
+      // A new/loaded document replaced the Scene — any handles the active tool
+      // cached (e.g. a ground-sketch handle) are now stale. Re-selecting the
+      // same tool doesn't recreate it, so reset it explicitly here.
+      const at = toolController.activeTool
+      if ('onDocumentReset' in at) {
+        (at as { onDocumentReset(): void }).onDocumentReset()
+      }
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
       sceneRenderer.refreshGuides()
@@ -823,6 +832,30 @@ export default function Viewport({
         previewGroup,
         (result) => {
           sceneRenderer.refreshAllSketches(result.sketchHandle)
+          sceneRenderer.refreshGuides()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+      // Scope the tool to the current editing context, if any.
+      const ctx = activeContextRef.current
+      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
+        ? ctx[ctx.length - 1].id : null
+      tool.setActiveContext(ctxId)
+      return tool
+    }
+
+    function makeLineTool(): LineTool {
+      const tool = new LineTool(
+        wasmScene,
+        previewGroup,
+        (sketchHandle) => {
+          sceneRenderer.refreshAllSketches(sketchHandle)
           sceneRenderer.refreshGuides()
           onDocumentChangedRef.current?.()
           scheduleRender()
@@ -997,6 +1030,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeRectTool())
+          break
+        case 'Line':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeLineTool())
           break
         case 'Push/Pull':
           cameraModeRef.current = false
@@ -1341,6 +1379,14 @@ export default function Viewport({
 
       const activeTool = toolController.activeTool
 
+      // The second pointerdown of a double-click carries `detail >= 2` — it's
+      // the phantom that precedes the 'dblclick' event. For tools that finish
+      // on double-click (LineTool), skip routing it so it can't place a
+      // spurious near-duplicate point; the 'dblclick' handler runs
+      // onDoubleClick instead. Distinct clicks are always detail === 1, so
+      // normal point-by-point drawing is unaffected at any cadence.
+      if (ev.detail >= 2 && 'onDoubleClick' in activeTool) return
+
       // ⌘/Ctrl-click on the Paint tool fills the whole object (base material).
       if (activeTool instanceof PaintTool) {
         activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
@@ -1365,6 +1411,25 @@ export default function Viewport({
       if (ev.button !== 0) return
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
       const ray = makeWorldRay(ndcX, ndcY, camera)
+
+      // Let the active tool consume the double-click first (e.g. LineTool
+      // ending a chain) — only fall through to the default "enter context"
+      // gesture below when the tool doesn't handle it (or isn't mid-gesture).
+      const activeTool = toolController.activeTool
+      if ('onDoubleClick' in activeTool) {
+        const viewportH = el.clientHeight
+        const fovY = camera.fov
+        const constraint = 'snapConstraint' in activeTool
+          ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+          : null
+        const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+        const handled = (activeTool as { onDoubleClick(snap: Snap | null, ray: Ray): boolean }).onDoubleClick(snap, ray)
+        if (handled) {
+          scheduleRender()
+          return
+        }
+      }
+
       const pick = wasmScene.pick_face(
         ray.origin[0], ray.origin[1], ray.origin[2],
         ray.direction[0], ray.direction[1], ray.direction[2],
@@ -1437,6 +1502,7 @@ export default function Viewport({
         if (ev.key === '5') { switchToolRef.current?.('Rotate'); return }
         if (ev.key === '6') { switchToolRef.current?.('Scale'); return }
         if (ev.key === 'r' || ev.key === 'R') { switchToolRef.current?.('Rectangle'); return }
+        if (ev.key === 'l' || ev.key === 'L') { switchToolRef.current?.('Line'); return }
         if (ev.key === 'p' || ev.key === 'P') { switchToolRef.current?.('Push/Pull'); return }
         if (ev.key === 'm' || ev.key === 'M') { switchToolRef.current?.('Move'); return }
         if (ev.key === 'q' || ev.key === 'Q') { switchToolRef.current?.('Rotate'); return }

@@ -60,4 +60,23 @@ export interface Tool {
    * `'capturingInput' in tool`.
    */
   capturingInput?(): boolean
+
+  /**
+   * (optional) Called on a double-click BEFORE the Viewport's default
+   * "enter context" gesture. Return `true` if the tool consumed the
+   * double-click (e.g. LineTool ending a chain) so the Viewport skips
+   * entering a group/instance/object; return `false`/omit to fall through to
+   * the default behavior. Viewport feature-detects with
+   * `'onDoubleClick' in tool`.
+   */
+  onDoubleClick?(snap: Snap | null, ray: Ray): boolean
+
+  /**
+   * (optional) A new/loaded document has replaced the Scene. Tools that cache
+   * kernel handles across gestures (e.g. a ground-sketch handle) must drop
+   * them here — reusing a handle from the previous document throws
+   * UnknownSketch. The Viewport calls this on the active tool from its
+   * `notifyLoaded`. Feature-detected with `'onDocumentReset' in tool`.
+   */
+  onDocumentReset?(): void
 }

@@ -43,8 +43,8 @@ import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { editNumericBuffer, parseDistance, pointAlong } from './moveInput'
-import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
+import { editLengthBuffer, pointAlong } from './moveInput'
+import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 
 export type OnGuideCreated = () => void
 export type OnToast = (message: string, code?: string) => void
@@ -193,9 +193,9 @@ export class TapeMeasureTool implements Tool {
     if (this.stage.kind === 'idle') return
 
     if (ev.key === 'Enter') {
-      const n = parseDistance(this.typed)
-      if (n !== null) {
-        this._commitFromTyped(metersFromUnit(n))
+      const meters = parseLengthToMeters(this.typed)
+      if (meters !== null) {
+        this._commitFromTyped(meters)
       }
       return
     }
@@ -204,11 +204,22 @@ export class TapeMeasureTool implements Tool {
       (ev.key >= '0' && ev.key <= '9') ||
       ev.key === '.' ||
       ev.key === '-' ||
-      ev.key === 'Backspace'
+      ev.key === 'Backspace' ||
+      ev.key === "'" ||
+      ev.key === '"' ||
+      ev.key === '/' ||
+      ev.key === ' '
     ) {
-      this.typed = editNumericBuffer(this.typed, ev.key)
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+      this.onMeasurementCb(this._typedReadout())
     }
+  }
+
+  /** The typed-buffer readout, suffixed for metric formats (imperial tokens
+   * like `'`/`"` are already visible in the buffer itself). */
+  private _typedReadout(): string {
+    const suffix = getLengthUnitSuffix()
+    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
   }
 
   cancel(): void {
@@ -330,7 +341,7 @@ export class TapeMeasureTool implements Tool {
 
   private _reportOffsetOrTyped(offsetDist: number): void {
     if (this.typed !== '') {
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.onMeasurementCb(this._typedReadout())
       return
     }
     this.onMeasurementCb(formatLength(offsetDist))
@@ -338,7 +349,7 @@ export class TapeMeasureTool implements Tool {
 
   private _reportDistanceOrTyped(p0: [number, number, number], p1: [number, number, number]): void {
     if (this.typed !== '') {
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.onMeasurementCb(this._typedReadout())
       return
     }
     const dx = p1[0] - p0[0], dy = p1[1] - p0[1], dz = p1[2] - p0[2]

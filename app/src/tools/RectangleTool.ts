@@ -284,6 +284,16 @@ export class RectangleTool implements Tool {
     this.onMeasurementCb('')
   }
 
+  /**
+   * A new/loaded document replaced the Scene, so the cached ground-sketch
+   * handle is now stale (reusing it throws UnknownSketch). Drop it and reset.
+   * Called by the Viewport from `notifyLoaded`.
+   */
+  onDocumentReset(): void {
+    this.sketchHandle = null
+    this.cancel()
+  }
+
   /** Report the live W × D measurement from the four rubber-band corners. */
   private _reportMeasurement(corners: readonly [V3, V3, V3, V3]): void {
     if (this.typed !== '') {

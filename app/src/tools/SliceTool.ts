@@ -23,8 +23,8 @@
  *         state — just whichever axis is currently selected.
  *   - The plane point follows the cursor's snapped position (so the preview
  *     quad visibly tracks the mouse); an optional typed VCB offset nudges
- *     that point along the normal (reusing `parseDistance`/
- *     `editNumericBuffer`, unit-aware via `metersFromUnit` — same pattern as
+ *     that point along the normal (reusing `parseLengthToMeters`/
+ *     `editLengthBuffer`, format-aware via `getLengthUnit` — same pattern as
  *     TapeMeasureTool/ProtractorTool).
  *   - Click (or Enter with a typed offset) commits: the **target solid** is
  *     whichever live world Object `pick_face` resolves under the same
@@ -60,8 +60,8 @@ import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { editNumericBuffer, parseDistance } from './moveInput'
-import { metersFromUnit, getLengthUnitSuffix } from '../settings/units'
+import { editLengthBuffer } from './moveInput'
+import { parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { axisColorForDirection } from '../viewport/axisColors'
 
@@ -248,9 +248,9 @@ export class SliceTool implements Tool {
     }
 
     if (ev.key === 'Enter') {
-      const n = parseDistance(this.typed)
-      if (n !== null) {
-        this._commitFromTyped(metersFromUnit(n))
+      const meters = parseLengthToMeters(this.typed)
+      if (meters !== null) {
+        this._commitFromTyped(meters)
       }
       return
     }
@@ -259,12 +259,23 @@ export class SliceTool implements Tool {
       (ev.key >= '0' && ev.key <= '9') ||
       ev.key === '.' ||
       ev.key === '-' ||
-      ev.key === 'Backspace'
+      ev.key === 'Backspace' ||
+      ev.key === "'" ||
+      ev.key === '"' ||
+      ev.key === '/' ||
+      ev.key === ' '
     ) {
-      this.typed = editNumericBuffer(this.typed, ev.key)
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+      this.onMeasurementCb(this._typedReadout())
       this._refreshPreview()
     }
+  }
+
+  /** The typed-buffer readout, suffixed for metric formats (imperial tokens
+   * like `'`/`"` are already visible in the buffer itself). */
+  private _typedReadout(): string {
+    const suffix = getLengthUnitSuffix()
+    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
   }
 
   cancel(): void {
@@ -324,9 +335,8 @@ export class SliceTool implements Tool {
   /** Effective plane point: lastPoint nudged along lastNormal by the typed offset, if any. */
   private _effectivePoint(): [number, number, number] | null {
     if (this.lastPoint === null) return null
-    const n = parseDistance(this.typed)
-    if (n === null) return this.lastPoint
-    const offset = metersFromUnit(n)
+    const offset = parseLengthToMeters(this.typed)
+    if (offset === null) return this.lastPoint
     return [
       this.lastPoint[0] + this.lastNormal[0] * offset,
       this.lastPoint[1] + this.lastNormal[1] * offset,
@@ -390,7 +400,7 @@ export class SliceTool implements Tool {
 
   private _reportOffsetOrTyped(): void {
     if (this.typed !== '') {
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.onMeasurementCb(this._typedReadout())
       return
     }
     this.onMeasurementCb('')

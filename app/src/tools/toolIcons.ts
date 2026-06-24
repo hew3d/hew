@@ -14,6 +14,7 @@
 
 import arrowSelectorToolSvg from '@material-symbols/svg-400/outlined/arrow_selector_tool.svg?raw'
 import rectangleSvg from '@material-symbols/svg-400/outlined/rectangle.svg?raw'
+import polylineSvg from '@material-symbols/svg-400/outlined/polyline.svg?raw'
 import unfoldMoreSvg from '@material-symbols/svg-400/outlined/unfold_more.svg?raw'
 import formatPaintSvg from '@material-symbols/svg-400/outlined/format_paint.svg?raw'
 import openWithSvg from '@material-symbols/svg-400/outlined/open_with.svg?raw'
@@ -32,6 +33,7 @@ import contentCutSvg from '@material-symbols/svg-400/outlined/content_cut.svg?ra
 export type ToolName =
   | 'Select'
   | 'Rectangle'
+  | 'Line'
   | 'Push/Pull'
   | 'Paint'
   | 'Move'
@@ -48,6 +50,7 @@ export type ToolName =
 export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Select': arrowSelectorToolSvg,
   'Rectangle': rectangleSvg,
+  'Line': polylineSvg,
   'Push/Pull': unfoldMoreSvg, // matches the up/down-arrow cursor stop-gap
   'Paint': formatPaintSvg,
   'Move': openWithSvg,
@@ -67,6 +70,7 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
 const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Select': { x: 0.25, y: 0.1 },
   'Rectangle': { x: 0.1, y: 0.9 },
+  'Line': { x: 0.1, y: 0.9 },
   'Push/Pull': { x: 0.5, y: 0.5 },
   'Paint': { x: 0.15, y: 0.9 },
   'Move': { x: 0.5, y: 0.5 },

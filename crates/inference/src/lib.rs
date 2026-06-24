@@ -33,8 +33,8 @@
 //! but `resolve` does not emit it yet.
 
 use kernel::{
-    EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, Transform, Vec3,
-    VertexId, tol,
+    EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchId,
+    Transform, Vec3, VertexId, tol,
 };
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
@@ -214,6 +214,17 @@ struct SceneGuide {
     geom: SceneGuideGeom,
 }
 
+/// A bare endpoint-pair segment with no `SnapSource` provenance — used for
+/// sketch and transient candidates (Part 1, Phase B), which aren't yet
+/// selectable kernel elements. Endpoints/midpoints derived from these snap
+/// exactly like [`SceneSegment`]'s, just with `source: None` (mirroring how a
+/// guide or the world axes snap with no provenance).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BareSegment {
+    a: Point3,
+    b: Point3,
+}
+
 /// The geometry of a [`SceneGuide`], mirroring [`kernel::Guide`] in world
 /// space (guides carry no placement/instance — they're authored directly in
 /// world coordinates, unlike Object geometry).
@@ -236,6 +247,15 @@ pub struct InferenceScene {
     segments: Vec<SceneSegment>,
     faces: Vec<SceneFace>,
     guides: Vec<SceneGuide>,
+    /// Persistent sketch candidates (committed sketch edges, not yet kernel
+    /// Objects): keyed by `SketchId` so a caller can replace one sketch's
+    /// segments without touching another's. No `SnapSource` provenance —
+    /// sketch elements aren't selectable in this phase.
+    sketch_segments: Vec<(SketchId, BareSegment)>,
+    /// Transient (in-progress) segments — e.g. the line tool's current
+    /// rubber-band chain — published every frame and never persisted. Cleared
+    /// wholesale by [`InferenceScene::clear_transient`], not per-id.
+    transient_segments: Vec<BareSegment>,
     /// When `false`, guide candidates are suppressed (View ▸ Guides off): a
     /// hidden guide must not snap or flash a cue. Defaults to `true`.
     guides_enabled: bool,
@@ -251,6 +271,8 @@ impl Default for InferenceScene {
             segments: Vec::new(),
             faces: Vec::new(),
             guides: Vec::new(),
+            sketch_segments: Vec::new(),
+            transient_segments: Vec::new(),
             guides_enabled: true,
             axes_enabled: true,
         }
@@ -437,6 +459,43 @@ impl InferenceScene {
         self.guides.len()
     }
 
+    /// Registers (or re-registers) the committed segments of sketch `id` as
+    /// snap candidates: each segment's endpoints and derived midpoint resolve
+    /// exactly like a kernel edge's, but with `source: None` (sketch elements
+    /// aren't selectable in this phase — no `ElementRef` variant exists for
+    /// them yet). Replace semantics, mirroring [`InferenceScene::add_object`]:
+    /// drops any prior candidates for `id` first, so callers can call this on
+    /// every sketch mutation (add/remove segment, extrude) without tracking
+    /// whether `id` was already registered.
+    pub fn add_sketch(&mut self, id: SketchId, segments: &[(Point3, Point3)]) {
+        self.remove_sketch(id);
+        self.sketch_segments
+            .extend(segments.iter().map(|&(a, b)| (id, BareSegment { a, b })));
+    }
+
+    /// Drops all candidates registered for sketch `id`. Unknown ids are a
+    /// no-op — removal must be idempotent (mirroring
+    /// [`InferenceScene::remove_object`]) so callers can remove-then-add
+    /// freely.
+    pub fn remove_sketch(&mut self, id: SketchId) {
+        self.sketch_segments.retain(|(sid, _)| *sid != id);
+    }
+
+    /// Publishes one transient (in-progress) segment as a snap candidate —
+    /// e.g. a just-placed point in the line tool's current chain, which never
+    /// touches the kernel sketch until the gesture commits. Additive; callers
+    /// typically call [`InferenceScene::clear_transient`] then re-publish the
+    /// whole current chain each time it changes (a one-frame lag between
+    /// publish and the next `resolve` is expected — see wasm-api docs).
+    pub fn add_transient_segment(&mut self, a: Point3, b: Point3) {
+        self.transient_segments.push(BareSegment { a, b });
+    }
+
+    /// Drops every transient segment. Idempotent.
+    pub fn clear_transient(&mut self) {
+        self.transient_segments.clear();
+    }
+
     /// Answers one inference query (see the module docs for the priority and
     /// locking model). Returns `None` when nothing falls inside the pick
     /// cone and no lock/anchor produces a directional snap — the tool then
@@ -490,6 +549,33 @@ impl InferenceScene {
                 if !pos.approx_eq(mid, tol::POINT_MERGE) {
                     candidates.push((SnapKind::OnEdge, ang, depth, pos, Some(seg.source), None));
                 }
+            }
+        }
+
+        // --- Sketch and transient segment candidates: Endpoint, Midpoint,
+        //     and OnEdge, all with source: None (no ElementRef provenance in
+        //     this phase — sketch/transient elements aren't selectable). ---
+        let bare_segments = self
+            .sketch_segments
+            .iter()
+            .map(|(_, seg)| seg)
+            .chain(self.transient_segments.iter());
+        for seg in bare_segments {
+            for endpoint in [seg.a, seg.b] {
+                if let Some((ang, depth)) = cone_test(origin, dir, endpoint, aperture) {
+                    candidates.push((SnapKind::Endpoint, ang, depth, endpoint, None, None));
+                }
+            }
+
+            let mid = midpoint(seg.a, seg.b);
+            if let Some((ang, depth)) = cone_test(origin, dir, mid, aperture) {
+                candidates.push((SnapKind::Midpoint, ang, depth, mid, None, None));
+            }
+
+            if let Some((pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
+                && !pos.approx_eq(mid, tol::POINT_MERGE)
+            {
+                candidates.push((SnapKind::OnEdge, ang, depth, pos, None, None));
             }
         }
 
@@ -1547,5 +1633,124 @@ mod tests {
         // registered) must not panic.
         scene.remove_guide(id);
         scene.remove_guide(GuideId::default());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase B: sketch + transient candidates
+    // -----------------------------------------------------------------------
+
+    /// A registered sketch segment's endpoint and its midpoint each resolve
+    /// as a snap along a ray through them, with `source: None`.
+    #[test]
+    fn sketch_segment_endpoint_and_midpoint_snap() {
+        let mut scene = InferenceScene::new();
+        let id = SketchId::default();
+        let a = Point3::new(0.0, 0.0, 0.0);
+        let b = Point3::new(2.0, 0.0, 0.0);
+        scene.add_sketch(id, &[(a, b)]);
+
+        // Ray straight at endpoint `b`.
+        let endpoint_snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(2.0, 0.0, 5.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.05,
+                constraint_plane: None,
+            })
+            .expect("sketch endpoint is on this ray");
+        assert_eq!(endpoint_snap.kind, SnapKind::Endpoint);
+        assert!(endpoint_snap.position.approx_eq(b, tol::POINT_MERGE));
+        assert!(endpoint_snap.source.is_none());
+
+        // Ray straight at the midpoint (1, 0, 0).
+        let mid_snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(1.0, 0.0, 5.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.05,
+                constraint_plane: None,
+            })
+            .expect("sketch midpoint is on this ray");
+        assert_eq!(mid_snap.kind, SnapKind::Midpoint);
+        assert!(
+            mid_snap
+                .position
+                .approx_eq(Point3::new(1.0, 0.0, 0.0), tol::POINT_MERGE)
+        );
+        assert!(mid_snap.source.is_none());
+    }
+
+    /// `remove_sketch` unregisters a sketch's candidates; removing an unknown
+    /// id is a no-op.
+    #[test]
+    fn remove_sketch_unregisters_its_candidates() {
+        let mut scene = InferenceScene::new();
+        let id = SketchId::default();
+        let a = Point3::new(20.0, 20.0, 0.0);
+        let b = Point3::new(22.0, 20.0, 0.0);
+        scene.add_sketch(id, &[(a, b)]);
+
+        let query = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(20.0, 20.0, 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.05,
+            constraint_plane: None,
+        };
+        assert!(scene.resolve(&query).is_some());
+
+        scene.remove_sketch(id);
+        assert!(
+            scene.resolve(&query).is_none(),
+            "removed sketch must no longer snap"
+        );
+
+        // Idempotent / unknown id is a no-op.
+        scene.remove_sketch(id);
+        scene.remove_sketch(SketchId::default());
+    }
+
+    /// A transient segment's endpoint snaps like a sketch segment's;
+    /// `clear_transient` removes it.
+    #[test]
+    fn transient_segment_endpoint_snaps_and_clears() {
+        let mut scene = InferenceScene::new();
+        let a = Point3::new(5.0, 5.0, 0.0);
+        let b = Point3::new(7.0, 5.0, 0.0);
+        scene.add_transient_segment(a, b);
+
+        let query = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(7.0, 5.0, 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.05,
+            constraint_plane: None,
+        };
+        let snap = scene
+            .resolve(&query)
+            .expect("transient endpoint is on this ray");
+        assert_eq!(snap.kind, SnapKind::Endpoint);
+        assert!(snap.position.approx_eq(b, tol::POINT_MERGE));
+        assert!(snap.source.is_none());
+
+        scene.clear_transient();
+        assert!(
+            scene.resolve(&query).is_none(),
+            "cleared transient segment must no longer snap"
+        );
     }
 }

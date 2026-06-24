@@ -669,12 +669,14 @@ impl Scene {
     /// Reconciles the inference scene and render caches with the Document after
     /// a mutation. For each touched Object: drop its cached mesh, then register
     /// it with inference if it is now visible or remove it if it is hidden/gone
-    /// (replace semantics, mirroring the Document's view). Sketches carry no
-    /// inference/cache state today, so `sketches_touched` needs no action here.
-    /// `guides_touched`: each touched guide is re-registered with
-    /// inference if still live (visible), or unregistered if hidden/gone —
-    /// guides are now real snap targets ([`SnapKind::OnGuide`] /
-    /// [`SnapKind::Endpoint`] for a guide point).
+    /// (replace semantics, mirroring the Document's view). `sketches_touched`
+    /// (Phase B): each touched sketch's live segments are re-registered with
+    /// inference (replace semantics) so committed sketch geometry becomes
+    /// snappable — see [`Scene::register_sketch`]. `guides_touched` (
+    ///): each touched guide is re-registered with inference if still
+    /// live (visible), or unregistered if hidden/gone — guides are now real
+    /// snap targets ([`SnapKind::OnGuide`] / [`SnapKind::Endpoint`] for a
+    /// guide point).
     fn reconcile(&mut self, change: &DocChange) {
         // Objects: drop the cached mesh, then (re)register *world* objects with
         // inference at identity, or drop hidden/gone ones. Definition members
@@ -701,6 +703,10 @@ impl Scene {
             if !self.hidden_instances.contains(&iid) {
                 self.register_instance(iid);
             }
+        }
+        // Sketches (Phase B): re-register each touched sketch's live segments.
+        for &sid in &change.sketches_touched {
+            self.register_sketch(sid);
         }
         // Guides: re-register if still live, else unregister.
         // Guides have no session-only hidden-set (unlike objects/instances) —
@@ -729,6 +735,39 @@ impl Scene {
                 self.inference.add_instance(iid, m, object, &pose);
             }
         }
+    }
+
+    /// Re-registers sketch `id`'s current live (non-consumed) segments with
+    /// inference (replace semantics — see [`inference::InferenceScene::add_sketch`]),
+    /// or unregisters it if the sketch is unknown/gone. Shared by `reconcile`
+    /// (each `sketches_touched` id) and the wasm-level call sites that mutate
+    /// a sketch directly (`sketch_add_segment`/`sketch_remove_edge`), which
+    /// bypass `Document::apply_*` and so never produce a `DocChange` —
+    /// `sketches_touched` would always be empty for them, so they register
+    /// the sketch at the call site instead (see those methods).
+    fn register_sketch(&mut self, id: SketchId) {
+        self.inference.remove_sketch(id);
+        if let Some(segments) = Self::live_sketch_segments(&self.doc, id) {
+            self.inference.add_sketch(id, &segments);
+        }
+    }
+
+    /// Enumerates sketch `id`'s live (non-consumed) edges as world-space
+    /// endpoint pairs, or `None` if the sketch is unknown/gone. Shared by
+    /// [`Scene::register_sketch`] and [`Scene::sketch_lines`] so both walk
+    /// the same "live edge" definition.
+    fn live_sketch_segments(doc: &Document, id: SketchId) -> Option<Vec<(Point3, Point3)>> {
+        let s = doc.sketch(id)?;
+        let mut out = Vec::with_capacity(s.edges().len());
+        for (eid, edge) in s.edges() {
+            if doc.is_sketch_edge_consumed(id, eid) {
+                continue;
+            }
+            let a = s.vertices()[edge.from].position;
+            let b = s.vertices()[edge.to].position;
+            out.push((a, b));
+        }
+        Some(out)
     }
 
     fn apply_op(&mut self, handle: u64, op: KernelOp) -> Result<KernelOpReport, ApiError> {
@@ -786,13 +825,18 @@ impl Scene {
         by: f64,
         bz: f64,
     ) -> Result<SegmentAddedJs, ApiError> {
+        let sid = sketch_id(sketch);
         let s = self
             .doc
-            .sketch_mut(sketch_id(sketch))
+            .sketch_mut(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let report = s
             .add_segment(Point3::new(ax, ay, az), Point3::new(bx, by, bz))
             .map_err(|e| api_err(&e, &e))?;
+        // `Sketch::add_segment` is called directly (not through
+        // `Document::apply_*`), so no `DocChange`/`sketches_touched` exists
+        // here — register the sketch with inference at this call site instead.
+        self.register_sketch(sid);
         Ok(SegmentAddedJs { inner: report })
     }
 
@@ -802,33 +846,29 @@ impl Scene {
         sketch: u64,
         edge: u64,
     ) -> Result<EdgeRemovedJs, ApiError> {
+        let sid = sketch_id(sketch);
         let s = self
             .doc
-            .sketch_mut(sketch_id(sketch))
+            .sketch_mut(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let report = s
             .remove_edge(SketchEdgeId::from(KeyData::from_ffi(edge)))
             .map_err(|e| api_err(&e, &e))?;
+        // Same rationale as `sketch_add_segment`: no `DocChange` here, so
+        // register at the call site.
+        self.register_sketch(sid);
         Ok(EdgeRemovedJs { inner: report })
     }
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
     /// Edges consumed by an extrusion (part of a solid's base) are excluded.
     pub fn sketch_lines(&self, sketch: u64) -> Result<Vec<f32>, ApiError> {
-        let sid = sketch_id(sketch);
-        let s = self
-            .doc
-            .sketch(sid)
+        let segments = Self::live_sketch_segments(&self.doc, sketch_id(sketch))
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
-        let mut out = Vec::with_capacity(s.edges().len() * 6);
-        for (eid, edge) in s.edges() {
-            if self.doc.is_sketch_edge_consumed(sid, eid) {
-                continue;
-            }
-            for v in [edge.from, edge.to] {
-                let p = s.vertices()[v].position;
-                out.extend([p.x as f32, p.y as f32, p.z as f32]);
-            }
+        let mut out = Vec::with_capacity(segments.len() * 6);
+        for (a, b) in segments {
+            out.extend([a.x as f32, a.y as f32, a.z as f32]);
+            out.extend([b.x as f32, b.y as f32, b.z as f32]);
         }
         Ok(out)
     }
@@ -1715,6 +1755,23 @@ impl Scene {
             // pick_face only ever yields faces; anything else is a bug.
             _ => None,
         }
+    }
+
+    /// Publishes one transient (in-progress) segment as a snap candidate —
+    /// e.g. a point the line tool has placed in its current chain but not yet
+    /// committed to the kernel sketch. Additive; tools typically call
+    /// `clear_transient_segments` then republish the whole current chain
+    /// whenever it changes. `snap`/`resolve` stays `&self`, so a one-frame lag
+    /// between publishing here and the next `snap` call is expected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_transient_segment(&mut self, ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) {
+        self.inference
+            .add_transient_segment(Point3::new(ax, ay, az), Point3::new(bx, by, bz));
+    }
+
+    /// Drops every transient segment published via `add_transient_segment`.
+    pub fn clear_transient_segments(&mut self) {
+        self.inference.clear_transient();
     }
 
     /// Set the user-hidden world objects and instances (session-only; this

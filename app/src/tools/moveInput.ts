@@ -1,8 +1,12 @@
 /**
  * moveInput — pure helpers for axis-lock and numeric VCB entry in MoveTool.
  *
- * No three.js or DOM imports — fully testable in Node/vitest.
+ * No three.js or DOM imports — fully testable in Node/vitest. (The
+ * `LengthFormat` type import below is type-only — erased at build time —
+ * so it doesn't pull in any runtime dependency.)
  */
+
+import type { LengthFormat } from '../settings/units'
 
 /**
  * Map an arrow key to an axis index.
@@ -47,6 +51,58 @@ export function editNumericBuffer(buf: string, key: string): string {
   }
 
   if (key >= '0' && key <= '9') {
+    return buf + key
+  }
+
+  return buf
+}
+
+/**
+ * Immutably edit a length VCB string buffer, format-aware.
+ *
+ * For imperial formats ('arch' | 'frac_in' | 'dec_in') this is
+ * `editNumericBuffer` PLUS acceptance of the SketchUp feet-inch-fraction
+ * grammar tokens: `'` (feet), `"` (inches), `/` (fraction), and a space
+ * (separator between inches and a fraction, e.g. "5' 3 1/2\"").
+ *
+ * For metric formats ('m' | 'cm' | 'mm') this behaves EXACTLY like
+ * `editNumericBuffer` — no new tokens accepted.
+ *
+ * No three.js or DOM imports — fully testable in Node/vitest.
+ */
+export function editLengthBuffer(buf: string, key: string, format: LengthFormat): string {
+  const isImperial = format === 'arch' || format === 'frac_in' || format === 'dec_in'
+
+  if (!isImperial) return editNumericBuffer(buf, key)
+
+  if (key === 'Backspace') {
+    return buf.slice(0, -1)
+  }
+
+  if (key === '-') {
+    return buf.startsWith('-') ? buf.slice(1) : '-' + buf
+  }
+
+  if (key === '.') {
+    // Reject a second dot within the current numeric token — i.e. since the
+    // last grammar token boundary (', ", /, space), same spirit as
+    // editNumericBuffer's single-dot rule but scoped to the active token.
+    const lastBoundary = Math.max(
+      buf.lastIndexOf("'"),
+      buf.lastIndexOf('"'),
+      buf.lastIndexOf('/'),
+      buf.lastIndexOf(' '),
+    )
+    const currentToken = buf.slice(lastBoundary + 1)
+    if (currentToken.includes('.')) return buf
+    return buf + '.'
+  }
+
+  if (key >= '0' && key <= '9') {
+    return buf + key
+  }
+
+  if (key === "'" || key === '"' || key === '/' || key === ' ') {
     return buf + key
   }
 

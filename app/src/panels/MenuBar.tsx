@@ -432,6 +432,13 @@ export function MenuBar({
               checked={activeTool === 'Rectangle'}
               onClick={withClose(() => onSelectTool?.('Rectangle'))}
             />
+            <div style={{ borderTop: '1px solid #4a4a4a', margin: '4px 0' }} />
+            <CheckMenuItem
+              label="Line"
+              shortcut={`${mod}L`}
+              checked={activeTool === 'Line'}
+              onClick={withClose(() => onSelectTool?.('Line'))}
+            />
           </div>
         )}
       </div>

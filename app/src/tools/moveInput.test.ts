@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   arrowToAxis,
   editNumericBuffer,
+  editLengthBuffer,
   editDimsBuffer,
   parseDistance,
   parseDimensions,
@@ -107,6 +108,55 @@ describe('parseDistance', () => {
     // editNumericBuffer can produce ".5" only if user types dot then digits from empty
     // parseFloat('.5') === 0.5
     expect(parseDistance('.5')).toBeCloseTo(0.5)
+  })
+})
+
+describe('editLengthBuffer', () => {
+  it('behaves exactly like editNumericBuffer for metric formats', () => {
+    for (const format of ['m', 'cm', 'mm'] as const) {
+      expect(editLengthBuffer('', '3', format)).toBe(editNumericBuffer('', '3'))
+      expect(editLengthBuffer('3', '.', format)).toBe(editNumericBuffer('3', '.'))
+      expect(editLengthBuffer('3.5', '.', format)).toBe(editNumericBuffer('3.5', '.'))
+      expect(editLengthBuffer('5', '-', format)).toBe(editNumericBuffer('5', '-'))
+      expect(editLengthBuffer('35', 'Backspace', format)).toBe(editNumericBuffer('35', 'Backspace'))
+      // Imperial-only tokens are rejected in metric formats, same as editNumericBuffer.
+      expect(editLengthBuffer('5', "'", format)).toBe('5')
+      expect(editLengthBuffer('5', '"', format)).toBe('5')
+      expect(editLengthBuffer('5', '/', format)).toBe('5')
+      expect(editLengthBuffer('5', ' ', format)).toBe('5')
+    }
+  })
+
+  it('accepts feet/inch/fraction tokens in imperial formats', () => {
+    for (const format of ['arch', 'frac_in', 'dec_in'] as const) {
+      expect(editLengthBuffer('5', "'", format)).toBe("5'")
+      expect(editLengthBuffer("5'", '3', format)).toBe("5'3")
+      expect(editLengthBuffer("5'3", '"', format)).toBe('5\'3"')
+      expect(editLengthBuffer('3', '/', format)).toBe('3/')
+      expect(editLengthBuffer('3', ' ', format)).toBe('3 ')
+      expect(editLengthBuffer("5'", ' ', format)).toBe("5' ")
+    }
+  })
+
+  it('still accepts digits, dot, minus, Backspace in imperial formats', () => {
+    expect(editLengthBuffer('', '6', 'arch')).toBe('6')
+    expect(editLengthBuffer('6', '0', 'arch')).toBe('60')
+    expect(editLengthBuffer('60', '.', 'arch')).toBe('60.')
+    expect(editLengthBuffer('60.', '1', 'arch')).toBe('60.1')
+    expect(editLengthBuffer('5', '-', 'arch')).toBe('-5')
+    expect(editLengthBuffer('60', 'Backspace', 'arch')).toBe('6')
+  })
+
+  it('rejects a second dot within the current token in imperial formats', () => {
+    expect(editLengthBuffer('60.1', '.', 'dec_in')).toBe('60.1')
+    // After a token boundary (space), a new dot is allowed again.
+    expect(editLengthBuffer('5 3.5', '.', 'arch')).toBe('5 3.5')
+    expect(editLengthBuffer('5 3', '.', 'arch')).toBe('5 3.')
+  })
+
+  it('ignores unknown keys in imperial formats', () => {
+    expect(editLengthBuffer('3', 'a', 'arch')).toBe('3')
+    expect(editLengthBuffer('3', 'Enter', 'frac_in')).toBe('3')
   })
 })
 

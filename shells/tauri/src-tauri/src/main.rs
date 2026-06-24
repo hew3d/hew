@@ -376,8 +376,17 @@ fn main() {
                 .item(&draw_rect)
                 .build()?;
 
+            let draw_line = MenuItemBuilder::with_id("draw-line", "Line")
+                .accelerator("CmdOrCtrl+L")
+                .build(handle)?;
+
+            let draw_lines = SubmenuBuilder::new(handle, "Lines")
+                .item(&draw_line)
+                .build()?;
+
             let draw_menu = SubmenuBuilder::new(handle, "Draw")
                 .item(&draw_shapes)
+                .item(&draw_lines)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -569,6 +578,7 @@ fn main() {
                 "view-axes" => "toggle-axes",
                 "view-guides" => "toggle-guides",
                 "draw-rectangle" => "tool-rectangle",
+                "draw-line" => "tool-line",
                 "tool-select" => "tool-select",
                 "tool-paint" => "tool-paint",
                 "tool-move" => "tool-move",
