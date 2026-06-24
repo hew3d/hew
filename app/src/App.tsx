@@ -55,7 +55,7 @@ function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
 }
 
-const TOOLS = ['Select', 'Rectangle', 'Line', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Slice', 'Orbit', 'Pan', 'Zoom'] as const
+const TOOLS = ['Select', 'Rectangle', 'Line', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Slice', 'Edit Vertex', 'Orbit', 'Pan', 'Zoom'] as const
 type ToolName = (typeof TOOLS)[number]
 // Canonical shortcuts use the ⌘ glyph; the toolbar-button tooltip swaps it for
 // `modLabel` ('Ctrl+') on non-Mac hosts (e.g. Linux/WebKitGTK).
@@ -71,6 +71,7 @@ const TOOL_KEYS: Record<ToolName, string> = {
   'Tape Measure': '⌘D',
   'Protractor': '',
   'Slice': '',
+  'Edit Vertex': '',
   'Orbit': '⌘B',
   'Pan': '⌘R',
   'Zoom': '⌘\\',
@@ -797,10 +798,6 @@ export default function App() {
   const exportGltfRef = useRef(exportGltf)
   const openPathRef = useRef(openPath)
   const openSettingsRef = useRef(openSettings)
-  // Tracks the latest active tool name for the keydown effect below (fixed
-  // dep array — see its Delete/Backspace handling), so it never sees a stale
-  // tool from the render it mounted in.
-  const activeToolRef = useRef(activeTool)
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
   useEffect(() => { openDocumentRef.current = openDocument }, [openDocument])
   useEffect(() => { importDocumentRef.current = importDocument }, [importDocument])
@@ -812,7 +809,6 @@ export default function App() {
   useEffect(() => { exportGltfRef.current = exportGltf }, [exportGltf])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
   useEffect(() => { openSettingsRef.current = openSettings }, [openSettings])
-  useEffect(() => { activeToolRef.current = activeTool }, [activeTool])
 
   // ---------------------------------------------------------------- native menu-action dispatch
   // The dispatch switch lives in a ref refreshed every render. The listener
@@ -873,6 +869,7 @@ export default function App() {
       case 'tool-tape-measure': setActiveTool('Tape Measure'); break
       case 'tool-protractor': setActiveTool('Protractor'); break
       case 'tool-slice':     setActiveTool('Slice'); break
+      case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
       case 'tool-orbit':     setActiveTool('Orbit'); break
       case 'tool-pan':       setActiveTool('Pan'); break
       case 'tool-zoom':      setActiveTool('Zoom'); break
@@ -1131,9 +1128,9 @@ export default function App() {
   // Registered SEPARATELY from the global-shortcut effect above because that one
   // is disabled under Tauri (the native menu owns accelerators) — but Edit ▸
   // Delete has *no* native accelerator (a bare Delete/Backspace would bypass the
-  // typing + Select-tool guards and collide with the tools' VCB Backspace), so
-  // the key must be handled in JS on BOTH web and desktop. Gating to the Select
-  // tool keeps it from stealing Backspace mid-typed-entry in other tools.
+  // typing guard and collide with the tools' VCB Backspace), so the key must be
+  // handled in JS on BOTH web and desktop. It deletes from any tool; only a tool
+  // mid-VCB entry (isCapturingInput) keeps Backspace for the typed buffer.
   useEffect(() => {
     const onDeleteKey = (ev: KeyboardEvent) => {
       if (ev.key !== 'Delete' && ev.key !== 'Backspace') return
@@ -1143,10 +1140,14 @@ export default function App() {
       if (isTyping) return // let the focused field edit text normally
       // ALWAYS swallow Delete/Backspace outside text fields: the webview
       // otherwise treats Backspace as "navigate back", which silently wedges
-      // the whole app until restart. (This is why delete "stopped working" after
-      // a stray Backspace in a non-Select tool.) Only the Select tool deletes.
+      // the whole app until restart.
       ev.preventDefault()
-      if (activeToolRef.current === 'Select') {
+      // Delete the current selection — from ANY tool and however it was selected
+      // (viewport or Object list), NOT just the Select tool. The one exception
+      // is a tool mid-VCB entry (e.g. typing a Move distance), where Backspace
+      // must edit the typed buffer instead; the Viewport routes the key to that
+      // tool and reports it here via isCapturingInput so we don't also delete.
+      if (!(viewportApi.current?.isCapturingInput?.() ?? false)) {
         menuActionRef.current('edit-delete')
       }
     }

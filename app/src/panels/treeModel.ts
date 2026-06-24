@@ -24,8 +24,14 @@ export function stripTagSuffix(name: string): string {
   return m === null ? name : name.slice(0, m.index)
 }
 
-/** Kind of a document node. */
-export type NodeKind = 'object' | 'group' | 'instance'
+/**
+ * Kind of a document node. `'sketch'` is a free-standing,
+ * not-yet-extruded sketch — it has no kernel `NodeId`/FFI `node_id` ('s
+ * NodeId enumerates only Object/Group/Instance), so it deliberately stays out
+ * of `nodeKindToNumber`'s mapping; sketch delete/pick route through dedicated
+ * `delete_sketch`/`pick_sketch` wasm methods instead of `delete_node`.
+ */
+export type NodeKind = 'object' | 'group' | 'instance' | 'sketch'
 
 /** A reference to a document node: kind + opaque handle. */
 export interface NodeRef {
@@ -159,11 +165,18 @@ export function isTreeRowDimmed(
 /**
  * Convert a NodeKind to the numeric kind tag used in WASM API calls.
  *   0 = object, 1 = group, 2 = instance
+ *
+ * `'sketch'` has no kernel `NodeId` variant (see the `NodeKind` doc comment)
+ * and none of this function's callers (DocumentTree/ObjectInfoPanel/
+ * MaterialPalette/TagsPanel) are wired for a sketch selection yet — throwing
+ * here surfaces that gap loudly instead of silently mis-mapping a sketch to
+ * 'instance' (2).
  */
 export function nodeKindToNumber(kind: NodeKind): number {
   if (kind === 'object') return 0
   if (kind === 'group') return 1
-  return 2
+  if (kind === 'instance') return 2
+  throw new Error(`nodeKindToNumber: 'sketch' has no kernel NodeId mapping`)
 }
 
 /**

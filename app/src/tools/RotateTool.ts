@@ -43,7 +43,7 @@ import {
   affineToFloat64,
 } from './transformMath'
 import { rayPlaneIntersect, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
+import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, buildSketchPreviewClone, clearPreview } from './transformPreview'
 import { arrowToAxis, editNumericBuffer, parseDistance } from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
 
@@ -321,6 +321,9 @@ export class RotateTool implements Tool {
       const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
       return buildInstancePreviewClone(group)
     }
+    if (node.kind === 'sketch') {
+      return buildSketchPreviewClone(this.wasmScene.sketch_lines(node.id))
+    }
     return buildPreviewClone(this.objectsGroup, node.id)
   }
 
@@ -337,6 +340,8 @@ export class RotateTool implements Tool {
         this.wasmScene.transform_group(node.id, affineF64)
       } else if (node.kind === 'instance') {
         this.wasmScene.transform_instance(node.id, affineF64)
+      } else if (node.kind === 'sketch') {
+        this.wasmScene.transform_sketch(node.id, affineF64)
       } else {
         this.wasmScene.transform_object(node.id, affineF64)
       }

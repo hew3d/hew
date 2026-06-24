@@ -34,7 +34,7 @@
 
 use kernel::{
     EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchId,
-    Transform, Vec3, VertexId, tol,
+    SketchVertexId, Transform, Vec3, VertexId, tol,
 };
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
@@ -252,6 +252,10 @@ pub struct InferenceScene {
     /// segments without touching another's. No `SnapSource` provenance —
     /// sketch elements aren't selectable in this phase.
     sketch_segments: Vec<(SketchId, BareSegment)>,
+    /// Committed sketch *vertices*, keyed by `SketchId`, carrying their
+    /// `SketchVertexId` so the per-vertex edit tool (Phase D) can pick an exact
+    /// vertex to drag. Registered/cleared alongside `sketch_segments`.
+    sketch_vertices: Vec<(SketchId, SketchVertexId, Point3)>,
     /// Transient (in-progress) segments — e.g. the line tool's current
     /// rubber-band chain — published every frame and never persisted. Cleared
     /// wholesale by [`InferenceScene::clear_transient`], not per-id.
@@ -272,6 +276,7 @@ impl Default for InferenceScene {
             faces: Vec::new(),
             guides: Vec::new(),
             sketch_segments: Vec::new(),
+            sketch_vertices: Vec::new(),
             transient_segments: Vec::new(),
             guides_enabled: true,
             axes_enabled: true,
@@ -473,12 +478,24 @@ impl InferenceScene {
             .extend(segments.iter().map(|&(a, b)| (id, BareSegment { a, b })));
     }
 
+    /// Registers (or re-registers) the committed *vertices* of sketch `id` as
+    /// pickable targets for the per-vertex edit tool (Phase D), carrying each
+    /// `SketchVertexId`. Replace semantics like [`InferenceScene::add_sketch`]:
+    /// drops any prior vertices for `id` first. Callers register vertices and
+    /// segments together on every sketch mutation.
+    pub fn add_sketch_vertices(&mut self, id: SketchId, vertices: &[(SketchVertexId, Point3)]) {
+        self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
+        self.sketch_vertices
+            .extend(vertices.iter().map(|&(vid, p)| (id, vid, p)));
+    }
+
     /// Drops all candidates registered for sketch `id`. Unknown ids are a
     /// no-op — removal must be idempotent (mirroring
     /// [`InferenceScene::remove_object`]) so callers can remove-then-add
     /// freely.
     pub fn remove_sketch(&mut self, id: SketchId) {
         self.sketch_segments.retain(|(sid, _)| *sid != id);
+        self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
     }
 
     /// Publishes one transient (in-progress) segment as a snap candidate —
@@ -731,6 +748,58 @@ impl InferenceScene {
             }
         }
         best.map(|(_, source)| source)
+    }
+
+    /// Picks the live sketch whose nearest edge is closest to the ray, for
+    /// whole-sketch selection of a free-standing (not-yet-extruded) sketch.
+    ///
+    /// Unlike `pick_face`, a sketch edge has no thickness, so this uses the
+    /// same pick-cone model as [`InferenceScene::resolve`]: a sketch is a
+    /// candidate iff some point on one of its edges falls within `aperture`
+    /// radians of the ray axis, and among candidates the one with the
+    /// smallest angular distance wins (depth breaks ties, nearest to the ray
+    /// origin first) — mirroring `OnEdge` ranking in `resolve`. Registered
+    /// transient segments (no owning sketch) are not candidates here.
+    /// Returns `None` if the ray hits no live sketch edge within `aperture`.
+    pub fn pick_sketch(&self, ray: &PickRay, aperture: f64) -> Option<SketchId> {
+        let dir = ray.direction.normalized().ok()?;
+        let origin = ray.origin;
+        let mut best: Option<(f64, f64, SketchId)> = None; // (angular_dist, depth, id)
+        for &(id, seg) in &self.sketch_segments {
+            if let Some((_pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
+                && best.as_ref().is_none_or(|&(a, d, _)| (ang, depth) < (a, d))
+            {
+                best = Some((ang, depth, id));
+            }
+        }
+        best.map(|(_, _, id)| id)
+    }
+
+    /// Picks the committed sketch *vertex* nearest the ray (Phase D per-vertex
+    /// edit). Uses the same pick-cone model as [`InferenceScene::pick_sketch`]
+    /// but tests vertex points (via [`cone_test`]) rather than edges, returning
+    /// the owning sketch, the exact `SketchVertexId`, and its world position.
+    /// Smallest angular distance wins; depth breaks ties (nearest first).
+    /// Returns `None` if no registered sketch vertex falls within `aperture`.
+    pub fn pick_sketch_vertex(
+        &self,
+        ray: &PickRay,
+        aperture: f64,
+    ) -> Option<(SketchId, SketchVertexId, Point3)> {
+        let dir = ray.direction.normalized().ok()?;
+        let origin = ray.origin;
+        // (angular_dist, depth, id, vertex, position)
+        let mut best: Option<(f64, f64, SketchId, SketchVertexId, Point3)> = None;
+        for &(id, vid, pos) in &self.sketch_vertices {
+            if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture)
+                && best
+                    .as_ref()
+                    .is_none_or(|&(a, d, _, _, _)| (ang, depth) < (a, d))
+            {
+                best = Some((ang, depth, id, vid, pos));
+            }
+        }
+        best.map(|(_, _, id, vid, pos)| (id, vid, pos))
     }
 }
 
@@ -1719,6 +1788,89 @@ mod tests {
         // Idempotent / unknown id is a no-op.
         scene.remove_sketch(id);
         scene.remove_sketch(SketchId::default());
+    }
+
+    /// `pick_sketch` returns the id of the sketch whose edge the ray passes
+    /// nearest to, within the aperture; a ray that hits nothing returns `None`.
+    #[test]
+    fn pick_sketch_returns_the_nearest_sketch_within_aperture() {
+        let mut scene = InferenceScene::new();
+        let near = SketchId::default();
+        scene.add_sketch(
+            near,
+            &[(Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0))],
+        );
+
+        let ray = PickRay {
+            origin: Point3::new(1.0, 0.0, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+        assert_eq!(scene.pick_sketch(&ray, 0.05), Some(near));
+
+        // A ray well off to the side hits nothing within a tight aperture.
+        let miss_ray = PickRay {
+            origin: Point3::new(50.0, 50.0, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+        assert_eq!(scene.pick_sketch(&miss_ray, 0.05), None);
+
+        scene.remove_sketch(near);
+        assert_eq!(
+            scene.pick_sketch(&ray, 0.05),
+            None,
+            "removed sketch is no longer pickable"
+        );
+    }
+
+    /// `pick_sketch_vertex` returns the exact `SketchVertexId` of the nearest
+    /// registered sketch vertex within the aperture, and `None` after removal.
+    #[test]
+    fn pick_sketch_vertex_returns_the_nearest_vertex() {
+        let mut scene = InferenceScene::new();
+        let id = SketchId::default();
+        let mut sk = kernel::Sketch::on_plane(
+            Plane::from_polygon(&[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ])
+            .unwrap(),
+        );
+        sk.add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0))
+            .unwrap();
+        let verts: Vec<_> = sk
+            .vertices()
+            .iter()
+            .map(|(vid, v)| (vid, v.position))
+            .collect();
+        scene.add_sketch_vertices(id, &verts);
+        let target = verts
+            .iter()
+            .find(|(_, p)| p.approx_eq(Point3::new(2.0, 0.0, 0.0), tol::POINT_MERGE))
+            .map(|(vid, _)| *vid)
+            .unwrap();
+
+        // A ray straight down onto the (2,0,0) corner picks that exact vertex.
+        let ray = PickRay {
+            origin: Point3::new(2.0, 0.0, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+        let hit = scene.pick_sketch_vertex(&ray, 0.05).expect("vertex on ray");
+        assert_eq!((hit.0, hit.1), (id, target));
+        assert!(
+            hit.2
+                .approx_eq(Point3::new(2.0, 0.0, 0.0), tol::POINT_MERGE)
+        );
+
+        // A ray down the middle of the edge (1,0,0) is too far from any vertex.
+        let mid_ray = PickRay {
+            origin: Point3::new(1.0, 0.0, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+        assert_eq!(scene.pick_sketch_vertex(&mid_ray, 0.05), None);
+
+        scene.remove_sketch(id);
+        assert_eq!(scene.pick_sketch_vertex(&ray, 0.05), None);
     }
 
     /// A transient segment's endpoint snaps like a sketch segment's;

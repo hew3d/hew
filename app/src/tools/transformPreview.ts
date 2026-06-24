@@ -104,6 +104,30 @@ export function buildInstancePreviewClone(
   return clone
 }
 
+/** Line color for a sketch drag preview — matches the live sketch line color
+ * (`SKETCH_LINE_COLOR` in SceneRenderer) so the ghost reads as "this sketch". */
+const SKETCH_PREVIEW_LINE_COLOR = 0x2266cc
+
+/**
+ * Build a semi-transparent THREE.LineSegments ghost from a sketch's
+ * world-space line positions (as returned by `wasmScene.sketch_lines`).
+ * Returns null if the sketch currently has no lines.
+ */
+export function buildSketchPreviewClone(
+  linePositions: Float32Array | number[],
+): THREE.Object3D | null {
+  if (linePositions.length === 0) return null
+  const positions = linePositions instanceof Float32Array
+    ? linePositions
+    : new Float32Array(linePositions)
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  const mat = fadePreviewMaterial(
+    new THREE.LineBasicMaterial({ color: SKETCH_PREVIEW_LINE_COLOR, linewidth: 2 }),
+  ) as THREE.LineBasicMaterial
+  return new THREE.LineSegments(geo, mat)
+}
+
 /**
  * Build a combined semi-transparent preview for a set of leaf object ids
  * (used when transforming a group — all leaves must move together as one unit).

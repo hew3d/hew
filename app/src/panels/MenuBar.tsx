@@ -505,6 +505,11 @@ export function MenuBar({
               checked={activeTool === 'Slice'}
               onClick={withClose(() => onSelectTool?.('Slice'))}
             />
+            <CheckMenuItem
+              label="Edit Vertex"
+              checked={activeTool === 'Edit Vertex'}
+              onClick={withClose(() => onSelectTool?.('Edit Vertex'))}
+            />
           </div>
         )}
       </div>

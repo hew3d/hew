@@ -7,8 +7,8 @@
 
 use kernel::{
     BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, KernelOp,
-    KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchId,
-    Transform, TransformError, Vec3, WatertightState,
+    KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
+    SketchError, SketchId, SketchVertexId, Transform, TransformError, Vec3, WatertightState,
 };
 use std::collections::HashSet;
 
@@ -420,6 +420,256 @@ fn transform_unknown_object_errors() {
     assert_eq!(
         doc.transform_object(bogus, &Transform::translation(Vec3::new(1.0, 0.0, 0.0))),
         Err(DocumentError::UnknownObject)
+    );
+}
+
+// ------------------------------------------------- transform a whole sketch
+
+/// Centroid of a sketch's vertex positions (insertion-order independent).
+fn sketch_centroid(doc: &Document, s: SketchId) -> Point3 {
+    let verts = doc.sketch(s).expect("sketch is live").vertices();
+    let mut acc = Vec3::ZERO;
+    let mut n = 0usize;
+    for (_, v) in verts {
+        acc = acc + v.position.to_vec();
+        n += 1;
+    }
+    Point3::ORIGIN + acc * (1.0 / n as f64)
+}
+
+/// Transforming a free-standing sketch moves every vertex by the affine and
+/// round-trips exactly through undo/redo, keeping the `SketchId` and the
+/// sketch's drawn topology (region count) intact.
+#[test]
+fn transform_sketch_translates_and_round_trips() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 1.0);
+    let c0 = sketch_centroid(&doc, s);
+    let regions0 = doc.extrudable_regions(s).unwrap().len();
+    let offset = Vec3::new(5.0, 3.0, 0.0);
+
+    let change = doc
+        .transform_sketch(s, &Transform::translation(offset))
+        .expect("translate sketch");
+    assert_eq!(
+        change.sketches_touched,
+        vec![s],
+        "reports the touched sketch"
+    );
+    assert!(
+        approx_pt(sketch_centroid(&doc, s), c0 + offset),
+        "every vertex moved by the offset"
+    );
+    assert_eq!(
+        doc.extrudable_regions(s).unwrap().len(),
+        regions0,
+        "topology preserved — still extrudable"
+    );
+
+    doc.undo().expect("undo sketch transform");
+    assert!(
+        approx_pt(sketch_centroid(&doc, s), c0),
+        "undo restores the original vertex positions"
+    );
+    assert!(
+        doc.sketch_ids().contains(&s),
+        "the SketchId stays valid and visible across undo"
+    );
+
+    doc.redo().expect("redo sketch transform");
+    assert!(approx_pt(sketch_centroid(&doc, s), c0 + offset));
+}
+
+/// A sketch translated off the z=0 plane keeps its vertices and plane in sync,
+/// so it remains a valid, extrudable sketch on its new plane.
+#[test]
+fn transform_sketch_remaps_plane_to_stay_coplanar() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+
+    // Lift straight up: vertices move to z=4, and the plane must follow.
+    doc.transform_sketch(s, &Transform::translation(Vec3::new(0.0, 0.0, 4.0)))
+        .expect("lift sketch");
+
+    let sk = doc.sketch(s).expect("sketch is live");
+    let plane = sk.plane();
+    for (_, v) in sk.vertices() {
+        assert!(
+            plane.signed_distance(v.position).abs() < 1e-9,
+            "vertices stay on the remapped plane"
+        );
+    }
+    // Still a single closed region the user can push/pull.
+    assert_eq!(doc.extrudable_regions(s).unwrap().len(), 1);
+}
+
+/// Uniform scale about the origin scales the sketch's extent by the factor.
+#[test]
+fn transform_sketch_scales_extent() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 1.0, 1.0, 3.0, 2.0);
+    let c0 = sketch_centroid(&doc, s);
+
+    doc.transform_sketch(s, &Transform::uniform_scale(2.0))
+        .expect("scale sketch");
+
+    // Each vertex's offset from the (scaled) centroid doubled; equivalently the
+    // centroid itself scaled about the origin by 2.
+    assert!(approx_pt(
+        sketch_centroid(&doc, s),
+        Point3::ORIGIN + c0.to_vec() * 2.0
+    ));
+}
+
+/// Orientation-flipping (negative scale) and singular transforms are refused
+/// without mutating the sketch — the same transactional guarantee as objects.
+#[test]
+fn transform_sketch_reflection_and_singular_refused() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    let c0 = sketch_centroid(&doc, s);
+
+    assert_eq!(
+        doc.transform_sketch(s, &Transform::uniform_scale(-1.0)),
+        Err(DocumentError::Transform(TransformError::Reflection))
+    );
+    assert_eq!(
+        doc.transform_sketch(s, &Transform::uniform_scale(0.0)),
+        Err(DocumentError::Transform(TransformError::Singular))
+    );
+    assert!(
+        approx_pt(sketch_centroid(&doc, s), c0),
+        "sketch untouched after refused transforms"
+    );
+}
+
+#[test]
+fn transform_unknown_sketch_errors() {
+    let mut doc = Document::new();
+    let bogus = SketchId::default();
+    assert_eq!(
+        doc.transform_sketch(bogus, &Transform::translation(Vec3::new(1.0, 0.0, 0.0))),
+        Err(DocumentError::UnknownSketch)
+    );
+}
+
+/// A hidden (deleted) sketch is not a transform target.
+#[test]
+fn transform_hidden_sketch_errors() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    doc.delete_sketch(s).expect("delete sketch");
+    assert_eq!(
+        doc.transform_sketch(s, &Transform::translation(Vec3::new(1.0, 0.0, 0.0))),
+        Err(DocumentError::UnknownSketch)
+    );
+}
+
+// ----------------------------------------- move_sketch_vertex (Phase D slice 3)
+
+/// The id of the vertex of sketch `s` sitting at `p` (panics if none).
+fn sketch_vertex_at(doc: &Document, s: SketchId, p: Point3) -> SketchVertexId {
+    let sk = doc.sketch(s).expect("sketch is live");
+    sk.vertices()
+        .iter()
+        .find(|(_, v)| approx_pt(v.position, p))
+        .map(|(id, _)| id)
+        .expect("a vertex at the given position")
+}
+
+/// Dragging one sketch corner repositions just that vertex, keeps the drawn
+/// topology, and round-trips exactly through undo/redo with a stable `SketchId`.
+#[test]
+fn move_sketch_vertex_moves_and_round_trips() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    let v = sketch_vertex_at(&doc, s, Point3::new(2.0, 2.0, 0.0));
+    let regions0 = doc.extrudable_regions(s).unwrap().len();
+
+    let change = doc
+        .move_sketch_vertex(s, v, Point3::new(2.5, 1.7, 0.0))
+        .expect("move corner");
+    assert_eq!(
+        change.sketches_touched,
+        vec![s],
+        "reports the touched sketch"
+    );
+    assert!(approx_pt(
+        doc.sketch(s).unwrap().vertices()[v].position,
+        Point3::new(2.5, 1.7, 0.0)
+    ));
+    assert_eq!(
+        doc.extrudable_regions(s).unwrap().len(),
+        regions0,
+        "topology preserved"
+    );
+
+    doc.undo().expect("undo vertex move");
+    assert!(
+        approx_pt(
+            doc.sketch(s).unwrap().vertices()[v].position,
+            Point3::new(2.0, 2.0, 0.0)
+        ),
+        "undo restores the original corner"
+    );
+    assert!(doc.sketch_ids().contains(&s), "SketchId stable across undo");
+
+    doc.redo().expect("redo vertex move");
+    assert!(approx_pt(
+        doc.sketch(s).unwrap().vertices()[v].position,
+        Point3::new(2.5, 1.7, 0.0)
+    ));
+}
+
+/// A drag that would re-topologize the sketch (corner swept across the far
+/// side) is refused as a typed `Sketch` error, leaving the document untouched.
+#[test]
+fn move_sketch_vertex_rejects_a_retopologizing_drag() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    let v = sketch_vertex_at(&doc, s, Point3::new(0.0, 0.0, 0.0));
+
+    assert_eq!(
+        doc.move_sketch_vertex(s, v, Point3::new(3.0, 1.0, 0.0)),
+        Err(DocumentError::Sketch(SketchError::WouldRetopologize))
+    );
+    assert!(
+        approx_pt(
+            doc.sketch(s).unwrap().vertices()[v].position,
+            Point3::new(0.0, 0.0, 0.0)
+        ),
+        "sketch untouched after a refused drag"
+    );
+}
+
+#[test]
+fn move_unknown_sketch_vertex_errors() {
+    let mut doc = Document::new();
+    let bogus = SketchId::default();
+    assert_eq!(
+        doc.move_sketch_vertex(bogus, SketchVertexId::default(), Point3::ORIGIN),
+        Err(DocumentError::UnknownSketch)
+    );
+}
+
+/// A hidden (deleted) sketch is not a vertex-move target.
+#[test]
+fn move_vertex_in_hidden_sketch_errors() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    let v = sketch_vertex_at(&doc, s, Point3::new(0.0, 0.0, 0.0));
+    doc.delete_sketch(s).expect("delete sketch");
+    assert_eq!(
+        doc.move_sketch_vertex(s, v, Point3::new(0.5, 0.5, 0.0)),
+        Err(DocumentError::UnknownSketch)
     );
 }
 
@@ -1755,6 +2005,41 @@ fn delete_guide_rejects_unknown_or_already_hidden() {
     let mut other = Document::new();
     let stray = other.add_guide_point(Point3::ORIGIN).unwrap();
     assert_eq!(doc.delete_guide(stray), Err(DocumentError::UnknownGuide));
+}
+
+#[test]
+fn delete_sketch_undo_redo_round_trips() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    assert_eq!(doc.sketch_ids(), vec![s]);
+
+    let change = doc.delete_sketch(s).expect("delete");
+    assert_eq!(change.sketches_touched, vec![s]);
+    assert!(doc.sketch_ids().is_empty(), "deleted sketch is hidden");
+    assert!(doc.sketch(s).is_none(), "hidden sketch is not queryable");
+
+    doc.undo().unwrap();
+    assert_eq!(doc.sketch_ids(), vec![s], "undo unhides it, same SketchId");
+    assert!(doc.sketch(s).is_some());
+
+    doc.redo().unwrap();
+    assert!(doc.sketch_ids().is_empty(), "redo re-hides it");
+}
+
+#[test]
+fn delete_sketch_rejects_unknown_or_already_hidden() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    doc.delete_sketch(s).unwrap();
+    // Already hidden — deleting again is refused.
+    assert_eq!(doc.delete_sketch(s), Err(DocumentError::UnknownSketch));
+
+    // Stale handle from another document.
+    let mut other = Document::new();
+    let stray = other.add_sketch(ground());
+    assert_eq!(doc.delete_sketch(stray), Err(DocumentError::UnknownSketch));
 }
 
 #[test]

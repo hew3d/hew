@@ -152,8 +152,9 @@ export function MaterialPalette({
   function handleFillObject() {
     if (selectedIds.length === 0) return
     for (const node of selectedIds) {
-      if (node.kind === 'instance') {
-        // Instances hold geometry via a component definition; skip — only
+      if (node.kind === 'instance' || node.kind === 'sketch') {
+        // Instances hold geometry via a component definition; a sketch is a
+        // drawn line with no faces and no kernel NodeId. Skip both — only
         // world objects / definition members support set_object_material.
         continue
       }
@@ -166,7 +167,9 @@ export function MaterialPalette({
     onDocumentChanged()
   }
 
-  const canFill = selectedIds.length > 0 && selectedIds.some((n) => n.kind !== 'instance')
+  const canFill =
+    selectedIds.length > 0 &&
+    selectedIds.some((n) => n.kind === 'object' || n.kind === 'group')
 
   return (
     <div style={PANEL_STYLE}>

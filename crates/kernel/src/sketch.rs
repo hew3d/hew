@@ -124,8 +124,15 @@ pub enum SketchError {
     DegenerateSegment,
     /// The given edge handle is not in this sketch (or already removed).
     UnknownEdge,
+    /// The given vertex handle is not in this sketch (or already removed).
+    UnknownVertex,
     /// The given region handle is not in this sketch (or already invalid).
     UnknownRegion,
+    /// A topology-preserving [`Sketch::move_vertex`] was refused because it
+    /// would require re-stitching the sketch: an incident edge would cross or
+    /// overlap another edge, or the moved vertex would land on another vertex
+    /// (a merge). No silent repair (rule 4) — the caller decides.
+    WouldRetopologize,
     /// The region's traced boundary does not form a valid [`Profile`] (a
     /// kernel bug in region tracing, surfaced as a typed error rather than a
     /// panic so it cannot brick the caller).
@@ -140,7 +147,11 @@ impl std::fmt::Display for SketchError {
             }
             SketchError::DegenerateSegment => write!(f, "segment endpoints coincide"),
             SketchError::UnknownEdge => write!(f, "no such edge in this sketch"),
+            SketchError::UnknownVertex => write!(f, "no such vertex in this sketch"),
             SketchError::UnknownRegion => write!(f, "no such region in this sketch"),
+            SketchError::WouldRetopologize => {
+                write!(f, "the move would cross or merge sketch geometry")
+            }
             SketchError::MalformedRegion => {
                 write!(f, "region boundary does not form a valid profile")
             }
@@ -191,6 +202,41 @@ impl Sketch {
         &self.regions
     }
 
+    /// Bakes an affine `transform` into this sketch: every vertex position is
+    /// moved by `transform` and the sketch `plane` is remapped (the
+    /// inverse-transpose rule) so vertices stay coplanar. The 2D topology —
+    /// vertices, edges, regions — is untouched, so all handles stay valid and
+    /// no region is gained or lost. This is what move/rotate/scale on a
+    /// free-standing sketch commit (Phase D), mirroring [`Object::apply_transform`].
+    ///
+    /// Validated up front so the mutation is transactional: a singular linear
+    /// part is [`TransformError::Singular`] and an orientation-flipping one
+    /// (determinant < 0) is [`TransformError::Reflection`] — both refused
+    /// before any vertex moves, so the sketch is never left half-transformed.
+    ///
+    /// [`Object::apply_transform`]: crate::Object::apply_transform
+    pub fn apply_transform(
+        &mut self,
+        transform: &crate::Transform,
+    ) -> Result<(), crate::TransformError> {
+        // Reject before mutating. `inverse()` fails iff the linear part is
+        // singular; a negative determinant would flip the plane normal and the
+        // perceived winding of every region.
+        transform.inverse()?;
+        if transform.determinant() < 0.0 {
+            return Err(crate::TransformError::Reflection);
+        }
+        // Remap the plane first (cannot fail on a validated non-singular map),
+        // then move every vertex onto it.
+        self.plane = transform
+            .apply_plane(&self.plane)
+            .expect("apply_plane on a validated non-singular transform");
+        for v in self.vertices.values_mut() {
+            v.position = transform.apply_point(v.position);
+        }
+        Ok(())
+    }
+
     /// Inserts the segment `from -> to`, applying the sticky rules in the
     /// module docs, and reports exactly what changed.
     ///
@@ -227,6 +273,130 @@ impl Sketch {
         let report = s.remove_edge_inner(edge);
         *self = s;
         Ok(report)
+    }
+
+    /// Repositions vertex `v` to `new_pos`, dragging its incident edges with
+    /// it while **preserving the 2D topology**: the same vertices, edges, and
+    /// regions exist (and keep their handles) before and after — nothing
+    /// splits, merges, or re-forms. This is Phase D's per-vertex edit (the user
+    /// drags one sketch corner), the single-vertex analogue of
+    /// [`Sketch::apply_transform`].
+    ///
+    /// Unlike [`Sketch::add_segment`], it never re-stitches geometry. A move
+    /// that *would* require re-topologizing is refused (rule 4 — no silent
+    /// repair); the caller decides what to do.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownVertex`] if `v` is stale.
+    /// - [`SketchError::PointOffPlane`] (`which: 0`) if `new_pos` is farther
+    ///   than [`tol::PLANE_DIST`] from the sketch plane (we don't project).
+    /// - [`SketchError::DegenerateSegment`] if the move would collapse an
+    ///   incident edge below [`tol::POINT_MERGE`].
+    /// - [`SketchError::WouldRetopologize`] if after the move an incident edge
+    ///   would cross or collinearly overlap another edge, or `v` would land on
+    ///   another vertex (a merge).
+    ///
+    /// On any error the sketch is unchanged (strong guarantee). On success
+    /// returns the vertex's **old** position, so the document layer can record
+    /// an exact inverse for undo.
+    pub fn move_vertex(
+        &mut self,
+        v: SketchVertexId,
+        new_pos: Point3,
+    ) -> Result<Point3, SketchError> {
+        let old_pos = self
+            .vertices
+            .get(v)
+            .ok_or(SketchError::UnknownVertex)?
+            .position;
+
+        if self.plane.signed_distance(new_pos).abs() > tol::PLANE_DIST {
+            return Err(SketchError::PointOffPlane { which: 0 });
+        }
+
+        // Validate on a clone; swap in only once every check passes.
+        let mut s = self.clone();
+        s.vertices[v].position = new_pos;
+
+        // The incident edges are the only geometry that changed.
+        let incident: Vec<SketchEdgeId> = s
+            .edges
+            .iter()
+            .filter(|(_, e)| e.from == v || e.to == v)
+            .map(|(id, _)| id)
+            .collect();
+
+        // (a) No incident edge may collapse to (near) zero length. Checked
+        //     before the merge guard so dropping a corner onto an *adjacent*
+        //     corner reads as a degenerate segment, not a merge.
+        for &eid in &incident {
+            let e = s.edges[eid];
+            if s.vertices[e.from]
+                .position
+                .approx_eq(s.vertices[e.to].position, tol::POINT_MERGE)
+            {
+                return Err(SketchError::DegenerateSegment);
+            }
+        }
+
+        // (b) The moved vertex may not land on top of another vertex (a merge).
+        if s.vertices
+            .iter()
+            .any(|(vid, vert)| vid != v && vert.position.approx_eq(new_pos, tol::POINT_MERGE))
+        {
+            return Err(SketchError::WouldRetopologize);
+        }
+
+        // (c) No incident edge may cross or collinearly overlap any other edge
+        //     (that would demand a split). Reuse the same 2D arrangement math
+        //     `add_segment` uses, treating each incident edge as the "new"
+        //     segment. Edges that merely share an endpoint produce no event.
+        let normal = s.plane.normal();
+        let (u_ax, v_ax) = plane_axes(normal);
+        let anchor = Point3::ORIGIN + normal * (-s.plane.signed_distance(Point3::ORIGIN));
+        let proj = |p: Point3| -> (f64, f64) { (p.to_vec().dot(u_ax), p.to_vec().dot(v_ax)) };
+
+        for &inc_id in &incident {
+            let inc = s.edges[inc_id];
+            let nf = proj(s.vertices[inc.from].position);
+            let nt = proj(s.vertices[inc.to].position);
+            for (oth_id, oth) in &s.edges {
+                if oth_id == inc_id {
+                    continue;
+                }
+                let ef = proj(s.vertices[oth.from].position);
+                let et = proj(s.vertices[oth.to].position);
+                let events =
+                    seg_seg_intersections_2d(nf, nt, ef, et, &s.vertices, *oth, u_ax, v_ax, anchor);
+                for ev in events {
+                    let bad = match ev {
+                        Intersection2D::Proper { .. }
+                        | Intersection2D::NewEndpointOnExisting { .. }
+                        | Intersection2D::ExistingEndpointOnNew { .. } => true,
+                        Intersection2D::Collinear {
+                            t_params_on_new,
+                            s_params_on_existing,
+                            ..
+                        } => !t_params_on_new.is_empty() || !s_params_on_existing.is_empty(),
+                    };
+                    if bad {
+                        return Err(SketchError::WouldRetopologize);
+                    }
+                }
+            }
+        }
+
+        // (d) Topology is unchanged, so the region cycles still reference the
+        //     same vertex ids and now read the moved geometry automatically.
+        //     Belt-and-suspenders: every region must still be a valid profile
+        //     (a reflex drag could in principle pinch a boundary). Surfaced as
+        //     a typed error rather than silently accepted.
+        for region in s.regions.keys().collect::<Vec<_>>() {
+            s.profile(region)?;
+        }
+
+        *self = s;
+        Ok(old_pos)
     }
 
     /// The boundary edges of `region` that are NOT shared by any other region's

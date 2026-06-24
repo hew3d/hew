@@ -117,6 +117,10 @@ export class SceneRenderer {
   private selectedGuideId: bigint | null = null
   /** Highlight overlay (solid bright line/cross) for `selectedGuideId`. */
   private guideHighlight: THREE.LineSegments | null = null
+  /** Currently selected sketch ids, drawn as a bright overlay. */
+  private selectedSketchIds: bigint[] = []
+  /** Highlight overlay (solid bright lines) for `selectedSketchIds`. */
+  private sketchHighlight: THREE.LineSegments | null = null
   /** The sketch currently being drawn into (tool target) — null if none. */
   private activeSketchHandle: bigint | null = null
   /** Last known watertight state per object */
@@ -594,6 +598,9 @@ export class SceneRenderer {
 
     // Rebuilt sketch geometry starts at full strength; re-apply the fade.
     this._applySketchIsolation()
+    // Re-assert the selection overlay after a rebuild (a deleted selected
+    // sketch's highlight drops out; a surviving one's geometry may have moved).
+    this._rebuildSketchHighlight()
   }
 
   /**
@@ -834,6 +841,52 @@ export class SceneRenderer {
       this._applyInstanceColors(id, true)
     }
     this.selectedInstanceIds = [...instanceIds]
+  }
+
+  /**
+   * Highlight exactly the given sketches as a bright overlay drawn on
+   * top of the normal sketch-line color, mirroring `setSelectedGuide`'s
+   * "separate overlay object" approach rather than recoloring the merged
+   * per-sketch-agnostic `sketchLines` buffer in place. Pass `[]` to clear.
+   */
+  setSelectedSketches(sketchIds: bigint[]): void {
+    this.selectedSketchIds = [...sketchIds]
+    this._rebuildSketchHighlight()
+  }
+
+  /** (Re)build the bright overlay for the selected sketches — solid lines in
+   * the selection color, drawn on top so a selected sketch reads as picked
+   * over the normal blue. Cleared if nothing is selected or all selected
+   * sketches are gone (e.g. deleted). */
+  private _rebuildSketchHighlight(): void {
+    if (this.sketchHighlight !== null) {
+      this.sketchHighlight.geometry.dispose()
+      ;(this.sketchHighlight.material as THREE.Material).dispose()
+      this.sketchGroup.remove(this.sketchHighlight)
+      this.sketchHighlight = null
+    }
+    if (this.selectedSketchIds.length === 0) return
+
+    const positions: number[] = []
+    for (const id of this.selectedSketchIds) {
+      let linePositions: Float32Array | number[]
+      try {
+        linePositions = this.wasmScene.sketch_lines(id)
+      } catch {
+        continue // stale/deleted handle — simply contributes nothing
+      }
+      for (let i = 0; i < linePositions.length; i++) {
+        positions.push(linePositions[i])
+      }
+    }
+    if (positions.length === 0) return
+
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+    const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false })
+    this.sketchHighlight = new THREE.LineSegments(geo, mat)
+    this.sketchHighlight.renderOrder = 999
+    this.sketchGroup.add(this.sketchHighlight)
   }
 
   /**

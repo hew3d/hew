@@ -161,10 +161,15 @@ export function DocumentTree({
 
   const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
 
-  // Compute canGroup / canUngroup for the button row
-  const parentOf = (n: NodeRef) => scene.node_parent(nodeKindToNumber(n.kind), n.id)
-  const canGroupNow = canGroupHelper(selectedIds, parentOf)
-  const canUngroupNow = canUngroupHelper(selectedIds)
+  // Compute canGroup / canUngroup for the button row. A sketch is top-level
+  // and has no kernel NodeId (so no group parent and can't be grouped) — never
+  // feed it to `nodeKindToNumber` (which throws), and any sketch in the
+  // selection disqualifies group/ungroup.
+  const parentOf = (n: NodeRef) =>
+    n.kind === 'sketch' ? undefined : scene.node_parent(nodeKindToNumber(n.kind), n.id)
+  const hasSketch = selectedIds.some((n) => n.kind === 'sketch')
+  const canGroupNow = !hasSketch && canGroupHelper(selectedIds, parentOf)
+  const canUngroupNow = !hasSketch && canUngroupHelper(selectedIds)
 
   // Label resolver for breadcrumbs — uses top_level_nodes ordering
   const labelFor = (node: NodeRef): string => {

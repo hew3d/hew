@@ -41,6 +41,7 @@ interface Props {
 function kindLabel(kind: NodeRef['kind']): string {
   if (kind === 'object') return 'Object'
   if (kind === 'group') return 'Group'
+  if (kind === 'sketch') return 'Sketch'
   return 'Component'
 }
 
@@ -85,8 +86,24 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
     if (selectedIds.length !== 1) return null
     const node = selectedIds[0]
     const kind = node.kind
-    const kindNum = nodeKindToNumber(kind)
     const id = node.id
+
+    // A sketch is a thin selectable (a drawn line) with no kernel NodeId, name,
+    // tags, or solid state — show a minimal read-only entry and never call the
+    // object/group/instance APIs (`nodeKindToNumber` throws for it).
+    if (kind === 'sketch') {
+      return {
+        node,
+        kind,
+        id,
+        kindNum: null as number | null,
+        nameFromScene: undefined as string | undefined,
+        tags: [] as string[][],
+        solid: null as boolean | null,
+      }
+    }
+
+    const kindNum = nodeKindToNumber(kind)
 
     let nameFromScene: string | undefined
     if (kind === 'object') nameFromScene = scene.object_name(id)
@@ -129,7 +146,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
   // Name commit: called on Enter or blur.
   // --------------------------------------------------------------------------
   const commitName = useCallback(() => {
-    if (nodeInfo === null) return
+    if (nodeInfo === null || nodeInfo.kindNum === null) return
     const trimmed = localName.trim()
     // Pass undefined to clear; pass the string to set.
     scene.set_node_name(nodeInfo.kindNum, nodeInfo.id, trimmed === '' ? undefined : trimmed)
@@ -142,7 +159,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
   const [tagInput, setTagInput] = useState('')
 
   const handleAddTag = useCallback(() => {
-    if (nodeInfo === null) return
+    if (nodeInfo === null || nodeInfo.kindNum === null) return
     const segments = tagInput.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
     if (segments.length === 0) return
     scene.add_node_tag(nodeInfo.kindNum, nodeInfo.id, segments)
@@ -151,7 +168,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
   }, [nodeInfo, tagInput, scene, onDocumentChanged])
 
   const handleRemoveTag = useCallback((path: string[]) => {
-    if (nodeInfo === null) return
+    if (nodeInfo === null || nodeInfo.kindNum === null) return
     scene.remove_node_tag(nodeInfo.kindNum, nodeInfo.id, path)
     onDocumentChanged()
   }, [nodeInfo, scene, onDocumentChanged])
@@ -165,29 +182,38 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
         <EmptyState multiSelect={selectedIds.length > 1} />
       ) : (
         <>
-          {/* Name */}
-          <div>
-            <div style={LABEL_STYLE}>Name</div>
-            <input
-              style={INPUT_STYLE}
-              value={localName}
-              onChange={(e) => setLocalName(e.target.value)}
-              onBlur={commitName}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.currentTarget.blur()
-                }
-              }}
-              placeholder="(unnamed)"
-              spellCheck={false}
-            />
-          </div>
+          {/* Name — sketches can't be named yet */}
+          {nodeInfo.kind !== 'sketch' && (
+            <div>
+              <div style={LABEL_STYLE}>Name</div>
+              <input
+                style={INPUT_STYLE}
+                value={localName}
+                onChange={(e) => setLocalName(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.currentTarget.blur()
+                  }
+                }}
+                placeholder="(unnamed)"
+                spellCheck={false}
+              />
+            </div>
+          )}
 
           {/* Type */}
           <div>
             <div style={LABEL_STYLE}>Type</div>
             <div style={VALUE_STYLE}>{kindLabel(nodeInfo.kind)}</div>
           </div>
+
+          {/* A sketch is a thin selectable — no name/tags/solid yet. */}
+          {nodeInfo.kind === 'sketch' && (
+            <div style={{ fontSize: '11px', color: '#666', fontStyle: 'italic' }}>
+              A drawn line. Delete with ⌫ (undoable); naming, tags, and move are not yet supported.
+            </div>
+          )}
 
           {/* Solid / Leaky — only for objects */}
           {nodeInfo.solid !== null && (
@@ -205,7 +231,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
             </div>
           )}
 
-          {/* Tags */}
+          {/* Tags — sketches can't be tagged yet */}
+          {nodeInfo.kind !== 'sketch' && (
           <div>
             <div style={LABEL_STYLE}>Tags</div>
             {nodeInfo.tags.length === 0 ? (
@@ -253,6 +280,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
               </button>
             </div>
           </div>
+          )}
         </>
       )}
     </div>

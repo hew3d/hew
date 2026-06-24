@@ -38,7 +38,7 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
+import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, buildSketchPreviewClone, clearPreview } from './transformPreview'
 import { arrowToAxis, editLengthBuffer, pointAlong } from './moveInput'
 import type { NodeRef, NodeKind } from '../panels/treeModel'
 import { nodeRefFromJs } from '../panels/treeModel'
@@ -380,13 +380,21 @@ export class MoveTool implements Tool {
       const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
       return buildInstancePreviewClone(group)
     }
+    if (node.kind === 'sketch') {
+      return buildSketchPreviewClone(this.wasmScene.sketch_lines(node.id))
+    }
     return buildPreviewClone(this.objectsGroup, node.id)
   }
 
   private _commit(node: NodeRef, tx: number, ty: number, tz: number): void {
     try {
       const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
-      if (this.copyMode) {
+      if (node.kind === 'sketch') {
+        // Sketches have no `duplicate_node` support — Alt/copy mode is ignored
+        // and this always falls through to a plain move (never the copy path).
+        this.wasmScene.transform_sketch(node.id, affineF64)
+        this.onCommit(node)
+      } else if (this.copyMode) {
         // Option/Alt: duplicate at the offset instead of moving. The copy
         // is the same kind as the source; select it and chain further copies.
         const created = this.wasmScene.duplicate_node(kindCode(node.kind), node.id, affineF64)

@@ -412,6 +412,8 @@ fn main() {
             let tool_protractor =
                 MenuItemBuilder::with_id("tool-protractor", "Protractor").build(handle)?;
             let tool_slice = MenuItemBuilder::with_id("tool-slice", "Slice").build(handle)?;
+            let tool_edit_vertex =
+                MenuItemBuilder::with_id("tool-edit-vertex", "Edit Vertex").build(handle)?;
 
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
@@ -424,6 +426,7 @@ fn main() {
                 .item(&tool_tape_measure)
                 .item(&tool_protractor)
                 .item(&tool_slice)
+                .item(&tool_edit_vertex)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -588,6 +591,7 @@ fn main() {
                 "tool-tape-measure" => "tool-tape-measure",
                 "tool-protractor" => "tool-protractor",
                 "tool-slice" => "tool-slice",
+                "tool-edit-vertex" => "tool-edit-vertex",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",

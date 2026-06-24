@@ -7,7 +7,7 @@
 //! on it. The sticky-rule numbering in comments refers to the module docs of
 //! `kernel::sketch`.
 
-use kernel::{Plane, Point3, Profile, ProfileError, Sketch, SketchError, tol};
+use kernel::{Plane, Point3, Profile, ProfileError, Sketch, SketchError, SketchVertexId, tol};
 use proptest::prelude::*;
 
 fn pt(x: f64, y: f64) -> Point3 {
@@ -274,6 +274,127 @@ fn unreshaped_region_keeps_its_handle() {
     assert!(s.profile(region).is_ok());
 }
 
+// ------------------------------------------- move_vertex (Phase D slice 3)
+//
+// Topology-PRESERVING vertex drag: the vertex moves and its incident edges
+// stretch, but the 2D topology (vertices/edges/regions) is untouched. Any
+// move that would require re-topologizing — an incident edge crossing another
+// edge, two vertices merging — is refused loudly (rule 4: no silent repair),
+// never re-stitched. `move_vertex` returns the vertex's OLD position so the
+// document layer can record an exact inverse for undo.
+
+/// The id of the vertex at `p` (panics if none — handles are opaque, so tests
+/// address vertices by where they sit).
+fn vertex_at(s: &Sketch, p: Point3) -> SketchVertexId {
+    s.vertices()
+        .iter()
+        .find(|(_, v)| v.position.approx_eq(p, tol::POINT_MERGE))
+        .map(|(id, _)| id)
+        .expect("a vertex at the given position")
+}
+
+/// A closed unit-square sketch (one region), the common fixture below.
+fn square() -> Sketch {
+    let mut s = xy_sketch();
+    for (from, to) in rect_segments(0.0, 0.0, 2.0, 2.0) {
+        s.add_segment(from, to).unwrap();
+    }
+    s
+}
+
+#[test]
+fn move_vertex_nudges_a_corner_keeping_topology() {
+    let mut s = square();
+    let v = vertex_at(&s, pt(2.0, 2.0));
+    // A small nudge keeps the quad simple (convex even) — pure reposition.
+    let old = s.move_vertex(v, pt(2.5, 1.8)).unwrap();
+    assert!(
+        old.approx_eq(pt(2.0, 2.0), 1e-12),
+        "returns the old position"
+    );
+    assert_eq!(counts(&s), (4, 4, 1), "topology untouched");
+    assert!(
+        s.vertices()[v].position.approx_eq(pt(2.5, 1.8), 1e-12),
+        "the vertex moved to its new position"
+    );
+    // The region survives with valid geometry.
+    let region = s.regions().keys().next().unwrap();
+    assert!(s.profile(region).is_ok());
+}
+
+#[test]
+fn move_vertex_round_trips_via_returned_old_position() {
+    let mut s = square();
+    let v = vertex_at(&s, pt(0.0, 0.0));
+    let old = s.move_vertex(v, pt(-0.5, -0.3)).unwrap();
+    // Replaying the returned old position is an exact inverse (what undo does).
+    s.move_vertex(v, old).unwrap();
+    assert!(s.vertices()[v].position.approx_eq(pt(0.0, 0.0), 1e-12));
+    assert_eq!(counts(&s), (4, 4, 1));
+}
+
+#[test]
+fn move_vertex_across_an_edge_is_rejected_unchanged() {
+    let mut s = square();
+    let v = vertex_at(&s, pt(0.0, 0.0));
+    // Drag corner A(0,0) out to (3, 1): its edge to D(0,2) now sweeps across
+    // the opposite side B(2,0)-C(2,2). No incident edge collapses and A lands
+    // on no vertex, so this is a pure crossing → WouldRetopologize.
+    assert_eq!(
+        s.move_vertex(v, pt(3.0, 1.0)),
+        Err(SketchError::WouldRetopologize)
+    );
+    // Strong guarantee: the sketch is exactly as it was.
+    assert_eq!(counts(&s), (4, 4, 1));
+    assert!(s.vertices()[v].position.approx_eq(pt(0.0, 0.0), 1e-12));
+}
+
+#[test]
+fn move_vertex_collapsing_an_incident_edge_is_degenerate() {
+    let mut s = square();
+    let v = vertex_at(&s, pt(0.0, 0.0));
+    // Onto the ADJACENT corner B(2,0): the shared edge A-B collapses to zero
+    // length — degeneracy is caught before the re-topology guard.
+    assert_eq!(
+        s.move_vertex(v, pt(2.0, 0.0)),
+        Err(SketchError::DegenerateSegment)
+    );
+    assert_eq!(counts(&s), (4, 4, 1));
+}
+
+#[test]
+fn move_vertex_onto_a_non_adjacent_vertex_is_rejected() {
+    let mut s = square();
+    let v = vertex_at(&s, pt(0.0, 0.0));
+    // Onto the DIAGONAL corner C(2,2): no incident edge of A touches C, so
+    // nothing collapses — but the vertices would merge → WouldRetopologize.
+    assert_eq!(
+        s.move_vertex(v, pt(2.0, 2.0)),
+        Err(SketchError::WouldRetopologize)
+    );
+    assert_eq!(counts(&s), (4, 4, 1));
+}
+
+#[test]
+fn move_vertex_off_plane_is_rejected_unchanged() {
+    let mut s = square();
+    let v = vertex_at(&s, pt(0.0, 0.0));
+    assert_eq!(
+        s.move_vertex(v, Point3::new(0.0, 0.0, 1.0)),
+        Err(SketchError::PointOffPlane { which: 0 })
+    );
+    assert!(s.vertices()[v].position.approx_eq(pt(0.0, 0.0), 1e-12));
+}
+
+#[test]
+fn move_unknown_vertex_errors() {
+    let mut s = square();
+    assert_eq!(
+        s.move_vertex(SketchVertexId::default(), pt(1.0, 1.0)),
+        Err(SketchError::UnknownVertex)
+    );
+}
+
 // --------------------------------------------------- insertion-order property
 
 proptest! {
@@ -285,6 +406,25 @@ proptest! {
             s.add_segment(segs[i].0, segs[i].1).unwrap();
         }
         prop_assert_eq!(counts(&s), (4, 4, 1));
+    }
+
+    /// A nudge small enough to keep the unit square a simple quad is always a
+    /// topology-preserving move (1 region in, 1 region out) and is reversed
+    /// exactly by replaying the returned old position.
+    #[test]
+    fn small_nudge_preserves_region_and_reverses(
+        dx in -0.4f64..0.4,
+        dy in -0.4f64..0.4,
+    ) {
+        let mut s = square();
+        let v = vertex_at(&s, pt(0.0, 0.0));
+        let target = pt(dx, dy);
+        // Skip the rare draw that lands on the corner's own neighbours.
+        prop_assume!(!target.approx_eq(pt(0.0, 0.0), 1e-3));
+        let old = s.move_vertex(v, target).unwrap();
+        prop_assert_eq!(counts(&s), (4, 4, 1));
+        s.move_vertex(v, old).unwrap();
+        prop_assert!(s.vertices()[v].position.approx_eq(pt(0.0, 0.0), 1e-9));
     }
 }
 

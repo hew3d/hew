@@ -253,6 +253,24 @@ enum DocAction {
         forward: Transform,
         inverse: Transform,
     },
+    /// A move/rotate/scale baked into a free-standing sketch's geometry (Phase
+    /// D). The sketch analogue of [`DocAction::Transform`]: undo bakes
+    /// `inverse`, redo bakes `forward`; the `SketchId` is handle-stable.
+    TransformSketch {
+        sketch: SketchId,
+        forward: Transform,
+        inverse: Transform,
+    },
+    /// A single sketch vertex dragged to a new position (Phase D per-vertex
+    /// edit). Topology-preserving, so the inverse is just the old position:
+    /// undo restores `old_pos`, redo re-applies `new_pos`; both the `SketchId`
+    /// and the `SketchVertexId` are handle-stable.
+    MovedSketchVertex {
+        sketch: SketchId,
+        vertex: SketchVertexId,
+        old_pos: Point3,
+        new_pos: Point3,
+    },
     /// `group_nodes` formed a group. Undo dissolves it (reparenting members to
     /// `parent` and restoring the parent's member order), redo re-forms it. The
     /// `GroupId` stays stable (hide-not-delete), as do all member handles.
@@ -346,6 +364,10 @@ enum DocAction {
     /// then-visible guide in one step. Undo unhides exactly these; redo
     /// re-hides them.
     DeletedGuides { guides: Vec<GuideId> },
+    /// `delete_sketch` hid a free-standing sketch (tombstone, not a real
+    /// delete — the `SketchId` stays valid for redo). Undo un-hides it; redo
+    /// re-hides it. Mirrors [`DocAction::DeletedGuide`].
+    DeletedSketch { sketch: SketchId },
     /// `transform_instance` changed an instance's pose. Undo restores
     /// `prev` exactly; redo re-applies `next`. No bake — the pose is mutable
     /// instance state, so this is exact rather than an inverse-transform.
@@ -592,6 +614,12 @@ pub struct Document {
     /// Sketch vertices hidden because all their incident edges are in
     /// `consumed_sketch_edges`. Derived index — rebuilt on load.
     consumed_sketch_verts: HashSet<(SketchId, SketchVertexId)>,
+    /// Sketches hidden by [`Document::delete_sketch`] (tombstone, not a real
+    /// delete — the id stays valid for redo). A document-level visibility
+    /// concern, not a field on [`Sketch`] itself, mirroring how object/group/
+    /// instance visibility lives on their `*Record` wrappers rather than the
+    /// payload type.
+    hidden_sketches: HashSet<SketchId>,
     undo: Vec<DocAction>,
     redo: Vec<DocAction>,
 }
@@ -685,6 +713,7 @@ impl Document {
         let sketches: Vec<(SketchId, Sketch)> = self
             .sketches
             .iter()
+            .filter(|(id, _)| !self.hidden_sketches.contains(id))
             .map(|(id, sk)| (id, sk.clone()))
             .collect();
 
@@ -703,11 +732,15 @@ impl Document {
         let roots: Vec<NodeId> = self.top_level_nodes();
 
         // ── Collect consumed (SketchId, SketchRegionId) pairs ─────────────
-        // Filter to only those where both the sketch and region are live.
+        // Filter to only those where both the sketch and region are live
+        // (present and not hidden — a hidden sketch is dropped from `sketches`
+        // above, so its consumed entries must not dangle either).
         let mut consumed: Vec<(SketchId, SketchRegionId)> = self
             .consumed
             .iter()
-            .filter(|(sid, _)| self.sketches.contains_key(*sid))
+            .filter(|(sid, _)| {
+                self.sketches.contains_key(*sid) && !self.hidden_sketches.contains(sid)
+            })
             .copied()
             .collect();
         // Sort for determinism (never emit a HashSet directly — rule from plan).
@@ -1140,26 +1173,58 @@ impl Document {
         self.sketches.insert(Sketch::on_plane(plane))
     }
 
-    /// A sketch by handle, or `None` if stale.
+    /// A sketch by handle, or `None` if stale or hidden (deleted).
     pub fn sketch(&self, id: SketchId) -> Option<&Sketch> {
+        if self.hidden_sketches.contains(&id) {
+            return None;
+        }
         self.sketches.get(id)
     }
 
-    /// A mutable sketch by handle, or `None` if stale.
+    /// A mutable sketch by handle, or `None` if stale or hidden (deleted).
     ///
     /// Sketch edits do not flow through the document undo log (sketch-level undo
     /// is a later milestone); they are surfaced to the caller via the returned
     /// handle and reconciled through [`Document::sketch`] reads.
     pub fn sketch_mut(&mut self, id: SketchId) -> Option<&mut Sketch> {
+        if self.hidden_sketches.contains(&id) {
+            return None;
+        }
         self.sketches.get_mut(id)
     }
 
-    /// All sketch handles, in unspecified but stable order.
+    /// All sketch handles, in unspecified but stable order. Excludes sketches
+    /// hidden by [`Document::delete_sketch`] (D-pending) as well as sketches
+    /// fully consumed by extrusion.
     pub fn sketch_ids(&self) -> Vec<SketchId> {
         self.sketches
             .keys()
-            .filter(|&s| !self.is_sketch_fully_consumed(s))
+            .filter(|&s| !self.hidden_sketches.contains(&s) && !self.is_sketch_fully_consumed(s))
             .collect()
+    }
+
+    /// Delete one free-standing sketch (hide-not-delete; the id stays valid
+    /// for redo) — whole-sketch granularity: every edge/vertex in it goes with
+    /// it. Stale or already-hidden id → [`DocumentError::UnknownSketch`].
+    /// Undoable ([`DocAction::DeletedSketch`]). Mirrors [`Document::delete_guide`].
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale, hidden, or from another
+    ///   Document.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn delete_sketch(&mut self, sketch: SketchId) -> Result<DocChange, DocumentError> {
+        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        self.hidden_sketches.insert(sketch);
+        self.undo.push(DocAction::DeletedSketch { sketch });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange {
+            sketches_touched: vec![sketch],
+            ..Default::default()
+        })
     }
 
     /// Whether every edge of `sketch` has been consumed by an extrusion — i.e.
@@ -2307,6 +2372,88 @@ impl Document {
         })
     }
 
+    /// Bakes an affine into a free-standing sketch's geometry (Phase D move/
+    /// rotate/scale). The sketch analogue of [`Document::transform_object`]:
+    /// every vertex moves and the sketch plane is remapped, the `SketchId`
+    /// stays stable, and the change is undoable via [`DocAction::TransformSketch`].
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale or hidden (deleted) sketch.
+    /// - [`DocumentError::Transform`] — singular or orientation-flipping map;
+    ///   the sketch is left untouched (transactional).
+    pub fn transform_sketch(
+        &mut self,
+        sketch: SketchId,
+        t: &Transform,
+    ) -> Result<DocChange, DocumentError> {
+        // Capture the inverse first: it both validates invertibility and is what
+        // undo will bake. (`apply_transform` re-checks and also rejects det<0.)
+        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        self.sketches[sketch]
+            .apply_transform(t)
+            .map_err(DocumentError::Transform)?;
+        self.undo.push(DocAction::TransformSketch {
+            sketch,
+            forward: *t,
+            inverse,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(DocChange {
+            objects_touched: Vec::new(),
+            sketches_touched: vec![sketch],
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        })
+    }
+
+    /// Drags one vertex of a free-standing sketch to `new_pos` (Phase D
+    /// per-vertex edit). Topology-preserving — see [`Sketch::move_vertex`]:
+    /// the vertex moves and its incident edges stretch, but nothing splits,
+    /// merges, or re-forms. Undoable via [`DocAction::MovedSketchVertex`].
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale or hidden (deleted) sketch.
+    /// - [`DocumentError::Sketch`] — the move was refused (off-plane, would
+    ///   collapse an incident edge, or would cross/merge geometry); the sketch
+    ///   is left untouched (the [`Sketch::move_vertex`] strong guarantee).
+    pub fn move_sketch_vertex(
+        &mut self,
+        sketch: SketchId,
+        vertex: SketchVertexId,
+        new_pos: Point3,
+    ) -> Result<DocChange, DocumentError> {
+        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let old_pos = self.sketches[sketch]
+            .move_vertex(vertex, new_pos)
+            .map_err(DocumentError::Sketch)?;
+        self.undo.push(DocAction::MovedSketchVertex {
+            sketch,
+            vertex,
+            old_pos,
+            new_pos,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(DocChange {
+            objects_touched: Vec::new(),
+            sketches_touched: vec![sketch],
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        })
+    }
+
     /// Non-destructively groups sibling nodes into a new [`Group`](GroupRecord)
     /// (ARCHITECTURE.md). Unlike a boolean union, no geometry is welded and no
     /// member is consumed — the members keep their identity, geometry, and
@@ -3247,6 +3394,42 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            &DocAction::TransformSketch {
+                sketch, inverse, ..
+            } => {
+                // Undo a sketch transform by baking its exact inverse.
+                self.sketches[sketch]
+                    .apply_transform(&inverse)
+                    .expect("inverse of a validated transform must re-apply");
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            &DocAction::MovedSketchVertex {
+                sketch,
+                vertex,
+                old_pos,
+                ..
+            } => {
+                // Undo a vertex drag by moving it back. The reverse move is
+                // topology-preserving by construction, so it cannot be refused.
+                self.sketches[sketch]
+                    .move_vertex(vertex, old_pos)
+                    .expect("reverse of a validated vertex move must re-apply");
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             DocAction::Grouped {
                 group,
                 parent,
@@ -3396,6 +3579,13 @@ impl Document {
                 }
                 DocChange {
                     guides_touched: guides.clone(),
+                    ..Default::default()
+                }
+            }
+            &DocAction::DeletedSketch { sketch } => {
+                self.hidden_sketches.remove(&sketch);
+                DocChange {
+                    sketches_touched: vec![sketch],
                     ..Default::default()
                 }
             }
@@ -3647,6 +3837,41 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            &DocAction::TransformSketch {
+                sketch, forward, ..
+            } => {
+                // Redo a sketch transform by re-baking the forward.
+                self.sketches[sketch]
+                    .apply_transform(&forward)
+                    .expect("forward of a validated transform must re-apply");
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            &DocAction::MovedSketchVertex {
+                sketch,
+                vertex,
+                new_pos,
+                ..
+            } => {
+                // Redo a vertex drag by re-applying the new position.
+                self.sketches[sketch]
+                    .move_vertex(vertex, new_pos)
+                    .expect("forward of a validated vertex move must re-apply");
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             &DocAction::Grouped { group, parent, .. } => {
                 // Redo grouping: re-form the group from its retained members.
                 self.groups[group].hidden = false;
@@ -3783,6 +4008,13 @@ impl Document {
                 }
                 DocChange {
                     guides_touched: guides.clone(),
+                    ..Default::default()
+                }
+            }
+            &DocAction::DeletedSketch { sketch } => {
+                self.hidden_sketches.insert(sketch);
+                DocChange {
+                    sketches_touched: vec![sketch],
                     ..Default::default()
                 }
             }

@@ -27,6 +27,15 @@ use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
 use wasm_bindgen::prelude::*;
 
+/// Pick-cone half-angle (radians) for [`Scene::pick_sketch`]. Unlike `snap`'s
+/// caller-supplied, screen-derived aperture, `pick_sketch` mirrors `pick_face`'s
+/// parameterless shape — but a sketch edge (unlike a face) has zero thickness,
+/// so *some* angular tolerance is unavoidable. `0.02` rad (~1.15°) is in the
+/// same neighborhood as the tightest apertures already exercised in the
+/// inference test suite (e.g. `aperture: 0.05`), forgiving enough for a
+/// deliberate click without competing with nearby solid geometry.
+const SKETCH_PICK_APERTURE: f64 = 0.02;
+
 // Persist a panic message where the UI can read it after the wasm instance is
 // poisoned. `console_error_panic_hook` writes through a web-sys console binding
 // that bypasses the app's `console.error` capture, so a kernel panic was
@@ -174,6 +183,10 @@ fn material_id_opt(handle: u64) -> Option<MaterialId> {
 
 fn sketch_id(handle: u64) -> SketchId {
     SketchId::from(KeyData::from_ffi(handle))
+}
+
+fn sketch_vertex_id(handle: u64) -> kernel::SketchVertexId {
+    kernel::SketchVertexId::from(KeyData::from_ffi(handle))
 }
 
 fn object_id(handle: u64) -> ObjectId {
@@ -544,6 +557,46 @@ impl FacePickJs {
     }
 }
 
+/// A sketch vertex picked by ray (Phase D per-vertex edit). Carries the owning
+/// sketch, the exact vertex handle to drag, and the vertex's world position so
+/// the tool can seed the gesture without a second kernel round-trip.
+#[wasm_bindgen]
+pub struct SketchVertexPickJs {
+    sketch: u64,
+    vertex: u64,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[wasm_bindgen]
+impl SketchVertexPickJs {
+    /// Handle of the sketch owning the picked vertex.
+    pub fn sketch(&self) -> u64 {
+        self.sketch
+    }
+
+    /// Handle of the picked vertex within that sketch (pass to `move_sketch_vertex`).
+    pub fn vertex(&self) -> u64 {
+        self.vertex
+    }
+
+    /// Picked vertex X (meters).
+    pub fn x(&self) -> f64 {
+        self.x
+    }
+
+    /// Picked vertex Y (meters).
+    pub fn y(&self) -> f64 {
+        self.y
+    }
+
+    /// Picked vertex Z (meters).
+    pub fn z(&self) -> f64 {
+        self.z
+    }
+}
+
 /// A resolved snap (mirrors `inference::Snap`).
 #[wasm_bindgen]
 pub struct SnapJs {
@@ -750,6 +803,35 @@ impl Scene {
         if let Some(segments) = Self::live_sketch_segments(&self.doc, id) {
             self.inference.add_sketch(id, &segments);
         }
+        if let Some(vertices) = Self::live_sketch_vertices(&self.doc, id) {
+            self.inference.add_sketch_vertices(id, &vertices);
+        }
+    }
+
+    /// Enumerates sketch `id`'s vertices as `(SketchVertexId, world position)`
+    /// pairs for the per-vertex edit tool's picking, or `None` if the sketch is
+    /// unknown/gone. Restricted to vertices on at least one **live**
+    /// (non-consumed) edge, matching [`Scene::live_sketch_segments`]'s "live
+    /// edge" definition — so a vertex is pickable iff a visible sketch line
+    /// touches it (no orphan ghost vertices from already-extruded edges).
+    fn live_sketch_vertices(
+        doc: &Document,
+        id: SketchId,
+    ) -> Option<Vec<(kernel::SketchVertexId, Point3)>> {
+        let s = doc.sketch(id)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (eid, edge) in s.edges() {
+            if doc.is_sketch_edge_consumed(id, eid) {
+                continue;
+            }
+            for vid in [edge.from, edge.to] {
+                if seen.insert(vid) {
+                    out.push((vid, s.vertices()[vid].position));
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Enumerates sketch `id`'s live (non-consumed) edges as world-space
@@ -961,6 +1043,58 @@ impl Scene {
         Ok(())
     }
 
+    /// Move/rotate/scale a free-standing sketch by baking an affine into its
+    /// geometry (undoable; Phase D). Same row-major 3×4 12-float matrix as
+    /// [`Scene::transform_object`]; the `SketchId` is unchanged. A sketch is a
+    /// distinct FFI concept from a tree node ('s `NodeId` has no sketch
+    /// variant), so this is dedicated rather than routing through a node path.
+    ///
+    /// # Errors
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `UnknownSketch` — stale or hidden (deleted) handle.
+    /// - `Transform` — singular or orientation-flipping (e.g. negative scale).
+    pub fn transform_sketch(&mut self, sketch: u64, affine: &[f64]) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_sketch(sketch_id(sketch), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Drag one vertex of a free-standing sketch to `(x, y, z)` (Phase D
+    /// per-vertex edit; undoable). Topology-preserving — see
+    /// [`kernel::Sketch::move_vertex`]: incident edges stretch, nothing splits
+    /// or merges. The `SketchId`/`SketchVertexId` are unchanged.
+    ///
+    /// # Errors
+    /// - `UnknownSketch` — stale or hidden (deleted) sketch.
+    /// - `Sketch` — the move was refused (off-plane, would collapse an incident
+    ///   edge, or would cross/merge geometry); the sketch is left untouched.
+    pub fn move_sketch_vertex(
+        &mut self,
+        sketch: u64,
+        vertex: u64,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .move_sketch_vertex(
+                sketch_id(sketch),
+                sketch_vertex_id(vertex),
+                Point3::new(x, y, z),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
     /// Deep-clone a node — Move+Option "copy" — placing the copy under the
     /// same parent, offset by `affine` (the same row-major 3×4 12-float matrix as
     /// [`Scene::transform_object`]). Returns the new node (always the **same kind**
@@ -1035,6 +1169,20 @@ impl Scene {
     pub fn delete_node(&mut self, kind: u8, id: u64) -> Result<(), ApiError> {
         let node = node_id(kind, id)?;
         let change = self.doc.delete_node(node).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
+    /// Deletes (hides) one free-standing sketch in one undoable step —
+    /// whole-sketch granularity, mirroring `delete_guide`. The handle stays
+    /// valid for redo. A sketch is a distinct FFI concept from a tree node
+    /// ('s `NodeId` has no sketch variant), so this is a dedicated method
+    /// rather than routing through `delete_node`.
+    ///
+    /// # Errors
+    /// - `UnknownSketch` — stale, already-hidden, or foreign handle.
+    pub fn delete_sketch(&mut self, sketch: u64) -> Result<(), ApiError> {
+        let change = self.doc.delete_sketch(sketch_id(sketch)).map_err(doc_err)?;
         self.reconcile(&change);
         Ok(())
     }
@@ -1755,6 +1903,54 @@ impl Scene {
             // pick_face only ever yields faces; anything else is a bug.
             _ => None,
         }
+    }
+
+    /// Picks the live (non-consumed, non-hidden) free-standing sketch whose
+    /// nearest edge the ray passes closest to (for whole-sketch selection,
+    ///) — `undefined` when the ray hits no live sketch edge.
+    ///
+    /// Like `pick_face`, this takes a bare ray with no caller-supplied
+    /// aperture: a sketch edge has no thickness, so a fixed pick-cone half-angle
+    /// (`SKETCH_PICK_APERTURE`) stands in for screen-derived aperture (the `snap`
+    /// convention) — picking a thin line by exact ray intersection alone would
+    /// be unreasonably precise to hit.
+    pub fn pick_sketch(&self, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64) -> Option<u64> {
+        let ray = PickRay {
+            origin: Point3::new(ox, oy, oz),
+            direction: kernel::Vec3::new(dx, dy, dz),
+        };
+        self.inference
+            .pick_sketch(&ray, SKETCH_PICK_APERTURE)
+            .map(|id| id.data().as_ffi())
+    }
+
+    /// Picks the committed sketch vertex nearest the ray (Phase D per-vertex
+    /// edit), for the EditVertex tool. Uses the same fixed `SKETCH_PICK_APERTURE`
+    /// as [`Scene::pick_sketch`] (a vertex is a point — exact ray intersection
+    /// would be unhittable). Returns the sketch, the vertex handle to drag, and
+    /// its world position, or `undefined` if no vertex is within the aperture.
+    pub fn pick_sketch_vertex(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<SketchVertexPickJs> {
+        let ray = PickRay {
+            origin: Point3::new(ox, oy, oz),
+            direction: kernel::Vec3::new(dx, dy, dz),
+        };
+        self.inference
+            .pick_sketch_vertex(&ray, SKETCH_PICK_APERTURE)
+            .map(|(sid, vid, pos)| SketchVertexPickJs {
+                sketch: sid.data().as_ffi(),
+                vertex: vid.data().as_ffi(),
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+            })
     }
 
     /// Publishes one transient (in-progress) segment as a snap candidate —
@@ -2599,6 +2795,106 @@ mod tests {
         ];
         let err = scene.transform_object(o, &reflect).unwrap_err();
         assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+    }
+
+    #[test]
+    fn transform_sketch_moves_and_is_undoable() {
+        let mut scene = Scene::new();
+        let (s, _r) = ground_unit_square(&mut scene);
+        // Row-major 3x4: identity linear, translate +X by 5.
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        scene.transform_sketch(s, &affine).unwrap();
+        assert!(
+            scene.sketch_ids().contains(&s),
+            "the sketch is still live and visible after transform"
+        );
+        scene.scene_undo().unwrap();
+        assert!(
+            scene.sketch_ids().contains(&s),
+            "still there after undo, same handle"
+        );
+    }
+
+    #[test]
+    fn transform_sketch_rejects_bad_affine_and_reflection() {
+        let mut scene = Scene::new();
+        let (s, _r) = ground_unit_square(&mut scene);
+
+        let short = [1.0, 0.0, 0.0];
+        assert!(
+            scene
+                .transform_sketch(s, &short)
+                .unwrap_err()
+                .0
+                .starts_with("BadAffine")
+        );
+        let reflect = [
+            -1.0, 0.0, 0.0, 0.0, //
+            0.0, -1.0, 0.0, 0.0, //
+            0.0, 0.0, -1.0, 0.0,
+        ];
+        let err = scene.transform_sketch(s, &reflect).unwrap_err();
+        assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+    }
+
+    #[test]
+    fn pick_and_move_sketch_vertex_is_undoable() {
+        let mut scene = Scene::new();
+        let (s, _r) = ground_unit_square(&mut scene);
+        // Ray straight down onto the (1,1) corner picks that exact vertex.
+        let pick = scene
+            .pick_sketch_vertex(1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+            .expect("a vertex sits under the (1,1) ray");
+        assert_eq!(pick.sketch(), s);
+        assert!((pick.x() - 1.0).abs() < 1e-9 && (pick.y() - 1.0).abs() < 1e-9);
+
+        // Nudge it; topology preserved, so the sketch stays live and undoable.
+        scene
+            .move_sketch_vertex(s, pick.vertex(), 1.4, 0.8, 0.0)
+            .unwrap();
+        assert!(scene.sketch_ids().contains(&s));
+        // The vertex is now pickable at its new spot, not the old one.
+        assert!(
+            scene
+                .pick_sketch_vertex(1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+                .is_none()
+        );
+        assert!(
+            scene
+                .pick_sketch_vertex(1.4, 0.8, 5.0, 0.0, 0.0, -1.0)
+                .is_some()
+        );
+
+        scene.scene_undo().unwrap();
+        assert!(
+            scene
+                .pick_sketch_vertex(1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn move_sketch_vertex_rejects_a_retopologizing_drag() {
+        let mut scene = Scene::new();
+        let (s, _r) = ground_unit_square(&mut scene);
+        let pick = scene
+            .pick_sketch_vertex(0.0, 0.0, 5.0, 0.0, 0.0, -1.0)
+            .expect("a vertex sits under the (0,0) ray");
+        // Drag corner (0,0) across to (2, 0.5): its edges sweep over the far
+        // side → refused as a typed Sketch error, sketch untouched.
+        let err = scene
+            .move_sketch_vertex(s, pick.vertex(), 2.0, 0.5, 0.0)
+            .unwrap_err();
+        assert!(err.0.starts_with("WouldRetopologize"), "got {}", err.0);
+        assert!(
+            scene
+                .pick_sketch_vertex(0.0, 0.0, 5.0, 0.0, 0.0, -1.0)
+                .is_some()
+        );
     }
 
     /// Two top-level boxes group into one node, transform together, and ungroup

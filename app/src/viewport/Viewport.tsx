@@ -36,6 +36,7 @@ import { ScaleTool } from '../tools/ScaleTool'
 import { TapeMeasureTool } from '../tools/TapeMeasureTool'
 import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
+import { EditVertexTool } from '../tools/EditVertexTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 import type { Snap } from '../tools/types'
@@ -161,6 +162,12 @@ export interface ViewportApi {
    * same path that undo/redo use (`handleSceneRefresh` + `refreshAllSketches`).
    */
   notifyLoaded: () => void
+  /**
+   * True while the active tool is capturing raw keyboard input (mid-VCB entry),
+   * so the global Delete/Backspace handler must not steal the key (Backspace
+   * edits the typed buffer). False for non-capturing tools (e.g. Select).
+   */
+  isCapturingInput: () => boolean
   /** Trigger scene undo (same as Cmd/Ctrl+Z keyboard shortcut). */
   runUndo: () => void
   /** Trigger scene redo (same as Shift+Cmd/Ctrl+Z keyboard shortcut). */
@@ -485,11 +492,23 @@ export default function Viewport({
 
     // Resolve a raw pick (leaf object id + optional instance id) to a
     // context-aware NodeRef, then lift the selection to the parent.
-    function handleSelect(pickedObjectId: bigint | null, pickedInstanceId?: bigint): void {
+    function handleSelect(
+      pickedObjectId: bigint | null,
+      pickedInstanceId?: bigint,
+      pickedSketchId?: bigint,
+    ): void {
       const additive = selectAdditiveRef.current && activeContextRef.current.length === 0
       const ctx = activeContextRef.current
 
       if (pickedObjectId === null) {
+        // A sketch hit: free-standing sketches are top-level-only (
+        // sketches have no group/instance nesting), so any active context
+        // is simply out of scope for them, like a plain miss.
+        if (pickedSketchId !== undefined && ctx.length === 0) {
+          onSelectRef.current?.({ kind: 'sketch', id: pickedSketchId }, additive)
+          scheduleRender()
+          return
+        }
         // Miss: if we're inside a context at top-level, exit; otherwise clear.
         if (!additive && ctx.length > 0 && ctx[ctx.length - 1].kind !== 'object') {
           // Click outside while inside a group → deselect but don't exit
@@ -590,11 +609,16 @@ export default function Viewport({
 
     function runDelete(nodes: NodeRef[]): void {
       if (nodes.length === 0) return
-      // kind: 0=object, 1=group, 2=instance
+      // kind: 0=object, 1=group, 2=instance; 'sketch' has no NodeId — its own
+      // dedicated delete_sketch call, mirroring delete_guide's shape.
       for (const n of nodes) {
-        const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
         try {
-          wasmScene.delete_node(kind, n.id)
+          if (n.kind === 'sketch') {
+            wasmScene.delete_sketch(n.id)
+          } else {
+            const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
+            wasmScene.delete_node(kind, n.id)
+          }
         } catch (err) {
           const code = parseKernelErrorCode(err)
           const rawMsg = err instanceof Error ? err.message : String(err)
@@ -822,7 +846,11 @@ export default function Viewport({
     }
 
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setStandardView, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
+      const isCapturingInput = (): boolean => {
+        const t = toolController.activeTool
+        return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
+      }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -926,6 +954,10 @@ export default function Viewport({
         sel,
         (node) => {
           handleSceneRefresh()
+          // A sketch move bakes new vertex positions; rebuild sketch buffers so
+          // the lines follow (objects refresh via handleSceneRefresh; sketches
+          // do not). Mirrors the boolean/undo refresh pairing.
+          sceneRenderer.refreshAllSketches()
           // Select the committed node — for an Option-copy this is the fresh
           // clone, so a follow-up Alt-drag chains off the new copy.
           onSelectRef.current?.(node, false)
@@ -945,6 +977,9 @@ export default function Viewport({
         sel,
         (_node) => {
           handleSceneRefresh()
+          // Rebuild sketch buffers so a rotated sketch's lines follow (see
+          // makeMoveTool).
+          sceneRenderer.refreshAllSketches()
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
@@ -961,6 +996,9 @@ export default function Viewport({
         sel,
         (_node) => {
           handleSceneRefresh()
+          // Rebuild sketch buffers so a scaled sketch's lines follow (see
+          // makeMoveTool).
+          sceneRenderer.refreshAllSketches()
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
@@ -1007,6 +1045,24 @@ export default function Viewport({
           handleSceneRefresh()
           sceneRenderer.refreshGuides()
           onSelectRef.current?.({ kind: 'object', id: objectId }, false)
+        },
+        handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
+    function makeEditVertexTool(): EditVertexTool {
+      return new EditVertexTool(
+        wasmScene,
+        previewGroup,
+        // A vertex drag bakes new sketch geometry: refresh objects AND rebuild
+        // sketch line buffers (handleSceneRefresh alone does NOT cover sketches
+        // — same pairing as makeMoveTool's sketch branch and undo/redo).
+        () => {
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
@@ -1078,6 +1134,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeSliceTool())
+          break
+        case 'Edit Vertex':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeEditVertexTool())
           break
         case 'Orbit':
           cameraModeRef.current = true
@@ -1643,19 +1704,23 @@ export default function Viewport({
 
   useEffect(() => {
     selectedIdsRef.current = selectedIds
-    // Collect leaf object ids and instance ids for highlighting
+    // Collect leaf object ids, instance ids, and sketch ids for highlighting
     const leafIds: bigint[] = []
     const instanceIds: bigint[] = []
+    const sketchIds: bigint[] = []
     for (const node of selectedIds) {
       if (node.kind === 'object') {
         leafIds.push(node.id)
       } else if (node.kind === 'instance') {
         instanceIds.push(node.id)
+      } else if (node.kind === 'sketch') {
+        sketchIds.push(node.id)
       }
       // Groups: isolation/lit set covers visual feedback
     }
     sceneRendererRef.current?.setSelected(leafIds)
     sceneRendererRef.current?.setSelectedInstances(instanceIds)
+    sceneRendererRef.current?.setSelectedSketches(sketchIds)
     scheduleRenderRef.current()
   }, [selectedIds])
 
