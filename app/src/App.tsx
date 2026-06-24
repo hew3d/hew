@@ -884,6 +884,13 @@ export default function App() {
       case 'toggle-guides':       setShowGuides((v) => !v); break
       case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
+      case 'view-top':            viewportApi.current?.setStandardView('top'); break
+      case 'view-bottom':         viewportApi.current?.setStandardView('bottom'); break
+      case 'view-front':          viewportApi.current?.setStandardView('front'); break
+      case 'view-back':           viewportApi.current?.setStandardView('back'); break
+      case 'view-left':           viewportApi.current?.setStandardView('left'); break
+      case 'view-right':          viewportApi.current?.setStandardView('right'); break
+      case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
       case 'open-settings':       openSettingsRef.current(); break
     }
   }
@@ -1460,6 +1467,7 @@ export default function App() {
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         onDelete={deleteSelection}
         onZoomExtents={handleZoomExtents}
+        onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         onOpenSettings={openSettings}
       />
 

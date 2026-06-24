@@ -432,12 +432,33 @@ fn main() {
             let cam_zoom_extents =
                 MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents").build(handle)?;
 
+            // Standard Views — axis-aligned + isometric framings.
+            let view_top = MenuItemBuilder::with_id("cam-view-top", "Top").build(handle)?;
+            let view_bottom =
+                MenuItemBuilder::with_id("cam-view-bottom", "Bottom").build(handle)?;
+            let view_front = MenuItemBuilder::with_id("cam-view-front", "Front").build(handle)?;
+            let view_back = MenuItemBuilder::with_id("cam-view-back", "Back").build(handle)?;
+            let view_left = MenuItemBuilder::with_id("cam-view-left", "Left").build(handle)?;
+            let view_right = MenuItemBuilder::with_id("cam-view-right", "Right").build(handle)?;
+            let view_iso = MenuItemBuilder::with_id("cam-view-iso", "Iso").build(handle)?;
+            let standard_views = SubmenuBuilder::new(handle, "Standard Views")
+                .item(&view_top)
+                .item(&view_bottom)
+                .item(&view_front)
+                .item(&view_back)
+                .item(&view_left)
+                .item(&view_right)
+                .separator()
+                .item(&view_iso)
+                .build()?;
+
             let camera_menu = SubmenuBuilder::new(handle, "Camera")
                 .item(&cam_orbit)
                 .item(&cam_pan)
                 .item(&cam_zoom)
                 .separator()
                 .item(&cam_zoom_extents)
+                .item(&standard_views)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -561,6 +582,13 @@ fn main() {
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",
                 "cam-zoom-extents" => "zoom-extents",
+                "cam-view-top" => "view-top",
+                "cam-view-bottom" => "view-bottom",
+                "cam-view-front" => "view-front",
+                "cam-view-back" => "view-back",
+                "cam-view-left" => "view-left",
+                "cam-view-right" => "view-right",
+                "cam-view-iso" => "view-iso",
                 "win-model-info" => "toggle-model-info",
                 "win-materials" => "toggle-materials",
                 "win-tags" => "toggle-tags",

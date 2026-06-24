@@ -1897,3 +1897,188 @@ fn push_through_sub_face_punches_hole_and_round_trips() {
     doc.redo().expect("redo through");
     assert_eq!(doc.visible_object_ids(), vec![holed]);
 }
+
+// -----------------------------------------------  duplicate_node (Move+copy)
+
+/// Duplicating an Object deep-clones its geometry at the placement offset: the
+/// copy is a distinct, independent world object; the source is untouched; and
+/// the action is one handle-stable undo step.
+#[test]
+fn duplicate_object_clones_geometry_at_offset_and_round_trips() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let original = doc.object(a).unwrap().clone();
+    let c0 = centroid(&original);
+    let offset = Vec3::new(3.0, 0.0, 0.0);
+
+    let (root, change) = doc
+        .duplicate_node(NodeId::Object(a), &Transform::translation(offset))
+        .expect("duplicate object");
+    let b = match root {
+        NodeId::Object(id) => id,
+        _ => panic!("duplicating an object yields an object"),
+    };
+
+    assert_ne!(a, b, "the copy is a distinct handle");
+    assert!(change.objects_touched.contains(&b));
+    let visible = doc.visible_object_ids();
+    assert!(visible.contains(&a) && visible.contains(&b), "both visible");
+    assert!(
+        doc.is_world_object(b),
+        "the copy is an independent world object"
+    );
+    assert!(
+        objects_equivalent(doc.object(a).unwrap(), &original),
+        "the source is untouched"
+    );
+    assert!(
+        approx_pt(centroid(doc.object(b).unwrap()), c0 + offset),
+        "the copy is the source translated by the placement"
+    );
+
+    // Independence: editing the copy leaves the source put.
+    doc.transform_object(b, &Transform::translation(Vec3::new(0.0, 0.0, 9.0)))
+        .unwrap();
+    assert!(
+        approx_pt(centroid(doc.object(a).unwrap()), c0),
+        "the source has its own geometry"
+    );
+    doc.undo().unwrap(); // undo the independence-probe transform
+
+    // Undo the duplication: only the copy disappears; redo restores it.
+    doc.undo().expect("undo duplicate");
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![a],
+        "undo removes the copy, keeps the source"
+    );
+    doc.redo().expect("redo duplicate");
+    let visible = doc.visible_object_ids();
+    assert!(visible.contains(&a) && visible.contains(&b));
+    assert!(approx_pt(centroid(doc.object(b).unwrap()), c0 + offset));
+}
+
+/// Duplicating a Group clones the whole subtree into a new top-level group with
+/// its own fresh leaves (none shared with the source); undo removes it wholesale.
+#[test]
+fn duplicate_group_clones_the_whole_subtree() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let orig_leaves: HashSet<ObjectId> = doc
+        .leaf_objects_under(NodeId::Group(g))
+        .into_iter()
+        .collect();
+
+    let (root, _) = doc
+        .duplicate_node(
+            NodeId::Group(g),
+            &Transform::translation(Vec3::new(0.0, 5.0, 0.0)),
+        )
+        .unwrap();
+    let g2 = match root {
+        NodeId::Group(id) => id,
+        _ => panic!("a group copy is a group"),
+    };
+    assert_ne!(g, g2);
+    assert!(doc.top_level_nodes().contains(&NodeId::Group(g2)));
+
+    let new_leaves = doc.leaf_objects_under(NodeId::Group(g2));
+    assert_eq!(new_leaves.len(), orig_leaves.len(), "same leaf count");
+    assert!(
+        new_leaves.iter().all(|o| !orig_leaves.contains(o)),
+        "the copy has its own distinct leaves"
+    );
+
+    doc.undo().unwrap();
+    assert!(!doc.top_level_nodes().contains(&NodeId::Group(g2)));
+    for o in &new_leaves {
+        assert!(
+            !doc.visible_object_ids().contains(o),
+            "copied leaves are hidden on undo"
+        );
+    }
+}
+
+/// Duplicating an Instance places another instance of the **same definition**
+/// (geometry stays shared — unlike make_unique) at `pose.then(placement)`.
+#[test]
+fn duplicate_instance_shares_the_definition_at_offset_pose() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let offset = Vec3::new(4.0, 0.0, 0.0);
+
+    let (root, _) = doc
+        .duplicate_node(NodeId::Instance(inst), &Transform::translation(offset))
+        .unwrap();
+    let inst2 = match root {
+        NodeId::Instance(id) => id,
+        _ => panic!("an instance copy is an instance"),
+    };
+    assert_ne!(inst, inst2);
+    assert_eq!(
+        doc.instance_def(inst2),
+        Some(comp),
+        "the copy shares the source's definition (not a fresh make_unique def)"
+    );
+    assert!(doc.instances_of(comp).contains(&inst) && doc.instances_of(comp).contains(&inst2));
+
+    let probe = Point3::new(0.3, 0.7, 0.2);
+    let expected = Transform::IDENTITY.then(&Transform::translation(offset));
+    assert!(
+        doc.instance_pose(inst2)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(expected.apply_point(probe), 1e-9),
+        "the copy's pose is the source pose composed with the placement"
+    );
+
+    doc.undo().unwrap();
+    assert!(
+        !doc.top_level_nodes().contains(&NodeId::Instance(inst2)),
+        "undo removes the copied instance"
+    );
+}
+
+/// A singular or reflecting placement, and a stale source, are refused — the
+/// document is left exactly as it was (a partial clone is rolled back).
+#[test]
+fn duplicate_refuses_bad_placement_and_stale_node() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+
+    assert_eq!(
+        doc.duplicate_node(NodeId::Object(a), &Transform::uniform_scale(0.0))
+            .map(|_| ()),
+        Err(DocumentError::Transform(TransformError::Singular))
+    );
+    assert_eq!(
+        doc.duplicate_node(NodeId::Object(a), &Transform::uniform_scale(-1.0))
+            .map(|_| ()),
+        Err(DocumentError::Transform(TransformError::Reflection))
+    );
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![a],
+        "a refused duplicate leaves the document untouched"
+    );
+    let bogus = ObjectId::default();
+    assert_eq!(
+        doc.duplicate_node(NodeId::Object(bogus), &Transform::IDENTITY)
+            .map(|_| ()),
+        Err(DocumentError::UnknownObject)
+    );
+
+    // No refused call left a stray action behind: the only thing on the undo
+    // stack is the original extrude, so one undo empties the document.
+    doc.undo().expect("undo the extrude");
+    assert!(
+        doc.visible_object_ids().is_empty(),
+        "refused duplicates pushed no undo entry"
+    );
+    assert!(!doc.can_undo());
+}

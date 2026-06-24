@@ -12,6 +12,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { modLabel } from '../platform'
+import type { StandardView } from '../viewport/Viewport'
 
 export interface MenuBarProps {
   /** Full document title (already includes dirty mark and " — Hew"). Only used in the web (non-native) bar. */
@@ -80,6 +81,8 @@ export interface MenuBarProps {
   onDelete?: () => void
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
+  /** Reposition the camera to a standard view (Camera → Standard Views). */
+  onStandardView?: (view: StandardView) => void
   /** Open the Settings window/modal (Window → Settings…, web only — native uses the OS app menu). */
   onOpenSettings?: () => void
 }
@@ -277,6 +280,7 @@ export function MenuBar({
   onDeleteGuides,
   onDelete,
   onZoomExtents,
+  onStandardView,
   onOpenSettings,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
@@ -531,6 +535,17 @@ export function MenuBar({
               label="Zoom Extents"
               onClick={withClose(() => onZoomExtents?.())}
             />
+            <div style={SEPARATOR_STYLE} />
+            <SubMenu label="Standard Views">
+              <MenuItem label="Top" onClick={withClose(() => onStandardView?.('top'))} />
+              <MenuItem label="Bottom" onClick={withClose(() => onStandardView?.('bottom'))} />
+              <MenuItem label="Front" onClick={withClose(() => onStandardView?.('front'))} />
+              <MenuItem label="Back" onClick={withClose(() => onStandardView?.('back'))} />
+              <MenuItem label="Left" onClick={withClose(() => onStandardView?.('left'))} />
+              <MenuItem label="Right" onClick={withClose(() => onStandardView?.('right'))} />
+              <div style={SEPARATOR_STYLE} />
+              <MenuItem label="Iso" onClick={withClose(() => onStandardView?.('iso'))} />
+            </SubMenu>
           </div>
         )}
       </div>

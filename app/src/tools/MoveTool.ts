@@ -14,6 +14,14 @@
  *   ArrowLeft  → lock Y (green guide line)
  *   ArrowUp    → lock Z (blue guide line)
  *   ArrowDown or same arrow again → clear lock
+ *   Shift (held) → lock to the axis the drag is currently moving along;
+ *                  releasing Shift clears that lock (an arrow lock overrides it).
+ *
+ * Copy: holding Option/Alt during the move turns the commit into a
+ * duplicate — the dragged result is a deep clone (`duplicate_node`) placed at the
+ * offset, and the copy becomes the new selection so further Alt-drags chain
+ * copies. Object/group copies are independent baked geometry; an instance copy
+ * shares its definition at the offset pose.
  *
  * Numeric VCB:
  *   Type digits / . / - while in 'base' stage → builds a buffer shown as the
@@ -32,8 +40,14 @@ import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, clearPreview } from './transformPreview'
 import { arrowToAxis, editNumericBuffer, parseDistance, pointAlong } from './moveInput'
-import type { NodeRef } from '../panels/treeModel'
+import type { NodeRef, NodeKind } from '../panels/treeModel'
+import { nodeRefFromJs } from '../panels/treeModel'
 import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
+
+/** FFI node-kind code matching `wasm-api`'s `node_id` (0=object, 1=group, 2=instance). */
+function kindCode(kind: NodeKind): number {
+  return kind === 'object' ? 0 : kind === 'group' ? 1 : 2
+}
 
 export type OnMoveCommit = (node: NodeRef) => void
 export type OnToast = (message: string, code?: string) => void
@@ -79,6 +93,10 @@ export class MoveTool implements Tool {
 
   /** Current axis lock: 0=X, 1=Y, 2=Z, null=free */
   private lockAxis: 0 | 1 | 2 | null = null
+  /** True when the *current* axis lock was set by holding Shift (vs. an arrow). */
+  private shiftAxisLock: boolean = false
+  /** True when Option/Alt is held — the move commits as a copy. */
+  private copyMode: boolean = false
   /** VCB buffer — raw string being typed by the user */
   private typed: string = ''
 
@@ -127,6 +145,55 @@ export class MoveTool implements Tool {
 
   capturingInput(): boolean {
     return this.stage.kind === 'base'
+  }
+
+  /**
+   * Set by the Viewport from the pointer/key Alt modifier: while true, the
+   * next commit duplicates instead of moving. Live-tracked so releasing Alt
+   * mid-drag drops back to a plain move.
+   */
+  setCopyMode(on: boolean): void {
+    if (this.copyMode === on) return
+    this.copyMode = on
+    if (this.stage.kind === 'base') {
+      this._reportMeasurement(this.stage.base, this.stage.dest)
+    }
+  }
+
+  /**
+   * Shift-held axis lock: pressing Shift while the drag is already
+   * moving along a dominant axis locks to it; releasing Shift clears that lock.
+   * An explicit arrow lock takes precedence and is left alone.
+   */
+  setShiftHeld(held: boolean): void {
+    if (this.stage.kind !== 'base') return
+    if (held) {
+      if (this.lockAxis !== null) return
+      const axis = this._dominantAxis()
+      if (axis === null) return
+      this.lockAxis = axis
+      this.shiftAxisLock = true
+      this._updateGuideLine()
+      this._reportMeasurement(this.stage.base, this.stage.dest)
+    } else if (this.shiftAxisLock) {
+      this.lockAxis = null
+      this.shiftAxisLock = false
+      this._updateGuideLine()
+      this._reportMeasurement(this.stage.base, this.stage.dest)
+    }
+  }
+
+  /** The world axis the current base→dest drag is most aligned with, or null. */
+  private _dominantAxis(): 0 | 1 | 2 | null {
+    if (this.stage.kind !== 'base') return null
+    const { base, dest } = this.stage
+    const d = [dest[0] - base[0], dest[1] - base[1], dest[2] - base[2]]
+    const ax = Math.abs(d[0]), ay = Math.abs(d[1]), az = Math.abs(d[2])
+    const max = Math.max(ax, ay, az)
+    if (max < 1e-9) return null
+    if (max === ax) return 0
+    if (max === ay) return 1
+    return 2
   }
 
   // ── Tool interface ──────────────────────────────────────────────────────────
@@ -191,6 +258,10 @@ export class MoveTool implements Tool {
 
     if (this.stage.kind !== 'base') return
 
+    // Keep copy-mode in sync with the Alt modifier on this key event (the VCB
+    // path commits from here, so it must see whether Alt is held).
+    this.copyMode = ev.altKey
+
     // ── Axis lock via arrow keys ──
     if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
       const requested = arrowToAxis(ev.key)
@@ -200,6 +271,8 @@ export class MoveTool implements Tool {
       } else {
         this.lockAxis = requested
       }
+      // An explicit arrow lock supersedes any Shift-held lock.
+      this.shiftAxisLock = false
       this._updateGuideLine()
       this._reportMeasurement(this.stage.base, this.stage.dest)
       return
@@ -226,7 +299,7 @@ export class MoveTool implements Tool {
       this.typed = editNumericBuffer(this.typed, ev.key)
       // Report the typed buffer as the measurement readout, tagged with the
       // current display unit so the user knows what they're typing in.
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.onMeasurementCb(this._decorate(`${this.typed} ${getLengthUnitSuffix()}`))
     }
   }
 
@@ -281,6 +354,7 @@ export class MoveTool implements Tool {
   private _resetToIdle(): void {
     this.stage = { kind: 'idle' }
     this.lockAxis = null
+    this.shiftAxisLock = false
     this.typed = ''
     clearPreview(this.preview)
     this.guideLine = null   // clearPreview removed it
@@ -301,16 +375,24 @@ export class MoveTool implements Tool {
 
   private _commit(node: NodeRef, tx: number, ty: number, tz: number): void {
     try {
-      const affine = translationAffine(tx, ty, tz)
-      const affineF64 = affineToFloat64(affine)
-      if (node.kind === 'group') {
+      const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
+      if (this.copyMode) {
+        // Option/Alt: duplicate at the offset instead of moving. The copy
+        // is the same kind as the source; select it and chain further copies.
+        const created = this.wasmScene.duplicate_node(kindCode(node.kind), node.id, affineF64)
+        const copy = nodeRefFromJs(created)
+        this.selectedNode = copy
+        this.onCommit(copy)
+      } else if (node.kind === 'group') {
         this.wasmScene.transform_group(node.id, affineF64)
+        this.onCommit(node)
       } else if (node.kind === 'instance') {
         this.wasmScene.transform_instance(node.id, affineF64)
+        this.onCommit(node)
       } else {
         this.wasmScene.transform_object(node.id, affineF64)
+        this.onCommit(node)
       }
-      this.onCommit(node)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
@@ -325,7 +407,7 @@ export class MoveTool implements Tool {
    */
   private _reportMeasurement(base: [number, number, number], dest: [number, number, number]): void {
     if (this.typed !== '') {
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.onMeasurementCb(this._decorate(`${this.typed} ${getLengthUnitSuffix()}`))
       return
     }
 
@@ -342,7 +424,12 @@ export class MoveTool implements Tool {
       dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
     }
 
-    this.onMeasurementCb(formatLength(dist))
+    this.onMeasurementCb(this._decorate(formatLength(dist)))
+  }
+
+  /** Prefix a "Copy" tag onto the readout while Option/Alt is held. */
+  private _decorate(text: string): string {
+    return this.copyMode ? `Copy · ${text}` : text
   }
 
   /**

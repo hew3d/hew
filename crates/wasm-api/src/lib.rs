@@ -921,6 +921,28 @@ impl Scene {
         Ok(())
     }
 
+    /// Deep-clone a node — Move+Option "copy" — placing the copy under the
+    /// same parent, offset by `affine` (the same row-major 3×4 12-float matrix as
+    /// [`Scene::transform_object`]). Returns the new node (always the **same kind**
+    /// as the source `kind`/`id`): an Object/Group copy bakes the offset into
+    /// fresh geometry; an Instance copy shares its definition at the offset pose.
+    /// Undoable; the source is left untouched.
+    pub fn duplicate_node(
+        &mut self,
+        kind: u8,
+        id: u64,
+        affine: &[f64],
+    ) -> Result<NodeJs, ApiError> {
+        let node = node_id(kind, id)?;
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let (new_node, change) = self.doc.duplicate_node(node, &t).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(node_js(new_node))
+    }
+
     /// Handles of all currently visible Objects in the scene (undone
     /// creations are hidden, not listed).
     pub fn object_ids(&self) -> Vec<u64> {

@@ -108,6 +108,34 @@ interface Props {
 }
 
 /** Imperative handle the viewport exposes to the parent. */
+/** One of the seven SketchUp-style standard camera framings. */
+export type StandardView = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'iso'
+
+/**
+ * A hair of tilt off the ±Z pole for Top/Bottom (≈0.06°, visually imperceptible).
+ * Looking *exactly* straight down with world-up +Z is gimbal-degenerate (the
+ * look direction is parallel to up), which both breaks the view's roll and — the
+ * real problem — would force a horizontal up, so orbiting from a top view pivots
+ * around the wrong axis. Nudging the eye a touch off the pole lets every view
+ * keep world-up +Z, so orbit always pivots around Z (natural in a Z-up world).
+ */
+const POLE_TILT = 0.001
+
+/**
+ * Eye direction (target→camera) for each standard view, in the Z-up world (X
+ * red, Y green, Z blue). Every view keeps world-up +Z (see {@link POLE_TILT});
+ * Iso is the SketchUp front-right-top corner.
+ */
+const STANDARD_VIEWS: Record<StandardView, { eye: [number, number, number] }> = {
+  top:    { eye: [0, -POLE_TILT, 1] },
+  bottom: { eye: [0, -POLE_TILT, -1] },
+  front:  { eye: [0, -1, 0] },
+  back:   { eye: [0, 1, 0] },
+  right:  { eye: [1, 0, 0] },
+  left:   { eye: [-1, 0, 0] },
+  iso:    { eye: [1, -1, 1] },
+}
+
 export interface ViewportApi {
   /** Combine two objects (0=union, 1=subtract a−b, 2=intersect). */
   runBoolean: (op: number, a: bigint, b: bigint) => void
@@ -143,6 +171,12 @@ export interface ViewportApi {
    * scene is empty. Idempotent — safe to call multiple times.
    */
   zoomExtents: () => void
+  /**
+   * Reposition the orbit camera to a standard axis-aligned or isometric view
+   * (Camera ▸ Standard Views), re-framing the scene each time. The current
+   * (perspective) projection is retained. No model geometry changes.
+   */
+  setStandardView: (view: StandardView) => void
   /**
    * Update the renderer's hidden object/instance sets.  Hidden groups have
    * `.visible = false` (not raypicked by three.js tools) and are excluded from
@@ -696,6 +730,39 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function setStandardView(view: StandardView): void {
+      // Eye direction (target → camera) in the Z-up world. Up is always world-up
+      // +Z so orbit keeps pivoting around Z (Top/Bottom dodge the gimbal via a
+      // tiny tilt baked into their eye direction — see POLE_TILT).
+      const spec = STANDARD_VIEWS[view]
+
+      // Re-frame the scene each time (like zoomExtents), falling back to the
+      // current target/distance when the scene is empty.
+      const box = new THREE.Box3()
+      box.expandByObject(sceneRenderer.objectsGroup)
+      box.expandByObject(sceneRenderer.instancesGroup)
+
+      const center = new THREE.Vector3()
+      let distance: number
+      if (box.isEmpty()) {
+        center.copy(controls.target)
+        distance = controls.getDistance()
+      } else {
+        box.getCenter(center)
+        const radius = box.getBoundingSphere(new THREE.Sphere()).radius
+        const fovRad = (camera.fov * Math.PI) / 180
+        distance = (radius * 1.2) / Math.tan(fovRad / 2)
+      }
+
+      const eye = new THREE.Vector3(spec.eye[0], spec.eye[1], spec.eye[2]).normalize()
+      camera.up.set(0, 0, 1)
+      controls.target.copy(center)
+      camera.position.copy(center).addScaledVector(eye, distance)
+      camera.updateProjectionMatrix()
+      controls.update()
+      scheduleRender()
+    }
+
     function setHidden(objectIds: bigint[], instanceIds: bigint[]): void {
       hiddenObjectIdsRef.current = new Set(objectIds)
       hiddenInstanceIdsRef.current = new Set(instanceIds)
@@ -746,7 +813,7 @@ export default function Viewport({
     }
 
     if (apiRefRef.current !== undefined) {
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, runUndo, runRedo, zoomExtents, setStandardView, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -824,8 +891,11 @@ export default function Viewport({
         previewGroup,
         sceneRenderer.objectsGroup,
         sel,
-        (_node) => {
+        (node) => {
           handleSceneRefresh()
+          // Select the committed node — for an Option-copy this is the fresh
+          // clone, so a follow-up Alt-drag chains off the new copy.
+          onSelectRef.current?.(node, false)
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
@@ -1038,12 +1108,23 @@ export default function Viewport({
     // only restores the Orbit cursor if we're the ones who changed it.
     function onShiftKeyDown(ev: KeyboardEvent): void {
       if (ev.key !== 'Shift') return
+      // Move's Shift-held axis lock. Idempotent under keydown autorepeat.
+      const at = toolController.activeTool
+      if ('setShiftHeld' in at) {
+        (at as { setShiftHeld(held: boolean): void }).setShiftHeld(true)
+      }
       if (shiftPanActive) return
       if (activeToolPropRef.current !== 'Orbit') return
       shiftPanActive = true
       renderer.domElement.style.cursor = cursorFor('Pan')
     }
     function onShiftKeyUp(ev: KeyboardEvent): void {
+      if (ev.key === 'Shift') {
+        const at = toolController.activeTool
+        if ('setShiftHeld' in at) {
+          (at as { setShiftHeld(held: boolean): void }).setShiftHeld(false)
+        }
+      }
       if (!shiftPanActive) return
       if (ev.key !== 'Shift' && ev.shiftKey) return
       shiftPanActive = false
@@ -1131,6 +1212,11 @@ export default function Viewport({
       lastRayRef.current = { ray, viewportH, fovY }
 
       const activeTool = toolController.activeTool
+      // Option/Alt held → Move commits as a copy; live-tracked so the
+      // readout and chaining follow the modifier.
+      if ('setCopyMode' in activeTool) {
+        (activeTool as { setCopyMode(on: boolean): void }).setCopyMode(ev.altKey)
+      }
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
         : null
@@ -1258,6 +1344,10 @@ export default function Viewport({
       // ⌘/Ctrl-click on the Paint tool fills the whole object (base material).
       if (activeTool instanceof PaintTool) {
         activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
+      }
+      // Option/Alt held at the click → Move commits as a copy.
+      if ('setCopyMode' in activeTool) {
+        (activeTool as { setCopyMode(on: boolean): void }).setCopyMode(ev.altKey)
       }
 
       const constraint = 'snapConstraint' in activeTool

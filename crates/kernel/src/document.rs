@@ -183,6 +183,16 @@ struct GuideRecord {
     hidden: bool,
 }
 
+/// Every entity created while deep-cloning a subtree in
+/// [`Document::duplicate_node`], accumulated so the clone is one atomic,
+/// reversible action — and so a partial clone can be rolled back on error.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CreatedClone {
+    objects: Vec<ObjectId>,
+    groups: Vec<GroupId>,
+    instances: Vec<InstanceId>,
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -309,6 +319,23 @@ enum DocAction {
     /// `place_instance` stamped another instance of an existing
     /// definition. Undo hides it; redo unhides. The `InstanceId` stays stable.
     PlacedInstance { instance: InstanceId },
+    /// `duplicate_node` (Move+Option "copy") deep-cloned a node under the
+    /// same parent. Undo hides every created entity and removes the clone root
+    /// from its parent's member list; redo unhides and re-appends. All handles
+    /// stay stable (hide-not-delete).
+    Duplicated {
+        /// The clone's root node (same kind as the source).
+        root: NodeId,
+        /// The parent group the clone was appended to, or `None` at top level.
+        parent: Option<GroupId>,
+        /// Every world object created by the clone (the root if it is an Object,
+        /// plus every cloned leaf beneath a cloned Group).
+        objects: Vec<ObjectId>,
+        /// Every group created by the clone.
+        groups: Vec<GroupId>,
+        /// Every instance created by the clone.
+        instances: Vec<InstanceId>,
+    },
     /// `add_guide_line`/`add_guide_point` created a construction guide.
     /// Undo hides it; redo unhides. The `GuideId` stays stable.
     CreatedGuide { guide: GuideId },
@@ -2890,6 +2917,171 @@ impl Document {
         ))
     }
 
+    /// Deep-clone a node (Object / Group / Instance) and place the copy under the
+    /// **same parent** as the source, offset by `placement` — the kernel
+    /// half of Move+Option "copy". Returns the new root node (always the **same
+    /// kind** as the source) and what it touched.
+    ///
+    /// This is deliberately distinct from its two neighbours:
+    /// - unlike [`Document::make_unique`] (detach an instance from its shared
+    ///   definition), a duplicated **Object** is a genuinely independent baked
+    ///   solid with fresh geometry and its own empty history;
+    /// - unlike [`Document::place_instance`] (share geometry under a new pose),
+    ///   it copies whatever the source *is* — an Object copy is new geometry, a
+    ///   Group copy is a new subtree, an Instance copy is another instance of the
+    ///   same definition.
+    ///
+    /// `placement` is composed per kind exactly as the matching transform op:
+    /// baked into a cloned Object's geometry ([`Object::apply_transform`]); baked
+    /// into every cloned leaf of a Group (like [`Document::transform_group`]);
+    /// and composed into a cloned Instance's pose (like
+    /// [`Document::transform_instance`]), keeping its geometry shared.
+    ///
+    /// Recorded as [`DocAction::Duplicated`]; undo/redo are handle-stable.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / `UnknownGroup` / `UnknownInstance` —
+    ///   the source node is stale or hidden.
+    /// - [`DocumentError::Transform`] — `placement` is singular, or it reflects an
+    ///   Object/Group leaf (baking would invert winding, as in
+    ///   [`Document::transform_object`]).
+    ///
+    /// On `Err` the document is untouched (a partial clone is rolled back).
+    pub fn duplicate_node(
+        &mut self,
+        node: NodeId,
+        placement: &Transform,
+    ) -> Result<(NodeId, DocChange), DocumentError> {
+        if !self.node_is_live(node) {
+            return Err(match node {
+                NodeId::Object(_) => DocumentError::UnknownObject,
+                NodeId::Group(_) => DocumentError::UnknownGroup,
+                NodeId::Instance(_) => DocumentError::UnknownInstance,
+            });
+        }
+        // Validate invertibility up front; a reflecting `placement` is re-rejected
+        // by `apply_transform` per object leaf during the clone.
+        placement.inverse().map_err(DocumentError::Transform)?;
+
+        let parent = self.node_parent(node);
+        let mut created = CreatedClone::default();
+        let root = match self.clone_subtree(node, parent, placement, &mut created) {
+            Ok(root) => root,
+            Err(e) => {
+                // Roll back any records inserted before the failure so the
+                // document is untouched on error (strong guarantee). Nothing
+                // outside `created` has been mutated yet.
+                for o in created.objects {
+                    self.objects.remove(o);
+                }
+                for g in created.groups {
+                    self.groups.remove(g);
+                }
+                for i in created.instances {
+                    self.instances.remove(i);
+                }
+                return Err(e);
+            }
+        };
+        // Append the clone root to its parent's member list (top-level nodes need
+        // no list — they derive from the slotmap, hidden-filtered).
+        if let Some(pg) = parent {
+            self.groups[pg].members.push(root);
+        }
+
+        self.undo.push(DocAction::Duplicated {
+            root,
+            parent,
+            objects: created.objects.clone(),
+            groups: created.groups.clone(),
+            instances: created.instances.clone(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        let mut change = DocChange {
+            objects_touched: created.objects,
+            groups_touched: created.groups,
+            instances_touched: created.instances,
+            ..Default::default()
+        };
+        change.groups_touched.extend(parent);
+        Ok((root, change))
+    }
+
+    /// Recursively deep-clone `node` under `new_parent`, baking/composing
+    /// `placement` per kind (see [`Document::duplicate_node`]). Newly created ids
+    /// are pushed onto `created` as they are inserted, so the caller can roll back
+    /// on error and record one atomic action. Returns the cloned node's id.
+    fn clone_subtree(
+        &mut self,
+        node: NodeId,
+        new_parent: Option<GroupId>,
+        placement: &Transform,
+        created: &mut CreatedClone,
+    ) -> Result<NodeId, DocumentError> {
+        match node {
+            NodeId::Object(id) => {
+                let src = &self.objects[id];
+                let mut object = src.object.clone();
+                let name = src.name.clone();
+                let tags = src.tags.clone();
+                object
+                    .apply_transform(placement)
+                    .map_err(DocumentError::Transform)?;
+                let new_id = self.objects.insert(ObjectRecord {
+                    object,
+                    history: History::new(),
+                    hidden: false,
+                    owner: ObjectOwner::World { parent: new_parent },
+                    name,
+                    tags,
+                });
+                created.objects.push(new_id);
+                Ok(NodeId::Object(new_id))
+            }
+            NodeId::Instance(id) => {
+                let src = &self.instances[id];
+                // Compose like `transform_instance`: an invertible `placement`
+                // into an invertible pose stays invertible, so no extra check.
+                let pose = src.pose.then(placement);
+                let def = src.def;
+                let name = src.name.clone();
+                let tags = src.tags.clone();
+                let new_id = self.instances.insert(InstanceRecord {
+                    def,
+                    pose,
+                    parent: new_parent,
+                    hidden: false,
+                    name,
+                    tags,
+                });
+                created.instances.push(new_id);
+                Ok(NodeId::Instance(new_id))
+            }
+            NodeId::Group(id) => {
+                let members = self.groups[id].members.clone();
+                let name = self.groups[id].name.clone();
+                let tags = self.groups[id].tags.clone();
+                let new_gid = self.groups.insert(GroupRecord {
+                    members: Vec::new(),
+                    parent: new_parent,
+                    hidden: false,
+                    name,
+                    tags,
+                });
+                created.groups.push(new_gid);
+                let mut new_members = Vec::with_capacity(members.len());
+                for m in members {
+                    let child = self.clone_subtree(m, Some(new_gid), placement, created)?;
+                    new_members.push(child);
+                }
+                self.groups[new_gid].members = new_members;
+                Ok(NodeId::Group(new_gid))
+            }
+        }
+    }
+
     /// Replace the span of `members` in group `pg`'s member list with the single
     /// node `replacement` at the position of the first member (group/instance
     /// fold-in). Inverse of [`Document::splice_out_parent`].
@@ -3147,6 +3339,36 @@ impl Document {
                     components_touched: vec![def],
                     ..Default::default()
                 }
+            }
+            DocAction::Duplicated {
+                root,
+                parent,
+                objects,
+                groups,
+                instances,
+            } => {
+                // Hide the whole clone and unlink its root from its parent.
+                let (root, parent) = (*root, *parent);
+                for &o in objects {
+                    self.objects[o].hidden = true;
+                }
+                for &g in groups {
+                    self.groups[g].hidden = true;
+                }
+                for &i in instances {
+                    self.instances[i].hidden = true;
+                }
+                if let Some(pg) = parent {
+                    self.groups[pg].members.retain(|&n| n != root);
+                }
+                let mut change = DocChange {
+                    objects_touched: objects.clone(),
+                    groups_touched: groups.clone(),
+                    instances_touched: instances.clone(),
+                    ..Default::default()
+                };
+                change.groups_touched.extend(parent);
+                change
             }
             &DocAction::CreatedGuide { guide } => {
                 if let Some(rec) = self.guides.get_mut(guide) {
@@ -3504,6 +3726,36 @@ impl Document {
                     components_touched: vec![def],
                     ..Default::default()
                 }
+            }
+            DocAction::Duplicated {
+                root,
+                parent,
+                objects,
+                groups,
+                instances,
+            } => {
+                // Unhide the whole clone and re-append its root to its parent.
+                let (root, parent) = (*root, *parent);
+                for &o in objects {
+                    self.objects[o].hidden = false;
+                }
+                for &g in groups {
+                    self.groups[g].hidden = false;
+                }
+                for &i in instances {
+                    self.instances[i].hidden = false;
+                }
+                if let Some(pg) = parent {
+                    self.groups[pg].members.push(root);
+                }
+                let mut change = DocChange {
+                    objects_touched: objects.clone(),
+                    groups_touched: groups.clone(),
+                    instances_touched: instances.clone(),
+                    ..Default::default()
+                };
+                change.groups_touched.extend(parent);
+                change
             }
             &DocAction::CreatedGuide { guide } => {
                 if let Some(rec) = self.guides.get_mut(guide) {
