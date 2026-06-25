@@ -146,6 +146,13 @@ pub fn end_gesture() {
 #[derive(Debug)]
 pub struct ApiError(String);
 
+impl ApiError {
+    /// Builds a `"CODE: message"` boundary error directly.
+    fn new(code: &str, message: &str) -> ApiError {
+        ApiError(format!("{code}: {message}"))
+    }
+}
+
 impl From<ApiError> for JsValue {
     fn from(e: ApiError) -> JsValue {
         JsValue::from_str(&e.0)
@@ -967,6 +974,7 @@ impl Scene {
     /// surface) and returns its handle. **Additive** — existing sketches are
     /// untouched, so independent coplanar shapes can coexist.
     pub fn begin_ground_sketch(&mut self) -> u64 {
+        recording::record(recording::RecordedCall::BeginGroundSketch);
         self.doc.add_sketch(ground_plane()).data().as_ffi()
     }
 
@@ -1004,6 +1012,11 @@ impl Scene {
         // `Document::apply_*`), so no `DocChange`/`sketches_touched` exists
         // here — register the sketch with inference at this call site instead.
         self.register_sketch(sid);
+        recording::record(recording::RecordedCall::SketchAddSegment {
+            sketch,
+            a: [ax, ay, az],
+            b: [bx, by, bz],
+        });
         Ok(SegmentAddedJs { inner: report })
     }
 
@@ -1060,12 +1073,17 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
-        let region = SketchRegionId::from(KeyData::from_ffi(region));
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let (id, change) = self
             .doc
-            .extrude_region(sketch_id(sketch), region, distance)
+            .extrude_region(sketch_id(sketch), region_id, distance)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::ExtrudeRegion {
+            sketch,
+            region,
+            distance,
+        });
         Ok(id.data().as_ffi())
     }
 
@@ -1074,7 +1092,7 @@ impl Scene {
     /// 0 = union, 1 = subtract (`a - b`), 2 = intersect. Operands and result
     /// stay stable handles across undo/redo.
     pub fn boolean(&mut self, op: u8, a: u64, b: u64) -> Result<u64, ApiError> {
-        let op = match op {
+        let bop = match op {
             0 => BooleanOp::Union,
             1 => BooleanOp::Subtract,
             2 => BooleanOp::Intersect,
@@ -1082,9 +1100,10 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .boolean(op, object_id(a), object_id(b))
+            .boolean(bop, object_id(a), object_id(b))
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::Boolean { op, a, b });
         Ok(id.data().as_ffi())
     }
 
@@ -1108,6 +1127,7 @@ impl Scene {
             .slice_node(object_id(object), &plane)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::SliceObject { object, plane: *p });
         Ok(vec![a.data().as_ffi(), b.data().as_ffi()])
     }
 
@@ -1125,6 +1145,10 @@ impl Scene {
             .transform_object(object_id(object), &t)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformObject {
+            object,
+            affine: *rows,
+        });
         Ok(())
     }
 
@@ -1255,6 +1279,7 @@ impl Scene {
         let node = node_id(kind, id)?;
         let change = self.doc.delete_node(node).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteNode { kind, id });
         Ok(())
     }
 
@@ -2448,17 +2473,17 @@ impl Scene {
         self.doc.state_hash()
     }
 
-    // ------------------------------------------------------- recording
+    // -------------------------------------------------- recording / replay
 
-    /// Begins recording the committed command stream (docs/DEVELOPMENT.md),
-    /// anchored at the document's current `state_hash`. The recording taps the
-    ///  log stream, so logging need not be otherwise enabled. Replaces any
-    /// prior in-progress recording. See `docs/DIAGNOSTICS.md`.
+    /// Begins recording the committed `Scene` command stream as replayable typed
+    /// calls (docs/DEVELOPMENT.md). Begin on a fresh `Scene` so the recording
+    /// replays from `Scene::new`. Replaces any prior in-progress recording.
+    /// See `docs/DIAGNOSTICS.md`.
     pub fn start_recording(&self) {
-        recording::start(self.doc.state_hash());
+        recording::start();
     }
 
-    /// Stops recording; the accumulated commands remain available to
+    /// Stops recording; the accumulated calls remain available to
     /// [`Scene::take_recording`].
     pub fn stop_recording(&self) {
         recording::stop();
@@ -2469,14 +2494,78 @@ impl Scene {
         recording::is_active()
     }
 
-    /// Takes the recording built so far as a JSON [`Recording`] artifact
-    /// (`docs/DIAGNOSTICS.md`), clearing the recorder's buffer. This is the
-    /// reproducer you attach to a bug and, once fixed, freeze as a replay
-    /// regression fixture.
+    /// Takes the recording so far as a JSON [`Recording`] artifact
+    /// (`docs/DIAGNOSTICS.md`): the captured calls plus this document's
+    /// current `state_hash` as the replay golden. Clears the recorder's buffer.
+    /// The reproducer you attach to a bug and, once fixed, freeze as a CI replay
+    /// fixture.
     ///
     /// [`Recording`]: recording::Recording
     pub fn take_recording(&self) -> String {
-        serde_json::to_string(&recording::take()).unwrap_or_else(|_| "{}".to_string())
+        let rec = recording::Recording {
+            version: recording::RECORDING_FORMAT_VERSION,
+            calls: recording::take_calls(),
+            golden_hash: self.doc.state_hash(),
+        };
+        serde_json::to_string(&rec).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Replays a [`Recording`] JSON (`docs/DIAGNOSTICS.md`) by re-issuing
+    /// each captured call verbatim into **this** scene, then returns the final
+    /// `state_hash`. Run on a fresh `Scene` and compare the result to the
+    /// recording's `golden_hash`: equality is the regression guarantee.
+    ///
+    /// Re-issued calls are not themselves recorded. A malformed artifact or a
+    /// call that fails to apply surfaces as a thrown error (`REPLAY: …`).
+    ///
+    /// [`Recording`]: recording::Recording
+    pub fn replay(&mut self, json: &str) -> Result<u64, ApiError> {
+        use recording::RecordedCall::*;
+        let rec: recording::Recording = serde_json::from_str(json)
+            .map_err(|e| ApiError::new("REPLAY", &format!("malformed recording: {e}")))?;
+        if rec.version != recording::RECORDING_FORMAT_VERSION {
+            return Err(ApiError::new(
+                "REPLAY",
+                &format!(
+                    "recording format v{} != supported v{}",
+                    rec.version,
+                    recording::RECORDING_FORMAT_VERSION
+                ),
+            ));
+        }
+        recording::without_capture(|| {
+            for call in rec.calls {
+                match call {
+                    BeginGroundSketch => {
+                        self.begin_ground_sketch();
+                    }
+                    SketchAddSegment { sketch, a, b } => {
+                        self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
+                    }
+                    ExtrudeRegion {
+                        sketch,
+                        region,
+                        distance,
+                    } => {
+                        self.extrude_region(sketch, region, distance)?;
+                    }
+                    Boolean { op, a, b } => {
+                        self.boolean(op, a, b)?;
+                    }
+                    SliceObject { object, plane } => {
+                        self.slice_object(object, &plane)?;
+                    }
+                    TransformObject { object, affine } => {
+                        self.transform_object(object, &affine)?;
+                    }
+                    DeleteNode { kind, id } => {
+                        self.delete_node(kind, id)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        Ok(self.doc.state_hash())
     }
 
     /// Replace this scene's document with one deserialized from `bytes` (a
@@ -2683,49 +2772,69 @@ mod tests {
         assert!(!scene.can_scene_redo());
     }
 
-    /// End-to-end: recording a real Scene extrude captures it as a
-    /// command whose `post_hash` equals the live `state_hash`, with the
-    /// `pre_hash` anchored at the recording baseline — the chain replay
-    /// will assert against.
+    /// End-to-end: record a real multi-op Scene session, then replay the
+    /// artifact verbatim into a *fresh* Scene and assert the final `state_hash`
+    /// matches the recorded golden — the regression guarantee, and empirical
+    /// proof that deterministic handles survive verbatim replay (no remap).
     #[test]
-    fn recording_captures_a_scene_extrude_with_a_hash_chain() {
-        use tracing::subscriber::with_default;
-
-        log::reset();
+    fn record_then_replay_reproduces_the_golden_state_hash() {
         recording::reset();
-        let json = with_default(log::DrainSubscriber, || {
-            let mut scene = Scene::new();
-            let baseline = scene.state_hash();
-            scene.start_recording();
-            assert!(scene.is_recording());
 
-            let (sketch, region) = ground_unit_square(&mut scene);
-            let _obj = scene.extrude_region(sketch, region, 2.0).unwrap();
-            let final_hash = scene.state_hash();
+        // Record: two boxes, union them, slice the result.
+        let mut scene = Scene::new();
+        scene.start_recording();
+        assert!(scene.is_recording());
 
-            scene.stop_recording();
-            assert!(!scene.is_recording());
-            (baseline, final_hash, scene.take_recording())
-        });
-        let (baseline, final_hash, json) = json;
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 2.0).unwrap();
+        let (s2, r2) = ground_unit_square(&mut scene);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        // Move b so it overlaps a, then union.
+        scene
+            .transform_object(
+                b,
+                &[1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let _u = scene.boolean(0, a, b).unwrap();
 
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        // The artifact reports its golden and is the right format version.
         let rec: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(rec["version"], recording::RECORDING_FORMAT_VERSION);
-        assert_eq!(rec["baseline_hash"].as_u64().unwrap(), baseline);
-
-        let cmds = rec["commands"].as_array().unwrap();
-        // The extrude is the recorded command; it carries the distance param.
-        let extrude = cmds
-            .iter()
-            .find(|c| c["op"] == "extrude_region")
-            .expect("the extrude was recorded as a command");
-        assert_eq!(extrude["params"]["distance"], 2.0);
-        assert_eq!(extrude["pre_hash"].as_u64().unwrap(), baseline);
-        assert_eq!(
-            extrude["post_hash"].as_u64().unwrap(),
-            final_hash,
-            "the recorded post_hash matches the live state_hash after the op"
+        assert_eq!(rec["golden_hash"].as_u64().unwrap(), golden);
+        assert!(
+            rec["calls"].as_array().unwrap().len() >= 10,
+            "the full call stream (sketch segments + extrudes + transform + boolean) was captured"
         );
+
+        // Replay into a fresh scene: same final state_hash, byte-identical save.
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying the recording reproduces the golden state_hash"
+        );
+        assert_eq!(
+            replayed.save(),
+            scene.save(),
+            "replay reproduces byte-identical document bytes"
+        );
+        // Replaying must not itself record.
+        assert!(!replayed.is_recording());
+    }
+
+    /// A version mismatch in a recording artifact is rejected, not mis-replayed.
+    #[test]
+    fn replay_rejects_a_wrong_format_version() {
+        let mut scene = Scene::new();
+        let err = scene
+            .replay(r#"{"version":999,"calls":[],"golden_hash":0}"#)
+            .unwrap_err();
+        assert!(err.0.starts_with("REPLAY:"), "got: {}", err.0);
     }
 
     /// Draws a unit square on the ground sketch and returns

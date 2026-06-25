@@ -1,5 +1,10 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The workspace clippy.toml bans HashMap/HashSet for kernel determinism (
+//). This desktop shell is outside the four kernel crates and the only hit
+// is HashMap inside `tauri::generate_context!()`'s expansion (not our code), so
+// suppress at the crate root per that lint's documented escape hatch.
+#![allow(clippy::disallowed_types)]
 
 use std::sync::Mutex;
 use tauri::{

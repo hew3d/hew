@@ -1,7 +1,7 @@
 # Hew CI — mirrors scripts/verify.sh (the canonical local gate: fmt +
 # clippy -D warnings + cargo test + wasm-pack + Vitest + app build + the
-# Tauri host crate's fmt/clippy), then adds a browser-based smoke test and
-# artifacts the built web app.
+# Tauri host crate's fmt/clippy), then adds the replay gate and the
+# web-E2E smoke, and artifacts the built web app.
 
 name: CI
 
@@ -56,6 +56,17 @@ jobs:
 
       - name: Verify (fmt, clippy, cargo test, wasm, vitest, builds)
         run: scripts/verify.sh
+
+      # Replay gate — replay every committed recording into a fresh kernel
+      # and assert its golden state_hash still matches. Needs a separate
+      # wasm build: the runner consumes `--target nodejs` (CommonJS)
+      # bindings, distinct from verify.sh's `--target web` app build.
+      # NB: wasm-pack's --out-dir is relative to the crate dir.
+      - name: Build kernel for Node (replay runner)
+        run: wasm-pack build crates/wasm-api --target nodejs --out-dir ../../tools/replay-runner/pkg-node
+
+      - name: Replay gate (golden state-hash fixtures)
+        run: node tools/replay-runner/run.mjs
 
       - name: Install Playwright browsers
         run: pnpm --dir app exec playwright install --with-deps chromium

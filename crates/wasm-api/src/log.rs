@@ -257,9 +257,6 @@ impl Subscriber for DrainSubscriber {
             target: metadata.target().to_string(),
             fields: visitor.0,
         };
-        // The recorder taps the same stream: "the log essentially is a
-        // recording" (docs/DEVELOPMENT.md). A no-op unless a recording is active.
-        crate::recording::observe(&record);
         // Serialization of a Map<String, Value> over plain JSON values cannot
         // fail; fall back to an empty object on the impossible error.
         let json = serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string());
