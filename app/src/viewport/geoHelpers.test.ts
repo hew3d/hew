@@ -8,6 +8,8 @@ import {
   kernelErrorMessage,
   pointInPolygonXY,
   polygonAreaXY,
+  circlePolygonGround,
+  circlePolygonFace,
 } from './geoHelpers'
 import type { V3 } from './geoHelpers'
 
@@ -351,5 +353,96 @@ describe('pointInPolygonXY', () => {
     const negRect = makePolygon([[-3, -3], [-1, -3], [-1, -1], [-3, -1]])
     expect(pointInPolygonXY(-2, -2, negRect)).toBe(true)
     expect(pointInPolygonXY(0, 0, negRect)).toBe(false)
+  })
+})
+
+describe('circlePolygonGround', () => {
+  it('returns N vertices, all at the given radius from center, all z=0', () => {
+    const verts = circlePolygonGround([1, 2], [4, 2], 24) // radius 3
+    expect(verts).toHaveLength(24)
+    for (const [x, y, z] of verts) {
+      expect(Math.hypot(x - 1, y - 2)).toBeCloseTo(3)
+      expect(z).toBe(0)
+    }
+  })
+
+  it('vertex 0 is exactly the rim point', () => {
+    const verts = circlePolygonGround([0, 0], [5, 0], 24)
+    expect(verts[0]).toEqual([5, 0, 0])
+  })
+
+  it('forms a closed loop (last vertex connects back near vertex 0 via equal angular spacing)', () => {
+    const verts = circlePolygonGround([0, 0], [1, 0], 8)
+    expect(verts).toHaveLength(8)
+    // 8-gon: vertex 4 should be diametrically opposite vertex 0.
+    expect(verts[4][0]).toBeCloseTo(-1)
+    expect(verts[4][1]).toBeCloseTo(0)
+  })
+
+  it('winding is counter-clockwise viewed from +Z', () => {
+    const verts = circlePolygonGround([0, 0], [1, 0], 4)
+    // Square-ish 4-gon starting at +X: should proceed toward +Y next (CCW).
+    expect(verts[1][0]).toBeCloseTo(0)
+    expect(verts[1][1]).toBeCloseTo(1)
+  })
+
+  it('returns [] for a degenerate (near-zero) radius', () => {
+    expect(circlePolygonGround([1, 1], [1, 1], 24)).toEqual([])
+    expect(circlePolygonGround([1, 1], [1 + 1e-9, 1], 24)).toEqual([])
+  })
+})
+
+describe('circlePolygonFace', () => {
+  const normalZ: V3 = [0, 0, 1]
+
+  it('returns N vertices, all at the given radius from center, all on the plane', () => {
+    const center: V3 = [1, 1, 5]
+    const rim: V3 = [4, 1, 5]
+    const verts = circlePolygonFace(center, rim, normalZ, 24)
+    expect(verts).not.toBeNull()
+    expect(verts).toHaveLength(24)
+    for (const [x, y, z] of verts!) {
+      expect(Math.hypot(x - 1, y - 1)).toBeCloseTo(3)
+      expect(z).toBeCloseTo(5) // on-plane (z=5 plane, normal +Z)
+    }
+  })
+
+  it('vertex 0 is the rim point when rim already lies on the plane', () => {
+    const verts = circlePolygonFace([0, 0, 2], [5, 0, 2], normalZ, 24)
+    expect(verts).not.toBeNull()
+    expect(verts![0][0]).toBeCloseTo(5)
+    expect(verts![0][1]).toBeCloseTo(0)
+    expect(verts![0][2]).toBeCloseTo(2)
+  })
+
+  it('matches circlePolygonGround for a Z=0 plane with +Z normal', () => {
+    const ground = circlePolygonGround([2, 3], [6, 3], 24)
+    const face = circlePolygonFace([2, 3, 0], [6, 3, 0], normalZ, 24)
+    expect(face).not.toBeNull()
+    for (let i = 0; i < 24; i++) {
+      expect(face![i][0]).toBeCloseTo(ground[i][0])
+      expect(face![i][1]).toBeCloseTo(ground[i][1])
+      expect(face![i][2]).toBeCloseTo(ground[i][2])
+    }
+  })
+
+  it('works on an arbitrary tilted plane (vertices stay coplanar, on the normal)', () => {
+    // Plane through origin with normal (1,1,1)/sqrt(3)
+    const n = 1 / Math.sqrt(3)
+    const normal: V3 = [n, n, n]
+    const center: V3 = [0, 0, 0]
+    // Pick a rim point that is actually on the plane: must satisfy dot(p, normal) = 0
+    const rim: V3 = [1, -1, 0] // dot = n - n + 0 = 0, on-plane
+    const verts = circlePolygonFace(center, rim, normal, 12)
+    expect(verts).not.toBeNull()
+    for (const v of verts!) {
+      const dot = v[0] * normal[0] + v[1] * normal[1] + v[2] * normal[2]
+      expect(dot).toBeCloseTo(0, 6) // coplanar with the plane through origin
+      expect(Math.hypot(v[0], v[1], v[2])).toBeCloseTo(Math.hypot(1, -1, 0))
+    }
+  })
+
+  it('returns null for a degenerate (near-zero) radius', () => {
+    expect(circlePolygonFace([1, 1, 1], [1, 1, 1], normalZ, 24)).toBeNull()
   })
 })

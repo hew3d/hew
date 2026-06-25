@@ -1085,16 +1085,28 @@ impl Sketch {
             }
             let rep_pos = Point3::new(sx / n, sy / n, sz / n);
 
-            // Assign the hole to the *smallest* enclosing outer cycle that is
-            // STRICTLY LARGER than the hole. The strict-area test is what makes
-            // this correct: it excludes the hole's own reverse-wound twin
-            // (same vertices, equal area — without this, a rectangle drawn
-            // inside another took its own boundary as a hole and Profile::new
-            // rejected it as self-intersecting), and it excludes any cycle
-            // nested *inside* the hole, so nested rings attach holes to their
-            // immediate encloser.
+            // Assign the hole to the *smallest* enclosing outer cycle, while
+            // excluding two things: (1) the hole's own reverse-wound twin — the
+            // same closed loop bounds the region on one side (CCW outer
+            // candidate) and its neighbour on the other (CW hole), so a hole
+            // must never take its own boundary as its encloser (without this, a
+            // ring took its own twin as a hole and Profile::new rejected it as
+            // self-intersecting); and (2) any cycle nested *inside* the hole, so
+            // nested rings attach holes to their immediate encloser. The twin is
+            // identified by exact vertex-set identity — NOT by an "equal area"
+            // test, which is FP-fragile (at some facet counts the twin's area
+            // drifts an epsilon past a strict `<=`, letting the hole attach to
+            // itself — the faceted-through-hole NonManifoldResult bug).
             let mut best: Option<(usize, f64)> = None; // (region_idx, area)
             for (ri, &(outer_ci, outer_area)) in outer_candidates.iter().enumerate() {
+                let outer_cycle = &cycles[outer_ci];
+                // (1) Skip the hole's reverse-wound twin (identical vertex set).
+                if outer_cycle.len() == hole_cycle.len()
+                    && hole_cycle.iter().all(|v| outer_cycle.contains(v))
+                {
+                    continue;
+                }
+                // (2) Skip cycles nested inside (or coincident with) the hole.
                 if outer_area <= hole_area {
                     continue;
                 }
@@ -1710,6 +1722,65 @@ mod tests {
             .collect();
         let area = signed_area_on_plane(&pts, xy_plane().normal());
         assert!(area > 0.0, "outer boundary should be CCW");
+    }
+
+    // ── Nested concentric rings: outer-with-hole, not self-as-hole ────────────
+
+    /// Two concentric regular n-gons (radii 1.0 and 0.5) must trace as exactly
+    /// two regions: the outer ring (outer r=1 with the r=0.5 loop as a hole) and
+    /// the inner disk (outer r=0.5, no holes). Regression for the facet-count
+    /// sensitive nesting bug: the inner loop's CW hole-cycle used to attach to
+    /// its own reverse-wound CCW twin (whose area equals the hole's only up to
+    /// floating point) instead of the true r=1 encloser — leaving the outer ring
+    /// hole-less and the inner disk holed by itself. That surfaced downstream as
+    /// a boolean `DegenerateContact` / push-through `NonManifoldResult` on
+    /// faceted solids (n = 5, 6, 16, 24 failed; 3, 4, 8, 12 happened to pass).
+    #[test]
+    fn concentric_rings_nest_outer_over_inner_for_all_facet_counts() {
+        for n in [3usize, 4, 5, 6, 8, 12, 16, 24, 32, 48, 64] {
+            let ngon = |r: f64| -> Vec<Point3> {
+                (0..n)
+                    .map(|i| {
+                        let a = std::f64::consts::TAU * (i as f64) / (n as f64);
+                        Point3::new(r * a.cos(), r * a.sin(), 0.0)
+                    })
+                    .collect()
+            };
+            let mut s = Sketch::on_plane(xy_plane());
+            let add_loop = |s: &mut Sketch, pts: &[Point3]| {
+                for i in 0..pts.len() {
+                    s.add_segment(pts[i], pts[(i + 1) % pts.len()]).unwrap();
+                }
+            };
+            add_loop(&mut s, &ngon(1.0));
+            add_loop(&mut s, &ngon(0.5));
+
+            let regs: Vec<&SketchRegion> = s.regions().values().collect();
+            assert_eq!(regs.len(), 2, "n={n}: expected ring + inner disk");
+
+            let radius = |vids: &[SketchVertexId]| {
+                let p = s.vertices()[vids[0]].position;
+                (p.x * p.x + p.y * p.y).sqrt()
+            };
+            let ring = regs
+                .iter()
+                .find(|r| radius(&r.outer) > 0.75)
+                .unwrap_or_else(|| panic!("n={n}: no r=1 outer region"));
+            let disk = regs
+                .iter()
+                .find(|r| radius(&r.outer) < 0.75)
+                .unwrap_or_else(|| panic!("n={n}: no r=0.5 outer region"));
+
+            assert_eq!(ring.holes.len(), 1, "n={n}: outer ring must have one hole");
+            assert!(
+                (radius(&ring.holes[0]) - 0.5).abs() < 1e-9,
+                "n={n}: the ring's hole must be the r=0.5 loop"
+            );
+            assert!(
+                disk.holes.is_empty(),
+                "n={n}: the inner disk must not hole itself"
+            );
+        }
     }
 
     // ── Collinear merge: new segment entirely inside an existing edge ─────────

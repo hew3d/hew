@@ -432,6 +432,12 @@ export function MenuBar({
               checked={activeTool === 'Rectangle'}
               onClick={withClose(() => onSelectTool?.('Rectangle'))}
             />
+            <CheckMenuItem
+              label="Circle"
+              shortcut="C"
+              checked={activeTool === 'Circle'}
+              onClick={withClose(() => onSelectTool?.('Circle'))}
+            />
             <div style={{ borderTop: '1px solid #4a4a4a', margin: '4px 0' }} />
             <CheckMenuItem
               label="Line"

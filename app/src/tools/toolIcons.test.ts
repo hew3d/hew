@@ -4,6 +4,7 @@ import { TOOL_ICON_SVG, cursorFor, type ToolName } from './toolIcons'
 const ALL_TOOLS: ToolName[] = [
   'Select',
   'Rectangle',
+  'Circle',
   'Line',
   'Push/Pull',
   'Paint',

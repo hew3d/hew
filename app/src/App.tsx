@@ -55,13 +55,14 @@ function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
 }
 
-const TOOLS = ['Select', 'Rectangle', 'Line', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Slice', 'Edit Vertex', 'Orbit', 'Pan', 'Zoom'] as const
+const TOOLS = ['Select', 'Rectangle', 'Circle', 'Line', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Slice', 'Edit Vertex', 'Orbit', 'Pan', 'Zoom'] as const
 type ToolName = (typeof TOOLS)[number]
 // Canonical shortcuts use the ⌘ glyph; the toolbar-button tooltip swaps it for
 // `modLabel` ('Ctrl+') on non-Mac hosts (e.g. Linux/WebKitGTK).
 const TOOL_KEYS: Record<ToolName, string> = {
   'Select': 'Spc',
   'Rectangle': '⌘K',
+  'Circle': 'C',
   'Line': '⌘L',
   'Push/Pull': '⌘=',
   'Paint': '4',
@@ -860,6 +861,7 @@ export default function App() {
       // Tool activations from native menu
       case 'tool-select':    setActiveTool('Select'); break
       case 'tool-rectangle': setActiveTool('Rectangle'); break
+      case 'tool-circle':    setActiveTool('Circle'); break
       case 'tool-line':      setActiveTool('Line'); break
       case 'tool-pushpull':  setActiveTool('Push/Pull'); break
       case 'tool-paint':     setActiveTool('Paint'); break

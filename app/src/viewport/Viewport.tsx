@@ -27,6 +27,7 @@ import { SceneRenderer } from './SceneRenderer'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
+import { CircleTool } from '../tools/CircleTool'
 import { LineTool } from '../tools/LineTool'
 import { PushPullTool } from '../tools/PushPullTool'
 import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
@@ -878,6 +879,30 @@ export default function Viewport({
       return tool
     }
 
+    function makeCircleTool(): CircleTool {
+      const tool = new CircleTool(
+        wasmScene,
+        previewGroup,
+        (result) => {
+          sceneRenderer.refreshAllSketches(result.sketchHandle)
+          sceneRenderer.refreshGuides()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+      // Scope the tool to the current editing context, if any.
+      const ctx = activeContextRef.current
+      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
+        ? ctx[ctx.length - 1].id : null
+      tool.setActiveContext(ctxId)
+      return tool
+    }
+
     function makeLineTool(): LineTool {
       const tool = new LineTool(
         wasmScene,
@@ -1086,6 +1111,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeRectTool())
+          break
+        case 'Circle':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeCircleTool())
           break
         case 'Line':
           cameraModeRef.current = false
@@ -1563,6 +1593,7 @@ export default function Viewport({
         if (ev.key === '5') { switchToolRef.current?.('Rotate'); return }
         if (ev.key === '6') { switchToolRef.current?.('Scale'); return }
         if (ev.key === 'r' || ev.key === 'R') { switchToolRef.current?.('Rectangle'); return }
+        if (ev.key === 'c' || ev.key === 'C') { switchToolRef.current?.('Circle'); return }
         if (ev.key === 'l' || ev.key === 'L') { switchToolRef.current?.('Line'); return }
         if (ev.key === 'p' || ev.key === 'P') { switchToolRef.current?.('Push/Pull'); return }
         if (ev.key === 'm' || ev.key === 'M') { switchToolRef.current?.('Move'); return }

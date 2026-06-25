@@ -26,3 +26,12 @@ pub const NORMALIZE_MIN_LENGTH: f64 = 1e-12;
 /// Two unit normals whose difference is shorter than this are considered the
 /// same direction (dimensionless).
 pub const NORMAL_DIRECTION: f64 = 1e-9;
+
+/// Relative depth skin for snap-occlusion culling in the inference layer
+/// (dimensionless fraction). When deciding whether an opaque face hides a snap
+/// candidate, a face counts as an occluder only if it lies at least this
+/// fraction nearer than the candidate along the ray *to that candidate*. This
+/// keeps a candidate's own (coplanar) face — and faces sharing its edge — from
+/// self-occluding it, robustly across the full range of scene scales (a fixed
+/// absolute skin would misbehave on very large or very small models).
+pub const OCCLUSION_REL: f64 = 1e-6;

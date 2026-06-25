@@ -18,6 +18,17 @@
 //! that). Among candidates of equal kind, the one nearest the ray wins; ties
 //! break toward the one nearest the ray origin (closest to camera).
 //!
+//! # Occlusion
+//!
+//! The pick cone is a screen-space projection with no depth buffer, so on its
+//! own it "sees through" solids: a hidden back edge or vertex (which outranks a
+//! face on [`SnapKind`] priority) would beat the visible front face under the
+//! cursor. After ranking, `resolve` therefore walks the sorted list and returns
+//! the first candidate that is *visible* — not hidden behind an opaque face
+//! along the ray to it (see `is_occluded`). Only what you can see can snap,
+//! matching SketchUp. A tool-supplied `constraint_plane` is a separate, additive
+//! filter (it restricts candidates to the active drawing plane).
+//!
 //! # Locking
 //!
 //! A [`SnapLock`] (shift-lock or arrow keys in SketchUp terms) constrains the
@@ -675,6 +686,18 @@ impl InferenceScene {
                 .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
         });
 
+        // --- Occlusion cull: walk the ranked list and take the first candidate
+        //     that isn't hidden behind an opaque face. A solid must not let a
+        //     draw/select snap "see through" it to a higher-priority back edge
+        //     or vertex — only what's visible from the eye should snap. Lazy by
+        //     design: usually the top candidate is visible, so this costs one
+        //     visibility test. The lock-fallback line below is a *directional*
+        //     inference, not a candidate, so it is intentionally never culled. ---
+        let winner = candidates
+            .iter()
+            .copied()
+            .find(|c| !self.is_occluded(origin, c.3));
+
         // --- Handle locking ---
         match (query.lock, query.anchor) {
             (Some(lock), Some(anchor)) => {
@@ -688,7 +711,7 @@ impl InferenceScene {
                     Err(_) => return None,
                 };
 
-                if let Some((kind, _ang, _depth, pos, source, _cdir)) = candidates.first() {
+                if let Some((kind, _ang, _depth, pos, source, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
                     Some(Snap {
@@ -710,16 +733,14 @@ impl InferenceScene {
                 }
             }
             _ => {
-                // No lock (or lock with no anchor): return the top-ranked candidate.
-                candidates
-                    .into_iter()
-                    .next()
-                    .map(|(kind, _ang, _depth, pos, source, snap_dir)| Snap {
-                        position: pos,
-                        kind,
-                        source,
-                        direction: snap_dir,
-                    })
+                // No lock (or lock with no anchor): return the top-ranked
+                // candidate that is actually visible (see the occlusion cull above).
+                winner.map(|(kind, _ang, _depth, pos, source, snap_dir)| Snap {
+                    position: pos,
+                    kind,
+                    source,
+                    direction: snap_dir,
+                })
             }
         }
     }
@@ -748,6 +769,37 @@ impl InferenceScene {
             }
         }
         best.map(|(_, source)| source)
+    }
+
+    /// Visibility test for snap occlusion: is `pos` hidden behind an opaque
+    /// face, as seen from `origin`?
+    ///
+    /// The pick cone is a screen-space projection that "sees through" solids,
+    /// so without this a snap candidate on the *far* side of a solid (a hidden
+    /// back edge/vertex, or the interior of a back face) — which can outrank
+    /// the visible front face on [`SnapKind`] priority alone — would win. We
+    /// cast the ray `origin -> pos` and treat `pos` as occluded iff some face
+    /// crosses that ray strictly nearer than `pos` itself.
+    ///
+    /// A [`tol::OCCLUSION_REL`] skin keeps the face `pos` lies on (and faces
+    /// sharing its edge) from self-occluding it: those are hit at depth ≈ the
+    /// distance to `pos`, not nearer. A ray that passes through a face's *hole*
+    /// is not occluded by that face (`face_cone_hit` already rejects holes), so
+    /// snaps seen through an imprinted opening stay visible.
+    fn is_occluded(&self, origin: Point3, pos: Point3) -> bool {
+        let to_pos = pos - origin;
+        let dist = to_pos.length();
+        let dir = match to_pos.normalized() {
+            Ok(d) => d,
+            Err(_) => return false, // candidate at the eye — nothing can occlude it
+        };
+        let near_threshold = dist * (1.0 - tol::OCCLUSION_REL);
+        self.faces.iter().any(|face| {
+            // `face_cone_hit` ignores its aperture arg for faces (pure
+            // ray-polygon containment); 0.0 is fine.
+            face_cone_hit(origin, dir, &face.plane, &face.boundary, &face.holes, 0.0)
+                .is_some_and(|(_pos, _ang, depth)| depth < near_threshold)
+        })
     }
 
     /// Picks the live sketch whose nearest edge is closest to the ray, for
@@ -1194,24 +1246,27 @@ mod tests {
         scene
     }
 
-    /// Drawing on the top face must not "see through" the solid: a ray aimed
-    /// into the top face interior whose cone also catches a *hidden bottom-edge
-    /// midpoint* snaps to that off-plane midpoint when unconstrained (Midpoint
-    /// outranks OnFace), but the constraint plane excludes it and keeps the snap
-    /// on the active (top) plane. This is the rectangle-on-face abort bug.
+    /// Drawing on the top face must not "see through" the solid. A ray aimed
+    /// into the top face interior whose wide cone *also* catches the hidden
+    /// bottom corner (an Endpoint, the strongest kind, nearer the axis than its
+    /// top twin) used to dive to that off-plane corner when unconstrained —
+    /// the rectangle-on-face abort bug. Two independent guards now prevent it:
+    /// occlusion culling (the front face hides the bottom corner from the eye,
+    /// so it can't win even unconstrained), AND the constraint plane (which
+    /// additionally restricts candidates to the active drawing plane). Assert
+    /// BOTH keep the snap on z = 1.
     #[test]
     fn constraint_plane_excludes_occluded_off_plane_snaps() {
         let scene = cube_scene();
         // Straight-down ray entering the top face interior at (0.3, 0.3); the
-        // wide cone also catches the *hidden bottom corner* (0,0,0), which is
-        // nearer the axis than its top twin (0,0,1) and is an Endpoint (the
-        // strongest kind), so it wins outright when unconstrained.
+        // wide cone also catches the hidden bottom corner (0,0,0).
         let ray = PickRay {
             origin: Point3::new(0.3, 0.3, 4.0),
             direction: Vec3::new(0.0, 0.0, -1.0),
         };
 
-        // Unconstrained: snaps to occluded geometry below the top plane.
+        // Unconstrained: occlusion culls the hidden bottom corner (it sits
+        // behind the top face along the ray to it), so the snap stays at z = 1.
         let free = scene
             .resolve(&SnapQuery {
                 ray,
@@ -1220,15 +1275,15 @@ mod tests {
                 aperture: 0.6,
                 constraint_plane: None,
             })
-            .expect("something in the wide cone");
+            .expect("something visible in the wide cone");
         assert!(
-            free.position.z < 0.5,
-            "unconstrained snap dives to hidden bottom geometry: {:?}",
+            free.position.z > 0.5,
+            "occlusion must keep the unconstrained snap on the visible top, \
+             not dive to the hidden bottom: {:?}",
             free.position
         );
 
-        // Constrained to the top plane: the bottom midpoint is filtered out and
-        // the snap stays on z = 1.
+        // Constrained to the top plane: independently keeps the snap on z = 1.
         let top =
             Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
         let constrained = scene
@@ -1244,6 +1299,138 @@ mod tests {
             top.signed_distance(constrained.position).abs() <= tol::PLANE_DIST,
             "constrained snap lies on the active plane: {:?}",
             constrained.position
+        );
+    }
+
+    /// Core occlusion regression (bug report,  era): hovering the
+    /// centre of a solid's top face must snap to that visible face, NOT pass
+    /// through to a hidden back-side edge/vertex. Mirrors push/pulling a circle
+    /// into a faceted cylinder, then drawing/measuring on its top: the dense
+    /// far-rim facet edges (`OnEdge`, which outranks `OnFace`) must be culled.
+    #[test]
+    fn unconstrained_snap_does_not_see_through_to_hidden_back_geometry() {
+        let scene = cube_scene();
+        // Straight down through the centre of the top face, with a tight cone so
+        // only the face interior is in range (the corners are ~13° off-axis,
+        // well outside). The bottom face's OnFace candidate (z=0) and the hidden
+        // bottom geometry are all occluded by the top, so the visible top face
+        // must win — proving the hover lands ON the face, not through it.
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(0.5, 0.5, 4.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.05,
+                constraint_plane: None,
+            })
+            .expect("the visible top face is under the cursor");
+        assert_eq!(
+            snap.kind,
+            SnapKind::OnFace,
+            "centre-of-face hover must land on the visible face, got {:?} at {:?}",
+            snap.kind,
+            snap.position
+        );
+        assert!(
+            (snap.position.z - 1.0).abs() <= tol::PLANE_DIST,
+            "snap must sit on the visible top (z=1), not the hidden bottom: {:?}",
+            snap.position
+        );
+    }
+
+    /// Occlusion must not over-cull: a snap target that is genuinely *visible*
+    /// (in front of, or beside, any face) still snaps. Here the top-front edge
+    /// of the cube is unobstructed from a front-corner eye, so it wins as
+    /// `OnEdge` even though deeper cube faces also fall in the cone.
+    #[test]
+    fn occlusion_keeps_visible_front_geometry() {
+        let scene = cube_scene();
+        // Eye straight out in front of the +X face, aimed at its centre. The
+        // four corners of that face are visible Endpoints (~13° off-axis); the
+        // back face's corners (x=0) are hidden behind the cube. Occlusion must
+        // cull the back corners but keep a front corner — so the snap lands on
+        // the visible front face (x≈1), never diving to the hidden back.
+        let eye = Point3::new(4.0, 0.5, 0.5);
+        let target = Point3::new(1.0, 0.5, 0.5);
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: eye,
+                    direction: target - eye,
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.3,
+                constraint_plane: None,
+            })
+            .expect("a visible +X-face corner is in the cone");
+        assert_eq!(
+            snap.kind,
+            SnapKind::Endpoint,
+            "a visible front corner must still snap, got {:?} at {:?}",
+            snap.kind,
+            snap.position
+        );
+        assert!(
+            (snap.position.x - 1.0).abs() <= tol::POINT_MERGE,
+            "snap must stay on the visible front face (x=1), not cull through to the back: {:?}",
+            snap.position
+        );
+    }
+
+    /// A ray through an imprinted hole must still reach the geometry visible
+    /// *through* the opening — occlusion uses the same hole-aware ray-face test
+    /// as `pick_face`, so a face does not occlude what shows through its hole.
+    #[test]
+    fn occlusion_ignores_geometry_seen_through_a_hole() {
+        let mut cube = unit_cube();
+        let top = cube
+            .faces()
+            .iter()
+            .find(|(_, f)| {
+                f.plane
+                    .normal()
+                    .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+            })
+            .map(|(id, _)| id)
+            .unwrap();
+        // Imprint an inner square, then PULL it down would be ideal, but for a
+        // pure-occlusion check we just rely on the annular parent having a hole:
+        // a ray down the hole centre is NOT occluded by the parent top face, so
+        // the sub-face (coplanar, at z=1) is the visible snap rather than being
+        // hidden. (Regression guard that holes punch through occlusion.)
+        cube.split_face_inner(
+            top,
+            &[
+                Point3::new(0.25, 0.25, 1.0),
+                Point3::new(0.75, 0.25, 1.0),
+                Point3::new(0.75, 0.75, 1.0),
+                Point3::new(0.25, 0.75, 1.0),
+            ],
+        )
+        .unwrap();
+        let mut scene = InferenceScene::new();
+        scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
+
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(0.5, 0.5, 4.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.05,
+                constraint_plane: None,
+            })
+            .expect("the sub-face seen through the parent's hole is visible");
+        assert!(
+            (snap.position.z - 1.0).abs() <= tol::PLANE_DIST,
+            "snap stays on the visible coplanar top (z=1): {:?}",
+            snap.position
         );
     }
 

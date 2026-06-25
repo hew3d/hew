@@ -236,6 +236,85 @@ export function faceRectangleCorners(
 }
 
 /**
+ * Build a faceted regular N-gon's vertices on the ground plane (Z=0), given
+ * a center and a point on the rim (the first click's radius/start-angle).
+ *
+ * Vertex 0 is exactly `rim` (so the preview/commit always passes through the
+ * cursor); the remaining N-1 vertices are spaced at equal angular steps
+ * counter-clockwise (viewed from +Z) around `center`, at the same radius.
+ *
+ * Returns `[]` if the radius (distance from `center` to `rim`) is below
+ * 1e-7 (degenerate — caller should treat as "no circle").
+ */
+export function circlePolygonGround(
+  center: [number, number],
+  rim: [number, number],
+  segments: number,
+): V3[] {
+  const [cx, cy] = center
+  const dx = rim[0] - cx
+  const dy = rim[1] - cy
+  const radius = Math.hypot(dx, dy)
+  if (radius < 1e-7) return []
+
+  const startAngle = Math.atan2(dy, dx)
+  const verts: V3[] = []
+  for (let i = 0; i < segments; i++) {
+    const angle = startAngle + (2 * Math.PI * i) / segments
+    verts.push([cx + radius * Math.cos(angle), cy + radius * Math.sin(angle), 0])
+  }
+  return verts
+}
+
+/**
+ * Build a faceted regular N-gon's vertices on an arbitrary plane, given a
+ * center, a point on the rim (defining radius + start angle), and the
+ * plane's unit normal.
+ *
+ * Mirrors `circlePolygonGround` but projects into the in-plane basis (u, v)
+ * built by `facePlaneBasis(normal)` — vertex 0 is the rim point's in-plane
+ * projection, and winding is counter-clockwise viewed from the +normal side
+ * (u→v is a quarter-turn CCW about +normal, matching `faceRectangleCorners`'s
+ * convention).
+ *
+ * Returns `null` if the basis is degenerate (see `facePlaneBasis`) or the
+ * radius (distance from `center` to the rim's in-plane projection) is below
+ * 1e-7.
+ */
+export function circlePolygonFace(
+  center: V3,
+  rim: V3,
+  normal: V3,
+  segments: number,
+): V3[] | null {
+  const basis = facePlaneBasis(normal)
+  if (basis === null) return null
+  const { u, v } = basis
+
+  const dx = rim[0] - center[0]
+  const dy = rim[1] - center[1]
+  const dz = rim[2] - center[2]
+  const du = dx * u[0] + dy * u[1] + dz * u[2]
+  const dv = dx * v[0] + dy * v[1] + dz * v[2]
+  const radius = Math.hypot(du, dv)
+  if (radius < 1e-7) return null
+
+  const startAngle = Math.atan2(dv, du)
+  const verts: V3[] = []
+  for (let i = 0; i < segments; i++) {
+    const angle = startAngle + (2 * Math.PI * i) / segments
+    const r_cos = radius * Math.cos(angle)
+    const r_sin = radius * Math.sin(angle)
+    verts.push([
+      center[0] + u[0] * r_cos + v[0] * r_sin,
+      center[1] + u[1] * r_cos + v[1] * r_sin,
+      center[2] + u[2] * r_cos + v[2] * r_sin,
+    ])
+  }
+  return verts
+}
+
+/**
  * Compute the absolute area of a 2D polygon given as a flat xyz vertex array
  * [x0, y0, z0, x1, y1, z1, ...] (z values ignored — polygon is treated as XY).
  *

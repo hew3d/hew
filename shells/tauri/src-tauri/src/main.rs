@@ -372,8 +372,11 @@ fn main() {
                 .accelerator("CmdOrCtrl+K")
                 .build(handle)?;
 
+            let draw_circle = MenuItemBuilder::with_id("draw-circle", "Circle").build(handle)?;
+
             let draw_shapes = SubmenuBuilder::new(handle, "Shapes")
                 .item(&draw_rect)
+                .item(&draw_circle)
                 .build()?;
 
             let draw_line = MenuItemBuilder::with_id("draw-line", "Line")
@@ -581,6 +584,7 @@ fn main() {
                 "view-axes" => "toggle-axes",
                 "view-guides" => "toggle-guides",
                 "draw-rectangle" => "tool-rectangle",
+                "draw-circle" => "tool-circle",
                 "draw-line" => "tool-line",
                 "tool-select" => "tool-select",
                 "tool-paint" => "tool-paint",

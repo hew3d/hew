@@ -1293,6 +1293,59 @@ fn push_through_a_full_convex_face_vanishes() {
 }
 
 #[test]
+fn push_through_a_circle_imprint_through_a_faceted_cylinder() {
+    // Punch a concentric circular through-hole in a faceted cylinder — the
+    //  testing case. Regression for the facet-count-sensitive nesting bug
+    // in the sketch region tracer (a concentric inner loop's hole-cycle attached
+    // to its own reverse-wound twin instead of the true outer encloser), which
+    // surfaced here as a boolean DegenerateContact → NonManifoldResult. Exercise
+    // the facet counts that used to fail (and a couple that passed) at both an
+    // exactly-through and an overshoot distance.
+    let ngon = |r: f64, n: usize, z: f64| -> Vec<Point3> {
+        (0..n)
+            .map(|i| {
+                let a = std::f64::consts::TAU * (i as f64) / (n as f64);
+                Point3::new(r * a.cos(), r * a.sin(), z)
+            })
+            .collect()
+    };
+    for n in [6usize, 16, 24] {
+        let base = Plane::from_polygon(&ngon(1.0, n, 0.0)).unwrap();
+        let cyl_profile = Profile::new(base, ngon(1.0, n, 0.0), vec![]).unwrap();
+        let solid = Object::from_extrusion(&cyl_profile, 1.5).unwrap();
+        let solid_vol = signed_volume(&solid);
+
+        for &dist in &[-1.5_f64, -2.0_f64] {
+            let mut cyl = solid.clone();
+            let top = face_with_normal(&cyl, Vec3::new(0.0, 0.0, 1.0));
+            let sub = cyl
+                .split_face_inner(top, &ngon(0.5, n, 1.5))
+                .expect("imprint a concentric circle")
+                .sub_face;
+            let holed = cyl
+                .push_through(sub, dist)
+                .unwrap_or_else(|e| panic!("n={n} dist={dist}: {e:?}"));
+            holed.validate().unwrap();
+            assert_eq!(
+                holed.watertight(),
+                WatertightState::Watertight,
+                "n={n} dist={dist}"
+            );
+            // Genus-1 tunnel: V − E + F − H = 2(S − G) with S=1, G=1 → 0.
+            assert_eq!(euler_poincare(&holed), 0, "n={n} dist={dist}: genus 1");
+            // The hole radius is half the outer, so a quarter of the cross-section
+            // (and thus a quarter of the volume) is removed.
+            assert!(
+                (signed_volume(&holed) - solid_vol * 0.75).abs() < VOLUME_TOL,
+                "n={n} dist={dist}: vol {} expected {}",
+                signed_volume(&holed),
+                solid_vol * 0.75
+            );
+        }
+    }
+}
+
+#[test]
 fn push_through_a_sub_face_punches_a_through_hole() {
     // A 4×4×1 slab with a centred 1×1 imprint pushed down past the bottom wall
     // becomes a slab with a 1×1 square through-hole.
