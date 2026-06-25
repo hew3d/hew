@@ -1580,6 +1580,30 @@ impl Scene {
         Ok(out)
     }
 
+    /// An Object face's outer-loop boundary as a flat `[x,y,z, x,y,z, …]` of
+    /// ordered world-space vertices — the face analog of [`Self::region_boundary`].
+    /// The push/pull live preview sweeps this polygon along the face
+    /// normal to ghost the growing/shrinking solid. Like `face_normal`/`face_plane`
+    /// this is the Object's local frame (world Objects are identity-placed, so
+    /// local == world). Holes in the face are ignored — the preview only needs
+    /// the outer silhouette.
+    pub fn face_boundary(&self, object: u64, face: u64) -> Result<Vec<f32>, ApiError> {
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let face = object
+            .faces()
+            .get(fid)
+            .ok_or_else(|| stale("UnknownFace", "face"))?;
+        let mut out = Vec::new();
+        for p in object.loop_positions(face.outer_loop) {
+            out.extend([p.x as f32, p.y as f32, p.z as f32]);
+        }
+        Ok(out)
+    }
+
     /// The unit normal of an Object face — the axis the push/pull tool drags
     /// along. (Exact, unlike guessing from the snap position.)
     pub fn face_normal(&self, object: u64, face: u64) -> Result<Vec<f64>, ApiError> {

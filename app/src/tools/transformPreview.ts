@@ -153,6 +153,123 @@ export function buildMultiPreviewClone(
   return container
 }
 
+/** Ghost tint for an additive push/pull drag (material being added) — matches
+ * the push/pull arrow's existing accent color. */
+const SWEPT_PRISM_ADD_COLOR = 0xee8800
+/** Ghost tint for a subtractive drag (material being removed / cut through) —
+ * a reddish warning tone so the direction of the operation reads at a glance. */
+const SWEPT_PRISM_CUT_COLOR = 0xdd4422
+
+/**
+ * Triangulate a closed 3D polygon loop (no duplicate closing vertex) by
+ * projecting onto the plane perpendicular to `normal` and delegating to
+ * `THREE.ShapeUtils.triangulateShape`. The axis with the largest |normal|
+ * component is dropped, which keeps the projection non-degenerate for any
+ * mostly-planar input. Returns vertex-index triangles into `points`, or an
+ * empty array if triangulation fails or the loop is degenerate.
+ */
+function triangulatePolygon3D(
+  points: THREE.Vector3[],
+  normal: THREE.Vector3,
+): number[][] {
+  if (points.length < 3) return []
+
+  // Drop the axis with the largest |normal| component so the remaining two
+  // axes give a non-degenerate 2D projection of the (mostly-planar) loop.
+  const ax = Math.abs(normal.x)
+  const ay = Math.abs(normal.y)
+  const az = Math.abs(normal.z)
+  const project: (p: THREE.Vector3) => THREE.Vector2 =
+    ax >= ay && ax >= az
+      ? (p) => new THREE.Vector2(p.y, p.z)
+      : ay >= az
+        ? (p) => new THREE.Vector2(p.x, p.z)
+        : (p) => new THREE.Vector2(p.x, p.y)
+
+  const contour2D = points.map(project)
+  try {
+    return THREE.ShapeUtils.triangulateShape(contour2D, [])
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Build a translucent swept-prism ghost: a base cap at `boundary`, a top cap
+ * at `boundary` offset by `normal * distance`, and quad side walls connecting
+ * the two loops edge-by-edge. Used by PushPullTool to preview the solid that
+ * push/pull will actually produce, instead of a bare arrow.
+ *
+ * `boundary` is an ordered closed loop of world-space points (no duplicate
+ * closing vertex); it may be non-convex or many-sided. Caps are triangulated
+ * via `triangulatePolygon3D` so non-convex loops (L-shapes) and facet circles
+ * (N-gons) both work. Returns null for degenerate input (fewer than 3 boundary
+ * vertices, or a near-zero distance) rather than throwing.
+ *
+ * The returned Object3D is always built from THREE.Mesh instances so the
+ * shared `clearPreview` (which disposes Mesh/LineSegments geometries and
+ * materials) fully cleans it up between drag frames.
+ */
+export function buildSweptPrismPreview(
+  boundary: Float32Array | number[],
+  normal: [number, number, number],
+  distance: number,
+): THREE.Object3D | null {
+  if (Math.abs(distance) < 1e-6) return null
+
+  const vertexCount = Math.floor(boundary.length / 3)
+  if (vertexCount < 3) return null
+
+  const n = new THREE.Vector3(normal[0], normal[1], normal[2])
+  const base: THREE.Vector3[] = []
+  for (let i = 0; i < vertexCount; i++) {
+    base.push(new THREE.Vector3(boundary[i * 3], boundary[i * 3 + 1], boundary[i * 3 + 2]))
+  }
+  const offset = n.clone().multiplyScalar(distance)
+  const top = base.map((p) => p.clone().add(offset))
+
+  const capTriangles = triangulatePolygon3D(base, n)
+  if (capTriangles.length === 0) return null
+
+  const positions: number[] = []
+  const pushTri = (a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) => {
+    positions.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z)
+  }
+
+  // Base cap — winding flipped so its outward normal faces away from the
+  // sweep direction (matches the top cap's natural winding facing +normal).
+  for (const [i0, i1, i2] of capTriangles) {
+    pushTri(base[i0], base[i2], base[i1])
+  }
+  // Top cap.
+  for (const [i0, i1, i2] of capTriangles) {
+    pushTri(top[i0], top[i1], top[i2])
+  }
+  // Side walls — one quad (two triangles) per boundary edge.
+  for (let i = 0; i < vertexCount; i++) {
+    const j = (i + 1) % vertexCount
+    pushTri(base[i], base[j], top[j])
+    pushTri(base[i], top[j], top[i])
+  }
+
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+  geo.computeVertexNormals()
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: distance > 0 ? SWEPT_PRISM_ADD_COLOR : SWEPT_PRISM_CUT_COLOR,
+    transparent: true,
+    opacity: 0.45,
+    depthWrite: false,
+    depthTest: false,
+    side: THREE.DoubleSide,
+  })
+
+  const mesh = new THREE.Mesh(geo, mat)
+  mesh.renderOrder = 996
+  return mesh
+}
+
 /**
  * Dispose all geometries and materials owned by the preview group, then
  * clear it.  Safe to call even when the group is empty.

@@ -20,6 +20,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { projectRayOntoAxis, parseKernelErrorCode, kernelErrorMessage, pointInPolygonXY, polygonAreaXY } from '../viewport/geoHelpers'
 import { editLengthBuffer } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
+import { buildSweptPrismPreview, clearPreview } from './transformPreview'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
  * cursor was parked on a real feature. `on-face` is excluded on purpose: it
@@ -194,7 +195,7 @@ export class PushPullTool implements Tool {
       const { target, anchor, distance } = this.stage
       this.stage = { kind: 'idle' }
       this.typed = ''
-      this._clearPreview()
+      clearPreview(this.preview)
       this.onMeasurementCb('')
 
       // Final depth at the click — perpendicular to the face, projecting the
@@ -252,7 +253,7 @@ export class PushPullTool implements Tool {
   cancel(): void {
     this.stage = { kind: 'idle' }
     this.typed = ''
-    this._clearPreview()
+    clearPreview(this.preview)
     this.onMeasurementCb('')
     this.lastSnap = null
   }
@@ -273,7 +274,7 @@ export class PushPullTool implements Tool {
 
     this.stage = { kind: 'idle' }
     this.typed = ''
-    this._clearPreview()
+    clearPreview(this.preview)
     this.onMeasurementCb('')
 
     this._commit(target, signed)
@@ -404,11 +405,51 @@ export class PushPullTool implements Tool {
     normal: [number, number, number],
     distance: number,
   ): void {
-    this._clearPreview()
+    clearPreview(this.preview)
 
     if (Math.abs(distance) < 1e-6) return
 
-    // Draw a simple arrow/line from anchor along normal to show extrusion distance
+    // Prefer the live swept-solid ghost (the actual prism push/pull will
+    // produce). It needs a real face/region boundary in world space:
+    //  - `face_boundary` returns DEFINITION-local coords inside a component
+    //    editing context, which would not match the placed instance's world
+    //    pose — fall back to the arrow there rather than draw a misplaced
+    //    ghost.
+    //  - A stale handle mid-drag (e.g. the target object/sketch changed
+    //    underneath us) throws from wasm; fall back silently, no toast.
+    if (this.stage.kind === 'dragging') {
+      const { target } = this.stage
+      const insideComponent = target.kind === 'face' && this._activeComponent !== null
+      if (!insideComponent) {
+        try {
+          const boundary = target.kind === 'region'
+            ? this.wasmScene.region_boundary(target.sketchHandle, target.regionHandle)
+            : this.wasmScene.face_boundary(target.objectHandle, target.faceHandle)
+          const prism = buildSweptPrismPreview(boundary, normal, distance)
+          if (prism !== null) {
+            this.preview.add(prism)
+            return
+          }
+        } catch {
+          // Stale handle mid-drag — fall through to the arrow.
+        }
+      }
+    }
+
+    this._drawArrowFallback(anchor, normal, distance)
+  }
+
+  /**
+   * Bare arrow + tip-cross preview — the original push/pull ghost. Used as a
+   * fallback when the swept-prism ghost can't be built: inside a component
+   * editing context (face_boundary is definition-local there, not world), or
+   * when the boundary fetch fails (stale handle) or the prism is degenerate.
+   */
+  private _drawArrowFallback(
+    anchor: [number, number, number],
+    normal: [number, number, number],
+    distance: number,
+  ): void {
     const [ax, ay, az] = anchor
     const [nx, ny, nz] = normal
 
@@ -441,17 +482,5 @@ export class PushPullTool implements Tool {
     const cross = new THREE.LineSegments(crossGeo, crossMat)
     cross.renderOrder = 996
     this.preview.add(cross)
-  }
-
-  private _clearPreview(): void {
-    this.preview.traverse((child) => {
-      if (child instanceof THREE.LineSegments) {
-        child.geometry.dispose()
-        if (child.material instanceof THREE.Material) {
-          child.material.dispose()
-        }
-      }
-    })
-    this.preview.clear()
   }
 }
