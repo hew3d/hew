@@ -784,3 +784,75 @@ fn pre_v4_manifest_loads_with_no_guides() {
         "guides default to empty when the manifest predates v4"
     );
 }
+
+// ------------------------------------------------------------ state_hash
+//
+// `Document::state_hash` is the canonical deterministic oracle (docs/DEVELOPMENT.md):
+// a digest of the canonical `save` bytes. These pin the contract everything
+// downstream (replay, log stamps, the guard) relies on.
+
+#[test]
+fn state_hash_is_stable_within_a_process() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    extrude_box(&mut doc, 3.0, 3.0, 4.0, 4.0, 0.0, 2.0);
+    assert_eq!(
+        doc.state_hash(),
+        doc.state_hash(),
+        "state_hash must be deterministic for an unchanged document"
+    );
+}
+
+#[test]
+fn state_hash_distinguishes_distinct_states() {
+    let empty = Document::new().state_hash();
+
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let one = doc.state_hash();
+    assert_ne!(empty, one, "adding a box must change the state_hash");
+
+    extrude_box(&mut doc, 3.0, 3.0, 4.0, 4.0, 0.0, 2.0);
+    let two = doc.state_hash();
+    assert_ne!(one, two, "adding a second box must change the state_hash");
+}
+
+#[test]
+fn state_hash_survives_save_load_round_trip() {
+    // The oracle is replay-stable: deserializing canonical bytes and re-hashing
+    // reproduces the original hash (dense-id remap is itself deterministic), so a
+    // golden hash frozen against a recorded session stays valid after reload.
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    extrude_box(&mut doc, 5.0, 5.0, 7.0, 6.0, 0.0, 3.0);
+    let before = doc.state_hash();
+
+    let loaded = Document::load(&doc.save()).expect("load");
+    assert_eq!(
+        before,
+        loaded.state_hash(),
+        "state_hash is preserved across a save/load round-trip"
+    );
+}
+
+#[test]
+fn state_hash_is_undo_redo_identity() {
+    // `state_hash` tracks live, visible state, and undo/redo is an identity on
+    // that state (document_specs::undo_redo_is_identity_on_visible_state), so a
+    // round trip through the undo log must return to the exact same hash — the
+    // property that lets a recorded session replay to a golden hash.
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    extrude_box(&mut doc, 5.0, 5.0, 7.0, 6.0, 0.0, 3.0);
+    let full = doc.state_hash();
+
+    doc.undo().expect("undo the second box");
+    assert_ne!(full, doc.state_hash(), "undo changes the visible state");
+
+    doc.redo().expect("redo the second box");
+    assert_eq!(
+        full,
+        doc.state_hash(),
+        "undo+redo restores the exact state_hash"
+    );
+}

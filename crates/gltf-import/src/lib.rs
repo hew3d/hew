@@ -1,3 +1,9 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). Like `dae-import`, this crate's maps are parse-time
+// node/mesh lookups; the shared `mesh-heal` pass (in scope) owns output
+// determinism. The workspace clippy.toml ban is suppressed here (submodules too).
+#![allow(clippy::disallowed_types)]
+
 //! glTF 2.0 / GLB import for Hew.
 //!
 //! The export-side sibling of `dae-import`: where COLLADA carries SketchUp

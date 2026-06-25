@@ -702,6 +702,12 @@ fn assemble(faces: Vec<OrientedFace>) -> Result<Object, BooleanError> {
     }
     resplit_shells(&mut obj);
     obj.check_invariants();
+    // Always-on backstop (generalized in): release WASM compiles out
+    // check_invariants(), so re-validate the result and refuse a boolean that
+    // produced invalid topology rather than commit it (DegenerateContact is the
+    // "no manifold result" channel, matching the watertight check above).
+    obj.validate()
+        .map_err(|_| BooleanError::DegenerateContact)?;
     Ok(obj)
 }
 

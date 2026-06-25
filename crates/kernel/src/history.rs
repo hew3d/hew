@@ -412,11 +412,11 @@ fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> Vec<Point3> {
     let outer_b = object.faces()[face_b].outer_loop;
 
     let hes_a: Vec<HalfEdgeId> = object.loop_half_edges(outer_a).collect();
-    let hes_b_set: std::collections::HashSet<HalfEdgeId> =
+    let hes_b_set: std::collections::BTreeSet<HalfEdgeId> =
         object.loop_half_edges(outer_b).collect();
 
     // Find all half-edges on outer_a whose twin is on outer_b.
-    let shared_set_a: std::collections::HashSet<HalfEdgeId> = hes_a
+    let shared_set_a: std::collections::BTreeSet<HalfEdgeId> = hes_a
         .iter()
         .copied()
         .filter(|&h| {

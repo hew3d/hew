@@ -1,3 +1,10 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). This importer's maps are keyed by COLLADA id strings
+// for parse-time lookup, not iterated to build kernel output (the shared heal
+// pass in `mesh-heal` — which IS in scope — already enforces determinism). The
+// workspace clippy.toml ban is suppressed here (covers submodules too).
+#![allow(clippy::disallowed_types)]
+
 //! COLLADA (`.dae`) import for Hew.
 //!
 //! I/O-free: images are resolved by the host and passed in — this crate never

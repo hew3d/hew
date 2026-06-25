@@ -1,0 +1,19 @@
+# Determinism guard (docs/DEVELOPMENT.md, Road to Reliable).
+#
+# Ban the iteration-order-dependent collections in the kernel crates. The
+# "worked twice, failed the third time" flakiness class is rooted in HashMap /
+# HashSet iteration order (already seen once as the seed-dependent split_face
+# dangling-`outgoing` crash). Offenders migrate to BTreeMap / BTreeSet
+# (sorted, zero new dep — the default) or IndexMap / IndexSet (insertion-order;
+# none needed so far).
+#
+# clippy.toml is resolved once per `cargo clippy --workspace` invocation, so this
+# applies to ALL workspace members, not just the four determinism-critical kernel
+# crates (kernel / inference / tessellate / mesh-heal). The crates outside that
+# scope — wasm-api (the WASM boundary), dae-import, gltf-import — carry a justified
+# crate-root `#![allow(clippy::disallowed_types)]`; so do the kernel integration
+# test files, whose set use is order-independent equality assertions.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is nondeterministic; use BTreeMap (sorted) or IndexMap (insertion-order) in kernel crates for bit-for-bit determinism. Outside the four kernel crates, suppress with a justified crate-root #![allow(clippy::disallowed_types)]." },
+    { path = "std::collections::HashSet", reason = "iteration order is nondeterministic; use BTreeSet (sorted) or IndexSet (insertion-order) in kernel crates for bit-for-bit determinism. Outside the four kernel crates, suppress with a justified crate-root #![allow(clippy::disallowed_types)]." },
+]

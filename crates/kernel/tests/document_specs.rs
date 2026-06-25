@@ -1,3 +1,8 @@
+// Test-only: the sets below are order-independent equality assertions on node /
+// object id collections, not kernel output, so HashSet is fine here. Suppress
+// the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_types)]
+
 //! Executable specs for [`kernel::Document`] — the document model backbone.
 //!
 //! These pin the behaviour the wasm-api shim depends on: many first-class
@@ -2366,4 +2371,41 @@ fn duplicate_refuses_bad_placement_and_stale_node() {
         "refused duplicates pushed no undo entry"
     );
     assert!(!doc.can_undo());
+}
+
+// ----------------------------------------------------------- torture mode
+
+#[test]
+fn torture_mode_toggles_and_passes_a_real_op_sequence() {
+    let mut doc = Document::new();
+    assert!(!doc.torture_mode(), "torture mode is off by default");
+    doc.set_torture_mode(true);
+    assert!(doc.torture_mode());
+
+    // Under torture mode the always-on topology validator runs after *every*
+    // op (release included). A representative build → boolean → transform →
+    // duplicate → delete → slice sequence must complete cleanly: each op's
+    // result passes the validator, so none of these `expect`s — nor the post-op
+    // torture validation — panics. (Slice goes last because it consumes `u`.)
+    let a = extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0);
+    let b = extrude_box(&mut doc, 1.0, 1.0, 3.0, 3.0, 0.0, 3.0);
+    let (u, _) = doc
+        .boolean(BooleanOp::Union, a, b)
+        .expect("union under torture");
+    doc.transform_object(u, &Transform::translation(Vec3::new(1.0, 0.0, 0.0)))
+        .expect("translate under torture");
+    let dup = doc
+        .duplicate_node(
+            NodeId::Object(u),
+            &Transform::translation(Vec3::new(6.0, 0.0, 0.0)),
+        )
+        .expect("duplicate under torture")
+        .0;
+    doc.delete_node(dup).expect("delete under torture");
+    let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("slice plane");
+    let _ = doc.slice_node(u, &plane); // exercises the slice path; tolerate refusal
+
+    doc.set_torture_mode(false);
+    assert!(!doc.torture_mode());
 }

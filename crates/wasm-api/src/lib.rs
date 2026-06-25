@@ -1,3 +1,10 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). The WASM boundary holds only session view-state
+// (e.g. hidden-object sets) that never feeds the canonical serialization, so
+// HashSet/HashMap iteration order cannot perturb kernel output. The workspace
+// clippy.toml ban is suppressed here deliberately.
+#![allow(clippy::disallowed_types)]
+
 //! The WASM boundary: the only crate allowed to know about JS
 //! (DEVELOPMENT.md rule 1).
 //!
@@ -2351,6 +2358,16 @@ impl Scene {
     /// wasm-bindgen marshals `Vec<u8>` to a JS `Uint8Array`.
     pub fn save(&self) -> Vec<u8> {
         self.doc.save()
+    }
+
+    /// A canonical, deterministic digest of the document's live state
+    /// ([`Document::state_hash`],  / docs/DEVELOPMENT.md). Read-only — the oracle
+    /// for record/replay, the diagnostic-log op stamps, and the determinism
+    /// guard. Two scenes share a hash iff they serialize identically.
+    ///
+    /// wasm-bindgen marshals `u64` to a JS `BigInt`.
+    pub fn state_hash(&self) -> u64 {
+        self.doc.state_hash()
     }
 
     /// Replace this scene's document with one deserialized from `bytes` (a

@@ -3,8 +3,8 @@
 //! This is the only public construction path in M0. Invalid input fails with
 //! a typed [`TopologyError`]; nothing is repaired silently (DEVELOPMENT.md rule 4).
 
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use slotmap::SecondaryMap;
 
@@ -129,8 +129,11 @@ impl Object {
             .collect();
         let mut used = vec![false; positions.len()];
 
-        // Directed edge (origin, dest) -> the half-edge traversing it.
-        let mut directed: HashMap<(VertexId, VertexId), HalfEdgeId> = HashMap::new();
+        // Directed edge (origin, dest) -> the half-edge traversing it. A
+        // BTreeMap (sorted by vertex-id pair), never a HashMap: its iteration
+        // order (used to insert edges during twin-pairing below) must be
+        // reproducible run-to-run for bit-for-bit determinism.
+        let mut directed: BTreeMap<(VertexId, VertexId), HalfEdgeId> = BTreeMap::new();
 
         let no_holes: Vec<Vec<usize>> = Vec::new();
         for (face_index, polygon) in faces.iter().enumerate() {
@@ -295,7 +298,9 @@ impl Object {
             .collect();
 
         // Directed half-edge map for twin pairing: (origin, dest) -> HalfEdgeId.
-        let mut directed: HashMap<(VertexId, VertexId), HalfEdgeId> = HashMap::new();
+        // BTreeMap (not HashMap) so the twin-pairing iteration below — which
+        // assigns edge ids — is deterministic run-to-run.
+        let mut directed: BTreeMap<(VertexId, VertexId), HalfEdgeId> = BTreeMap::new();
         let mut all_face_ids: Vec<FaceId> = Vec::new();
 
         for (outer_indices, hole_index_lists, plane, material, uv_frame) in faces {
@@ -369,10 +374,10 @@ impl Object {
         }
 
         // Update vertex outgoing pointers to any half-edge originating there.
-        // Iterate the half-edge slotmap (deterministic insertion order), NOT the
-        // `directed` HashMap: a vertex's cached `outgoing` must not depend on the
-        // per-process HashMap seed, or kernel output varies run-to-run (this seed
-        // dependence previously surfaced as a flaky split_boundary_edge crash).
+        // Iterate the half-edge slotmap in its deterministic insertion order so
+        // a vertex's cached `outgoing` is reproducible run-to-run; a
+        // seed-dependent assignment here previously surfaced as a flaky
+        // split_boundary_edge crash.
         for (h, he) in obj.half_edges.iter() {
             obj.vertices[he.origin].outgoing = h;
         }
@@ -455,7 +460,7 @@ fn build_loop(
     vertex_ids: &[VertexId],
     indices: &[usize],
     loop_id: crate::ids::LoopId,
-    directed: &mut HashMap<(VertexId, VertexId), HalfEdgeId>,
+    directed: &mut BTreeMap<(VertexId, VertexId), HalfEdgeId>,
 ) {
     let ids: Vec<VertexId> = indices.iter().map(|&i| vertex_ids[i]).collect();
     let n = ids.len();
@@ -496,7 +501,7 @@ fn build_validated_loop(
     indices: &[usize],
     loop_id: crate::ids::LoopId,
     used: &mut [bool],
-    directed: &mut HashMap<(VertexId, VertexId), HalfEdgeId>,
+    directed: &mut BTreeMap<(VertexId, VertexId), HalfEdgeId>,
     face_index: usize,
 ) -> Result<(), TopologyError> {
     if indices.len() < 3 {

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4155d199880ba11816282f1d53508bcf1b4e540cab8c5279b4d7b9857b474f18 # shrinks to program = [AddBox { x: 0.0, y: 0.0, w: 0.5, d: 0.5, z: 0.0, h: 2.0190176131342334 }, Duplicate { obj: 0, dx: 0.0, dy: 0.0, dz: 0.0 }, Group { a: 2, b: 1 }, PushPull { obj: 0, face: 0, dist: -1.076190549842621 }]

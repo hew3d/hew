@@ -60,7 +60,7 @@ type FilteredFaces = (Vec<Vec<usize>>, Vec<u32>, FaceCornerUvs, FaceHoles);
 /// explicitly documented (DEVELOPMENT.md rule 4 applies to kernel operations; this
 /// is pre-kernel filtering).
 const MIN_FACE_AREA_SQ: f64 = tol::POINT_MERGE * tol::POINT_MERGE;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // ── Up-axis rotation ──────────────────────────────────────────────────────────
 
@@ -127,7 +127,7 @@ pub fn weld(positions: &[Point3]) -> (Vec<Point3>, Vec<usize>) {
 /// Weld positions, merging any two within `weld_tol` (Euclidean). See [`weld`].
 pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<usize>) {
     // Map (bucket_key) → index in the representative list.
-    let mut cell_to_rep: HashMap<(i64, i64, i64), usize> = HashMap::new();
+    let mut cell_to_rep: BTreeMap<(i64, i64, i64), usize> = BTreeMap::new();
     let mut unique: Vec<Point3> = Vec::new();
     let mut old_to_new: Vec<usize> = Vec::with_capacity(positions.len());
 
@@ -200,7 +200,7 @@ pub fn remap_faces(
     {
         let remapped: Vec<usize> = face.iter().map(|&i| old_to_new[i]).collect();
         // Drop degenerate outer: any repeated index → collapsed by welding.
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         if !remapped.iter().all(|i| seen.insert(*i)) || remapped.len() < 3 {
             // Outer degenerated → drop face and its holes.
             continue;
@@ -210,7 +210,7 @@ pub fn remap_faces(
             .iter()
             .filter_map(|hole| {
                 let h: Vec<usize> = hole.iter().map(|&i| old_to_new[i]).collect();
-                let mut seen_h = std::collections::HashSet::new();
+                let mut seen_h = std::collections::BTreeSet::new();
                 if h.iter().all(|i| seen_h.insert(*i)) && h.len() >= 3 {
                     Some(h)
                 } else {
@@ -308,7 +308,7 @@ pub fn dedup_two_sided(
 ) -> FilteredFaces {
     // Canonical key: sorted vertex ids as a Vec<usize>.
     // Value: the first face's canonical direction (for opposite-winding check).
-    let mut seen: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
+    let mut seen: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut out_faces: Vec<Vec<usize>> = Vec::new();
     let mut out_mats: Vec<u32> = Vec::new();
     let mut out_uvs: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -509,8 +509,8 @@ fn signed_volume6(faces: &[Vec<usize>], positions: &[Point3]) -> f64 {
 /// `(b, a)` — i.e. the mesh is closed (manifold or not). Orientation is only
 /// well-defined for a closed shell, so we gate the flip on this.
 fn is_closed(faces: &[Vec<usize>]) -> bool {
-    use std::collections::HashSet;
-    let mut dir: HashSet<(usize, usize)> = HashSet::new();
+    use std::collections::BTreeSet;
+    let mut dir: BTreeSet<(usize, usize)> = BTreeSet::new();
     for face in faces {
         let n = face.len();
         for k in 0..n {
@@ -624,7 +624,7 @@ pub fn orient_consistent(
     let n = faces.len();
 
     // Undirected outer edge -> incident face indices.
-    let mut edge_faces: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    let mut edge_faces: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     for (fi, face) in faces.iter().enumerate() {
         let m = face.len();
         for k in 0..m {
@@ -856,7 +856,7 @@ pub fn merge_coplanar(
         .collect();
 
     // Map each undirected edge → the faces touching it (for adjacency).
-    let mut edge_faces: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    let mut edge_faces: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     for (fi, face) in faces.iter().enumerate() {
         let n = face.len();
         for k in 0..n {
@@ -889,7 +889,7 @@ pub fn merge_coplanar(
     }
 
     // Bucket faces by cluster root.
-    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for fi in 0..nf {
         clusters.entry(uf.find(fi)).or_default().push(fi);
     }
@@ -924,7 +924,7 @@ pub fn merge_coplanar(
 
         // Boundary = directed edges of the group whose reverse is NOT in the
         // group. Record the (source vertex → (dest, uv-at-source)) successor.
-        let mut dir: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+        let mut dir: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
         for &fi in group {
             let face = &faces[fi];
             let n = face.len();
@@ -933,8 +933,11 @@ pub fn merge_coplanar(
             }
         }
         // succ: vertex a → (b, uv_at_a). Reject (fallback) if a vertex has >1
-        // outgoing boundary edge (pinch / non-simple boundary).
-        let mut succ: HashMap<usize, (usize, Option<[f64; 2]>)> = HashMap::new();
+        // outgoing boundary edge (pinch / non-simple boundary). A BTreeMap, not
+        // a HashMap: the loop walk below seeds at `succ.keys().next()`, so the
+        // merged polygon's start vertex (hence its winding rotation) must be the
+        // deterministic smallest id, not a hash-seed-dependent one.
+        let mut succ: BTreeMap<usize, (usize, Option<[f64; 2]>)> = BTreeMap::new();
         let mut boundary_count = 0usize;
         let mut simple = true;
         for &fi in group {
@@ -985,7 +988,7 @@ pub fn merge_coplanar(
 
         let single_loop = cur == start && loop_verts.len() == boundary_count;
         // A clean polygon needs ≥3 distinct vertices and no repeats.
-        let distinct: std::collections::HashSet<usize> = loop_verts.iter().copied().collect();
+        let distinct: std::collections::BTreeSet<usize> = loop_verts.iter().copied().collect();
         if !single_loop || loop_verts.len() < 3 || distinct.len() != loop_verts.len() {
             keep_original(&mut out_faces, &mut out_mats, &mut out_uvs, &mut out_holes);
             continue;
@@ -1514,7 +1517,7 @@ mod tests {
     /// Count directed edges traversed by more than one face — the exact condition
     /// `from_polygons` rejects ("non-manifold or inconsistent winding").
     fn dup_directed_edges(faces: &[Vec<usize>]) -> usize {
-        let mut dir: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut dir: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for f in faces {
             let n = f.len();
             for k in 0..n {

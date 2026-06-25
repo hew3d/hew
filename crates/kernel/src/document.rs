@@ -29,7 +29,7 @@
 //! shim can reconcile inference candidates and render caches precisely without
 //! the kernel knowing those concerns exist.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use slotmap::SlotMap;
 
@@ -607,27 +607,47 @@ pub struct Document {
     /// `(sketch, region)` pairs already extruded into a solid: such a region is
     /// the bottom of its box and is no longer offered for extrusion. Keyed by
     /// sketch too because a different sketch's slotmap reuses region keys.
-    consumed: HashSet<(SketchId, SketchRegionId)>,
+    consumed: BTreeSet<(SketchId, SketchRegionId)>,
     /// Sketch edges hidden because their region was extruded and they are not
     /// shared by any surviving region. Derived index — rebuilt on load.
-    consumed_sketch_edges: HashSet<(SketchId, SketchEdgeId)>,
+    consumed_sketch_edges: BTreeSet<(SketchId, SketchEdgeId)>,
     /// Sketch vertices hidden because all their incident edges are in
     /// `consumed_sketch_edges`. Derived index — rebuilt on load.
-    consumed_sketch_verts: HashSet<(SketchId, SketchVertexId)>,
+    consumed_sketch_verts: BTreeSet<(SketchId, SketchVertexId)>,
     /// Sketches hidden by [`Document::delete_sketch`] (tombstone, not a real
     /// delete — the id stays valid for redo). A document-level visibility
     /// concern, not a field on [`Sketch`] itself, mirroring how object/group/
     /// instance visibility lives on their `*Record` wrappers rather than the
     /// payload type.
-    hidden_sketches: HashSet<SketchId>,
+    hidden_sketches: BTreeSet<SketchId>,
     undo: Vec<DocAction>,
     redo: Vec<DocAction>,
+    /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
+    /// validator runs after **every** op even in release builds (where
+    /// `check_invariants` / `debug_assert!` are compiled out), so a flaky op
+    /// surfaces at the exact op instead of as a downstream glitch. Session-only
+    /// debug state — never serialized (like the undo log), defaults off.
+    torture: bool,
 }
 
 impl Document {
     /// An empty document.
     pub fn new() -> Document {
         Document::default()
+    }
+
+    /// Enables/disables torture ("paranoid") mode (docs/DEVELOPMENT.md): the
+    /// always-on topology validator after every op, even in release. A debug aid
+    /// — on a violation it panics at the offending op rather than committing.
+    /// (The companion re-tessellation self-check lives above the kernel, in the
+    /// wasm Debug-Mode wiring,  — `tessellate` may not be a kernel dep.)
+    pub fn set_torture_mode(&mut self, on: bool) {
+        self.torture = on;
+    }
+
+    /// Whether torture mode is enabled (see [`Document::set_torture_mode`]).
+    pub fn torture_mode(&self) -> bool {
+        self.torture
     }
 
     // ---------------------------------------------------------- persistence
@@ -670,7 +690,7 @@ impl Document {
             .collect();
 
         // ── Per-object names (world + def members), keyed by id ────────────
-        let obj_names: std::collections::HashMap<ObjectId, Option<String>> = self
+        let obj_names: std::collections::BTreeMap<ObjectId, Option<String>> = self
             .objects
             .iter()
             .filter(|(_, rec)| !rec.hidden)
@@ -678,7 +698,7 @@ impl Document {
             .collect();
 
         // ── Per-object tags (world + def members), keyed by id ─────────────
-        let obj_tags: std::collections::HashMap<ObjectId, Vec<Vec<String>>> = self
+        let obj_tags: std::collections::BTreeMap<ObjectId, Vec<Vec<String>>> = self
             .objects
             .iter()
             .filter(|(_, rec)| !rec.hidden)
@@ -743,11 +763,12 @@ impl Document {
             })
             .copied()
             .collect();
-        // Sort for determinism (never emit a HashSet directly — rule from plan).
+        // Sort for canonical output by dense id (a BTreeSet is keyed by raw
+        // slotmap id, not the dense remap — so we still sort explicitly here).
         // The slotmap keys are not directly comparable, but their iteration
         // order from the slotmaps IS stable. We derive dense indices for the
         // sort key by looking them up in the sketch slotmap iteration order.
-        let sketch_dense: std::collections::HashMap<SketchId, usize> = sketches
+        let sketch_dense: std::collections::BTreeMap<SketchId, usize> = sketches
             .iter()
             .enumerate()
             .map(|(i, (sid, _))| (*sid, i))
@@ -784,6 +805,35 @@ impl Document {
             obj_names,
             obj_tags,
         })
+    }
+
+    /// A canonical, deterministic digest of the document's live state ( /
+    /// docs/DEVELOPMENT.md). The single oracle for the Road-to-Reliable phase:
+    /// record/replay asserts against it, the diagnostic log stamps every op with
+    /// it, and the determinism guard compares it.
+    ///
+    /// Defined as a hash of the canonical [`save`] bytes, which are themselves
+    /// byte-for-byte deterministic, so two documents share a `state_hash` iff
+    /// they serialize identically — i.e. iff their live, visible state matches
+    /// (undo/redo history and undone-creation records are excluded, exactly as
+    /// `save` excludes them).
+    ///
+    /// The digest is [FNV-1a/64] — fixed, zero-dependency, and stable across
+    /// Rust toolchain versions (unlike `DefaultHasher`/SipHash), so a hash frozen
+    /// into a committed replay fixture stays valid forever. 64 bits is ample for
+    /// an equality oracle; this is never a security or anti-collision primitive.
+    ///
+    /// [`save`]: Document::save
+    /// [FNV-1a/64]: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
+    pub fn state_hash(&self) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut hash = FNV_OFFSET;
+        for byte in self.save() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
     }
 
     /// Reconstructs a document from a `.hew` container produced by [`save`].
@@ -4151,6 +4201,18 @@ impl Document {
     /// still listed extrudable.
     #[inline]
     fn debug_validate(&self) {
+        // Torture mode (docs/DEVELOPMENT.md): run the topology validator on every
+        // visible object after every op, **always-on** (release included), so a
+        // corruption that slips past an op's own backstop surfaces here at the
+        // exact op. The fuller debug-only invariant battery (tree/consumed)
+        // follows below in debug builds.
+        if self.torture {
+            for (_, rec) in self.objects.iter().filter(|(_, r)| !r.hidden) {
+                rec.object
+                    .validate()
+                    .expect("torture mode: document holds an invalid visible object");
+            }
+        }
         if cfg!(debug_assertions) {
             for (_, rec) in self.objects.iter().filter(|(_, r)| !r.hidden) {
                 rec.object

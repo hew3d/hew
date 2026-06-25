@@ -1,3 +1,8 @@
+// Test-only: the set below is an order-independent equality assertion on
+// visible-object ids, not kernel output, so HashSet is fine here. Suppress the
+// workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_types)]
+
 //! Acceptance specs for `Document::ingest` (DEVELOPMENT.md rule 3).
 //!
 //! Tests are written stub-first per : they were un-ignored once

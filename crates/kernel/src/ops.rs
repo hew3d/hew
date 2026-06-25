@@ -677,8 +677,8 @@ impl Object {
             .collect();
 
         // Collect all vertex IDs on the moved face (outer + inner loops).
-        let moved_vertices: std::collections::HashSet<VertexId> = {
-            let mut verts = std::collections::HashSet::new();
+        let moved_vertices: std::collections::BTreeSet<VertexId> = {
+            let mut verts = std::collections::BTreeSet::new();
             for &loop_id in &boundary_loops {
                 for h in self.loop_half_edges(loop_id) {
                     verts.insert(self.half_edges[h].origin);
@@ -692,7 +692,7 @@ impl Object {
         // and the twin is on a different face.
         let neighbor_faces: Vec<FaceId> = {
             let mut neighbors = Vec::new();
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = std::collections::BTreeSet::new();
             for &loop_id in &boundary_loops {
                 for h in self.loop_half_edges(loop_id) {
                     if let Some(twin_h) = self.half_edges[h].twin {
@@ -715,8 +715,8 @@ impl Object {
         // - dot ~ 1: coplanar sibling (a `split_face` cut edge) — build a wall
         //   along the shared edge instead of refusing.
         // - otherwise: a genuinely slanted neighbor — still refused.
-        let mut edge_kinds: std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind> =
-            std::collections::HashMap::new();
+        let mut edge_kinds: std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind> =
+            std::collections::BTreeMap::new();
         for &loop_id in &boundary_loops {
             for h in self.loop_half_edges(loop_id) {
                 let Some(twin_h) = self.half_edges[h].twin else {
@@ -743,7 +743,7 @@ impl Object {
         // with a sibling sub-face): the coplanar-aware mutation unwelds along
         // these on purpose, so a "fixed" occurrence of either endpoint on a
         // neighbor wall is never an obstruction.
-        let coplanar_adjacent_vertices: std::collections::HashSet<VertexId> = boundary_loops
+        let coplanar_adjacent_vertices: std::collections::BTreeSet<VertexId> = boundary_loops
             .iter()
             .flat_map(|&loop_id| self.loop_half_edges(loop_id))
             .filter(|h| matches!(edge_kinds[h], BoundaryEdgeKind::Coplanar))
@@ -1085,6 +1085,10 @@ impl Object {
         obj.shells[shell].faces.push(sub_face);
 
         obj.check_invariants();
+        // Always-on backstop (generalized in): release WASM compiles
+        // out check_invariants(), so re-validate and refuse — never commit — an
+        // op that slipped past the up-front guards yet corrupted topology.
+        obj.validate().map_err(|_| StickyError::WouldCorrupt)?;
         *self = obj;
         Ok(FaceSplitInnerReport {
             sub_face,
@@ -1165,6 +1169,8 @@ impl Object {
         }
 
         obj.check_invariants();
+        // Always-on backstop.
+        obj.validate().map_err(|_| StickyError::WouldCorrupt)?;
         *self = obj;
         Ok(FaceMergeInnerReport { parent, loop_path })
     }
@@ -1369,6 +1375,9 @@ impl Object {
         }
 
         obj.check_invariants();
+        // Always-on backstop.
+        obj.validate()
+            .map_err(|_| PushPullError::NonManifoldResult)?;
         *self = obj;
         Ok(PushPullReport {
             face: sub_face,
@@ -1486,6 +1495,9 @@ impl Object {
         obj.faces[sub_face].plane = obj.faces[parent].plane;
 
         obj.check_invariants();
+        // Always-on backstop.
+        obj.validate()
+            .map_err(|_| PushPullError::NonManifoldResult)?;
         *self = obj;
         Ok(CollapseSubFaceReport { sub_face, distance })
     }
@@ -1714,6 +1726,8 @@ impl Object {
         let mut obj = self.clone();
         let report = do_merge_faces(&mut obj, face_a, face_b)?;
         obj.check_invariants();
+        // Always-on backstop.
+        obj.validate().map_err(|_| StickyError::WouldCorrupt)?;
         *self = obj;
         Ok(report)
     }
@@ -1766,7 +1780,7 @@ impl Object {
         if face_ids.len() <= 1 {
             return vec![self.clone()];
         }
-        let index_of: std::collections::HashMap<FaceId, usize> =
+        let index_of: std::collections::BTreeMap<FaceId, usize> =
             face_ids.iter().enumerate().map(|(i, &f)| (f, i)).collect();
 
         // Union-find with path compression. `find` is iterative (no recursion).
@@ -1801,8 +1815,8 @@ impl Object {
 
         // Group faces by root, preserving first-appearance order of roots so the
         // output ordering is deterministic.
-        let mut component_of_root: std::collections::HashMap<usize, usize> =
-            std::collections::HashMap::new();
+        let mut component_of_root: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
         let mut components: Vec<Vec<FaceId>> = Vec::new();
         for (i, &fid) in face_ids.iter().enumerate() {
             let root = find(&mut parent, i);
@@ -1837,7 +1851,7 @@ impl Object {
             obj: &Object,
             lid: LoopId,
             positions: &mut Vec<Point3>,
-            local_index: &mut std::collections::HashMap<VertexId, usize>,
+            local_index: &mut std::collections::BTreeMap<VertexId, usize>,
         ) -> Vec<usize> {
             obj.loop_half_edges(lid)
                 .map(|h| {
@@ -1851,8 +1865,8 @@ impl Object {
         }
 
         let mut positions: Vec<Point3> = Vec::new();
-        let mut local_index: std::collections::HashMap<VertexId, usize> =
-            std::collections::HashMap::new();
+        let mut local_index: std::collections::BTreeMap<VertexId, usize> =
+            std::collections::BTreeMap::new();
         let mut specs: Vec<(
             Vec<usize>,
             Vec<Vec<usize>>,
@@ -1983,6 +1997,10 @@ impl Object {
 
         positive.check_invariants();
         negative.check_invariants();
+        // Always-on backstop: refuse a cut that corrupted either
+        // piece rather than hand back invalid solids.
+        positive.validate().map_err(|_| SliceError::Degenerate)?;
+        negative.validate().map_err(|_| SliceError::Degenerate)?;
         Ok((positive, negative))
     }
 
@@ -2092,6 +2110,10 @@ impl Object {
         match Object::boolean(BooleanOp::Subtract, self, &tool, &Transform::IDENTITY) {
             Ok(result) => {
                 result.check_invariants();
+                // Always-on backstop.
+                result
+                    .validate()
+                    .map_err(|_| PushPullError::NonManifoldResult)?;
                 Ok(result)
             }
             Err(BooleanError::EmptyResult) => Err(PushPullError::WouldVanish),
@@ -2153,7 +2175,7 @@ fn find_collapse_plans(
     obj: &Object,
     face: FaceId,
     boundary_loops: &[LoopId],
-    edge_kinds: &std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind>,
+    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
     sweep: Vec3,
 ) -> Vec<CollapsePlan> {
     let face_normal = obj.faces[face].plane.normal();
@@ -2213,7 +2235,7 @@ fn try_collapse_coplanar_step(
     obj: &mut Object,
     face: FaceId,
     boundary_loops: &[LoopId],
-    edge_kinds: &std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind>,
+    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
     sweep: Vec3,
 ) -> Result<Option<Vec<FaceId>>, PushPullError> {
     let plans = find_collapse_plans(obj, face, boundary_loops, edge_kinds, sweep);
@@ -2227,7 +2249,7 @@ fn try_collapse_coplanar_step(
     // edges were Transverse) still needs to translate back by `sweep` now —
     // exactly mirroring the fast (pure-translate) path. Collected up front,
     // before any welding below changes the loops' membership.
-    let welded: std::collections::HashSet<VertexId> =
+    let welded: std::collections::BTreeSet<VertexId> =
         plans.iter().flat_map(|p| [p.far_a, p.far_b]).collect();
     let mut to_translate: Vec<VertexId> = Vec::new();
     for &loop_id in boundary_loops {
@@ -2435,7 +2457,7 @@ fn push_pull_coplanar_aware(
     obj: &mut Object,
     face: FaceId,
     boundary_loops: &[LoopId],
-    edge_kinds: &std::collections::HashMap<HalfEdgeId, BoundaryEdgeKind>,
+    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
     neighbor_faces: &[FaceId],
     sweep: Vec3,
 ) -> Result<Vec<FaceId>, PushPullError> {
@@ -2462,8 +2484,8 @@ fn push_pull_coplanar_aware(
     // put for whoever doesn't move) iff at least one of its two incident
     // boundary half-edges in the moved face's loop is Coplanar. A vertex with
     // both edges Transverse translates in place, exactly as pre-.
-    let mut raised: std::collections::HashMap<VertexId, VertexId> =
-        std::collections::HashMap::new();
+    let mut raised: std::collections::BTreeMap<VertexId, VertexId> =
+        std::collections::BTreeMap::new();
     for walk in &walks {
         let n = walk.hes.len();
         for k in 0..n {
@@ -2526,8 +2548,8 @@ fn push_pull_coplanar_aware(
     // the wall's existing half-edge already agrees with the moved face on the
     // non-junction end (translated in place in Pass 1), so only the junction
     // end needs a new vertex spliced into the wall's loop.
-    let mut steps: std::collections::HashMap<VertexId, StepEdges> =
-        std::collections::HashMap::new();
+    let mut steps: std::collections::BTreeMap<VertexId, StepEdges> =
+        std::collections::BTreeMap::new();
     for walk in &walks {
         let n = walk.hes.len();
         for k in 0..n {
@@ -3438,7 +3460,7 @@ fn do_merge_faces(
     // 1. Find all half-edges on outer_a whose twin is on outer_b.
     //    These form the shared chain(s).  There must be at least one.
     let hes_a: Vec<HalfEdgeId> = obj.loop_half_edges(outer_a).collect();
-    let hes_b_set: std::collections::HashSet<HalfEdgeId> = obj.loop_half_edges(outer_b).collect();
+    let hes_b_set: std::collections::BTreeSet<HalfEdgeId> = obj.loop_half_edges(outer_b).collect();
 
     // Find the starting half-edge on outer_a that is in the shared chain,
     // preceded by a non-shared half-edge. This ensures we start at a boundary
@@ -3475,7 +3497,8 @@ fn do_merge_faces(
     //    without being non-manifold).  We handle a single chain.
 
     // Find the start of the chain: a shared half-edge whose prev is NOT shared.
-    let shared_set_a: std::collections::HashSet<HalfEdgeId> = shared_on_a.iter().copied().collect();
+    let shared_set_a: std::collections::BTreeSet<HalfEdgeId> =
+        shared_on_a.iter().copied().collect();
 
     let chain_start_a = shared_on_a
         .iter()
@@ -3560,8 +3583,8 @@ fn do_merge_faces(
 
     // 6. Find interior vertices of the shared chain (those that are not the
     //    chain endpoints and will be fully orphaned after the chain dissolves).
-    let mut candidate_orphans: std::collections::HashSet<VertexId> =
-        std::collections::HashSet::new();
+    let mut candidate_orphans: std::collections::BTreeSet<VertexId> =
+        std::collections::BTreeSet::new();
     for &h in &chain_a_seq {
         let v = obj.half_edges[h].origin;
         if v != chain_a_start_v && v != chain_b_start_v {
@@ -3703,7 +3726,7 @@ fn do_merge_faces(
 
     // 10. Fix any remaining broken outgoing pointers (shared-chain endpoints
     //     that are still present but whose outgoing pointed into the dissolved chain).
-    let outgoing_map: std::collections::HashMap<VertexId, HalfEdgeId> = obj
+    let outgoing_map: std::collections::BTreeMap<VertexId, HalfEdgeId> = obj
         .half_edges
         .iter()
         .map(|(hid, he)| (he.origin, hid))
@@ -3952,10 +3975,11 @@ mod tests {
     /// dangling `vertex.outgoing`.
     ///
     /// A vertex's `outgoing` is an arbitrary-but-valid half-edge originating at
-    /// it. `from_faces_with_holes` (the extrude builder) assigns it via HashMap
-    /// iteration, so on an extruded box a top-cap corner's `outgoing` may point
-    /// at the very top-cap boundary half-edge that a split removes — which used
-    /// to flake the validator (~3/5) depending on the per-process HashMap seed.
+    /// it. On an extruded box a top-cap corner's `outgoing` may point at the very
+    /// top-cap boundary half-edge that a split removes; the builder once assigned
+    /// it via HashMap iteration, so the validator flaked (~3/5) on the per-process
+    /// seed (the determinism class now banned by  — the builder iterates the
+    /// half-edge slotmap and `directed` is a `BTreeMap`).
     /// Here we *force* that adversarial assignment so the case is deterministic:
     /// every top-loop origin's `outgoing` points into the top loop, then we cut
     /// the top face boundary-to-boundary. `split_boundary_edge` must re-point any

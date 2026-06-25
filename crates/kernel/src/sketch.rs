@@ -869,8 +869,8 @@ impl Sketch {
         // valid until a mutation actually reshapes the region. Everything
         // else is a removal + creation.
         let mut regions_created: Vec<SketchRegionId> = Vec::new();
-        let mut reused: std::collections::HashSet<SketchRegionId> =
-            std::collections::HashSet::new();
+        let mut reused: std::collections::BTreeSet<SketchRegionId> =
+            std::collections::BTreeSet::new();
 
         for new_r in new_region_data {
             let matched = old_regions.iter().find(|(old_id, old_r)| {
@@ -924,8 +924,8 @@ impl Sketch {
         }
 
         // For each vertex, build sorted adjacency list by angle.
-        let mut adj: std::collections::HashMap<SketchVertexId, Vec<SketchVertexId>> =
-            std::collections::HashMap::new();
+        let mut adj: std::collections::BTreeMap<SketchVertexId, Vec<SketchVertexId>> =
+            std::collections::BTreeMap::new();
         for &(from, to) in &half_edges {
             adj.entry(from).or_default().push(to);
         }
@@ -948,8 +948,8 @@ impl Sketch {
         //   2. Find b->a in b's sorted adjacency list.
         //   3. Take the NEXT entry (wrapping) — the rotational successor.
         //   4. That gives the next outgoing half-edge b->c.
-        let mut visited: std::collections::HashSet<(SketchVertexId, SketchVertexId)> =
-            std::collections::HashSet::new();
+        let mut visited: std::collections::BTreeSet<(SketchVertexId, SketchVertexId)> =
+            std::collections::BTreeSet::new();
         let mut cycles: Vec<Vec<SketchVertexId>> = Vec::new();
 
         for &start_he in &half_edges {

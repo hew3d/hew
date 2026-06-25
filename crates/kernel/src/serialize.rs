@@ -10,7 +10,7 @@
 //! layout here must match that document; the spec is updated in the SAME commit
 //! as any serialization change (docs/DEVELOPMENT.md file-format rule).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, Write};
 
 use serde::{Deserialize, Serialize};
@@ -734,9 +734,9 @@ pub(crate) struct DocSaveData {
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
     /// Per-object display name, keyed by id (covers world + def members).
-    pub obj_names: std::collections::HashMap<ObjectId, Option<String>>,
+    pub obj_names: std::collections::BTreeMap<ObjectId, Option<String>>,
     /// Per-object tag list, keyed by id (covers world + def members).
-    pub obj_tags: std::collections::HashMap<ObjectId, Vec<Vec<String>>>,
+    pub obj_tags: std::collections::BTreeMap<ObjectId, Vec<Vec<String>>>,
     /// All live world roots (objects/groups/instances with no parent).
     pub roots: Vec<crate::document::NodeId>,
     /// (sketch_id, region_id) pairs that are consumed.
@@ -748,14 +748,14 @@ pub(crate) struct DocSaveData {
 pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     // ── 1. Assign dense ids ───────────────────────────────────────────────
     // Materials: iteration order of the slotmap (stable ascending slot).
-    let mut mat_to_dense: HashMap<MaterialId, u32> = HashMap::new();
+    let mut mat_to_dense: BTreeMap<MaterialId, u32> = BTreeMap::new();
     for (i, (mid, _)) in data.materials.iter().enumerate() {
         mat_to_dense.insert(*mid, i as u32);
     }
 
     // Objects (world + def): assign in the order provided (slotmap order from
     // document.rs). We collect all objects and assign dense ids.
-    let mut obj_to_dense: HashMap<ObjectId, u32> = HashMap::new();
+    let mut obj_to_dense: BTreeMap<ObjectId, u32> = BTreeMap::new();
     let mut all_objects: Vec<(ObjectId, &Object)> = Vec::new();
     for (oid, obj) in &data.world_objects {
         obj_to_dense.insert(*oid, all_objects.len() as u32);
@@ -766,22 +766,22 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         all_objects.push((*oid, obj));
     }
 
-    let mut grp_to_dense: HashMap<GroupId, u32> = HashMap::new();
+    let mut grp_to_dense: BTreeMap<GroupId, u32> = BTreeMap::new();
     for (i, (gid, ..)) in data.groups.iter().enumerate() {
         grp_to_dense.insert(*gid, i as u32);
     }
 
-    let mut comp_to_dense: HashMap<ComponentId, u32> = HashMap::new();
+    let mut comp_to_dense: BTreeMap<ComponentId, u32> = BTreeMap::new();
     for (i, (cid, ..)) in data.components.iter().enumerate() {
         comp_to_dense.insert(*cid, i as u32);
     }
 
-    let mut inst_to_dense: HashMap<InstanceId, u32> = HashMap::new();
+    let mut inst_to_dense: BTreeMap<InstanceId, u32> = BTreeMap::new();
     for (i, (iid, ..)) in data.instances.iter().enumerate() {
         inst_to_dense.insert(*iid, i as u32);
     }
 
-    let mut sketch_to_dense: HashMap<SketchId, u32> = HashMap::new();
+    let mut sketch_to_dense: BTreeMap<SketchId, u32> = BTreeMap::new();
     for (i, (sid, _)) in data.sketches.iter().enumerate() {
         sketch_to_dense.insert(*sid, i as u32);
     }
@@ -963,7 +963,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             Some([dense_sid, dense_rid])
         })
         .collect();
-    // Sort for determinism (never iterate HashSet for encode).
+    // Sort for determinism (encode in dense-id order, not raw set order).
     consumed_pairs.sort_unstable();
 
     let manifest = Manifest {
