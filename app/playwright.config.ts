@@ -23,7 +23,11 @@ export default defineConfig({
   // Vitest owns *.test.ts; Playwright owns *.spec.ts — disjoint by extension so
   // neither runner ever loads the other's files. (vitest.config.ts mirrors this.)
   testMatch: '**/*.spec.ts',
-  fullyParallel: true,
+  // Serial: the harness specs drive a stateful kernel + a software-GL (SwiftShader)
+  // WebGL context; multiple parallel contexts contend and flake (docs/DEVELOPMENT.md).
+  // The E2E suite is intentionally thin, so one worker is plenty.
+  fullyParallel: false,
+  workers: 1,
   forbidOnly: isCI,
   retries: isCI ? 1 : 0,
   // The opaque-WebGL-canvas smoke is GPU/timing sensitive; keep a real timeout.
@@ -55,13 +59,14 @@ export default defineConfig({
     },
   ],
 
-  // Serve the built web app. In CI the build is produced by an earlier pipeline
-  // step (so just preview the existing dist); locally we build first for a
-  // one-command run. reuseExistingServer keeps local iteration fast.
+  // Serve the app via the Vite dev server. Dev mode auto-enables the
+  // `window.__hew_test` harness (`import.meta.env.DEV`), which the semantic E2E
+  // tests drive — without shipping the harness in a production bundle or
+  // plumbing a build flag. The production build is validated separately by
+  // `vite build` in scripts/verify.sh. The dev server needs the WASM pkg built
+  // (scripts/verify.sh / wasm-pack does this; present locally).
   webServer: {
-    command: isCI
-      ? `pnpm exec vite preview --host ${HOST} --port ${PORT} --strictPort`
-      : `pnpm build && pnpm exec vite preview --host ${HOST} --port ${PORT} --strictPort`,
+    command: `pnpm exec vite --host ${HOST} --port ${PORT} --strictPort`,
     url: baseURL,
     reuseExistingServer: !isCI,
     timeout: 180_000,

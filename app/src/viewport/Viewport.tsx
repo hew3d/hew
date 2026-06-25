@@ -24,6 +24,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
 import { SnapService } from './snapService'
 import { SceneRenderer } from './SceneRenderer'
+import * as inputRecorder from '../recording/inputRecorder'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
@@ -187,6 +188,17 @@ export interface ViewportApi {
    * (perspective) projection is retained. No model geometry changes.
    */
   setStandardView: (view: StandardView) => void
+  /**
+   * Pin the camera to an explicit pose ( `__hew_test.setCamera`): position,
+   * orbit target, up, vertical FOV (deg). Deterministic framing for E2E / pixel
+   * tests; mirrors the recorded `camera` input shape and  `PINNED_CAMERA`.
+   */
+  setCamera: (
+    position: [number, number, number],
+    target: [number, number, number],
+    up: [number, number, number],
+    fovDeg: number,
+  ) => void
   /**
    * Update the renderer's hidden object/instance sets.  Hidden groups have
    * `.visible = false` (not raypicked by three.js tools) and are excluded from
@@ -797,6 +809,21 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function setCamera(
+      position: [number, number, number],
+      target: [number, number, number],
+      up: [number, number, number],
+      fovDeg: number,
+    ): void {
+      camera.position.set(position[0], position[1], position[2])
+      controls.target.set(target[0], target[1], target[2])
+      camera.up.set(up[0], up[1], up[2])
+      camera.fov = fovDeg
+      camera.updateProjectionMatrix()
+      controls.update()
+      scheduleRender()
+    }
+
     function setHidden(objectIds: bigint[], instanceIds: bigint[]): void {
       hiddenObjectIdsRef.current = new Set(objectIds)
       hiddenInstanceIdsRef.current = new Set(instanceIds)
@@ -851,7 +878,7 @@ export default function Viewport({
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -1293,6 +1320,27 @@ export default function Viewport({
 
     controls.addEventListener('change', scheduleRender)
 
+    // Low-level capture: camera state on every orbit/pan/zoom change, and
+    // keys (Shift axis-lock, Esc/Enter/Del). All no-ops unless recording.
+    function recordCameraInput(): void {
+      if (!inputRecorder.isActive()) return
+      inputRecorder.recordCamera(
+        [camera.position.x, camera.position.y, camera.position.z],
+        [controls.target.x, controls.target.y, controls.target.z],
+        [camera.up.x, camera.up.y, camera.up.z],
+        camera.fov,
+      )
+    }
+    function onKeyDownRecord(ev: KeyboardEvent): void {
+      inputRecorder.recordKey('keydown', ev)
+    }
+    function onKeyUpRecord(ev: KeyboardEvent): void {
+      inputRecorder.recordKey('keyup', ev)
+    }
+    controls.addEventListener('change', recordCameraInput)
+    window.addEventListener('keydown', onKeyDownRecord)
+    window.addEventListener('keyup', onKeyUpRecord)
+
     // ------------------------------------------------------------------ context loss
     // WebKitGTK drops the GL context more readily than Chromium (suspend/resume,
     // GPU/driver reset). Without these handlers the canvas freezes grey with no
@@ -1326,8 +1374,23 @@ export default function Viewport({
     renderer.domElement.addEventListener('webglcontextlost', onContextLost)
     renderer.domElement.addEventListener('webglcontextrestored', onContextRestored)
 
+    // Low-level input capture. A no-op unless a recording is active, so
+    // it costs nothing in normal use; coords are canvas-relative CSS px so replay
+    // can dispatch synthetic events at the same place.
+    function recordPointerInput(
+      kind: 'pointermove' | 'pointerdown' | 'pointerup',
+      ev: PointerEvent,
+    ): void {
+      if (!inputRecorder.isActive()) return
+      const rect = renderer.domElement.getBoundingClientRect()
+      inputRecorder.recordPointer(kind, ev.clientX - rect.left, ev.clientY - rect.top, ev)
+    }
+
     // ------------------------------------------------------------------ pointer move (snap + cue)
     function onPointerMove(ev: PointerEvent): void {
+      // Capture every raw move first (before any early-return) so low-level
+      // replay reproduces the whole stack, camera-nav moves included.
+      recordPointerInput('pointermove', ev)
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
       if (cameraModeRef.current) return
       if (ev.buttons !== 0 && ev.button !== -1) return
@@ -1443,6 +1506,7 @@ export default function Viewport({
     }
 
     function onPointerDown(ev: PointerEvent): void {
+      recordPointerInput('pointerdown', ev)
       if (ev.button !== 0) return
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
       if (cameraModeRef.current) return
@@ -1638,8 +1702,14 @@ export default function Viewport({
       toolController.activeTool.onKey(ev)
     }
 
+    // Record-only pointerup: tools are click-based so nothing else needs
+    // it, but capturing it makes low-level replay faithful (drag releases).
+    function onPointerUpRecord(ev: PointerEvent): void {
+      recordPointerInput('pointerup', ev)
+    }
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerdown', onPointerDown)
+    renderer.domElement.addEventListener('pointerup', onPointerUpRecord)
     renderer.domElement.addEventListener('dblclick', onDoubleClick)
     window.addEventListener('keydown', onKeyDown)
 
@@ -1658,14 +1728,18 @@ export default function Viewport({
     return () => {
       cancelAnimationFrame(rafId)
       controls.removeEventListener('change', scheduleRender)
+      controls.removeEventListener('change', recordCameraInput)
       window.removeEventListener('keydown', onShiftKeyDown)
       window.removeEventListener('keyup', onShiftKeyUp)
+      window.removeEventListener('keydown', onKeyDownRecord)
+      window.removeEventListener('keyup', onKeyUpRecord)
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost)
       renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored)
       contextLostOverlay?.remove()
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+      renderer.domElement.removeEventListener('pointerup', onPointerUpRecord)
       renderer.domElement.removeEventListener('dblclick', onDoubleClick)
       window.removeEventListener('keydown', onKeyDown)
       resizeObserver.disconnect()

@@ -14,6 +14,7 @@ import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, 
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
+import { installTestHarness } from './test/harness'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { makeFileHost, isTauri, type ImportReport } from './io/fileHost'
@@ -374,6 +375,26 @@ export default function App() {
       dirtySinceAutosaveRef.current = true
     }
   }, [trimContextPath])
+
+  // Semantic test harness `window.__hew_test`, installed only in
+  // debug/test builds (dev server, or a build with VITE_HEW_TEST=1 for the
+  // Playwright E2E build). Live values are read through refs so the harness
+  // object is installed once and never goes stale.
+  const reconcileRef = useRef(handleDocumentChanged)
+  reconcileRef.current = handleDocumentChanged
+  const selectedIdsRef = useRef(selectedIds)
+  selectedIdsRef.current = selectedIds
+  useEffect(() => {
+    if (!(import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1')) return
+    return installTestHarness({
+      getScene: () => sceneRef.current,
+      getViewportApi: () => viewportApi.current,
+      reconcile: () => reconcileRef.current(),
+      getSelection: () => selectedIdsRef.current,
+      setSelectedObjects: (ids) =>
+        setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
+    })
+  }, [])
 
   const handleToast = useCallback((message: string, code?: string) => {
     const isError = code !== undefined &&

@@ -1,11 +1,11 @@
 import { test, expect } from '@playwright/test'
 
 /**
- * Boot smoke. Proves the whole web pipeline end to end *now*, before
- * the semantic harness lands: the built app is served, React mounts, the
- * WASM kernel loads, and the WebGL2 viewport gets a live canvas — with no
- * console errors and no crash fallback. The richer draw → push/pull →
- * save/reload flow is.
+ * Boot smoke. Proves the whole web pipeline end to end: the app is
+ * served (Vite dev server — see playwright.config.ts), React mounts, the WASM
+ * kernel loads, and the WebGL2 viewport gets a live canvas — with no console
+ * errors and no crash fallback. The richer draw → push/pull → save/reload flow
+ * is; the semantic harness it builds on is exercised in harness.spec.ts.
  */
 
 // Console noise that is not a real failure in a headless/preview context.
