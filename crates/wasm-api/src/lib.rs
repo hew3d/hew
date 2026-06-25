@@ -21,6 +21,9 @@
 //! `version()`/`demo_mesh()` remain from M0 until the viewport fully retires
 //! the demo path.
 
+mod log;
+mod recording;
+
 use dae_import::ImageMap;
 use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
@@ -72,6 +75,69 @@ pub fn start() {
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+// ------------------------------------------------------- diagnostic logging
+//
+// The wasm half of the log seam (see `log.rs`): install the kernel-side
+// `tracing` subscriber, route its JSON records to a JS drain (Tauri rolling file
+// / web ring buffer), and bracket a user gesture with a correlation id.
+// Rule-8 surface; recorded in docs/DEVELOPMENT.md.
+
+/// Installs the structured-logging subscriber once and sets the capture level
+/// (`"trace"|"debug"|"info"|"warn"|"error"`). Idempotent: a second call only
+/// updates the level (the global subscriber can be set just once per process).
+/// Until a drain is installed via [`set_log_drain`], records collect in an
+/// in-memory ring buffer drainable with [`drain_log_records`].
+#[wasm_bindgen]
+pub fn init_logging(level: &str) {
+    log::set_capture_level(level);
+    // `set_global_default` errors if already set; ignore — the level was updated
+    // above and the subscriber is already live.
+    let _ = tracing::subscriber::set_global_default(log::DrainSubscriber);
+}
+
+/// Sets the capture level without (re)installing the subscriber.
+#[wasm_bindgen]
+pub fn set_log_level(level: &str) {
+    log::set_capture_level(level);
+}
+
+/// Installs a JS drain: `cb(jsonRecord: string)` is invoked once per log record.
+/// Replaces any previous drain and stops buffering (the TS sink owns the tail).
+#[wasm_bindgen]
+pub fn set_log_drain(cb: js_sys::Function) {
+    log::set_drain(Box::new(move |json: &str| {
+        // A drain callback must never unwind into the kernel; ignore a throwing
+        // JS sink rather than poison the wasm instance.
+        let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(json));
+    }));
+}
+
+/// Removes the JS drain; later records fall back to the in-memory ring buffer.
+#[wasm_bindgen]
+pub fn clear_log_drain() {
+    log::clear_drain();
+}
+
+/// Takes and clears the buffered JSON records — the web on-demand download path
+/// (no JS drain installed). Each element is one `LogRecord` as a JSON string.
+#[wasm_bindgen]
+pub fn drain_log_records() -> Vec<String> {
+    log::drain_buffer()
+}
+
+/// Opens a correlation scope for one user gesture and returns its id; every log
+/// record until [`end_gesture`] carries it, so the log filters to one gesture.
+#[wasm_bindgen]
+pub fn begin_gesture() -> u64 {
+    log::begin_gesture()
+}
+
+/// Closes the current gesture's correlation scope.
+#[wasm_bindgen]
+pub fn end_gesture() {
+    log::end_gesture()
 }
 
 // ------------------------------------------------------------------ errors
@@ -777,6 +843,18 @@ impl Scene {
                 None => self.inference.remove_guide(gid),
             }
         }
+
+        // Stamp the post-op canonical state_hash on the log stream. This
+        // fires once per committed mutation (the universal post-mutation hook),
+        // so the `kernel::op` event the kernel emitted at the start of the op and
+        // this `kernel::cmd` event share a correlation id and bracket the command
+        // with its name+params and its resulting state digest (docs/DEVELOPMENT.md).
+        // The single full serialization per gesture is negligible vs. per-frame work.
+        tracing::info!(
+            target: "kernel::cmd",
+            state_hash = self.doc.state_hash(),
+            objects = change.objects_touched.len(),
+        );
     }
 
     /// Registers a visible instance's definition members with inference, each
@@ -2370,6 +2448,37 @@ impl Scene {
         self.doc.state_hash()
     }
 
+    // ------------------------------------------------------- recording
+
+    /// Begins recording the committed command stream (docs/DEVELOPMENT.md),
+    /// anchored at the document's current `state_hash`. The recording taps the
+    ///  log stream, so logging need not be otherwise enabled. Replaces any
+    /// prior in-progress recording. See `docs/DIAGNOSTICS.md`.
+    pub fn start_recording(&self) {
+        recording::start(self.doc.state_hash());
+    }
+
+    /// Stops recording; the accumulated commands remain available to
+    /// [`Scene::take_recording`].
+    pub fn stop_recording(&self) {
+        recording::stop();
+    }
+
+    /// Whether a recording is currently active.
+    pub fn is_recording(&self) -> bool {
+        recording::is_active()
+    }
+
+    /// Takes the recording built so far as a JSON [`Recording`] artifact
+    /// (`docs/DIAGNOSTICS.md`), clearing the recorder's buffer. This is the
+    /// reproducer you attach to a bug and, once fixed, freeze as a replay
+    /// regression fixture.
+    ///
+    /// [`Recording`]: recording::Recording
+    pub fn take_recording(&self) -> String {
+        serde_json::to_string(&recording::take()).unwrap_or_else(|_| "{}".to_string())
+    }
+
     /// Replace this scene's document with one deserialized from `bytes` (a
     /// `.hew` container produced by [`Scene::save`]).
     ///
@@ -2490,6 +2599,81 @@ mod tests {
         assert_eq!(version(), env!("CARGO_PKG_VERSION"));
     }
 
+    /// End-to-end: a real kernel `Document` op emits its `kernel::op`
+    /// event through the wasm `DrainSubscriber`, stamped with the active gesture
+    /// correlation id — proving the kernel→drain seam across the crate boundary.
+    #[test]
+    fn kernel_op_event_reaches_the_drain_with_correlation() {
+        use kernel::{Document, Plane, Point3};
+        use tracing::subscriber::with_default;
+
+        log::reset();
+        with_default(log::DrainSubscriber, || {
+            begin_gesture();
+            let mut doc = Document::new();
+            let plane = Plane::from_polygon(&[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ])
+            .unwrap();
+            let s = doc.add_sketch(plane);
+            {
+                let sk = doc.sketch_mut(s).unwrap();
+                for (a, b) in [
+                    (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+                    (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+                    (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+                    (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+                ] {
+                    sk.add_segment(a, b).unwrap();
+                }
+            }
+            let r = doc.extrudable_regions(s).unwrap()[0];
+            doc.extrude_region(s, r, 2.0).unwrap();
+            end_gesture();
+        });
+        let records: Vec<serde_json::Value> = log::drain_buffer()
+            .into_iter()
+            .map(|s| serde_json::from_str(&s).unwrap())
+            .collect();
+
+        let extrude = records
+            .iter()
+            .find(|r| r["fields"]["op"] == "extrude_region")
+            .expect("the kernel extrude_region event reached the drain");
+        assert_eq!(extrude["target"], "kernel::op");
+        assert_eq!(extrude["fields"]["distance"], 2.0);
+        assert!(
+            extrude["corr"].as_u64().unwrap() > 0,
+            "the event carries the active gesture correlation id"
+        );
+    }
+
+    /// A Scene mutation emits the post-op `kernel::cmd` event carrying the
+    /// canonical `state_hash` (the reconcile stamp).
+    #[test]
+    fn scene_mutation_stamps_state_hash_on_the_log() {
+        use tracing::subscriber::with_default;
+
+        log::reset();
+        with_default(log::DrainSubscriber, || {
+            let mut scene = Scene::new();
+            scene
+                .add_guide_point(1.0, 2.0, 3.0)
+                .expect("add guide point");
+        });
+        let cmd = log::drain_buffer()
+            .into_iter()
+            .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap())
+            .find(|r| r["target"] == "kernel::cmd")
+            .expect("a committed Scene mutation emits a kernel::cmd event");
+        assert!(
+            cmd["fields"]["state_hash"].as_u64().is_some(),
+            "the cmd event carries a numeric post-op state_hash"
+        );
+    }
+
     #[test]
     fn empty_scene_has_no_objects_and_rejects_stale_handles() {
         let scene = Scene::new();
@@ -2497,6 +2681,51 @@ mod tests {
         assert!(scene.object_watertight(42).is_err());
         assert!(!scene.can_scene_undo());
         assert!(!scene.can_scene_redo());
+    }
+
+    /// End-to-end: recording a real Scene extrude captures it as a
+    /// command whose `post_hash` equals the live `state_hash`, with the
+    /// `pre_hash` anchored at the recording baseline — the chain replay
+    /// will assert against.
+    #[test]
+    fn recording_captures_a_scene_extrude_with_a_hash_chain() {
+        use tracing::subscriber::with_default;
+
+        log::reset();
+        recording::reset();
+        let json = with_default(log::DrainSubscriber, || {
+            let mut scene = Scene::new();
+            let baseline = scene.state_hash();
+            scene.start_recording();
+            assert!(scene.is_recording());
+
+            let (sketch, region) = ground_unit_square(&mut scene);
+            let _obj = scene.extrude_region(sketch, region, 2.0).unwrap();
+            let final_hash = scene.state_hash();
+
+            scene.stop_recording();
+            assert!(!scene.is_recording());
+            (baseline, final_hash, scene.take_recording())
+        });
+        let (baseline, final_hash, json) = json;
+
+        let rec: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(rec["version"], recording::RECORDING_FORMAT_VERSION);
+        assert_eq!(rec["baseline_hash"].as_u64().unwrap(), baseline);
+
+        let cmds = rec["commands"].as_array().unwrap();
+        // The extrude is the recorded command; it carries the distance param.
+        let extrude = cmds
+            .iter()
+            .find(|c| c["op"] == "extrude_region")
+            .expect("the extrude was recorded as a command");
+        assert_eq!(extrude["params"]["distance"], 2.0);
+        assert_eq!(extrude["pre_hash"].as_u64().unwrap(), baseline);
+        assert_eq!(
+            extrude["post_hash"].as_u64().unwrap(),
+            final_hash,
+            "the recorded post_hash matches the live state_hash after the op"
+        );
     }
 
     /// Draws a unit square on the ground sketch and returns

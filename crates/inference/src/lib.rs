@@ -698,6 +698,15 @@ impl InferenceScene {
             .copied()
             .find(|c| !self.is_occluded(origin, c.3));
 
+        // TRACE only — `resolve` runs on every pointer move, so this is a
+        // firehose filtered out by default; raise the capture level to debug a
+        // bad snap (the inference winner + candidate count,  / docs/DEVELOPMENT.md).
+        tracing::trace!(
+            target: "inference::resolve",
+            candidates = candidates.len(),
+            winner = ?winner.as_ref().map(|c| c.0),
+        );
+
         // --- Handle locking ---
         match (query.lock, query.anchor) {
             (Some(lock), Some(anchor)) => {

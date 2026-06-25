@@ -32,6 +32,7 @@
 use std::collections::BTreeSet;
 
 use slotmap::SlotMap;
+use tracing::info;
 
 use crate::guide::Guide;
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
@@ -2131,6 +2132,7 @@ impl Document {
         region: SketchRegionId,
         distance: f64,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "extrude_region", distance);
         let s = self
             .sketches
             .get(sketch)
@@ -2228,6 +2230,7 @@ impl Document {
         a: ObjectId,
         b: ObjectId,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "boolean", boolean_op = ?op);
         if a == b {
             // A single object cannot be combined with itself (its faces would be
             // fully coincident — a degenerate contact); reject before mutating.
@@ -2284,6 +2287,8 @@ impl Document {
         object: ObjectId,
         plane: &Plane,
     ) -> Result<((ObjectId, ObjectId), DocChange), DocumentError> {
+        let n = plane.normal();
+        info!(target: "kernel::op", op = "slice_node", nx = n.x, ny = n.y, nz = n.z);
         let source = match self.objects.get(object) {
             Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
             _ => return Err(DocumentError::UnknownObject),
@@ -2343,6 +2348,7 @@ impl Document {
         face: crate::ids::FaceId,
         distance: f64,
     ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "push_pull_through", distance);
         let src = match self.objects.get(object) {
             Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
             _ => return Err(DocumentError::UnknownObject),
@@ -2394,6 +2400,7 @@ impl Document {
         object: ObjectId,
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "transform_object");
         // Capture the inverse first: it both validates invertibility and is what
         // undo will bake. (`apply_transform` re-checks and also rejects det<0.)
         let inverse = t.inverse().map_err(DocumentError::Transform)?;
@@ -2518,6 +2525,7 @@ impl Document {
         &mut self,
         members: &[NodeId],
     ) -> Result<(GroupId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "group_nodes", members = members.len());
         if members.is_empty() {
             return Err(DocumentError::EmptyGroup);
         }
@@ -2571,6 +2579,7 @@ impl Document {
     /// `GroupId` is retained but hidden, so redo can re-form it. `Err` (document
     /// untouched) if the group handle is stale or already hidden.
     pub fn ungroup(&mut self, group: GroupId) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "ungroup");
         if !self.group_is_live(group) {
             return Err(DocumentError::UnknownGroup);
         }
@@ -2618,6 +2627,7 @@ impl Document {
     ///
     /// On `Err` the document is untouched (the strong guarantee).
     pub fn delete_node(&mut self, node: NodeId) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "delete_node", node = ?node);
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,
@@ -3149,6 +3159,7 @@ impl Document {
         node: NodeId,
         placement: &Transform,
     ) -> Result<(NodeId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "duplicate_node", node = ?node);
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,

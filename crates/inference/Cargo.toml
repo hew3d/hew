@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 kernel.workspace = true
+tracing.workspace = true

@@ -36,6 +36,11 @@ js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zip = { version = "2", default-features = false }
+# Structured diagnostic logging (docs/DEVELOPMENT.md, M14). kernel/inference use only
+# the `tracing` facade (events, no I/O); wasm-api owns the Subscriber + the
+# wasm→shell drain seam. default-features=false drops the `#[instrument]` proc
+# macro we don't use, keeping the WASM bundle lean.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 dae-parser = { path = "crates/vendor/dae-parser" }
 
 [profile.release]
