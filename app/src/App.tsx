@@ -384,6 +384,10 @@ export default function App() {
   reconcileRef.current = handleDocumentChanged
   const selectedIdsRef = useRef(selectedIds)
   selectedIdsRef.current = selectedIds
+  // applyLoadedBytes is defined further down (it depends on later state setters);
+  // the harness installs once on mount, so reach it through a ref (kept current
+  // below, beside that definition) like reconcileRef.
+  const applyLoadedBytesRef = useRef<((bytes: Uint8Array) => boolean) | null>(null)
   useEffect(() => {
     if (!(import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1')) return
     return installTestHarness({
@@ -393,6 +397,7 @@ export default function App() {
       getSelection: () => selectedIdsRef.current,
       setSelectedObjects: (ids) =>
         setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
+      loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
     })
   }, [])
 
@@ -486,6 +491,9 @@ export default function App() {
     }
     return true
   }, [handleToast])
+  // Keep the harness's Open path ( __hew_test.load) pointed at the latest
+  // applyLoadedBytes closure.
+  applyLoadedBytesRef.current = applyLoadedBytes
 
   // ---------------------------------------------------------------- discard guard
   // Returns true if it's safe to proceed (no unsaved changes, or user confirms).

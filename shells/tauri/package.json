@@ -5,9 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "e2e:build": "cross-env VITE_HEW_TEST=1 tauri build --debug --no-bundle",
+    "e2e": "wdio run e2e/wdio.conf.ts",
+    "e2e:typecheck": "tsc --noEmit -p e2e/tsconfig.json"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.2"
+    "@tauri-apps/cli": "^2.11.2",
+    "@wdio/cli": "^9.20.0",
+    "@wdio/globals": "^9.20.0",
+    "@wdio/local-runner": "^9.20.0",
+    "@wdio/mocha-framework": "^9.20.0",
+    "@wdio/spec-reporter": "^9.20.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.9.3",
+    "cross-env": "^10.1.0",
+    "expect-webdriverio": "^5.1.0",
+    "typescript": "^5.6.2",
+    "webdriverio": "^9.20.0"
   }
 }

@@ -1,9 +1,12 @@
 // Prevents an additional console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// The workspace clippy.toml bans HashMap/HashSet for kernel determinism (
-//). This desktop shell is outside the four kernel crates and the only hit
-// is HashMap inside `tauri::generate_context!()`'s expansion (not our code), so
-// suppress at the crate root per that lint's documented escape hatch.
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). The workspace `clippy.toml` bans HashMap/HashSet for
+// kernel determinism, but it also applies to this desktop shell, where the only
+// hit is HashMap inside `tauri::generate_context!()`'s macro-generated code —
+// not kernel output, and not ours to change. Suppress the ban for this crate
+// exactly as wasm-api / dae-import / gltf-import do. (Previously latent: the
+// Tauri-shell clippy result was cache-masked until touched main.rs.)
 #![allow(clippy::disallowed_types)]
 
 use std::sync::Mutex;
@@ -108,6 +111,88 @@ fn recovery_clear(app: tauri::AppHandle) -> Result<(), String> {
     let _ = std::fs::remove_file(config_dir.join("recovery.hew"));
     let _ = std::fs::remove_file(config_dir.join("recovery.json"));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic log — rolling file (docs/DEVELOPMENT.md).
+//
+// One file in the app log dir: diagnostic.log. On rotation (size cap
+// exceeded), it's renamed to diagnostic.1.log (replacing any prior backup)
+// and a fresh diagnostic.log is started — one backup kept, kept simple.
+// ---------------------------------------------------------------------------
+
+/// Size cap (bytes) before `log_rotate` rolls `diagnostic.log` to `diagnostic.1.log`.
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Append `lines` (already-formatted NDJSON, newline-terminated) to the
+/// rolling diagnostic log file, creating the log dir/file if needed.
+#[tauri::command]
+fn log_append(app: tauri::AppHandle, lines: String) -> Result<(), String> {
+    let Some(log_dir) = app.path().app_log_dir().ok() else {
+        return Err("could not resolve app log dir".into());
+    };
+    std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("diagnostic.log"))
+        .map_err(|e| e.to_string())?;
+    file.write_all(lines.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Rotate `diagnostic.log` to `diagnostic.1.log` (replacing any prior backup)
+/// if it has grown past `LOG_ROTATE_BYTES`. No-op if the file is missing or
+/// under the cap.
+#[tauri::command]
+fn log_rotate(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(log_dir) = app.path().app_log_dir().ok() else {
+        return Err("could not resolve app log dir".into());
+    };
+    let current = log_dir.join("diagnostic.log");
+    let Ok(metadata) = std::fs::metadata(&current) else {
+        return Ok(()); // nothing to rotate yet
+    };
+    if metadata.len() <= LOG_ROTATE_BYTES {
+        return Ok(());
+    }
+    let backup = log_dir.join("diagnostic.1.log");
+    let _ = std::fs::remove_file(&backup);
+    std::fs::rename(&current, &backup).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Auto-reproducer dump (docs/DEVELOPMENT.md) — on a failure, the app
+// bundles {recorded command stream + serialized .hew + diagnostic-log tail}
+// into one JSON file under the app log dir, so "it broke" becomes "here is a
+// model + an input log that reproduces it". See app/src/log/reproducerDump.ts.
+// ---------------------------------------------------------------------------
+
+/// Write a reproducer bundle (`contents`, already-serialized JSON) to
+/// `<app_log_dir>/reproducers/<name>`, creating the directory if needed.
+/// Returns the absolute path. `name` is restricted to a plain filename (no
+/// path separators or `..`) since it crosses the invoke boundary from the
+/// webview.
+#[tauri::command]
+fn reproducer_write(
+    app: tauri::AppHandle,
+    name: String,
+    contents: String,
+) -> Result<String, String> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+        return Err("invalid reproducer file name".into());
+    }
+    let Some(log_dir) = app.path().app_log_dir().ok() else {
+        return Err("could not resolve app log dir".into());
+    };
+    let dir = log_dir.join("reproducers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(&name);
+    std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +343,9 @@ fn main() {
             recovery_write,
             recovery_read,
             recovery_clear,
+            log_append,
+            log_rotate,
+            reproducer_write,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.

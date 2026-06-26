@@ -2,6 +2,11 @@ packages:
   - 'app'
   - 'shells/*'
 allowBuilds:
+  # Edge/Firefox WebDriver managers pulled in transitively by WebdriverIO; the
+  # desktop E2E drives the Tauri binary via tauri-driver + WebKitWebDriver,
+  # so these browser drivers are never used — skip their postinstall downloads.
+  edgedriver: false
+  geckodriver: false
   esbuild: true
 minimumReleaseAgeExclude:
   - '@tauri-apps/api@2.11.1'

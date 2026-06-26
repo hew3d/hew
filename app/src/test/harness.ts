@@ -51,6 +51,12 @@ export interface HarnessDeps {
   getSelection: () => NodeRef[]
   /** Replace the selection with these object handles. */
   setSelectedObjects: (ids: bigint[]) => void
+  /**
+   * Reload `.hew` bytes through the app's real Open path (the same
+   * `scene.load` + UI reset + viewport `notifyLoaded` re-tessellation a user's
+   * File→Open runs). Returns false if the load was rejected..
+   */
+  loadBytes: (bytes: Uint8Array) => boolean
 }
 
 export interface HewTestHarness {
@@ -67,6 +73,11 @@ export interface HewTestHarness {
   selectObjects(ids: string[]): void
   setCamera(pose: CameraPose): void
   replay(recordingJson: string): string
+  // serialization ( — round-trips the live `.hew` container through the
+  // app's real save/open path). Bytes cross `page.evaluate` as a plain number[]
+  // (portable + structured-cloneable); a box is tiny, so the cost is moot.
+  save(): number[]
+  load(bytes: number[]): void
   // recording ( high + low, one artifact)
   startRecording(): void
   stopRecording(): void
@@ -99,11 +110,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     return s
   }
 
-  // Run a mutation, reconcile on success, and track the last error.
+  // Run a mutation, reconcile + re-tessellate on success, and track the last
+  // error. When the viewport is mounted we drive its `refreshScene` (which
+  // re-tessellates the new geometry to the GPU *and* reconciles the app, exactly
+  // like a tool commit) — a bare `reconcile()` updates React state but leaves the
+  // canvas stale, so harness geometry would never render. Headless
+  // callers with no viewport fall back to a plain reconcile.
   function act<T>(fn: (s: Scene) => T): T {
     try {
       const out = fn(scene())
-      deps.reconcile()
+      const api = deps.getViewportApi()
+      if (api !== null) api.refreshScene()
+      else deps.reconcile()
       lastError = null
       return out
     } catch (e) {
@@ -192,6 +210,20 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     replay: (json) => act((s) => s.replay(json).toString()),
+
+    save: () => query((s) => Array.from(s.save())),
+    load: (bytes) => {
+      // Route through the app's real Open path, not a bare `scene.load`, so the
+      // viewport re-tessellates exactly as File→Open does. `loadBytes` reports
+      // failure via its boolean (it has already toasted); surface it as both a
+      // lastError and a throw, matching the `act` helper's contract.
+      const ok = deps.loadBytes(new Uint8Array(bytes))
+      if (!ok) {
+        lastError = '__hew_test: load rejected'
+        throw new Error(lastError)
+      }
+      lastError = null
+    },
 
     startRecording: () => {
       scene().start_recording()

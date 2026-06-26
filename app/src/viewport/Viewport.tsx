@@ -165,6 +165,14 @@ export interface ViewportApi {
    */
   notifyLoaded: () => void
   /**
+   * Re-tessellate + re-render after a mutation made *outside* a tool (the
+   * `__hew_test` harness commits kernel ops directly). Mirrors what a tool commit
+   * runs internally — `handleSceneRefresh` (re-tessellate + propagate watertight
+   * state + reconcile + schedule a frame) plus `refreshAllSketches`. Without it
+   * harness geometry exists in the kernel but never reaches the GPU.
+   */
+  refreshScene: () => void
+  /**
    * True while the active tool is capturing raw keyboard input (mid-VCB entry),
    * so the global Delete/Backspace handler must not steal the key (Backspace
    * edits the typed buffer). False for non-capturing tools (e.g. Select).
@@ -571,6 +579,12 @@ export default function Viewport({
       scheduleRender()
     }
 
+    // Re-tessellate after a harness-driven kernel mutation (ViewportApi.refreshScene).
+    function refreshScene(): void {
+      handleSceneRefresh()
+      sceneRenderer.refreshAllSketches()
+    }
+
     function handleToast(message: string, code?: string): void {
       onToastRef.current?.(message, code)
     }
@@ -878,7 +892,7 @@ export default function Viewport({
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
     }
 
     // ------------------------------------------------------------------ tool factories

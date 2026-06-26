@@ -387,6 +387,7 @@ export function FloatingPanel({
     <div
       ref={rootRef}
       onPointerDownCapture={onFocus}
+      data-testid="floating-panel"
       style={{
         position: 'absolute',
         left: `${pos.x}px`,

@@ -62,7 +62,19 @@ edge." Three strategies, in priority order:
 
 ## Scope today
 
-`smoke.spec.ts` is the only spec: it proves the web build boots — React
-mounts, the WASM kernel loads, the WebGL2 canvas goes live, no console errors.
-The fuller flow (draw rectangle → push/pull → save/reload → screenshot) is
-**** and drives through the semantic harness where possible.
+- `smoke.spec.ts` — proves the web build boots: React mounts, the WASM
+  kernel loads, the WebGL2 canvas goes live, no console errors.
+- `harness.spec.ts` — drives `window.__hew_test` to prove the semantic
+  harness is wired to the live kernel + app reconcile (kernel ops, picking,
+  recording, error surfacing).
+- `web-smoke.spec.ts` — the canonical lifecycle: launch → draw
+  rectangle → push/pull → **save/reload** → screenshot. The modeling +
+  persistence logic goes through the harness; the **pixel** channel is used only
+  as its own subject (the viewport rendered the solid, and still shows it after
+  a save/open round-trip). The strong fidelity guarantee is logical, not visual:
+  `state_hash` + object count survive save→reload exactly. Screenshots are
+  attached as artifacts but **not** pixel-compared — pinned visual goldens are
+   (GPU variance needs a pinned runner).
+- `visual/` — the render-regression goldens, run only by the pinned
+  `visual` Playwright project (fixed viewport/DPR + SwiftShader). The functional
+  projects skip this dir (`testIgnore`). See `e2e/visual/README.md`.

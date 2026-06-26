@@ -1,7 +1,7 @@
 # Hew CI — mirrors scripts/verify.sh (the canonical local gate: fmt +
 # clippy -D warnings + cargo test + wasm-pack + Vitest + app build + the
-# Tauri host crate's fmt/clippy), then adds the replay gate and the
-# web-E2E smoke, and artifacts the built web app.
+# Tauri host crate's fmt/clippy), then adds the replay gate, the web-E2E
+# smoke, and the visual goldens, and artifacts the built web app.
 
 name: CI
 
@@ -69,7 +69,7 @@ jobs:
         run: node tools/replay-runner/run.mjs
 
       - name: Install Playwright browsers
-        run: pnpm --dir app exec playwright install --with-deps chromium
+        run: pnpm --dir app exec playwright install --with-deps chromium webkit
 
       # Chromium (SwiftShader software GL): boot smoke, harness specs, and
       # the draw → push/pull → save/reload lifecycle.
@@ -77,6 +77,30 @@ jobs:
         env:
           CI: '1'
         run: pnpm --dir app exec playwright test --project=chromium
+
+      # WebKit (WebKitGTK) — the engine closest to the macOS WKWebView.
+      # Runs under Xvfb because headless WebKitGTK needs a display + system
+      # GL (llvmpipe) to bring up the WebGL2 viewport. Non-blocking until
+      # validated green on GitHub-hosted runners; then drop
+      # continue-on-error to make it a required gate.
+      - name: Web E2E smoke (webkit) [validating — non-blocking]
+        continue-on-error: true
+        env:
+          CI: '1'
+        run: xvfb-run -a pnpm --dir app exec playwright test --project=webkit
+
+      # Visual-regression goldens on the pinned `visual` project (fixed
+      # 800×600 / DPR=1 / SwiftShader). The renderer is ANGLE-SwiftShader
+      # bundled with Playwright's pinned Chromium, so output should be
+      # reproducible across hosts on the same @playwright/test version.
+      # Non-blocking until a green run confirms the goldens reproduce on
+      # GitHub-hosted runners; regenerate once here (`e2e:visual:update`)
+      # and commit the PNGs if they diverge, then make this required.
+      - name: Web E2E visual goldens [validating — non-blocking]
+        continue-on-error: true
+        env:
+          CI: '1'
+        run: pnpm --dir app exec playwright test --project=visual
 
       - name: Upload built web app
         if: always()

@@ -1,7 +1,20 @@
-import init, { version, demo_mesh, Scene, type DemoMesh } from './pkg/wasm_api.js'
+import init, {
+  version,
+  demo_mesh,
+  Scene,
+  type DemoMesh,
+  init_logging,
+  set_log_drain,
+} from './pkg/wasm_api.js'
+import { installKernelDrain, bridgeLogStore } from '../log/diagnosticLog'
+import { registerScene, installFailureHandlers } from '../log/reproducerDump'
 
 // Memoize: only one initialization promise across the lifetime of the module.
 let initPromise: Promise<void> | null = null
+
+// Guards the log-drain install so it only ever runs once per session, even if
+// loadKernel() is awaited from multiple call sites.
+let logDrainInstalled = false
 
 function getInitPromise(): Promise<void> {
   if (initPromise === null) {
@@ -20,10 +33,27 @@ export interface KernelApi {
 
 export async function loadKernel(): Promise<KernelApi> {
   await getInitPromise()
+  if (!logDrainInstalled) {
+    logDrainInstalled = true
+    // : install the diagnostic-log sink — route kernel LogRecords into
+    // the unified ring buffer and bridge the existing app LogStore into it.
+    installKernelDrain(init_logging, set_log_drain)
+    bridgeLogStore()
+    // : install the auto-reproducer dump's uncaught error/rejection
+    // handlers once per session (catches panics/traps without an
+    // App/ErrorBoundary edit).
+    installFailureHandlers()
+  }
   return {
     version,
     demo_mesh,
-    newScene: () => new Scene(),
+    newScene: () => {
+      const scene = new Scene()
+      // : register every created Scene as the reproducer dump's
+      // command-stream source and start recording it immediately.
+      registerScene(scene)
+      return scene
+    },
   }
 }
 
