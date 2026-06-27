@@ -513,6 +513,13 @@ pub enum DocumentError {
     /// `group_nodes` members do not share a common parent — only siblings (all
     /// top-level, or all direct children of one group) can be grouped.
     MixedParents,
+    /// A replacing world-context op (boolean / slice / push-through subtract)
+    /// was targeted at an object that is **inside a group**. These ops consume
+    /// their operand(s) and emit fresh top-level world solids; applying one to a
+    /// group member would leave the parent group listing a consumed id (a
+    /// tree-consistency violation). Refused loudly (DEVELOPMENT.md rule 4) rather than
+    /// silently re-homed — ungroup, or enter no group context, first.
+    GroupedOperand,
     /// A sketch operation (region lookup / profile tracing) failed.
     Sketch(SketchError),
     /// Extruding the region into a solid failed.
@@ -572,6 +579,10 @@ impl std::fmt::Display for DocumentError {
             DocumentError::MixedParents => {
                 write!(f, "only sibling nodes (sharing one parent) can be grouped")
             }
+            DocumentError::GroupedOperand => write!(
+                f,
+                "cannot combine, slice, or push-through an object inside a group — ungroup it first"
+            ),
             DocumentError::Sketch(e) => write!(f, "{e}"),
             DocumentError::Extrude(e) => write!(f, "{e}"),
             DocumentError::Boolean(e) => write!(f, "{e}"),
@@ -2236,16 +2247,23 @@ impl Document {
             // fully coincident — a degenerate contact); reject before mutating.
             return Err(DocumentError::Boolean(BooleanError::DegenerateContact));
         }
-        let obj_a = match self.objects.get(a) {
-            Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
-            _ => return Err(DocumentError::UnknownObject),
-        };
-        let obj_b = match self.objects.get(b) {
-            Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
-            _ => return Err(DocumentError::UnknownObject),
-        };
+        let rec_a = self
+            .objects
+            .get(a)
+            .filter(|r| !r.hidden && r.is_world())
+            .ok_or(DocumentError::UnknownObject)?;
+        let rec_b = self
+            .objects
+            .get(b)
+            .filter(|r| !r.hidden && r.is_world())
+            .ok_or(DocumentError::UnknownObject)?;
+        // A replacing op consumes its operands and emits fresh top-level solids;
+        // a grouped operand would orphan the parent group's member list.
+        if rec_a.group_parent().is_some() || rec_b.group_parent().is_some() {
+            return Err(DocumentError::GroupedOperand);
+        }
 
-        let result = Object::boolean(op, obj_a, obj_b, &Transform::IDENTITY)
+        let result = Object::boolean(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
             .map_err(DocumentError::Boolean)?;
 
         let id = self.objects.insert(ObjectRecord {
@@ -2289,11 +2307,16 @@ impl Document {
     ) -> Result<((ObjectId, ObjectId), DocChange), DocumentError> {
         let n = plane.normal();
         info!(target: "kernel::op", op = "slice_node", nx = n.x, ny = n.y, nz = n.z);
-        let source = match self.objects.get(object) {
-            Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
-            _ => return Err(DocumentError::UnknownObject),
-        };
-        let (positive, negative) = source.slice(plane).map_err(DocumentError::Slice)?;
+        let rec = self
+            .objects
+            .get(object)
+            .filter(|r| !r.hidden && r.is_world())
+            .ok_or(DocumentError::UnknownObject)?;
+        // Replacing op: a grouped source would orphan its parent group.
+        if rec.group_parent().is_some() {
+            return Err(DocumentError::GroupedOperand);
+        }
+        let (positive, negative) = rec.object.slice(plane).map_err(DocumentError::Slice)?;
 
         let a = self.objects.insert(ObjectRecord {
             object: positive,
@@ -2349,11 +2372,17 @@ impl Document {
         distance: f64,
     ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "push_pull_through", distance);
-        let src = match self.objects.get(object) {
-            Some(rec) if !rec.hidden && rec.is_world() => &rec.object,
-            _ => return Err(DocumentError::UnknownObject),
-        };
-        let result = src
+        let rec = self
+            .objects
+            .get(object)
+            .filter(|r| !r.hidden && r.is_world())
+            .ok_or(DocumentError::UnknownObject)?;
+        // Replacing op: a grouped source would orphan its parent group.
+        if rec.group_parent().is_some() {
+            return Err(DocumentError::GroupedOperand);
+        }
+        let result = rec
+            .object
             .push_through(face, distance)
             .map_err(|e| DocumentError::Op(KernelOpError::PushPull(e)))?;
         let pieces = result.split_connected_components();

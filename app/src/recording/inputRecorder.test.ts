@@ -98,4 +98,31 @@ describe('inputRecorder', () => {
     expect(rec.isActive()).toBe(false)
     expect(rec.take()).toHaveLength(1)
   })
+
+  it('peek() returns events without clearing the buffer', () => {
+    rec.start()
+    rec.recordPointer('pointerdown', 0, 0, ptr({ buttons: 1 }))
+    rec.recordPointer('pointermove', 1, 1, ptr({ buttons: 1 }))
+
+    const first = rec.peek()
+    expect(first).toHaveLength(2)
+
+    // A subsequent peek() still sees the same events (not cleared).
+    const second = rec.peek()
+    expect(second).toHaveLength(2)
+    expect(second).toEqual(first)
+
+    // take() afterward still sees them too.
+    expect(rec.take()).toHaveLength(2)
+    expect(rec.take()).toEqual([]) // now cleared
+  })
+
+  it('peek() returns a copy, not a live reference to the internal buffer', () => {
+    rec.start()
+    rec.recordPointer('pointerdown', 0, 0, ptr({ buttons: 1 }))
+    const snapshot = rec.peek()
+    rec.recordPointer('pointermove', 1, 1, ptr({ buttons: 1 }))
+    expect(snapshot).toHaveLength(1) // unaffected by the later record
+    expect(rec.peek()).toHaveLength(2)
+  })
 })

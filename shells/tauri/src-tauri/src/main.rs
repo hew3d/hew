@@ -596,6 +596,16 @@ fn main() {
                 .build()?;
 
             // ----------------------------------------------------------------
+            // Help menu
+            // ----------------------------------------------------------------
+            let help_report_bug =
+                MenuItemBuilder::with_id("help-report-bug", "Report Bug…").build(handle)?;
+
+            let help_menu = SubmenuBuilder::new(handle, "Help")
+                .item(&help_report_bug)
+                .build()?;
+
+            // ----------------------------------------------------------------
             // Assemble and set the menu bar
             // ----------------------------------------------------------------
             let menu = MenuBuilder::new(handle)
@@ -607,6 +617,7 @@ fn main() {
                 .item(&tools_menu)
                 .item(&camera_menu)
                 .item(&window_menu)
+                .item(&help_menu)
                 .build()?;
 
             // Attach the menu. macOS shows a single global menu bar owned by the
@@ -705,6 +716,7 @@ fn main() {
                 "win-tags" => "toggle-tags",
                 "win-object-info" => "toggle-object-info",
                 "win-debug-log" => "toggle-debug-log",
+                "help-report-bug" => "report-bug",
                 _ => return,
             };
             let _ = app.emit("menu-action", action);

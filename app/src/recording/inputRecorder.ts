@@ -107,6 +107,16 @@ export function take(): InputEvent[] {
   return out
 }
 
+/**
+ * Return a COPY of the buffered events WITHOUT clearing the buffer — for a
+ * bug report (generateBugReport) that shouldn't disrupt an ongoing
+ * recording. Unlike {@link take}, a subsequent take()/peek() still sees the
+ * same events.
+ */
+export function peek(): InputEvent[] {
+  return events.slice()
+}
+
 /** Test seam: override the clock used for `t`. Pass nothing to restore default. */
 export function __setClockForTest(fn?: () => number): void {
   clock =

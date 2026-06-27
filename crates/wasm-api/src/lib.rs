@@ -862,6 +862,40 @@ impl Scene {
             state_hash = self.doc.state_hash(),
             objects = change.objects_touched.len(),
         );
+
+        self.torture_self_check(change);
+    }
+
+    /// Torture-mode (docs/DEVELOPMENT.md) re-tessellation self-check.
+    /// When the Document's torture flag is on, re-tessellate every touched
+    /// visible world object after the op and emit a loud `kernel::torture` error
+    /// marker if any fails — so a flake surfaces at the **exact** op instead of
+    /// as a downstream visual glitch three steps later. The kernel half (the
+    /// topology validator on every op even in release WASM) lives in `Document`
+    ///; this is the tessellate half, which can't live in the kernel
+    /// (rule 1 — the kernel may not depend on `tessellate`). A no-op — one
+    /// branch — when torture mode is off, the default.
+    fn torture_self_check(&self, change: &DocChange) {
+        if !self.doc.torture_mode() {
+            return;
+        }
+        let palette = self.doc.materials();
+        for &id in &change.objects_touched {
+            if !self.doc.is_world_object(id) {
+                continue;
+            }
+            let Some(object) = self.doc.object(id) else {
+                continue;
+            };
+            if let Err(e) = tessellate(object, palette) {
+                tracing::error!(
+                    target: "kernel::torture",
+                    object = ?id,
+                    error = %e,
+                    "torture: re-tessellation failed after op (flake surfaced at this op)",
+                );
+            }
+        }
     }
 
     /// Registers a visible instance's definition members with inference, each
@@ -2473,6 +2507,23 @@ impl Scene {
         self.doc.state_hash()
     }
 
+    /// Enable/disable kernel **torture mode** (docs/DEVELOPMENT.md): the
+    /// Debug Mode toggle (Settings) flips it. When on, the topology validator
+    /// runs on every visible object after every op **even in release WASM**
+    /// (where the debug `check_invariants` compiles out —), and this Scene
+    /// additionally re-tessellates every touched object after each op (the
+    /// [`Scene::reconcile`] self-check). Together they surface a flake at the
+    /// exact op with a precise log marker. Off by default — interactive cost is
+    /// real, so it stays opt-in.
+    pub fn set_torture_mode(&mut self, on: bool) {
+        self.doc.set_torture_mode(on);
+    }
+
+    /// Whether torture mode is currently enabled (see [`Scene::set_torture_mode`]).
+    pub fn torture_mode(&self) -> bool {
+        self.doc.torture_mode()
+    }
+
     // -------------------------------------------------- recording / replay
 
     /// Begins recording the committed `Scene` command stream as replayable typed
@@ -2760,6 +2811,40 @@ mod tests {
         assert!(
             cmd["fields"]["state_hash"].as_u64().is_some(),
             "the cmd event carries a numeric post-op state_hash"
+        );
+    }
+
+    /// Torture mode: the wasm accessor forwards to the kernel flag, a
+    /// normal op still commits with it on, and a valid op emits **no**
+    /// `kernel::torture` error marker (the re-tessellation self-check passes —
+    /// the marker fires only on a genuine flake).
+    #[test]
+    fn torture_mode_runs_the_self_check_without_false_positives() {
+        use tracing::subscriber::with_default;
+
+        log::reset();
+        with_default(log::DrainSubscriber, || {
+            let mut scene = Scene::new();
+            assert!(!scene.torture_mode(), "off by default");
+            scene.set_torture_mode(true);
+            assert!(scene.torture_mode());
+
+            let (s, r) = ground_unit_square(&mut scene);
+            scene
+                .extrude_region(s, r, 2.0)
+                .expect("extrude commits with torture on");
+
+            scene.set_torture_mode(false);
+            assert!(!scene.torture_mode());
+        });
+        let torture_failures = log::drain_buffer()
+            .into_iter()
+            .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap())
+            .filter(|r| r["target"] == "kernel::torture")
+            .count();
+        assert_eq!(
+            torture_failures, 0,
+            "a valid op produces no torture self-check failure marker"
         );
     }
 

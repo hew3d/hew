@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
+import { connect } from 'node:net'
 
 /**
  * WebdriverIO + tauri-driver config for the **real desktop binary** (
@@ -24,8 +25,12 @@ const srcTauri = resolve(here, '../src-tauri')
 // `hew-desktop` → `hew` rename (and `Hew.app` on macOS) with no edit here.
 function cargoBinName(): string {
   const toml = readFileSync(resolve(srcTauri, 'Cargo.toml'), 'utf8')
-  const m = toml.match(/^\s*name\s*=\s*"([^"]+)"/m)
-  if (!m) throw new Error('wdio.conf: could not read package name from src-tauri/Cargo.toml')
+  // Read `name` from the [package] table specifically: split on section headers
+  // and scan only that chunk, so a future `[[bin]]`/`[lib]`/dependency `name = …`
+  // line can't shadow the package name.
+  const pkg = toml.split(/^\[/m).find((s) => s.startsWith('package]'))
+  const m = pkg?.match(/^\s*name\s*=\s*"([^"]+)"/m)
+  if (!m) throw new Error('wdio.conf: could not read [package].name from src-tauri/Cargo.toml')
   return m[1]
 }
 
@@ -39,6 +44,29 @@ const application =
 const nativeDriver = process.env.WEBKIT_WEBDRIVER
 
 let tauriDriver: ChildProcess | undefined
+
+// Poll a TCP port until something accepts a connection (or we give up). Used to
+// hold off the WebDriver session until tauri-driver has actually bound :4444 —
+// `spawn` returns immediately, so opening the session right away races the
+// driver's listen() and flakes with a connection-refused.
+function waitForPort(host: string, port: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  return new Promise((res, rej) => {
+    const attempt = (): void => {
+      const sock = connect({ host, port })
+      sock.once('connect', () => {
+        sock.destroy()
+        res()
+      })
+      sock.once('error', () => {
+        sock.destroy()
+        if (Date.now() >= deadline) rej(new Error(`tauri-driver never listened on ${host}:${port}`))
+        else setTimeout(attempt, 100)
+      })
+    }
+    attempt()
+  })
+}
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
@@ -73,12 +101,17 @@ export const config: WebdriverIO.Config = {
   },
 
   // tauri-driver must run for the duration of each session.
-  beforeSession() {
+  async beforeSession() {
     const args = ['--port', '4444']
     if (nativeDriver) args.push('--native-driver', nativeDriver)
     tauriDriver = spawn('tauri-driver', args, {
       stdio: [null, process.stdout, process.stderr],
     })
+    tauriDriver.once('error', (e) => {
+      throw new Error(`wdio.conf: failed to spawn tauri-driver (is it installed?): ${e.message}`)
+    })
+    // Don't open the session until the driver is actually listening.
+    await waitForPort('127.0.0.1', 4444)
   },
   afterSession() {
     tauriDriver?.kill()

@@ -2136,6 +2136,86 @@ fn slice_node_missing_plane_refused_and_untouched() {
     );
 }
 
+/// Replacing world-context ops (boolean / slice / push-through) consume their
+/// operand(s) and emit fresh top-level solids. Applied to a **grouped** leaf
+/// they would hide the operand but leave the parent group still listing the
+/// consumed id — a tree-consistency violation (`debug_validate_tree`) found by
+/// the determinism guard. They must be refused loudly (rule 4) and leave
+/// the document untouched, so the group is never left pointing at a stale id.
+#[test]
+fn replacing_ops_refuse_a_grouped_leaf_and_leave_the_document_untouched() {
+    let mut doc = Document::new();
+    // A 4×4×1 slab with a centred 1×1 sub-face imprinted (so push-through has a
+    // real sub-face to drive), plus a second box to combine / group with.
+    let a = extrude_box(&mut doc, 0.0, 0.0, 4.0, 4.0, 0.0, 1.0);
+    let top = top_face(doc.object(a).unwrap());
+    let sub = match doc
+        .apply_object_op(
+            a,
+            KernelOp::SplitFaceInner {
+                face: top,
+                loop_path: vec![
+                    Point3::new(1.5, 1.5, 1.0),
+                    Point3::new(2.5, 1.5, 1.0),
+                    Point3::new(2.5, 2.5, 1.0),
+                    Point3::new(1.5, 2.5, 1.0),
+                ],
+            },
+        )
+        .expect("imprint sub-face")
+        .0
+    {
+        KernelOpReport::FaceSplitInner(r) => r.sub_face,
+        other => panic!("unexpected report {other:?}"),
+    };
+    let b = extrude_box(&mut doc, 6.0, 6.0, 7.0, 7.0, 0.0, 1.0);
+
+    // Group both leaves: now `a` and `b` are members of `g`, not top-level.
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group the two boxes");
+    assert_eq!(doc.node_parent(NodeId::Object(a)), Some(g));
+
+    let plane =
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 0.5), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+
+    // All three replacing ops refuse a grouped operand with GroupedOperand…
+    assert_eq!(
+        doc.boolean(BooleanOp::Union, a, b).map(|_| ()),
+        Err(DocumentError::GroupedOperand),
+        "boolean refuses a grouped operand"
+    );
+    assert_eq!(
+        doc.slice_node(a, &plane).map(|_| ()),
+        Err(DocumentError::GroupedOperand),
+        "slice refuses a grouped source"
+    );
+    assert_eq!(
+        doc.push_pull_through(a, sub, -2.0).map(|_| ()),
+        Err(DocumentError::GroupedOperand),
+        "push-through refuses a grouped source"
+    );
+
+    // …and each leaves the document untouched: both leaves still visible, the
+    // group still lists exactly them (an invariant the debug validator that runs
+    // after every mutation would have caught had any op partially applied).
+    let visible = doc.visible_object_ids();
+    assert_eq!(visible.len(), 2, "both leaves still visible");
+    assert!(visible.contains(&a) && visible.contains(&b));
+    assert_eq!(
+        doc.group_members(g),
+        Some(vec![NodeId::Object(a), NodeId::Object(b)]),
+        "group membership intact — no stale/consumed id"
+    );
+
+    // The guard is precise: once ungrouped, the same slice succeeds.
+    doc.ungroup(g).expect("ungroup");
+    assert!(
+        doc.slice_node(a, &plane).is_ok(),
+        "slice works on the now-top-level object"
+    );
+}
+
 // -------------------------------------------------- push-through subtract
 
 #[test]

@@ -85,9 +85,11 @@ export interface MenuBarProps {
   onStandardView?: (view: StandardView) => void
   /** Open the Settings window/modal (Window → Settings…, web only — native uses the OS app menu). */
   onOpenSettings?: () => void
+  /** Assemble and write a "Report Bug" bundle (Help → Report Bug…). */
+  onReportBug?: () => void
 }
 
-type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | null
+type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | 'help' | null
 
 /** Filename portion of a path (handles / and \ separators). */
 function baseName(path: string): string {
@@ -282,6 +284,7 @@ export function MenuBar({
   onZoomExtents,
   onStandardView,
   onOpenSettings,
+  onReportBug,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -612,6 +615,24 @@ export function MenuBar({
               label="Settings…"
               shortcut={`${mod},`}
               onClick={withClose(() => onOpenSettings?.())}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Help menu */}
+      <div style={{ position: 'relative' }}>
+        <button
+          style={MENU_TRIGGER_STYLE(openMenu === 'help')}
+          onClick={() => toggle('help')}
+        >
+          Help
+        </button>
+        {openMenu === 'help' && (
+          <div style={DROPDOWN_STYLE}>
+            <MenuItem
+              label="Report Bug…"
+              onClick={withClose(() => onReportBug?.())}
             />
           </div>
         )}

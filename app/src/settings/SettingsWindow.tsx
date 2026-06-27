@@ -2,18 +2,20 @@
  * SettingsWindow — standalone shell rendered in the separate Settings webview
  * window (Tauri) when the URL hash is `#settings` (see main.tsx).
  *
- * Two-column layout: a left list of setting categories (currently just
- * "Units") and the right pane rendering the selected category's content.
- * Styled to match the app's dark theme.
+ * Two-column layout: a left list of setting categories ("Units", "Debug")
+ * and the right pane rendering the selected category's content. Styled to
+ * match the app's dark theme.
  */
 
 import { useState } from 'react'
 import { UnitsPane } from './UnitsPane'
+import { DebugPane } from './DebugPane'
 
-type Category = 'units'
+type Category = 'units' | 'debug'
 
 const CATEGORIES: { id: Category; label: string }[] = [
   { id: 'units', label: 'Units' },
+  { id: 'debug', label: 'Debug' },
 ]
 
 export function SettingsWindow() {
@@ -74,6 +76,7 @@ export function SettingsWindow() {
         {/* Right pane */}
         <div style={{ flex: 1, minWidth: 0, padding: '16px', overflowY: 'auto' }}>
           {active === 'units' && <UnitsPane />}
+          {active === 'debug' && <DebugPane />}
         </div>
       </div>
     </div>

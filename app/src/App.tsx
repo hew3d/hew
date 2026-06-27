@@ -32,6 +32,10 @@ import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { UnitsPane } from './settings/UnitsPane'
+import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
+import * as diagnosticLog from './log/diagnosticLog'
+import * as inputRecorder from './recording/inputRecorder'
+import { generateBugReport } from './log/reportBug'
 import { TOOL_ICON_SVG } from './tools/toolIcons'
 import { modLabel } from './platform'
 
@@ -221,6 +225,25 @@ export default function App() {
         setError(msg)
         LogStore.log.error('app', `Kernel load failed: ${msg}`)
       })
+  }, [])
+
+  // ---------------------------------------------------------------- Debug Mode
+  // Apply the GLOBAL half of Debug Mode's effects (file logging + input
+  // recording + torture mode on the CURRENT scene) once on mount and on every
+  // subsequent toggle. The PER-SCENE half — a freshly-created Scene (New/Open)
+  // inheriting the current mode — is covered by wasm/loader.ts's newScene().
+  useEffect(() => {
+    const apply = (on: boolean): void => {
+      diagnosticLog.setFileLogging(on)
+      if (on) {
+        inputRecorder.start()
+      } else {
+        inputRecorder.stop()
+      }
+      sceneRef.current?.set_torture_mode(on)
+    }
+    apply(getDebugMode())
+    return subscribeDebugMode(apply)
   }, [])
 
   // Keep the ref in sync so side-effect callbacks can read current session state.
@@ -423,6 +446,27 @@ export default function App() {
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
+
+  // Report Bug — assemble the bundle and tell the user what happened.
+  // The write is otherwise silent (Tauri saves a file, web downloads), so
+  // without a toast it looks like the menu item does nothing.
+  const handleReportBug = useCallback(() => {
+    const scene = sceneRef.current
+    if (scene === null) {
+      handleToast('Report Bug: the model is still loading — try again in a moment.')
+      return
+    }
+    handleToast('Generating bug report…')
+    void generateBugReport(scene, 'user-report').then((result) => {
+      if (!result.ok) {
+        handleToast('Report Bug failed — see the diagnostic log for details.')
+      } else if (result.path !== null) {
+        handleToast(`Bug report saved: ${result.path}`)
+      } else {
+        handleToast('Bug report downloaded.')
+      }
+    })
+  }, [handleToast])
 
   useEffect(() => {
     const unsub = LogStore.subscribe((entries) => {
@@ -922,6 +966,7 @@ export default function App() {
       case 'view-right':          viewportApi.current?.setStandardView('right'); break
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
       case 'open-settings':       openSettingsRef.current(); break
+      case 'report-bug': handleReportBug(); break
     }
   }
 
@@ -1508,6 +1553,7 @@ export default function App() {
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         onOpenSettings={openSettings}
+        onReportBug={handleReportBug}
       />
 
       {/* Kernel panic sticky banner */}

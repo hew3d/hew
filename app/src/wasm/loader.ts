@@ -8,6 +8,7 @@ import init, {
 } from './pkg/wasm_api.js'
 import { installKernelDrain, bridgeLogStore } from '../log/diagnosticLog'
 import { registerScene, installFailureHandlers } from '../log/reproducerDump'
+import { getDebugMode } from '../settings/debugMode'
 
 // Memoize: only one initialization promise across the lifetime of the module.
 let initPromise: Promise<void> | null = null
@@ -52,6 +53,9 @@ export async function loadKernel(): Promise<KernelApi> {
       // : register every created Scene as the reproducer dump's
       // command-stream source and start recording it immediately.
       registerScene(scene)
+      // : a freshly-created Scene (New/Open recreate it) inherits the
+      // current Debug Mode setting, since torture mode is per-Scene state.
+      scene.set_torture_mode(getDebugMode())
       return scene
     },
   }
