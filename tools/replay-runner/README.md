@@ -37,6 +37,19 @@ Drives a fresh `Scene` through each named scenario in `generate.mjs`
   recorded method except `delete_node`.
 - `single-box-delete` — one extruded box, transformed, then removed via
   `delete_node` (the one method the boxes scenario doesn't touch).
+- `two-boxes-subtract` / `two-boxes-intersect` — the same overlapping pair
+  combined with boolean op 1 (a−b) and op 2 (intersect). The union scenario only
+  pins op 0; these lock the other two CSG ops, whose result topology differs.
+- `rotated-box` — one box `transform_object`-ed by a 45°-about-Z rotation (+
+  translate). The only fixture that drives the rotational affine path (the rest
+  only translate); 45° also pins float determinism in the transform.
+- `multi-object-scene` — three independent boxes at distinct positions, never
+  combined. Locks the multi-object *document* hash (every other fixture
+  collapses to one object).
+- `chained-boolean` — union a∪b, then subtract c from the result: a boolean
+  whose operand is itself a boolean result (handle reuse across a replacing op).
+- `hex-prism` — a 6-gon ground profile (the Circle tool's N-gon shape) extruded,
+  exercising extrude over a non-quad loop.
 
 To regenerate a single scenario: `node generate.mjs <name>` (or
 `node generate.mjs` with no arg to run every scenario, same as

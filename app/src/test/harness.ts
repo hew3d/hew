@@ -31,6 +31,13 @@ import type { ViewportApi } from '../viewport/Viewport'
 import type { NodeRef } from '../panels/treeModel'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
+import {
+  formatLength,
+  getLengthUnit,
+  parseLengthToMeters,
+  setLengthUnit,
+  type LengthFormat,
+} from '../settings/units'
 
 type Vec3 = [number, number, number]
 
@@ -60,6 +67,8 @@ export interface HarnessDeps {
 }
 
 export interface HewTestHarness {
+  /** True once the kernel scene AND the viewport API are both wired — wait on
+   * this before driving any harness op (camera/draw/pick need the viewport). */
   isReady(): boolean
   // modeling
   drawRectangle(p0: Vec3, p1: Vec3): { sketch: string; region: string }
@@ -89,6 +98,144 @@ export interface HewTestHarness {
   getObjectIds(): string[]
   getSelection(): { kind: string; id: string }[]
   getLastError(): string | null
+
+  // -------- NEW in  --------
+
+  /**
+   * Draw a chain of line segments in a new ground sketch. Points are an ordered
+   * list of positions; segments are added between consecutive pairs. Returns the
+   * sketch handle (string) and all closed regions that formed (as handle strings).
+   * Equivalent to what LineTool commits: begin_ground_sketch → N × sketch_add_segment.
+   */
+  drawLineChain(points: Vec3[]): { sketch: string; regions: string[] }
+
+  /**
+   * Draw a regular N-gon approximation of a circle in a new ground sketch.
+   * `center` is the XY centroid (Z ignored), `radius` in meters, `nSegments`
+   * defaults to 24 (same as CircleTool). Returns the sketch and the one closed
+   * region that forms (the N-gon). Equivalent to CircleTool's commit.
+   */
+  drawCircle(center: Vec3, radius: number, nSegments?: number): { sketch: string; region: string }
+
+  /**
+   * Move `object` by a world translation (meters). Calls `transform_object` with
+   * a pure-translation 3×4 affine, exactly as MoveTool commits. The handle
+   * is unchanged; the document state_hash changes.
+   */
+  moveObject(object: string, dx: number, dy: number, dz: number): void
+
+  /**
+   * Copy `object` to a new object offset by `(dx, dy, dz)` meters. Calls
+   * `duplicate_node(0, id, affine)` with a translation affine, matching the
+   * "Option-drag" branch of MoveTool. Returns the new node's kind and id.
+   */
+  copyObject(id: string, dx: number, dy: number, dz: number): { kind: string; id: string }
+
+  /**
+   * Rotate `object` by `angleDeg` degrees around `axis` (default: Z = [0,0,1]).
+   * Builds a Rodrigues rotation matrix and calls `transform_object`, matching
+   * RotateTool's commit.
+   */
+  rotateObject(object: string, angleDeg: number, axis?: Vec3): void
+
+  /**
+   * Slice a watertight solid by a plane. `plane` is 6 floats `[px,py,pz,nx,ny,nz]`
+   * (a point on the plane + its normal). Returns `[positiveId, negativeId]` as
+   * decimal strings. Calls `slice_object` directly (SliceTool's commit).
+   */
+  sliceObject(
+    object: string,
+    plane: [number, number, number, number, number, number],
+  ): [string, string]
+
+  /**
+   * Add a construction guide line through `(ox,oy,oz)` along direction
+   * `(dx,dy,dz)`. Returns the guide handle as a decimal string. Matches
+   * TapeMeasureTool's parallel-guide commit and ProtractorTool's angular-guide
+   * commit.
+   */
+  addGuideLine(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): string
+
+  /**
+   * Add a construction guide point at `(x,y,z)`. Returns the guide handle as a
+   * decimal string. Matches TapeMeasureTool's point-mode commit.
+   */
+  addGuidePoint(x: number, y: number, z: number): string
+
+  /** Delete one construction guide by handle string. */
+  deleteGuide(id: string): void
+
+  /** Delete all construction guides in one undo step. */
+  deleteAllGuides(): void
+
+  /** Handles of all currently visible construction guides, as decimal strings. */
+  getGuideIds(): string[]
+
+  /**
+   * Document-level undo (same kernel path as Cmd+Z). Calls `scene_undo()` and
+   * reconciles the viewport. Throws if there is nothing to undo.
+   */
+  undo(): void
+
+  /**
+   * Document-level redo. Calls `scene_redo()` and reconciles the viewport.
+   * Throws if there is nothing to redo.
+   */
+  redo(): void
+
+  /** True if there is a document action to undo. */
+  canUndo(): boolean
+
+  /** True if there is a document action to redo. */
+  canRedo(): boolean
+
+  /**
+   * Set the active display/parse length unit ( VCB). `format` is one
+   * of `'m'|'cm'|'mm'|'arch'|'frac_in'|'dec_in'`. Writes through to
+   * `setLengthUnit` (the same singleton the tools use) so subsequent
+   * `formatLength` / `parseLength` calls reflect the new format.
+   */
+  setLengthUnit(format: string): void
+
+  /** The currently active length format string (e.g. `'cm'`). */
+  getLengthUnit(): string
+
+  /**
+   * Format `meters` (a kernel f64 length) using the current display unit, as
+   * the VCB and status bar do. E.g. 1.5 m → "150 cm" when unit is cm.
+   */
+  formatLength(meters: number): string
+
+  /**
+   * Parse a typed length string to meters using the current unit ( VCB).
+   * Returns `null` on empty/invalid input. E.g. "100 cm" → 1.0.
+   */
+  parseLength(input: string): number | null
+
+  // -------- materials --------
+
+  /**
+   * Add a solid-color material to the palette and return its handle (decimal
+   * string). `r`/`g`/`b`/`a` are 0–255; `a` < 255 is translucent. Wraps
+   * `add_material`. Palette additions are not individually undoable — only
+   * assignment (via `paintObject`/`paintFace`) is.
+   */
+  addMaterial(name: string, r: number, g: number, b: number, a: number): string
+
+  /**
+   * Set `object`'s base material — the color the whole solid (and faces grown
+   * later by extrude/boolean) renders with, unless a face is explicitly painted.
+   * Wraps `set_object_material`. Pass `null` to clear back to the renderer
+   * default. Undoable.
+   */
+  paintObject(object: string, material: string | null): void
+
+  /**
+   * Paint a single `face` of `object` with `material`, overriding the object's
+   * base material for that face. Wraps `paint_face`. Pass `null` for `material`
+   * to reset the face to the (unpainted) default. Undoable.
+   */
+  paintFace(object: string, face: string, material: string | null): void
 }
 
 declare global {
@@ -138,6 +285,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     }
   }
 
+  // The kernel's "no/clear material" sentinel is u64::MAX (see paint_face /
+  // set_object_material in wasm-api). Map the harness's `null` to it.
+  const MATERIAL_NONE = (1n << 64n) - 1n
+  const materialHandle = (m: string | null): bigint => (m === null ? MATERIAL_NONE : BigInt(m))
+
   // Add the four edges of the axis-aligned rectangle p0→p1 (on p0's z plane) to
   // `sketch`, returning the first closed region handle it forms.
   function addRectangle(s: Scene, sketch: bigint, p0: Vec3, p1: Vec3): bigint {
@@ -161,7 +313,13 @@ export function installTestHarness(deps: HarnessDeps): () => void {
   }
 
   const harness: HewTestHarness = {
-    isReady: () => deps.getScene() !== null,
+    // Ready = kernel scene live AND the viewport API wired. Both are needed
+    // before callers drive the harness: drawBox/setCamera/pickFace go through the
+    // viewport (setCamera throws "viewport not ready" without it). The viewport
+    // registers its API a tick after the scene becomes non-null, so gating only
+    // on the scene leaves a race that a slower-mounting engine (webkit) loses —
+    // `waitForFunction(isReady)` then `setCamera` flaked. Gate on both.
+    isReady: () => deps.getScene() !== null && deps.getViewportApi() !== null,
 
     drawRectangle: (p0, p1) =>
       act((s) => {
@@ -243,6 +401,132 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getSelection: () =>
       deps.getSelection().map((n) => ({ kind: n.kind, id: n.id.toString() })),
     getLastError: () => lastError,
+
+    // -------- NEW in  --------
+
+    drawLineChain: (points) =>
+      act((s) => {
+        if (points.length < 2) throw new Error('drawLineChain: need at least 2 points')
+        const sketch = s.begin_ground_sketch()
+        const regionsAll = new Set<bigint>()
+        for (let i = 0; i < points.length - 1; i++) {
+          const a = points[i]
+          const b = points[i + 1]
+          const added = s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+          for (const r of added.regions_created()) regionsAll.add(r)
+        }
+        return {
+          sketch: sketch.toString(),
+          regions: Array.from(regionsAll).map(String),
+        }
+      }),
+
+    drawCircle: (center, radius, nSegments = 24) =>
+      act((s) => {
+        if (radius <= 0) throw new Error('drawCircle: radius must be positive')
+        const sketch = s.begin_ground_sketch()
+        const pts: Vec3[] = []
+        for (let i = 0; i < nSegments; i++) {
+          const theta = (2 * Math.PI * i) / nSegments
+          pts.push([center[0] + radius * Math.cos(theta), center[1] + radius * Math.sin(theta), center[2]])
+        }
+        let lastRegion: bigint | null = null
+        for (let i = 0; i < nSegments; i++) {
+          const a = pts[i]
+          const b = pts[(i + 1) % nSegments]
+          const added = s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+          for (const r of added.regions_created()) lastRegion = r
+        }
+        if (lastRegion === null) {
+          // Fallback: ask the scene for any open regions
+          const regions = s.sketch_regions(sketch)
+          lastRegion = regions.length > 0 ? regions[0] : null
+        }
+        if (lastRegion === null) throw new Error('drawCircle: no region formed')
+        return { sketch: sketch.toString(), region: lastRegion.toString() }
+      }),
+
+    moveObject: (object, dx, dy, dz) => {
+      // Pure-translation 3×4 row-major affine: identity rotation + (dx,dy,dz) column.
+      const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
+      act((s) => s.transform_object(BigInt(object), affine))
+    },
+
+    copyObject: (id, dx, dy, dz) => {
+      const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
+      return act((s) => {
+        const node = s.duplicate_node(0, BigInt(id), affine)
+        return { kind: node.kind, id: node.id.toString() }
+      })
+    },
+
+    rotateObject: (object, angleDeg, axis = [0, 0, 1]) => {
+      // Rodrigues rotation matrix around a normalized axis by angleDeg degrees.
+      const [ux, uy, uz] = axis
+      const len = Math.hypot(ux, uy, uz)
+      if (len < 1e-12) throw new Error('rotateObject: axis must be non-zero')
+      const ax = ux / len, ay = uy / len, az = uz / len
+      const theta = (angleDeg * Math.PI) / 180
+      const c = Math.cos(theta), s_ = Math.sin(theta), t = 1 - c
+      // Row-major 3×4 affine; translation column is zero.
+      const affine = new Float64Array([
+        t * ax * ax + c,       t * ax * ay - s_ * az, t * ax * az + s_ * ay, 0,
+        t * ay * ax + s_ * az, t * ay * ay + c,       t * ay * az - s_ * ax, 0,
+        t * az * ax - s_ * ay, t * az * ay + s_ * ax, t * az * az + c,       0,
+      ])
+      act((s) => s.transform_object(BigInt(object), affine))
+    },
+
+    sliceObject: (object, plane) =>
+      act((s) => {
+        const ids = s.slice_object(BigInt(object), new Float64Array(plane))
+        return [ids[0].toString(), ids[1].toString()] as [string, string]
+      }),
+
+    addGuideLine: (ox, oy, oz, dx, dy, dz) =>
+      act((s) => s.add_guide_line(ox, oy, oz, dx, dy, dz).toString()),
+
+    addGuidePoint: (x, y, z) =>
+      act((s) => s.add_guide_point(x, y, z).toString()),
+
+    deleteGuide: (id) => {
+      act((s) => s.delete_guide(BigInt(id)))
+    },
+
+    deleteAllGuides: () => {
+      act((s) => s.delete_all_guides())
+    },
+
+    getGuideIds: () => query((s) => Array.from(s.guide_ids()).map(String)),
+
+    undo: () => {
+      act((s) => s.scene_undo())
+    },
+
+    redo: () => {
+      act((s) => s.scene_redo())
+    },
+
+    canUndo: () => query((s) => s.can_scene_undo()),
+    canRedo: () => query((s) => s.can_scene_redo()),
+
+    setLengthUnit: (format) => setLengthUnit(format as LengthFormat),
+    getLengthUnit: () => getLengthUnit(),
+    formatLength: (meters) => formatLength(meters),
+    parseLength: (input) => parseLengthToMeters(input),
+
+    // -------- materials --------
+
+    addMaterial: (name, r, g, b, a) =>
+      act((s) => s.add_material(name, r, g, b, a).toString()),
+
+    paintObject: (object, material) => {
+      act((s) => s.set_object_material(BigInt(object), materialHandle(material)))
+    },
+
+    paintFace: (object, face, material) => {
+      act((s) => s.paint_face(BigInt(object), BigInt(face), materialHandle(material)))
+    },
   }
 
   window.__hew_test = harness

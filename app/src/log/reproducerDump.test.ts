@@ -209,7 +209,8 @@ describe('dumpReproducer', () => {
 // installFailureHandlers() guards on `typeof window === 'undefined'` and
 // no-ops in that case (verified separately below); to exercise the
 // listener-attaching path itself, stub a minimal EventTarget as `window` —
-// Node's built-in EventTarget/Event/ErrorEvent classes are sufficient.
+// Node's built-in EventTarget/Event classes are sufficient (DOM-only globals
+// like ErrorEvent are not available here; tests synthesize equivalents).
 function withFakeWindow<T>(fn: (fakeWindow: EventTarget) => T): T {
   const fakeWindow = new EventTarget()
   const original = (globalThis as { window?: unknown }).window
@@ -245,7 +246,14 @@ describe('installFailureHandlers', () => {
       const store = fakeStore()
       setStoreForTest(store)
 
-      const errorEvent = new ErrorEvent('error', { error: new Error('boom'), message: 'boom' })
+      // `ErrorEvent` is a DOM global, not a Node one (this suite runs in the
+      // 'node' environment), so synthesize an equivalent plain Event carrying
+      // the `.error`/`.message` fields the handler reads — same approach the
+      // unhandledrejection test below uses for its `.reason` field.
+      const errorEvent = Object.assign(new Event('error'), {
+        error: new Error('boom'),
+        message: 'boom',
+      })
       fakeWindow.dispatchEvent(errorEvent)
 
       // dumpReproducer is fire-and-forget (void) inside the handler; flush microtasks.

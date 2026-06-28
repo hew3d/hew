@@ -82,10 +82,139 @@ function buildSingleBoxDelete(scene) {
   return scene.take_recording();
 }
 
+/**
+ * Draws a closed regular `n`-gon on a fresh ground sketch, centered at
+ * (cx, cy) with circumradius `r`, and returns `[sketchHandle, regionHandle]`.
+ * This is the shape the Circle tool emits ( — circles are N-gon profiles),
+ * so a fixture built from it exercises the many-edge extrude path the two unit
+ * squares never reach.
+ */
+function groundRegularPolygon(scene, n, cx, cy, r) {
+  const sketch = scene.begin_ground_sketch();
+  const pt = (i) => {
+    const t = (2 * Math.PI * i) / n;
+    return [cx + r * Math.cos(t), cy + r * Math.sin(t)];
+  };
+  let region = null;
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = pt(i);
+    const [bx, by] = pt((i + 1) % n);
+    const report = scene.sketch_add_segment(sketch, ax, ay, 0, bx, by, 0);
+    const created = report.regions_created();
+    if (created.length > 0) {
+      region = created[0];
+    }
+  }
+  if (region === null) {
+    throw new Error(`closing the ${n}-gon did not create a region`);
+  }
+  return [sketch, region];
+}
+
+/** Translation affine (row-major 3x4) by (tx, ty, tz). */
+function translate(tx, ty, tz) {
+  return [1, 0, 0, tx, 0, 1, 0, ty, 0, 0, 1, tz];
+}
+
+/**
+ * Two overlapping boxes combined with boolean op `op` (1 = subtract a−b,
+ * 2 = intersect). The representative fixture only exercises union (op 0); these
+ * lock the goldens for the other two CSG ops, whose result topology is wholly
+ * different (subtract carves a recess, intersect keeps only the overlap).
+ */
+function buildBooleanOp(op) {
+  return (scene) => {
+    scene.start_recording();
+    const [s1, r1] = groundUnitSquare(scene);
+    const a = scene.extrude_region(s1, r1, 2.0);
+    const [s2, r2] = groundUnitSquare(scene);
+    const b = scene.extrude_region(s2, r2, 1.0);
+    scene.transform_object(b, translate(0.5, 0.5, 0));
+    scene.boolean(op, a, b);
+    scene.stop_recording();
+    return scene.take_recording();
+  };
+}
+
+/**
+ * A single box rotated 45° about Z (then nudged) — the existing fixtures only
+ * ever translate, so this is the only one that drives the rotational part of
+ * the affine multiply through replay. 45° gives irrational f64 vertex coords,
+ * so it also pins float determinism in `transform_object`.
+ */
+function buildRotatedBox(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundUnitSquare(scene);
+  const obj = scene.extrude_region(sketch, region, 1.5);
+  const c = Math.SQRT1_2; // cos 45° = sin 45°
+  // Row-major 3x4: rotate 45° about +Z, translate +2 in x.
+  scene.transform_object(obj, [c, -c, 0, 2, c, c, 0, 0, 0, 0, 1, 0]);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
+ * Three independent boxes at distinct positions, never combined — locks the
+ * multi-object *document* hash (vs. every other fixture, which collapses to one
+ * object). Mirrors the multi-object visual scene at the kernel layer.
+ */
+function buildMultiObjectScene(scene) {
+  scene.start_recording();
+  const [s1, r1] = groundUnitSquare(scene);
+  scene.extrude_region(s1, r1, 1.0);
+  const [s2, r2] = groundUnitSquare(scene);
+  const b = scene.extrude_region(s2, r2, 2.0);
+  scene.transform_object(b, translate(3, 0, 0));
+  const [s3, r3] = groundUnitSquare(scene);
+  const c = scene.extrude_region(s3, r3, 0.5);
+  scene.transform_object(c, translate(0, 3, 0));
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
+ * Chained CSG: union a∪b, then subtract c from the result. Exercises a boolean
+ * whose operand is itself a boolean result (handle reuse across a replacing op
+ * — the path that surfaced the tree-consistency bug).
+ */
+function buildChainedBoolean(scene) {
+  scene.start_recording();
+  const [s1, r1] = groundUnitSquare(scene);
+  const a = scene.extrude_region(s1, r1, 2.0);
+  const [s2, r2] = groundUnitSquare(scene);
+  const b = scene.extrude_region(s2, r2, 2.0);
+  scene.transform_object(b, translate(0.5, 0.5, 0));
+  const ab = scene.boolean(0 /* union */, a, b);
+  const [s3, r3] = groundUnitSquare(scene);
+  const c = scene.extrude_region(s3, r3, 1.0);
+  scene.transform_object(c, translate(0.25, 0.25, 0.5));
+  scene.boolean(1 /* subtract */, ab, c);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
+ * A hexagonal prism: a 6-gon ground profile extruded. The many-edge profile
+ * (the Circle tool's output shape) drives extrude over a non-quad loop.
+ */
+function buildHexPrism(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundRegularPolygon(scene, 6, 0, 0, 1);
+  scene.extrude_region(sketch, region, 1.0);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
 /** Named scenarios, each producing a `take_recording()` JSON string. */
 const SCENARIOS = {
   'two-boxes-union-slice': buildTwoBoxesUnionSlice,
   'single-box-delete': buildSingleBoxDelete,
+  'two-boxes-subtract': buildBooleanOp(1),
+  'two-boxes-intersect': buildBooleanOp(2),
+  'rotated-box': buildRotatedBox,
+  'multi-object-scene': buildMultiObjectScene,
+  'chained-boolean': buildChainedBoolean,
+  'hex-prism': buildHexPrism,
 };
 
 /** Runs scenario `name`'s build and writes `fixtures/<name>.json`. */
