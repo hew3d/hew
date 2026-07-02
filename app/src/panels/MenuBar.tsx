@@ -1,22 +1,31 @@
 /**
  * MenuBar — top-of-screen app bar with File + Edit menus.
  *
- * Shows the document title (with dirty marker) in the center.
+ * Shows the document name + "Edited/Saved <relative time>" save-state
+ * indicator centered in the bar, when not hidden.
  * Keyboard shortcuts for File operations are handled in App.tsx via global
  * keydown listeners; the menu items here are the visual/click-driven path.
  *
- * Under Tauri (nativeMenuBar=true) the OS owns the menus AND the document
- * title now lives in the native title bar (set via Tauri's window.setTitle —
- * see App.tsx), so this component renders nothing in that case.
+ * Under Tauri (nativeMenuBar=true, macOS only since) the OS owns the
+ * menus AND the document title lives in the native title bar (set via
+ * Tauri's window.setTitle — see App.tsx), so this component renders nothing
+ * in that case. On Windows/Linux, `hideTitle` is set instead (the custom
+ * `TitleBar` above shows the name + indicator there); only the web build
+ * reaches this component's own centered name/indicator.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { modLabel } from '../platform'
+import { modLabel, isMac } from '../platform'
+import { shortcutFor, type ToolName } from '../tools/toolRegistry'
 import type { StandardView } from '../viewport/Viewport'
 
 export interface MenuBarProps {
-  /** Full document title (already includes dirty mark and " — Hew"). Only used in the web (non-native) bar. */
-  title: string
+  /** Bare document name (no dirty mark, no " — Hew" suffix — `documentSession.ts`'s
+   * `documentName()`). Only rendered in the web (non-native) bar. */
+  name: string
+  /** "Edited <relative time>" / "Saved <relative time>" / "" — `documentSession.ts`'s
+   * `saveStateLabel()`. Only rendered alongside `name` in the web bar. */
+  saveState: string
   /**
    * When true the OS provides a native menu bar (Tauri desktop) AND the
    * native title bar shows the document title — so this component renders
@@ -87,21 +96,31 @@ export interface MenuBarProps {
   onOpenSettings?: () => void
   /** Assemble and write a "Report Bug" bundle (Help → Report Bug…). */
   onReportBug?: () => void
+  /** Open the command palette — the resting Ctrl-K field's click handler. */
+  onOpenPalette?: () => void
 }
 
 type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | 'help' | null
+
+/** Shortcut display for a tool-registry entry — mac vs. the
+ * Windows/Linux/Web bare-letter scheme, `undefined` when the tool has none. */
+function keyFor(name: ToolName): string | undefined {
+  const s = shortcutFor(name, isMac)
+  return s === '' ? undefined : s
+}
 
 /** Filename portion of a path (handles / and \ separators). */
 function baseName(path: string): string {
   return path.replace(/[/\\]+$/, '').split(/[/\\]/).pop() ?? path
 }
 
+// `02_app_shell.md`'s Windows/Linux menu-bar spec: 33px height, surface/bar.
 const BAR_STYLE: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  height: '32px',
-  background: '#1e1e1e',
-  borderBottom: '1px solid #3a3a3a',
+  height: '33px',
+  background: 'var(--surface-bar, #1e1e1e)',
+  borderBottom: '1px solid var(--border-hairline, #3a3a3a)',
   flexShrink: 0,
   userSelect: 'none',
   gap: 0,
@@ -113,24 +132,26 @@ const MENU_TRIGGER_STYLE = (open: boolean): React.CSSProperties => ({
   height: '100%',
   display: 'flex',
   alignItems: 'center',
-  fontSize: '13px',
-  color: open ? '#fff' : '#ccc',
-  background: open ? '#3a5e9e' : 'transparent',
+  fontSize: 'var(--font-size-menu-item, 13px)',
+  color: open ? 'var(--accent-text-on-tint, #fff)' : 'var(--text-tertiary, #ccc)',
+  background: open ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
   cursor: 'pointer',
   border: 'none',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: 'var(--font-family-ui)',
   whiteSpace: 'nowrap',
+  borderRadius: 'var(--radius-control, 0)',
 })
 
 const DROPDOWN_STYLE: React.CSSProperties = {
   position: 'absolute',
-  top: '32px',
+  top: '33px',
   left: 0,
   minWidth: '180px',
-  background: '#2a2a2a',
-  border: '1px solid #4a4a4a',
-  borderRadius: '0 0 4px 4px',
-  boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+  background: 'var(--surface-overlay, #2a2a2a)',
+  backdropFilter: 'blur(12px)',
+  border: '1px solid var(--border-strong, #4a4a4a)',
+  borderRadius: '0 0 var(--radius-control, 4px) var(--radius-control, 4px)',
+  boxShadow: 'var(--shadow-dock, 0 4px 12px rgba(0,0,0,0.5))',
   zIndex: 1000,
   paddingTop: '4px',
   paddingBottom: '4px',
@@ -141,22 +162,23 @@ const MENU_ITEM_STYLE = (disabled: boolean): React.CSSProperties => ({
   justifyContent: 'space-between',
   alignItems: 'center',
   padding: '5px 16px',
-  fontSize: '13px',
-  color: disabled ? '#666' : '#ddd',
+  fontSize: 'var(--font-size-menu-item, 13px)',
+  color: disabled ? 'var(--text-faint, #666)' : 'var(--text-secondary, #ddd)',
   cursor: disabled ? 'default' : 'pointer',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: 'var(--font-family-ui)',
   gap: '32px',
 })
 
 const SEPARATOR_STYLE: React.CSSProperties = {
   height: '1px',
-  background: '#444',
+  background: 'var(--border-hairline, #444)',
   margin: '4px 0',
 }
 
 const SHORTCUT_STYLE: React.CSSProperties = {
-  fontSize: '11px',
-  color: '#888',
+  fontFamily: 'var(--font-family-mono)',
+  fontSize: 'var(--font-size-kbd, 11px)',
+  color: 'var(--text-faint, #888)',
   whiteSpace: 'nowrap',
 }
 
@@ -173,7 +195,7 @@ function MenuItem({ label, shortcut, disabled = false, onClick }: MenuItemProps)
     <div
       style={{
         ...MENU_ITEM_STYLE(disabled),
-        background: hovered && !disabled ? '#3a5e9e' : 'transparent',
+        background: hovered && !disabled ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -200,7 +222,7 @@ function SubMenu({ label, children }: { label: string; children: React.ReactNode
       <div
         style={{
           ...MENU_ITEM_STYLE(false),
-          background: hovered ? '#3a5e9e' : 'transparent',
+          background: hovered ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
         }}
       >
         <span>{label}</span>
@@ -228,7 +250,7 @@ function CheckMenuItem({ label, shortcut, checked, onClick }: CheckMenuItemProps
     <div
       style={{
         ...MENU_ITEM_STYLE(false),
-        background: hovered ? '#3a5e9e' : 'transparent',
+        background: hovered ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -238,7 +260,7 @@ function CheckMenuItem({ label, shortcut, checked, onClick }: CheckMenuItemProps
       }}
     >
       <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-        <span style={{ width: '12px', fontSize: '10px', color: '#7aaaee' }}>{checked ? '✓' : ''}</span>
+        <span style={{ width: '12px', fontSize: '10px', color: 'var(--accent-base, #7aaaee)' }}>{checked ? '✓' : ''}</span>
         {label}
       </span>
       {shortcut !== undefined && <span style={SHORTCUT_STYLE}>{shortcut}</span>}
@@ -247,7 +269,8 @@ function CheckMenuItem({ label, shortcut, checked, onClick }: CheckMenuItemProps
 }
 
 export function MenuBar({
-  title,
+  name,
+  saveState,
   nativeMenuBar = false,
   hideTitle = false,
   onNew,
@@ -285,6 +308,7 @@ export function MenuBar({
   onStandardView,
   onOpenSettings,
   onReportBug,
+  onOpenPalette,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -431,20 +455,20 @@ export function MenuBar({
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
               label="Rectangle"
-              shortcut={`${mod}K`}
+              shortcut={keyFor('Rectangle')}
               checked={activeTool === 'Rectangle'}
               onClick={withClose(() => onSelectTool?.('Rectangle'))}
             />
             <CheckMenuItem
               label="Circle"
-              shortcut="C"
+              shortcut={keyFor('Circle')}
               checked={activeTool === 'Circle'}
               onClick={withClose(() => onSelectTool?.('Circle'))}
             />
             <div style={{ borderTop: '1px solid #4a4a4a', margin: '4px 0' }} />
             <CheckMenuItem
               label="Line"
-              shortcut={`${mod}L`}
+              shortcut={keyFor('Line')}
               checked={activeTool === 'Line'}
               onClick={withClose(() => onSelectTool?.('Line'))}
             />
@@ -464,43 +488,44 @@ export function MenuBar({
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
               label="Select"
-              shortcut="Space"
+              shortcut={keyFor('Select')}
               checked={activeTool === 'Select'}
               onClick={withClose(() => onSelectTool?.('Select'))}
             />
             <CheckMenuItem
               label="Paint"
+              shortcut={keyFor('Paint')}
               checked={activeTool === 'Paint'}
               onClick={withClose(() => onSelectTool?.('Paint'))}
             />
             <CheckMenuItem
               label="Move"
-              shortcut={`${mod}0`}
+              shortcut={keyFor('Move')}
               checked={activeTool === 'Move'}
               onClick={withClose(() => onSelectTool?.('Move'))}
             />
             <CheckMenuItem
               label="Rotate"
-              shortcut={`${mod}8`}
+              shortcut={keyFor('Rotate')}
               checked={activeTool === 'Rotate'}
               onClick={withClose(() => onSelectTool?.('Rotate'))}
             />
             <CheckMenuItem
               label="Scale"
-              shortcut={`${mod}9`}
+              shortcut={keyFor('Scale')}
               checked={activeTool === 'Scale'}
               onClick={withClose(() => onSelectTool?.('Scale'))}
             />
             <CheckMenuItem
               label="Push/Pull"
-              shortcut={`${mod}=`}
+              shortcut={keyFor('Push/Pull')}
               checked={activeTool === 'Push/Pull'}
               onClick={withClose(() => onSelectTool?.('Push/Pull'))}
             />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem
               label="Tape Measure"
-              shortcut={`${mod}D`}
+              shortcut={keyFor('Tape Measure')}
               checked={activeTool === 'Tape Measure'}
               onClick={withClose(() => onSelectTool?.('Tape Measure'))}
             />
@@ -535,19 +560,19 @@ export function MenuBar({
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
               label="Orbit"
-              shortcut={`${mod}B`}
+              shortcut={keyFor('Orbit')}
               checked={activeTool === 'Orbit'}
               onClick={withClose(() => onSelectTool?.('Orbit'))}
             />
             <CheckMenuItem
               label="Pan"
-              shortcut={`${mod}R`}
+              shortcut={keyFor('Pan')}
               checked={activeTool === 'Pan'}
               onClick={withClose(() => onSelectTool?.('Pan'))}
             />
             <CheckMenuItem
               label="Zoom"
-              shortcut={`${mod}\\`}
+              shortcut={keyFor('Zoom')}
               checked={activeTool === 'Zoom'}
               onClick={withClose(() => onSelectTool?.('Zoom'))}
             />
@@ -638,30 +663,96 @@ export function MenuBar({
         )}
       </div>
 
-      {/* Document title — centered in bar (hidden when a custom TitleBar above
-          already shows it, e.g. the Linux borderless shell). */}
+      {/* Document name + save-state indicator — centered in bar (hidden when
+          a custom TitleBar above already shows it, e.g. the Linux/Windows
+          borderless shells). Web build only reaches here; it follows the
+          same Windows/Linux name+indicator split, `02_app_shell.md`. */}
       {!hideTitle && (
         <div
           style={{
             position: 'absolute',
             left: '50%',
             transform: 'translateX(-50%)',
-            fontSize: '13px',
-            color: '#bbb',
-            fontFamily: 'system-ui, sans-serif',
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 'var(--space-2, 6px)',
+            fontFamily: 'var(--font-family-ui)',
             pointerEvents: 'none',
             whiteSpace: 'nowrap',
             overflow: 'hidden',
             maxWidth: '50%',
-            textOverflow: 'ellipsis',
           }}
         >
-          {title}
+          <span
+            style={{
+              fontSize: 'var(--font-size-titlebar-filename, 13px)',
+              fontWeight: 600,
+              color: 'var(--text-primary, #eee)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {name}
+          </span>
+          {saveState !== '' && (
+            <span
+              style={{
+                fontSize: 'var(--font-size-titlebar-meta, 11px)',
+                color: 'var(--text-section, #888)',
+                flexShrink: 0,
+              }}
+            >
+              {saveState}
+            </span>
+          )}
         </div>
       )}
 
       {/* Spacer */}
       <div style={{ flex: 1 }} />
+
+      {/* Resting command-palette field (`04_command_palette.md`) —
+          "Windows/Linux/Web: right side of the menu bar, ~280px." macOS has
+          no equivalent slot here (nativeMenuBar=true means this whole
+          component renders nothing on macOS) — it reaches the palette via
+          the native View ▸ Command Palette… menu item / Cmd+/ instead. */}
+      {onOpenPalette !== undefined && (
+        <button
+          onClick={onOpenPalette}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--space-3, 8px)',
+            width: '280px',
+            margin: '0 var(--space-4, 9px)',
+            padding: '5px var(--space-4, 9px)',
+            background: 'var(--surface-input, #14161a)',
+            border: '1px solid var(--border-hairline, #3a3a3a)',
+            borderRadius: '9px',
+            cursor: 'pointer',
+            fontFamily: 'var(--font-family-ui)',
+          }}
+        >
+          <span aria-hidden="true" style={{ color: 'var(--text-faint, #888)', fontSize: '13px' }}>⌕</span>
+          <span style={{ flex: 1, textAlign: 'left', fontSize: '12.5px', color: 'var(--text-faint, #888)' }}>
+            Search tools, actions, help…
+          </span>
+          <span
+            style={{
+              fontFamily: 'var(--font-family-mono)',
+              fontSize: 'var(--font-size-kbd, 10px)',
+              fontWeight: 600,
+              color: 'var(--kbd-text, #9aa3b0)',
+              background: 'var(--kbd-bg, rgba(255,255,255,0.07))',
+              border: '1px solid var(--kbd-border, rgba(255,255,255,0.08))',
+              borderRadius: 'var(--radius-kbd, 4px)',
+              padding: '1.5px 5px',
+            }}
+          >
+            Ctrl K
+          </span>
+        </button>
+      )}
     </div>
   )
 }

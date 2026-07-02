@@ -75,27 +75,13 @@ export function makeRecoveryStore(): RecoveryStore {
 /**
  * Format `savedAt` (epoch ms) as a short relative-time string, relative to
  * `now` (epoch ms).  Falls back to a date string beyond ~24h.
+ *
+ * Re-exported from `relativeTime.ts`, which also backs
+ * documentSession.ts's "Edited/Saved <relative time>" indicator — kept as a
+ * named alias here so this module's existing call sites (RecoveryDialog.tsx)
+ * don't need to change.
  */
-export function formatRecoveryTime(savedAt: number, now: number): string {
-  const deltaMs = Math.max(0, now - savedAt)
-  const deltaSec = Math.floor(deltaMs / 1000)
-
-  if (deltaSec < 45) return 'just now'
-
-  // Round (rather than floor) so e.g. 45s reads as "1 minute ago" instead of
-  // "0 minutes ago" — the 45s "just now" cutoff implies the next bucket up.
-  const deltaMin = Math.round(deltaSec / 60)
-  if (deltaMin < 60) {
-    return deltaMin === 1 ? '1 minute ago' : `${deltaMin} minutes ago`
-  }
-
-  const deltaHour = Math.round(deltaSec / 3600)
-  if (deltaHour < 24) {
-    return deltaHour === 1 ? '1 hour ago' : `${deltaHour} hours ago`
-  }
-
-  return new Date(savedAt).toLocaleString()
-}
+export { formatRelativeTime as formatRecoveryTime } from './relativeTime'
 
 /**
  * True when the user should be prompted to recover `snapshot`.

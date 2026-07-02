@@ -53,7 +53,7 @@ const PANEL_STYLE: React.CSSProperties = {
 
 const LABEL_STYLE: React.CSSProperties = {
   fontSize: '10px',
-  color: '#888',
+  color: 'var(--text-faint, #888)',
   textTransform: 'uppercase',
   letterSpacing: '0.05em',
   marginBottom: '2px',
@@ -61,17 +61,17 @@ const LABEL_STYLE: React.CSSProperties = {
 
 const VALUE_STYLE: React.CSSProperties = {
   fontSize: '12px',
-  color: '#ccc',
+  color: 'var(--text-secondary, #ccc)',
   fontFamily: 'monospace',
 }
 
 const INPUT_STYLE: React.CSSProperties = {
   width: '100%',
   boxSizing: 'border-box',
-  background: '#1e1e1e',
-  border: '1px solid #444',
+  background: 'var(--surface-input, #1e1e1e)',
+  border: '1px solid var(--border-strong, #444)',
   borderRadius: '3px',
-  color: '#eee',
+  color: 'var(--text-primary, #eee)',
   fontFamily: 'monospace',
   fontSize: '12px',
   padding: '3px 6px',
@@ -210,7 +210,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
 
           {/* A sketch is a thin selectable — no name/tags/solid yet. */}
           {nodeInfo.kind === 'sketch' && (
-            <div style={{ fontSize: '11px', color: '#666', fontStyle: 'italic' }}>
+            <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', fontStyle: 'italic' }}>
               A drawn line. Delete with ⌫ (undoable); naming, tags, and move are not yet supported.
             </div>
           )}
@@ -236,7 +236,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
           <div>
             <div style={LABEL_STYLE}>Tags</div>
             {nodeInfo.tags.length === 0 ? (
-              <div style={{ fontSize: '11px', color: '#666', fontStyle: 'italic' }}>No tags</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', fontStyle: 'italic' }}>No tags</div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                 {nodeInfo.tags.map((path) => (
@@ -265,9 +265,9 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
                 onClick={handleAddTag}
                 disabled={tagInput.trim() === ''}
                 style={{
-                  background: '#3a5e9e',
+                  background: 'var(--accent-base, #3a5e9e)',
                   border: 'none',
-                  color: '#eee',
+                  color: 'var(--accent-text-strong, #eee)',
                   cursor: tagInput.trim() === '' ? 'default' : 'pointer',
                   borderRadius: '3px',
                   fontSize: '11px',
@@ -299,11 +299,11 @@ function TagChip({ path, onRemove }: { path: string[]; onRemove: () => void }) {
         display: 'flex',
         alignItems: 'center',
         gap: '4px',
-        background: '#1e3a5e',
+        background: 'var(--accent-tint-18, #1e3a5e)',
         borderRadius: '3px',
         padding: '2px 6px',
         fontSize: '11px',
-        color: '#aaccee',
+        color: 'var(--accent-text-on-tint, #aaccee)',
         fontFamily: 'monospace',
       }}
     >
@@ -316,7 +316,7 @@ function TagChip({ path, onRemove }: { path: string[]; onRemove: () => void }) {
         style={{
           background: 'none',
           border: 'none',
-          color: '#7799bb',
+          color: 'var(--accent-text-on-tint, #7799bb)',
           cursor: 'pointer',
           fontSize: '12px',
           lineHeight: 1,
@@ -339,7 +339,7 @@ function EmptyState({ multiSelect }: { multiSelect: boolean }) {
     <div
       style={{
         fontSize: '11px',
-        color: '#666',
+        color: 'var(--text-faint, #666)',
         fontStyle: 'italic',
         padding: '4px 8px',
         lineHeight: 1.5,

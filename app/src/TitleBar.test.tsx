@@ -31,28 +31,38 @@ describe('TitleBar', () => {
     vi.clearAllMocks()
   })
 
-  it('renders the title string', () => {
-    render(<TitleBar title="bridge.hew — Hew" />)
-    expect(screen.getByText('bridge.hew — Hew')).toBeInTheDocument()
+  it('renders the document name', () => {
+    render(<TitleBar name="bridge.hew" saveState="" />)
+    expect(screen.getByText('bridge.hew')).toBeInTheDocument()
+  })
+
+  it('renders the save-state indicator when non-empty', () => {
+    render(<TitleBar name="bridge.hew" saveState="Edited just now" />)
+    expect(screen.getByText('Edited just now')).toBeInTheDocument()
+  })
+
+  it('omits the save-state indicator when empty', () => {
+    render(<TitleBar name="Untitled" saveState="" />)
+    expect(screen.queryByText(/edited|saved/i)).not.toBeInTheDocument()
   })
 
   it('renders a Minimize button', () => {
-    render(<TitleBar title="Untitled" />)
+    render(<TitleBar name="Untitled" saveState="" />)
     expect(screen.getByRole('button', { name: /minimize/i })).toBeInTheDocument()
   })
 
   it('renders a Maximize button when not maximized', () => {
-    render(<TitleBar title="Untitled" />)
+    render(<TitleBar name="Untitled" saveState="" />)
     expect(screen.getByRole('button', { name: /maximize/i })).toBeInTheDocument()
   })
 
   it('renders a Close button', () => {
-    render(<TitleBar title="Untitled" />)
+    render(<TitleBar name="Untitled" saveState="" />)
     expect(screen.getByRole('button', { name: /close/i })).toBeInTheDocument()
   })
 
   it('renders resize grips when not maximized', () => {
-    const { container } = render(<TitleBar title="Untitled" />)
+    const { container } = render(<TitleBar name="Untitled" saveState="" />)
     // There are 8 grip divs (N/S/E/W + 4 corners)
     // They are the only divs with a fixed position style
     const fixed = container.querySelectorAll('[style*="position: fixed"]')

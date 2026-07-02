@@ -52,9 +52,10 @@ describe('SettingsWindow', () => {
     render(<SettingsWindow />)
     // 'Units' appears twice when the Units pane is active: the nav item and the
     // pane's <h3> heading. The nav item (not the heading) carries the active
-    // highlight (color '#fff' = rgb(255,255,255)).
+    // highlight (the accent-on-tint token, Follow-up: — was a
+    // hardcoded '#fff').
     const unitsNav = screen.getAllByText('Units').find((el) => el.tagName !== 'H3')
-    expect(unitsNav?.style.color).toBe('rgb(255, 255, 255)')
+    expect(unitsNav?.style.color).toBe('var(--accent-text-on-tint, #fff)')
   })
 })
 

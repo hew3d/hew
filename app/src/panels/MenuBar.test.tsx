@@ -11,7 +11,8 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { MenuBar, type MenuBarProps } from './MenuBar'
 
 const defaultProps: MenuBarProps = {
-  title: 'Untitled — Hew',
+  name: 'Untitled',
+  saveState: '',
   nativeMenuBar: false,
   onNew: vi.fn(),
   onOpen: vi.fn(),
@@ -40,9 +41,38 @@ describe('MenuBar', () => {
     expect(screen.getByTestId('menu-bar')).toBeInTheDocument()
   })
 
-  it('shows the document title in the bar', () => {
-    render(<MenuBar {...defaultProps} title="myfile.hew — Hew" />)
-    expect(screen.getByText('myfile.hew — Hew')).toBeInTheDocument()
+  it('shows the document name in the bar', () => {
+    render(<MenuBar {...defaultProps} name="myfile.hew" />)
+    expect(screen.getByText('myfile.hew')).toBeInTheDocument()
+  })
+
+  it('shows the save-state indicator when non-empty', () => {
+    render(<MenuBar {...defaultProps} name="myfile.hew" saveState="Saved 2 minutes ago" />)
+    expect(screen.getByText('Saved 2 minutes ago')).toBeInTheDocument()
+  })
+
+  it('omits the save-state indicator when empty', () => {
+    render(<MenuBar {...defaultProps} name="myfile.hew" saveState="" />)
+    expect(screen.queryByText(/edited|saved/i)).not.toBeInTheDocument()
+  })
+
+  // --- Command palette resting field ---
+
+  it('omits the resting palette field when onOpenPalette is not provided', () => {
+    render(<MenuBar {...defaultProps} />)
+    expect(screen.queryByText(/search tools, actions, help/i)).not.toBeInTheDocument()
+  })
+
+  it('shows the resting palette field when onOpenPalette is provided', () => {
+    render(<MenuBar {...defaultProps} onOpenPalette={vi.fn()} />)
+    expect(screen.getByText(/search tools, actions, help/i)).toBeInTheDocument()
+  })
+
+  it('clicking the resting palette field calls onOpenPalette', () => {
+    const onOpenPalette = vi.fn()
+    render(<MenuBar {...defaultProps} onOpenPalette={onOpenPalette} />)
+    fireEvent.click(screen.getByText(/search tools, actions, help/i))
+    expect(onOpenPalette).toHaveBeenCalledOnce()
   })
 
   // --- File menu ---

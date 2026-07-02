@@ -80,7 +80,8 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { editNumericBuffer, parseDistance } from './moveInput'
 import { projectOntoPlane, signedAngleAboutAxis, rotationAxisAffine } from './transformMath'
-import { axisColorForDirection } from '../viewport/axisColors'
+import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
+import { getResolvedTheme } from '../settings/theme'
 
 export type OnGuideCreated = () => void
 export type OnToast = (message: string, code?: string) => void
@@ -245,7 +246,7 @@ export class ProtractorTool implements Tool {
         ...cursorDir,
       )
 
-      const match = axisColorForDirection(cursorDir, AXIS_SNAP_TOL_DOT)
+      const match = axisColorForDirection(cursorDir, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
       const sweptDir = match !== null ? match.snapped : cursorDir
       const previewColor = match !== null ? match.color : NEUTRAL_PREVIEW_COLOR
 
@@ -436,7 +437,7 @@ export class ProtractorTool implements Tool {
     ]
     const dir = normalize(rotated) ?? baselineDir
 
-    const match = axisColorForDirection(dir, AXIS_SNAP_TOL_DOT)
+    const match = axisColorForDirection(dir, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
     const finalDir = match !== null ? match.snapped : dir
 
     this._commitGuide(apex, finalDir)
@@ -534,7 +535,7 @@ export class ProtractorTool implements Tool {
     const unitNormal = normalize(normal) ?? WORLD_UP
     const { u, v } = planeBasis(unitNormal)
 
-    const match = axisColorForDirection(unitNormal, AXIS_SNAP_TOL_DOT)
+    const match = axisColorForDirection(unitNormal, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
     const color = match !== null ? match.color : NEUTRAL_PREVIEW_COLOR
 
     const ringPts = new Float32Array(DISK_SEGMENTS * 3)

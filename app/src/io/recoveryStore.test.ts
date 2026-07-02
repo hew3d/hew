@@ -64,17 +64,17 @@ describe('shouldPromptRecovery', () => {
   })
 
   it('returns false when the session already has a currentRef (e.g. cold-start open)', () => {
-    const session: DocSessionState = { currentRef: mockRef('opened.hew'), dirty: false }
+    const session: DocSessionState = { currentRef: mockRef('opened.hew'), dirty: false, lastEditAt: null, lastSavedAt: null }
     expect(shouldPromptRecovery(session, mockSnapshot())).toBe(false)
   })
 
   it('returns false when the session is already dirty', () => {
-    const session: DocSessionState = { currentRef: null, dirty: true }
+    const session: DocSessionState = { currentRef: null, dirty: true, lastEditAt: null, lastSavedAt: null }
     expect(shouldPromptRecovery(session, mockSnapshot())).toBe(false)
   })
 
   it('returns false when both currentRef is set and dirty is true', () => {
-    const session: DocSessionState = { currentRef: mockRef('opened.hew'), dirty: true }
+    const session: DocSessionState = { currentRef: mockRef('opened.hew'), dirty: true, lastEditAt: null, lastSavedAt: null }
     expect(shouldPromptRecovery(session, mockSnapshot())).toBe(false)
   })
 })

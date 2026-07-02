@@ -4,9 +4,12 @@
  * Covers:
  *   - Loading state shown before kernel resolves
  *   - Full UI appears after kernel loads
- *   - Tool switching via toolbar button clicks
- *   - Keyboard shortcuts: Space→Select, Ctrl+K→Rectangle, Ctrl+Shift+I→toggle Model Info
- *   - Panel open/close state reflected in floating panels
+ *   - Tool switching via tool-rail button clicks
+ *   - Keyboard shortcuts: Space→Select, bare R→Rectangle (SketchUp-for-Windows
+ *     scheme,  — this test file runs under jsdom, which resolves as
+ *     non-Mac), Ctrl+Shift+I→toggle Model Info
+ *   - Docked tray section collapse/expand state ( — replaced the old
+ *     floating, draggable panels; FloatingPanel.tsx deleted)
  *   - Object Info shows "Select an object." when nothing is selected
  *
  * Stubs only:
@@ -22,9 +25,10 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 /**
  * Scope a query to the top menu bar. Tool/panel names (e.g. "Select",
- * "Model Info") also appear in the status bar and floating-panel titles, so a
- * bare screen.getByText is ambiguous in the full App; the checkmark state we
- * care about lives only inside the open dropdown, which is within the menu bar.
+ * "Model Info") also appear in the status bar and docked-tray section
+ * headers, so a bare screen.getByText is ambiguous in the full App; the
+ * checkmark state we care about lives only inside the open dropdown, which
+ * is within the menu bar.
  */
 const menubar = () => within(screen.getByTestId('menu-bar'))
 
@@ -92,13 +96,13 @@ import App from './App'
 // ---------------------------------------------------------------------------
 
 /**
- * Render <App /> and wait until the kernel has loaded (i.e. the toolbar
- * becomes visible). Returns when the "Rectangle (Ctrl+K)" button is in DOM.
+ * Render <App /> and wait until the kernel has loaded (i.e. the tool rail
+ * becomes visible). Returns when the "Rectangle (R)" row is in DOM.
  */
 async function renderAndLoad() {
   render(<App />)
   // The loading state says "Loading kernel…". Wait for it to clear.
-  await waitFor(() => screen.getByTitle('Rectangle (Ctrl+K)'), { timeout: 2000 })
+  await waitFor(() => screen.getByTitle('Rectangle (R)'), { timeout: 2000 })
 }
 
 // ---------------------------------------------------------------------------
@@ -120,12 +124,14 @@ describe('App — loaded state', () => {
     vi.clearAllMocks()
   })
 
-  it('renders the toolbar tool buttons after the kernel loads', async () => {
+  it('renders the tool rail rows after the kernel loads', async () => {
     await renderAndLoad()
-    // A sampling of the 16 toolbar buttons (title = tool name + shortcut):
+    // A sampling of the rail's rows (title = tool name + shortcut). jsdom
+    // resolves as non-Mac, so these use the bare-letter Windows/Linux/Web
+    // scheme, not macOS's Cmd-combo one.
     expect(screen.getByTitle('Select (Spc)')).toBeInTheDocument()
-    expect(screen.getByTitle('Rectangle (Ctrl+K)')).toBeInTheDocument()
-    expect(screen.getByTitle('Push/Pull (Ctrl+=)')).toBeInTheDocument()
+    expect(screen.getByTitle('Rectangle (R)')).toBeInTheDocument()
+    expect(screen.getByTitle('Push/Pull (P)')).toBeInTheDocument()
   })
 
   it('renders the web MenuBar (nativeMenuBar=false in jsdom)', async () => {
@@ -133,15 +139,12 @@ describe('App — loaded state', () => {
     expect(screen.getByTestId('menu-bar')).toBeInTheDocument()
   })
 
-  it('initially shows Model Info and Object Info floating panels', async () => {
+  it('docked tray: Entity Info and Outliner expanded by default, Materials and Tags collapsed', async () => {
     await renderAndLoad()
-    const panels = screen.getAllByTestId('floating-panel')
-    // showModelInfo=true and showObjectInfo=true by default → 2 panels
-    expect(panels.length).toBe(2)
-    // Check the panel titles
-    const titles = panels.map((p) => p.textContent ?? '')
-    expect(titles.some((t) => t.includes('Model Info'))).toBe(true)
-    expect(titles.some((t) => t.includes('Object Info'))).toBe(true)
+    expect(screen.getByRole('button', { name: /entity info/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /^materials$/i })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: /^tags$/i })).toHaveAttribute('aria-expanded', 'false')
   })
 
   it('Object Info panel shows "Select an object." when selection is empty', async () => {
@@ -150,27 +153,29 @@ describe('App — loaded state', () => {
   })
 })
 
-describe('App — toolbar tool switching', () => {
+describe('App — tool rail tool switching', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
-  it('clicking a toolbar button activates that tool (reflected in Tools menu)', async () => {
+  it('clicking a rail row activates that tool (reflected in Tools menu)', async () => {
     await renderAndLoad()
-    // Click the Push/Pull toolbar button
-    fireEvent.click(screen.getByTitle('Push/Pull (Ctrl+=)'))
+    // Click the Push/Pull rail row
+    fireEvent.click(screen.getByTitle('Push/Pull (P)'))
     // Open the Tools menu
     fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
-    // Push/Pull should now have a checkmark
-    const pushPullItem = screen.getByText('Push/Pull').closest('div')
+    // Push/Pull should now have a checkmark. Scope to the menu bar — the
+    // tool rail also renders a visible "Push/Pull" text node now, so
+    // a bare screen.getByText is ambiguous.
+    const pushPullItem = menubar().getByText('Push/Pull').closest('div')
     expect(pushPullItem?.textContent).toContain('✓')
   })
 
   it('switching to a new tool clears the checkmark on the previous tool', async () => {
     await renderAndLoad()
     // Activate Rectangle, then switch to Move
-    fireEvent.click(screen.getByTitle('Rectangle (Ctrl+K)'))
-    fireEvent.click(screen.getByTitle('Move (Ctrl+0)'))
+    fireEvent.click(screen.getByTitle('Rectangle (R)'))
+    fireEvent.click(screen.getByTitle('Move (M)'))
     // Rectangle lives in the Draw menu — it should no longer be checked.
     fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
     const rectangleItem = menubar().getByText('Rectangle').closest('div')
@@ -191,7 +196,7 @@ describe('App — keyboard shortcuts', () => {
   it('Space activates the Select tool', async () => {
     await renderAndLoad()
     // First switch away from Select so we can detect the change
-    fireEvent.click(screen.getByTitle('Rectangle (Ctrl+K)'))
+    fireEvent.click(screen.getByTitle('Rectangle (R)'))
     // Now press Space
     fireEvent.keyDown(document, { key: ' ' })
     // Open Tools menu and check Select has the checkmark
@@ -200,21 +205,49 @@ describe('App — keyboard shortcuts', () => {
     expect(selectItem?.textContent).toContain('✓')
   })
 
-  it('Ctrl+K activates the Rectangle tool', async () => {
+  it('bare R activates the Rectangle tool (SketchUp-for-Windows scheme)', async () => {
     await renderAndLoad()
-    fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
+    fireEvent.keyDown(document, { key: 'r' })
     // Rectangle lives in the Draw menu, not Tools.
     fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
     const rectangleItem = menubar().getByText('Rectangle').closest('div')
     expect(rectangleItem?.textContent).toContain('✓')
   })
 
-  it('Ctrl+0 activates the Move tool', async () => {
+  it('bare M activates the Move tool (SketchUp-for-Windows scheme)', async () => {
     await renderAndLoad()
-    fireEvent.keyDown(document, { key: '0', ctrlKey: true })
+    fireEvent.keyDown(document, { key: 'm' })
     fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
     const moveItem = menubar().getByText('Move').closest('div')
     expect(moveItem?.textContent).toContain('✓')
+  })
+
+  it('Ctrl+R (modified) still activates the Pan camera tool, not bare-letter Rectangle', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: 'r', ctrlKey: true })
+    fireEvent.click(screen.getByRole('button', { name: /^camera$/i }))
+    const panItem = menubar().getByText('Pan').closest('div')
+    expect(panItem?.textContent).toContain('✓')
+  })
+
+  it('Ctrl+K opens the command palette', async () => {
+    await renderAndLoad()
+    expect(screen.queryByRole('dialog', { name: /command palette/i })).not.toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
+    expect(screen.getByRole('dialog', { name: /command palette/i })).toBeInTheDocument()
+  })
+
+  it('selecting a palette result runs the same action as its rail row', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
+    fireEvent.change(screen.getByPlaceholderText(/search tools, actions, help/i), { target: { value: 'rotate' } })
+    // Scope to the dialog — the rail underneath also renders a "Rotate" row.
+    fireEvent.click(within(screen.getByRole('dialog')).getByText('Rotate'))
+    // Palette closes and the same menuActionRef dispatch the rail/menu use ran.
+    expect(screen.queryByRole('dialog', { name: /command palette/i })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    const rotateItem = menubar().getByText('Rotate').closest('div')
+    expect(rotateItem?.textContent).toContain('✓')
   })
 })
 
@@ -223,40 +256,32 @@ describe('App — panel toggle', () => {
     vi.clearAllMocks()
   })
 
-  it('Ctrl+Shift+I hides the Model Info floating panel', async () => {
+  it('Ctrl+Shift+I collapses the Outliner tray section', async () => {
     await renderAndLoad()
-    // Both panels start visible
-    expect(screen.getAllByTestId('floating-panel')).toHaveLength(2)
-    // Toggle Model Info off
+    expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'true')
     fireEvent.keyDown(document, { key: 'I', ctrlKey: true, shiftKey: true })
     await waitFor(() =>
-      expect(screen.getAllByTestId('floating-panel')).toHaveLength(1),
+      expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false'),
     )
   })
 
-  it('Ctrl+Shift+I re-shows the Model Info panel when pressed again', async () => {
+  it('Ctrl+Shift+I re-expands the Outliner section when pressed again', async () => {
     await renderAndLoad()
-    // Toggle off then back on
     fireEvent.keyDown(document, { key: 'I', ctrlKey: true, shiftKey: true })
     await waitFor(() =>
-      expect(screen.getAllByTestId('floating-panel')).toHaveLength(1),
+      expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false'),
     )
     fireEvent.keyDown(document, { key: 'I', ctrlKey: true, shiftKey: true })
     await waitFor(() =>
-      expect(screen.getAllByTestId('floating-panel')).toHaveLength(2),
+      expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'true'),
     )
   })
 
-  it('closing the Model Info panel via the × button hides it', async () => {
+  it('clicking the Outliner section header collapses it (the tray has no close button)', async () => {
     await renderAndLoad()
-    // Find the "Model Info" floating panel's close button (title="Close panel")
-    // There are two panels → two close buttons. Click the one inside Model Info.
-    const panels = screen.getAllByTestId('floating-panel')
-    const modelInfoPanel = panels.find((p) => p.textContent?.includes('Model Info'))
-    expect(modelInfoPanel).toBeDefined()
-    fireEvent.click(modelInfoPanel!.querySelector('[title="Close panel"]')!)
+    fireEvent.click(screen.getByRole('button', { name: /outliner/i }))
     await waitFor(() =>
-      expect(screen.getAllByTestId('floating-panel')).toHaveLength(1),
+      expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false'),
     )
   })
 

@@ -452,10 +452,21 @@ fn main() {
             // ----------------------------------------------------------------
             let view_axes = MenuItemBuilder::with_id("view-axes", "Axes").build(handle)?;
             let view_guides = MenuItemBuilder::with_id("view-guides", "Guides").build(handle)?;
+            // Command palette. `Cmd+K` is already Rectangle's
+            // accelerator (preserved unchanged) — `Cmd+/` is free and is
+            // the same binding Windows/Linux/web reach via the JS keydown
+            // handler's Ctrl+K (that platform's Rectangle moved to a bare
+            // `R` in, freeing Ctrl+K there; macOS keeps Cmd+K on
+            // Rectangle, so the palette needs a different key here).
+            let view_palette = MenuItemBuilder::with_id("view-palette", "Command Palette…")
+                .accelerator("CmdOrCtrl+/")
+                .build(handle)?;
 
             let view_menu = SubmenuBuilder::new(handle, "View")
                 .item(&view_axes)
                 .item(&view_guides)
+                .item(&PredefinedMenuItem::separator(handle)?)
+                .item(&view_palette)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -621,26 +632,24 @@ fn main() {
                 .build()?;
 
             // Attach the menu. macOS shows a single global menu bar owned by the
-            // app, so the app-level menu is correct there. On GTK/Windows the
-            // menu bar lives *inside* each window, so an app-wide menu would also
-            // appear on secondary windows (e.g. the floating Settings window).
-            // Scope it to the primary window instead; windows created later
-            // (Settings) then have no menu bar of their own.
+            // app, so the app-level menu is correct there.
             #[cfg(target_os = "macos")]
             app.set_menu(menu)?;
-            #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
-            if let Some(main_window) = app.webview_windows().values().next() {
-                main_window.set_menu(menu)?;
-            }
-            // Linux/WebKitGTK: KWin's titlebar decoration does not repaint the
-            // window title after the webview sets it, so we go borderless and
-            // draw our own title bar + menu in the web layer (App renders the
-            // custom TitleBar + the in-app MenuBar when isLinux). Skip the GTK
-            // menu (it would otherwise sit above our HTML chrome) and drop the
-            // server-side decorations.
-            #[cfg(target_os = "linux")]
+            // Windows and Linux both go borderless with in-app chrome instead of
+            // a native per-window menu (App renders the custom TitleBar + the
+            // in-app MenuBar when isLinux || isWindows —). Linux's
+            // original reason still applies (KWin/WebKitGTK doesn't repaint the
+            // server-side titlebar after the webview sets it), and Windows joins
+            // it here so the Studio design's in-window chrome + Ctrl-K field +
+            // SketchUp-for-Windows bare-letter shortcuts (— those
+            // shortcuts are handled entirely in TS, but only fire when nothing
+            // else, like a native accelerator, competes for the same keys) ship
+            // identically on both platforms. Skip the native menu (it would
+            // otherwise sit above our HTML chrome) and drop server-side
+            // decorations.
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
-                let _ = menu; // built for parity; not attached on Linux.
+                let _ = menu; // built for parity; not attached on Windows/Linux.
                 if let Some(main_window) = app.webview_windows().values().next() {
                     let _ = main_window.set_decorations(false);
                 }
@@ -687,6 +696,7 @@ fn main() {
                 "edit-delete-guides" => "edit-delete-guides",
                 "view-axes" => "toggle-axes",
                 "view-guides" => "toggle-guides",
+                "view-palette" => "open-palette",
                 "draw-rectangle" => "tool-rectangle",
                 "draw-circle" => "tool-circle",
                 "draw-line" => "tool-line",

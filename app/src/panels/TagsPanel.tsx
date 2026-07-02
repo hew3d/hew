@@ -37,6 +37,7 @@ const ROW_BASE: React.CSSProperties = {
   borderRadius: '3px',
   userSelect: 'none',
   minWidth: 0,
+  color: 'var(--text-secondary, #ccc)',
 }
 
 export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath }: Props) {
@@ -132,7 +133,7 @@ function TagRow({
             style={{
               background: 'none',
               border: 'none',
-              color: '#aaa',
+              color: 'var(--text-tertiary, #aaa)',
               cursor: 'pointer',
               padding: '0 2px',
               fontSize: '10px',
@@ -157,7 +158,7 @@ function TagRow({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            color: isHiddenByAncestorOrSelf ? '#555' : '#ccc',
+            color: isHiddenByAncestorOrSelf ? 'var(--text-faint, #555)' : 'var(--text-secondary, #ccc)',
             fontSize: '12px',
           }}
         >
@@ -169,7 +170,7 @@ function TagRow({
           <span
             style={{
               fontSize: '10px',
-              color: '#666',
+              color: 'var(--text-faint, #666)',
               minWidth: '16px',
               textAlign: 'right',
               flexShrink: 0,
@@ -186,7 +187,7 @@ function TagRow({
           style={{
             background: 'none',
             border: 'none',
-            color: hidden ? '#555' : '#888',
+            color: hidden ? 'var(--text-faint, #555)' : 'var(--text-tertiary, #888)',
             cursor: 'pointer',
             padding: '0 2px',
             fontSize: '11px',
@@ -232,7 +233,7 @@ function EmptyState() {
     <div
       style={{
         fontSize: '11px',
-        color: '#666',
+        color: 'var(--text-faint, #666)',
         fontStyle: 'italic',
         padding: '4px 8px',
         lineHeight: 1.5,
@@ -240,7 +241,7 @@ function EmptyState() {
     >
       No tags found.
       <br />
-      Use <code style={{ fontStyle: 'normal', color: '#888' }}>hew_export_tags.rb</code> in
+      Use <code style={{ fontStyle: 'normal', color: 'var(--text-tertiary, #888)' }}>hew_export_tags.rb</code> in
       SketchUp before exporting to COLLADA to encode tags into node names.
     </div>
   )

@@ -1,93 +1,21 @@
 /**
- *  — component tests for the dialog and floating-panel chrome.
+ *  — component tests for the dialog chrome.
  *
- * Covers: FloatingPanel, RecoveryDialog, ImportingOverlay, ImportReportDialog.
+ * Covers: RecoveryDialog, ImportingOverlay, ImportReportDialog.
  * None of these touch WASM or three.js, so no mocks beyond callbacks are needed.
+ *
+ * FloatingPanel's tests lived here too until deleted that component
+ * (replaced by the permanently docked tray, `TraySection.tsx` — see its own
+ * test file).
  */
 
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { FloatingPanel } from './FloatingPanel'
+import { describe, expect, it, vi } from 'vitest'
 import { RecoveryDialog } from './RecoveryDialog'
 import { ImportingOverlay } from './ImportingOverlay'
 import { ImportReportDialog } from './ImportReportDialog'
 import type { RecoverySnapshot } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
-
-// ---------------------------------------------------------------------------
-// FloatingPanel
-// ---------------------------------------------------------------------------
-
-describe('FloatingPanel', () => {
-  const baseProps = {
-    panelId: 'test-panel',
-    title: 'My Panel',
-    defaultPosition: { x: 20, y: 40 },
-    width: 240,
-    onClose: vi.fn(),
-    zIndex: 10,
-    onFocus: vi.fn(),
-  }
-
-  beforeEach(() => {
-    vi.clearAllMocks()
-    localStorage.clear()
-  })
-
-  it('renders the title text', () => {
-    render(<FloatingPanel {...baseProps}><p>body</p></FloatingPanel>)
-    expect(screen.getByText('My Panel')).toBeInTheDocument()
-  })
-
-  it('renders children in the panel body', () => {
-    render(<FloatingPanel {...baseProps}><p>Panel content</p></FloatingPanel>)
-    expect(screen.getByText('Panel content')).toBeInTheDocument()
-  })
-
-  it('calls onClose when the × close button is clicked', () => {
-    const onClose = vi.fn()
-    render(
-      <FloatingPanel {...baseProps} onClose={onClose}><p>body</p></FloatingPanel>,
-    )
-    fireEvent.click(screen.getByTitle('Close panel'))
-    expect(onClose).toHaveBeenCalledOnce()
-  })
-
-  it('positions the panel at the default coordinates', () => {
-    render(
-      <FloatingPanel {...baseProps} defaultPosition={{ x: 55, y: 99 }}>
-        <p>body</p>
-      </FloatingPanel>,
-    )
-    const panel = screen.getByTestId('floating-panel')
-    expect(panel.style.left).toBe('55px')
-    expect(panel.style.top).toBe('99px')
-  })
-
-  it('restores position from localStorage when a saved position exists', () => {
-    localStorage.setItem('hew.panel.test-panel.pos', JSON.stringify({ x: 77, y: 33 }))
-    render(<FloatingPanel {...baseProps}><p>body</p></FloatingPanel>)
-    const panel = screen.getByTestId('floating-panel')
-    // The stored position overrides the default
-    expect(panel.style.left).toBe('77px')
-    expect(panel.style.top).toBe('33px')
-  })
-
-  it('applies the zIndex to the panel root', () => {
-    render(<FloatingPanel {...baseProps} zIndex={42}><p>body</p></FloatingPanel>)
-    const panel = screen.getByTestId('floating-panel')
-    expect(panel.style.zIndex).toBe('42')
-  })
-
-  it('calls onFocus when the panel is clicked (pointer-down capture)', () => {
-    const onFocus = vi.fn()
-    render(
-      <FloatingPanel {...baseProps} onFocus={onFocus}><p>body</p></FloatingPanel>,
-    )
-    fireEvent.pointerDown(screen.getByTestId('floating-panel'))
-    expect(onFocus).toHaveBeenCalled()
-  })
-})
 
 // ---------------------------------------------------------------------------
 // RecoveryDialog

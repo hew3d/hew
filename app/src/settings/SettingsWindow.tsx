@@ -2,19 +2,23 @@
  * SettingsWindow — standalone shell rendered in the separate Settings webview
  * window (Tauri) when the URL hash is `#settings` (see main.tsx).
  *
- * Two-column layout: a left list of setting categories ("Units", "Debug")
- * and the right pane rendering the selected category's content. Styled to
- * match the app's dark theme.
+ * Two-column layout: a left list of setting categories ("Units", "Theme",
+ * "Debug") and the right pane rendering the selected category's content.
+ * Token-styled `
+ * unconditionally, so this window's `data-theme` was always correct — it was
+ * just ignored, since every color here was hardcoded dark regardless).
  */
 
 import { useState } from 'react'
 import { UnitsPane } from './UnitsPane'
+import { ThemePane } from './ThemePane'
 import { DebugPane } from './DebugPane'
 
-type Category = 'units' | 'debug'
+type Category = 'units' | 'theme' | 'debug'
 
 const CATEGORIES: { id: Category; label: string }[] = [
   { id: 'units', label: 'Units' },
+  { id: 'theme', label: 'Theme' },
   { id: 'debug', label: 'Debug' },
 ]
 
@@ -27,9 +31,9 @@ export function SettingsWindow() {
         display: 'flex',
         flexDirection: 'column',
         height: '100vh',
-        background: '#1a1a1a',
-        color: '#ddd',
-        fontFamily: 'system-ui, sans-serif',
+        background: 'var(--surface-window, #1a1a1a)',
+        color: 'var(--text-secondary, #ddd)',
+        fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',
         boxSizing: 'border-box',
       }}
     >
@@ -38,8 +42,8 @@ export function SettingsWindow() {
           padding: '10px 16px',
           fontSize: '14px',
           fontWeight: 600,
-          color: '#eee',
-          borderBottom: '1px solid #333',
+          color: 'var(--text-primary, #eee)',
+          borderBottom: '1px solid var(--border-hairline, #333)',
           flexShrink: 0,
         }}
       >
@@ -51,8 +55,8 @@ export function SettingsWindow() {
           style={{
             width: '140px',
             flexShrink: 0,
-            borderRight: '1px solid #333',
-            background: '#202020',
+            borderRight: '1px solid var(--border-hairline, #333)',
+            background: 'var(--surface-panel, #202020)',
             padding: '8px 0',
           }}
         >
@@ -64,8 +68,8 @@ export function SettingsWindow() {
                 padding: '6px 16px',
                 fontSize: '13px',
                 cursor: 'pointer',
-                color: active === cat.id ? '#fff' : '#bbb',
-                background: active === cat.id ? '#3a5e9e' : 'transparent',
+                color: active === cat.id ? 'var(--accent-text-on-tint, #fff)' : 'var(--text-tertiary, #bbb)',
+                background: active === cat.id ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
               }}
             >
               {cat.label}
@@ -76,6 +80,7 @@ export function SettingsWindow() {
         {/* Right pane */}
         <div style={{ flex: 1, minWidth: 0, padding: '16px', overflowY: 'auto' }}>
           {active === 'units' && <UnitsPane />}
+          {active === 'theme' && <ThemePane />}
           {active === 'debug' && <DebugPane />}
         </div>
       </div>

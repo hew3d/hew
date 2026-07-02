@@ -1,14 +1,24 @@
 /**
- * Custom window title bar for the Linux desktop shell (M-fix).
+ * Custom window title bar for the Linux and Windows desktop shells
+ * (M-fix Linux-only; widened to Windows in).
  *
  * On Linux/WebKitGTK the KWin server-side titlebar does not repaint the window
- * title after the webview calls `setTitle`, so the shell runs borderless
- * (`set_decorations(false)` in main.rs) and we draw our own chrome here: a
- * draggable bar showing the document title (filename + dirty dot + "Hew") with
- * minimize / maximize-restore / close controls, plus edge + corner grips that
- * drive native window resizing (borderless Wayland windows lose edge resize).
+ * title after the webview calls `setTitle`, so that shell runs borderless
+ * (`set_decorations(false)` in main.rs) and draws its own chrome here.
+ * Windows joined this treatment in for the Studio design's in-window
+ * chrome (`02_app_shell.md`'s Windows/Linux title bar spec): a draggable bar
+ * showing a placeholder app glyph, the document name, and the "Edited/Saved
+ * <relative time>" save-state indicator (replaces a Save button as the
+ * primary save-state cue — no button here or elsewhere in Hew), with
+ * minimize / maximize-restore / close caption buttons, plus edge + corner
+ * grips that drive native window resizing (borderless Wayland windows lose
+ * edge resize).
  *
- * Rendered only when `isTauri && isLinux`; macOS/Windows keep native decorations.
+ * Rendered only when `isTauri && (isLinux || isWindows)`; macOS keeps native
+ * decorations + its own title bar (the OS owns that chrome — Hew has no way
+ * to inject a custom save-state indicator into it, so macOS doesn't show one
+ * outside the app itself; see the docked tray's Entity Info, for a
+ * possible future home).
  */
 import { useEffect, useRef, useState } from 'react'
 
@@ -25,30 +35,56 @@ type ResizeDir =
   | 'SouthEast'
   | 'SouthWest'
 
-const BAR_HEIGHT = 30
+// `02_app_shell.md`'s Windows/Linux title bar spec: 34px height (vs macOS's
+// native 46px, which Hew doesn't draw).
+const BAR_HEIGHT = 34
 const GRIP = 6 // edge thickness / corner size, px
 
 const barStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   height: BAR_HEIGHT,
-  background: '#171717',
-  borderBottom: '1px solid #2a2a2a',
+  background: 'var(--surface-titlebar-bottom, #1b1f26)',
+  borderBottom: '1px solid var(--border-hairline, #2a2a2a)',
   flexShrink: 0,
   userSelect: 'none',
   WebkitUserSelect: 'none',
+  gap: 'var(--space-3, 8px)',
+  padding: '0 0 0 var(--space-6, 13px)',
 }
 
-const titleStyle: React.CSSProperties = {
-  flex: 1,
-  textAlign: 'center',
-  fontSize: 12,
-  color: '#cfcfcf',
+/** Placeholder app glyph (README's "Logo/wordmark" open item — a rounded
+ * accent square stands in until a real mark exists). */
+const glyphStyle: React.CSSProperties = {
+  width: 14,
+  height: 14,
+  borderRadius: 4,
+  background: 'var(--accent-base, #5b8cff)',
+  flexShrink: 0,
+}
+
+const nameStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-family-ui)',
+  fontSize: 'var(--font-size-titlebar-filename, 13px)',
+  fontWeight: 600,
+  color: 'var(--text-primary, #cdd4de)',
   whiteSpace: 'nowrap',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
-  lineHeight: `${BAR_HEIGHT}px`,
-  padding: '0 8px',
+}
+
+const saveStateStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-family-ui)',
+  fontSize: 'var(--font-size-titlebar-meta, 11px)',
+  color: 'var(--text-section, #5b6472)',
+  whiteSpace: 'nowrap',
+  flexShrink: 0,
+}
+
+const dragFillStyle: React.CSSProperties = {
+  flex: 1,
+  height: '100%',
+  minWidth: 0,
 }
 
 const btnStyle: React.CSSProperties = {
@@ -59,9 +95,10 @@ const btnStyle: React.CSSProperties = {
   justifyContent: 'center',
   border: 'none',
   background: 'transparent',
-  color: '#cfcfcf',
+  color: 'var(--text-tertiary, #9aa3b0)',
   cursor: 'pointer',
   padding: 0,
+  flexShrink: 0,
 }
 
 /** One resize grip's CSS box + the native resize direction it triggers. */
@@ -76,7 +113,14 @@ const GRIPS: { dir: ResizeDir; style: React.CSSProperties }[] = [
   { dir: 'SouthEast', style: { bottom: 0, right: 0, width: GRIP, height: GRIP, cursor: 'nwse-resize' } },
 ]
 
-export function TitleBar({ title }: { title: string }) {
+export interface TitleBarProps {
+  /** Bare document name (no dirty mark, no " — Hew" suffix) — `documentSession.ts`'s `documentName()`. */
+  name: string
+  /** "Edited <relative time>" / "Saved <relative time>" / "" — `documentSession.ts`'s `saveStateLabel()`. */
+  saveState: string
+}
+
+export function TitleBar({ name, saveState }: TitleBarProps) {
   const apiRef = useRef<WindowApi | null>(null)
   const [maximized, setMaximized] = useState(false)
 
@@ -118,9 +162,10 @@ export function TitleBar({ title }: { title: string }) {
   return (
     <>
       <div style={barStyle} data-tauri-drag-region>
-        <div style={titleStyle} data-tauri-drag-region>
-          {title}
-        </div>
+        <div aria-hidden="true" style={glyphStyle} />
+        <span style={nameStyle}>{name}</span>
+        {saveState !== '' && <span style={saveStateStyle}>{saveState}</span>}
+        <div style={dragFillStyle} data-tauri-drag-region />
         <button style={btnStyle} title="Minimize" onClick={minimize} aria-label="Minimize">
           <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor" /></svg>
         </button>
@@ -140,8 +185,8 @@ export function TitleBar({ title }: { title: string }) {
           title="Close"
           onClick={close}
           aria-label="Close"
-          onMouseEnter={(e) => { e.currentTarget.style.background = '#c42b1c'; e.currentTarget.style.color = '#fff' }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#cfcfcf' }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--chrome-win-close-hover, #e53b41)'; e.currentTarget.style.color = '#fff' }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-tertiary, #9aa3b0)' }}
         >
           <svg width="11" height="11" viewBox="0 0 11 11" stroke="currentColor"><path d=" 1.5l8 8M9.5 1.5l-8 8" /></svg>
         </button>

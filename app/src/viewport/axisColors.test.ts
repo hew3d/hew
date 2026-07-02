@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { axisColorForDirection, AXIS_COLORS } from './axisColors'
+import {
+  axisColorForDirection,
+  axisColorsForTheme,
+  AXIS_COLORS,
+  DARK_AXIS_COLORS,
+  LIGHT_AXIS_COLORS,
+} from './axisColors'
 
 const TOL_2DEG = Math.cos((2 * Math.PI) / 180)
 
@@ -50,5 +56,23 @@ describe('axisColorForDirection', () => {
     const rad = (5 * Math.PI) / 180
     const m = axisColorForDirection([Math.cos(rad), Math.sin(rad), 0], TOL_2DEG)
     expect(m).toBeNull()
+  })
+})
+
+describe('axisColorsForTheme', () => {
+  it('AXIS_COLORS is an alias of DARK_AXIS_COLORS (no behavior change at existing call sites)', () => {
+    expect(AXIS_COLORS).toEqual(DARK_AXIS_COLORS)
+  })
+
+  it('returns DARK_AXIS_COLORS for "dark"', () => {
+    expect(axisColorsForTheme('dark')).toEqual(DARK_AXIS_COLORS)
+  })
+
+  it('returns LIGHT_AXIS_COLORS for "light"', () => {
+    expect(axisColorsForTheme('light')).toEqual(LIGHT_AXIS_COLORS)
+  })
+
+  it('dark and light triples differ', () => {
+    expect(LIGHT_AXIS_COLORS).not.toEqual(DARK_AXIS_COLORS)
   })
 })

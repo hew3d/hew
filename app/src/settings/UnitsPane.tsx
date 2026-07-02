@@ -34,18 +34,29 @@ const selectStyle: React.CSSProperties = {
   width: '100%',
   padding: '6px 8px',
   fontSize: '13px',
-  background: '#2a2a2a',
-  color: '#eee',
-  border: '1px solid #444',
+  background: 'var(--surface-input, #2a2a2a)',
+  color: 'var(--text-primary, #eee)',
+  border: '1px solid var(--border-strong, #444)',
   borderRadius: '4px',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',
 }
 
 const labelStyle: React.CSSProperties = {
   display: 'block',
   fontSize: '12px',
-  color: '#aaa',
+  color: 'var(--text-tertiary, #aaa)',
   marginBottom: '6px',
+}
+
+// Follow-up: many browsers/webviews render a <select>'s dropdown
+// popup using OS-native styling that ignores the *parent* element's color
+// (only `selectStyle` above), always showing dark-mode-only or light-mode-
+// only text regardless of theme. Styling each <option> directly is the
+// standard workaround — some engines respect it, closing the gap that
+// styling only the <select> leaves open.
+const optionStyle: React.CSSProperties = {
+  background: 'var(--surface-input, #2a2a2a)',
+  color: 'var(--text-primary, #eee)',
 }
 
 export function UnitsPane() {
@@ -65,7 +76,7 @@ export function UnitsPane() {
 
   return (
     <div>
-      <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#eee', fontWeight: 600 }}>
+      <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: 'var(--text-primary, #eee)', fontWeight: 600 }}>
         Units
       </h3>
 
@@ -76,7 +87,7 @@ export function UnitsPane() {
         style={{ ...selectStyle, marginBottom: '12px' }}
       >
         {SYSTEM_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
+          <option key={opt.value} value={opt.value} style={optionStyle}>
             {opt.label}
           </option>
         ))}
@@ -91,14 +102,14 @@ export function UnitsPane() {
         {formatOptions.map((value) => {
           const opt = LENGTH_FORMAT_OPTIONS.find((o) => o.value === value)
           return (
-            <option key={value} value={value}>
+            <option key={value} value={value} style={optionStyle}>
               {opt?.label ?? value}
             </option>
           )
         })}
       </select>
 
-      <p style={{ fontSize: '11px', color: '#777', marginTop: '10px', lineHeight: 1.4 }}>
+      <p style={{ fontSize: '11px', color: 'var(--text-faint, #777)', marginTop: '10px', lineHeight: 1.4 }}>
         Controls how lengths are displayed (e.g. the Move tool's live measurement).
         Model geometry is always stored in meters internally.
       </p>

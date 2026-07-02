@@ -20,7 +20,8 @@
 
 import * as THREE from 'three'
 import type { Snap } from '../tools/types'
-import { AXIS_COLORS } from './axisColors'
+import { axisColorsForTheme } from './axisColors'
+import { getResolvedTheme } from '../settings/theme'
 
 const SNAP_COLORS: Record<string, number> = {
   endpoint: 0x00cc44,
@@ -149,11 +150,12 @@ export class CueLayer {
     // Determine color
     let color = snapColor(snap.kind)
     if (snap.kind === 'on-axis' && snap.direction !== undefined) {
-      // Infer axis color from dominant direction component
+      // Infer axis color from dominant direction component (—
+      // theme-aware: light/dark axis colors differ, per 01_design_tokens.md).
       const [dx, dy, dz] = snap.direction
       const abs = [Math.abs(dx), Math.abs(dy), Math.abs(dz)]
       const axis = abs.indexOf(Math.max(...abs)) as 0 | 1 | 2
-      color = AXIS_COLORS[axis]
+      color = axisColorsForTheme(getResolvedTheme())[axis]
     }
 
     // Build unit cross at origin; position+scale set by updateMarkerScale()

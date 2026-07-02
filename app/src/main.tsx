@@ -1,15 +1,22 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import './theme/tokens.css'
 import './index.css'
 import App from './App.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { SettingsWindow } from './settings/SettingsWindow.tsx'
 import { isTauri } from './io/fileHost'
+import { initThemeSync } from './theme/applyTheme'
 
 // The Settings window (Tauri: a separate webview; web: unused — the modal
 // fallback renders inline in App) loads this same entry with a `#settings`
 // hash so it gets its own render root without a second HTML file.
 const isSettingsWindow = window.location.hash.startsWith('#settings')
+
+// Set the initial `data-theme` attribute before first paint, and keep it in
+// sync thereafter. Runs unconditionally so both the main app window and the
+// Settings window (each its own top-level document) stay themed identically.
+initThemeSync()
 
 // Clear any panic recorded by a previous session so the error boundary only
 // ever shows a panic from the *current* run (the wasm hook re-records on panic).

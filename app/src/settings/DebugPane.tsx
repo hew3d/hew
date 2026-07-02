@@ -20,7 +20,7 @@ const labelStyle: React.CSSProperties = {
   alignItems: 'center',
   gap: '8px',
   fontSize: '13px',
-  color: '#ddd',
+  color: 'var(--text-secondary, #ddd)',
   cursor: 'pointer',
 }
 
@@ -28,9 +28,9 @@ const buttonStyle: React.CSSProperties = {
   marginTop: '12px',
   padding: '6px 12px',
   fontSize: '13px',
-  background: '#2a2a2a',
-  color: '#eee',
-  border: '1px solid #444',
+  background: 'var(--surface-input, #2a2a2a)',
+  color: 'var(--text-primary, #eee)',
+  border: '1px solid var(--border-strong, #444)',
   borderRadius: '4px',
   cursor: 'pointer',
 }
@@ -44,7 +44,7 @@ export function DebugPane() {
 
   return (
     <div>
-      <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#eee', fontWeight: 600 }}>
+      <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: 'var(--text-primary, #eee)', fontWeight: 600 }}>
         Debug
       </h3>
 
@@ -57,7 +57,7 @@ export function DebugPane() {
         Enable Debug Mode
       </label>
 
-      <p style={{ fontSize: '11px', color: '#777', marginTop: '10px', lineHeight: 1.4 }}>
+      <p style={{ fontSize: '11px', color: 'var(--text-faint, #777)', marginTop: '10px', lineHeight: 1.4 }}>
         Debug Mode enables the rolling diagnostic log <strong>file</strong>, low-level
         input recording, and kernel <strong>torture mode</strong> (extra validation
         and a re-tessellation self-check after every op — slower, but surfaces
@@ -65,7 +65,7 @@ export function DebugPane() {
       </p>
 
       {isTauri ? (
-        <p style={{ fontSize: '11px', color: '#777', marginTop: '10px', lineHeight: 1.4 }}>
+        <p style={{ fontSize: '11px', color: 'var(--text-faint, #777)', marginTop: '10px', lineHeight: 1.4 }}>
           Written to the app log directory as <code>diagnostic.log</code>.
         </p>
       ) : (

@@ -13,6 +13,26 @@ body,
 }
 
 body {
-  background: #1a1a1a;
+  background: var(--surface-canvas-page, #1a1a1a);
   overflow: hidden;
+}
+
+/* VCB blinking caret (`07_inference_feedback.md` — "the caret is the
+ * cue" that the measurement box always accepts typed input). ~1.1s step,
+ * matching the spec's motion guidance; drops to a static caret under
+ * prefers-reduced-motion instead of stopping the animation mid-blink. */
+@keyframes hew-vcb-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.hew-vcb-caret {
+  animation: hew-vcb-caret-blink 1.1s step-end infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hew-vcb-caret {
+    animation: none;
+    opacity: 1;
+  }
 }

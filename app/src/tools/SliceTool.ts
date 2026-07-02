@@ -63,7 +63,8 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { editLengthBuffer } from './moveInput'
 import { parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { axisColorForDirection } from '../viewport/axisColors'
+import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
+import { getResolvedTheme } from '../settings/theme'
 
 export type OnSliceCommitted = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -414,7 +415,7 @@ export class SliceTool implements Tool {
 
     const unitNormal = normalize(normal) ?? AXIS_NORMAL[2]
     const { u, v } = planeBasis(unitNormal)
-    const match = axisColorForDirection(unitNormal, AXIS_COLOR_TOL_DOT)
+    const match = axisColorForDirection(unitNormal, AXIS_COLOR_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
     const color = match !== null ? match.color : NEUTRAL_PREVIEW_COLOR
 
     // Quad corners in LOCAL space (offsets from the group origin along u/v); the

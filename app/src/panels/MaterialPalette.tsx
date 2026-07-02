@@ -36,7 +36,7 @@ const PANEL_STYLE: React.CSSProperties = {
   gap: '6px',
   fontFamily: 'monospace',
   fontSize: '11px',
-  color: '#ccc',
+  color: 'var(--text-secondary, #ccc)',
 }
 
 const SWATCH_STYLE: React.CSSProperties = {
@@ -54,9 +54,9 @@ const INPUT_STYLE: React.CSSProperties = {
   width: '100%',
   fontSize: '11px',
   fontFamily: 'monospace',
-  background: '#444',
-  color: '#eee',
-  border: '1px solid #555',
+  background: 'var(--surface-input, #444)',
+  color: 'var(--text-primary, #eee)',
+  border: '1px solid var(--border-strong, #555)',
   borderRadius: '3px',
   padding: '2px 4px',
   boxSizing: 'border-box',
@@ -65,9 +65,9 @@ const INPUT_STYLE: React.CSSProperties = {
 const BTN_STYLE: React.CSSProperties = {
   fontSize: '11px',
   fontFamily: 'monospace',
-  background: '#444',
-  color: '#eee',
-  border: '1px solid #555',
+  background: 'var(--surface-input, #444)',
+  color: 'var(--text-primary, #eee)',
+  border: '1px solid var(--border-strong, #555)',
   borderRadius: '3px',
   padding: '3px 8px',
   cursor: 'pointer',
@@ -184,7 +184,7 @@ export function MaterialPalette({
             borderColor: currentMaterialId === MATERIAL_SENTINEL ? '#ffaa00' : 'transparent',
           }}
         />
-        <span style={{ color: '#aaa', fontSize: '10px' }}>Default</span>
+        <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Default</span>
       </div>
 
       {/* Fill selected object */}
@@ -238,7 +238,7 @@ export function MaterialPalette({
               style={{
                 ...SWATCH_STYLE,
                 background: thumbUrl !== undefined ? `url(${thumbUrl}) center/cover` : hex,
-                borderColor: selected ? '#ffaa00' : '#444',
+                borderColor: selected ? '#ffaa00' : 'var(--border-strong, #444)',
               }}
             />
             <span
@@ -247,7 +247,7 @@ export function MaterialPalette({
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
                 flex: 1,
-                color: selected ? '#ffaa00' : '#ccc',
+                color: selected ? '#ffaa00' : 'var(--text-secondary, #ccc)',
                 cursor: 'pointer',
               }}
               onClick={() => onSelectMaterial(id)}
@@ -259,10 +259,10 @@ export function MaterialPalette({
       })}
 
       {/* Divider */}
-      <div style={{ borderTop: '1px solid #444', margin: '2px 0' }} />
+      <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
 
       {/* Add color */}
-      <div style={{ fontWeight: 'bold', color: '#aaa', fontSize: '10px' }}>Add color</div>
+      <div style={{ fontWeight: 'bold', color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Add color</div>
       <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
         <input
           type="color"
@@ -284,8 +284,8 @@ export function MaterialPalette({
       </button>
 
       {/* Add texture */}
-      <div style={{ borderTop: '1px solid #444', margin: '2px 0' }} />
-      <div style={{ fontWeight: 'bold', color: '#aaa', fontSize: '10px' }}>Add texture</div>
+      <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
+      <div style={{ fontWeight: 'bold', color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Add texture</div>
       <input
         type="text"
         value={texName}
@@ -298,10 +298,10 @@ export function MaterialPalette({
         type="file"
         accept="image/png,image/jpeg"
         onChange={(e) => setPendingFile(e.target.files?.[0] ?? null)}
-        style={{ fontSize: '10px', color: '#aaa' }}
+        style={{ fontSize: '10px', color: 'var(--text-tertiary, #aaa)' }}
       />
       <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-        <span style={{ color: '#888', flexShrink: 0 }}>W:</span>
+        <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>W:</span>
         <input
           type="number"
           value={texWorldW}
@@ -310,7 +310,7 @@ export function MaterialPalette({
           onChange={(e) => setTexWorldW(e.target.value)}
           style={{ ...INPUT_STYLE, width: '60px' }}
         />
-        <span style={{ color: '#888', flexShrink: 0 }}>H:</span>
+        <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>H:</span>
         <input
           type="number"
           value={texWorldH}
@@ -321,7 +321,7 @@ export function MaterialPalette({
         />
       </div>
       {pendingFile !== null && (
-        <span style={{ color: '#aaa', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {pendingFile.name}
         </span>
       )}

@@ -1,15 +1,20 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
-import Viewport, { type ViewportApi } from './viewport/Viewport'
+import Viewport, { type ViewportApi, type InferenceInfo, type StandardView } from './viewport/Viewport'
+import { InferenceTooltip } from './viewport/InferenceTooltip'
+import { MeasurementBox } from './viewport/MeasurementBox'
+import { ViewportHUD } from './viewport/ViewportHUD'
 import { DocumentTree } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
 import { TitleBar } from './TitleBar'
-import { isLinux } from './platform'
+import { isLinux, isMac, isWindows } from './platform'
 import { TagsPanel } from './panels/TagsPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
-import { FloatingPanel } from './panels/FloatingPanel'
+import { TraySection } from './panels/TraySection'
+import { ToolRail } from './panels/ToolRail'
+import { ContextualDock } from './panels/ContextualDock'
 import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, nodeKey, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
@@ -21,6 +26,8 @@ import { makeFileHost, isTauri, type ImportReport } from './io/fileHost'
 import {
   INITIAL_SESSION,
   deriveTitle,
+  documentName,
+  saveStateLabel,
   afterMutation,
   afterSave,
   afterOpen,
@@ -31,16 +38,18 @@ import { makeRecoveryStore, shouldPromptRecovery, type RecoverySnapshot, type Re
 import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
+import { CommandPalette } from './palette/CommandPalette'
 import { UnitsPane } from './settings/UnitsPane'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { generateBugReport } from './log/reportBug'
-import { TOOL_ICON_SVG } from './tools/toolIcons'
-import { modLabel } from './platform'
+import { TOOLS, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). */
 const AUTOSAVE_INTERVAL_MS = 12000
+/** Refresh interval (ms) for the "Edited/Saved <relative time>" indicator. */
+const SAVE_STATE_TICK_MS = 30000
 
 interface AppState {
   kernelVersion: string
@@ -60,29 +69,6 @@ function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
 }
 
-const TOOLS = ['Select', 'Rectangle', 'Circle', 'Line', 'Push/Pull', 'Paint', 'Move', 'Rotate', 'Scale', 'Tape Measure', 'Protractor', 'Slice', 'Edit Vertex', 'Orbit', 'Pan', 'Zoom'] as const
-type ToolName = (typeof TOOLS)[number]
-// Canonical shortcuts use the ⌘ glyph; the toolbar-button tooltip swaps it for
-// `modLabel` ('Ctrl+') on non-Mac hosts (e.g. Linux/WebKitGTK).
-const TOOL_KEYS: Record<ToolName, string> = {
-  'Select': 'Spc',
-  'Rectangle': '⌘K',
-  'Circle': 'C',
-  'Line': '⌘L',
-  'Push/Pull': '⌘=',
-  'Paint': '4',
-  'Move': '⌘0',
-  'Rotate': '⌘8',
-  'Scale': '⌘9',
-  'Tape Measure': '⌘D',
-  'Protractor': '',
-  'Slice': '',
-  'Edit Vertex': '',
-  'Orbit': '⌘B',
-  'Pan': '⌘R',
-  'Zoom': '⌘\\',
-}
-
 /** Strings that signal the Scene borrow-lock after a Rust panic. */
 const PANIC_SIGNATURES = ['recursive use of an object', 'unreachable']
 
@@ -91,33 +77,14 @@ function isPanicError(message: string): boolean {
   return PANIC_SIGNATURES.some((sig) => lower.includes(sig))
 }
 
-/** Inline Material Symbols icon. The source SVGs carry no `fill`
- * attribute, so `fill="currentColor"` is spliced onto the root `<svg>` tag
- * here — letting the button's `color` style (active vs. idle) drive icon
- * color without a stylesheet (this codebase is inline-styles-only). */
-function ToolIcon({ name }: { name: ToolName }) {
-  // Material Symbols SVGs carry intrinsic width="48" height="48" attributes.
-  // Strip those and inject the size we actually want, otherwise the glyph
-  // renders at 48px inside an 18px span and bleeds into neighboring buttons.
-  const svg = TOOL_ICON_SVG[name]
-    .replace(/\swidth="[^"]*"/, '')
-    .replace(/\sheight="[^"]*"/, '')
-    .replace('<svg ', '<svg fill="currentColor" width="18" height="18" ')
-  return (
-    <span
-      aria-hidden="true"
-      style={{ width: '18px', height: '18px', display: 'block', overflow: 'hidden' }}
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
-  )
-}
-
 export default function App() {
   const [state, setState] = useState<AppState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toolName, setToolName] = useState<string>('Select')
   const [snapKind, setSnapKind] = useState<string | null>(null)
   const [measurement, setMeasurement] = useState<string>('')
+  /** Live inference-cursor info for the tooltip chip. */
+  const [inferenceInfo, setInferenceInfo] = useState<InferenceInfo | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   /** Per-object watertight map (bigint key) */
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
@@ -140,6 +107,10 @@ export default function App() {
   const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
   /** Document session: currentRef + dirty flag. */
   const [docSession, setDocSession] = useState<DocSessionState>(INITIAL_SESSION)
+  /** Ticks every SAVE_STATE_TICK_MS purely to refresh the "Edited/Saved
+   * <relative time>" indicator — nothing else reads this state.
+   * Coarse (30s) since the label only needs minute-level freshness. */
+  const [nowTick, setNowTick] = useState(() => Date.now())
   /** Pane visibility: Model info (DocumentTree) */
   const [showModelInfo, setShowModelInfo] = useState(true)
   /** Pane visibility: Materials (MaterialPalette) */
@@ -155,16 +126,8 @@ export default function App() {
   const [showGuides, setShowGuides] = useState(true)
   /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
   const [showSettingsModal, setShowSettingsModal] = useState(false)
-  /**
-   * Floating-panel z-order (draggable overlay panels). Each panel's
-   * z-index is its position in this array (later = on top); clicking a panel
-   * moves its id to the end. Base values stay well below the toast stack
-   * (z 100) and other fixed overlays.
-   */
-  const [panelOrder, setPanelOrder] = useState<string[]>(['modelInfo', 'materials', 'tags', 'objectInfo'])
-  const bringPanelToFront = useCallback((id: string) => {
-    setPanelOrder((cur) => (cur[cur.length - 1] === id ? cur : [...cur.filter((p) => p !== id), id]))
-  }, [])
+  /** Command palette visibility (⌘K / Ctrl-K). */
+  const [paletteOpen, setPaletteOpen] = useState(false)
   /** Tag-path hide set: each entry is tagPathKey(path). Cleared on load/new. */
   const [hiddenTagPaths, setHiddenTagPaths] = useState<Set<string>>(new Set())
   /** Import report to display (null = no dialog). */
@@ -275,6 +238,16 @@ export default function App() {
     return () => clearInterval(interval)
   }, [])
 
+  // ---------------------------------------------------------------- save-state indicator tick
+  // The "Edited/Saved <relative time>" text in TitleBar/MenuBar needs to
+  // advance even when nothing else changes (e.g. sitting idle after an edit,
+  // "Edited just now" should become "Edited 2 minutes ago"). Runs once for
+  // the component's lifetime.
+  useEffect(() => {
+    const interval = setInterval(() => setNowTick(Date.now()), SAVE_STATE_TICK_MS)
+    return () => clearInterval(interval)
+  }, [])
+
   // ---------------------------------------------------------------- startup recovery check
   // Runs once, after the scene first becomes available. Guarded by
   // recoveryCheckedRef so StrictMode's double-invoke / Vite HMR re-renders
@@ -325,6 +298,10 @@ export default function App() {
 
   const handleMeasurement = useCallback((text: string) => {
     setMeasurement(text)
+  }, [])
+
+  const handleInferenceChange = useCallback((info: InferenceInfo | null) => {
+    setInferenceInfo(info)
   }, [])
 
   const handleSceneChange = useCallback((wtMap: Map<bigint, boolean>) => {
@@ -394,7 +371,7 @@ export default function App() {
     // Mark the document dirty on any mutation — but NOT during programmatic
     // loads (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
     if (!suppressDirtyRef.current) {
-      setDocSession((s) => afterMutation(s))
+      setDocSession((s) => afterMutation(s, Date.now()))
       dirtySinceAutosaveRef.current = true
     }
   }, [trimContextPath])
@@ -558,7 +535,7 @@ export default function App() {
     if (!(await confirmDiscard())) return
     const blank = blankBytesRef.current
     if (blank === null) return
-    if (applyLoadedBytes(blank)) setDocSession(afterOpen(null))
+    if (applyLoadedBytes(blank)) setDocSession(afterOpen(null, Date.now()))
   }, [confirmDiscard, applyLoadedBytes])
 
   const openDocument = useCallback(async () => {
@@ -567,7 +544,7 @@ export default function App() {
       if (result === null) return // user cancelled
       const ok = applyLoadedBytes(result.bytes)
       if (!ok) return
-      setDocSession(afterOpen(result.ref))
+      setDocSession(afterOpen(result.ref, Date.now()))
       if (isTauri && typeof result.ref.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: result.ref.handle as string })
@@ -659,7 +636,7 @@ export default function App() {
     // overwrite risk on either WebFileHost or TauriFileHost) and dirty=true.
     // The importedName is used by deriveTitle (window title) and by
     // saveAsDocument's suggested filename.
-    setDocSession(afterImport(result!.name))
+    setDocSession(afterImport(result!.name, Date.now()))
 
     setImportReport(report)
     const fmt = result!.kind === 'gltf' ? 'glTF' : 'DAE'
@@ -674,7 +651,7 @@ export default function App() {
     const ref = docSession.currentRef
     fileHostRef.current.save(bytes, ref).then((newRef) => {
       if (newRef === null) return // user cancelled
-      setDocSession(afterSave(newRef))
+      setDocSession(afterSave(newRef, Date.now()))
       LogStore.log.info('app', `Saved: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
       recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
@@ -700,7 +677,7 @@ export default function App() {
     const suggestedName = baseName.endsWith('.hew') ? baseName : baseName + '.hew'
     fileHostRef.current.saveAs(bytes, suggestedName).then((newRef) => {
       if (newRef === null) return // user cancelled
-      setDocSession(afterSave(newRef))
+      setDocSession(afterSave(newRef, Date.now()))
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
       recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
@@ -723,7 +700,7 @@ export default function App() {
     const raw: number[] = await invoke('read_file', { path })
     const bytes = new Uint8Array(raw)
     if (applyLoadedBytes(bytes)) {
-      setDocSession(afterOpen({ name: basenameOf(path), handle: path }))
+      setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
       invoke('push_recent', { path }).catch(() => { /* ignore */ })
     }
   }, [confirmDiscard, applyLoadedBytes])
@@ -763,6 +740,12 @@ export default function App() {
         currentRef: meta.path !== null ? { name: meta.name, handle: meta.path } : null,
         dirty: true,
         importedName: meta.path !== null ? undefined : meta.name,
+        // meta.savedAt is when the autosave snapshot was written — the best
+        // available lower bound for "edits existed as of here".
+        // lastSavedAt stays null: this snapshot was never actually written to
+        // the real file yet, only to the recovery slot.
+        lastEditAt: meta.savedAt,
+        lastSavedAt: null,
       })
       // The recovered document still only exists in the recovery snapshot —
       // leave it in place (the next autosave tick refreshes it) and mark
@@ -967,6 +950,21 @@ export default function App() {
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
       case 'open-settings':       openSettingsRef.current(); break
       case 'report-bug': handleReportBug(); break
+      case 'open-palette':        setPaletteOpen(true); break
+      // Contextual dock only — these need the current selection, not
+      // just a bare trigger, so unlike every case above they aren't also
+      // reachable from a static native-menu item; the dock and (once
+      // adds outliner actions there too) other selection-aware UI are the
+      // only callers. handleUngroup/handleMakeUnique already read
+      // `selectedIds` from their own closure (no args needed); this case is
+      // defined before their `const` declarations later in this render, but
+      // the switch only ever *runs* on a later click, by which point this
+      // render has fully executed and the closure sees the real function.
+      case 'enter-context':
+        if (selectedIds.length === 1) handleEnterContext(selectedIds[0])
+        break
+      case 'ungroup': handleUngroup(); break
+      case 'make-unique': handleMakeUnique(); break
     }
   }
 
@@ -1071,11 +1069,15 @@ export default function App() {
 
   // ---------------------------------------------------------------- global keyboard shortcuts
   useEffect(() => {
-    // macOS/Windows Tauri use the native menu bar, which owns all keyboard
-    // shortcuts — the JS handler must not double-fire them. On Linux the shell
-    // is borderless with the in-app web menu (no native accelerators), so the
-    // JS handler is the only shortcut source there (as on the web).
-    if (isTauri && !isLinux) return
+    // macOS Tauri uses the native menu bar exclusively, which owns all
+    // keyboard shortcuts there — the JS handler must not double-fire them.
+    // Windows and Linux Tauri, and the web build, all rely on this handler:
+    // Linux and web always have (no native accelerators); Windows joins them
+    // here in so it gets the SketchUp-for-Windows bare-letter
+    // tool shortcuts below (its native menu keeps its own Ctrl-combo
+    // accelerators too, redundantly, until drops Windows' native menu
+    // in favor of this same in-app path).
+    if (isTauri && isMac) return
 
     const onKeyDown = (ev: KeyboardEvent) => {
       const isMod = ev.metaKey || ev.ctrlKey
@@ -1084,15 +1086,33 @@ export default function App() {
       const target = ev.target as HTMLElement
       const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
 
-      // Space → Select (no modifier required; guard against typing contexts)
-      if (!isMod && ev.key === ' ' && !isTyping) {
-        ev.preventDefault()
-        setActiveTool('Select')
-        return
+      if (!isMod && !isTyping) {
+        // Space → Select (no modifier required; guard against typing contexts).
+        if (ev.key === ' ') {
+          ev.preventDefault()
+          setActiveTool('Select')
+          return
+        }
+        // SketchUp-for-Windows bare-letter tool shortcuts — the 9
+        // letter-keyed tools from `tools/toolRegistry.ts`'s `winKey`s. Real
+        // SketchUp reserves these as unmodified keys; Hew's other tools
+        // (Protractor/Slice/Edit Vertex/camera) keep their existing
+        // Ctrl-combo shortcuts below instead — the design spec doesn't cover
+        // bare letters for them.
+        const key = ev.key.toLowerCase()
+        if (key === 'l') { ev.preventDefault(); setActiveTool('Line'); return }
+        if (key === 'r') { ev.preventDefault(); setActiveTool('Rectangle'); return }
+        if (key === 'c') { ev.preventDefault(); setActiveTool('Circle'); return }
+        if (key === 'p') { ev.preventDefault(); setActiveTool('Push/Pull'); return }
+        if (key === 'm') { ev.preventDefault(); setActiveTool('Move'); return }
+        if (key === 'q') { ev.preventDefault(); setActiveTool('Rotate'); return }
+        if (key === 's') { ev.preventDefault(); setActiveTool('Scale'); return }
+        if (key === 't') { ev.preventDefault(); setActiveTool('Tape Measure'); return }
+        if (key === 'b') { ev.preventDefault(); setActiveTool('Paint'); return }
       }
 
       // (Delete/Backspace handled by a dedicated always-on effect below, since
-      // this whole handler is disabled under Tauri.)
+      // this whole handler is disabled under Tauri macOS.)
 
       if (!isMod) return
       if (isTyping) return
@@ -1117,42 +1137,9 @@ export default function App() {
         newDocument()
         return
       }
-      // Tool shortcuts
-      if (ev.key === 'k' && !ev.shiftKey) {
-        ev.preventDefault()
-        setActiveTool('Rectangle')
-        return
-      }
-      if (ev.key === 'l' && !ev.shiftKey) {
-        ev.preventDefault()
-        setActiveTool('Line')
-        return
-      }
-      if (ev.key === '0') {
-        ev.preventDefault()
-        setActiveTool('Move')
-        return
-      }
-      if (ev.key === '8') {
-        ev.preventDefault()
-        setActiveTool('Rotate')
-        return
-      }
-      if (ev.key === '9') {
-        ev.preventDefault()
-        setActiveTool('Scale')
-        return
-      }
-      if (ev.key === '=') {
-        ev.preventDefault()
-        setActiveTool('Push/Pull')
-        return
-      }
-      if (ev.key.toLowerCase() === 'd' && !ev.shiftKey) {
-        ev.preventDefault()
-        setActiveTool('Tape Measure')
-        return
-      }
+      // Camera-tool shortcuts — not part of the design spec's bare-letter
+      // table (Hew additions beyond stock SketchUp), so these keep their
+      // existing Ctrl-combo bindings on every platform this handler runs on.
       if (ev.key === 'b' && !ev.shiftKey) {
         ev.preventDefault()
         setActiveTool('Orbit')
@@ -1193,6 +1180,15 @@ export default function App() {
       if (ev.key === ',') {
         ev.preventDefault()
         openSettingsRef.current()
+        return
+      }
+      // Command palette. Ctrl+K on Windows/Linux/web — free to
+      // use here since moved Rectangle off Ctrl+K onto a bare
+      // 'R'. macOS instead binds Cmd+/ via the native menu (see main.rs) —
+      // Cmd+K there is still Rectangle's native accelerator, unchanged.
+      if (ev.key.toLowerCase() === 'k' && !ev.shiftKey) {
+        ev.preventDefault()
+        setPaletteOpen(true)
         return
       }
     }
@@ -1251,7 +1247,7 @@ export default function App() {
     file.arrayBuffer().then((buf) => {
       const ok = applyLoadedBytes(new Uint8Array(buf))
       if (ok) {
-        setDocSession(afterOpen({ name: file.name, handle: null }))
+        setDocSession(afterOpen({ name: file.name, handle: null }, Date.now()))
       }
     }).catch((err: unknown) => {
       handleToast(`Drop open failed: ${String(err)}`)
@@ -1503,22 +1499,27 @@ export default function App() {
         height: '100%',
         boxSizing: 'border-box',
         overflow: 'hidden',
-        background: '#1a1a1a',
+        background: 'var(--surface-canvas-page, #1a1a1a)',
       }}
     >
-      {/* Linux desktop shell: borderless window → draw our own title bar
-          (KWin won't repaint the native one after setTitle). */}
-      {isTauri && isLinux && <TitleBar title={deriveTitle(docSession)} />}
+      {/* Linux and Windows desktop shells: borderless window → draw our own
+          title bar (Linux: KWin won't repaint the native one after setTitle;
+          Windows joined this treatment in for the Studio in-window
+          chrome). macOS keeps native decorations. */}
+      {isTauri && (isLinux || isWindows) && (
+        <TitleBar name={documentName(docSession)} saveState={saveStateLabel(docSession, nowTick)} />
+      )}
 
       {/* App bar / menu bar.
-          On macOS/Windows Tauri the native OS menu bar owns File/Edit (this
-          renders nothing). On the web and the Linux borderless shell, the in-app
-          bar renders the menus; the centered title is shown by TitleBar on Linux
-          so it is hidden here in that case. */}
+          On macOS Tauri the native OS menu bar owns File/Edit (this renders
+          nothing). On the web build and the Linux/Windows borderless shells,
+          the in-app bar renders the menus; the centered title is shown by
+          TitleBar on Linux/Windows so it is hidden here in that case. */}
       <MenuBar
-        title={deriveTitle(docSession)}
-        nativeMenuBar={isTauri && !isLinux}
-        hideTitle={isTauri && isLinux}
+        name={documentName(docSession)}
+        saveState={saveStateLabel(docSession, nowTick)}
+        nativeMenuBar={isTauri && isMac}
+        hideTitle={isTauri && (isLinux || isWindows)}
         onNew={newDocument}
         onOpen={openDocument}
         onSave={saveDocument}
@@ -1554,6 +1555,7 @@ export default function App() {
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         onOpenSettings={openSettings}
         onReportBug={handleReportBug}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
 
       {/* Kernel panic sticky banner */}
@@ -1594,65 +1596,11 @@ export default function App() {
         </div>
       )}
 
-      {/* Toolbar — tools + watertight badge */}
-      <div
-        style={{
-          display: 'flex',
-          gap: '6px',
-          padding: '4px 6px',
-          background: '#2a2a2a',
-          borderBottom: '1px solid #3a3a3a',
-          alignItems: 'center',
-          flexShrink: 0,
-        }}
-      >
-        {TOOLS.map((t) => (
-          <button
-            key={t}
-            onClick={() => setActiveTool(t)}
-            title={TOOL_KEYS[t] === '' ? t : `${t} (${TOOL_KEYS[t].replace('⌘', modLabel)})`}
-            style={{
-              width: '30px',
-              height: '30px',
-              padding: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              background: activeTool === t ? '#5588cc' : '#444',
-              color: activeTool === t ? '#fff' : '#ccc',
-              border: activeTool === t ? '1px solid #7aaaee' : '1px solid #555',
-              borderRadius: '3px',
-            }}
-          >
-            <ToolIcon name={t} />
-          </button>
-        ))}
-
-        <div style={{ flex: 1 }} />
-
-        {/* Watertight badge */}
-        {objectCount > 0 && (
-          <span
-            style={{
-              padding: '2px 8px',
-              fontSize: '11px',
-              borderRadius: '3px',
-              background: allWatertight ? '#1a7a3a' : '#cc3322',
-              color: '#fff',
-              fontFamily: 'monospace',
-            }}
-          >
-            {allWatertight
-              ? `${objectCount} object${objectCount !== 1 ? 's' : ''} ✓ solid`
-              : `${leakyCount} leaky`}
-          </span>
-        )}
-      </div>
-
-      {/* Viewport — fills the full width of the main area; floating panels
-          overlay it instead of sharing a flex row. */}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', padding: '8px 8px 0 8px' }}>
+      {/* Body row: labeled left tool rail (`03_tool_rail.md`), the
+          viewport, and the docked right tray (`06_docked_panels.md`)
+          — the app-shell's full 3-column layout (`02_app_shell.md`). */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        <ToolRail activeTool={activeTool} onSelectTool={(name) => setActiveTool(name)} />
         <div
           style={{ flex: 1, minWidth: 0, position: 'relative' }}
           onDragOver={handleDragOver}
@@ -1675,110 +1623,31 @@ export default function App() {
             onDocumentChanged={handleDocumentChanged}
             apiRef={viewportApi}
             onMeasurement={handleMeasurement}
+            onInferenceChange={handleInferenceChange}
             currentMaterialId={currentMaterialId}
           />
 
-          {/* Floating panels — overlaid on the viewport. Free-drag with
-              magnetic docking against the container edges and sibling
-              panels (see FloatingPanel.tsx). z-index stays below the toast
-              stack (100) and other fixed overlays. */}
-          {showModelInfo && (
-            <FloatingPanel
-              panelId="modelInfo"
-              title="Model Info"
-              defaultPosition={{ x: window.innerWidth - 300, y: 16 }}
-              width={280}
-              zIndex={10 + panelOrder.indexOf('modelInfo')}
-              onFocus={() => bringPanelToFront('modelInfo')}
-              onClose={() => setShowModelInfo(false)}
-            >
-              <DocumentTree
-                scene={state.scene}
-                docRev={docRev}
-                watertightMap={watertightMap}
-                selectedIds={selectedIds}
-                activeContext={activeContext}
-                onSelect={handleSelect}
-                onEnterContext={handleEnterContext}
-                onExitContext={handleExitContext}
-                onSetContextDepth={handleSetContextDepth}
-                canBoolean={canBoolean}
-                onBoolean={handleBoolean}
-                onGroup={handleGroup}
-                onUngroup={handleUngroup}
-                canMakeComponent={canMakeComp}
-                onMakeComponent={handleMakeComponent}
-                canPlaceInstance={canPlace}
-                onPlaceInstance={handlePlaceInstance}
-                canExplodeInstance={canExplode}
-                onExplodeInstance={handleExplodeInstance}
-                canMakeUnique={canUnique}
-                onMakeUnique={handleMakeUnique}
-                hiddenKeys={hiddenKeys}
-                onToggleHidden={handleToggleHidden}
-              />
-            </FloatingPanel>
-          )}
-          {showObjectInfo && (
-            <FloatingPanel
-              panelId="objectInfo"
-              title="Object Info"
-              // Directly below Model Info by default, so the two stack vertically.
-              defaultPosition={{ x: window.innerWidth - 300, y: 250 }}
-              width={280}
-              zIndex={10 + panelOrder.indexOf('objectInfo')}
-              onFocus={() => bringPanelToFront('objectInfo')}
-              onClose={() => setShowObjectInfo(false)}
-            >
-              <ObjectInfoPanel
-                scene={state.scene}
-                docRev={docRev}
-                selectedIds={selectedIds}
-                onDocumentChanged={handleDocumentChanged}
-              />
-            </FloatingPanel>
-          )}
-          {showMaterials && (
-            <FloatingPanel
-              panelId="materials"
-              title="Materials"
-              defaultPosition={{ x: 16, y: 16 }}
-              width={260}
-              zIndex={10 + panelOrder.indexOf('materials')}
-              onFocus={() => bringPanelToFront('materials')}
-              onClose={() => setShowMaterials(false)}
-            >
-              <MaterialPalette
-                scene={state.scene}
-                docRev={docRev}
-                currentMaterialId={currentMaterialId}
-                onSelectMaterial={setCurrentMaterialId}
-                onDocumentChanged={handleDocumentChanged}
-                selectedIds={selectedIds}
-              />
-            </FloatingPanel>
-          )}
-          {showTags && (
-            <FloatingPanel
-              panelId="tags"
-              title="Tags"
-              defaultPosition={{ x: 300, y: 16 }}
-              width={260}
-              zIndex={10 + panelOrder.indexOf('tags')}
-              onFocus={() => bringPanelToFront('tags')}
-              onClose={() => setShowTags(false)}
-            >
-              <TagsPanel
-                scene={state.scene}
-                docRev={docRev}
-                hiddenTagPaths={hiddenTagPaths}
-                onToggleTagPath={handleToggleTagPath}
-              />
-            </FloatingPanel>
-          )}
+          {/* Inference & viewport feedback (`07_inference_feedback.md`)
+              — all net-new DOM overlays; Viewport.tsx rendered none of this
+              before this milestone. */}
+          <InferenceTooltip info={inferenceInfo} />
+          <MeasurementBox toolName={toolName} value={measurement} />
+          <ViewportHUD
+            onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
+            onOrbit={() => setActiveTool('Orbit')}
+          />
 
-          {/* Toast stack — positioned inside the viewport container, above
-              floating panels (z 100 vs panel z 10-13). */}
+          {/* Contextual dock — bottom-center, self-hides when there's
+              no curated verb set for the current selection (a sketch, or a
+              construction guide). Reuses the same menuActionRef dispatch the
+              palette and every menu item already go through. */}
+          <ContextualDock
+            selectedIds={selectedIds}
+            selectedGuide={selectedGuide}
+            onRun={(id) => menuActionRef.current(id)}
+          />
+
+          {/* Toast stack — positioned inside the viewport container. */}
           <div
             style={{
               position: 'absolute',
@@ -1820,6 +1689,82 @@ export default function App() {
             ))}
           </div>
         </div>
+
+        {/* Docked right tray (`06_docked_panels.md`) — permanently
+            present, collapsible sections; replaces the old floating,
+            draggable panels entirely (FloatingPanel.tsx deleted). Default
+            order per spec: Entity Info -> Outliner -> Materials, plus Tags
+            as a 4th section (not in the spec's default list, but a real
+            shipped Hew feature — kept rather than dropped). The showX/setShowX
+            state pairs are unchanged from the floating-panel era; they now
+            mean "expanded" instead of "visible," so every existing keyboard
+            shortcut (Shift+Cmd+I/C/T/O) and Window-menu checkbox keeps
+            working with its original meaning. */}
+        <div
+          style={{
+            width: '252px',
+            flexShrink: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+            background: 'var(--surface-panel)',
+            borderLeft: '1px solid var(--border-hairline)',
+          }}
+        >
+          <TraySection title="Entity Info" collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
+            <ObjectInfoPanel
+              scene={state.scene}
+              docRev={docRev}
+              selectedIds={selectedIds}
+              onDocumentChanged={handleDocumentChanged}
+            />
+          </TraySection>
+          <TraySection title="Outliner" collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
+            <DocumentTree
+              scene={state.scene}
+              docRev={docRev}
+              watertightMap={watertightMap}
+              selectedIds={selectedIds}
+              activeContext={activeContext}
+              onSelect={handleSelect}
+              onEnterContext={handleEnterContext}
+              onExitContext={handleExitContext}
+              onSetContextDepth={handleSetContextDepth}
+              canBoolean={canBoolean}
+              onBoolean={handleBoolean}
+              onGroup={handleGroup}
+              onUngroup={handleUngroup}
+              canMakeComponent={canMakeComp}
+              onMakeComponent={handleMakeComponent}
+              canPlaceInstance={canPlace}
+              onPlaceInstance={handlePlaceInstance}
+              canExplodeInstance={canExplode}
+              onExplodeInstance={handleExplodeInstance}
+              canMakeUnique={canUnique}
+              onMakeUnique={handleMakeUnique}
+              hiddenKeys={hiddenKeys}
+              onToggleHidden={handleToggleHidden}
+            />
+          </TraySection>
+          <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
+            <MaterialPalette
+              scene={state.scene}
+              docRev={docRev}
+              currentMaterialId={currentMaterialId}
+              onSelectMaterial={setCurrentMaterialId}
+              onDocumentChanged={handleDocumentChanged}
+              selectedIds={selectedIds}
+            />
+          </TraySection>
+          <TraySection title="Tags" collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
+            <TagsPanel
+              scene={state.scene}
+              docRev={docRev}
+              hiddenTagPaths={hiddenTagPaths}
+              onToggleTagPath={handleToggleTagPath}
+            />
+          </TraySection>
+        </div>
       </div>
 
       {/* Status bar — bottom strip, above the Debug Log panel when shown.
@@ -1828,7 +1773,7 @@ export default function App() {
       <div
         style={{
           padding: '4px 8px 10px 8px',
-          background: '#222',
+          background: 'var(--surface-bar, #222)',
           color: '#eee',
           fontFamily: 'monospace',
           fontSize: '12px',
@@ -1849,7 +1794,24 @@ export default function App() {
         <span style={{ color: '#888', fontSize: '11px' }}>
           Middle-drag: orbit | Shift+Middle: pan | Scroll: zoom
         </span>
-        <span style={{ color: '#888', fontSize: '11px', marginLeft: 'auto' }}>
+        {/* Watertight badge — moved here from the old horizontal toolbar. */}
+        {objectCount > 0 && (
+          <span
+            style={{
+              padding: '2px 8px',
+              fontSize: '11px',
+              borderRadius: '3px',
+              background: allWatertight ? '#1a7a3a' : '#cc3322',
+              color: '#fff',
+              marginLeft: 'auto',
+            }}
+          >
+            {allWatertight
+              ? `${objectCount} object${objectCount !== 1 ? 's' : ''} ✓ solid`
+              : `${leakyCount} leaky`}
+          </span>
+        )}
+        <span style={{ color: '#888', fontSize: '11px', marginLeft: objectCount > 0 ? undefined : 'auto' }}>
           Undo: Cmd/Ctrl+Z | Redo: Shift+Cmd/Ctrl+Z
         </span>
       </div>
@@ -1882,6 +1844,15 @@ export default function App() {
         />
       )}
 
+      {/* Command palette (⌘K / Ctrl-K / Cmd+/ on macOS). Selecting a
+          result reuses the exact same dispatch the native menu and every
+          menu click already go through. */}
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onRun={(id) => menuActionRef.current(id)}
+      />
+
       {/* Settings modal — web-only fallback (Tauri opens a real, separate OS
           window instead; see openSettings in App.tsx). */}
       {showSettingsModal && (
@@ -1903,11 +1874,11 @@ export default function App() {
               width: '420px',
               maxHeight: '80vh',
               overflowY: 'auto',
-              background: '#1a1a1a',
-              color: '#ddd',
-              border: '1px solid #333',
+              background: 'var(--surface-window, #1a1a1a)',
+              color: 'var(--text-secondary, #ddd)',
+              border: '1px solid var(--border-hairline, #333)',
               borderRadius: '6px',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+              boxShadow: 'var(--shadow-palette, 0 8px 32px rgba(0,0,0,0.6))',
               padding: '16px 20px',
             }}
           >
@@ -1919,13 +1890,13 @@ export default function App() {
                 marginBottom: '12px',
               }}
             >
-              <span style={{ fontSize: '14px', fontWeight: 600, color: '#eee' }}>Settings</span>
+              <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary, #eee)' }}>Settings</span>
               <button
                 onClick={() => setShowSettingsModal(false)}
                 style={{
                   background: 'none',
                   border: 'none',
-                  color: '#888',
+                  color: 'var(--text-faint, #888)',
                   cursor: 'pointer',
                   fontSize: '16px',
                   lineHeight: 1,

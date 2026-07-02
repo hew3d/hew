@@ -78,6 +78,7 @@ const ROW_BASE: React.CSSProperties = {
   padding: '3px 8px',
   fontSize: '12px',
   fontFamily: 'monospace',
+  color: 'var(--text-secondary, #ccc)',
   cursor: 'pointer',
   borderRadius: '3px',
   userSelect: 'none',
@@ -198,9 +199,9 @@ export function DocumentTree({
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'monospace' }}>
         {crumbs.map((c, i) => (
           <span key={i} style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
-            {i > 0 && <span style={{ color: '#777' }}>›</span>}
+            {i > 0 && <span style={{ color: 'var(--text-faint, #777)' }}>›</span>}
             {i === crumbs.length - 1 ? (
-              <span style={{ color: '#fff', fontWeight: 'bold' }}>{c.label}</span>
+              <span style={{ color: 'var(--text-primary, #fff)', fontWeight: 'bold' }}>{c.label}</span>
             ) : (
               <button
                 onClick={() => {
@@ -215,7 +216,7 @@ export function DocumentTree({
                 style={{
                   background: 'none',
                   border: 'none',
-                  color: '#7aa7e0',
+                  color: 'var(--accent-base, #7aa7e0)',
                   cursor: 'pointer',
                   fontFamily: 'monospace',
                   fontSize: '12px',
@@ -531,11 +532,11 @@ function Section({ title, empty, children }: { title: string; empty: string; chi
   const isEmpty = items.flat().filter(Boolean).length === 0
   return (
     <div>
-      <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: '#888', marginBottom: '4px' }}>
+      <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-faint, #888)', marginBottom: '4px' }}>
         {title}
       </div>
       {isEmpty ? (
-        <div style={{ fontSize: '11px', color: '#666', fontStyle: 'italic', padding: '2px 8px' }}>{empty}</div>
+        <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', fontStyle: 'italic', padding: '2px 8px' }}>{empty}</div>
       ) : (
         children
       )}
@@ -610,7 +611,7 @@ function Row({
           style={{
             background: 'none',
             border: 'none',
-            color: '#aaa',
+            color: 'var(--text-tertiary, #aaa)',
             cursor: 'pointer',
             padding: '0 2px',
             fontSize: '10px',
@@ -631,7 +632,7 @@ function Row({
       {dot !== undefined && (
         <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: dot, flexShrink: 0 }} />
       )}
-      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? '#666' : undefined }}>{label}</span>
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
       {active && <span style={{ fontSize: '10px', color: '#cfe0f5' }}>editing</span>}
       {/* Eye toggle — only visible on hover via CSS would require class, so always show */}
       {onToggleHidden !== undefined && (

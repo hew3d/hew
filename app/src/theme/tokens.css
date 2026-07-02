@@ -1,0 +1,179 @@
+/**
+ * Design tokens — "Studio" UI.
+ *
+ * Source of truth: ~/Source/design_handoff_hew_studio_ui/01_design_tokens.md.
+ * This file holds VALUES ONLY (custom properties) — never component-specific
+ * selectors. Components consume these vars directly (inline `style={{ ... }}`
+ * during the incremental migration, or real CSS classes once a surface has
+ * one) rather than hardcoding literals.
+ *
+ * Dark is the default theme (no `data-theme` attribute needed to get it), so
+ * the dark color block is folded into `:root` itself — this avoids a flash of
+ * unstyled/wrong-theme content before `theme/applyTheme.ts`'s
+ * `initThemeSync()` sets `data-theme` on first paint. Light is a pure
+ * override block keyed off `[data-theme="light"]`.
+ *
+ * Where the source spec gives per-theme names that don't line up 1:1 (e.g.
+ * dark's accent/tint-15 + accent/tint-18 vs. light's single accent/tint),
+ * tokens are unified semantically here (see the accent block below) — this is
+ * a deliberate reconciliation, not a spec transcription error.
+ */
+
+:root {
+  color-scheme: dark light;
+
+  /* ---- Typography ---------------------------------------------------- */
+  --font-family-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-family-mono: ui-monospace, Menlo, monospace;
+
+  --font-size-titlebar-filename: 13px;
+  --font-size-titlebar-meta: 11px;
+  --font-size-menu-item: 12.5px;
+  --font-size-tool-row: 13px;
+  --font-size-section-header: 9.5px;
+  --font-size-panel-header: 11px;
+  --font-size-body: 12px;
+  --font-size-dock-label: 11px;
+  --font-size-dock-chip: 9.5px;
+  --font-size-measurement: 14px;
+  --font-size-kbd: 10px;
+  --font-size-palette-title: 13.5px;
+  --font-size-palette-desc: 11.5px;
+
+  --font-weight-regular: 400;
+  --font-weight-active: 600;
+
+  /* ---- Spacing (base unit 4px) ---------------------------------------- */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 9px;
+  --space-5: 11px;
+  --space-6: 13px;
+  --space-7: 16px;
+  --space-8: 22px;
+  --space-9: 26px;
+
+  /* ---- Radius ----------------------------------------------------------*/
+  --radius-window-mac: 13px;
+  --radius-window-win: 9px;
+  --radius-control: 7px;
+  --radius-panel-item: 9px;
+  --radius-dock: 15px;
+  --radius-palette: 14px;
+  --radius-kbd: 4px;
+  --radius-swatch: 5px;
+
+  /* ---- Shadows (dark values; light-specific values below) -------------*/
+  --shadow-window: 0 34px 90px -28px rgba(0, 0, 0, 0.85);
+  --shadow-dock: 0 18px 44px -14px rgba(0, 0, 0, 0.85);
+  --shadow-palette: 0 40px 100px -24px rgba(0, 0, 0, 0.9);
+  --shadow-chip: none;
+
+  /* ---- OS chrome (shared across themes) --------------------------------*/
+  --chrome-mac-close: #ff5f57;
+  --chrome-mac-minimize: #febc2e;
+  --chrome-mac-zoom: #28c840;
+  --chrome-win-close-hover: #e53b41;
+}
+
+/* ============================================================ Dark (default) */
+:root,
+[data-theme='dark'] {
+  /* ---- Surfaces --------------------------------------------------------*/
+  --surface-canvas-page: #0c0e11;
+  --surface-window: #15181d;
+  --surface-panel: #171b21;
+  --surface-bar: #181c22;
+  --surface-input: #11141a;
+  --surface-titlebar-top: #21262f;
+  --surface-titlebar-bottom: #1a1e25;
+  --surface-overlay: rgba(20, 24, 30, 0.94);
+  /* Full-canvas dim behind a modal (command palette) — distinct from
+     --surface-overlay, which is the modal PANEL's own background. */
+  --backdrop-dim: rgba(8, 10, 13, 0.45);
+
+  /* ---- Text --------------------------------------------------------- */
+  --text-primary: #e6e9ee;
+  --text-secondary: #cfd6e0;
+  --text-tertiary: #aeb6c2;
+  --text-muted: #8b95a3;
+  --text-faint: #7b8492;
+  --text-section: #5b6472;
+
+  /* ---- Accent (single brand blue) -------------------------------------*/
+  --accent-base: #5b8cff;
+  --accent-text-on-tint: #bcd2ff; /* dark: accent/text-on-dark */
+  --accent-text-strong: #eaf0ff; /* dark: accent/text-bright */
+  --accent-tint-15: rgba(91, 140, 255, 0.15);
+  --accent-tint-18: rgba(91, 140, 255, 0.18);
+  --accent-border: rgba(91, 140, 255, 0.4);
+
+  /* ---- Axis colors (3D) -------------------------------------------------*/
+  --axis-red: #e85a60;
+  --axis-green: #5fce80;
+  --axis-blue: #5f96eb;
+
+  /* ---- Borders / dividers ---------------------------------------------*/
+  --border-hairline: rgba(255, 255, 255, 0.06);
+  --border-panel: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  /* ---- kbd shortcut chip -------------------------------------------- */
+  --kbd-text: #9aa3b0;
+  --kbd-bg: rgba(255, 255, 255, 0.07);
+  --kbd-border: rgba(255, 255, 255, 0.08);
+  --kbd-active-text: #bcd2ff;
+  --kbd-active-bg: rgba(91, 140, 255, 0.2);
+}
+
+/* ============================================================ Light (CAD) */
+[data-theme='light'] {
+  /* ---- Surfaces --------------------------------------------------------*/
+  --surface-canvas-page: linear-gradient(180deg, #f2f5f9 0%, #e6ebf1 55%, #dde3ea 100%);
+  --surface-window: #eef1f5;
+  --surface-panel: #f5f7fa;
+  --surface-bar: #f5f7fa;
+  --surface-input: #ffffff;
+  --surface-titlebar-top: #fbfcfe;
+  --surface-titlebar-bottom: #eef1f5;
+  --surface-overlay: rgba(255, 255, 255, 0.96);
+  --backdrop-dim: rgba(120, 140, 170, 0.18);
+
+  /* ---- Text --------------------------------------------------------- */
+  --text-primary: #23272e;
+  --text-secondary: #3d4756;
+  --text-tertiary: #56616f;
+  --text-muted: #6b7686;
+  --text-faint: #8a94a3;
+  --text-section: #9aa4b2;
+
+  /* ---- Accent (light) --------------------------------------------------*/
+  --accent-base: #5b8cff;
+  --accent-text-on-tint: #2f5fd0; /* light: accent/text-strong */
+  --accent-text-strong: #23448f; /* light: accent/text-deep */
+  --accent-tint-15: rgba(91, 140, 255, 0.14); /* light spec has one tint value */
+  --accent-tint-18: rgba(91, 140, 255, 0.14);
+  --accent-border: rgba(91, 140, 255, 0.35);
+
+  /* ---- Axis colors (light, deepened for contrast) ----------------------*/
+  --axis-red: #d6454b;
+  --axis-green: #28a055;
+  --axis-blue: #2d78e1;
+
+  /* ---- Borders -----------------------------------------------------*/
+  --border-hairline: rgba(20, 40, 70, 0.08);
+  --border-panel: rgba(20, 40, 70, 0.12);
+  --border-strong: rgba(20, 40, 70, 0.14);
+
+  /* ---- kbd shortcut chip -------------------------------------------- */
+  --kbd-text: #6b7686;
+  --kbd-bg: rgba(20, 40, 70, 0.06);
+  --kbd-border: rgba(20, 40, 70, 0.12);
+  --kbd-active-text: #2f5fd0;
+  --kbd-active-bg: rgba(91, 140, 255, 0.2);
+
+  /* ---- Shadows (light overrides) ----------------------------------- */
+  --shadow-window: 0 34px 90px -28px rgba(40, 60, 90, 0.4);
+  --shadow-chip: 0 6px 18px -8px rgba(40, 60, 90, 0.4);
+}

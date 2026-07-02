@@ -44,6 +44,8 @@ import type { Ray } from './math'
 import type { Snap } from '../tools/types'
 import type { NodeRef } from '../panels/treeModel'
 import { cursorFor } from '../tools/toolIcons'
+import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
+import { InfiniteGrid } from './InfiniteGrid'
 
 /**
  * Centered message overlay shown over the viewport when the WebGL2 context is
@@ -73,11 +75,33 @@ function buildViewportOverlay(title: string, detail: string): HTMLDivElement {
   return overlay
 }
 
+/**
+ * Live inference-cursor info for the inference tooltip chip
+ * (`07_inference_feedback.md`) — a DOM overlay App.tsx positions at
+ * (screenX, screenY), so unlike `onStatusChange`'s plain status-bar text
+ * this needs screen-space coordinates. `direction` is passed through
+ * unprocessed (not pre-resolved to an axis/color) so the tooltip component
+ * can call `axisColorForDirection` itself, keeping this callback a thin,
+ * additive forward of data already available at the existing pointer-move
+ * call site — no new geometry logic added to Viewport.tsx.
+ */
+export interface InferenceInfo {
+  kind: string
+  screenX: number
+  screenY: number
+  direction?: [number, number, number]
+}
+
 interface Props {
   /** WASM Scene — owns inference, sketches, objects */
   wasmScene: WasmScene
   /** Called when tool name or snap kind changes (for status bar) */
   onStatusChange?: (toolName: string, snapKind: string | null) => void
+  /** Called on every pointer move with the live inference-cursor info,
+   * or null when there's no active snap. Screen-space coordinates only —
+   * `App.tsx` positions the tooltip chip; this component does no DOM overlay
+   * work itself. */
+  onInferenceChange?: (info: InferenceInfo | null) => void
   /** Called after any scene mutation with new watertight state per object */
   onSceneChange?: (watertightMap: Map<bigint, boolean>) => void
   /** Called when an error toast should be shown */
@@ -254,18 +278,37 @@ function pointerToNDC(
   return [x, y]
 }
 
-/** Build a ground grid */
-function buildGroundGrid(): THREE.Group {
+/** Ground grid colors, dark/light.
+ *
+ * `ground` is the plane's own base tint (distinct from — and, per testing,
+ * darker than — the sky/clear-color above, so there's a visible horizon
+ * even between grid lines); `major`/`minor` are the line colors. Dark-mode
+ * lines were brightened significantly per testing ("almost invisible in
+ * dark mode... needs a lighter hue") — light mode's original values tested
+ * well and are unchanged. */
+const GROUND_GRID_COLORS: Record<'light' | 'dark', { ground: number; major: number; minor: number }> = {
+  dark: { ground: 0x0c0e11, major: 0x8b95a3, minor: 0x565f6b },
+  light: { ground: 0xd7dee6, major: 0xb0b8c2, minor: 0xd8dee5 },
+}
+
+const ORIGIN_AXIS_COLORS: Record<'light' | 'dark', { x: [number, number, number]; y: [number, number, number]; z: [number, number, number] }> = {
+  // Normalized 0-1 RGB (vertex colors), not hex — matches DARK_AXIS_COLORS/
+  // LIGHT_AXIS_COLORS in axisColors.ts (#e85a60/#5fce80/#5f96eb dark,
+  // #d6454b/#28a055/#2d78e1 light) converted to float triples.
+  dark: { x: [0.910, 0.353, 0.376], y: [0.373, 0.808, 0.502], z: [0.373, 0.588, 0.922] },
+  light: { x: [0.839, 0.271, 0.294], y: [0.157, 0.627, 0.333], z: [0.176, 0.471, 0.882] },
+}
+
+/** World origin axis lines, colored for `theme`, long enough (150 — beyond
+ * the camera's far-clip of 100) to always run off the edge of the visible
+ * world in every direction, reading as "infinite" without needing a shader
+ *. Static vertex-color
+ * geometry — rebuilt (not mutated) on every theme change, same as before. */
+function buildOriginAxes(theme: 'light' | 'dark'): THREE.Group {
   const group = new THREE.Group()
-  group.name = 'GroundGrid'
+  group.name = 'OriginAxes'
 
-  // Main grid: 10x10 meters, 1m divisions (person-scale: 1m squares)
-  const grid = new THREE.GridHelper(10, 10, 0x888888, 0xcccccc)
-  grid.rotation.x = Math.PI / 2  // GridHelper is in XZ plane; rotate to XY
-  group.add(grid)
-
-  // World origin axes: ~1 m, person-scale (red=+X, green=+Y, blue=+Z)
-  const AXIS_LEN = 1.0
+  const AXIS_LEN = 150
   const axesPts = new Float32Array([
     0, 0, 0.001,  AXIS_LEN, 0, 0.001,   // +X axis
     0, 0, 0.001,  0, AXIS_LEN, 0.001,   // +Y axis
@@ -274,10 +317,11 @@ function buildGroundGrid(): THREE.Group {
   const axesGeo = new THREE.BufferGeometry()
   axesGeo.setAttribute('position', new THREE.BufferAttribute(axesPts, 3))
   const axesMat = new THREE.LineBasicMaterial({ vertexColors: true })
+  const { x: xc, y: yc, z: zc } = ORIGIN_AXIS_COLORS[theme]
   const colors = new Float32Array([
-    1, 0.1, 0.1,  1, 0.1, 0.1,           // X: red
-    0.1, 0.8, 0.1,  0.1, 0.8, 0.1,       // Y: green
-    0.15, 0.35, 1.0,  0.15, 0.35, 1.0,   // Z: blue
+    ...xc, ...xc,
+    ...yc, ...yc,
+    ...zc, ...zc,
   ])
   axesGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   group.add(new THREE.LineSegments(axesGeo, axesMat))
@@ -362,6 +406,7 @@ function resolvePickToSelectable(
 export default function Viewport({
   wasmScene,
   onStatusChange,
+  onInferenceChange,
   onSceneChange,
   onToast,
   activeTool: activeToolProp,
@@ -383,6 +428,8 @@ export default function Viewport({
   // Keep stable refs to latest callbacks
   const onStatusChangeRef = useRef(onStatusChange)
   onStatusChangeRef.current = onStatusChange
+  const onInferenceChangeRef = useRef(onInferenceChange)
+  onInferenceChangeRef.current = onInferenceChange
   const onSceneChangeRef = useRef(onSceneChange)
   onSceneChangeRef.current = onSceneChange
   const onToastRef = useRef(onToast)
@@ -468,7 +515,16 @@ export default function Viewport({
       }
     }
     renderer.setPixelRatio(window.devicePixelRatio)
-    renderer.setClearColor(0xd0d0d0)
+    // Canvas clear color — theme-aware. Matches --surface-canvas-page: dark is the exact
+    // token hex; light approximates the CSS gradient with its middle stop
+    // (a flat WebGL clear color can't reproduce a gradient).
+    // "Sky" — lighter than the ground plane's own tint (GROUND_TINT below) in
+    // both themes, so there's a visible horizon even where the grid has no
+    // lines. Dark sky reuses
+    // --surface-window (a shade lighter than --surface-canvas-page); light
+    // sky is the lightest stop of the CSS gradient token.
+    const CANVAS_CLEAR_COLOR: Record<'light' | 'dark', number> = { dark: 0x15181d, light: 0xf2f5f9 }
+    renderer.setClearColor(CANVAS_CLEAR_COLOR[getResolvedTheme()])
     renderer.setSize(el.clientWidth, el.clientHeight)
     el.appendChild(renderer.domElement)
 
@@ -488,9 +544,44 @@ export default function Viewport({
     dirLight.position.set(3, -5, 8)
     threeScene.add(dirLight)
 
-    // Ground grid (named group so View ▸ Axes can toggle its visibility)
-    const groundGrid = buildGroundGrid()
-    threeScene.add(groundGrid)
+    // Ground plane: an effectively-infinite, zoom-adaptive shader grid
+    // (`InfiniteGrid.ts`) plus the world origin axes (named group so View ▸
+    // Axes can toggle both,  / Follow-up:). `originAxes` is
+    // `let`, not `const`: rebuilt on a theme change (static vertex-color
+    // geometry, not a material .color that can just be reassigned) — the
+    // grid, in contrast, only needs a cheap uniform write via `setColors()`.
+    let originAxes = buildOriginAxes(getResolvedTheme())
+    threeScene.add(originAxes)
+    const initialGridColors = GROUND_GRID_COLORS[getResolvedTheme()]
+    const infiniteGrid = new InfiniteGrid(initialGridColors.ground, initialGridColors.minor, initialGridColors.major)
+    threeScene.add(infiniteGrid.mesh)
+
+    function disposeOriginAxes(group: THREE.Group): void {
+      group.traverse((child) => {
+        if (child instanceof THREE.LineSegments) {
+          child.geometry.dispose()
+          if (child.material instanceof THREE.Material) child.material.dispose()
+        }
+      })
+    }
+
+    // Live theme reactivity: Settings > Theme can change at any time while
+    // the viewport is mounted, so the clear color and ground plane need to
+    // follow it without a reload — everything else in the app (CSS
+    // variables) already updates live via `data-theme`.
+    const unsubscribeTheme = subscribeTheme(() => {
+      const theme = getResolvedTheme()
+      renderer.setClearColor(CANVAS_CLEAR_COLOR[theme])
+      const gridColors = GROUND_GRID_COLORS[theme]
+      infiniteGrid.setColors(gridColors.ground, gridColors.minor, gridColors.major)
+      const wasVisible = originAxes.visible
+      threeScene.remove(originAxes)
+      disposeOriginAxes(originAxes)
+      originAxes = buildOriginAxes(theme)
+      originAxes.visible = wasVisible
+      threeScene.add(originAxes)
+      scheduleRenderRef.current()
+    })
 
     // ------------------------------------------------------------------ scene renderer
     const sceneRenderer = new SceneRenderer(threeScene, wasmScene)
@@ -846,7 +937,8 @@ export default function Viewport({
     }
 
     function setAxesVisible(visible: boolean): void {
-      groundGrid.visible = visible
+      originAxes.visible = visible
+      infiniteGrid.mesh.visible = visible
       // Hidden axes must not snap or flash a cue — gate inference too.
       wasmScene.set_axes_snappable(visible)
       scheduleRender()
@@ -1237,6 +1329,7 @@ export default function Viewport({
       // read "Select" here — use the requested toolName instead. The snap
       // kind is reset to null since switching tools invalidates any prior snap.
       onStatusChangeRef.current?.(toolName, null)
+      onInferenceChangeRef.current?.(null)
       // Tool-aware cursor: derived from the same Material Symbols
       // icon as the toolbar button, so the active tool is readable from the
       // pointer. The canvas owns its cursor — nothing else should set
@@ -1321,6 +1414,9 @@ export default function Viewport({
         if ('updateDiskScale' in activeToolForScale) {
           ;(activeToolForScale as { updateDiskScale(c: THREE.Camera): void }).updateDiskScale(camera)
         }
+        // Feed the shader grid the camera's current position so it can pick
+        // the right cell-size decade per fragment.
+        infiniteGrid.update(camera.position)
         renderer.render(threeScene, camera)
         needsRender = false
       }
@@ -1435,6 +1531,21 @@ export default function Viewport({
         ? ((activeTool as { lastSnap: { kind: string } }).lastSnap).kind
         : (snap !== null ? snap.kind : null)
       onStatusChangeRef.current?.(toolController.activeToolName, snapKind)
+
+      // Inference tooltip chip — container-relative screen coords so
+      // App.tsx can position a DOM overlay directly; snap.direction passed
+      // through unprocessed for the tooltip to resolve its own axis/color.
+      if (snap === null) {
+        onInferenceChangeRef.current?.(null)
+      } else {
+        const rect = el.getBoundingClientRect()
+        onInferenceChangeRef.current?.({
+          kind: snapKind ?? snap.kind,
+          screenX: ev.clientX - rect.left,
+          screenY: ev.clientY - rect.top,
+          direction: snap.direction,
+        })
+      }
     }
 
     // ------------------------------------------------------------------ pointer down
@@ -1757,6 +1868,9 @@ export default function Viewport({
       renderer.domElement.removeEventListener('dblclick', onDoubleClick)
       window.removeEventListener('keydown', onKeyDown)
       resizeObserver.disconnect()
+      unsubscribeTheme()
+      disposeOriginAxes(originAxes)
+      infiniteGrid.dispose()
       controls.dispose()
       cueLayer.clear()
       sceneRenderer.dispose()
