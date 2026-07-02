@@ -24,7 +24,7 @@ interface ImportingOverlayProps {
 const OVERLAY_STYLE: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
-  background: 'rgba(0,0,0,0.6)',
+  background: 'var(--backdrop-dim)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -32,15 +32,15 @@ const OVERLAY_STYLE: React.CSSProperties = {
 }
 
 const CARD_STYLE: React.CSSProperties = {
-  background: '#2a2a2a',
-  border: '1px solid #4a4a4a',
+  background: 'var(--surface-window)',
+  border: '1px solid var(--border-strong)',
   borderRadius: '6px',
-  boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+  boxShadow: 'var(--shadow-window)',
   padding: '28px 32px',
   minWidth: '300px',
   maxWidth: '480px',
-  fontFamily: 'system-ui, sans-serif',
-  color: '#ddd',
+  fontFamily: 'var(--font-family-ui)',
+  color: 'var(--text-secondary)',
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
@@ -50,27 +50,27 @@ const CARD_STYLE: React.CSSProperties = {
 const SPINNER_STYLE: React.CSSProperties = {
   width: '32px',
   height: '32px',
-  border: '3px solid #444',
-  borderTopColor: '#5588cc',
+  border: '3px solid var(--border-strong)',
+  borderTopColor: 'var(--accent-base)',
   borderRadius: '50%',
   animation: 'hew-spin 0.8s linear infinite',
 }
 
 const MESSAGE_STYLE: React.CSSProperties = {
   fontSize: '14px',
-  color: '#ccc',
+  color: 'var(--text-secondary)',
   textAlign: 'center',
   lineHeight: '1.5',
 }
 
 const FILE_NAME_STYLE: React.CSSProperties = {
-  color: '#eee',
+  color: 'var(--text-primary)',
   fontWeight: 600,
 }
 
 const HINT_STYLE: React.CSSProperties = {
   fontSize: '11px',
-  color: '#666',
+  color: 'var(--text-faint)',
   textAlign: 'center',
 }
 

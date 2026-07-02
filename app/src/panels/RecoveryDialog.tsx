@@ -24,7 +24,7 @@ interface RecoveryDialogProps {
 const OVERLAY_STYLE: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
-  background: 'rgba(0,0,0,0.6)',
+  background: 'var(--backdrop-dim)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -32,27 +32,27 @@ const OVERLAY_STYLE: React.CSSProperties = {
 }
 
 const DIALOG_STYLE: React.CSSProperties = {
-  background: '#2a2a2a',
-  border: '1px solid #4a4a4a',
+  background: 'var(--surface-window)',
+  border: '1px solid var(--border-strong)',
   borderRadius: '6px',
-  boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+  boxShadow: 'var(--shadow-window)',
   padding: '20px 24px',
   minWidth: '340px',
   maxWidth: '480px',
-  fontFamily: 'system-ui, sans-serif',
-  color: '#ddd',
+  fontFamily: 'var(--font-family-ui)',
+  color: 'var(--text-secondary)',
 }
 
 const HEADING_STYLE: React.CSSProperties = {
   fontSize: '15px',
   fontWeight: 600,
-  color: '#eee',
+  color: 'var(--text-primary)',
   marginBottom: '12px',
 }
 
 const BODY_STYLE: React.CSSProperties = {
   fontSize: '13px',
-  color: '#ccc',
+  color: 'var(--text-secondary)',
   marginBottom: '20px',
   lineHeight: '1.5',
 }
@@ -65,23 +65,23 @@ const BUTTON_ROW_STYLE: React.CSSProperties = {
 
 const DISCARD_BUTTON_STYLE: React.CSSProperties = {
   padding: '6px 20px',
-  background: '#444',
-  color: '#eee',
+  background: 'var(--surface-input)',
+  color: 'var(--text-primary)',
   border: 'none',
   borderRadius: '4px',
   fontSize: '13px',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: 'var(--font-family-ui)',
   cursor: 'pointer',
 }
 
 const RECOVER_BUTTON_STYLE: React.CSSProperties = {
   padding: '6px 20px',
-  background: '#3a5e9e',
+  background: 'var(--accent-base)',
   color: '#fff',
   border: 'none',
   borderRadius: '4px',
   fontSize: '13px',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: 'var(--font-family-ui)',
   cursor: 'pointer',
 }
 
@@ -115,7 +115,7 @@ export function RecoveryDialog({ snapshot, onRecover, onDiscard, onDismiss }: Re
       >
         <div style={HEADING_STYLE}>Recover Unsaved Document?</div>
         <div style={BODY_STYLE}>
-          Hew found an autosaved version of <strong style={{ color: '#eee' }}>{name}</strong>{' '}
+          Hew found an autosaved version of <strong style={{ color: 'var(--text-primary)' }}>{name}</strong>{' '}
           from {when} that wasn&apos;t saved before the app closed.
         </div>
         <div style={BUTTON_ROW_STYLE}>

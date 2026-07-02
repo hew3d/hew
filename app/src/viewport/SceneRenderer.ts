@@ -10,7 +10,10 @@
  */
 
 import * as THREE from 'three'
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { makeFatSegments } from './fatLine'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -21,7 +24,7 @@ const EDGE_COLOR_SELECTED = 0xffaa00
 const SKETCH_LINE_COLOR = 0x2266cc
 const SKETCH_REGION_COLOR = 0x88aadd
 /** Normal translucency of a sketch region fill. */
-const SKETCH_REGION_OPACITY = 0.35
+const SKETCH_REGION_OPACITY = 0.4
 /** Opacity of entities faded out by the active editing context (isolation). */
 const DIMMED_OPACITY = 0.15
 /** Muted grey for construction guides — distinct from edges/axes/sketch lines. */
@@ -103,7 +106,7 @@ export class SceneRenderer {
    * and shared across instances so we never duplicate GPU texture objects.
    */
   private textureCache: Map<string, THREE.Texture> = new Map()
-  private sketchLines: THREE.LineSegments | null = null
+  private sketchLines: LineSegments2 | null = null
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
   private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
@@ -583,16 +586,16 @@ export class SceneRenderer {
     }
 
     if (allLinePositions.length > 0) {
-      const geo = new THREE.BufferGeometry()
-      geo.setAttribute(
-        'position',
-        new THREE.BufferAttribute(new Float32Array(allLinePositions), 3),
-      )
-      const mat = new THREE.LineBasicMaterial({
+      // Fat lines (LineSegments2) — a plain THREE.LineSegments ignores
+      // `linewidth` on WebGL and renders 1px, which read as almost-invisible
+      // sketch edges (Refinement pass). `transparent: true` so the
+      // sketch-isolation fade can animate opacity. Resolution is kept current
+      // by Viewport's render loop via updateFatLineResolutions(sketchGroup).
+      this.sketchLines = makeFatSegments(new Float32Array(allLinePositions), {
         color: SKETCH_LINE_COLOR,
-        linewidth: 2,
+        widthPx: 2.2,
+        transparent: true,
       })
-      this.sketchLines = new THREE.LineSegments(geo, mat)
       this.sketchGroup.add(this.sketchLines)
     }
 
@@ -618,12 +621,46 @@ export class SceneRenderer {
       const n = Math.floor(boundary.length / 3)
       if (n < 3) continue
 
-      const positions: number[] = []
-      for (let t = 1; t < n - 1; t++) {
-        positions.push(boundary[0], boundary[1], 0.001)
-        positions.push(boundary[t * 3], boundary[t * 3 + 1], 0.001)
-        positions.push(boundary[(t + 1) * 3], boundary[(t + 1) * 3 + 1], 0.001)
+      const verts3: THREE.Vector3[] = []
+      for (let i = 0; i < n; i++) {
+        verts3.push(new THREE.Vector3(boundary[i * 3], boundary[i * 3 + 1], boundary[i * 3 + 2]))
       }
+
+      // Robust planar triangulation. The old code fanned from vertex 0, which is
+      // only correct for CONVEX polygons — a non-convex region (an L-shaped or
+      // freehand polyline sketch) produced overlapping/absent triangles, so its
+      // fill "only sometimes" appeared (Refinement pass). Newell's method gives
+      // the polygon normal (works on the ground OR on a face), we project into
+      // that plane, ear-clip via THREE.ShapeUtils, then emit triangles from the
+      // original 3D verts lifted slightly along the normal to avoid z-fighting.
+      const normal = new THREE.Vector3()
+      for (let i = 0; i < n; i++) {
+        const cur = verts3[i]
+        const nxt = verts3[(i + 1) % n]
+        normal.x += (cur.y - nxt.y) * (cur.z + nxt.z)
+        normal.y += (cur.z - nxt.z) * (cur.x + nxt.x)
+        normal.z += (cur.x - nxt.x) * (cur.y + nxt.y)
+      }
+      if (normal.lengthSq() < 1e-12) continue
+      normal.normalize()
+
+      const u = new THREE.Vector3()
+      if (Math.abs(normal.z) < 0.9) u.set(0, 0, 1).cross(normal).normalize()
+      else u.set(1, 0, 0).cross(normal).normalize()
+      const v = new THREE.Vector3().crossVectors(normal, u).normalize()
+
+      const pts2 = verts3.map((p) => new THREE.Vector2(p.dot(u), p.dot(v)))
+      const tris = THREE.ShapeUtils.triangulateShape(pts2, [])
+
+      const lift = normal.clone().multiplyScalar(0.001)
+      const positions: number[] = []
+      for (const tri of tris) {
+        for (const idx of tri) {
+          const p = verts3[idx]
+          positions.push(p.x + lift.x, p.y + lift.y, p.z + lift.z)
+        }
+      }
+      if (positions.length === 0) continue
 
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
@@ -1082,7 +1119,7 @@ export class SceneRenderer {
   private _applySketchIsolation(): void {
     const inside = this.activeLitSet !== null
     if (this.sketchLines !== null) {
-      const mat = this.sketchLines.material as THREE.LineBasicMaterial
+      const mat = this.sketchLines.material as LineMaterial
       mat.opacity = inside ? DIMMED_OPACITY : 1
       mat.transparent = inside
     }

@@ -20,6 +20,10 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { Line2 } from 'three/examples/jsm/lines/Line2.js'
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
+import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
+import { updateFatLineResolutions } from './fatLine'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
 import { SnapService } from './snapService'
@@ -302,31 +306,72 @@ const ORIGIN_AXIS_COLORS: Record<'light' | 'dark', { x: [number, number, number]
 /** World origin axis lines, colored for `theme`, long enough (150 — beyond
  * the camera's far-clip of 100) to always run off the edge of the visible
  * world in every direction, reading as "infinite" without needing a shader
- *. Static vertex-color
- * geometry — rebuilt (not mutated) on every theme change, same as before. */
+ *.
+ *
+ * Rendered as fat lines (`Line2`/`LineMaterial`) rather than `LineBasicMaterial`
+ * because WebGL ignores `linewidth` on plain lines — every line is 1px, which
+ * read as dim/thin regardless of the (already vibrant) axis colors (Refinement
+ * pass, issue C). Each axis is two segments: a SOLID positive half and a
+ * DASHED negative half (SketchUp convention — the dashing distinguishes the
+ * +/- direction of each axis). `LineMaterial.resolution` must track the canvas
+ * size for correct pixel width; `updateAxisResolution` handles that on build,
+ * resize, and theme rebuild. Rebuilt (not mutated) on every theme change. */
+const AXIS_WIDTH_POS = 2.6 // px — solid positive halves
+const AXIS_WIDTH_NEG = 1.8 // px — dashed negative halves
+
+function buildAxisLine(
+  from: [number, number, number],
+  to: [number, number, number],
+  color: [number, number, number],
+  dashed: boolean,
+): Line2 {
+  const geo = new LineGeometry()
+  geo.setPositions([...from, ...to])
+  const mat = new LineMaterial({
+    color: new THREE.Color(color[0], color[1], color[2]).getHex(),
+    linewidth: dashed ? AXIS_WIDTH_NEG : AXIS_WIDTH_POS,
+    dashed,
+    dashSize: 0.28,
+    gapSize: 0.22,
+    transparent: dashed,
+    opacity: dashed ? 0.75 : 1,
+    depthTest: true,
+  })
+  const line = new Line2(geo, mat)
+  if (dashed) line.computeLineDistances()
+  line.renderOrder = 1 // draw over the grid plane
+  return line
+}
+
 function buildOriginAxes(theme: 'light' | 'dark'): THREE.Group {
   const group = new THREE.Group()
   group.name = 'OriginAxes'
 
-  const AXIS_LEN = 150
-  const axesPts = new Float32Array([
-    0, 0, 0.001,  AXIS_LEN, 0, 0.001,   // +X axis
-    0, 0, 0.001,  0, AXIS_LEN, 0.001,   // +Y axis
-    0, 0, 0,      0, 0, AXIS_LEN,       // +Z axis
-  ])
-  const axesGeo = new THREE.BufferGeometry()
-  axesGeo.setAttribute('position', new THREE.BufferAttribute(axesPts, 3))
-  const axesMat = new THREE.LineBasicMaterial({ vertexColors: true })
+  const L = 150
+  const E = 0.002 // tiny lift off Z=0 so the ground-plane axes don't z-fight the grid
   const { x: xc, y: yc, z: zc } = ORIGIN_AXIS_COLORS[theme]
-  const colors = new Float32Array([
-    ...xc, ...xc,
-    ...yc, ...yc,
-    ...zc, ...zc,
-  ])
-  axesGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  group.add(new THREE.LineSegments(axesGeo, axesMat))
+
+  // X (red): solid +X, dashed -X
+  group.add(buildAxisLine([0, 0, E], [L, 0, E], xc, false))
+  group.add(buildAxisLine([0, 0, E], [-L, 0, E], xc, true))
+  // Y (green): solid +Y, dashed -Y
+  group.add(buildAxisLine([0, 0, E], [0, L, E], yc, false))
+  group.add(buildAxisLine([0, 0, E], [0, -L, E], yc, true))
+  // Z (blue): solid +Z, dashed -Z (below ground)
+  group.add(buildAxisLine([0, 0, 0], [0, 0, L], zc, false))
+  group.add(buildAxisLine([0, 0, 0], [0, 0, -L], zc, true))
 
   return group
+}
+
+/** Point every axis `LineMaterial` at the current canvas pixel size — required
+ * for `Line2` to compute correct screen-space widths. */
+function updateAxisResolution(group: THREE.Group, width: number, height: number): void {
+  group.traverse((child) => {
+    if (child instanceof Line2) {
+      ;(child.material as LineMaterial).resolution.set(width, height)
+    }
+  })
 }
 
 /**
@@ -551,6 +596,7 @@ export default function Viewport({
     // geometry, not a material .color that can just be reassigned) — the
     // grid, in contrast, only needs a cheap uniform write via `setColors()`.
     let originAxes = buildOriginAxes(getResolvedTheme())
+    updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
     threeScene.add(originAxes)
     const initialGridColors = GROUND_GRID_COLORS[getResolvedTheme()]
     const infiniteGrid = new InfiniteGrid(initialGridColors.ground, initialGridColors.minor, initialGridColors.major)
@@ -558,7 +604,9 @@ export default function Viewport({
 
     function disposeOriginAxes(group: THREE.Group): void {
       group.traverse((child) => {
-        if (child instanceof THREE.LineSegments) {
+        // Line2 (fat axes) extends Mesh, not LineSegments — match both so the
+        // fat-line geometry+material are actually released.
+        if (child instanceof THREE.LineSegments || child instanceof Line2) {
           child.geometry.dispose()
           if (child.material instanceof THREE.Material) child.material.dispose()
         }
@@ -578,6 +626,7 @@ export default function Viewport({
       threeScene.remove(originAxes)
       disposeOriginAxes(originAxes)
       originAxes = buildOriginAxes(theme)
+      updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
       originAxes.visible = wasVisible
       threeScene.add(originAxes)
       scheduleRenderRef.current()
@@ -1404,8 +1453,6 @@ export default function Viewport({
       rafId = requestAnimationFrame(render)
       const changed = controls.update()
       if (changed || needsRender) {
-        // Keep the snap cursor at a constant screen size regardless of zoom.
-        cueLayer.updateMarkerScale(camera)
         // Keep guide-line dashes screen-constant too (see updateGuideDashScale).
         sceneRenderer.updateGuideDashScale(controls.getDistance())
         // Protractor's plane-preview disk is a virtual construct too — keep
@@ -1417,6 +1464,10 @@ export default function Viewport({
         // Feed the shader grid the camera's current position so it can pick
         // the right cell-size decade per fragment.
         infiniteGrid.update(camera.position)
+        // Keep every fat line (axes, sketch edges, tool-preview rubber-bands)
+        // sized to the current canvas — LineMaterial needs its resolution
+        // uniform current or the pixel width is wrong (Refinement pass).
+        updateFatLineResolutions(threeScene, el.clientWidth, el.clientHeight)
         renderer.render(threeScene, camera)
         needsRender = false
       }
@@ -1532,17 +1583,22 @@ export default function Viewport({
         : (snap !== null ? snap.kind : null)
       onStatusChangeRef.current?.(toolController.activeToolName, snapKind)
 
-      // Inference tooltip chip — container-relative screen coords so
-      // App.tsx can position a DOM overlay directly; snap.direction passed
-      // through unprocessed for the tooltip to resolve its own axis/color.
+      // Inference tooltip chip + snap dot (Refinement B) —
+      // container-relative screen coords so App.tsx can position DOM overlays
+      // directly. These project the SNAP POINT's world position (not the raw
+      // cursor), so the dot sits exactly on the inferred point and, crucially,
+      // stays pinned there when the magnetic hysteresis in SnapService holds a
+      // snap while the cursor drifts off it (that "resistance" is invisible if
+      // the dot just tracks the cursor). snap.direction passes through
+      // unprocessed for the tooltip to resolve its own axis/color.
       if (snap === null) {
         onInferenceChangeRef.current?.(null)
       } else {
-        const rect = el.getBoundingClientRect()
+        const p = worldToPixels(new THREE.Vector3(snap.x, snap.y, snap.z))
         onInferenceChangeRef.current?.({
           kind: snapKind ?? snap.kind,
-          screenX: ev.clientX - rect.left,
-          screenY: ev.clientY - rect.top,
+          screenX: p.x,
+          screenY: p.y,
           direction: snap.direction,
         })
       }
@@ -1845,6 +1901,7 @@ export default function Viewport({
       camera.aspect = w / h
       camera.updateProjectionMatrix()
       renderer.setSize(w, h)
+      updateAxisResolution(originAxes, w, h)
       scheduleRender()
     })
     resizeObserver.observe(el)

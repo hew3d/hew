@@ -13,8 +13,41 @@ import type { Scene, SnapJs } from '../wasm/pkg/wasm_api.js'
 import type { Snap } from '../tools/types'
 import { intersectGroundPlane, pixelRadiusToAperture, type Ray } from './math'
 
-/** Pixel radius treated as a snap candidate */
+/** Pixel radius to *acquire* a snap candidate. */
 export const SNAP_RADIUS_PX = 8
+
+/**
+ * Pixel radius to *release* an already-held discrete snap (endpoint, midpoint,
+ * etc.). Larger than the acquire radius → asymmetric hysteresis, which is what
+ * gives inference points their "magnetic"/sticky feel: once the dot lands on a
+ * point it resists being dragged off until the cursor moves well past it,
+ * rather than dropping the instant the cursor leaves the 8px acquire ring.
+ */
+export const SNAP_BREAK_RADIUS_PX = 16
+
+/** Snap kinds that are discrete/linear inference targets worth holding onto
+ * with hysteresis. Excludes the broad-area 'ground' and 'on-face' snaps, where
+ * "resistance" has no meaning (any point on the face/ground is equally valid). */
+const STICKY_KINDS = new Set([
+  'endpoint',
+  'midpoint',
+  'intersection',
+  'on-edge',
+  'on-guide',
+  'on-axis',
+])
+
+/** Do two snaps refer to the same inference target? Used to decide whether a
+ * held snap is still the one under (or near) the cursor after the cursor drifts
+ * within the break radius. */
+function sameTarget(a: Snap, b: Snap): boolean {
+  return (
+    a.kind === b.kind &&
+    a.object === b.object &&
+    a.element === b.element &&
+    a.elementKind === b.elementKind
+  )
+}
 
 /**
  * Convert a SnapJs wasm result to our plain Snap interface, freeing the
@@ -42,9 +75,41 @@ function snapJsToSnap(s: SnapJs): Snap {
 
 export class SnapService {
   private scene: Scene
+  /** The last resolved snap, kept for magnetic hysteresis (see `resolve`). */
+  private lastSnap: Snap | null = null
 
   constructor(scene: Scene) {
     this.scene = scene
+  }
+
+  /** One kernel snap query at a given pixel aperture; null if the kernel
+   * returns no candidate or throws. */
+  private query(
+    ray: Ray,
+    pixelRadius: number,
+    viewportHeightPx: number,
+    fovYDeg: number,
+    anchorArr: Float64Array | null,
+    lockAxis: 0 | 1 | 2 | undefined,
+    constraintPlaneArr: Float64Array | null,
+  ): Snap | null {
+    try {
+      const [ox, oy, oz] = ray.origin
+      const [dx, dy, dz] = ray.direction
+      const aperture = pixelRadiusToAperture(pixelRadius, viewportHeightPx, fovYDeg)
+      const result = this.scene.snap(
+        ox, oy, oz,
+        dx, dy, dz,
+        aperture,
+        anchorArr,
+        lockAxis ?? null,
+        constraintPlaneArr,
+      )
+      return result !== undefined ? snapJsToSnap(result) : null
+    } catch (err) {
+      console.warn('[SnapService] scene.snap() threw unexpectedly:', err)
+      return null
+    }
   }
 
   /**
@@ -55,6 +120,12 @@ export class SnapService {
    *
    * The returned Snap has kind "ground" when it's a pure fallback (no kernel
    * snap available). All other kind strings come from the kernel.
+   *
+   * **Magnetic hysteresis:** discrete inference points (endpoint/midpoint/…,
+   * see `STICKY_KINDS`) are *acquired* within `SNAP_RADIUS_PX` but only
+   * *released* once the cursor moves past the larger `SNAP_BREAK_RADIUS_PX`.
+   * The wider release query only runs when the normal query is about to lose a
+   * held sticky snap, so a steady hover on a point costs a single kernel call.
    */
   resolve(
     ray: Ray,
@@ -64,50 +135,48 @@ export class SnapService {
     lockAxis?: 0 | 1 | 2,
     constraintPlane?: { point: [number, number, number]; normal: [number, number, number] },
   ): { snap: Snap | null; fromKernel: boolean } {
-    try {
-      const [ox, oy, oz] = ray.origin
-      const [dx, dy, dz] = ray.direction
-      const aperture = pixelRadiusToAperture(SNAP_RADIUS_PX, viewportHeightPx, fovYDeg)
+    const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
+    const constraintPlaneArr =
+      constraintPlane !== undefined
+        ? new Float64Array([...constraintPlane.point, ...constraintPlane.normal])
+        : null
 
-      let anchorArr: Float64Array | null = null
-      if (anchor !== undefined) {
-        anchorArr = new Float64Array(anchor)
-      }
-
-      let constraintPlaneArr: Float64Array | null = null
-      if (constraintPlane !== undefined) {
-        constraintPlaneArr = new Float64Array([
-          ...constraintPlane.point,
-          ...constraintPlane.normal,
-        ])
-      }
-
-      const result = this.scene.snap(
-        ox, oy, oz,
-        dx, dy, dz,
-        aperture,
-        anchorArr,
-        lockAxis ?? null,
-        constraintPlaneArr,
-      )
-
-      if (result !== undefined) {
-        return { snap: snapJsToSnap(result), fromKernel: true }
-      }
-      // snap returned undefined — no kernel snap; fall through to fallback
-    } catch (err) {
-      console.warn('[SnapService] scene.snap() threw unexpectedly:', err)
+    // 1. Acquire at the normal radius.
+    const acquired = this.query(
+      ray, SNAP_RADIUS_PX, viewportHeightPx, fovYDeg, anchorArr, lockAxis, constraintPlaneArr,
+    )
+    if (acquired !== null && STICKY_KINDS.has(acquired.kind)) {
+      this.lastSnap = acquired
+      return { snap: acquired, fromKernel: true }
     }
 
-    // Ground-plane fallback
+    // 2. Resist release: the acquire query lost the previously-held sticky
+    //    point (returned nothing / a broad ground/face snap). Re-query at the
+    //    wider break radius; if that same target is still a candidate, hold it.
+    if (this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
+      const held = this.query(
+        ray, SNAP_BREAK_RADIUS_PX, viewportHeightPx, fovYDeg, anchorArr, lockAxis, constraintPlaneArr,
+      )
+      if (held !== null && sameTarget(held, this.lastSnap)) {
+        this.lastSnap = held
+        return { snap: held, fromKernel: true }
+      }
+    }
+
+    // 3. Otherwise take the acquire result (e.g. an on-face snap), if any.
+    if (acquired !== null) {
+      this.lastSnap = acquired
+      return { snap: acquired, fromKernel: true }
+    }
+
+    // 4. Ground-plane fallback.
     const pt = intersectGroundPlane(ray)
     if (pt !== null) {
-      return {
-        snap: { x: pt.x, y: pt.y, z: pt.z, kind: 'ground' },
-        fromKernel: false,
-      }
+      this.lastSnap = { x: pt.x, y: pt.y, z: pt.z, kind: 'ground' }
+      return { snap: this.lastSnap, fromKernel: false }
     }
 
+    this.lastSnap = null
     return { snap: null, fromKernel: false }
   }
 }

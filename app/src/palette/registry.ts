@@ -69,6 +69,13 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Zoom': 'Move the camera closer to or farther from the model.',
 }
 
+/** One-line instructor hint for a tool, for the status bar's active-tool line
+ * (`02_app_shell.md`). Reuses the palette's own tool descriptions so the two
+ * surfaces never drift. Empty string for an unknown tool name. */
+export function toolHint(name: string): string {
+  return TOOL_DESCRIPTIONS[name as ToolName] ?? ''
+}
+
 const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
   'Push/Pull': ['extrude', 'pull', 'push'],
   'Rectangle': ['rect', 'box'],

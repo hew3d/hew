@@ -44,6 +44,7 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { circlePolygonGround, circlePolygonFace, facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 import { editLengthBuffer } from './moveInput'
 
@@ -581,19 +582,12 @@ export class CircleTool implements Tool {
       for (let i = 2; i < pts.length; i += 3) pts[i] += 0.001
     }
 
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
-    const mat = new THREE.LineBasicMaterial({
-      color: 0x2266cc,
-      depthTest: false,
-    })
-    const lines = new THREE.LineSegments(geo, mat)
-    lines.renderOrder = 997
-    this.preview.add(lines)
+    this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
   }
 
   private _clearPreview(): void {
     this.preview.traverse((child) => {
+      disposeFatSegments(child)
       if (child instanceof THREE.LineSegments) {
         child.geometry.dispose()
         if (child.material instanceof THREE.Material) {

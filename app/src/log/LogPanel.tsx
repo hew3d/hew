@@ -18,9 +18,9 @@ function fmtTime(d: Date): string {
 }
 
 const LEVEL_COLORS: Record<LogStore.LogLevel, { fg: string; label: string }> = {
-  info: { fg: '#88ccff', label: 'INFO' },
-  warn: { fg: '#ffcc44', label: 'WARN' },
-  error: { fg: '#ff6655', label: 'ERR ' },
+  info: { fg: 'var(--accent-base)', label: 'INFO' },
+  warn: { fg: 'var(--status-warning)', label: 'WARN' },
+  error: { fg: 'var(--status-leaky)', label: 'ERR ' },
 }
 
 interface EntryRowProps {
@@ -38,14 +38,14 @@ function EntryRow({ entry }: EntryRowProps) {
         fontFamily: 'monospace',
         fontSize: '11px',
         lineHeight: '1.4',
-        borderBottom: '1px solid #2a2a2a',
+        borderBottom: '1px solid var(--border-hairline)',
         alignItems: 'baseline',
       }}
     >
-      <span style={{ color: '#888', flexShrink: 0 }}>{fmtTime(entry.timestamp)}</span>
+      <span style={{ color: 'var(--text-faint)', flexShrink: 0 }}>{fmtTime(entry.timestamp)}</span>
       <span style={{ color: fg, fontWeight: 'bold', flexShrink: 0, width: '30px' }}>{label}</span>
-      <span style={{ color: '#aaa', flexShrink: 0 }}>[{entry.source}]</span>
-      <span style={{ color: '#ddd', wordBreak: 'break-word', flex: 1 }}>{entry.message}</span>
+      <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>[{entry.source}]</span>
+      <span style={{ color: 'var(--text-secondary)', wordBreak: 'break-word', flex: 1 }}>{entry.message}</span>
     </div>
   )
 }
@@ -87,8 +87,8 @@ export function LogPanel({ panelHeight = 160 }: Props) {
   return (
     <div
       style={{
-        borderTop: '1px solid #444',
-        background: '#1a1a1a',
+        borderTop: '1px solid var(--border-hairline)',
+        background: 'var(--surface-window)',
         userSelect: 'none',
       }}
     >
@@ -98,20 +98,20 @@ export function LogPanel({ panelHeight = 160 }: Props) {
           display: 'flex',
           alignItems: 'center',
           padding: '3px 8px',
-          background: '#262626',
+          background: 'var(--surface-panel)',
           cursor: 'pointer',
           gap: '8px',
         }}
         onClick={() => setCollapsed((c) => !c)}
       >
-        <span style={{ color: '#aaa', fontFamily: 'monospace', fontSize: '11px' }}>
+        <span style={{ color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: '11px' }}>
           {collapsed ? '▶' : '▼'} Log
         </span>
         <span
           style={{
             fontFamily: 'monospace',
             fontSize: '11px',
-            color: errorCount > 0 ? '#ff6655' : warnCount > 0 ? '#ffcc44' : '#777',
+            color: errorCount > 0 ? 'var(--status-leaky)' : warnCount > 0 ? 'var(--status-warning)' : 'var(--text-faint)',
           }}
         >
           {badgeText}
@@ -126,9 +126,9 @@ export function LogPanel({ panelHeight = 160 }: Props) {
             padding: '1px 8px',
             fontSize: '11px',
             fontFamily: 'monospace',
-            background: '#383838',
-            color: '#aaa',
-            border: '1px solid #555',
+            background: 'var(--surface-input)',
+            color: 'var(--text-muted)',
+            border: '1px solid var(--border-strong)',
             borderRadius: '2px',
             cursor: 'pointer',
           }}
@@ -156,7 +156,7 @@ export function LogPanel({ panelHeight = 160 }: Props) {
             <div
               style={{
                 padding: '8px',
-                color: '#555',
+                color: 'var(--text-section)',
                 fontFamily: 'monospace',
                 fontSize: '11px',
                 textAlign: 'center',

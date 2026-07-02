@@ -125,6 +125,16 @@
   --kbd-border: rgba(255, 255, 255, 0.08);
   --kbd-active-text: #bcd2ff;
   --kbd-active-bg: rgba(91, 140, 255, 0.2);
+
+  /* ---- Semantic status + glyph colors (Refinement pass) ------------- */
+  /* Theme-aware replacements for colors that were hardcoded dark in dialogs,
+     the Outliner, and panel glyphs (they broke on the light theme). */
+  --status-solid: #5fce80;
+  --status-leaky: #e0714f;
+  --status-warning: #e8c84a;
+  --glyph-instance: #7acce8;
+  --tag-accent: #b07aaa;
+  --danger-base: #e0574f;
 }
 
 /* ============================================================ Light (CAD) */
@@ -172,6 +182,14 @@
   --kbd-border: rgba(20, 40, 70, 0.12);
   --kbd-active-text: #2f5fd0;
   --kbd-active-bg: rgba(91, 140, 255, 0.2);
+
+  /* ---- Semantic status + glyph colors (Refinement pass) ------------- */
+  --status-solid: #2f9e57;
+  --status-leaky: #c4543f;
+  --status-warning: #b8860b;
+  --glyph-instance: #2d78e1;
+  --tag-accent: #9c5aa0;
+  --danger-base: #c4543f;
 
   /* ---- Shadows (light overrides) ----------------------------------- */
   --shadow-window: 0 34px 90px -28px rgba(40, 60, 90, 0.4);

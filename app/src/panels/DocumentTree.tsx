@@ -402,7 +402,7 @@ function NodeRow({
         dimmed={dimmed}
         hidden={hidden}
         indent={depth}
-        dot={watertight ? '#1a7a3a' : '#cc3322'}
+        dot={watertight ? 'var(--status-solid)' : 'var(--status-leaky)'}
         rowRef={isPrimary ? selectedRowRef : undefined}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
@@ -494,9 +494,9 @@ function BoolButton({ label, title, onClick }: { label: string; title: string; o
         fontSize: '11px',
         fontFamily: 'monospace',
         cursor: 'pointer',
-        background: '#46618c',
-        color: '#eee',
-        border: 'none',
+        background: 'var(--accent-tint-18)',
+        color: 'var(--accent-text-on-tint)',
+        border: '1px solid var(--accent-border)',
         borderRadius: '3px',
       }}
     >
@@ -516,9 +516,9 @@ function ActionButton({ label, title, onClick }: { label: string; title: string;
         fontSize: '11px',
         fontFamily: 'monospace',
         cursor: 'pointer',
-        background: '#4a6840',
-        color: '#eee',
-        border: 'none',
+        background: 'color-mix(in srgb, var(--status-solid) 18%, transparent)',
+        color: 'var(--status-solid)',
+        border: '1px solid color-mix(in srgb, var(--status-solid) 45%, transparent)',
         borderRadius: '3px',
       }}
     >
@@ -579,14 +579,17 @@ function Row({
   onDoubleClick?: () => void
   onToggleHidden?: () => void
 }) {
-  // Primary selected row gets a strong highlight; secondary selected is subtler.
-  const background = active
-    ? '#3a567f'
-    : isPrimary === true
-      ? '#4477cc'
-      : selected
-        ? '#2d4a6a'
-        : 'transparent'
+  // Selection highlight uses the theme accent tint (06_docked_panels.md: "the
+  // selected node is highlighted with accent/tint background + accent text"),
+  // not the old hardcoded blue bars that broke on the light theme. Three tiers:
+  // the active (being-edited) row gets an inset accent rail; primary selection
+  // the full tint; secondary selection a fainter tint.
+  const anySelected = active || isPrimary === true || selected
+  const background = active || isPrimary === true
+    ? 'var(--accent-tint-18)'
+    : selected
+      ? 'var(--accent-tint-15)'
+      : 'transparent'
 
   return (
     <div
@@ -598,6 +601,8 @@ function Row({
         paddingLeft: `${8 + indent * 16}px`,
         paddingRight: '4px',
         background,
+        boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
+        color: anySelected ? 'var(--accent-text-on-tint)' : undefined,
         opacity: dimmed ? 0.5 : 1,
         fontWeight: active ? 'bold' : 'normal',
       }}
@@ -623,17 +628,17 @@ function Row({
       )}
       {/* Folder icon for groups */}
       {isGroup === true && (
-        <span style={{ fontSize: '11px', color: '#e8c84a' }}>▤</span>
+        <span style={{ fontSize: '11px', color: 'var(--status-warning)' }}>▤</span>
       )}
       {/* Component/instance icon */}
       {isInstance === true && (
-        <span style={{ fontSize: '11px', color: '#7acce8' }}>⬡</span>
+        <span style={{ fontSize: '11px', color: 'var(--glyph-instance)' }}>⬡</span>
       )}
       {dot !== undefined && (
         <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: dot, flexShrink: 0 }} />
       )}
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
-      {active && <span style={{ fontSize: '10px', color: '#cfe0f5' }}>editing</span>}
+      {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}>editing</span>}
       {/* Eye toggle — only visible on hover via CSS would require class, so always show */}
       {onToggleHidden !== undefined && (
         <button
@@ -645,7 +650,7 @@ function Row({
           style={{
             background: 'none',
             border: 'none',
-            color: hidden === true ? '#555' : '#888',
+            color: hidden === true ? 'var(--text-section)' : 'var(--text-muted)',
             cursor: 'pointer',
             padding: '0 2px',
             fontSize: '11px',

@@ -148,7 +148,7 @@ function TagRow({
         )}
 
         {/* Tag folder/label icon */}
-        <span style={{ fontSize: '11px', color: '#b07aaa', flexShrink: 0 }}>⬧</span>
+        <span style={{ fontSize: '11px', color: 'var(--tag-accent)', flexShrink: 0 }}>⬧</span>
 
         {/* Tag name */}
         <span

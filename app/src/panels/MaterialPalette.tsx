@@ -181,7 +181,7 @@ export function MaterialPalette({
           style={{
             ...SWATCH_STYLE,
             background: '#cccccc',
-            borderColor: currentMaterialId === MATERIAL_SENTINEL ? '#ffaa00' : 'transparent',
+            borderColor: currentMaterialId === MATERIAL_SENTINEL ? 'var(--accent-base)' : 'transparent',
           }}
         />
         <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Default</span>
@@ -238,7 +238,7 @@ export function MaterialPalette({
               style={{
                 ...SWATCH_STYLE,
                 background: thumbUrl !== undefined ? `url(${thumbUrl}) center/cover` : hex,
-                borderColor: selected ? '#ffaa00' : 'var(--border-strong, #444)',
+                borderColor: selected ? 'var(--accent-base)' : 'var(--border-strong, #444)',
               }}
             />
             <span
@@ -247,7 +247,7 @@ export function MaterialPalette({
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
                 flex: 1,
-                color: selected ? '#ffaa00' : 'var(--text-secondary, #ccc)',
+                color: selected ? 'var(--accent-base)' : 'var(--text-secondary, #ccc)',
                 cursor: 'pointer',
               }}
               onClick={() => onSelectMaterial(id)}
@@ -326,7 +326,7 @@ export function MaterialPalette({
         </span>
       )}
       {texError !== null && (
-        <span style={{ color: '#ff6666', fontSize: '10px' }}>{texError}</span>
+        <span style={{ color: 'var(--status-leaky)', fontSize: '10px' }}>{texError}</span>
       )}
       <button style={BTN_STYLE} onClick={() => { void handleAddTexture() }}>
         + Add texture

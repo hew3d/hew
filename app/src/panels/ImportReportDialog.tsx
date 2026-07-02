@@ -20,7 +20,7 @@ interface ImportReportDialogProps {
 const OVERLAY_STYLE: React.CSSProperties = {
   position: 'fixed',
   inset: 0,
-  background: 'rgba(0,0,0,0.6)',
+  background: 'var(--backdrop-dim)',
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -28,21 +28,21 @@ const OVERLAY_STYLE: React.CSSProperties = {
 }
 
 const DIALOG_STYLE: React.CSSProperties = {
-  background: '#2a2a2a',
-  border: '1px solid #4a4a4a',
+  background: 'var(--surface-window)',
+  border: '1px solid var(--border-strong)',
   borderRadius: '6px',
-  boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+  boxShadow: 'var(--shadow-window)',
   padding: '20px 24px',
   minWidth: '340px',
   maxWidth: '520px',
-  fontFamily: 'system-ui, sans-serif',
-  color: '#ddd',
+  fontFamily: 'var(--font-family-ui)',
+  color: 'var(--text-secondary)',
 }
 
 const HEADING_STYLE: React.CSSProperties = {
   fontSize: '15px',
   fontWeight: 600,
-  color: '#eee',
+  color: 'var(--text-primary)',
   marginBottom: '16px',
 }
 
@@ -54,7 +54,7 @@ const SECTION_LABEL_STYLE: React.CSSProperties = {
   fontSize: '11px',
   textTransform: 'uppercase',
   letterSpacing: '0.06em',
-  color: '#888',
+  color: 'var(--text-faint)',
   marginBottom: '6px',
 }
 
@@ -62,7 +62,7 @@ const LIST_STYLE: React.CSSProperties = {
   margin: 0,
   padding: '0 0 0 16px',
   fontSize: '12px',
-  color: '#bbb',
+  color: 'var(--text-secondary)',
   lineHeight: '1.6',
   maxHeight: '120px',
   overflowY: 'auto',
@@ -73,12 +73,12 @@ const OK_BUTTON_STYLE: React.CSSProperties = {
   marginLeft: 'auto',
   marginTop: '16px',
   padding: '6px 20px',
-  background: '#3a5e9e',
+  background: 'var(--accent-base)',
   color: '#fff',
   border: 'none',
   borderRadius: '4px',
   fontSize: '13px',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: 'var(--font-family-ui)',
   cursor: 'pointer',
 }
 
@@ -112,20 +112,20 @@ export function ImportReportDialog({ report, onClose }: ImportReportDialogProps)
         <div style={HEADING_STYLE}>Import Complete</div>
 
         {/* Summary row */}
-        <div style={{ ...SECTION_STYLE, fontSize: '13px', color: '#eee' }}>
+        <div style={{ ...SECTION_STYLE, fontSize: '13px', color: 'var(--text-primary)' }}>
           {objects_created === 0 ? (
-            <span style={{ color: '#aaa' }}>No objects were created.</span>
+            <span style={{ color: 'var(--text-muted)' }}>No objects were created.</span>
           ) : (
             <>
               <strong>{objects_created}</strong>
               {' '}
               {objects_created === 1 ? 'object' : 'objects'} imported
               {' — '}
-              <span style={{ color: '#5a9e5a' }}>{watertight} solid</span>
+              <span style={{ color: 'var(--status-solid)' }}>{watertight} solid</span>
               {leaky > 0 && (
                 <>
                   {', '}
-                  <span style={{ color: '#cc6644' }}>{leaky} leaky</span>
+                  <span style={{ color: 'var(--status-leaky)' }}>{leaky} leaky</span>
                 </>
               )}
             </>
@@ -139,7 +139,7 @@ export function ImportReportDialog({ report, onClose }: ImportReportDialogProps)
             <ul style={LIST_STYLE}>
               {skipped.map((item, i) => (
                 <li key={i}>
-                  <strong style={{ color: '#dda' }}>{item.name}</strong>
+                  <strong style={{ color: 'var(--text-primary)' }}>{item.name}</strong>
                   {' — '}
                   <span>{item.reason}</span>
                 </li>

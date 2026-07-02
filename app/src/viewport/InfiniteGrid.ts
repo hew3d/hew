@@ -51,7 +51,15 @@ const FRAGMENT_SHADER = `
   // into Inf/NaN and silently vanish the whole grid).
   float gridFactor(vec2 coord, float cellSize) {
     vec2 c = coord / cellSize;
-    vec2 fw = max(fwidth(c), vec2(1e-4));
+    // Derive the line's screen width from fwidth of the CONTINUOUS world coord,
+    // then scale by cellSize — NOT fwidth(coord/cellSize). cellSize is
+    // piecewise-constant across the LOD decades (it steps at each power-of-ten
+    // distance from the camera), so fwidth(coord/cellSize) SPIKES on the
+    // one-pixel ring where two adjacent fragments straddle a tier boundary —
+    // that spike drew a phantom dashed circle on the ground (the "dashed
+    // circle" bug). fwidth(coord) is smooth everywhere, so dividing it by the
+    // constant cellSize gives the same line width without the boundary spike.
+    vec2 fw = max(fwidth(coord) / cellSize, vec2(1e-4));
     vec2 g = abs(fract(c - 0.5) - 0.5) / fw;
     return 1.0 - clamp(min(g.x, g.y), 0.0, 1.0);
   }
@@ -74,15 +82,18 @@ const FRAGMENT_SHADER = `
     float gMajor = mix(gridFactor(vWorldPos.xy, hi), gridFactor(vWorldPos.xy, hi * 10.0), t);
     float gLine = clamp(max(gMinor, gMajor), 0.0, 1.0);
 
-    // Opaque ground base everywhere on the plane; grid lines layered on top.
+    // NO distance fade. Any fade keyed to radial camera distance draws a
+    // circle on the ground (the fade boundary is a ring where it crosses the
+    // axis-aligned grid lines) — that was the "dashed circle" bug in both its
+    // original alpha-fade form and the first line-fade fix. It's unnecessary
+    // here: the grid is zoom-ADAPTIVE (cell size ∝ camera distance, above), so
+    // on-screen line density stays roughly constant at every zoom, which is
+    // what keeps distant lines from moiré-ing — not a fade. The plane is opaque
+    // and its only boundary is the frustum far-plane: a natural straight
+    // horizon, no ring at any camera angle.
     vec3 color = mix(uGroundColor, mix(uMinorColor, uMajorColor, gMajor), gLine);
 
-    // Fade out well before the camera's far-clip plane (100) so the grid's
-    // edge is never a visible hard line.
-    float alpha = 1.0 - smoothstep(70.0, 95.0, dist);
-
-    if (alpha < 0.003) discard;
-    gl_FragColor = vec4(color, alpha);
+    gl_FragColor = vec4(color, 1.0);
   }
 `
 
@@ -112,6 +123,13 @@ export class InfiniteGrid {
     })
     this.mesh = new THREE.Mesh(geometry, this.material)
     this.mesh.name = 'InfiniteGrid'
+    // Render before every other transparent overlay (sketch region fills, sketch
+    // edges, axes, tool previews — all just above the ground at z≈0.001). The
+    // grid paints an opaque ground base, so without this it can paint OVER those
+    // overlays in the transparent pass — that's why sketch fills showed "only
+    // sometimes" (they survived only where the grid's old distance-fade happened
+    // to be transparent). renderOrder -1 makes the grid always paint first.
+    this.mesh.renderOrder = -1
     // Defensive: a 600x600 plane's bounding sphere should always intersect
     // the frustum near the origin, but skip the computed-bounds culling test
     // entirely rather than risk it being wrong.

@@ -78,8 +78,8 @@ export class ErrorBoundary extends Component<Props, State> {
         style={{
           position: 'fixed',
           inset: 0,
-          background: '#1a1a1a',
-          color: '#eee',
+          background: 'var(--surface-window, #1a1a1a)',
+          color: 'var(--text-primary, #eee)',
           font: '13px/1.5 system-ui, sans-serif',
           padding: '32px',
           overflow: 'auto',
@@ -87,7 +87,7 @@ export class ErrorBoundary extends Component<Props, State> {
         }}
       >
         <h2 style={{ margin: '0 0 8px' }}>Hew hit an error</h2>
-        <p style={{ color: '#bbb', marginTop: 0 }}>
+        <p style={{ color: 'var(--text-secondary, #bbb)', marginTop: 0 }}>
           The app stopped to avoid a blank window. Reload to recover — your most
           recent autosave will be offered.
         </p>
@@ -96,7 +96,7 @@ export class ErrorBoundary extends Component<Props, State> {
           style={{
             padding: '6px 16px',
             fontSize: 13,
-            background: '#3a5e9e',
+            background: 'var(--accent-base, #3a5e9e)',
             color: '#fff',
             border: 'none',
             borderRadius: 4,
@@ -108,17 +108,17 @@ export class ErrorBoundary extends Component<Props, State> {
         </button>
         {recentErrors.length > 0 && (
           <>
-            <div style={{ color: '#bbb', margin: '4px 0' }}>
+            <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>
               Underlying error(s) — the first is usually the real cause:
             </div>
             <pre
               style={{
                 whiteSpace: 'pre-wrap',
-                background: '#111',
-                border: '1px solid #533',
+                background: 'var(--surface-input, #111)',
+                border: '1px solid var(--danger-base, #533)',
                 borderRadius: 4,
                 padding: 12,
-                color: '#fbb',
+                color: 'var(--danger-base, #fbb)',
                 fontSize: 12,
                 marginBottom: 16,
               }}
@@ -127,15 +127,15 @@ export class ErrorBoundary extends Component<Props, State> {
             </pre>
           </>
         )}
-        <div style={{ color: '#bbb', margin: '4px 0' }}>Render error (symptom):</div>
+        <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>Render error (symptom):</div>
         <pre
           style={{
             whiteSpace: 'pre-wrap',
-            background: '#111',
-            border: '1px solid #333',
+            background: 'var(--surface-input, #111)',
+            border: '1px solid var(--border-strong, #333)',
             borderRadius: 4,
             padding: 12,
-            color: '#f88',
+            color: 'var(--danger-base, #f88)',
             fontSize: 12,
           }}
         >

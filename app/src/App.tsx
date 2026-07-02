@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, { type ViewportApi, type InferenceInfo, type StandardView } from './viewport/Viewport'
 import { InferenceTooltip } from './viewport/InferenceTooltip'
+import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
 import { ViewportHUD } from './viewport/ViewportHUD'
 import { DocumentTree } from './panels/DocumentTree'
@@ -39,6 +40,7 @@ import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { CommandPalette } from './palette/CommandPalette'
+import { toolHint } from './palette/registry'
 import { UnitsPane } from './settings/UnitsPane'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import * as diagnosticLog from './log/diagnosticLog'
@@ -1600,7 +1602,16 @@ export default function App() {
           viewport, and the docked right tray (`06_docked_panels.md`)
           — the app-shell's full 3-column layout (`02_app_shell.md`). */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <ToolRail activeTool={activeTool} onSelectTool={(name) => setActiveTool(name)} />
+        <ToolRail
+          activeTool={activeTool}
+          onSelectTool={(name) => setActiveTool(name)}
+          // macOS has no in-window menu bar to host the resting palette field
+          // (MenuBar renders nothing when nativeMenuBar), so the rail carries
+          // it there. The palette shortcut on macOS is Cmd+/ (Cmd+K stays
+          // Rectangle's native accelerator — Refinement).
+          onOpenPalette={isTauri && isMac ? () => setPaletteOpen(true) : undefined}
+          paletteKbd="⌘/"
+        />
         <div
           style={{ flex: 1, minWidth: 0, position: 'relative' }}
           onDragOver={handleDragOver}
@@ -1630,6 +1641,7 @@ export default function App() {
           {/* Inference & viewport feedback (`07_inference_feedback.md`)
               — all net-new DOM overlays; Viewport.tsx rendered none of this
               before this milestone. */}
+          <SnapDot info={inferenceInfo} />
           <InferenceTooltip info={inferenceInfo} />
           <MeasurementBox toolName={toolName} value={measurement} />
           <ViewportHUD
@@ -1767,43 +1779,48 @@ export default function App() {
         </div>
       </div>
 
-      {/* Status bar — bottom strip, above the Debug Log panel when shown.
-          Extra bottom padding avoids descender clipping under macOS Tahoe's
-          rounded window corners. */}
+      {/* Status bar — the Studio instructor line (`02_app_shell.md`): active
+          tool name in text/tertiary, a dim ·, then a one-line hint in
+          text/faint. Snap state moved to the on-cursor inference dot and live
+          Measurements to the top-right VCB + near-cursor readout, so both are
+          dropped here (Refinement pass, issue E). Every color is now a theme
+          token — the old bar hardcoded near-white text (`#eee`), which was
+          unreadable on the light theme's light bar (the dark/light divergence
+          the user flagged). Extra bottom padding avoids descender clipping
+          under macOS Tahoe's rounded window corners. */}
       <div
         style={{
-          padding: '4px 8px 10px 8px',
-          background: 'var(--surface-bar, #222)',
-          color: '#eee',
-          fontFamily: 'monospace',
-          fontSize: '12px',
-          borderTop: '1px solid #3a3a3a',
+          height: 30,
+          boxSizing: 'border-box',
+          padding: '0 var(--space-6, 13px) 6px',
+          background: 'var(--surface-bar)',
+          fontFamily: 'var(--font-family-ui)',
+          fontSize: 'var(--font-size-body, 12px)',
+          borderTop: '1px solid var(--border-hairline)',
           display: 'flex',
-          gap: '1.5rem',
+          alignItems: 'center',
+          gap: 'var(--space-3, 8px)',
           flexShrink: 0,
         }}
       >
-        <span>Tool: <strong>{toolName}</strong></span>
-        <span>Snap: {snapKind ?? '—'}</span>
-        <span>Measurements: {measurement !== '' ? measurement : '—'}</span>
-        {activeTool === 'Paint' && (
-          <span style={{ color: '#aaa', fontSize: '11px' }}>
-            Click: paint face | Cmd/Ctrl+click: fill whole object
-          </span>
+        <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }}>{toolName}</span>
+        {toolHint(toolName) !== '' && (
+          <>
+            <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
+            <span style={{ color: 'var(--text-faint)' }}>{toolHint(toolName)}</span>
+          </>
         )}
-        <span style={{ color: '#888', fontSize: '11px' }}>
-          Middle-drag: orbit | Shift+Middle: pan | Scroll: zoom
-        </span>
-        {/* Watertight badge — moved here from the old horizontal toolbar. */}
+        {/* Watertight badge — aggregate solids feedback; no other single-glance
+            home (per-object status lives in the Outliner). Right-aligned. */}
         {objectCount > 0 && (
           <span
             style={{
+              marginLeft: 'auto',
               padding: '2px 8px',
-              fontSize: '11px',
-              borderRadius: '3px',
+              fontSize: 'var(--font-size-dock-chip, 11px)',
+              borderRadius: 4,
               background: allWatertight ? '#1a7a3a' : '#cc3322',
               color: '#fff',
-              marginLeft: 'auto',
             }}
           >
             {allWatertight
@@ -1811,9 +1828,6 @@ export default function App() {
               : `${leakyCount} leaky`}
           </span>
         )}
-        <span style={{ color: '#888', fontSize: '11px', marginLeft: objectCount > 0 ? undefined : 'auto' }}>
-          Undo: Cmd/Ctrl+Z | Redo: Shift+Cmd/Ctrl+Z
-        </span>
       </div>
 
       {/* Debug Log panel — opt-in via Window menu, default hidden. */}

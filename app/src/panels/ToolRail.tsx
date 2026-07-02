@@ -19,6 +19,58 @@ import { isMac } from '../platform'
 export interface ToolRailProps {
   activeTool: ToolName
   onSelectTool: (name: ToolName) => void
+  /** When set, a resting command-palette search field is drawn at the top of
+   * the rail. Used on macOS, where there is no in-window menu bar to host the
+   * field (the Windows/Linux/Web build keeps it in `MenuBar.tsx` per
+   * `04_command_palette.md`). Clicking it opens the palette. */
+  onOpenPalette?: () => void
+  /** Shortcut label shown in the field's kbd chip (e.g. '⌘/' on macOS). */
+  paletteKbd?: string
+}
+
+/** Resting command-palette field for the top of the rail (macOS — see
+ * `onOpenPalette` above). Mirrors `MenuBar.tsx`'s menu-bar field, widened to
+ * the rail's full width. */
+function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
+  return (
+    <button
+      onClick={onOpen}
+      aria-label="Search tools, actions, help"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--space-3, 8px)',
+        width: '100%',
+        margin: '0 0 var(--space-3, 8px)',
+        padding: '6px var(--space-4, 9px)',
+        background: 'var(--surface-input, #14161a)',
+        border: '1px solid var(--border-hairline, #3a3a3a)',
+        borderRadius: '9px',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-family-ui)',
+      }}
+    >
+      <span aria-hidden="true" style={{ color: 'var(--text-faint, #888)', fontSize: '13px' }}>⌕</span>
+      <span style={{ flex: 1, textAlign: 'left', fontSize: '12.5px', color: 'var(--text-faint, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        Search…
+      </span>
+      <span
+        style={{
+          fontFamily: 'var(--font-family-mono)',
+          fontSize: 'var(--font-size-kbd, 10px)',
+          fontWeight: 600,
+          color: 'var(--kbd-text, #9aa3b0)',
+          background: 'var(--kbd-bg, rgba(255,255,255,0.07))',
+          border: '1px solid var(--kbd-border, rgba(255,255,255,0.08))',
+          borderRadius: 'var(--radius-kbd, 4px)',
+          padding: '1.5px 5px',
+          flexShrink: 0,
+        }}
+      >
+        {kbd}
+      </span>
+    </button>
+  )
 }
 
 /** Inline Material Symbols icon (moved here from App.tsx in). The
@@ -108,7 +160,7 @@ function ToolRow({
   )
 }
 
-export function ToolRail({ activeTool, onSelectTool }: ToolRailProps) {
+export function ToolRail({ activeTool, onSelectTool, onOpenPalette, paletteKbd }: ToolRailProps) {
   return (
     <div
       role="radiogroup"
@@ -125,6 +177,9 @@ export function ToolRail({ activeTool, onSelectTool }: ToolRailProps) {
         overflowY: 'auto',
       }}
     >
+      {onOpenPalette !== undefined && (
+        <RailSearchField onOpen={onOpenPalette} kbd={paletteKbd ?? 'Ctrl K'} />
+      )}
       {RAIL_GROUPS.map((group) => (
         <div key={group}>
           <div

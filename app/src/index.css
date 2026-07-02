@@ -36,3 +36,23 @@ body {
     opacity: 1;
   }
 }
+
+/* Snap/inference dot pulse (Refinement pass, `07_inference_feedback.md` — the
+ * precise on-cursor marker; see viewport/SnapDot.tsx). ~1.6s ease-in-out
+ * scale+opacity pulse; the keyframes carry the -50%/-50% centering so the
+ * animated transform doesn't fight SnapDot's inline centering. Drops to a
+ * static dot under prefers-reduced-motion. */
+@keyframes hew-snap-pulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  50%      { transform: translate(-50%, -50%) scale(1.18); opacity: 0.82; }
+}
+
+.hew-snap-dot {
+  animation: hew-snap-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hew-snap-dot {
+    animation: none;
+  }
+}
