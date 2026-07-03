@@ -48,6 +48,11 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Line', group: 'Draw', macKey: '⌘L', winKey: 'L' },
   { name: 'Rectangle', group: 'Draw', macKey: '⌘K', winKey: 'R' },
   { name: 'Circle', group: 'Draw', macKey: 'C', winKey: 'C' },
+  // Arc: 'A' is SketchUp-for-Windows' real arc key. The macOS
+  // Cmd-scheme has no slot assigned yet — that's a product decision, so
+  // macKey stays empty (Arc remains reachable on mac via the rail, the Draw
+  // menu, and the command palette).
+  { name: 'Arc', group: 'Draw', macKey: '', winKey: 'A' },
   // ---- Modify ----
   { name: 'Push/Pull', group: 'Modify', macKey: '⌘=', winKey: 'P' },
   { name: 'Move', group: 'Modify', macKey: '⌘0', winKey: 'M' },

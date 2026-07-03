@@ -39,6 +39,8 @@ import { makeRecoveryStore, shouldPromptRecovery, type RecoverySnapshot, type Re
 import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
+import { StlExportDialog } from './panels/StlExportDialog'
+import { collectNonSolidObjects } from './io/exporters/stlExport'
 import { CommandPalette } from './palette/CommandPalette'
 import { toolHint } from './palette/registry'
 import { UnitsPane } from './settings/UnitsPane'
@@ -818,6 +820,66 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
+  // ---------------------------------------------------------------- STL export
+  // Names of non-solid objects pending the solid-gating confirmation; null =
+  // no dialog. STL feeds slicers, so the export warns — never repairs (rule
+  // 4) — when any exported object is not a watertight solid.
+  const [stlWarning, setStlWarning] = useState<string[] | null>(null)
+
+  /** The actual export — runs directly when all objects are solid, or after
+   *  "Export Anyway" in the gating dialog. */
+  const doExportStl = useCallback(async () => {
+    const api = viewportApi.current
+    if (api === null) {
+      handleToast('Export failed: viewport not ready.')
+      return
+    }
+    let result: Awaited<ReturnType<typeof api.exportStl>>
+    try {
+      result = await api.exportStl()
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${String(err)}`)
+      return
+    }
+    if (result === null) {
+      handleToast('Nothing to export — the model has no solids.')
+      return
+    }
+    // Suggest a name derived from the current document, dropping any .hew suffix.
+    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
+    const base = rawBase.replace(/\.hew$/i, '')
+    try {
+      const ok = await fileHostRef.current.exportBinary(result.bytes, base, {
+        description: 'STL (Binary)',
+        ext: 'stl',
+        mime: 'model/stl',
+      })
+      if (ok) {
+        handleToast('Exported STL.')
+        LogStore.log.info(
+          'app',
+          `Exported STL (${result.triangleCount} triangles, ${result.bytes.length} bytes` +
+            (result.skippedDegenerate > 0
+              ? `, ${result.skippedDegenerate} degenerate triangles skipped)`
+              : ')'),
+        )
+      }
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${String(err)}`)
+    }
+  }, [docSession.currentRef, docSession.importedName, handleToast])
+
+  /** Entry point (File ▸ Export STL…): gate on solid status first. */
+  const exportStl = useCallback(async () => {
+    const scene = sceneRef.current
+    const offenders = scene !== null ? collectNonSolidObjects(scene) : []
+    if (offenders.length > 0) {
+      setStlWarning(offenders.map((o) => o.name))
+      return
+    }
+    await doExportStl()
+  }, [doExportStl])
+
   // ---------------------------------------------------------------- settings window
   // Under Tauri: a separate, free-floating OS webview window (movable outside
   // the main Hew window). On web: there's no concept of a second OS window,
@@ -855,6 +917,7 @@ export default function App() {
   const handleRedoRef = useRef(handleRedo)
   const handleZoomExtentsRef = useRef(handleZoomExtents)
   const exportGltfRef = useRef(exportGltf)
+  const exportStlRef = useRef(exportStl)
   const openPathRef = useRef(openPath)
   const openSettingsRef = useRef(openSettings)
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
@@ -866,6 +929,7 @@ export default function App() {
   useEffect(() => { handleRedoRef.current = handleRedo }, [handleRedo])
   useEffect(() => { handleZoomExtentsRef.current = handleZoomExtents }, [handleZoomExtents])
   useEffect(() => { exportGltfRef.current = exportGltf }, [exportGltf])
+  useEffect(() => { exportStlRef.current = exportStl }, [exportStl])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
   useEffect(() => { openSettingsRef.current = openSettings }, [openSettings])
 
@@ -904,6 +968,7 @@ export default function App() {
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
       case 'export':   exportGltfRef.current(); break
+      case 'export-stl': exportStlRef.current(); break
       case 'save':     saveDocumentRef.current(); break
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
@@ -920,6 +985,7 @@ export default function App() {
       case 'tool-select':    setActiveTool('Select'); break
       case 'tool-rectangle': setActiveTool('Rectangle'); break
       case 'tool-circle':    setActiveTool('Circle'); break
+      case 'tool-arc':       setActiveTool('Arc'); break
       case 'tool-line':      setActiveTool('Line'); break
       case 'tool-pushpull':  setActiveTool('Push/Pull'); break
       case 'tool-paint':     setActiveTool('Paint'); break
@@ -1095,7 +1161,7 @@ export default function App() {
           setActiveTool('Select')
           return
         }
-        // SketchUp-for-Windows bare-letter tool shortcuts — the 9
+        // SketchUp-for-Windows bare-letter tool shortcuts — the
         // letter-keyed tools from `tools/toolRegistry.ts`'s `winKey`s. Real
         // SketchUp reserves these as unmodified keys; Hew's other tools
         // (Protractor/Slice/Edit Vertex/camera) keep their existing
@@ -1105,6 +1171,7 @@ export default function App() {
         if (key === 'l') { ev.preventDefault(); setActiveTool('Line'); return }
         if (key === 'r') { ev.preventDefault(); setActiveTool('Rectangle'); return }
         if (key === 'c') { ev.preventDefault(); setActiveTool('Circle'); return }
+        if (key === 'a') { ev.preventDefault(); setActiveTool('Arc'); return }
         if (key === 'p') { ev.preventDefault(); setActiveTool('Push/Pull'); return }
         if (key === 'm') { ev.preventDefault(); setActiveTool('Move'); return }
         if (key === 'q') { ev.preventDefault(); setActiveTool('Rotate'); return }
@@ -1528,6 +1595,7 @@ export default function App() {
         onSaveAs={saveAsDocument}
         onImport={importDocument}
         onExport={exportGltf}
+        onExportStl={exportStl}
         recentFiles={recentFiles}
         onOpenRecent={openRecent}
         onClearRecent={clearRecent}
@@ -1844,6 +1912,19 @@ export default function App() {
         <ImportReportDialog
           report={importReport}
           onClose={() => setImportReport(null)}
+        />
+      )}
+
+      {/* STL solid-gating confirmation — shown before export when any
+          exported object is not a watertight solid; never silent repair (rule 4). */}
+      {stlWarning !== null && (
+        <StlExportDialog
+          offenders={stlWarning}
+          onExport={() => {
+            setStlWarning(null)
+            void doExportStl()
+          }}
+          onCancel={() => setStlWarning(null)}
         />
       )}
 

@@ -42,6 +42,8 @@ export interface MenuBarProps {
   onImport: () => void
   /** Export the model (glTF/GLB — format chosen in the file dialog). */
   onExport: () => void
+  /** Export the model as binary STL, mm scale. */
+  onExportStl: () => void
   /** Recent file paths (most-recent first), shown under File ▸ Open Recent. */
   recentFiles?: string[]
   /** Open a recent file by its path. */
@@ -279,6 +281,7 @@ export function MenuBar({
   onSaveAs,
   onImport,
   onExport,
+  onExportStl,
   recentFiles,
   onOpenRecent,
   onClearRecent,
@@ -376,6 +379,7 @@ export function MenuBar({
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Import…" onClick={withClose(onImport)} />
             <MenuItem label="Export…" onClick={withClose(onExport)} />
+            <MenuItem label="Export STL…" onClick={withClose(onExportStl)} />
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
             <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
@@ -464,6 +468,12 @@ export function MenuBar({
               shortcut={keyFor('Circle')}
               checked={activeTool === 'Circle'}
               onClick={withClose(() => onSelectTool?.('Circle'))}
+            />
+            <CheckMenuItem
+              label="Arc"
+              shortcut={keyFor('Arc')}
+              checked={activeTool === 'Arc'}
+              onClick={withClose(() => onSelectTool?.('Arc'))}
             />
             <div style={{ borderTop: '1px solid #4a4a4a', margin: '4px 0' }} />
             <CheckMenuItem

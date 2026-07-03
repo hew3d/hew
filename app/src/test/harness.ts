@@ -31,6 +31,8 @@ import type { ViewportApi } from '../viewport/Viewport'
 import type { NodeRef } from '../panels/treeModel'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
+import { arcPolylineOnPlane } from '../tools/arcMath'
+import { facePlaneBasis, type V3 } from '../viewport/geoHelpers'
 import {
   formatLength,
   getLengthUnit,
@@ -116,6 +118,25 @@ export interface HewTestHarness {
    * region that forms (the N-gon). Equivalent to CircleTool's commit.
    */
   drawCircle(center: Vec3, radius: number, nSegments?: number): { sketch: string; region: string }
+
+  /**
+   * Draw a faceted 2-point arc in a new ground sketch. `a`/`b` are the
+   * chord endpoints (z should be 0 — ground plane), `sagitta` is the signed
+   * bulge distance from the chord midpoint (positive on the CCW side of a→b,
+   * viewed from +Z). With `close`, also adds the chord b→a so the arc closes
+   * into a region. Equivalent to ArcTool's ground commit:
+   * begin_ground_sketch → N × sketch_add_segment along `arcPolylineOnPlane`.
+   */
+  drawArc(a: Vec3, b: Vec3, sagitta: number, close?: boolean): { sketch: string; regions: string[] }
+
+  /**
+   * Cut `face` of `object` along a faceted 2-point arc. `a`/`b` must
+   * lie on the face (endpoints on its boundary for a boundary-to-boundary
+   * cut); `sagitta` is signed in the face's `facePlaneBasis(normal)` (u, v)
+   * frame. Equivalent to ArcTool's face commit: one `split_face` call with
+   * the arc polyline path.
+   */
+  drawArcOnFace(object: string, face: string, a: Vec3, b: Vec3, sagitta: number): void
 
   /**
    * Move `object` by a world translation (meters). Calls `transform_object` with
@@ -445,6 +466,43 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         if (lastRegion === null) throw new Error('drawCircle: no region formed')
         return { sketch: sketch.toString(), region: lastRegion.toString() }
       }),
+
+    drawArc: (a, b, sagitta, close = false) =>
+      act((s) => {
+        const pts = arcPolylineOnPlane(a, b, sagitta, [1, 0, 0], [0, 1, 0])
+        if (pts === null) throw new Error('drawArc: degenerate chord or flat sagitta')
+        const sketch = s.begin_ground_sketch()
+        const regionsAll = new Set<bigint>()
+        const addSeg = (p: V3, q: V3): void => {
+          const added = s.sketch_add_segment(sketch, p[0], p[1], p[2], q[0], q[1], q[2])
+          for (const r of added.regions_created()) regionsAll.add(r)
+        }
+        for (let i = 0; i < pts.length - 1; i++) addSeg(pts[i], pts[i + 1])
+        if (close) addSeg(pts[pts.length - 1], pts[0])
+        return {
+          sketch: sketch.toString(),
+          regions: Array.from(regionsAll).map(String),
+        }
+      }),
+
+    drawArcOnFace: (object, face, a, b, sagitta) => {
+      act((s) => {
+        const objId = BigInt(object)
+        const faceId = BigInt(face)
+        const n = s.face_normal(objId, faceId)
+        const basis = facePlaneBasis([n[0], n[1], n[2]])
+        if (basis === null) throw new Error('drawArcOnFace: degenerate face normal')
+        const pts = arcPolylineOnPlane(a, b, sagitta, basis.u, basis.v)
+        if (pts === null) throw new Error('drawArcOnFace: degenerate chord or flat sagitta')
+        const path = new Float64Array(pts.length * 3)
+        for (let i = 0; i < pts.length; i++) {
+          path[i * 3 + 0] = pts[i][0]
+          path[i * 3 + 1] = pts[i][1]
+          path[i * 3 + 2] = pts[i][2]
+        }
+        s.split_face(objId, faceId, path).free()
+      })
+    },
 
     moveObject: (object, dx, dy, dz) => {
       // Pure-translation 3×4 row-major affine: identity rotation + (dx,dy,dz) column.

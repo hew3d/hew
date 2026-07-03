@@ -131,6 +131,7 @@ describe('App — loaded state', () => {
     // scheme, not macOS's Cmd-combo one.
     expect(screen.getByTitle('Select (Spc)')).toBeInTheDocument()
     expect(screen.getByTitle('Rectangle (R)')).toBeInTheDocument()
+    expect(screen.getByTitle('Arc (A)')).toBeInTheDocument()
     expect(screen.getByTitle('Push/Pull (P)')).toBeInTheDocument()
   })
 
@@ -212,6 +213,27 @@ describe('App — keyboard shortcuts', () => {
     fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
     const rectangleItem = menubar().getByText('Rectangle').closest('div')
     expect(rectangleItem?.textContent).toContain('✓')
+  })
+
+  it('bare A activates the Arc tool (SketchUp-for-Windows arc key)', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: 'a' })
+    // Arc lives in the Draw menu.
+    fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+    const arcItem = menubar().getByText('Arc').closest('div')
+    expect(arcItem?.textContent).toContain('✓')
+  })
+
+  it('clicking Draw > Arc activates the Arc tool', async () => {
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+    // CheckMenuItem commits on mousedown (so the outside-mousedown closer
+    // can't race it), not click.
+    fireEvent.mouseDown(menubar().getByText('Arc'))
+    // Re-open the Draw menu — Arc should now be checked.
+    fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+    const arcItem = menubar().getByText('Arc').closest('div')
+    expect(arcItem?.textContent).toContain('✓')
   })
 
   it('bare M activates the Move tool (SketchUp-for-Windows scheme)', async () => {

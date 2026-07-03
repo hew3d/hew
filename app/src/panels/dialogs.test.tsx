@@ -1,7 +1,8 @@
 /**
  *  — component tests for the dialog chrome.
  *
- * Covers: RecoveryDialog, ImportingOverlay, ImportReportDialog.
+ * Covers: RecoveryDialog, ImportingOverlay, ImportReportDialog, and the
+ * STL solid-gating dialog StlExportDialog.
  * None of these touch WASM or three.js, so no mocks beyond callbacks are needed.
  *
  * FloatingPanel's tests lived here too until deleted that component
@@ -14,6 +15,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { RecoveryDialog } from './RecoveryDialog'
 import { ImportingOverlay } from './ImportingOverlay'
 import { ImportReportDialog } from './ImportReportDialog'
+import { StlExportDialog } from './StlExportDialog'
 import type { RecoverySnapshot } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
 
@@ -209,5 +211,50 @@ describe('ImportReportDialog', () => {
   it('has the expected ARIA dialog role and label', () => {
     render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /import report/i })).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// StlExportDialog ( — solid gating)
+// ---------------------------------------------------------------------------
+
+describe('StlExportDialog', () => {
+  const offenders = ['Roof', 'Object 7']
+
+  it('shows the non-manifold warning and names every offender', () => {
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
+    expect(
+      screen.getByText(/not watertight solids; the STL may not be manifold/i),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Roof')).toBeInTheDocument()
+    expect(screen.getByText('Object 7')).toBeInTheDocument()
+  })
+
+  it('calls onExport when "Export Anyway" is clicked', () => {
+    const onExport = vi.fn()
+    render(<StlExportDialog offenders={offenders} onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /export anyway/i }))
+    expect(onExport).toHaveBeenCalledOnce()
+  })
+
+  it('calls onCancel when Cancel is clicked', () => {
+    const onCancel = vi.fn()
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={onCancel} />)
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  it('calls onCancel — never onExport — when Escape is pressed', () => {
+    const onExport = vi.fn()
+    const onCancel = vi.fn()
+    render(<StlExportDialog offenders={offenders} onExport={onExport} onCancel={onCancel} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledOnce()
+    expect(onExport).not.toHaveBeenCalled()
+  })
+
+  it('has the expected ARIA dialog role and label', () => {
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByRole('dialog', { name: /export stl warning/i })).toBeInTheDocument()
   })
 })

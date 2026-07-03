@@ -30,9 +30,11 @@ import { SnapService } from './snapService'
 import { SceneRenderer } from './SceneRenderer'
 import * as inputRecorder from '../recording/inputRecorder'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
+import { exportSceneToStl, type StlBuildResult } from '../io/exporters/stlExport'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
 import { CircleTool } from '../tools/CircleTool'
+import { ArcTool } from '../tools/ArcTool'
 import { LineTool } from '../tools/LineTool'
 import { PushPullTool } from '../tools/PushPullTool'
 import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
@@ -254,6 +256,12 @@ export interface ViewportApi {
    * glTF (.glb) buffer. Resolves null when the model has no solids.
    */
   exportGlb: () => Promise<Uint8Array | null>
+  /**
+   * Serialize the current solid geometry (objects + instances) to a binary
+   * STL buffer — millimeter scale, Z-up. Resolves null when the
+   * model has no solids.
+   */
+  exportStl: () => Promise<StlBuildResult | null>
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -1028,12 +1036,16 @@ export default function Viewport({
       return exportSceneToGlb(sceneRenderer)
     }
 
+    async function exportStl(): Promise<StlBuildResult | null> {
+      return exportSceneToStl(sceneRenderer)
+    }
+
     if (apiRefRef.current !== undefined) {
       const isCapturingInput = (): boolean => {
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -1063,6 +1075,30 @@ export default function Viewport({
 
     function makeCircleTool(): CircleTool {
       const tool = new CircleTool(
+        wasmScene,
+        previewGroup,
+        (result) => {
+          sceneRenderer.refreshAllSketches(result.sketchHandle)
+          sceneRenderer.refreshGuides()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        (_objectId) => {
+          handleSceneRefresh()
+        },
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+      // Scope the tool to the current editing context, if any.
+      const ctx = activeContextRef.current
+      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
+        ? ctx[ctx.length - 1].id : null
+      tool.setActiveContext(ctxId)
+      return tool
+    }
+
+    function makeArcTool(): ArcTool {
+      const tool = new ArcTool(
         wasmScene,
         previewGroup,
         (result) => {
@@ -1298,6 +1334,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeCircleTool())
+          break
+        case 'Arc':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeArcTool())
           break
         case 'Line':
           cameraModeRef.current = false
@@ -1839,6 +1880,7 @@ export default function Viewport({
         if (ev.key === '6') { switchToolRef.current?.('Scale'); return }
         if (ev.key === 'r' || ev.key === 'R') { switchToolRef.current?.('Rectangle'); return }
         if (ev.key === 'c' || ev.key === 'C') { switchToolRef.current?.('Circle'); return }
+        if (ev.key === 'a' || ev.key === 'A') { switchToolRef.current?.('Arc'); return }
         if (ev.key === 'l' || ev.key === 'L') { switchToolRef.current?.('Line'); return }
         if (ev.key === 'p' || ev.key === 'P') { switchToolRef.current?.('Push/Pull'); return }
         if (ev.key === 'm' || ev.key === 'M') { switchToolRef.current?.('Move'); return }

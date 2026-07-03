@@ -395,6 +395,8 @@ fn main() {
                 .build(handle)?;
             let file_import = MenuItemBuilder::with_id("file-import", "Import…").build(handle)?;
             let file_export = MenuItemBuilder::with_id("file-export", "Export…").build(handle)?;
+            let file_export_stl =
+                MenuItemBuilder::with_id("file-export-stl", "Export STL…").build(handle)?;
             let file_save = MenuItemBuilder::with_id("file-save", "Save")
                 .accelerator("CmdOrCtrl+S")
                 .build(handle)?;
@@ -412,6 +414,7 @@ fn main() {
                 .separator()
                 .item(&file_import)
                 .item(&file_export)
+                .item(&file_export_stl)
                 .separator()
                 .item(&file_save)
                 .item(&file_save_as)
@@ -687,6 +690,7 @@ fn main() {
                 "file-open" => "open",
                 "file-import" => "import",
                 "file-export" => "export",
+                "file-export-stl" => "export-stl",
                 "file-save" => "save",
                 "file-save-as" => "save-as",
                 "file-close" => "close",

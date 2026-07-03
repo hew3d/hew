@@ -14,8 +14,8 @@ describe('toolRegistry', () => {
     expect(toolSpec('Select').macKey).toBe('Spc')
   })
 
-  it('groups exactly the 10 tools 03_tool_rail.md covers, 4/4/2 per group', () => {
-    expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle'])
+  it('groups the 03_tool_rail.md tools plus Arc, 5/4/2 per group', () => {
+    expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Arc'])
     expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Move', 'Rotate', 'Scale'])
     expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Paint'])
   })
@@ -42,6 +42,7 @@ describe('toolRegistry', () => {
       expect(shortcutFor('Line', false)).toBe('L')
       expect(shortcutFor('Rectangle', false)).toBe('R')
       expect(shortcutFor('Circle', false)).toBe('C')
+      expect(shortcutFor('Arc', false)).toBe('A') // SketchUp-for-Windows' real arc key
       expect(shortcutFor('Push/Pull', false)).toBe('P')
       expect(shortcutFor('Move', false)).toBe('M')
       expect(shortcutFor('Rotate', false)).toBe('Q')
@@ -55,6 +56,10 @@ describe('toolRegistry', () => {
         expect(shortcutFor(name, true)).toBe('')
         expect(shortcutFor(name, false)).toBe('')
       }
+    })
+
+    it('Arc has no macOS shortcut yet (Cmd-scheme slot is a pending product decision)', () => {
+      expect(shortcutFor('Arc', true)).toBe('')
     })
 
     it('camera tools keep their existing Ctrl-combo shortcuts on non-Mac (no spec bare letter)', () => {

@@ -128,6 +128,82 @@ test('Circle tool: custom segment count (12-gon) produces a region', async ({ pa
 })
 
 // ---------------------------------------------------------------------------
+// Arc tool — drawArc / drawArcOnFace ( faceted 2-point arc)
+// ---------------------------------------------------------------------------
+
+test('Arc tool: arc chain + closing chord forms a region that extrudes to a solid', async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const hash0 = h.getStateHash()
+
+    // Chord (0,0)→(2,0) bulging 0.5 m toward +Y, closed with the chord.
+    const arc = h.drawArc([0, 0, 0], [2, 0, 0], 0.5, true)
+    const hasRegion = arc.regions.length >= 1
+    if (!hasRegion) return { hasRegion, count: 0, hash0, hash1: hash0 }
+
+    const objId = h.extrudeRegion(arc.sketch, arc.regions[0], 1.0)
+    return {
+      hasRegion,
+      count: h.getObjectCount(),
+      hash0,
+      hash1: h.getStateHash(),
+      objId,
+    }
+  })
+
+  expect(result.hasRegion).toBe(true)
+  expect(result.count).toBe(1)
+  expect(result.hash1).not.toBe(result.hash0)
+})
+
+test('Arc tool: open arc chain alone forms no region', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const arc = h.drawArc([0, 0, 0], [2, 0, 0], 0.5, false)
+    return { regions: arc.regions.length, count: h.getObjectCount() }
+  })
+
+  expect(result.regions).toBe(0)
+  expect(result.count).toBe(0)
+})
+
+test('Arc tool: on-face arc (boundary to boundary) splits the face', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    // 2×2×1 box; its top face spans (0,0)..(2,2) at z=1.
+    h.drawBox([0, 0, 0], [2, 2, 0], 1)
+    const top = h.pickFace([1, 1, 10], [0, 0, -1])
+    if (!top) return { error: 'pickFace miss' }
+
+    // Arc endpoints on the top face's y=2 boundary edge, bulging into the
+    // face (apex at y = 1.6): a lens forms between the edge and the arc.
+    // Sagitta sign: the top face's facePlaneBasis normal is +Z with u=+Y,
+    // v=−X, making −0.4 the "into the face" side for this chord (the harness
+    // doc explains the (u,v)-frame sign).
+    h.drawArcOnFace(top.object, top.face, [0.5, 2, 1], [1.5, 2, 1], -0.4)
+
+    // The cut splits the top face in two: a probe inside the lens and one in
+    // the face's interior must now land on DIFFERENT faces of the SAME object.
+    const inLens = h.pickFace([1, 1.9, 10], [0, 0, -1])
+    const inMain = h.pickFace([1, 0.5, 10], [0, 0, -1])
+    if (!inLens || !inMain) return { error: 'probe pickFace miss' }
+
+    return {
+      count: h.getObjectCount(),
+      sameObject: inLens.object === inMain.object,
+      differentFaces: inLens.face !== inMain.face,
+    }
+  })
+
+  if ('error' in result) throw new Error(String(result.error))
+  expect(result.count).toBe(1) // a face split never creates a new object
+  expect(result.sameObject).toBe(true)
+  expect(result.differentFaces).toBe(true)
+})
+
+// ---------------------------------------------------------------------------
 // Push/Pull — normal + error behavior
 // ---------------------------------------------------------------------------
 

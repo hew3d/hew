@@ -2941,29 +2941,18 @@ fn do_split_face(
     let inner_loops: Vec<LoopId> = obj.faces[face].inner_loops.clone();
 
     // 1. If either endpoint is an edge hit, split that boundary edge.
-    //    We must split ep1 before ep0 in terms of storage, but we need to
-    //    re-resolve ep0's half-edge pointer after ep1 is split if they share
-    //    an edge (they can't share the same half-edge — the endpoints would be
-    //    the same point, which would be caught by simplicity — but let's be safe).
-    let mut split_boundary_edges: Vec<(EdgeId, [EdgeId; 2])> = Vec::new();
-
-    // Resolve both endpoints into vertices, splitting boundary edges as needed.
-    // We process ep1 first so that ep0's half-edge index (if edge hit) is not
-    // disturbed (ep0 comes first in the loop, ep1 comes later).
-    // Actually, order matters: if both are edge hits on the *same* edge, that's a
-    // degenerate case (path.len() == 2, both endpoints on same edge) — but since
-    // they must be distinct boundary points and we already checked path simplicity,
-    // this can't happen.  We process ep0 first (lower index in the outer loop)
-    // then ep1. But since edge-splitting changes half-edge IDs, we need to be
-    // careful: split ep1's edge first (it's "after" ep0 in the loop traversal),
-    // then split ep0's edge.  Actually the easiest is: split ep1 first,
-    // then re-derive ep0 if it was on the same edge (impossible by simplicity
-    // argument), then split ep0.
     //
-    // Since both endpoints are on the OUTER loop, and the outer loop's half-edges
-    // are stored in the object, splitting one half-edge doesn't change the
-    // position of other half-edges (slotmap doesn't move things).  So we can
-    // split in any order.
+    //    Ordering subtlety: a STRAIGHT 2-point path cannot have both
+    //    endpoints interior to the same boundary edge (it would be collinear
+    //    with it), but a MULTI-SEGMENT path legally can — a "lens" cut that
+    //    leaves the edge and returns to it (Arc tool, V-shaped Line chains).
+    //    In that case ep0's `split_boundary_edge` CONSUMES the shared
+    //    half-edge, so ep1's stored `he` key is dead by the time we get to
+    //    it; blindly indexing it panics ("invalid SlotMap key used" — the
+    //     lens-cut bug). ep1 therefore re-resolves against the
+    //    CURRENT outer loop when its key is gone. For distinct edges,
+    //    slotmap key stability makes order irrelevant, as before.
+    let mut split_boundary_edges: Vec<(EdgeId, [EdgeId; 2])> = Vec::new();
 
     let v0 = match ep0 {
         EndpointHit::Vertex(v) => *v,
@@ -2986,23 +2975,47 @@ fn do_split_face(
     let v1 = match ep1 {
         EndpointHit::Vertex(v) => *v,
         EndpointHit::Edge { he, t } => {
-            // The original half-edge id is still valid (slotmap doesn't move it),
-            // but if ep0 was an edge split that inserted a new half-edge *after* ep1's
-            // half-edge in the loop, we need the original `he` pointer to still be valid.
-            // Slotmap guarantees that; the only half-edge removed is the one that was split,
-            // and ep1's `he` is a different half-edge.
-            // HOWEVER: if ep0 split the edge immediately before ep1's edge, the `t` value
-            // might now refer to the wrong portion. But `t` in EndpointHit is the original
-            // t before any splits, and we store `he` as a specific half-edge id. Since
-            // slotmap key stability: after split_boundary_edge(ep0), the half-edge `ep1.he`
-            // still refers to the same segment (it's a different half-edge). Valid.
-            let pos = {
+            let (live_he, pos) = if obj.half_edges.contains_key(*he) {
+                // Distinct edge (or ep0 was a vertex hit): the stored key is
+                // still the same segment — slotmap key stability — so the
+                // original interpolation stands.
                 let h = obj.half_edges[*he];
                 let p = obj.vertices[h.origin].position;
                 let q = obj.vertices[obj.half_edges[h.next].origin].position;
-                p + (q - p) * *t
+                (*he, p + (q - p) * *t)
+            } else {
+                // Lens cut: ep0's split consumed this half-edge. Re-resolve
+                // the last path point against the CURRENT outer loop — the
+                // containing sub-edge lies on the same carrier line as the
+                // original edge, so projection reproduces the classification
+                // snap. Typed error if nothing contains it (rule 4: never
+                // panic on a user-reachable path).
+                let target = *path.last().expect("validated: path.len() >= 2");
+                let mut found: Option<(HalfEdgeId, Point3)> = None;
+                for h2 in obj.loop_half_edges(obj.faces[face].outer_loop) {
+                    let p = obj.vertices[obj.half_edges[h2].origin].position;
+                    let next = obj.half_edges[h2].next;
+                    let q = obj.vertices[obj.half_edges[next].origin].position;
+                    let seg = q - p;
+                    let len_sq = seg.dot(seg);
+                    if len_sq <= tol::POINT_MERGE * tol::POINT_MERGE {
+                        continue;
+                    }
+                    let s = (target - p).dot(seg) / len_sq;
+                    let proj = p + seg * s;
+                    let interior = (proj - p).length() > tol::POINT_MERGE
+                        && (proj - q).length() > tol::POINT_MERGE;
+                    if interior && (target - proj).length() <= tol::POINT_MERGE {
+                        found = Some((h2, proj));
+                        break;
+                    }
+                }
+                match found {
+                    Some(hit) => hit,
+                    None => return Err(StickyError::EndpointNotOnBoundary { which: 1 }),
+                }
             };
-            let (v, dead_edge, new_edges) = split_boundary_edge(obj, *he, pos);
+            let (v, dead_edge, new_edges) = split_boundary_edge(obj, live_he, pos);
             split_boundary_edges.push((dead_edge, new_edges));
             v
         }
