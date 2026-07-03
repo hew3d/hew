@@ -45,4 +45,26 @@ cargo fmt --check --manifest-path "$TAURI_MANIFEST"
 echo "=== cargo clippy --all-targets -- -D warnings (tauri shell) ==="
 cargo clippy --manifest-path "$TAURI_MANIFEST" --all-targets -- -D warnings
 
+# ---------------------------------------------------------------------------
+# skp-import (clean-room.skp reader integration).
+#
+# NOT a workspace member: it path-depends on the sibling../OpenSKP repo,
+# which has no hosted remote yet, so CI cannot resolve the dependency and the
+# workspace checks above skip it. Gate it here whenever the sibling checkout
+# is present (every dev box); CI skips silently. Flip to a rev-pinned git dep
+# + workspace membership once OpenSKP is hosted on GitHub.
+# ---------------------------------------------------------------------------
+if [ -d "../OpenSKP/crates/skp" ]; then
+  SKP_MANIFEST="crates/skp-import/Cargo.toml"
+
+  echo "=== cargo fmt --check (skp-import) ==="
+  cargo fmt --check --manifest-path "$SKP_MANIFEST"
+
+  echo "=== cargo clippy --all-targets -- -D warnings (skp-import) ==="
+  cargo clippy --manifest-path "$SKP_MANIFEST" --all-targets -- -D warnings
+
+  echo "=== cargo test (skp-import) ==="
+  cargo test --manifest-path "$SKP_MANIFEST"
+fi
+
 echo "verify: all green"

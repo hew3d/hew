@@ -642,9 +642,20 @@ impl Object {
     ///   along that shared edge and the shared vertices are **unwelded** (the
     ///   sibling stays put), so pushing one half of a bisected face steps it up
     ///   or down. Side walls that straddle the cut reshape into stepped
-    ///   (still planar) polygons. A neighbor that is *not* coplanar and whose
-    ///   normal is not perpendicular to the sweep is still refused as
-    ///   [`PushPullError::NonManifoldResult`].
+    ///   (still planar) polygons.
+    /// - **Slanted neighbors ( contract — implementation pending):** a
+    ///   neighbor that is neither transverse nor coplanar (adjacent facets of
+    ///   an N-gon prism; any face produced by Slice) gets the same
+    ///   wall-and-unweld treatment as the coplanar case — the neighbor stays
+    ///   put, a planar wall is built along the shared edge (always
+    ///   non-degenerate: a boundary edge lies in the moved face's plane, so
+    ///   it is never parallel to the sweep), and transverse neighbors
+    ///   elsewhere on the boundary still stretch. SketchUp-style autofold is
+    ///   out of contract; overshoot/push-through semantics are unchanged.
+    ///   **Until that lands, such a neighbor is still refused as
+    ///   [`PushPullError::NonManifoldResult`]** — the `#[ignore]`d
+    ///   "slanted-neighbor" specs in `op_specs.rs` are the acceptance
+    ///   criteria.
     /// - Pushing inward until the moved face lands on the opposite face's
     ///   plane dissolves both ("push through"): material is subtracted, and
     ///   the object may split into multiple shells (still one Object).

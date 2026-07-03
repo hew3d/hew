@@ -331,6 +331,13 @@ fn inward_partial_push_keeps_six_faces_and_reduces_extent() {
 /// hypotenuse wall (normal ≈ (1/√2, 1/√2, 0)), and left wall.
 /// Dot product of -y with hypotenuse normal ≈ -1/√2, |dot| ≈ 0.707 >> tol::NORMAL_DIRECTION.
 /// Therefore eligibility check must fire and return NonManifoldResult.
+///
+/// **Superseded by the slanted-neighbor re-spec below** (Road to
+/// Refinement; approved): the same construction becomes the
+/// success case `push_pull_prism_front_wall_with_slanted_neighbor_builds_a_wall`.
+/// The PR that implements DELETES this test and un-ignores that section
+/// — that deletion carries human sign-off via ROADMAP  (rule 5); do not
+/// remove it before the implementation actually lands.
 #[test]
 fn push_pull_slanted_neighbor_returns_non_manifold_result() {
     use kernel::Profile;
@@ -385,14 +392,225 @@ fn push_pull_slanted_neighbor_returns_non_manifold_result() {
     assert_eq!(prism_mut.faces().len(), 5);
 }
 
+// ------------------------------------- slanted-neighbor push/pull
+//
+// Road to Refinement  (the "an earlier kernel gap"): push/pull on a face with a
+// *slanted* neighbor — neither transverse (|dot| ≈ 0, stretched in place) nor
+// coplanar (|dot| ≈ 1,  wall + unweld) — is refused today, which blocks
+// push/pull on EVERY side facet of an N-gon prism (the Circle tool's own
+// output) and every face produced by Slice.
+//
+// Contract: a slanted neighbor gets the SAME wall-and-unweld treatment
+// gives coplanar siblings — the neighbor stays put, a planar wall is built
+// along the shared edge, and transverse neighbors elsewhere on the boundary
+// still stretch. The wall is always non-degenerate: a shared boundary edge
+// lies in the moved face's plane, so it is never parallel to the sweep, and a
+// straight edge swept by a translation is a planar quad. SketchUp-style
+// autofold is explicitly OUT of contract. Push-through/overshoot semantics
+// are unchanged — slanted neighbors only change side-wall
+// construction, never sweep semantics.
+//
+// These are the acceptance criteria (docs/DEVELOPMENT.md workflow): un-ignore
+// each in the PR that implements, delete the superseded refusal test
+// above in the same PR, and extend the push/pull proptests to N-gon-prism
+// profiles (rule 3: watertight after; inverse restores).
+
+/// The refusal test's exact construction, re-specced as the success case: a
+/// right-triangle prism's front wall (normal -y) has a MIXED boundary — top
+/// cap, bottom cap, and left wall are transverse (stretch); the hypotenuse
+/// wall (|dot| ≈ 0.707) is slanted (wall + unweld).
+///
+/// Pulling the front wall out by 0.5:
+/// - front wall translates to y = -0.5;
+/// - (0,0,0)/(0,0,1) — shared only with transverse neighbors — translate in
+///   place (left wall and caps stretch);
+/// - (1,0,0)/(1,0,1) — shared with the slanted hypotenuse — unweld: the
+///   hypotenuse keeps them, the front wall gets translated copies, and ONE
+///   new wall (the quad in the plane x = 1) joins old to new;
+/// - counts: V 6→8, F 5→6, E 9→12 (all faces are quads or stay quads;
+///   Euler V - E + F = 2 holds).
+#[test]
+#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
+fn push_pull_prism_front_wall_with_slanted_neighbor_builds_a_wall() {
+    use kernel::Profile;
+
+    let plane = xy_plane();
+    let profile = Profile::new(
+        plane,
+        vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let mut prism = Object::from_extrusion(&profile, 1.0).unwrap();
+    let front_wall = face_with_normal(&prism, Vec3::new(0.0, -1.0, 0.0));
+
+    let report = prism.push_pull(front_wall, 0.5).unwrap();
+    prism.validate().unwrap();
+
+    assert_eq!(prism.watertight(), WatertightState::Watertight);
+    assert_eq!(prism.vertices().len(), 8, "2 corners unweld into 2 more");
+    assert_eq!(prism.edges().len(), 12);
+    assert_eq!(prism.faces().len(), 6, "5 originals + 1 new wall");
+    assert_eq!(
+        report.created_faces.len(),
+        1,
+        "exactly one wall: only the hypotenuse edge is slanted"
+    );
+
+    // The moved face sits at y = -0.5; exactly 4 vertices reached it.
+    let at_front = prism
+        .vertices()
+        .values()
+        .filter(|v| (v.position.y + 0.5).abs() <= tol::POINT_MERGE)
+        .count();
+    assert_eq!(at_front, 4, "front wall's 4 corners at y = -0.5");
+
+    // The slanted hypotenuse did not move: its corners are still present.
+    for expect in [
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ] {
+        assert!(
+            prism
+                .vertices()
+                .values()
+                .any(|v| (v.position - expect).length() <= tol::POINT_MERGE),
+            "hypotenuse corner {expect:?} must be unchanged"
+        );
+    }
+}
+
+/// Regular hexagonal prism (radius 1, height 1) — the Circle tool's own
+/// output shape. Pulling one side facet outward by 0.2 bumps out a pad:
+/// caps are transverse (stretch, hexagon → octagon boundary), BOTH adjacent
+/// facets are slanted at 60° (|dot| = 0.5 → wall + unweld, they stay put).
+/// Counts: V 12→16, E 18→24, F 8→10 (2 new walls); Euler holds.
+#[test]
+#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
+fn push_pull_hex_prism_facet_bumps_out_a_pad() {
+    let (mut hex, facet, n) = hex_prism_and_facet();
+    let apothem = 3.0_f64.sqrt() / 2.0;
+
+    let report = hex.push_pull(facet, 0.2).unwrap();
+    hex.validate().unwrap();
+
+    assert_eq!(hex.watertight(), WatertightState::Watertight);
+    assert_eq!(hex.vertices().len(), 16);
+    assert_eq!(hex.edges().len(), 24);
+    assert_eq!(hex.faces().len(), 10);
+    assert_eq!(report.created_faces.len(), 2, "one wall per slanted edge");
+
+    // Exactly the pad's 4 corners advanced to apothem + 0.2 along the facet
+    // normal; everything else stayed at or below the apothem.
+    let advanced = hex
+        .vertices()
+        .values()
+        .filter(|v| {
+            let d = Vec3::new(v.position.x, v.position.y, v.position.z).dot(n);
+            (d - (apothem + 0.2)).abs() <= tol::POINT_MERGE
+        })
+        .count();
+    assert_eq!(advanced, 4, "pad corners at apothem + 0.2 along the normal");
+}
+
+/// Rule-3 inverse property on the slanted case: bump the hex facet out, then
+/// push the returned face back by the same distance — the walls collapse,
+/// the unwelded vertices re-weld, and the result is equivalent to the
+/// original (cyclic position matching, not bytewise — see module docs).
+#[test]
+#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
+fn push_pull_slanted_then_inverse_is_identity() {
+    let (mut hex, facet, _n) = hex_prism_and_facet();
+    let original = hex.clone();
+
+    let report = hex.push_pull(facet, 0.2).unwrap();
+    hex.validate().unwrap();
+    hex.push_pull(report.face, -0.2).unwrap();
+    hex.validate().unwrap();
+
+    assert!(
+        objects_equivalent(&hex, &original),
+        "pull 0.2 then push -0.2 on the slanted facet must restore the prism"
+    );
+}
+
+/// Negative distance with slanted neighbors carves a recess instead of
+/// bumping a pad: same topology counts (walls now face inward), adjacent
+/// facets keep their full extent, and only the moved facet retreats.
+#[test]
+#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
+fn push_pull_inward_with_slanted_neighbors_carves_a_recess() {
+    let (mut hex, facet, n) = hex_prism_and_facet();
+    let apothem = 3.0_f64.sqrt() / 2.0;
+
+    hex.push_pull(facet, -0.2).unwrap();
+    hex.validate().unwrap();
+
+    assert_eq!(hex.watertight(), WatertightState::Watertight);
+    assert_eq!(hex.vertices().len(), 16);
+    assert_eq!(hex.edges().len(), 24);
+    assert_eq!(hex.faces().len(), 10);
+
+    // The recessed pad's 4 corners sit at apothem - 0.2 along the normal;
+    // the unwelded originals (kept by the slanted neighbors) still sit at
+    // the full apothem, so the hexagonal silhouette is unchanged.
+    let recessed = hex
+        .vertices()
+        .values()
+        .filter(|v| {
+            let d = Vec3::new(v.position.x, v.position.y, v.position.z).dot(n);
+            (d - (apothem - 0.2)).abs() <= tol::POINT_MERGE
+        })
+        .count();
+    assert_eq!(recessed, 4, "pad corners at apothem - 0.2 along the normal");
+    let at_rim = hex
+        .vertices()
+        .values()
+        .filter(|v| {
+            let d = Vec3::new(v.position.x, v.position.y, v.position.z).dot(n);
+            (d - apothem).abs() <= tol::POINT_MERGE
+        })
+        .count();
+    assert_eq!(at_rim, 4, "unwelded rim corners keep the full apothem");
+}
+
+/// Regular hexagonal prism (radius 1, height 1, extruded +z from the XY
+/// plane) plus the side facet between the 0° and 60° hex vertices and that
+/// facet's outward normal (at 30°). Shared by the slanted-neighbor
+/// specs.
+fn hex_prism_and_facet() -> (Object, FaceId, Vec3) {
+    use kernel::Profile;
+
+    let pts: Vec<Point3> = (0..6)
+        .map(|k| {
+            let a = std::f64::consts::FRAC_PI_3 * k as f64;
+            Point3::new(a.cos(), a.sin(), 0.0)
+        })
+        .collect();
+    let profile = Profile::new(xy_plane(), pts, vec![]).unwrap();
+    let hex = Object::from_extrusion(&profile, 1.0).unwrap();
+    assert_eq!(hex.faces().len(), 8, "6 facets + 2 caps");
+
+    let n = Vec3::new(std::f64::consts::FRAC_PI_6.cos(), 0.5, 0.0);
+    let facet = face_with_normal(&hex, n);
+    (hex, facet, n)
+}
+
 // ----------------------------------------------- coplanar-aware push/pull
 //
 // The kernel half of the on-face Line workflow: a line drawn edge-to-edge
 // on a face `split_face`s it into two COPLANAR siblings; push/pull of ONE sibling
 // must build a wall along the shared cut edge instead of refusing it
 // (pre- this returned PushPullError::NonManifoldResult — see
-// `push_pull_slanted_neighbor_returns_non_manifold_result`, which still holds for
-// a genuinely slanted neighbor). These are the acceptance criteria for the K2
+// `push_pull_slanted_neighbor_returns_non_manifold_result`, which holds for a
+// genuinely slanted neighbor only until the re-spec above is
+// implemented). These are the acceptance criteria for the K2
 // kernel lane; un-ignore each in the PR that implements it (docs/DEVELOPMENT.md).
 
 /// Mean x of a face's outer-loop vertices — picks a specific sub-face when

@@ -1,0 +1,10 @@
+# skp-import — SketchUp `.skp` -> Hew Objects, via the clean-room OpenSKP reader
+# (https://github.com/hew3d/openskp). Excluded from the workspace until the
+# reader is published.
+[package]
+name = "skp-import"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+skp = { package = "openskp", version = "0.1.0" }

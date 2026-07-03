@@ -15,7 +15,14 @@ members = [
 #
 # The vendored dae-parser is likewise excluded: it is third-party code (built via
 # dae-import's path dep) and must not be held to Hew's `clippy -D warnings` bar.
-exclude = ["shells/tauri/src-tauri", "crates/vendor/dae-parser"]
+#
+# skp-import is excluded while its clean-room .skp reader (OpenSKP) is
+# developed externally; it joins the workspace once the reader is published.
+exclude = [
+    "shells/tauri/src-tauri",
+    "crates/vendor/dae-parser",
+    "crates/skp-import",
+]
 
 [workspace.package]
 version = "0.1.0"
