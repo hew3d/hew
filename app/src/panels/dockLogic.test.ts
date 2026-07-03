@@ -45,19 +45,19 @@ describe('dockVerbsFor', () => {
     expect(verbs.map((v) => v.id)).toEqual(['tool-rectangle', 'tool-line', 'tool-circle'])
   })
 
-  it('object: primary Move, then Push/Pull, Paint, Erase', () => {
+  it('object: primary Push/Pull, then Move, Paint, Erase (spec Face row)', () => {
     const verbs = dockVerbsFor('object')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'tool-pushpull', 'tool-paint', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'edit-delete'])
   })
 
-  it('group: primary Move, then Edit, Ungroup, Erase', () => {
+  it('group: primary Edit, then Move, Scale, Ungroup, Erase (spec Component/Group row)', () => {
     const verbs = dockVerbsFor('group')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'enter-context', 'ungroup', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'ungroup', 'edit-delete'])
   })
 
-  it('instance: primary Move, then Edit, Make Unique, Erase', () => {
+  it('instance: primary Edit, then Move, Scale, Make Unique, Explode (spec Component row)', () => {
     const verbs = dockVerbsFor('instance')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'enter-context', 'make-unique', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'make-unique', 'explode-instance'])
   })
 
   it('multi: primary Move, then Erase', () => {
@@ -65,7 +65,7 @@ describe('dockVerbsFor', () => {
     expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-delete'])
   })
 
-  it('every context caps at 4 items (spec: "4-6 items max, curated")', () => {
+  it('every context stays within the spec cap ("4-6 items max, curated")', () => {
     for (const ctx of ['empty', 'object', 'group', 'instance', 'multi'] as const) {
       expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(6)
       expect(dockVerbsFor(ctx).length).toBeGreaterThan(0)

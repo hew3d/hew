@@ -56,3 +56,26 @@ body {
     animation: none;
   }
 }
+
+/* Contextual dock (`05_contextual_dock.md` "Behavior"): a quick
+ * cross-fade (~140ms, inside the spec's 120–160ms band) when the dock's
+ * context chip + verb set swap (the container is keyed on the context, so a
+ * swap remounts it and replays the animation), plus an opacity transition for
+ * hiding the dock during active camera-drag navigation. Both drop out under
+ * prefers-reduced-motion. */
+@keyframes hew-dock-crossfade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.hew-dock {
+  animation: hew-dock-crossfade 140ms ease;
+  transition: opacity 140ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hew-dock {
+    animation: none;
+    transition: none;
+  }
+}

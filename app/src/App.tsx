@@ -45,6 +45,7 @@ import { CommandPalette } from './palette/CommandPalette'
 import { toolHint } from './palette/registry'
 import { UnitsPane } from './settings/UnitsPane'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
+import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { generateBugReport } from './log/reportBug'
@@ -115,14 +116,19 @@ export default function App() {
    * <relative time>" indicator — nothing else reads this state.
    * Coarse (30s) since the label only needs minute-level freshness. */
   const [nowTick, setNowTick] = useState(() => Date.now())
+  /** Tray-section expanded state ( sections; the showX names predate the
+   * tray — they used to mean floating-panel visibility). Initialized from and
+   * written back to the trayLayout singleton so the layout survives
+   * relaunches; the setters, shortcuts, and Window-menu checkmarks are
+   * untouched. */
   /** Pane visibility: Model info (DocumentTree) */
-  const [showModelInfo, setShowModelInfo] = useState(true)
+  const [showModelInfo, setShowModelInfo] = useState(() => getTrayLayout().modelInfo)
   /** Pane visibility: Materials (MaterialPalette) */
-  const [showMaterials, setShowMaterials] = useState(false)
+  const [showMaterials, setShowMaterials] = useState(() => getTrayLayout().materials)
   /** Pane visibility: Tags */
-  const [showTags, setShowTags] = useState(false)
+  const [showTags, setShowTags] = useState(() => getTrayLayout().tags)
   /** Pane visibility: Object Info */
-  const [showObjectInfo, setShowObjectInfo] = useState(true)
+  const [showObjectInfo, setShowObjectInfo] = useState(() => getTrayLayout().objectInfo)
   /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
   const [showDebugLog, setShowDebugLog] = useState(false)
   /** View ▸ Axes / Guides visibility. Default both shown. */
@@ -132,6 +138,10 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false)
   /** Command palette visibility (⌘K / Ctrl-K). */
   const [paletteOpen, setPaletteOpen] = useState(false)
+  /** True while the user is pointer-dragging the camera (orbit/pan/dolly) —
+   * fades the contextual dock out of the way. Fed by Viewport's
+   * OrbitControls start/end events; never persisted. */
+  const [cameraDragging, setCameraDragging] = useState(false)
   /** Tag-path hide set: each entry is tagPathKey(path). Cleared on load/new. */
   const [hiddenTagPaths, setHiddenTagPaths] = useState<Set<string>>(new Set())
   /** Import report to display (null = no dialog). */
@@ -211,6 +221,29 @@ export default function App() {
     }
     apply(getDebugMode())
     return subscribeDebugMode(apply)
+  }, [])
+
+  // ---------------------------------------------------------------- tray layout persistence
+  // Write the four section flags back to the singleton whenever any of them
+  // changes (also fires once on mount, writing the just-restored values —
+  // harmless). The subscription mirrors the other settings singletons and
+  // covers cross-window/tab changes; for locally-originated changes it echoes
+  // the values React already has, so the setState calls bail out.
+  useEffect(() => {
+    setTrayLayout({
+      modelInfo: showModelInfo,
+      objectInfo: showObjectInfo,
+      materials: showMaterials,
+      tags: showTags,
+    })
+  }, [showModelInfo, showObjectInfo, showMaterials, showTags])
+  useEffect(() => {
+    return subscribeTrayLayout((layout) => {
+      setShowModelInfo(layout.modelInfo)
+      setShowObjectInfo(layout.objectInfo)
+      setShowMaterials(layout.materials)
+      setShowTags(layout.tags)
+    })
   }, [])
 
   // Keep the ref in sync so side-effect callbacks can read current session state.
@@ -1033,6 +1066,7 @@ export default function App() {
         break
       case 'ungroup': handleUngroup(); break
       case 'make-unique': handleMakeUnique(); break
+      case 'explode-instance': handleExplodeInstance(); break
     }
   }
 
@@ -1455,7 +1489,7 @@ export default function App() {
 
   if (error !== null) {
     return (
-      <main style={{ fontFamily: 'sans-serif', padding: '1rem', color: 'red' }}>
+      <main style={{ fontFamily: 'sans-serif', padding: '1rem', color: 'var(--danger-base, red)' }}>
         <h1>Hew — kernel load error</h1>
         <pre>{error}</pre>
       </main>
@@ -1703,6 +1737,7 @@ export default function App() {
             apiRef={viewportApi}
             onMeasurement={handleMeasurement}
             onInferenceChange={handleInferenceChange}
+            onCameraDragChange={setCameraDragging}
             currentMaterialId={currentMaterialId}
           />
 
@@ -1719,11 +1754,13 @@ export default function App() {
 
           {/* Contextual dock — bottom-center, self-hides when there's
               no curated verb set for the current selection (a sketch, or a
-              construction guide). Reuses the same menuActionRef dispatch the
+              construction guide), and fades out while the camera is being
+              dragged. Reuses the same menuActionRef dispatch the
               palette and every menu item already go through. */}
           <ContextualDock
             selectedIds={selectedIds}
             selectedGuide={selectedGuide}
+            hidden={cameraDragging}
             onRun={(id) => menuActionRef.current(id)}
           />
 
@@ -1887,7 +1924,7 @@ export default function App() {
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               borderRadius: 4,
-              background: allWatertight ? '#1a7a3a' : '#cc3322',
+              background: allWatertight ? 'var(--status-solid-bg)' : 'var(--status-leaky-bg)',
               color: '#fff',
             }}
           >
@@ -1956,7 +1993,7 @@ export default function App() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(0,0,0,0.5)',
+            background: 'var(--backdrop-dim)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',

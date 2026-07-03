@@ -222,7 +222,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
               <div
                 style={{
                   ...VALUE_STYLE,
-                  color: nodeInfo.solid ? '#4caf50' : '#f44336',
+                  color: nodeInfo.solid ? 'var(--status-solid)' : 'var(--status-leaky)',
                   fontWeight: 'bold',
                 }}
               >

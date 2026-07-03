@@ -67,7 +67,7 @@ function buildViewportOverlay(title: string, detail: string): HTMLDivElement {
   overlay.style.cssText = [
     'position:absolute', 'inset:0', 'display:flex', 'flex-direction:column',
     'align-items:center', 'justify-content:center', 'gap:8px', 'padding:24px',
-    'text-align:center', 'background:#d0d0d0', 'color:#333',
+    'text-align:center', 'background:var(--surface-panel, #d0d0d0)', 'color:var(--text-primary, #333)',
     'font-family:system-ui,sans-serif', 'z-index:10', 'pointer-events:none',
   ].join(';')
   const h = document.createElement('div')
@@ -136,6 +136,12 @@ interface Props {
   apiRef?: React.MutableRefObject<ViewportApi | null>
   /** Called with the live measurement text from tools that support VCB entry. */
   onMeasurement?: (text: string) => void
+  /** Fired when a pointer-drag camera navigation (orbit/pan/dolly-drag via
+   * OrbitControls) starts (true) / ends (false) —; App.tsx fades the
+   * contextual dock out while active. Wheel dollies are deliberately NOT
+   * reported: OrbitControls fires an immediate 'start'+'end' pair per wheel
+   * tick, which would blink the dock on every scroll. */
+  onCameraDragChange?: (active: boolean) => void
   /** Currently selected material id for the Paint tool. `u64::MAX` =
    *  default / unpaint. The viewport keeps a stable ref so a paint tool
    *  instantiated inside the effect always sees the latest value. */
@@ -474,6 +480,7 @@ export default function Viewport({
   onDocumentChanged,
   apiRef,
   onMeasurement,
+  onCameraDragChange,
   currentMaterialId = MATERIAL_SENTINEL,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -501,6 +508,8 @@ export default function Viewport({
   apiRefRef.current = apiRef
   const onMeasurementRef = useRef(onMeasurement)
   onMeasurementRef.current = onMeasurement
+  const onCameraDragChangeRef = useRef(onCameraDragChange)
+  onCameraDragChangeRef.current = onCameraDragChange
   // Latest context path, readable inside the stable event closures.
   const activeContextRef = useRef<NodeRef[]>(activeContext)
   // Latest selected ids, readable inside the stable event closures.
@@ -1444,6 +1453,33 @@ export default function Viewport({
     controls.maxDistance = 50
     controls.enablePan = true
 
+    // Camera-drag notifications: tell the parent while a pointer-drag
+    // navigation is in flight so it can fade the contextual dock out of the
+    // way. OrbitControls' 'start'/'end' also fire as an immediate pair on
+    // every wheel tick, so gate 'start' on a pointer actually being down —
+    // the window-level CAPTURE listeners below run before OrbitControls' own
+    // element-level pointerdown handler (which dispatches 'start' from inside
+    // the same event), so the flag is always current by then.
+    let cameraPointerDown = false
+    let cameraDragActive = false
+    function onCameraPointerDown(): void { cameraPointerDown = true }
+    function onCameraPointerUp(): void { cameraPointerDown = false }
+    function onControlsStart(): void {
+      if (!cameraPointerDown || cameraDragActive) return
+      cameraDragActive = true
+      onCameraDragChangeRef.current?.(true)
+    }
+    function onControlsEnd(): void {
+      if (!cameraDragActive) return
+      cameraDragActive = false
+      onCameraDragChangeRef.current?.(false)
+    }
+    window.addEventListener('pointerdown', onCameraPointerDown, true)
+    window.addEventListener('pointerup', onCameraPointerUp, true)
+    window.addEventListener('pointercancel', onCameraPointerUp, true)
+    controls.addEventListener('start', onControlsStart)
+    controls.addEventListener('end', onControlsEnd)
+
     // Prevent the browser context menu on right-drag so pan isn't interrupted.
     function onContextMenu(ev: MouseEvent): void {
       ev.preventDefault()
@@ -1953,6 +1989,13 @@ export default function Viewport({
       cancelAnimationFrame(rafId)
       controls.removeEventListener('change', scheduleRender)
       controls.removeEventListener('change', recordCameraInput)
+      controls.removeEventListener('start', onControlsStart)
+      controls.removeEventListener('end', onControlsEnd)
+      window.removeEventListener('pointerdown', onCameraPointerDown, true)
+      window.removeEventListener('pointerup', onCameraPointerUp, true)
+      window.removeEventListener('pointercancel', onCameraPointerUp, true)
+      // Don't leave the parent thinking a drag is still active mid-teardown.
+      if (cameraDragActive) onCameraDragChangeRef.current?.(false)
       window.removeEventListener('keydown', onShiftKeyDown)
       window.removeEventListener('keyup', onShiftKeyUp)
       window.removeEventListener('keydown', onKeyDownRecord)

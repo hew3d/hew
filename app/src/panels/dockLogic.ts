@@ -48,25 +48,36 @@ const EMPTY_VERBS: DockVerb[] = [
   { id: 'tool-circle', label: 'Circle' },
 ]
 
+/** Spec's Face row (Push/Pull primary, then Offset · Move · Paint · Erase) is
+ * the nearest analog for Hew's Object context — Offset is skipped because Hew
+ * has no Offset tool (align only where the verb already exists). */
 const OBJECT_VERBS: DockVerb[] = [
-  { id: 'tool-move', label: 'Move' },
   { id: 'tool-pushpull', label: 'Push/Pull' },
+  { id: 'tool-move', label: 'Move' },
   { id: 'tool-paint', label: 'Paint' },
   { id: 'edit-delete', label: 'Erase' },
 ]
 
+/** Spec's Component/Group row: Edit (enter) primary, then Move · Scale ·
+ * Make Unique · Explode. For a Group, Make Unique/Explode don't apply —
+ * Ungroup is Hew's group-level explode analog (kept under its menu name so
+ * the dock stays a shortcut surface for the same verb, not a synonym). */
 const GROUP_VERBS: DockVerb[] = [
-  { id: 'tool-move', label: 'Move' },
   { id: 'enter-context', label: 'Edit' },
+  { id: 'tool-move', label: 'Move' },
+  { id: 'tool-scale', label: 'Scale' },
   { id: 'ungroup', label: 'Ungroup' },
   { id: 'edit-delete', label: 'Erase' },
 ]
 
+/** Spec's Component row verbatim — every verb already exists in Hew
+ * (enter-context / Move / Scale / runMakeUnique / runExplodeInstance). */
 const INSTANCE_VERBS: DockVerb[] = [
-  { id: 'tool-move', label: 'Move' },
   { id: 'enter-context', label: 'Edit' },
+  { id: 'tool-move', label: 'Move' },
+  { id: 'tool-scale', label: 'Scale' },
   { id: 'make-unique', label: 'Make Unique' },
-  { id: 'edit-delete', label: 'Erase' },
+  { id: 'explode-instance', label: 'Explode' },
 ]
 
 const MULTI_VERBS: DockVerb[] = [

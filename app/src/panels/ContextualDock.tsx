@@ -8,11 +8,15 @@
  * owns no execution logic, only layout + the context->verbs derivation in
  * `dockLogic.ts`.
  *
- * Deferred from the spec for this milestone: the trailing "more actions"
- * overflow affordance (would open the right-click context menu, which isn't
- * a reusable component yet) and hiding the dock during active camera-drag
- * navigation (would need new drag-state plumbing from Viewport.tsx) — both
- * documented as follow-on polish, not silently dropped.
+ * Still deferred from the spec (M24 scope decision, not silently dropped):
+ * the trailing "more actions" overflow affordance (would open the right-click
+ * context menu, which isn't a reusable component yet). The two
+ * deferrals M24 landed: context swaps cross-fade ( — the container is
+ * keyed on the context, so a swap remounts it and replays the `.hew-dock`
+ * animation, ~140ms, spec's "quick cross-fade... rather than a hard cut"),
+ * and the dock fades out while the camera is being pointer-dragged ( —
+ * `hidden` prop, fed by Viewport.tsx's onCameraDragChange, riding the same
+ * `.hew-dock` opacity transition). Reduced motion drops both (index.css).
  */
 
 import { useState } from 'react'
@@ -21,6 +25,7 @@ import inkEraserSvg from '@material-symbols/svg-400/outlined/ink_eraser.svg?raw'
 import editSvg from '@material-symbols/svg-400/outlined/edit.svg?raw'
 import groupOffSvg from '@material-symbols/svg-400/outlined/group_off.svg?raw'
 import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?raw'
+import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
 import { deriveDockContext, dockVerbsFor, dockChipLabel, type DockContext, type DockVerb } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
@@ -29,6 +34,7 @@ const NON_TOOL_ICON_SVG: Record<string, string> = {
   'enter-context': editSvg,
   'ungroup': groupOffSvg,
   'make-unique': contentCopySvg,
+  'explode-instance': callSplitSvg,
 }
 
 const CHIP_COLOR: Record<DockContext, string> = {
@@ -97,9 +103,13 @@ export interface ContextualDockProps {
   selectedIds: NodeRef[]
   selectedGuide: bigint | null
   onRun: (id: string) => void
+  /** Fade the dock out (opacity 0 + click-through) while the camera is being
+   * dragged (spec: "Hidden during pure camera navigation... reappears
+   * on release"). Kept mounted so the fade can transition both ways. */
+  hidden?: boolean
 }
 
-export function ContextualDock({ selectedIds, selectedGuide, onRun }: ContextualDockProps) {
+export function ContextualDock({ selectedIds, selectedGuide, onRun, hidden = false }: ContextualDockProps) {
   const context = deriveDockContext(selectedIds, selectedGuide)
   if (context === null) return null
 
@@ -107,7 +117,12 @@ export function ContextualDock({ selectedIds, selectedGuide, onRun }: Contextual
 
   return (
     <div
+      key={context}
+      className="hew-dock"
+      data-hidden={hidden || undefined}
       style={{
+        opacity: hidden ? 0 : 1,
+        pointerEvents: hidden ? 'none' : undefined,
         position: 'absolute',
         bottom: '18px',
         left: '50%',

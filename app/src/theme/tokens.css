@@ -135,6 +135,11 @@
   --glyph-instance: #7acce8;
   --tag-accent: #b07aaa;
   --danger-base: #e0574f;
+  /* Filled status badges (white text on top) — the text-oriented
+     --status-solid/--status-leaky above are too pale on dark to carry white
+     text as a background, so badges get their own saturated fills. */
+  --status-solid-bg: #1a7a3a;
+  --status-leaky-bg: #cc3322;
 }
 
 /* ============================================================ Light (CAD) */
@@ -190,6 +195,8 @@
   --glyph-instance: #2d78e1;
   --tag-accent: #9c5aa0;
   --danger-base: #c4543f;
+  --status-solid-bg: #2f9e57;
+  --status-leaky-bg: #c4543f;
 
   /* ---- Shadows (light overrides) ----------------------------------- */
   --shadow-window: 0 34px 90px -28px rgba(40, 60, 90, 0.4);

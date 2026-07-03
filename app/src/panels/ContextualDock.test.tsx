@@ -37,6 +37,7 @@ describe('ContextualDock', () => {
     render(<ContextualDock selectedIds={[instance(1n)]} selectedGuide={null} onRun={vi.fn()} />)
     expect(screen.getByText('COMPNT')).toBeInTheDocument()
     expect(screen.getByText('Make Unique')).toBeInTheDocument()
+    expect(screen.getByText('Explode')).toBeInTheDocument()
   })
 
   it('shows the Multi verb set for more than one selected node', () => {
@@ -60,8 +61,8 @@ describe('ContextualDock', () => {
   it('clicking the primary verb calls onRun with its id', () => {
     const onRun = vi.fn()
     render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={onRun} />)
-    fireEvent.click(screen.getByText('Move'))
-    expect(onRun).toHaveBeenCalledWith('tool-move')
+    fireEvent.click(screen.getByText('Push/Pull'))
+    expect(onRun).toHaveBeenCalledWith('tool-pushpull')
   })
 
   it('clicking a secondary verb calls onRun with its id', () => {
@@ -69,5 +70,54 @@ describe('ContextualDock', () => {
     render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={onRun} />)
     fireEvent.click(screen.getByText('Erase'))
     expect(onRun).toHaveBeenCalledWith('edit-delete')
+  })
+
+  it('cross-fades on context change: container carries.hew-dock and remounts when the context swaps', () => {
+    const { container, rerender } = render(
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />,
+    )
+    const before = container.firstChild as HTMLElement
+    expect(before.className).toContain('hew-dock')
+
+    rerender(<ContextualDock selectedIds={[group(2n)]} selectedGuide={null} onRun={vi.fn()} />)
+    const after = container.firstChild as HTMLElement
+    // The container is keyed on the context, so a context swap replaces the
+    // DOM node — that remount is what replays the CSS cross-fade animation.
+    expect(after).not.toBe(before)
+    expect(after.className).toContain('hew-dock')
+    expect(screen.getByText('GROUP')).toBeInTheDocument()
+  })
+
+  it('does NOT remount (no cross-fade restart) when the selection changes but the context stays the same', () => {
+    const { container, rerender } = render(
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />,
+    )
+    const before = container.firstChild as HTMLElement
+    rerender(<ContextualDock selectedIds={[obj(2n)]} selectedGuide={null} onRun={vi.fn()} />)
+    expect(container.firstChild).toBe(before)
+  })
+
+  it('hidden (camera drag): stays mounted but fades to opacity 0 and becomes click-through', () => {
+    const { container } = render(
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hidden />,
+    )
+    const dock = container.firstChild as HTMLElement
+    expect(dock).not.toBeNull() // mounted, so the fade can transition back in
+    expect(dock.style.opacity).toBe('0')
+    expect(dock.style.pointerEvents).toBe('none')
+  })
+
+  it('reappears when hidden flips back off (drag released)', () => {
+    const { container, rerender } = render(
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hidden />,
+    )
+    const before = container.firstChild as HTMLElement
+    rerender(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hidden={false} />)
+    const dock = container.firstChild as HTMLElement
+    // Same node (no remount — this is the transition path, not the cross-fade
+    // path) and fully interactive again.
+    expect(dock).toBe(before)
+    expect(dock.style.opacity).toBe('1')
+    expect(dock.style.pointerEvents).toBe('')
   })
 })

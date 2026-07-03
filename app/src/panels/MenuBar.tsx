@@ -475,7 +475,7 @@ export function MenuBar({
               checked={activeTool === 'Arc'}
               onClick={withClose(() => onSelectTool?.('Arc'))}
             />
-            <div style={{ borderTop: '1px solid #4a4a4a', margin: '4px 0' }} />
+            <div style={{ borderTop: '1px solid var(--border-strong)', margin: '4px 0' }} />
             <CheckMenuItem
               label="Line"
               shortcut={keyFor('Line')}

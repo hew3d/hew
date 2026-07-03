@@ -227,34 +227,51 @@ test('autosave recovery: clicking Discard closes dialog without loading data', a
 })
 
 // ---------------------------------------------------------------------------
-// 3. Floating panel presence
+// 3. Docked tray presence & persistence
+//
+// (Rewritten : the original two specs asserted the pre-
+// FloatingPanel architecture — data-testid="floating-panel" + drag-positioned
+// inline left/top — which deleted when the docked right tray replaced
+// floating panels.  removed the FloatingPanel unit suite but missed
+// these; stale ever since. They now assert the tray equivalent, plus the
+//  persistence that made the tray layout survive a reload.)
 // ---------------------------------------------------------------------------
 
-test('panels: floating panels are mounted in the DOM', async ({ page }) => {
+test('panels: docked tray sections are mounted with the default layout', async ({ page }) => {
   await page.goto('/')
   await waitForHarness(page)
 
-  // The app starts with at least the "Model Info" panel visible.
-  const panels = page.getByTestId('floating-panel')
-  // At least one floating panel should be in the DOM.
-  await expect(panels.first()).toBeVisible({ timeout: 10_000 })
-  const count = await panels.count()
-  expect(count).toBeGreaterThanOrEqual(1)
+  // All four tray section headers exist; Entity Info + Outliner start
+  // expanded, Materials + Tags start collapsed ( defaults).
+  for (const [title, expanded] of [
+    ['Entity Info', 'true'],
+    ['Outliner', 'true'],
+    ['Materials', 'false'],
+    ['Tags', 'false'],
+  ] as const) {
+    const header = page.getByRole('button', { name: title })
+    await expect(header).toBeVisible({ timeout: 10_000 })
+    await expect(header).toHaveAttribute('aria-expanded', expanded)
+  }
 })
 
-test('panels: floating panels have a position set via inline styles', async ({ page }) => {
+test('panels: tray section expanded state persists across reload', async ({ page }) => {
   await page.goto('/')
   await waitForHarness(page)
 
-  // Each panel should have an absolute position set (the style attribute contains
-  // `left:` and `top:` values set by FloatingPanel's drag/init logic).
-  const panel = page.getByTestId('floating-panel').first()
-  await expect(panel).toBeVisible({ timeout: 10_000 })
+  // Flip a collapsed-by-default section open…
+  const materials = page.getByRole('button', { name: 'Materials' })
+  await expect(materials).toHaveAttribute('aria-expanded', 'false')
+  await materials.click()
+  await expect(materials).toHaveAttribute('aria-expanded', 'true')
 
-  // The style attribute should contain 'absolute' positioning strings.
-  const style = await panel.getAttribute('style')
-  expect(style).toMatch(/left:/)
-  expect(style).toMatch(/top:/)
+  // …and it survives a full reload (same browser context → same localStorage).
+  await page.reload()
+  await waitForHarness(page)
+  await expect(page.getByRole('button', { name: 'Materials' })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  )
 })
 
 // ---------------------------------------------------------------------------

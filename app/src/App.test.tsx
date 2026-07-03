@@ -90,10 +90,19 @@ vi.mock('./viewport/Viewport', () => ({
 }))
 
 import App from './App'
+import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Tray-section state persists across renders now ( trayLayout
+// singleton), so tests that collapse a section would otherwise leak that
+// state into every later render of <App />. Reset before each test —
+// individual tests then seed their own layout where needed.
+beforeEach(() => {
+  setTrayLayout(DEFAULT_TRAY_LAYOUT)
+})
 
 /**
  * Render <App /> and wait until the kernel has loaded (i.e. the tool rail
@@ -324,5 +333,37 @@ describe('App — panel toggle', () => {
       const item = menubar().getByText('Model Info').closest('div')
       expect(item?.textContent).not.toContain('✓')
     })
+  })
+})
+
+describe('App — tray layout persistence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('restores each tray section\'s collapsed/expanded state from the persisted layout', async () => {
+    setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, tags: false })
+    await renderAndLoad()
+    expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: /entity info/i })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: /^materials$/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /^tags$/i })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('collapsing a section via its header persists to the trayLayout singleton', async () => {
+    await renderAndLoad()
+    expect(getTrayLayout().modelInfo).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: /outliner/i }))
+    await waitFor(() => expect(getTrayLayout().modelInfo).toBe(false))
+    // The other sections are untouched.
+    expect(getTrayLayout().objectInfo).toBe(true)
+    expect(getTrayLayout().materials).toBe(false)
+    expect(getTrayLayout().tags).toBe(false)
+  })
+
+  it('the Ctrl+Shift+I shortcut also persists (shortcuts keep working unchanged)', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: 'I', ctrlKey: true, shiftKey: true })
+    await waitFor(() => expect(getTrayLayout().modelInfo).toBe(false))
   })
 })
