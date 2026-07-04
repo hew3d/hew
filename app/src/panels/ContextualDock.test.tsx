@@ -49,9 +49,17 @@ describe('ContextualDock', () => {
     expect(screen.queryByText('Paint')).not.toBeInTheDocument()
   })
 
-  it('renders nothing for a selected free-standing sketch', () => {
-    const { container } = render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
-    expect(container.firstChild).toBeNull()
+  // Contract change: a selected sketch used to render nothing — it
+  // now gets its own 'sketch' verb row (Push/Pull primary, then the
+  // transform trio, then Erase).
+  it('shows the Sketch verb set for a single selected free-standing sketch', () => {
+    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    expect(screen.getByText('SKETCH')).toBeInTheDocument()
+    expect(screen.getByText('Push/Pull')).toBeInTheDocument()
+    expect(screen.getByText('Move')).toBeInTheDocument()
+    expect(screen.getByText('Rotate')).toBeInTheDocument()
+    expect(screen.getByText('Scale')).toBeInTheDocument()
+    expect(screen.getByText('Erase')).toBeInTheDocument()
   })
 
   it('renders nothing when a construction guide is selected', () => {
@@ -157,5 +165,49 @@ describe('ContextualDock', () => {
     expect(dock).toBe(before)
     expect(dock.style.opacity).toBe('1')
     expect(dock.style.pointerEvents).toBe('')
+  })
+
+  // --- Hover-preview of the Sketch verbs --------------------------
+
+  it('shows the Sketch verb set when selection is empty and hoveringSketchRegion is set', () => {
+    render(
+      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+    )
+    expect(screen.getByText('SKETCH')).toBeInTheDocument()
+    expect(screen.getByText('Push/Pull')).toBeInTheDocument()
+    expect(screen.queryByText('Rectangle')).not.toBeInTheDocument()
+  })
+
+  it('shows the ordinary empty (draw-tool) verb set when hoveringSketchRegion is false', () => {
+    render(
+      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion={false} />,
+    )
+    expect(screen.getByText('DRAW')).toBeInTheDocument()
+    expect(screen.getByText('Rectangle')).toBeInTheDocument()
+  })
+
+  it('ignores hoveringSketchRegion entirely once something is actually selected', () => {
+    render(
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+    )
+    // An explicit Object selection always wins — still the Object row, not Sketch.
+    expect(screen.getByText('OBJECT')).toBeInTheDocument()
+    expect(screen.queryByText('SKETCH')).not.toBeInTheDocument()
+  })
+
+  it('ignores hoveringSketchRegion when a construction guide is selected (still no dock)', () => {
+    const { container } = render(
+      <ContextualDock selectedIds={[]} selectedGuide={5n} onRun={vi.fn()} hoveringSketchRegion />,
+    )
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('clicking the hover-previewed Push/Pull verb dispatches the same id as a real Sketch selection', () => {
+    const onRun = vi.fn()
+    render(
+      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={onRun} hoveringSketchRegion />,
+    )
+    fireEvent.click(screen.getByText('Push/Pull'))
+    expect(onRun).toHaveBeenCalledWith('tool-pushpull')
   })
 })

@@ -47,6 +47,7 @@ import { circlePolygonGround, circlePolygonFace, facePlaneBasis, parseKernelErro
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 import { editLengthBuffer } from './moveInput'
+import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
 
 /** Number of straight segments approximating the circle ("circle" = faceted
  * regular N-gon; true arcs are out of scope for). */
@@ -120,6 +121,12 @@ export class CircleTool implements Tool {
 
   /** Handle to the current active sketch — reused across commits if not null */
   private sketchHandle: bigint | null = null
+
+  /** `sketchHandle` get/set, boxed for `runSketchGesture`. */
+  private readonly _sketchHandleCache: SketchHandleCache = {
+    get: () => this.sketchHandle,
+    set: (h) => { this.sketchHandle = h },
+  }
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -426,30 +433,26 @@ export class CircleTool implements Tool {
     if (verts.length === 0) return // degenerate — ignore
 
     try {
-      // Begin sketch if we don't already have one
-      if (this.sketchHandle === null) {
-        this.sketchHandle = this.wasmScene.begin_ground_sketch()
-      }
-      const sketch = this.sketchHandle
-
-      let lastRegionsCreated: bigint[] = []
-      for (let i = 0; i < verts.length; i++) {
-        const p = verts[i]
-        const q = verts[(i + 1) % verts.length]
-        const report = this.wasmScene.sketch_add_segment(
-          sketch,
-          p[0], p[1], p[2],
-          q[0], q[1], q[2],
-        )
-        try {
-          const rc = report.regions_created()
-          lastRegionsCreated = Array.from(rc)
-        } finally {
-          report.free()
+      runSketchGesture(this.wasmScene, this._sketchHandleCache, (sketch) => {
+        let lastRegionsCreated: bigint[] = []
+        for (let i = 0; i < verts.length; i++) {
+          const p = verts[i]
+          const q = verts[(i + 1) % verts.length]
+          const report = this.wasmScene.sketch_add_segment(
+            sketch,
+            p[0], p[1], p[2],
+            q[0], q[1], q[2],
+          )
+          try {
+            const rc = report.regions_created()
+            lastRegionsCreated = Array.from(rc)
+          } finally {
+            report.free()
+          }
         }
-      }
 
-      this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+        this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+      })
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

@@ -1,14 +1,20 @@
 /**
- * SelectTool — M1 minimal implementation, extended for sketch selection.
+ * SelectTool — M1 minimal implementation, extended for sketch selection (
+ * "sketches are first-class interactable").
  *
  * Hover-highlight via snap() provenance; click uses pick_face() for reliable
  * object-face detection (snap prefers vertices/edges and can miss face intent).
- * On a pick_face miss, falls back to pick_sketch() so a free-standing
- * (not-yet-extruded) sketch's edges are selectable too — whole-sketch
- * granularity, fired as the third `sketchId` arg since a sketch has no
+ * On a pick_face miss, falls back through two sketch pickers so a free-standing
+ * (not-yet-extruded) sketch is selectable both by its edges and by clicking
+ * inside a closed region it forms:
+ *   1. pick_sketch() — nearest live sketch edge within the pick aperture.
+ *   2. pick_sketch_region() — the extrudable region under the ray (across ALL
+ *      live sketches); clicking INSIDE a drawn rectangle/circle selects its
+ *      owning sketch, not just a click on the boundary line.
+ * Both resolve to the same third `sketchId` arg since a sketch has no
  * object/instance id of its own.
  * Fires onSelect(objectId) on a face hit, onSelect(null, undefined, sketchId)
- * on a sketch hit, onSelect(null) on a total miss.
+ * on a sketch hit (edge or interior), onSelect(null) on a total miss.
  */
 
 import type { Tool, Snap } from './types'
@@ -67,10 +73,28 @@ export class SelectTool implements Tool {
     if (sketchId !== undefined) {
       console.log('[SelectTool] selected sketch:', sketchId)
       this.onSelect(null, undefined, sketchId)
-    } else {
-      console.log('[SelectTool] click hit no object or sketch — clearing selection')
-      this.onSelect(null)
+      return
     }
+
+    // No edge hit either — try the interior of a closed region (clicking
+    // inside a drawn rectangle/circle selects its owning sketch).
+    const regionPick = this.wasmScene.pick_sketch_region(
+      ray.origin[0], ray.origin[1], ray.origin[2],
+      ray.direction[0], ray.direction[1], ray.direction[2],
+    )
+    if (regionPick !== undefined) {
+      try {
+        const regionSketchId = regionPick.sketch()
+        console.log('[SelectTool] selected sketch (interior pick):', regionSketchId)
+        this.onSelect(null, undefined, regionSketchId)
+      } finally {
+        regionPick.free()
+      }
+      return
+    }
+
+    console.log('[SelectTool] click hit no object or sketch — clearing selection')
+    this.onSelect(null)
   }
 
   onKey(ev: KeyboardEvent): void {

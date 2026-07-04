@@ -251,6 +251,26 @@ describe('ObjectInfoPanel', () => {
     expect((scene as any).set_node_name).toHaveBeenCalledWith(0, 1n, 'Pillar')
     expect(onDocumentChanged).toHaveBeenCalled()
   })
+
+  it('shows "Sketch" + its positional label for a sketch selection, and never crashes', () => {
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([10n, 20n, 30n]),
+    })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch', id: 20n }]}
+        onDocumentChanged={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Sketch')).toBeInTheDocument()
+    // 20n is index 1 in sketch_ids() → "Sketch 2" (1-based, matching the tree's label).
+    expect(screen.getByText('Sketch 2')).toBeInTheDocument()
+    expect(screen.getByText(/naming and tags are not yet supported/i)).toBeInTheDocument()
+    // No name input (sketches aren't renameable), no crash from nodeKindToNumber.
+    expect(screen.queryByPlaceholderText('(unnamed)')).not.toBeInTheDocument()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -507,6 +527,39 @@ describe('DocumentTree', () => {
     )
     fireEvent.click(screen.getByText('Cube'))
     expect(onSelect).toHaveBeenCalledWith({ kind: 'object', id: 1n }, false)
+  })
+
+  it('calls onSelect with a sketch NodeRef when a Sketches-section row is clicked', () => {
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([5n]),
+    })
+    const onSelect = vi.fn()
+    render(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        onSelect={onSelect}
+      />,
+    )
+    fireEvent.click(screen.getByText('Sketch 1'))
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'sketch', id: 5n }, false)
+  })
+
+  it('highlights the sketch row selected from the canvas (canvas → tree)', () => {
+    const scene = makeScene({
+      sketch_ids: () => new BigUint64Array([5n]),
+    })
+    render(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        selectedIds={[{ kind: 'sketch', id: 5n }]}
+      />,
+    )
+    const row = screen.getByText('Sketch 1').closest('div')
+    // The primary-selection tint is applied via inline style — assert it isn't
+    // the default transparent background a non-selected row would get.
+    expect(row).toHaveStyle({ background: 'var(--accent-tint-18)' })
   })
 
   it('shows the Group button when two sibling objects are selected', () => {

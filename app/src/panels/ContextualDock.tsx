@@ -43,6 +43,7 @@ const CHIP_COLOR: Record<DockContext, string> = {
   group: 'var(--axis-green)',
   instance: 'var(--axis-green)',
   multi: 'var(--text-section)',
+  sketch: 'var(--axis-blue)',
 }
 
 function VerbIcon({ verb }: { verb: DockVerb }) {
@@ -122,10 +123,28 @@ export interface ContextualDockProps {
    * accent-highlighted item  — replaces the old
    * "first verb always looks selected" behavior. */
   activeToolId?: string
+  /** True when the cursor is hovering a live sketch's extrudable region AND
+   * nothing is selected (throttled/edge-detected in Viewport.tsx via
+   * `SketchHoverGate`). Only consulted when the derived context is 'empty'
+   * — an explicit selection's dock always wins, so this is ignored entirely
+   * the moment `selectedIds`/`selectedGuide` yield anything else. Swaps the
+   * empty-selection draw-tool row for the 'sketch' verb set (Push/Pull
+   * primary) as a preview of what a click there would do. */
+  hoveringSketchRegion?: boolean
 }
 
-export function ContextualDock({ selectedIds, selectedGuide, onRun, hidden = false, activeToolId }: ContextualDockProps) {
-  const context = deriveDockContext(selectedIds, selectedGuide)
+export function ContextualDock({
+  selectedIds,
+  selectedGuide,
+  onRun,
+  hidden = false,
+  activeToolId,
+  hoveringSketchRegion = false,
+}: ContextualDockProps) {
+  const baseContext = deriveDockContext(selectedIds, selectedGuide)
+  // Hover only ever promotes 'empty' -> 'sketch' — any other context (an
+  // actual selection, or null for a selected guide) is left untouched.
+  const context = baseContext === 'empty' && hoveringSketchRegion ? 'sketch' : baseContext
   if (context === null) return null
 
   const verbs = dockVerbsFor(context)
@@ -134,6 +153,8 @@ export function ContextualDock({ selectedIds, selectedGuide, onRun, hidden = fal
     <div
       key={context}
       className="hew-dock"
+      data-testid="contextual-dock"
+      data-dock-context={context}
       data-hidden={hidden || undefined}
       style={{
         opacity: hidden ? 0 : 1,

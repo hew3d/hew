@@ -312,7 +312,9 @@ export function installTestHarness(deps: HarnessDeps): () => void {
   const materialHandle = (m: string | null): bigint => (m === null ? MATERIAL_NONE : BigInt(m))
 
   // Add the four edges of the axis-aligned rectangle p0→p1 (on p0's z plane) to
-  // `sketch`, returning the first closed region handle it forms.
+  // `sketch`, returning the first closed region handle it forms. Bracketed in
+  // one gesture (M-sketches-first-class) so a harness-drawn rectangle has the
+  // same one-undo-step semantics as a tool-drawn one.
   function addRectangle(s: Scene, sketch: bigint, p0: Vec3, p1: Vec3): bigint {
     const z = p0[2]
     const corners: Vec3[] = [
@@ -321,10 +323,15 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       [p1[0], p1[1], z],
       [p0[0], p1[1], z],
     ]
-    for (let i = 0; i < 4; i++) {
-      const a = corners[i]
-      const b = corners[(i + 1) % 4]
-      s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+    s.sketch_begin_gesture(sketch)
+    try {
+      for (let i = 0; i < 4; i++) {
+        const a = corners[i]
+        const b = corners[(i + 1) % 4]
+        s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+      }
+    } finally {
+      s.sketch_end_gesture(sketch)
     }
     const regions = s.sketch_regions(sketch)
     if (regions.length === 0) {
@@ -430,11 +437,16 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         if (points.length < 2) throw new Error('drawLineChain: need at least 2 points')
         const sketch = s.begin_ground_sketch()
         const regionsAll = new Set<bigint>()
-        for (let i = 0; i < points.length - 1; i++) {
-          const a = points[i]
-          const b = points[i + 1]
-          const added = s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
-          for (const r of added.regions_created()) regionsAll.add(r)
+        s.sketch_begin_gesture(sketch)
+        try {
+          for (let i = 0; i < points.length - 1; i++) {
+            const a = points[i]
+            const b = points[i + 1]
+            const added = s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+            for (const r of added.regions_created()) regionsAll.add(r)
+          }
+        } finally {
+          s.sketch_end_gesture(sketch)
         }
         return {
           sketch: sketch.toString(),
@@ -452,11 +464,16 @@ export function installTestHarness(deps: HarnessDeps): () => void {
           pts.push([center[0] + radius * Math.cos(theta), center[1] + radius * Math.sin(theta), center[2]])
         }
         let lastRegion: bigint | null = null
-        for (let i = 0; i < nSegments; i++) {
-          const a = pts[i]
-          const b = pts[(i + 1) % nSegments]
-          const added = s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
-          for (const r of added.regions_created()) lastRegion = r
+        s.sketch_begin_gesture(sketch)
+        try {
+          for (let i = 0; i < nSegments; i++) {
+            const a = pts[i]
+            const b = pts[(i + 1) % nSegments]
+            const added = s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+            for (const r of added.regions_created()) lastRegion = r
+          }
+        } finally {
+          s.sketch_end_gesture(sketch)
         }
         if (lastRegion === null) {
           // Fallback: ask the scene for any open regions

@@ -29,13 +29,21 @@ describe('deriveDockContext', () => {
     expect(deriveDockContext([instance(1n)], null)).toBe('instance')
   })
 
-  it('is null for a single selected free-standing sketch (no verb set defined)', () => {
-    expect(deriveDockContext([sketch(1n)], null)).toBeNull()
+  // Contract change ("sketches are first-class interactable"): a
+  // selected sketch used to return null (no dock at all) — it now gets a
+  // dedicated 'sketch' context with its own curated verb set, since sketches
+  // gained real Push/Pull/Move/Rotate/Scale/Erase behavior.
+  it('is "sketch" for a single selected free-standing sketch', () => {
+    expect(deriveDockContext([sketch(1n)], null)).toBe('sketch')
   })
 
   it('is "multi" for more than one selected node, regardless of kind mix', () => {
     expect(deriveDockContext([obj(1n), obj(2n)], null)).toBe('multi')
     expect(deriveDockContext([obj(1n), group(2n), instance(3n)], null)).toBe('multi')
+  })
+
+  it('is "multi" for a sketch mixed into a multi-selection (multi rules unchanged)', () => {
+    expect(deriveDockContext([obj(1n), sketch(2n)], null)).toBe('multi')
   })
 })
 
@@ -65,8 +73,30 @@ describe('dockVerbsFor', () => {
     expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-delete'])
   })
 
+  it('sketch: primary Push/Pull, then Move, Rotate, Scale, Erase', () => {
+    const verbs = dockVerbsFor('sketch')
+    expect(verbs.map((v) => v.id)).toEqual([
+      'tool-pushpull', 'tool-move', 'tool-rotate', 'tool-scale', 'edit-delete',
+    ])
+  })
+
+  it('sketch verbs reuse the exact same ids as the other rows (menuActionRef/activeToolId compatibility)', () => {
+    const sketchIds = new Set(dockVerbsFor('sketch').map((v) => v.id))
+    const objectIds = new Set(dockVerbsFor('object').map((v) => v.id))
+    const groupIds = new Set(dockVerbsFor('group').map((v) => v.id))
+    // tool-pushpull and edit-delete already exist on the Object row; tool-move
+    // and tool-scale already exist on the Group/Instance rows — no new ids
+    // were invented for the sketch context.
+    expect(sketchIds.has('tool-pushpull')).toBe(true)
+    expect(objectIds.has('tool-pushpull')).toBe(true)
+    expect(sketchIds.has('edit-delete')).toBe(true)
+    expect(objectIds.has('edit-delete')).toBe(true)
+    expect(sketchIds.has('tool-scale')).toBe(true)
+    expect(groupIds.has('tool-scale')).toBe(true)
+  })
+
   it('every context stays within the spec cap ("4-6 items max, curated")', () => {
-    for (const ctx of ['empty', 'object', 'group', 'instance', 'multi'] as const) {
+    for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
       expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(6)
       expect(dockVerbsFor(ctx).length).toBeGreaterThan(0)
     }
@@ -75,8 +105,12 @@ describe('dockVerbsFor', () => {
 
 describe('dockChipLabel', () => {
   it('has a label for every context', () => {
-    for (const ctx of ['empty', 'object', 'group', 'instance', 'multi'] as const) {
+    for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
       expect(dockChipLabel(ctx).length).toBeGreaterThan(0)
     }
+  })
+
+  it('reads "SKETCH" for the sketch context', () => {
+    expect(dockChipLabel('sketch')).toBe('SKETCH')
   })
 })

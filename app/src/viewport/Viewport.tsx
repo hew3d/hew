@@ -52,6 +52,7 @@ import type { NodeRef } from '../panels/treeModel'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
 import { InfiniteGrid } from './InfiniteGrid'
+import { SketchHoverGate } from './sketchHoverGate'
 
 /**
  * Centered message overlay shown over the viewport when the WebGL2 context is
@@ -142,6 +143,15 @@ interface Props {
    * reported: OrbitControls fires an immediate 'start'+'end' pair per wheel
    * tick, which would blink the dock on every scroll. */
   onCameraDragChange?: (active: boolean) => void
+  /** Fired on a hover TRANSITION (true when the cursor is aimed at a live
+   * sketch's extrudable region, false when it leaves) —, "sketches
+   * are first-class interactable" contextual-dock half. Only polled while
+   * selection is empty and no camera-drag/tool-drag/button-down is in
+   * flight; throttled via `SketchHoverGate` so the underlying wasm ray-cast
+   * runs at most once per ~100ms regardless of mousemove frequency. App.tsx
+   * feeds this into `ContextualDock` so an idle cursor over a sketch
+   * previews the Push/Pull verb instead of the empty-selection draw row. */
+  onHoverSketchRegionChange?: (hovering: boolean) => void
   /** Currently selected material id for the Paint tool. `u64::MAX` =
    *  default / unpaint. The viewport keeps a stable ref so a paint tool
    *  instantiated inside the effect always sees the latest value. */
@@ -481,6 +491,7 @@ export default function Viewport({
   apiRef,
   onMeasurement,
   onCameraDragChange,
+  onHoverSketchRegionChange,
   currentMaterialId = MATERIAL_SENTINEL,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -510,6 +521,8 @@ export default function Viewport({
   onMeasurementRef.current = onMeasurement
   const onCameraDragChangeRef = useRef(onCameraDragChange)
   onCameraDragChangeRef.current = onCameraDragChange
+  const onHoverSketchRegionChangeRef = useRef(onHoverSketchRegionChange)
+  onHoverSketchRegionChangeRef.current = onHoverSketchRegionChange
   // Latest context path, readable inside the stable event closures.
   const activeContextRef = useRef<NodeRef[]>(activeContext)
   // Latest selected ids, readable inside the stable event closures.
@@ -537,6 +550,15 @@ export default function Viewport({
   // Last pointer ray + viewport params cached so key-driven re-lock can
   // immediately re-resolve snap without waiting for the next pointer move.
   const lastRayRef = useRef<{ ray: import('./math').Ray; viewportH: number; fovY: number } | null>(null)
+
+  // Last pointer NDC position, captured on every `onPointerMove` regardless of
+  // any early-return below it (camera-nav mode, button held, ...) — unlike
+  // `lastRayRef` this exists purely so a document mutation with NO subsequent
+  // pointer move (undo/redo/delete/tool-commit) can still re-evaluate the
+  // sketch-hover probe against "wherever the cursor actually is" instead of
+  // leaving it stale until the next real move ( Follow-up:).
+  // `null` until the pointer has entered the viewport at least once.
+  const lastPointerNdcRef = useRef<{ ndcX: number; ndcY: number } | null>(null)
 
   // True when a camera-navigation tool (Orbit/Pan/Zoom) is active.
   // Used inside the mount-effect pointer handlers to suppress geometry routing.
@@ -734,6 +756,12 @@ export default function Viewport({
       onSceneChangeRef.current?.(wtMap)
       onDocumentChangedRef.current?.()
       scheduleRender()
+      // Every kernel-mutating path funnels through here (tool commits,
+      // boolean/group/delete, undo, redo, harness ops) — re-poll the sketch
+      // hover probe against the cursor's last known position right away so a
+      // stationary mouse across the mutation doesn't leave the contextual
+      // dock showing a stale context (see `reevaluateHoverNow`'s doc comment).
+      reevaluateHoverNow()
     }
 
     // Re-tessellate after a harness-driven kernel mutation (ViewportApi.refreshScene).
@@ -1063,7 +1091,7 @@ export default function Viewport({
         wasmScene,
         previewGroup,
         (result) => {
-          sceneRenderer.refreshAllSketches(result.sketchHandle)
+          sceneRenderer.refreshAllSketches()
           sceneRenderer.refreshGuides()
           onDocumentChangedRef.current?.()
           scheduleRender()
@@ -1087,7 +1115,7 @@ export default function Viewport({
         wasmScene,
         previewGroup,
         (result) => {
-          sceneRenderer.refreshAllSketches(result.sketchHandle)
+          sceneRenderer.refreshAllSketches()
           sceneRenderer.refreshGuides()
           onDocumentChangedRef.current?.()
           scheduleRender()
@@ -1111,7 +1139,7 @@ export default function Viewport({
         wasmScene,
         previewGroup,
         (result) => {
-          sceneRenderer.refreshAllSketches(result.sketchHandle)
+          sceneRenderer.refreshAllSketches()
           sceneRenderer.refreshGuides()
           onDocumentChangedRef.current?.()
           scheduleRender()
@@ -1135,7 +1163,7 @@ export default function Viewport({
         wasmScene,
         previewGroup,
         (sketchHandle) => {
-          sceneRenderer.refreshAllSketches(sketchHandle)
+          sceneRenderer.refreshAllSketches()
           sceneRenderer.refreshGuides()
           onDocumentChangedRef.current?.()
           scheduleRender()
@@ -1166,11 +1194,6 @@ export default function Viewport({
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
       )
-      // Give it the current sketch handle if one exists
-      const sketchHandle = sceneRenderer.currentSketchHandle
-      if (sketchHandle !== null) {
-        tool.setSketchHandle(sketchHandle)
-      }
       // Scope it to the current editing context, if any.
       const ctx = activeContextRef.current
       const deepest = ctx.length > 0 ? ctx[ctx.length - 1] : null
@@ -1624,17 +1647,109 @@ export default function Viewport({
       inputRecorder.recordPointer(kind, ev.clientX - rect.left, ev.clientY - rect.top, ev)
     }
 
+    // ------------------------------------------------------------------ sketch-region hover probe
+    // "Sketches are first-class interactable" — an idle cursor aimed at a
+    // free-standing sketch's extrudable region previews the dock's Push/Pull
+    // verb (App.tsx/ContextualDock.tsx), but ONLY while nothing is selected
+    // (an explicit selection's dock always wins — the check here just avoids
+    // paying for the ray-cast in that case too). Throttled + edge-detected by
+    // SketchHoverGate so the wasm pick runs at most once per ~100ms and the
+    // callback (-> React state) fires only on an actual transition.
+    const hoverGate = new SketchHoverGate()
+    // Shared "should the hover probe be suppressed right now" predicate —
+    // explicit selection, a camera-nav tool, or an in-flight camera drag
+    // (stray middle/right-drag orbit/pan while a non-camera tool is active —
+    // cameraModeRef alone wouldn't catch that). Factored out of
+    // `updateSketchHover` so `reevaluateHoverNow` (post-mutation re-poll,
+    // below) shares the exact same rule instead of drifting from it.
+    function isHoverPaused(): boolean {
+      return selectedIdsRef.current.length > 0 || cameraModeRef.current || cameraDragActive
+    }
+    function pickSketchHover(ray: Ray): boolean {
+      const pick = wasmScene.pick_sketch_region(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      const hovering = pick !== undefined
+      pick?.free()
+      return hovering
+    }
+    function updateSketchHover(ray: Ray, ev: PointerEvent): void {
+      const cb = onHoverSketchRegionChangeRef.current
+      if (cb === undefined) return
+      // Also paused on any button held (the same "mid-gesture" signal the
+      // geometry-routing early-return below uses). Forces the state back to
+      // false so a stale "hovering" can't stick through a drag the cursor
+      // drifted away during.
+      const paused = isHoverPaused() || (ev.buttons !== 0 && ev.button !== -1)
+      if (paused) {
+        const next = hoverGate.pause()
+        if (next !== null) cb(next)
+        return
+      }
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      if (!hoverGate.shouldPoll(now)) return
+      const next = hoverGate.update(pickSketchHover(ray))
+      if (next !== null) cb(next)
+    }
+
+    /**
+     * Re-evaluate the sketch-hover probe right now, against the last known
+     * pointer position, instead of waiting for the next `pointermove`
+     *. Called from
+     * `handleSceneRefresh`, the one choke point every kernel-mutating path
+     * (tool commits, boolean/group/delete, undo, redo, harness ops) already
+     * funnels through.
+     *
+     * `hoverGate.reset()` clears the throttle clock (not the emitted state)
+     * so this always re-polls immediately rather than being swallowed by the
+     * normal ~100ms window — the whole point is that the document just
+     * changed, so the last poll's result may already be stale.
+     */
+    function reevaluateHoverNow(): void {
+      const cb = onHoverSketchRegionChangeRef.current
+      if (cb === undefined) return
+      hoverGate.reset()
+      if (lastPointerNdcRef.current === null) {
+        // No pointer has entered the viewport yet — nothing to re-pick against.
+        const next = hoverGate.update(false)
+        if (next !== null) cb(next)
+        return
+      }
+      if (isHoverPaused()) {
+        const next = hoverGate.pause()
+        if (next !== null) cb(next)
+        return
+      }
+      const { ndcX, ndcY } = lastPointerNdcRef.current
+      const ray = makeWorldRay(ndcX, ndcY, camera)
+      const next = hoverGate.update(pickSketchHover(ray))
+      if (next !== null) cb(next)
+    }
+
     // ------------------------------------------------------------------ pointer move (snap + cue)
     function onPointerMove(ev: PointerEvent): void {
       // Capture every raw move first (before any early-return) so low-level
       // replay reproduces the whole stack, camera-nav moves included.
       recordPointerInput('pointermove', ev)
+
+      // NDC/ray math is cheap (no wasm calls) — compute it up front so both
+      // the hover probe above and the geometry routing below share one ray,
+      // and the probe still runs even when the early-returns below skip the
+      // rest of this function (it has its own pause conditions).
+      const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+      const ray = makeWorldRay(ndcX, ndcY, camera)
+      // Remember where the pointer is, unconditionally, so a later document
+      // mutation with no further pointer move (undo/redo/delete/tool-commit)
+      // can still re-evaluate the hover probe via `reevaluateHoverNow` instead
+      // of leaving it stale (see that function's doc comment).
+      lastPointerNdcRef.current = { ndcX, ndcY }
+      updateSketchHover(ray, ev)
+
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
       if (cameraModeRef.current) return
       if (ev.buttons !== 0 && ev.button !== -1) return
 
-      const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
-      const ray = makeWorldRay(ndcX, ndcY, camera)
       const viewportH = el.clientHeight
       const fovY = camera.fov
 

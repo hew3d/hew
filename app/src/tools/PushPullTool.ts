@@ -17,7 +17,7 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import { intersectGroundPlane } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { projectRayOntoAxis, parseKernelErrorCode, kernelErrorMessage, pointInPolygonXY, polygonAreaXY } from '../viewport/geoHelpers'
+import { projectRayOntoAxis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { editLengthBuffer } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
@@ -144,44 +144,34 @@ export class PushPullTool implements Tool {
 
       // --- Path B: no object face hit — try picking a sketch region ---
       // Only reached when pick_face returns undefined (bare ground click, or
-      // no objects in scene yet).
+      // no objects in scene yet). `pick_sketch_region` resolves the smallest
+      // containing region across ALL live sketches kernel-side (nested rings
+      // resolve to the innermost — the app no longer has to walk sketch_regions
+      // + region_boundary + point-in-polygon itself).
       // Region extrusion is a top-level act; suppress it inside a context.
-      if (target === null && this._activeContext === null && this._sketchHandle !== null) {
-        // Intersect the ray with the ground plane to get the hit point
-        const hit = intersectGroundPlane(ray)
-        if (hit !== null) {
-          // Use snap position if we have a snap, otherwise use ground hit
-          anchor = snap !== null ? [snap.x, snap.y, snap.z] : [hit.x, hit.y, hit.z]
-          const px = hit.x
-          const py = hit.y
-          const sketchHandle = this._sketchHandle
-          const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
-
-          // Among all regions whose outer boundary contains the hit point,
-          // pick the one with the smallest outer-polygon area. This ensures a
-          // click inside a nested inner rectangle selects that rectangle's
-          // region rather than the enclosing ring's region (both contain the
-          // point, but the inner region is smaller).
-          let bestHandle: bigint | null = null
-          let bestArea = Infinity
-          for (let i = 0; i < regionHandles.length; i++) {
-            const regionHandle = regionHandles[i]
-            const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
-            if (pointInPolygonXY(px, py, boundary)) {
-              const area = polygonAreaXY(boundary)
-              if (area < bestArea) {
-                bestArea = area
-                bestHandle = regionHandle
-              }
+      if (target === null && this._activeContext === null) {
+        const regionPick = this.wasmScene.pick_sketch_region(
+          ray.origin[0], ray.origin[1], ray.origin[2],
+          ray.direction[0], ray.direction[1], ray.direction[2],
+        )
+        if (regionPick !== undefined) {
+          try {
+            const sketchHandle = regionPick.sketch()
+            const regionHandle = regionPick.region()
+            if (snap !== null) {
+              anchor = [snap.x, snap.y, snap.z]
+            } else {
+              const hit = intersectGroundPlane(ray)
+              anchor = hit !== null ? [hit.x, hit.y, hit.z] : [...ray.origin]
             }
-          }
-          if (bestHandle !== null) {
             target = {
               kind: 'region',
               sketchHandle,
-              regionHandle: bestHandle,
-              normal: [0, 0, 1], // ground plane normal
+              regionHandle,
+              normal: [0, 0, 1], // ground plane normal — all sketches are ground-plane today
             }
+          } finally {
+            regionPick.free()
           }
         }
       }
@@ -278,12 +268,6 @@ export class PushPullTool implements Tool {
     this.onMeasurementCb('')
 
     this._commit(target, signed)
-  }
-
-  /** Set the currently active sketch handle (for region extrusion) */
-  private _sketchHandle: bigint | null = null
-  setSketchHandle(handle: bigint | null): void {
-    this._sketchHandle = handle
   }
 
   /** Set the active editing context (entered object), or null for top level.

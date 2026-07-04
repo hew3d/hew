@@ -22,7 +22,7 @@
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { nodeKindToNumber, type NodeRef } from './treeModel'
+import { entityLabel, nodeKindToNumber, type NodeRef } from './treeModel'
 
 interface Props {
   scene: WasmScene
@@ -90,14 +90,20 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
 
     // A sketch is a thin selectable (a drawn line) with no kernel NodeId, name,
     // tags, or solid state — show a minimal read-only entry and never call the
-    // object/group/instance APIs (`nodeKindToNumber` throws for it).
+    // object/group/instance APIs (`nodeKindToNumber` yields the -1 sentinel,
+    // which no node_id-keyed wasm call accepts). Its
+    // "name" is the same positional label the tree/canvas show ("Sketch 2"),
+    // derived from `sketch_ids()` order since sketches can't be renamed yet.
     if (kind === 'sketch') {
+      const allSketches = Array.from(scene.sketch_ids())
+      const idx = allSketches.indexOf(id)
       return {
         node,
         kind,
         id,
         kindNum: null as number | null,
         nameFromScene: undefined as string | undefined,
+        positionalLabel: entityLabel('sketch', idx >= 0 ? idx : 0),
         tags: [] as string[][],
         solid: null as boolean | null,
       }
@@ -182,8 +188,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
         <EmptyState multiSelect={selectedIds.length > 1} />
       ) : (
         <>
-          {/* Name — sketches can't be named yet */}
-          {nodeInfo.kind !== 'sketch' && (
+          {/* Name — sketches can't be named yet; show the read-only positional label instead. */}
+          {nodeInfo.kind === 'sketch' ? (
+            <div>
+              <div style={LABEL_STYLE}>Name</div>
+              <div style={VALUE_STYLE}>{nodeInfo.positionalLabel}</div>
+            </div>
+          ) : (
             <div>
               <div style={LABEL_STYLE}>Name</div>
               <input
@@ -208,10 +219,12 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
             <div style={VALUE_STYLE}>{kindLabel(nodeInfo.kind)}</div>
           </div>
 
-          {/* A sketch is a thin selectable — no name/tags/solid yet. */}
+          {/* A sketch is a thin selectable — no name/tags/solid yet, but it can
+           * be deleted and transformed (Move/Rotate/Scale all support a whole
+           * selected sketch via transform_sketch). */}
           {nodeInfo.kind === 'sketch' && (
             <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', fontStyle: 'italic' }}>
-              A drawn line. Delete with ⌫ (undoable); naming, tags, and move are not yet supported.
+              A drawn line. Delete with ⌫ (undoable), or Move/Rotate/Scale it; naming and tags are not yet supported.
             </div>
           )}
 

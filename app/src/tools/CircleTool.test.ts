@@ -36,13 +36,24 @@ function makeWasmScene(opts: {
   faceNormal?: [number, number, number]
   addSegmentThrows?: boolean
   splitFaceThrows?: boolean
+  /** Make the FIRST `sketch_begin_gesture` call throw (stale cached handle),
+   *  as if the sketch's creating gesture had been undone since caching. */
+  beginGestureThrowsOnce?: boolean
 } = {}): WasmScene {
-  let sketchCounter = 0n
+  let sketchCounter = 41n
+  let beginGestureFailuresLeft = opts.beginGestureThrowsOnce ? 1 : 0
   return {
     begin_ground_sketch: vi.fn(() => {
-      sketchCounter = 42n
+      sketchCounter += 1n
       return sketchCounter
     }),
+    sketch_begin_gesture: vi.fn(() => {
+      if (beginGestureFailuresLeft > 0) {
+        beginGestureFailuresLeft -= 1
+        throw new Error('UnknownSketch: stale or hidden handle')
+      }
+    }),
+    sketch_end_gesture: vi.fn(),
     sketch_add_segment: vi.fn(() => {
       if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
       return {
@@ -85,6 +96,11 @@ describe('CircleTool — ground mode', () => {
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 42n, regionsCreated: [] })
     expect(onToast).not.toHaveBeenCalled()
+    // The whole N-segment commit is bracketed in exactly one gesture.
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(42n)
+    expect(scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(42n)
   })
 
   it('the last segment closes back to the exact stored vertex 0 coordinates', () => {
@@ -138,6 +154,23 @@ describe('CircleTool — ground mode', () => {
 
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('a stale cached sketch handle (begin_gesture throws once) recovers by minting a fresh sketch and retrying', () => {
+    const scene = makeWasmScene({ beginGestureThrowsOnce: true })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim — commits
+
+    // begin_ground_sketch is called twice: once lazily, once on stale-handle retry.
+    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(2)
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(2)
+    // The retry used the SECOND (fresh) handle for the actual commit.
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 43n, regionsCreated: [] })
+    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(43n)
+    expect(onToast).not.toHaveBeenCalled()
   })
 })
 

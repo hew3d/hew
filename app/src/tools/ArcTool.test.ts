@@ -51,11 +51,26 @@ function makeWasmScene(opts: {
   faceNormal?: [number, number, number]
   addSegmentThrows?: boolean
   splitFaceThrows?: boolean
+  /** Make the FIRST `sketch_begin_gesture` call throw (stale cached handle),
+   *  as if the sketch's creating gesture had been undone since caching. */
+  beginGestureThrowsOnce?: boolean
 } = {}) {
   const segments: SegmentCall[] = []
   const splitPaths: Float64Array[] = []
+  let sketchCounter = 41n
+  let beginGestureFailuresLeft = opts.beginGestureThrowsOnce ? 1 : 0
   const scene = {
-    begin_ground_sketch: vi.fn(() => 42n),
+    begin_ground_sketch: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
+    sketch_begin_gesture: vi.fn(() => {
+      if (beginGestureFailuresLeft > 0) {
+        beginGestureFailuresLeft -= 1
+        throw new Error('UnknownSketch: stale or hidden handle')
+      }
+    }),
+    sketch_end_gesture: vi.fn(),
     sketch_add_segment: vi.fn((_sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
       if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
       segments.push([ax, ay, az, bx, by, bz])
@@ -127,6 +142,27 @@ describe('ArcTool — ground mode', () => {
     }
 
     expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+    // The whole faceted-chain commit is bracketed in exactly one gesture.
+    expect((scene as unknown as { sketch_begin_gesture: ReturnType<typeof vi.fn> }).sketch_begin_gesture).toHaveBeenCalledTimes(1)
+    expect((scene as unknown as { sketch_end_gesture: ReturnType<typeof vi.fn> }).sketch_end_gesture).toHaveBeenCalledTimes(1)
+  })
+
+  it('a stale cached sketch handle (begin_gesture throws once) recovers by minting a fresh sketch and retrying', () => {
+    const { scene, segments } = makeWasmScene({ beginGestureThrowsOnce: true })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)   // A
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY)   // B
+    tool.onPointerDown(makeSnap({ x: 1, y: 0.5 }), RAY) // commit
+
+    const beginGroundSketch = (scene as unknown as { begin_ground_sketch: ReturnType<typeof vi.fn> }).begin_ground_sketch
+    const beginGesture = (scene as unknown as { sketch_begin_gesture: ReturnType<typeof vi.fn> }).sketch_begin_gesture
+    // Lazily created once, then re-minted once on the stale-handle retry.
+    expect(beginGroundSketch).toHaveBeenCalledTimes(2)
+    expect(beginGesture).toHaveBeenCalledTimes(2)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(segments.length).toBeGreaterThan(0)
     expect(onToast).not.toHaveBeenCalled()
   })
 

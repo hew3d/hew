@@ -22,6 +22,12 @@ const EDGE_COLOR = 0x1a1a1a
 /** Orange highlight for selected object edges (kept for selection; face fill uses material color). */
 const EDGE_COLOR_SELECTED = 0xffaa00
 const SKETCH_LINE_COLOR = 0x2266cc
+/** Sketch line width in px (matches the `makeFatSegments` call in `refreshAllSketches`). */
+const SKETCH_LINE_WIDTH_PX = 2.2
+/** Selected-sketch highlight width — deliberately bolder than the base
+ * sketch-line width above so the orange overlay reads as clearly on top of
+ * it rather than disappearing into (or under) it, worst case in light mode. */
+const SKETCH_HIGHLIGHT_WIDTH_PX = 3.8
 const SKETCH_REGION_COLOR = 0x88aadd
 /** Normal translucency of a sketch region fill. */
 const SKETCH_REGION_OPACITY = 0.4
@@ -122,10 +128,16 @@ export class SceneRenderer {
   private guideHighlight: THREE.LineSegments | null = null
   /** Currently selected sketch ids, drawn as a bright overlay. */
   private selectedSketchIds: bigint[] = []
-  /** Highlight overlay (solid bright lines) for `selectedSketchIds`. */
-  private sketchHighlight: THREE.LineSegments | null = null
-  /** The sketch currently being drawn into (tool target) — null if none. */
-  private activeSketchHandle: bigint | null = null
+  /**
+   * Highlight overlay (solid bright lines) for `selectedSketchIds`. A fat
+   * `LineSegments2` (not a plain `THREE.LineSegments`) — normal sketch lines
+   * are already fat (`sketchLines`, ~2.2px via `makeFatSegments`), and WebGL
+   * ignores `linewidth` on a plain `LineBasicMaterial` (always renders 1px),
+   * so the old plain-line highlight was thinner than the lines it was meant
+   * to highlight and read as nearly invisible, worst in light mode
+   *.
+   */
+  private sketchHighlight: LineSegments2 | null = null
   /** Last known watertight state per object */
   private watertightMap: Map<bigint, boolean> = new Map()
   /** Currently selected object ids (ordered; may include non-object entities,
@@ -563,16 +575,12 @@ export class SceneRenderer {
   /**
    * Rebuild lines and region fills for EVERY sketch in the document (the
    * document holds many first-class sketches). Call after any sketch mutation,
-   * extrusion, or scene undo/redo. `activeHandle`, if given, records which
-   * sketch the tools should draw into next.
+   * extrusion, or scene undo/redo.
    *
    * All sketches' edges are merged into one LineSegments buffer; each region is
    * a triangle-fan fill keyed by `${sketchHandle}:${regionHandle}`.
    */
-  refreshAllSketches(activeHandle?: bigint): void {
-    if (activeHandle !== undefined) {
-      this.activeSketchHandle = activeHandle
-    }
+  refreshAllSketches(): void {
     this._clearSketchLines()
     this._clearSketchRegions()
 
@@ -593,7 +601,7 @@ export class SceneRenderer {
       // by Viewport's render loop via updateFatLineResolutions(sketchGroup).
       this.sketchLines = makeFatSegments(new Float32Array(allLinePositions), {
         color: SKETCH_LINE_COLOR,
-        widthPx: 2.2,
+        widthPx: SKETCH_LINE_WIDTH_PX,
         transparent: true,
       })
       this.sketchGroup.add(this.sketchLines)
@@ -918,10 +926,16 @@ export class SceneRenderer {
     }
     if (positions.length === 0) return
 
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
-    const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false })
-    this.sketchHighlight = new THREE.LineSegments(geo, mat)
+    // Fat line (LineSegments2), like the base sketch lines — a plain
+    // THREE.LineSegments/LineBasicMaterial ignores `linewidth` on WebGL and
+    // renders 1px, which is thinner than the 2.2px fat sketch lines it's
+    // meant to highlight and reads as nearly invisible. `updateFatLineResolutions(sketchGroup)` (Viewport's render
+    // loop) keeps this correctly sized since it's added to `sketchGroup`.
+    this.sketchHighlight = makeFatSegments(new Float32Array(positions), {
+      color: EDGE_COLOR_SELECTED,
+      widthPx: SKETCH_HIGHLIGHT_WIDTH_PX,
+      depthTest: false,
+    })
     this.sketchHighlight.renderOrder = 999
     this.sketchGroup.add(this.sketchHighlight)
   }
@@ -1151,10 +1165,6 @@ export class SceneRenderer {
 
   clearSketchRegion(): void {
     this._clearSketchRegions()
-  }
-
-  get currentSketchHandle(): bigint | null {
-    return this.activeSketchHandle
   }
 
   /**

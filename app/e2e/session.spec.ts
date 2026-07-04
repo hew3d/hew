@@ -319,7 +319,12 @@ test('undo then save: saved bytes encode the undone state, not the original', as
     h.drawBox([4, 0, 0], [5, 1, 0], 1)
     const hash3 = h.getStateHash()
 
-    // Undo twice → back to one box.
+    // Undo two boxes → back to one. A drawBox is TWO undo steps since sketch
+    // gestures became undoable ("sketches are first-class interactable"):
+    // the extrusion, then the drawing gesture (which also removes the sketch
+    // it created).
+    h.undo()
+    h.undo()
     h.undo()
     h.undo()
     const hash1 = h.getStateHash()

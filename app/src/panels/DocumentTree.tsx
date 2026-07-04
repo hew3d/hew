@@ -163,9 +163,10 @@ export function DocumentTree({
   const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
 
   // Compute canGroup / canUngroup for the button row. A sketch is top-level
-  // and has no kernel NodeId (so no group parent and can't be grouped) — never
-  // feed it to `nodeKindToNumber` (which throws), and any sketch in the
-  // selection disqualifies group/ungroup.
+  // and has no kernel NodeId (so no group parent and can't be grouped) —
+  // short-circuit before `scene.node_parent` (nodeKindToNumber's -1 sentinel
+  // for 'sketch' is not a real node_id kind), and any sketch in the selection
+  // disqualifies group/ungroup.
   const parentOf = (n: NodeRef) =>
     n.kind === 'sketch' ? undefined : scene.node_parent(nodeKindToNumber(n.kind), n.id)
   const hasSketch = selectedIds.some((n) => n.kind === 'sketch')
@@ -324,17 +325,22 @@ export function DocumentTree({
       </Section>
 
       <Section title="Sketches" empty="(no sketches yet)">
-        {sketches.map((id, index) => (
-          <Row
-            key={String(id)}
-            label={entityLabel('sketch', index)}
-            selected={false}
-            active={false}
-            dimmed={activeContext.length > 0}
-            indent={0}
-            onClick={() => { /* sketches are not selectable as nodes for now */ }}
-          />
-        ))}
+        {sketches.map((id, index) => {
+          const node: NodeRef = { kind: 'sketch', id }
+          return (
+            <Row
+              key={String(id)}
+              label={entityLabel('sketch', index)}
+              selected={isSelected(node)}
+              isPrimary={primaryKey === nodeKey(node)}
+              active={false}
+              dimmed={activeContext.length > 0}
+              indent={0}
+              rowRef={primaryKey === nodeKey(node) ? selectedRowRef : undefined}
+              onClick={(additive) => onSelect(node, additive)}
+            />
+          )
+        })}
       </Section>
     </div>
   )

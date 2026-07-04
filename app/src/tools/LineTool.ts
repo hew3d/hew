@@ -55,6 +55,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
 import { arrowToAxis, editLengthBuffer, pointAlong } from './moveInput'
 import { segmentLength, directionBetween } from './lineInput'
+import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
 export type OnFaceImprint = (objectId: bigint) => void
@@ -121,6 +122,12 @@ export class LineTool implements Tool {
 
   /** Handle to the current active sketch — reused across commits if not null */
   private sketchHandle: bigint | null = null
+
+  /** `sketchHandle` get/set, boxed for `runSketchGesture`. */
+  private readonly _sketchHandleCache: SketchHandleCache = {
+    get: () => this.sketchHandle,
+    set: (h) => { this.sketchHandle = h },
+  }
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -633,44 +640,43 @@ export class LineTool implements Tool {
     }
 
     try {
-      if (this.sketchHandle === null) {
-        this.sketchHandle = this.wasmScene.begin_ground_sketch()
-      }
-      const sketch = this.sketchHandle
+      // Each committed segment is its own gesture — one Cmd+Z undoes exactly
+      // that segment, matching LineTool's chain-forward-per-click semantics.
+      runSketchGesture(this.wasmScene, this._sketchHandleCache, (sketch) => {
+        const report = this.wasmScene.sketch_add_segment(
+          sketch,
+          anchor[0], anchor[1], 0,
+          cursor[0], cursor[1], 0,
+        )
+        let closed: boolean
+        try {
+          closed = report.regions_created().length > 0
+        } finally {
+          report.free()
+        }
 
-      const report = this.wasmScene.sketch_add_segment(
-        sketch,
-        anchor[0], anchor[1], 0,
-        cursor[0], cursor[1], 0,
-      )
-      let closed: boolean
-      try {
-        closed = report.regions_created().length > 0
-      } finally {
-        report.free()
-      }
+        this.onCommit(sketch)
 
-      this.onCommit(sketch)
-
-      if (closed) {
-        // The loop closed into a face — end the chain (idle, ready for a new line).
-        this.groundStage = { kind: 'idle' }
-        this.typed = ''
-        this._lastGroundCursor = null
-        this.lockAxis = null
-        this.shiftAxisLock = false
-        this._clearPreview()
-        this.onMeasurementCb('')
-        this.wasmScene.clear_transient_segments()
-      } else {
-        // Chain forward: the new point becomes the anchor for the next segment.
-        this.groundStage = { kind: 'anchored', anchor: cursor }
-        this._lastGroundCursor = null
-        this.typed = ''
-        this._clearPreview()
-        this.onMeasurementCb('')
-        this._publishTransient(null)
-      }
+        if (closed) {
+          // The loop closed into a face — end the chain (idle, ready for a new line).
+          this.groundStage = { kind: 'idle' }
+          this.typed = ''
+          this._lastGroundCursor = null
+          this.lockAxis = null
+          this.shiftAxisLock = false
+          this._clearPreview()
+          this.onMeasurementCb('')
+          this.wasmScene.clear_transient_segments()
+        } else {
+          // Chain forward: the new point becomes the anchor for the next segment.
+          this.groundStage = { kind: 'anchored', anchor: cursor }
+          this._lastGroundCursor = null
+          this.typed = ''
+          this._clearPreview()
+          this.onMeasurementCb('')
+          this._publishTransient(null)
+        }
+      })
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

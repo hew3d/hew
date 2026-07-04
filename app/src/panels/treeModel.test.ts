@@ -91,6 +91,11 @@ describe('nodeKindToNumber', () => {
     expect(nodeKindToNumber('group')).toBe(1)
     expect(nodeKindToNumber('instance')).toBe(2)
   })
+
+  it('handles the sketch kind without throwing (sentinel -1 — no kernel NodeId)', () => {
+    expect(() => nodeKindToNumber('sketch')).not.toThrow()
+    expect(nodeKindToNumber('sketch')).toBe(-1)
+  })
 })
 
 describe('canMakeComponent', () => {

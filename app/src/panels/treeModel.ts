@@ -166,17 +166,25 @@ export function isTreeRowDimmed(
  * Convert a NodeKind to the numeric kind tag used in WASM API calls.
  *   0 = object, 1 = group, 2 = instance
  *
- * `'sketch'` has no kernel `NodeId` variant (see the `NodeKind` doc comment)
- * and none of this function's callers (DocumentTree/ObjectInfoPanel/
- * MaterialPalette/TagsPanel) are wired for a sketch selection yet — throwing
- * here surfaces that gap loudly instead of silently mis-mapping a sketch to
- * 'instance' (2).
+ * `'sketch'` has no kernel `NodeId` variant (see the `NodeKind` doc comment):
+ * sketch operations route through their own dedicated wasm methods
+ * (`delete_sketch`/`pick_sketch`/`pick_sketch_region`/`transform_sketch`/…),
+ * never a `node_id`-keyed call. Whole-sketch selection is now wired throughout
+ * the UI (DocumentTree/ObjectInfoPanel/MaterialPalette/TagsPanel); every one of
+ * those callers checks `kind === 'sketch'` and takes its own sketch-specific
+ * path *before* reaching this function. This used to throw for `'sketch'` —
+ * back when no caller was wired for a sketch selection, that was the loud
+ * signal of a real gap. Now that they all guard, throwing would just be a
+ * crash waiting for the one caller that forgets to; return the -1 sentinel
+ * instead so a stray path degrades to "matches nothing" rather than throwing
+ * mid-render. `-1` is not a valid `node_id` kind — never forward it to a
+ * `node_id`-keyed wasm call.
  */
 export function nodeKindToNumber(kind: NodeKind): number {
   if (kind === 'object') return 0
   if (kind === 'group') return 1
   if (kind === 'instance') return 2
-  throw new Error(`nodeKindToNumber: 'sketch' has no kernel NodeId mapping`)
+  return -1
 }
 
 /**

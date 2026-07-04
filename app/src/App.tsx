@@ -143,6 +143,12 @@ export default function App() {
    * fades the contextual dock out of the way. Fed by Viewport's
    * OrbitControls start/end events; never persisted. */
   const [cameraDragging, setCameraDragging] = useState(false)
+  /** True while the cursor is aimed at a live sketch's extrudable region AND
+   * nothing is selected ( hover-dock) — Viewport polls+throttles this
+   * via SketchHoverGate and only calls back on a true/false transition. An
+   * explicit selection's dock always wins; ContextualDock only consults this
+   * when the derived context is 'empty'. */
+  const [hoveringSketchRegion, setHoveringSketchRegion] = useState(false)
   /** Tag-path hide set: each entry is tagPathKey(path). Cleared on load/new. */
   const [hiddenTagPaths, setHiddenTagPaths] = useState<Set<string>>(new Set())
   /** Import report to display (null = no dialog). */
@@ -1749,6 +1755,7 @@ export default function App() {
             onMeasurement={handleMeasurement}
             onInferenceChange={handleInferenceChange}
             onCameraDragChange={setCameraDragging}
+            onHoverSketchRegionChange={setHoveringSketchRegion}
             currentMaterialId={currentMaterialId}
           />
 
@@ -1763,19 +1770,24 @@ export default function App() {
             onOrbit={() => setActiveTool('Orbit')}
           />
 
-          {/* Contextual dock — bottom-center, self-hides when there's
-              no curated verb set for the current selection (a sketch, or a
-              construction guide), and fades out while the camera is being
+          {/* Contextual dock — bottom-center, self-hides only when
+              there's no curated verb set for the current selection (a
+              construction guide — a selected sketch gets its own 'sketch'
+              context as of), and fades out while the camera is being
               dragged. Reuses the same menuActionRef dispatch the
               palette and every menu item already go through.
               activeToolId tells the dock which verb, if any,
               is the ACTUAL active tool — so it never shows a stale "selected"
-              verb (e.g. Rectangle) while a different tool (e.g. Arc) is live. */}
+              verb (e.g. Rectangle) while a different tool (e.g. Arc) is live.
+              hoveringSketchRegion previews the Push/Pull verb when
+              nothing is selected and the cursor is aimed at a sketch region
+              — an explicit selection's dock always wins over this hint. */}
           <ContextualDock
             selectedIds={selectedIds}
             selectedGuide={selectedGuide}
             hidden={cameraDragging}
             activeToolId={toolActionId(activeTool)}
+            hoveringSketchRegion={hoveringSketchRegion}
             onRun={(id) => menuActionRef.current(id)}
           />
 

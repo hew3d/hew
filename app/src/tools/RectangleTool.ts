@@ -30,6 +30,7 @@ import { rectangleCorners, faceRectangleCorners, facePlaneBasis, parseKernelErro
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
 import { editDimsBuffer, parseDimensions } from './moveInput'
+import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
 
 export type RectangleCommitResult = {
   sketchHandle: bigint
@@ -99,6 +100,12 @@ export class RectangleTool implements Tool {
 
   /** Handle to the current active sketch — reused across commits if not null */
   private sketchHandle: bigint | null = null
+
+  /** `sketchHandle` get/set, boxed for `runSketchGesture`. */
+  private readonly _sketchHandleCache: SketchHandleCache = {
+    get: () => this.sketchHandle,
+    set: (h) => { this.sketchHandle = h },
+  }
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -394,37 +401,33 @@ export class RectangleTool implements Tool {
 
   private _commitGroundRectangle(a: [number, number], b: [number, number]): void {
     try {
-      // Begin sketch if we don't already have one
-      if (this.sketchHandle === null) {
-        this.sketchHandle = this.wasmScene.begin_ground_sketch()
-      }
-      const sketch = this.sketchHandle
+      runSketchGesture(this.wasmScene, this._sketchHandleCache, (sketch) => {
+        const corners = rectangleCorners(a, b)
+        // Four edges: 0→1, 1→2, 2→3, 3→0
+        const edges = [
+          [corners[0], corners[1]],
+          [corners[1], corners[2]],
+          [corners[2], corners[3]],
+          [corners[3], corners[0]],
+        ] as const
 
-      const corners = rectangleCorners(a, b)
-      // Four edges: 0→1, 1→2, 2→3, 3→0
-      const edges = [
-        [corners[0], corners[1]],
-        [corners[1], corners[2]],
-        [corners[2], corners[3]],
-        [corners[3], corners[0]],
-      ] as const
-
-      let lastRegionsCreated: bigint[] = []
-      for (const [p, q] of edges) {
-        const report = this.wasmScene.sketch_add_segment(
-          sketch,
-          p[0], p[1], p[2],
-          q[0], q[1], q[2],
-        )
-        try {
-          const rc = report.regions_created()
-          lastRegionsCreated = Array.from(rc)
-        } finally {
-          report.free()
+        let lastRegionsCreated: bigint[] = []
+        for (const [p, q] of edges) {
+          const report = this.wasmScene.sketch_add_segment(
+            sketch,
+            p[0], p[1], p[2],
+            q[0], q[1], q[2],
+          )
+          try {
+            const rc = report.regions_created()
+            lastRegionsCreated = Array.from(rc)
+          } finally {
+            report.free()
+          }
         }
-      }
 
-      this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+        this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+      })
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
