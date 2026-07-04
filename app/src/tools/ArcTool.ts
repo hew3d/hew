@@ -24,9 +24,34 @@
  *   - flat bulge (|sagitta| < ARC_MIN_SAGITTA_M): the commit click is refused
  *     and the measurement line hints to pull out the bulge.
  *
- * VCB: no typed entry in  — the "12s" segment override is explicitly
- * deferred, and typed radius entry is ambiguous for a 2-point arc (radius
- * alone doesn't pick the bulge side), so the gesture is pointer-only.
+ * VCB : typed length entry mirrors LineTool's
+ * mechanism exactly (`editLengthBuffer` builds the raw string,
+ * `parseLengthToMeters` resolves it on Enter, `capturingInput()` gates when
+ * the Viewport routes keys here) but means something different at each
+ * stage, since an arc has two distances to place, not one:
+ *
+ *   - Chord stage (A placed, B not yet): typed length commits endpoint B at
+ *     exactly that distance from A along the LIVE cursor direction (the
+ *     same semantics as LineTool's typed segment length). Refused — buffer
+ *     kept, gesture unchanged — when there's no cursor direction yet (mouse
+ *     hasn't moved off A) or the typed distance is below ARC_MIN_CHORD_M.
+ *
+ *   - Bulge stage (A, B placed): typed length sets |sagitta| to exactly that
+ *     distance, on whichever side of the chord the cursor is CURRENTLY on
+ *     (sign taken from the live cursor's sagitta). If the cursor sits
+ *     exactly on the chord (sagitta ~0) or hasn't moved since B was placed,
+ *     this falls back to the last nonzero side seen during this bulge stage;
+ *     with no side ever established, the commit is refused (mirrors the
+ *     pointer path's flat-bulge refusal — same hint text). This resolution
+ *     order (live side, then last-seen side, then refuse) was picked over
+ *     "always refuse without a live side" because it lets a user nudge the
+ *     mouse to declare a side ONCE and then type an exact radius/sagitta
+ *     repeatedly without having to keep the mouse perfectly off the chord.
+ *
+ * The typed buffer is cleared on every stage transition (pointer- or
+ * VCB-driven) and the live measurement readout shows the typed text instead
+ * of the pointer-derived one whenever the buffer is non-empty — identical
+ * to LineTool's `_reportMeasurement` convention.
  */
 
 import * as THREE from 'three'
@@ -36,10 +61,12 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
-import { formatLength } from '../settings/units'
-import { segmentLength } from './lineInput'
+import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
+import { segmentLength, directionBetween } from './lineInput'
+import { editLengthBuffer, pointAlong } from './moveInput'
 import {
   ARC_MIN_CHORD_M,
+  ARC_MIN_SAGITTA_M,
   arcFromChord,
   arcPolylineOnPlane,
   chordSagitta,
@@ -130,6 +157,21 @@ export class ArcTool implements Tool {
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
+
+  /** VCB buffer — raw string being typed by the user (length, in display units). */
+  private typed: string = ''
+
+  /** Last live cursor position seen this stage (ground/face — only one is
+   *  ever populated at a time, mirroring LineTool's pair of fields). Used
+   *  for the typed-commit chord direction and the bulge-side resolution. */
+  private _lastGroundCursor: [number, number] | null = null
+  private _lastFaceCursor: V3 | null = null
+
+  /** The last NONZERO sagitta sign seen during the current bulge stage —
+   *  the fallback when a typed bulge commit's live cursor sits exactly on
+   *  the chord (see module doc's VCB section). Reset every time a fresh
+   *  bulge stage begins (or the gesture ends). */
+  private _lastSagittaSign: -1 | 1 | null = null
 
   constructor(
     wasmScene: WasmScene,
@@ -222,8 +264,8 @@ export class ArcTool implements Tool {
 
   /**
    * True while a gesture is in progress, so the Viewport routes keys here
-   * (Escape stage-back) instead of treating letters as tool-switch
-   * shortcuts mid-gesture. There is no typed VCB entry (see module doc).
+   * (Escape stage-back, and — since the — typed VCB entry) instead
+   * of treating letters as tool-switch shortcuts mid-gesture.
    */
   capturingInput(): boolean {
     return this.groundStage.kind !== 'idle' || this.faceStage.kind !== 'idle'
@@ -232,14 +274,52 @@ export class ArcTool implements Tool {
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
       this._stepBack()
+      return
     }
-    // No VCB — all other keys are ignored (segment override deferred).
+
+    if (!this.capturingInput()) return
+
+    if (ev.key === 'Enter') {
+      if (this.typed === '') return
+      const meters = parseLengthToMeters(this.typed)
+      if (meters !== null) this._commitTyped(meters)
+      return
+    }
+
+    if (
+      (ev.key >= '0' && ev.key <= '9') ||
+      ev.key === '.' ||
+      ev.key === '-' ||
+      ev.key === 'Backspace' ||
+      ev.key === "'" ||
+      ev.key === '"' ||
+      ev.key === '/' ||
+      ev.key === ' '
+    ) {
+      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+      this.onMeasurementCb(this._typedReadout())
+    }
+  }
+
+  /** The typed-buffer readout, suffixed for metric formats (mirrors LineTool). */
+  private _typedReadout(): string {
+    const suffix = getLengthUnitSuffix()
+    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
+  }
+
+  /** Show the typed VCB buffer if one is being entered; otherwise the given
+   *  live (pointer-derived) measurement text. */
+  private _measurementText(live: string): string {
+    return this.typed !== '' ? this._typedReadout() : live
   }
 
   /** Esc steps back one stage: bulge → chord (A kept), chord → idle. */
   private _stepBack(): void {
     if (this.groundStage.kind === 'bulge') {
       this.groundStage = { kind: 'chord', a: this.groundStage.a }
+      this.typed = ''
+      this._lastGroundCursor = null
+      this._lastSagittaSign = null
       this._clearPreview()
       this.onMeasurementCb('')
       return
@@ -247,6 +327,9 @@ export class ArcTool implements Tool {
     if (this.faceStage.kind === 'bulge') {
       const { object, face, normal, planePoint, a } = this.faceStage
       this.faceStage = { kind: 'chord', object, face, normal, planePoint, a }
+      this.typed = ''
+      this._lastFaceCursor = null
+      this._lastSagittaSign = null
       this._clearPreview()
       this.onMeasurementCb('')
       return
@@ -257,8 +340,135 @@ export class ArcTool implements Tool {
   cancel(): void {
     this.groundStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
+    this.typed = ''
+    this._lastGroundCursor = null
+    this._lastFaceCursor = null
+    this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
+  }
+
+  /**
+   * Enter with a non-empty typed buffer: resolved per-stage (see module doc).
+   */
+  private _commitTyped(distance: number): void {
+    if (this.groundStage.kind === 'chord') {
+      this._commitTypedGroundChord(distance)
+    } else if (this.groundStage.kind === 'bulge') {
+      this._commitTypedGroundBulge(distance)
+    } else if (this.faceStage.kind === 'chord') {
+      this._commitTypedFaceChord(distance)
+    } else if (this.faceStage.kind === 'bulge') {
+      this._commitTypedFaceBulge(distance)
+    }
+  }
+
+  /** Chord stage (ground): place B at `distance` from A along the live
+   *  cursor direction. Refused (buffer kept) with no direction yet, or a
+   *  sub-ARC_MIN_CHORD_M distance. */
+  private _commitTypedGroundChord(distance: number): void {
+    if (this.groundStage.kind !== 'chord') return
+    if (distance < ARC_MIN_CHORD_M) return
+    const cursor = this._lastGroundCursor
+    if (cursor === null) return
+    const { a } = this.groundStage
+    const a3: V3 = [a[0], a[1], 0]
+    const dir = directionBetween(a3, [cursor[0], cursor[1], 0])
+    if (dir === null) return
+    const endpoint = pointAlong(a3, dir, distance)
+    this._placeGroundB([endpoint[0], endpoint[1]])
+  }
+
+  /** Bulge stage (ground): commit the arc with |sagitta| == `distance`, on
+   *  the side resolved by `_resolveGroundSagittaSign`. Refused (same hint as
+   *  a flat pointer-commit) with no side resolvable, or a flat result. */
+  private _commitTypedGroundBulge(distance: number): void {
+    if (this.groundStage.kind !== 'bulge') return
+    const sign = this._resolveGroundSagittaSign()
+    if (sign === null) {
+      this.onMeasurementCb(FLAT_BULGE_HINT)
+      return
+    }
+    const { a, b } = this.groundStage
+    const verts = this._groundPolyline(a, b, sign * distance)
+    if (verts === null) {
+      this.onMeasurementCb(FLAT_BULGE_HINT)
+      return
+    }
+    this._commitGroundChain(verts)
+    this.groundStage = { kind: 'idle' }
+    this.typed = ''
+    this._lastGroundCursor = null
+    this._lastSagittaSign = null
+    this._clearPreview()
+    this.onMeasurementCb('')
+  }
+
+  /** Chord stage (face): place B at `distance` from A along the live cursor
+   *  direction, projected onto the locked face plane. */
+  private _commitTypedFaceChord(distance: number): void {
+    if (this.faceStage.kind !== 'chord') return
+    if (distance < ARC_MIN_CHORD_M) return
+    const cursor = this._lastFaceCursor
+    if (cursor === null) return
+    const { a } = this.faceStage
+    const dir = directionBetween(a, cursor)
+    if (dir === null) return
+    const endpoint = pointAlong(a, dir, distance)
+    this._placeFaceB(endpoint)
+  }
+
+  /** Bulge stage (face): commit the arc with |sagitta| == `distance` on the
+   *  side resolved by `_resolveFaceSagittaSign`. */
+  private _commitTypedFaceBulge(distance: number): void {
+    if (this.faceStage.kind !== 'bulge') return
+    const sign = this._resolveFaceSagittaSign()
+    if (sign === null) {
+      this.onMeasurementCb(FLAT_BULGE_HINT)
+      return
+    }
+    const { object, face, a, b, normal } = this.faceStage
+    const basis = facePlaneBasis(normal)
+    const verts = basis === null ? null : arcPolylineOnPlane(a, b, sign * distance, basis.u, basis.v)
+    if (verts === null) {
+      this.onMeasurementCb(FLAT_BULGE_HINT)
+      return
+    }
+    this.faceStage = { kind: 'idle' }
+    this.typed = ''
+    this._lastFaceCursor = null
+    this._lastSagittaSign = null
+    this._clearPreview()
+    this.onMeasurementCb('')
+    this._commitFaceChain(object, face, verts)
+  }
+
+  /**
+   * Resolve the bulge side for a typed ground commit: the sign of the live
+   * cursor's sagitta if it's non-negligible, else the last nonzero side seen
+   * this bulge stage, else null (refuse — see module doc).
+   */
+  private _resolveGroundSagittaSign(): -1 | 1 | null {
+    if (this.groundStage.kind !== 'bulge') return null
+    const { a, b } = this.groundStage
+    const cursor = this._lastGroundCursor
+    if (cursor !== null) {
+      const s = chordSagitta(a, b, cursor)
+      if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) return Math.sign(s) as -1 | 1
+    }
+    return this._lastSagittaSign
+  }
+
+  /** Face-mode counterpart of `_resolveGroundSagittaSign`. */
+  private _resolveFaceSagittaSign(): -1 | 1 | null {
+    if (this.faceStage.kind !== 'bulge') return null
+    const { a, b, normal } = this.faceStage
+    const cursor = this._lastFaceCursor
+    if (cursor !== null) {
+      const s = this._faceChordSagitta(a, b, normal, cursor)
+      if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) return Math.sign(s) as -1 | 1
+    }
+    return this._lastSagittaSign
   }
 
   /**
@@ -276,7 +486,7 @@ export class ArcTool implements Tool {
   private _onPointerMoveGround(snap: Snap | null): void {
     if (snap === null || this.groundStage.kind === 'idle') {
       this._clearPreview()
-      this.onMeasurementCb('')
+      if (this.typed === '') this.onMeasurementCb('')
       return
     }
 
@@ -284,21 +494,25 @@ export class ArcTool implements Tool {
       // Stage 2: rubber-band the chord A→cursor, report chord length.
       const { a } = this.groundStage
       const cursor: [number, number] = [snap.x, snap.y]
+      this._lastGroundCursor = cursor
       this._clearPreview()
       this._drawSegments([[a[0], a[1], 0], [cursor[0], cursor[1], 0]], /* liftZ */ true)
-      this.onMeasurementCb(formatLength(Math.hypot(cursor[0] - a[0], cursor[1] - a[1])))
+      this.onMeasurementCb(this._measurementText(formatLength(Math.hypot(cursor[0] - a[0], cursor[1] - a[1]))))
       return
     }
 
     // Stage 3: rubber-band the faceted arc through the cursor's bulge side.
     const { a, b } = this.groundStage
-    const s = chordSagitta(a, b, [snap.x, snap.y])
+    const cursor: [number, number] = [snap.x, snap.y]
+    this._lastGroundCursor = cursor
+    const s = chordSagitta(a, b, cursor)
+    if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(s) as -1 | 1
     const verts = s === null ? null : this._groundPolyline(a, b, s)
     if (verts === null) {
       // Flat bulge — fall back to showing the bare chord.
       this._clearPreview()
       this._drawSegments([[a[0], a[1], 0], [b[0], b[1], 0]], /* liftZ */ true)
-      this.onMeasurementCb('')
+      this.onMeasurementCb(this._measurementText(''))
       return
     }
     this._clearPreview()
@@ -312,17 +526,15 @@ export class ArcTool implements Tool {
     if (this.groundStage.kind === 'idle') {
       // First click: endpoint A
       this.groundStage = { kind: 'chord', a: [snap.x, snap.y] }
+      this.typed = ''
+      this._lastGroundCursor = null
       return
     }
 
     if (this.groundStage.kind === 'chord') {
       // Second click: endpoint B (the chord). Ignore a degenerate chord.
-      const { a } = this.groundStage
       const b: [number, number] = [snap.x, snap.y]
-      if (Math.hypot(b[0] - a[0], b[1] - a[1]) < ARC_MIN_CHORD_M) return
-      this.groundStage = { kind: 'bulge', a, b }
-      this._clearPreview()
-      this.onMeasurementCb('')
+      this._placeGroundB(b)
       return
     }
 
@@ -337,6 +549,24 @@ export class ArcTool implements Tool {
 
     this._commitGroundChain(verts)
     this.groundStage = { kind: 'idle' }
+    this.typed = ''
+    this._lastGroundCursor = null
+    this._lastSagittaSign = null
+    this._clearPreview()
+    this.onMeasurementCb('')
+  }
+
+  /** Place chord endpoint B (ground) — shared by the pointer-click and typed
+   *  (`_commitTypedGroundChord`) paths. Ignores a degenerate (sub-ARC_MIN_CHORD_M)
+   *  chord. */
+  private _placeGroundB(b: [number, number]): void {
+    if (this.groundStage.kind !== 'chord') return
+    const { a } = this.groundStage
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < ARC_MIN_CHORD_M) return
+    this.groundStage = { kind: 'bulge', a, b }
+    this.typed = ''
+    this._lastGroundCursor = null
+    this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
   }
@@ -392,9 +622,11 @@ export class ArcTool implements Tool {
     return intersectPlane(ray.origin, ray.direction, planePoint, normal)
   }
 
-  /** In-plane (u,v) sagitta of `cursor` for the face chord a→b, plus the
-   * face polyline it implies. Returns null when flat/degenerate. */
-  private _facePolyline(a: V3, b: V3, normal: V3, cursor: V3): V3[] | null {
+  /** In-plane (u,v) signed sagitta of `cursor` relative to the face chord
+   * a→b (the shared projection step `_facePolyline` and the bulge-side
+   * resolution both need). Returns null when the face has no valid in-plane
+   * basis, or the chord is degenerate in-plane. */
+  private _faceChordSagitta(a: V3, b: V3, normal: V3, cursor: V3): number | null {
     const basis = facePlaneBasis(normal)
     if (basis === null) return null
     const { u, v } = basis
@@ -404,40 +636,51 @@ export class ArcTool implements Tool {
       const dz = p[2] - a[2]
       return [dx * u[0] + dy * u[1] + dz * u[2], dx * v[0] + dy * v[1] + dz * v[2]]
     }
-    const b2 = project(b)
-    const s = chordSagitta([0, 0], b2, project(cursor))
+    return chordSagitta([0, 0], project(b), project(cursor))
+  }
+
+  /** In-plane (u,v) sagitta of `cursor` for the face chord a→b, plus the
+   * face polyline it implies. Returns null when flat/degenerate. */
+  private _facePolyline(a: V3, b: V3, normal: V3, cursor: V3): V3[] | null {
+    const basis = facePlaneBasis(normal)
+    if (basis === null) return null
+    const s = this._faceChordSagitta(a, b, normal, cursor)
     if (s === null) return null
-    return arcPolylineOnPlane(a, b, s, u, v)
+    return arcPolylineOnPlane(a, b, s, basis.u, basis.v)
   }
 
   private _onPointerMoveFace(snap: Snap | null, ray: Ray): void {
     if (this.faceStage.kind === 'idle') {
       this._clearPreview()
-      this.onMeasurementCb('')
+      if (this.typed === '') this.onMeasurementCb('')
       return
     }
     const cursor = this._faceCursor(snap, ray)
     if (cursor === null) {
       this._clearPreview()
-      this.onMeasurementCb('')
+      if (this.typed === '') this.onMeasurementCb('')
       return
     }
 
     if (this.faceStage.kind === 'chord') {
       const { a } = this.faceStage
+      this._lastFaceCursor = cursor
       this._clearPreview()
       this._drawSegments([a, cursor], /* liftZ */ false)
-      this.onMeasurementCb(formatLength(segmentLength(a, cursor)))
+      this.onMeasurementCb(this._measurementText(formatLength(segmentLength(a, cursor))))
       return
     }
 
     if (this.faceStage.kind !== 'bulge') return // (narrowing is lost across the _faceCursor call)
     const { a, b, normal } = this.faceStage
+    this._lastFaceCursor = cursor
+    const sSign = this._faceChordSagitta(a, b, normal, cursor)
+    if (sSign !== null && Math.abs(sSign) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(sSign) as -1 | 1
     const verts = this._facePolyline(a, b, normal, cursor)
     this._clearPreview()
     if (verts === null) {
       this._drawSegments([a, b], /* liftZ */ false)
-      this.onMeasurementCb('')
+      this.onMeasurementCb(this._measurementText(''))
       return
     }
     this._drawSegments(verts, /* liftZ */ false)
@@ -472,6 +715,8 @@ export class ArcTool implements Tool {
           planePoint: a,
           a,
         }
+        this.typed = ''
+        this._lastFaceCursor = null
       } finally {
         pick.free()
       }
@@ -483,11 +728,7 @@ export class ArcTool implements Tool {
 
     if (this.faceStage.kind === 'chord') {
       // Second click: endpoint B. Ignore a degenerate chord.
-      const { object, face, normal, planePoint, a } = this.faceStage
-      if (segmentLength(a, cursor) < ARC_MIN_CHORD_M) return
-      this.faceStage = { kind: 'bulge', object, face, normal, planePoint, a, b: cursor }
-      this._clearPreview()
-      this.onMeasurementCb('')
+      this._placeFaceB(cursor)
       return
     }
 
@@ -501,9 +742,27 @@ export class ArcTool implements Tool {
     }
 
     this.faceStage = { kind: 'idle' }
+    this.typed = ''
+    this._lastFaceCursor = null
+    this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
     this._commitFaceChain(object, face, verts)
+  }
+
+  /** Place chord endpoint B (face) — shared by the pointer-click and typed
+   *  (`_commitTypedFaceChord`) paths. Ignores a degenerate (sub-ARC_MIN_CHORD_M)
+   *  chord. */
+  private _placeFaceB(cursor: V3): void {
+    if (this.faceStage.kind !== 'chord') return
+    const { object, face, normal, planePoint, a } = this.faceStage
+    if (segmentLength(a, cursor) < ARC_MIN_CHORD_M) return
+    this.faceStage = { kind: 'bulge', object, face, normal, planePoint, a, b: cursor }
+    this.typed = ''
+    this._lastFaceCursor = null
+    this._lastSagittaSign = null
+    this._clearPreview()
+    this.onMeasurementCb('')
   }
 
   /** Cut `face` along the arc polyline (open, boundary-to-boundary — the
@@ -534,10 +793,10 @@ export class ArcTool implements Tool {
   private _reportRadius(a: Vec2, b: Vec2, s: number): void {
     const arc = arcFromChord(a, b, s)
     if (arc === null) {
-      this.onMeasurementCb('')
+      this.onMeasurementCb(this._measurementText(''))
       return
     }
-    this.onMeasurementCb(`R ${formatLength(arc.radius)}`)
+    this.onMeasurementCb(this._measurementText(`R ${formatLength(arc.radius)}`))
   }
 
   /** Report the radius from an already-built polyline (face mode): the
@@ -556,11 +815,11 @@ export class ArcTool implements Tool {
     const p = (ab + am + bm) / 2
     const areaSq = p * (p - ab) * (p - am) * (p - bm)
     if (areaSq <= 0) {
-      this.onMeasurementCb('')
+      this.onMeasurementCb(this._measurementText(''))
       return
     }
     const radius = (ab * am * bm) / (4 * Math.sqrt(areaSq))
-    this.onMeasurementCb(`R ${formatLength(radius)}`)
+    this.onMeasurementCb(this._measurementText(`R ${formatLength(radius)}`))
   }
 
   // ------------------------------------------------------------------ preview

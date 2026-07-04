@@ -40,10 +40,8 @@ export interface MenuBarProps {
   onSaveAs: () => void
   /** Import a model file (COLLADA / glTF — chosen in the file dialog). */
   onImport: () => void
-  /** Export the model (glTF/GLB — format chosen in the file dialog). */
+  /** Open the unified Export dialog (format — glTF/GLB or STL — chosen there). */
   onExport: () => void
-  /** Export the model as binary STL, mm scale. */
-  onExportStl: () => void
   /** Recent file paths (most-recent first), shown under File ▸ Open Recent. */
   recentFiles?: string[]
   /** Open a recent file by its path. */
@@ -281,7 +279,6 @@ export function MenuBar({
   onSaveAs,
   onImport,
   onExport,
-  onExportStl,
   recentFiles,
   onOpenRecent,
   onClearRecent,
@@ -379,7 +376,6 @@ export function MenuBar({
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Import…" onClick={withClose(onImport)} />
             <MenuItem label="Export…" onClick={withClose(onExport)} />
-            <MenuItem label="Export STL…" onClick={withClose(onExportStl)} />
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
             <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />

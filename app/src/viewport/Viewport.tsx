@@ -1941,8 +1941,11 @@ export default function Viewport({
         return
       }
 
-      // Redo: Shift+Cmd/Ctrl+Z — document-level
-      if (isMod && ev.shiftKey && ev.key === 'z') {
+      // Redo: Shift+Cmd/Ctrl+Z — document-level. With Shift held, ev.key is
+      // the UPPERCASE letter, so compare case-insensitively (a bare === 'z'
+      // never fires on a physical keyboard — caught by the input-pipeline
+      // E2E redo spec).
+      if (isMod && ev.shiftKey && ev.key.toLowerCase() === 'z') {
         ev.preventDefault()
         if (wasmSceneRef.current.can_scene_redo()) {
           try {

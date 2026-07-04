@@ -40,9 +40,10 @@ import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { StlExportDialog } from './panels/StlExportDialog'
+import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
 import { CommandPalette } from './palette/CommandPalette'
-import { toolHint } from './palette/registry'
+import { toolHint, toolActionId } from './palette/registry'
 import { UnitsPane } from './settings/UnitsPane'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
@@ -902,7 +903,7 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
-  /** Entry point (File ▸ Export STL…): gate on solid status first. */
+  /** Entry point (Export dialog, STL format): gate on solid status first. */
   const exportStl = useCallback(async () => {
     const scene = sceneRef.current
     const offenders = scene !== null ? collectNonSolidObjects(scene) : []
@@ -912,6 +913,22 @@ export default function App() {
     }
     await doExportStl()
   }, [doExportStl])
+
+  // ---------------------------------------------------------------- unified Export dialog
+  // File ▸ Export… now opens ONE dialog with a Format select (glTF/STL)
+  // instead of two separate menu entries — the dialog's Export dispatches to
+  // whichever of exportGltf/exportStl the user picked; STL's solid-gating
+  // dialog remains the follow-on step (chain unchanged).
+  const [exportDialogOpen, setExportDialogOpen] = useState(false)
+
+  const handleExportFormat = useCallback((format: ExportFormat) => {
+    setExportDialogOpen(false)
+    if (format === 'glb') {
+      void exportGltf()
+    } else {
+      void exportStl()
+    }
+  }, [exportGltf, exportStl])
 
   // ---------------------------------------------------------------- settings window
   // Under Tauri: a separate, free-floating OS webview window (movable outside
@@ -949,8 +966,6 @@ export default function App() {
   const handleUndoRef = useRef(handleUndo)
   const handleRedoRef = useRef(handleRedo)
   const handleZoomExtentsRef = useRef(handleZoomExtents)
-  const exportGltfRef = useRef(exportGltf)
-  const exportStlRef = useRef(exportStl)
   const openPathRef = useRef(openPath)
   const openSettingsRef = useRef(openSettings)
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
@@ -961,8 +976,6 @@ export default function App() {
   useEffect(() => { handleUndoRef.current = handleUndo }, [handleUndo])
   useEffect(() => { handleRedoRef.current = handleRedo }, [handleRedo])
   useEffect(() => { handleZoomExtentsRef.current = handleZoomExtents }, [handleZoomExtents])
-  useEffect(() => { exportGltfRef.current = exportGltf }, [exportGltf])
-  useEffect(() => { exportStlRef.current = exportStl }, [exportStl])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
   useEffect(() => { openSettingsRef.current = openSettings }, [openSettings])
 
@@ -1000,8 +1013,7 @@ export default function App() {
       case 'new':      newDocumentRef.current(); break
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
-      case 'export':   exportGltfRef.current(); break
-      case 'export-stl': exportStlRef.current(); break
+      case 'export':   setExportDialogOpen(true); break
       case 'save':     saveDocumentRef.current(); break
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
@@ -1628,8 +1640,7 @@ export default function App() {
         onSave={saveDocument}
         onSaveAs={saveAsDocument}
         onImport={importDocument}
-        onExport={exportGltf}
-        onExportStl={exportStl}
+        onExport={() => setExportDialogOpen(true)}
         recentFiles={recentFiles}
         onOpenRecent={openRecent}
         onClearRecent={clearRecent}
@@ -1756,11 +1767,15 @@ export default function App() {
               no curated verb set for the current selection (a sketch, or a
               construction guide), and fades out while the camera is being
               dragged. Reuses the same menuActionRef dispatch the
-              palette and every menu item already go through. */}
+              palette and every menu item already go through.
+              activeToolId tells the dock which verb, if any,
+              is the ACTUAL active tool — so it never shows a stale "selected"
+              verb (e.g. Rectangle) while a different tool (e.g. Arc) is live. */}
           <ContextualDock
             selectedIds={selectedIds}
             selectedGuide={selectedGuide}
             hidden={cameraDragging}
+            activeToolId={toolActionId(activeTool)}
             onRun={(id) => menuActionRef.current(id)}
           />
 
@@ -1949,6 +1964,17 @@ export default function App() {
         <ImportReportDialog
           report={importReport}
           onClose={() => setImportReport(null)}
+        />
+      )}
+
+      {/* Unified Export dialog  — File ▸ Export…'s one entry
+          point; the Format select decides glTF vs. STL, dispatching to
+          exportGltf/exportStl. STL's solid-gating confirmation below remains
+          the follow-on step. */}
+      {exportDialogOpen && (
+        <ExportDialog
+          onExport={handleExportFormat}
+          onCancel={() => setExportDialogOpen(false)}
         />
       )}
 

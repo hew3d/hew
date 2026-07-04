@@ -15,6 +15,7 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Rectangle')).toBeInTheDocument()
     expect(screen.getByText('Line')).toBeInTheDocument()
     expect(screen.getByText('Circle')).toBeInTheDocument()
+    expect(screen.getByText('Arc')).toBeInTheDocument()
   })
 
   it('shows the Object verb set for a single selected Object', () => {
@@ -70,6 +71,39 @@ describe('ContextualDock', () => {
     render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={onRun} />)
     fireEvent.click(screen.getByText('Erase'))
     expect(onRun).toHaveBeenCalledWith('edit-delete')
+  })
+
+  // --- Active-tool highlight  ---
+
+  it('does NOT highlight the first (primary) verb when it is not the active tool', () => {
+    render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} activeToolId="tool-arc" />)
+    // Rectangle is first in EMPTY_VERBS (the old "primary" slot) but Arc is
+    // the actual active tool here — Rectangle must render unselected.
+    const rectangleBtn = screen.getByRole('button', { name: 'Rectangle' })
+    expect(rectangleBtn.style.border).toBe('1px solid transparent')
+  })
+
+  it('highlights the verb matching activeToolId, wherever it sits in the list', () => {
+    render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} activeToolId="tool-arc" />)
+    const arcBtn = screen.getByRole('button', { name: 'Arc' })
+    expect(arcBtn.style.border).toContain('var(--accent-border)')
+  })
+
+  it('highlights nothing when activeToolId is undefined', () => {
+    render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} />)
+    for (const label of ['Rectangle', 'Line', 'Circle', 'Arc']) {
+      const btn = screen.getByRole('button', { name: label })
+      expect(btn.style.border).toBe('1px solid transparent')
+    }
+  })
+
+  it('highlights nothing when activeToolId is not in the current context\'s verb set', () => {
+    // Arc has no dock verb in the Object context — nothing should light up.
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} activeToolId="tool-arc" />)
+    for (const label of ['Push/Pull', 'Move', 'Paint', 'Erase']) {
+      const btn = screen.getByRole('button', { name: label })
+      expect(btn.style.border).toBe('1px solid transparent')
+    }
   })
 
   it('cross-fades on context change: container carries.hew-dock and remounts when the context swaps', () => {

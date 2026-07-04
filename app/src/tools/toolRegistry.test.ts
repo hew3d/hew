@@ -58,8 +58,8 @@ describe('toolRegistry', () => {
       }
     })
 
-    it('Arc has no macOS shortcut yet (Cmd-scheme slot is a pending product decision)', () => {
-      expect(shortcutFor('Arc', true)).toBe('')
+    it('Arc uses Cmd+J on macOS — SketchUp\'s arc-family key (assigned)', () => {
+      expect(shortcutFor('Arc', true)).toBe('⌘J')
     })
 
     it('camera tools keep their existing Ctrl-combo shortcuts on non-Mac (no spec bare letter)', () => {

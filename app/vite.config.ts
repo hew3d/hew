@@ -14,8 +14,9 @@ export default defineConfig({
         name: 'Hew',
         short_name: 'Hew',
         description: 'A solids-first 3D modeler',
-        theme_color: '#1e1e1e',
-        background_color: '#1e1e1e',
+        // Brand "Charcoal" (Hew Brand Sheet v1) — the PWA splash / OS chrome color.
+        theme_color: '#1b1a17',
+        background_color: '#1b1a17',
         display: 'standalone',
         start_url: '/',
         icons: [

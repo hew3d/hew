@@ -23,6 +23,12 @@ function makeKeyEvent(key: string): KeyboardEvent {
   return { key, preventDefault: () => {} } as unknown as KeyboardEvent
 }
 
+/** Feed each character of `s` through `onKey` (digits/'.'/'-' only — enough
+ *  for the VCB tests below), mirroring how the Viewport forwards keydown. */
+function typeDigits(tool: ArcTool, s: string): void {
+  for (const ch of s) tool.onKey(makeKeyEvent(ch))
+}
+
 /** A fake `FacePickJs` returning the seeded handles. */
 function makePick(object: bigint, face: bigint) {
   return {
@@ -234,6 +240,129 @@ describe('ArcTool — ground mode', () => {
     const last = onMeasurement.mock.calls.at(-1)?.[0] as string
     expect(last.startsWith('R ')).toBe(true)
     expect(last).toContain('1') // 1 m in the default unit format
+  })
+})
+
+describe('ArcTool — typed VCB entry ', () => {
+  it('chord stage: typed length commits B at that distance along the live cursor direction', () => {
+    const { scene, segments } = makeWasmScene()
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)   // A
+    tool.onPointerMove(makeSnap({ x: 1, y: 0 }), RAY)   // establish +X direction
+    typeDigits(tool, '5')
+    tool.onKey(makeKeyEvent('Enter'))                   // commits B = (5, 0)
+
+    // Now in the bulge stage with a=(0,0), b=(5,0) — commit via pointer.
+    tool.onPointerDown(makeSnap({ x: 2.5, y: 1 }), RAY)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+
+    expect(segments[0][0]).toBe(0)
+    expect(segments[0][1]).toBe(0)
+    expect(segments[segments.length - 1][3]).toBe(5)
+    expect(segments[segments.length - 1][4]).toBe(0)
+  })
+
+  it('chord stage: typed commit is refused with no live cursor direction yet', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY) // A — no pointer move yet
+    typeDigits(tool, '5')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    // Still waiting for B: an ordinary click now becomes B, not a bulge commit.
+    tool.onPointerDown(makeSnap({ x: 3, y: 0 }), RAY)
+    expect(onCommit).not.toHaveBeenCalled()
+    tool.onPointerDown(makeSnap({ x: 1.5, y: 1 }), RAY) // bulge → commits
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('chord stage: a typed distance below ARC_MIN_CHORD_M is refused', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0 }), RAY)
+    typeDigits(tool, '0')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    // Still waiting for B.
+    tool.onPointerDown(makeSnap({ x: 3, y: 0 }), RAY)
+    expect(onCommit).not.toHaveBeenCalled()
+    tool.onPointerDown(makeSnap({ x: 1.5, y: 1 }), RAY)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('bulge stage: typed length sets |sagitta| on the side the live cursor is currently on', () => {
+    const { scene, segments } = makeWasmScene()
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY) // A
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY) // B — chord (0,0)-(2,0)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5 }), RAY) // cursor on the +y side
+    typeDigits(tool, '1')
+    tool.onKey(makeKeyEvent('Enter')) // commits sagitta = +1 (the typed magnitude, +y side)
+
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    // Every vertex lands on the +y (bulge) side, matching the live cursor's side.
+    for (const s of segments) {
+      expect(s[1]).toBeGreaterThanOrEqual(0)
+      expect(s[4]).toBeGreaterThanOrEqual(0)
+    }
+    // The sagitta really is ~1 (not the ~0.5 the cursor itself was at) — the
+    // typed distance overrides the live cursor's distance, only its side.
+    const ys = segments.flatMap((s) => [s[1], s[4]])
+    expect(Math.max(...ys)).toBeCloseTo(1, 6)
+  })
+
+  it('bulge stage: cursor exactly on the chord falls back to the last nonzero side seen', () => {
+    const { scene, segments } = makeWasmScene()
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY) // A
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY) // B
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5 }), RAY) // establish +y side
+    tool.onPointerMove(makeSnap({ x: 1, y: 0 }), RAY)   // cursor now ON the chord
+    typeDigits(tool, '1')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const ys = segments.flatMap((s) => [s[1], s[4]])
+    expect(Math.max(...ys)).toBeCloseTo(1, 6) // committed on the remembered +y side
+  })
+
+  it('bulge stage: no side ever established refuses the typed commit (same hint as a flat pointer commit)', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onCommit, onMeasurement } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY) // A
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY) // B — no pointer move since
+    typeDigits(tool, '1')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(onMeasurement).toHaveBeenLastCalledWith('Pull out the bulge')
+
+    // The gesture is still alive — a real pointer bulge still commits.
+    tool.onPointerDown(makeSnap({ x: 1, y: 1 }), RAY)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('the typed buffer readout replaces the live measurement until committed', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onMeasurement } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0 }), RAY)
+    onMeasurement.mockClear()
+
+    typeDigits(tool, '5')
+    expect(onMeasurement).toHaveBeenLastCalledWith(expect.stringContaining('5'))
+
+    // Further pointer movement must NOT clobber the typed readout.
+    tool.onPointerMove(makeSnap({ x: 3, y: 0 }), RAY)
+    expect(onMeasurement).toHaveBeenLastCalledWith(expect.stringContaining('5'))
   })
 })
 

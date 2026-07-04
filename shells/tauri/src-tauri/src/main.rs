@@ -394,9 +394,11 @@ fn main() {
                 .accelerator("CmdOrCtrl+O")
                 .build(handle)?;
             let file_import = MenuItemBuilder::with_id("file-import", "Import…").build(handle)?;
+            // Export… opens the unified Export dialog (format — glTF/GLB or
+            // STL — chosen there); there used to be a second "Export STL…"
+            // item here, but the design calls for format choice handled in-dialog like
+            // every other app.
             let file_export = MenuItemBuilder::with_id("file-export", "Export…").build(handle)?;
-            let file_export_stl =
-                MenuItemBuilder::with_id("file-export-stl", "Export STL…").build(handle)?;
             let file_save = MenuItemBuilder::with_id("file-save", "Save")
                 .accelerator("CmdOrCtrl+S")
                 .build(handle)?;
@@ -414,7 +416,6 @@ fn main() {
                 .separator()
                 .item(&file_import)
                 .item(&file_export)
-                .item(&file_export_stl)
                 .separator()
                 .item(&file_save)
                 .item(&file_save_as)
@@ -481,9 +482,17 @@ fn main() {
 
             let draw_circle = MenuItemBuilder::with_id("draw-circle", "Circle").build(handle)?;
 
+            // Arc : Cmd+J is SketchUp's arc-family
+            // key on macOS, even though Hew's Arc is the simpler 2-point
+            // gesture rather than SketchUp's multi-mode arc tool family.
+            let draw_arc = MenuItemBuilder::with_id("draw-arc", "Arc")
+                .accelerator("CmdOrCtrl+J")
+                .build(handle)?;
+
             let draw_shapes = SubmenuBuilder::new(handle, "Shapes")
                 .item(&draw_rect)
                 .item(&draw_circle)
+                .item(&draw_arc)
                 .build()?;
 
             let draw_line = MenuItemBuilder::with_id("draw-line", "Line")
@@ -690,7 +699,6 @@ fn main() {
                 "file-open" => "open",
                 "file-import" => "import",
                 "file-export" => "export",
-                "file-export-stl" => "export-stl",
                 "file-save" => "save",
                 "file-save-as" => "save-as",
                 "file-close" => "close",
@@ -703,6 +711,7 @@ fn main() {
                 "view-palette" => "open-palette",
                 "draw-rectangle" => "tool-rectangle",
                 "draw-circle" => "tool-circle",
+                "draw-arc" => "tool-arc",
                 "draw-line" => "tool-line",
                 "tool-select" => "tool-select",
                 "tool-paint" => "tool-paint",

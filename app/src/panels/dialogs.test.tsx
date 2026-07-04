@@ -16,6 +16,7 @@ import { RecoveryDialog } from './RecoveryDialog'
 import { ImportingOverlay } from './ImportingOverlay'
 import { ImportReportDialog } from './ImportReportDialog'
 import { StlExportDialog } from './StlExportDialog'
+import { ExportDialog } from './ExportDialog'
 import type { RecoverySnapshot } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
 
@@ -256,5 +257,54 @@ describe('StlExportDialog', () => {
   it('has the expected ARIA dialog role and label', () => {
     render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /export stl warning/i })).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ExportDialog (unified Export… dialog, — replaces the two
+// separate "Export…"/"Export STL…" menu entries)
+// ---------------------------------------------------------------------------
+
+describe('ExportDialog', () => {
+  it('has the expected ARIA dialog role and label', () => {
+    render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByRole('dialog', { name: /export/i })).toBeInTheDocument()
+  })
+
+  it('shows both format options in the Format select', () => {
+    render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByText(/gltf binary \(\.glb\).*y-up, meters/i)).toBeInTheDocument()
+    expect(screen.getByText(/stl binary \(\.stl\).*millimeters, for 3d printing/i)).toBeInTheDocument()
+  })
+
+  it('defaults to glTF and calls onExport with "glb" when Export is clicked', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenCalledWith('glb')
+  })
+
+  it('calls onExport with "stl" after switching the Format select to STL', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenCalledWith('stl')
+  })
+
+  it('calls onCancel when Cancel is clicked', () => {
+    const onCancel = vi.fn()
+    render(<ExportDialog onExport={vi.fn()} onCancel={onCancel} />)
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  it('calls onCancel — never onExport — when Escape is pressed', () => {
+    const onExport = vi.fn()
+    const onCancel = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={onCancel} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledOnce()
+    expect(onExport).not.toHaveBeenCalled()
   })
 })

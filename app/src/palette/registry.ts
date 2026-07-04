@@ -78,6 +78,14 @@ export function toolHint(name: string): string {
   return TOOL_DESCRIPTIONS[name as ToolName] ?? ''
 }
 
+/** The `menuActionRef` dispatch id for a tool name (e.g. `'Arc'` ->
+ * `'tool-arc'`) — the same id space `dockLogic.ts`'s verbs and this
+ * registry's own tool entries use. `undefined` for an unknown tool name
+ * (the contextual dock uses this to match its active-tool highlight). */
+export function toolActionId(name: string): string | undefined {
+  return TOOL_ACTION_ID[name as ToolName]
+}
+
 const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
   'Push/Pull': ['extrude', 'pull', 'push'],
   'Rectangle': ['rect', 'box'],
@@ -101,8 +109,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'new', label: 'New', description: 'Start a new, blank document.', group: 'Actions' },
   { id: 'open', label: 'Open…', description: 'Open a .hew file from disk.', group: 'Actions' },
   { id: 'import', label: 'Import…', description: 'Import a COLLADA (.dae) or glTF model.', group: 'Actions' },
-  { id: 'export', label: 'Export…', description: 'Export the model as glTF/GLB.', group: 'Actions' },
-  { id: 'export-stl', label: 'Export STL…', description: 'Export the model as binary STL (millimeters) for 3D printing.', group: 'Actions', synonyms: ['print', 'slicer'] },
+  { id: 'export', label: 'Export…', description: 'Export the model as glTF or STL — format chosen in the dialog.', group: 'Actions', synonyms: ['stl', 'glb', 'gltf', '3d print', 'print', 'slicer'] },
   { id: 'save', label: 'Save', description: 'Save the current document.', group: 'Actions' },
   { id: 'save-as', label: 'Save As…', description: 'Save the current document under a new name.', group: 'Actions' },
   { id: 'undo', label: 'Undo', description: 'Undo the last change.', group: 'Actions' },

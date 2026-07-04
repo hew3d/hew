@@ -20,7 +20,6 @@ const defaultProps: MenuBarProps = {
   onSaveAs: vi.fn(),
   onImport: vi.fn(),
   onExport: vi.fn(),
-  onExportStl: vi.fn(),
   onUndo: vi.fn(),
   onRedo: vi.fn(),
   canUndo: false,

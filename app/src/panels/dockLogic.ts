@@ -46,6 +46,7 @@ const EMPTY_VERBS: DockVerb[] = [
   { id: 'tool-rectangle', label: 'Rectangle' },
   { id: 'tool-line', label: 'Line' },
   { id: 'tool-circle', label: 'Circle' },
+  { id: 'tool-arc', label: 'Arc' },
 ]
 
 /** Spec's Face row (Push/Pull primary, then Offset · Move · Paint · Erase) is

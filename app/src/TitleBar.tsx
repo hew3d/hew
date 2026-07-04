@@ -53,14 +53,14 @@ const barStyle: React.CSSProperties = {
   padding: '0 0 0 var(--space-6, 13px)',
 }
 
-/** Placeholder app glyph (README's "Logo/wordmark" open item — a rounded
- * accent square stands in until a real mark exists). */
+/** App glyph — the Hew mark (open isometric-cube wireframe, "Terracotta" from
+ * the Hew Brand Sheet v1). Kept as brand Terracotta (#C45D3C) rather than the
+ * UI `--accent-base` on purpose: the mark is brand chrome, not a themed accent.
+ * Stroke is thickened vs. the source SVG (4.6→7 in the 100-unit viewBox) so the
+ * wireframe stays legible at ~15px. */
 const glyphStyle: React.CSSProperties = {
-  width: 14,
-  height: 14,
-  borderRadius: 4,
-  background: 'var(--accent-base, #5b8cff)',
   flexShrink: 0,
+  display: 'block',
 }
 
 const nameStyle: React.CSSProperties = {
@@ -162,7 +162,20 @@ export function TitleBar({ name, saveState }: TitleBarProps) {
   return (
     <>
       <div style={barStyle} data-tauri-drag-region>
-        <div aria-hidden="true" style={glyphStyle} />
+        <svg
+          aria-hidden="true"
+          width="15"
+          height="15"
+          viewBox="-50 -50 100 100"
+          style={glyphStyle}
+        >
+          <g fill="none" stroke="#C45D3C" strokeWidth="7" strokeLinejoin="round" strokeLinecap="round">
+            <polygon points="0,-34 29.44,-17 29.44,17 0,34 -29.44,17 -29.44,-17" />
+            <line x1="0" y1="0" x2="0" y2="-34" />
+            <line x1="0" y1="0" x2="-29.44" y2="-17" />
+            <line x1="0" y1="0" x2="29.44" y2="-17" />
+          </g>
+        </svg>
         <span style={nameStyle}>{name}</span>
         {saveState !== '' && <span style={saveStateStyle}>{saveState}</span>}
         <div style={dragFillStyle} data-tauri-drag-region />

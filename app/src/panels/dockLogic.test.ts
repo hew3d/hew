@@ -40,9 +40,9 @@ describe('deriveDockContext', () => {
 })
 
 describe('dockVerbsFor', () => {
-  it('empty: primary Rectangle, then Line, Circle', () => {
+  it('empty: primary Rectangle, then Line, Circle, Arc', () => {
     const verbs = dockVerbsFor('empty')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-rectangle', 'tool-line', 'tool-circle'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-rectangle', 'tool-line', 'tool-circle', 'tool-arc'])
   })
 
   it('object: primary Push/Pull, then Move, Paint, Erase (spec Face row)', () => {

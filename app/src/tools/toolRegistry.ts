@@ -48,11 +48,12 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Line', group: 'Draw', macKey: '⌘L', winKey: 'L' },
   { name: 'Rectangle', group: 'Draw', macKey: '⌘K', winKey: 'R' },
   { name: 'Circle', group: 'Draw', macKey: 'C', winKey: 'C' },
-  // Arc: 'A' is SketchUp-for-Windows' real arc key. The macOS
-  // Cmd-scheme has no slot assigned yet — that's a product decision, so
-  // macKey stays empty (Arc remains reachable on mac via the rail, the Draw
-  // menu, and the command palette).
-  { name: 'Arc', group: 'Draw', macKey: '', winKey: 'A' },
+  // Arc: 'A' is SketchUp-for-Windows' real arc key. macKey assigned
+  //  — Cmd+J is SketchUp's arc-FAMILY key (it cycles through
+  // 2-point/3-point/pie arc modes there), even though Hew's Arc is only the
+  // simpler 2-point gesture; reusing the same key keeps muscle memory intact
+  // for anyone coming from SketchUp.
+  { name: 'Arc', group: 'Draw', macKey: '⌘J', winKey: 'A' },
   // ---- Modify ----
   { name: 'Push/Pull', group: 'Modify', macKey: '⌘=', winKey: 'P' },
   { name: 'Move', group: 'Modify', macKey: '⌘0', winKey: 'M' },

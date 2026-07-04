@@ -61,7 +61,16 @@ function VerbIcon({ verb }: { verb: DockVerb }) {
   )
 }
 
-function DockItem({ verb, primary, onRun }: { verb: DockVerb; primary: boolean; onRun: (id: string) => void }) {
+/**
+ * `selected` is the ONLY thing that drives the accent styling — it's true
+ * iff this verb is the actual active tool (`activeToolId` matched, from
+ * `ContextualDock`'s prop). Being first in the verbs array (formerly styled
+ * as "primary") no longer renders any different from the rest: a dock
+ * showing Rectangle/Line/Circle/Arc must never look like Rectangle is
+ * selected just because it's first — only Arc lights up while Arc is the
+ * live tool.
+ */
+function DockItem({ verb, selected, onRun }: { verb: DockVerb; selected: boolean; onRun: (id: string) => void }) {
   const [hovered, setHovered] = useState(false)
   return (
     <button
@@ -77,10 +86,10 @@ function DockItem({ verb, primary, onRun }: { verb: DockVerb; primary: boolean; 
         gap: '4px',
         padding: '8px var(--space-6, 13px)',
         minWidth: '60px',
-        border: primary ? '1px solid var(--accent-border)' : '1px solid transparent',
+        border: selected ? '1px solid var(--accent-border)' : '1px solid transparent',
         borderRadius: 'var(--radius-panel-item, 11px)',
-        background: primary ? 'var(--accent-tint-18)' : hovered ? 'rgba(255,255,255,0.04)' : 'transparent',
-        color: primary ? 'var(--accent-text-strong)' : 'var(--text-secondary)',
+        background: selected ? 'var(--accent-tint-18)' : hovered ? 'rgba(255,255,255,0.04)' : 'transparent',
+        color: selected ? 'var(--accent-text-strong)' : 'var(--text-secondary)',
         cursor: 'pointer',
         fontFamily: 'var(--font-family-ui)',
       }}
@@ -89,7 +98,7 @@ function DockItem({ verb, primary, onRun }: { verb: DockVerb; primary: boolean; 
       <span
         style={{
           fontSize: 'var(--font-size-dock-label, 11px)',
-          fontWeight: primary ? 600 : 400,
+          fontWeight: selected ? 600 : 400,
           whiteSpace: 'nowrap',
         }}
       >
@@ -107,9 +116,14 @@ export interface ContextualDockProps {
    * dragged (spec: "Hidden during pure camera navigation... reappears
    * on release"). Kept mounted so the fade can transition both ways. */
   hidden?: boolean
+  /** The dock-verb id of the ACTUAL active tool (e.g. `'tool-arc'`), or
+   * undefined/no-match if the active tool has no dock verb. Drives the one
+   * accent-highlighted item  — replaces the old
+   * "first verb always looks selected" behavior. */
+  activeToolId?: string
 }
 
-export function ContextualDock({ selectedIds, selectedGuide, onRun, hidden = false }: ContextualDockProps) {
+export function ContextualDock({ selectedIds, selectedGuide, onRun, hidden = false, activeToolId }: ContextualDockProps) {
   const context = deriveDockContext(selectedIds, selectedGuide)
   if (context === null) return null
 
@@ -168,8 +182,8 @@ export function ContextualDock({ selectedIds, selectedGuide, onRun, hidden = fal
         </span>
       </div>
 
-      {verbs.map((verb, i) => (
-        <DockItem key={verb.id} verb={verb} primary={i === 0} onRun={onRun} />
+      {verbs.map((verb) => (
+        <DockItem key={verb.id} verb={verb} selected={verb.id === activeToolId} onRun={onRun} />
       ))}
     </div>
   )
