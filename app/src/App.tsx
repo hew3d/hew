@@ -1230,6 +1230,12 @@ export default function App() {
         if (key === 's') { ev.preventDefault(); setActiveTool('Scale'); return }
         if (key === 't') { ev.preventDefault(); setActiveTool('Tape Measure'); return }
         if (key === 'b') { ev.preventDefault(); setActiveTool('Paint'); return }
+        // Camera tools: SketchUp's real O / H / Z — replaces the old
+        // Ctrl+B / Ctrl+R / Ctrl+\ Hew inventions so the rail, the menus,
+        // and actual dispatch all advertise the same keys.
+        if (key === 'o') { ev.preventDefault(); setActiveTool('Orbit'); return }
+        if (key === 'h') { ev.preventDefault(); setActiveTool('Pan'); return }
+        if (key === 'z') { ev.preventDefault(); setActiveTool('Zoom'); return }
       }
 
       // (Delete/Backspace handled by a dedicated always-on effect below, since
@@ -1258,24 +1264,8 @@ export default function App() {
         newDocument()
         return
       }
-      // Camera-tool shortcuts — not part of the design spec's bare-letter
-      // table (Hew additions beyond stock SketchUp), so these keep their
-      // existing Ctrl-combo bindings on every platform this handler runs on.
-      if (ev.key === 'b' && !ev.shiftKey) {
-        ev.preventDefault()
-        setActiveTool('Orbit')
-        return
-      }
-      if (ev.key === 'r' && !ev.shiftKey) {
-        ev.preventDefault()
-        setActiveTool('Pan')
-        return
-      }
-      if (ev.key === '\\') {
-        ev.preventDefault()
-        setActiveTool('Zoom')
-        return
-      }
+      // (Camera tools moved from Ctrl+B/R/\ to SketchUp's bare O / H / Z in
+      //  — see the bare-letter block above.)
       // Window pane toggles. Note: with Shift held, ev.key is the UPPERCASE
       // letter, so compare case-insensitively (else these never fire).
       if (ev.key.toLowerCase() === 'i' && ev.shiftKey) {
@@ -1634,8 +1624,10 @@ export default function App() {
       {/* App bar / menu bar.
           On macOS Tauri the native OS menu bar owns File/Edit (this renders
           nothing). On the web build and the Linux/Windows borderless shells,
-          the in-app bar renders the menus; the centered title is shown by
-          TitleBar on Linux/Windows so it is hidden here in that case. */}
+          the in-app bar renders the menus (Linux settled on in-app chrome
+          over the native GTK menubar — trialed and rejected); the
+          centered title is shown by TitleBar on Linux/Windows so it is
+          hidden here in that case. */}
       <MenuBar
         name={documentName(docSession)}
         saveState={saveStateLabel(docSession, nowTick)}
@@ -1676,7 +1668,6 @@ export default function App() {
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         onOpenSettings={openSettings}
         onReportBug={handleReportBug}
-        onOpenPalette={() => setPaletteOpen(true)}
       />
 
       {/* Kernel panic sticky banner */}
@@ -1724,12 +1715,14 @@ export default function App() {
         <ToolRail
           activeTool={activeTool}
           onSelectTool={(name) => setActiveTool(name)}
-          // macOS has no in-window menu bar to host the resting palette field
-          // (MenuBar renders nothing when nativeMenuBar), so the rail carries
-          // it there. The palette shortcut on macOS is Cmd+/ (Cmd+K stays
-          // Rectangle's native accelerator — Refinement).
-          onOpenPalette={isTauri && isMac ? () => setPaletteOpen(true) : undefined}
-          paletteKbd="⌘/"
+          // The resting palette field lives at the top of the rail on every
+          // platform ( — macOS forced it here since it has no in-window
+          // menu bar, and the rest follow for consistency). The shortcut on
+          // macOS desktop is Cmd+/ (Cmd+K stays Rectangle's native
+          // accelerator — Refinement); everywhere else Ctrl+K
+          // (metaKey ⌘K on mac web) via the global keydown handler above.
+          onOpenPalette={() => setPaletteOpen(true)}
+          paletteKbd={isTauri && isMac ? '⌘/' : isMac ? '⌘K' : 'Ctrl K'}
         />
         <div
           style={{ flex: 1, minWidth: 0, position: 'relative' }}

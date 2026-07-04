@@ -56,23 +56,11 @@ describe('MenuBar', () => {
     expect(screen.queryByText(/edited|saved/i)).not.toBeInTheDocument()
   })
 
-  // --- Command palette resting field ---
+  // --- Command palette resting field: moved to ToolRail ---
 
-  it('omits the resting palette field when onOpenPalette is not provided', () => {
+  it('never renders a palette search field (it lives in ToolRail since)', () => {
     render(<MenuBar {...defaultProps} />)
-    expect(screen.queryByText(/search tools, actions, help/i)).not.toBeInTheDocument()
-  })
-
-  it('shows the resting palette field when onOpenPalette is provided', () => {
-    render(<MenuBar {...defaultProps} onOpenPalette={vi.fn()} />)
-    expect(screen.getByText(/search tools, actions, help/i)).toBeInTheDocument()
-  })
-
-  it('clicking the resting palette field calls onOpenPalette', () => {
-    const onOpenPalette = vi.fn()
-    render(<MenuBar {...defaultProps} onOpenPalette={onOpenPalette} />)
-    fireEvent.click(screen.getByText(/search tools, actions, help/i))
-    expect(onOpenPalette).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/search/i)).not.toBeInTheDocument()
   })
 
   // --- File menu ---

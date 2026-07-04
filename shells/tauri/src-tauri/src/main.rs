@@ -51,6 +51,22 @@ fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// Attach the per-platform menu accelerator: macOS keeps its long-standing
+/// Cmd-combo scheme; every other platform advertises the
+/// SketchUp-for-Windows scheme so the native menu, the tool rail, and
+/// the TS keydown handler all show the same keys for the same tools.
+/// `None` = no accelerator on that platform.
+fn accel(
+    builder: tauri::menu::MenuItemBuilder,
+    mac: Option<&str>,
+    win: Option<&str>,
+) -> tauri::menu::MenuItemBuilder {
+    match if cfg!(target_os = "macos") { mac } else { win } {
+        Some(a) => builder.accelerator(a),
+        None => builder,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Managed state
 // ---------------------------------------------------------------------------
@@ -462,9 +478,12 @@ fn main() {
             // handler's Ctrl+K (that platform's Rectangle moved to a bare
             // `R` in, freeing Ctrl+K there; macOS keeps Cmd+K on
             // Rectangle, so the palette needs a different key here).
-            let view_palette = MenuItemBuilder::with_id("view-palette", "Command Palette…")
-                .accelerator("CmdOrCtrl+/")
-                .build(handle)?;
+            let view_palette = accel(
+                MenuItemBuilder::with_id("view-palette", "Command Palette…"),
+                Some("CmdOrCtrl+/"),
+                Some("CmdOrCtrl+K"),
+            )
+            .build(handle)?;
 
             let view_menu = SubmenuBuilder::new(handle, "View")
                 .item(&view_axes)
@@ -476,18 +495,29 @@ fn main() {
             // ----------------------------------------------------------------
             // Draw menu
             // ----------------------------------------------------------------
-            let draw_rect = MenuItemBuilder::with_id("draw-rectangle", "Rectangle")
-                .accelerator("CmdOrCtrl+K")
-                .build(handle)?;
+            let draw_rect = accel(
+                MenuItemBuilder::with_id("draw-rectangle", "Rectangle"),
+                Some("CmdOrCtrl+K"),
+                Some("R"),
+            )
+            .build(handle)?;
 
-            let draw_circle = MenuItemBuilder::with_id("draw-circle", "Circle").build(handle)?;
+            let draw_circle = accel(
+                MenuItemBuilder::with_id("draw-circle", "Circle"),
+                None,
+                Some("C"),
+            )
+            .build(handle)?;
 
             // Arc : Cmd+J is SketchUp's arc-family
             // key on macOS, even though Hew's Arc is the simpler 2-point
             // gesture rather than SketchUp's multi-mode arc tool family.
-            let draw_arc = MenuItemBuilder::with_id("draw-arc", "Arc")
-                .accelerator("CmdOrCtrl+J")
-                .build(handle)?;
+            let draw_arc = accel(
+                MenuItemBuilder::with_id("draw-arc", "Arc"),
+                Some("CmdOrCtrl+J"),
+                Some("A"),
+            )
+            .build(handle)?;
 
             let draw_shapes = SubmenuBuilder::new(handle, "Shapes")
                 .item(&draw_rect)
@@ -495,9 +525,12 @@ fn main() {
                 .item(&draw_arc)
                 .build()?;
 
-            let draw_line = MenuItemBuilder::with_id("draw-line", "Line")
-                .accelerator("CmdOrCtrl+L")
-                .build(handle)?;
+            let draw_line = accel(
+                MenuItemBuilder::with_id("draw-line", "Line"),
+                Some("CmdOrCtrl+L"),
+                Some("L"),
+            )
+            .build(handle)?;
 
             let draw_lines = SubmenuBuilder::new(handle, "Lines")
                 .item(&draw_line)
@@ -511,23 +544,48 @@ fn main() {
             // ----------------------------------------------------------------
             // Tools menu
             // ----------------------------------------------------------------
-            let tool_select = MenuItemBuilder::with_id("tool-select", "Select").build(handle)?;
-            let tool_paint = MenuItemBuilder::with_id("tool-paint", "Paint").build(handle)?;
-            let tool_move = MenuItemBuilder::with_id("tool-move", "Move")
-                .accelerator("CmdOrCtrl+0")
-                .build(handle)?;
-            let tool_rotate = MenuItemBuilder::with_id("tool-rotate", "Rotate")
-                .accelerator("CmdOrCtrl+8")
-                .build(handle)?;
-            let tool_scale = MenuItemBuilder::with_id("tool-scale", "Scale")
-                .accelerator("CmdOrCtrl+9")
-                .build(handle)?;
-            let tool_pushpull = MenuItemBuilder::with_id("tool-pushpull", "Push/Pull")
-                .accelerator("CmdOrCtrl+=")
-                .build(handle)?;
-            let tool_tape_measure = MenuItemBuilder::with_id("tool-tape-measure", "Tape Measure")
-                .accelerator("CmdOrCtrl+D")
-                .build(handle)?;
+            let tool_select = accel(
+                MenuItemBuilder::with_id("tool-select", "Select"),
+                None,
+                Some("Space"),
+            )
+            .build(handle)?;
+            let tool_paint = accel(
+                MenuItemBuilder::with_id("tool-paint", "Paint"),
+                None,
+                Some("B"),
+            )
+            .build(handle)?;
+            let tool_move = accel(
+                MenuItemBuilder::with_id("tool-move", "Move"),
+                Some("CmdOrCtrl+0"),
+                Some("M"),
+            )
+            .build(handle)?;
+            let tool_rotate = accel(
+                MenuItemBuilder::with_id("tool-rotate", "Rotate"),
+                Some("CmdOrCtrl+8"),
+                Some("Q"),
+            )
+            .build(handle)?;
+            let tool_scale = accel(
+                MenuItemBuilder::with_id("tool-scale", "Scale"),
+                Some("CmdOrCtrl+9"),
+                Some("S"),
+            )
+            .build(handle)?;
+            let tool_pushpull = accel(
+                MenuItemBuilder::with_id("tool-pushpull", "Push/Pull"),
+                Some("CmdOrCtrl+="),
+                Some("P"),
+            )
+            .build(handle)?;
+            let tool_tape_measure = accel(
+                MenuItemBuilder::with_id("tool-tape-measure", "Tape Measure"),
+                Some("CmdOrCtrl+D"),
+                Some("T"),
+            )
+            .build(handle)?;
             let tool_protractor =
                 MenuItemBuilder::with_id("tool-protractor", "Protractor").build(handle)?;
             let tool_slice = MenuItemBuilder::with_id("tool-slice", "Slice").build(handle)?;
@@ -551,15 +609,27 @@ fn main() {
             // ----------------------------------------------------------------
             // Camera menu
             // ----------------------------------------------------------------
-            let cam_orbit = MenuItemBuilder::with_id("cam-orbit", "Orbit")
-                .accelerator("CmdOrCtrl+B")
-                .build(handle)?;
-            let cam_pan = MenuItemBuilder::with_id("cam-pan", "Pan")
-                .accelerator("CmdOrCtrl+R")
-                .build(handle)?;
-            let cam_zoom = MenuItemBuilder::with_id("cam-zoom", "Zoom")
-                .accelerator("CmdOrCtrl+\\")
-                .build(handle)?;
+            // Camera tools: SketchUp's real O / H / Z on non-Mac (
+            // verified against the official 2024 Windows Quick Reference
+            // Card); macOS keeps its pre-existing Cmd-combos.
+            let cam_orbit = accel(
+                MenuItemBuilder::with_id("cam-orbit", "Orbit"),
+                Some("CmdOrCtrl+B"),
+                Some("O"),
+            )
+            .build(handle)?;
+            let cam_pan = accel(
+                MenuItemBuilder::with_id("cam-pan", "Pan"),
+                Some("CmdOrCtrl+R"),
+                Some("H"),
+            )
+            .build(handle)?;
+            let cam_zoom = accel(
+                MenuItemBuilder::with_id("cam-zoom", "Zoom"),
+                Some("CmdOrCtrl+\\"),
+                Some("Z"),
+            )
+            .build(handle)?;
             let cam_zoom_extents =
                 MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents").build(handle)?;
 
@@ -647,18 +717,19 @@ fn main() {
             // app, so the app-level menu is correct there.
             #[cfg(target_os = "macos")]
             app.set_menu(menu)?;
-            // Windows and Linux both go borderless with in-app chrome instead of
-            // a native per-window menu (App renders the custom TitleBar + the
-            // in-app MenuBar when isLinux || isWindows —). Linux's
-            // original reason still applies (KWin/WebKitGTK doesn't repaint the
-            // server-side titlebar after the webview sets it), and Windows joins
-            // it here so the Studio design's in-window chrome + Ctrl-K field +
-            // SketchUp-for-Windows bare-letter shortcuts (— those
-            // shortcuts are handled entirely in TS, but only fire when nothing
-            // else, like a native accelerator, competes for the same keys) ship
-            // identically on both platforms. Skip the native menu (it would
-            // otherwise sit above our HTML chrome) and drop server-side
-            // decorations.
+            // Windows and Linux both go borderless with fully in-app chrome
+            // (custom TitleBar + HTML MenuBar — App renders both when
+            // isLinux || isWindows). Linux settled on this after the
+            //  experiments: native decorations can't return
+            // on Wayland ('s stale-title bug still reproduces; X11 works
+            // but is backend-regressive), and the native GTK menubar —
+            // trialed in  — was rejected because GTK can only stack it
+            // ABOVE the custom title bar and can't match Hew's theme beyond
+            // a dark/light flip. The menu below is still built on every
+            // platform: macOS attaches it (above), and it keeps parity ready
+            // if Windows ever goes native chrome ( leaves that open —
+            // Windows hasn't been examined yet); `accel()` keeps its
+            // per-platform accelerator labels correct for that day.
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 let _ = menu; // built for parity; not attached on Windows/Linux.

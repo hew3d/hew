@@ -96,8 +96,6 @@ export interface MenuBarProps {
   onOpenSettings?: () => void
   /** Assemble and write a "Report Bug" bundle (Help → Report Bug…). */
   onReportBug?: () => void
-  /** Open the command palette — the resting Ctrl-K field's click handler. */
-  onOpenPalette?: () => void
 }
 
 type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | 'help' | null
@@ -144,7 +142,11 @@ const MENU_TRIGGER_STYLE = (open: boolean): React.CSSProperties => ({
 
 const DROPDOWN_STYLE: React.CSSProperties = {
   position: 'absolute',
-  top: '33px',
+  // Anchored to the trigger wrapper's bottom edge. The wrapper must be
+  // height:100% (see the trigger divs below): the bar centers its flex items,
+  // so an auto-height wrapper sits ~8px down and a pixel offset here would
+  // open the menu detached from the bar (regression fixed).
+  top: '100%',
   left: 0,
   minWidth: '180px',
   background: 'var(--surface-overlay, #2a2a2a)',
@@ -308,7 +310,6 @@ export function MenuBar({
   onStandardView,
   onOpenSettings,
   onReportBug,
-  onOpenPalette,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -343,7 +344,7 @@ export function MenuBar({
   return (
     <div ref={barRef} style={BAR_STYLE} data-testid="menu-bar">
       {/* File menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'file')}
           onClick={() => toggle('file')}
@@ -384,7 +385,7 @@ export function MenuBar({
       </div>
 
       {/* Edit menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'edit')}
           onClick={() => toggle('edit')}
@@ -420,7 +421,7 @@ export function MenuBar({
       </div>
 
       {/* View menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'view')}
           onClick={() => toggle('view')}
@@ -444,7 +445,7 @@ export function MenuBar({
       </div>
 
       {/* Draw menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'draw')}
           onClick={() => toggle('draw')}
@@ -483,7 +484,7 @@ export function MenuBar({
       </div>
 
       {/* Tools menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'tools')}
           onClick={() => toggle('tools')}
@@ -555,7 +556,7 @@ export function MenuBar({
       </div>
 
       {/* Camera menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'camera')}
           onClick={() => toggle('camera')}
@@ -603,7 +604,7 @@ export function MenuBar({
       </div>
 
       {/* Window menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'window')}
           onClick={() => toggle('window')}
@@ -652,7 +653,7 @@ export function MenuBar({
       </div>
 
       {/* Help menu */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative', height: '100%' }}>
         <button
           style={MENU_TRIGGER_STYLE(openMenu === 'help')}
           onClick={() => toggle('help')}
@@ -714,51 +715,10 @@ export function MenuBar({
         </div>
       )}
 
-      {/* Spacer */}
+      {/* Spacer. (The resting command-palette field lived here on
+          Windows/Linux/Web until moved it to the top of the tool rail on
+          every platform — see ToolRail.tsx.) */}
       <div style={{ flex: 1 }} />
-
-      {/* Resting command-palette field (`04_command_palette.md`) —
-          "Windows/Linux/Web: right side of the menu bar, ~280px." macOS has
-          no equivalent slot here (nativeMenuBar=true means this whole
-          component renders nothing on macOS) — it reaches the palette via
-          the native View ▸ Command Palette… menu item / Cmd+/ instead. */}
-      {onOpenPalette !== undefined && (
-        <button
-          onClick={onOpenPalette}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 'var(--space-3, 8px)',
-            width: '280px',
-            margin: '0 var(--space-4, 9px)',
-            padding: '5px var(--space-4, 9px)',
-            background: 'var(--surface-input, #14161a)',
-            border: '1px solid var(--border-hairline, #3a3a3a)',
-            borderRadius: '9px',
-            cursor: 'pointer',
-            fontFamily: 'var(--font-family-ui)',
-          }}
-        >
-          <span aria-hidden="true" style={{ color: 'var(--text-faint, #888)', fontSize: '13px' }}>⌕</span>
-          <span style={{ flex: 1, textAlign: 'left', fontSize: '12.5px', color: 'var(--text-faint, #888)' }}>
-            Search tools, actions, help…
-          </span>
-          <span
-            style={{
-              fontFamily: 'var(--font-family-mono)',
-              fontSize: 'var(--font-size-kbd, 10px)',
-              fontWeight: 600,
-              color: 'var(--kbd-text, #9aa3b0)',
-              background: 'var(--kbd-bg, rgba(255,255,255,0.07))',
-              border: '1px solid var(--kbd-border, rgba(255,255,255,0.08))',
-              borderRadius: 'var(--radius-kbd, 4px)',
-              padding: '1.5px 5px',
-            }}
-          >
-            Ctrl K
-          </span>
-        </button>
-      )}
     </div>
   )
 }

@@ -62,10 +62,10 @@ describe('toolRegistry', () => {
       expect(shortcutFor('Arc', true)).toBe('⌘J')
     })
 
-    it('camera tools keep their existing Ctrl-combo shortcuts on non-Mac (no spec bare letter)', () => {
-      expect(shortcutFor('Orbit', false)).toBe('Ctrl+B')
-      expect(shortcutFor('Pan', false)).toBe('Ctrl+R')
-      expect(shortcutFor('Zoom', false)).toBe('Ctrl+\\')
+    it('camera tools use SketchUp\'s real O / H / Z on non-Mac', () => {
+      expect(shortcutFor('Orbit', false)).toBe('O')
+      expect(shortcutFor('Pan', false)).toBe('H')
+      expect(shortcutFor('Zoom', false)).toBe('Z')
     })
   })
 })

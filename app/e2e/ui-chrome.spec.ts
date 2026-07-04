@@ -193,6 +193,15 @@ test('export: Escape closes the dialog', async ({ page }) => {
 // Command palette
 // ---------------------------------------------------------------------------
 
+test('palette: the resting search field at the top of the tool rail opens it', async ({
+  page,
+}) => {
+  await page.getByRole('button', { name: 'Search tools, actions, help' }).click()
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).not.toBeVisible()
+})
+
 test('palette: Ctrl+K opens it; running a tool entry activates the tool', async ({ page }) => {
   await page.keyboard.press('Control+k')
   const palette = page.getByRole('dialog', { name: 'Command palette' })

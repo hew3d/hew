@@ -11,10 +11,30 @@
  * `document.documentElement` directly, which works identically for both.
  */
 
-import { getResolvedTheme, subscribe } from '../settings/theme'
+import { getResolvedTheme, getThemeSetting, subscribe } from '../settings/theme'
+import { isTauri } from '../io/fileHost'
 
 function apply(): void {
   document.documentElement.dataset.theme = getResolvedTheme()
+  syncWindowTheme()
+}
+
+/**
+ * Under Tauri, mirror the theme setting onto the OS window so native chrome
+ * GTK draws around the webview — the Linux menubar — follows Hew's
+ * theme instead of the desktop-wide GTK default. 'auto' maps to null
+ * (= follow the system): pinning an explicit theme would freeze the
+ * `prefers-color-scheme` media query that 'auto' resolution reads, breaking
+ * live OS-theme tracking. Runs in both the main and Settings windows (each
+ * document syncs its own window). Fire-and-forget: theme chrome sync is
+ * cosmetic and must never block or fail the DOM apply above.
+ */
+function syncWindowTheme(): void {
+  if (!isTauri) return
+  const setting = getThemeSetting()
+  import('@tauri-apps/api/window')
+    .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(setting === 'auto' ? null : setting))
+    .catch(() => { /* ignore — window theme is cosmetic */ })
 }
 
 /**

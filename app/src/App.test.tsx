@@ -253,12 +253,20 @@ describe('App — keyboard shortcuts', () => {
     expect(moveItem?.textContent).toContain('✓')
   })
 
-  it('Ctrl+R (modified) still activates the Pan camera tool, not bare-letter Rectangle', async () => {
+  it('bare H activates the Pan camera tool (SketchUp camera keys)', async () => {
     await renderAndLoad()
-    fireEvent.keyDown(document, { key: 'r', ctrlKey: true })
+    fireEvent.keyDown(document, { key: 'h' })
     fireEvent.click(screen.getByRole('button', { name: /^camera$/i }))
     const panItem = menubar().getByText('Pan').closest('div')
     expect(panItem?.textContent).toContain('✓')
+  })
+
+  it('modified letters do not hit the bare-letter tools (Ctrl+R is not Rectangle)', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: 'r', ctrlKey: true })
+    fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+    const rectItem = menubar().getByText('Rectangle').closest('div')
+    expect(rectItem?.textContent).not.toContain('✓')
   })
 
   it('Ctrl+K opens the command palette', async () => {

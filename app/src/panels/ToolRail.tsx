@@ -20,17 +20,19 @@ export interface ToolRailProps {
   activeTool: ToolName
   onSelectTool: (name: ToolName) => void
   /** When set, a resting command-palette search field is drawn at the top of
-   * the rail. Used on macOS, where there is no in-window menu bar to host the
-   * field (the Windows/Linux/Web build keeps it in `MenuBar.tsx` per
-   * `04_command_palette.md`). Clicking it opens the palette. */
+   * the rail. Home of the field on every platform since  (macOS forced it
+   * out of the menu bar — no in-window bar to host it — and the other
+   * platforms follow for cross-platform consistency, superseding
+   * `04_command_palette.md`'s menu-bar placement). Clicking it opens the
+   * palette. */
   onOpenPalette?: () => void
-  /** Shortcut label shown in the field's kbd chip (e.g. '⌘/' on macOS). */
+  /** Shortcut label shown in the field's kbd chip (e.g. '⌘/' on macOS
+   * desktop, 'Ctrl K' on Windows/Linux/Web). */
   paletteKbd?: string
 }
 
-/** Resting command-palette field for the top of the rail (macOS — see
- * `onOpenPalette` above). Mirrors `MenuBar.tsx`'s menu-bar field, widened to
- * the rail's full width. */
+/** Resting command-palette field for the top of the rail (all platforms —
+ * see `onOpenPalette` above). */
 function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
   return (
     <button

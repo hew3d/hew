@@ -9,18 +9,19 @@
  * display. This registry is that source; `ToolRail.tsx` and `MenuBar.tsx`
  * both read it.
  *
- * Keyboard-shortcut split: macOS keeps its pre-existing Cmd-combo
- * accelerators unchanged — they're wired to the native Tauri menu
- * (`shells/tauri/src-tauri/src/main.rs`), never routed through the JS
- * keydown handler, and explicitly preserves them as-is. Windows, Linux,
- * and the web build adopt SketchUp-for-Windows' real bare-letter scheme for
- * the 10 tools `03_tool_rail.md` covers (`winKey` below); the remaining six
- * Hew-only tools (camera navigation + inspect extras) keep their existing
- * Ctrl-combo shortcuts on those platforms too — the spec doesn't define bare
- * letters for them, and inventing one would contradict the "curated, not
- * exhaustive" rail philosophy the whole redesign follows. See the keydown
- * handler in `App.tsx` for where `winKey` actually gets wired to a key
- * event (this module only holds the data + display strings).
+ * Keyboard-shortcut split (extended by): macOS keeps its
+ * pre-existing Cmd-combo accelerators unchanged — they're wired to the
+ * native Tauri menu (`shells/tauri/src-tauri/src/main.rs`), never routed
+ * through the JS keydown handler, and explicitly preserves them as-is.
+ * Windows, Linux, and the web build adopt SketchUp-for-Windows' real
+ * bare-letter scheme (`winKey` below): the 10 tools `03_tool_rail.md` covers
+ * plus the camera tools' O / H / Z ( — verified against the
+ * official SketchUp 2024 Windows Quick Reference Card). Protractor / Slice /
+ * Edit Vertex stay shortcut-less: SketchUp defines no default key for them
+ * either. The native Linux menu advertises the same winKeys (main.rs's
+ * `accel()`), so menu, rail, and actual dispatch all agree. See the
+ * keydown handler in `App.tsx` for where `winKey` actually gets wired to a
+ * key event (this module only holds the data + display strings).
  */
 
 import type { ToolName } from './toolIcons'
@@ -66,9 +67,11 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Protractor', macKey: '', winKey: '' },
   { name: 'Slice', macKey: '', winKey: '' },
   { name: 'Edit Vertex', macKey: '', winKey: '' },
-  { name: 'Orbit', macKey: '⌘B', winKey: 'Ctrl+B' },
-  { name: 'Pan', macKey: '⌘R', winKey: 'Ctrl+R' },
-  { name: 'Zoom', macKey: '⌘\\', winKey: 'Ctrl+\\' },
+  // Camera tools: SketchUp's real O / H / Z on non-Mac; macOS keeps
+  // its pre-existing Cmd-combos.
+  { name: 'Orbit', macKey: '⌘B', winKey: 'O' },
+  { name: 'Pan', macKey: '⌘R', winKey: 'H' },
+  { name: 'Zoom', macKey: '⌘\\', winKey: 'Z' },
 ]
 
 /** Every tool name, in registry order — replaces the old App.tsx `TOOLS` const. */
