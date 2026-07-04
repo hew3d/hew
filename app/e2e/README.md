@@ -75,6 +75,28 @@ edge." Three strategies, in priority order:
   `state_hash` + object count survive save→reload exactly. Screenshots are
   attached as artifacts but **not** pixel-compared — pinned visual goldens are
    (GPU variance needs a pinned runner).
+- `tools.spec.ts` — pixel-free behavior spec per modeling tool, driven
+  through the harness's semantic methods (which call the kernel directly).
+- `session.spec.ts` — shell/session journeys: save/load fidelity,
+  autosave recovery dialog, docked-tray defaults + persistence, unit
+  persistence, undo-then-save.
+- `ui-chrome.spec.ts` (2026-07) — the DOM chrome the semantic specs bypass:
+  tool-rail radio activation, bare-letter shortcuts, the contextual
+  dock (verbs, honest active-tool highlight via `aria-pressed`, context
+  swap), the unified File ▸ Export… dialog, and the command palette.
+- `input-pipeline.spec.ts` (2026-07) — strategy 2 made live, and the only
+  place the REAL input path (keyboard → tool switch, canvas pointer →
+  raycast/snap, typed VCB → commit) is exercised end to end:
+  `harness.setCamera` pins the pose, `helpers/projectWorldToScreen.ts`'s
+  `buildViewProjection` + `worldToPagePixel` turn world points into
+  `page.mouse` targets. Covers the Rectangle→Push/Pull typed journey, Arc
+  typed-bulge entry, Escape cancel, click-selection (SelectTool ray-pick +
+  dock context follow), the Delete-key handler, and the Ctrl+Z /
+  Ctrl+Shift+Z bindings.
+  Keep it small: geometry correctness stays in kernel tests; per-op behavior
+  stays in `tools.spec.ts` — only *wiring* belongs here. Gotcha discovered
+  while writing it: a chord on a world axis axis-snaps the bulge cursor back
+  onto the chord (flat sagitta), so pixel tests draw off-axis.
 - `visual/` — the render-regression goldens, run only by the pinned
   `visual` Playwright project (fixed viewport/DPR + SwiftShader). The functional
   projects skip this dir (`testIgnore`). See `e2e/visual/README.md`.

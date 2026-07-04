@@ -16,9 +16,10 @@
  * `camera.projectionMatrix.clone().multiply(camera.matrixWorldInverse).elements`
  * straight in.
  *
- * The actual `setCamera` pinning hook is exposed by the semantic harness
- * (`window.__hew_test`); until that lands, pixel tests construct the
- * view-projection from a fixed camera themselves. See PINNED_CAMERA below.
+ * The camera-pinning hook is the semantic harness's `setCamera`
+ * (`window.__hew_test`); a pixel test pins the app camera with it and
+ * builds the matching view-projection via `buildViewProjection` below —
+ * `input-pipeline.spec.ts` is the pattern. See also PINNED_CAMERA.
  */
 
 export interface Vec3 {
@@ -95,6 +96,79 @@ export function worldToPagePixel(
   return ndcToPagePixel(ndc, rect)
 }
 
+/** Camera parameters a view-projection can be built from — the same shape the
+ * harness's `setCamera` consumes (PINNED_CAMERA below is one of these). */
+export interface CameraParams {
+  position: Vec3
+  target: Vec3
+  up: Vec3
+  fovDeg: number
+  near: number
+  far: number
+}
+
+/**
+ * Build the view-projection matrix for a pinned camera, in three.js
+ * conventions (column-major `Matrix4.elements`, vertical `fovDeg`, right-
+ * handed camera space looking down −Z). This is the "pixel test builds the
+ * view-projection from PINNED_CAMERA itself" half promised in the module
+ * doc: `harness.setCamera(...)` pins the app's real camera to the same
+ * parameters, and `worldToPagePixel(world, buildViewProjection(...), rect)`
+ * then lands `mouse.move/click` on the pixel where the app rendered that
+ * world point. Note NDC x/y (all a pixel test consumes) depend only on
+ * fov + aspect — near/far shape only NDC z, so they need not match the
+ * app's exact clip planes.
+ */
+export function buildViewProjection(cam: CameraParams, aspect: number): Mat4 {
+  // --- view matrix: inverse of the camera's lookAt world transform ---
+  const sub = (a: Vec3, b: Vec3): Vec3 => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z })
+  const cross = (a: Vec3, b: Vec3): Vec3 => ({
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  })
+  const norm = (a: Vec3): Vec3 => {
+    const l = Math.hypot(a.x, a.y, a.z)
+    if (l < 1e-12) throw new Error('buildViewProjection: degenerate camera basis')
+    return { x: a.x / l, y: a.y / l, z: a.z / l }
+  }
+  const dot = (a: Vec3, b: Vec3): number => a.x * b.x + a.y * b.y + a.z * b.z
+
+  const zAxis = norm(sub(cam.position, cam.target)) // camera looks down −Z
+  const xAxis = norm(cross(cam.up, zAxis))
+  const yAxis = cross(zAxis, xAxis)
+
+  // Column-major view matrix: rows are the camera basis vectors, translation
+  // column is −basis·position.
+  const view: number[] = [
+    xAxis.x, yAxis.x, zAxis.x, 0,
+    xAxis.y, yAxis.y, zAxis.y, 0,
+    xAxis.z, yAxis.z, zAxis.z, 0,
+    -dot(xAxis, cam.position), -dot(yAxis, cam.position), -dot(zAxis, cam.position), 1,
+  ]
+
+  // --- perspective projection (three.js PerspectiveCamera layout) ---
+  const f = 1 / Math.tan((cam.fovDeg * Math.PI) / 360)
+  const { near, far } = cam
+  const proj: number[] = [
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) / (near - far), -1,
+    0, 0, (2 * far * near) / (near - far), 0,
+  ]
+
+  // vp = proj * view, both column-major (e[col*4 + row]).
+  const vp = new Array<number>(16)
+  for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 4; row++) {
+      let acc = 0
+      for (let k = 0; k < 4; k++) acc += proj[k * 4 + row] * view[col * 4 + k]
+      vp[col * 4 + row] = acc
+    }
+  }
+  return vp
+}
+
 /**
  * The canonical pinned camera for pixel/visual E2E. Deterministic across runs
  * and machines so a projected world point lands on the same pixel every time.
@@ -102,8 +176,8 @@ export function worldToPagePixel(
  * matrix from these parameters; keeping the parameters here — pure data — lets
  * both the harness and the pixel math agree on one source of truth.
  *
- * Values mirror a standard iso-ish framing of the origin; tune alongside the
- *  `setCamera` harness when it lands.
+ * Values mirror a standard iso-ish framing of the origin; feed them to both
+ * `harness.setCamera` and `buildViewProjection` so the app and the test agree.
  */
 export const PINNED_CAMERA = {
   position: { x: 8, y: 6, z: 8 } as Vec3,

@@ -75,6 +75,7 @@ function DockItem({ verb, selected, onRun }: { verb: DockVerb; selected: boolean
   return (
     <button
       type="button"
+      aria-pressed={selected}
       onClick={() => onRun(verb.id)}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}

@@ -44,10 +44,9 @@ test('viewport renders the canonical push/pulled box (golden)', async ({ page })
 
   const canvas = page.locator('canvas').first()
   await expect(canvas).toBeVisible()
-  // Mask the floating info panels: they overlap the canvas crop but their text
-  // (object names, counts) is incidental to a *render* golden — masking keeps
-  // the assertion about shading/tessellation/camera, not panel copy.
-  await expect(canvas).toHaveScreenshot('box.png', {
-    mask: [page.getByTestId('floating-panel')],
-  })
+  // No masks: the pre- floating panels this spec used to mask are gone,
+  // and the Studio chrome overlapping the canvas crop (contextual dock,
+  // viewport HUD) is deterministic for this scene, so it's simply part of
+  // the golden now (re-baselined).
+  await expect(canvas).toHaveScreenshot('box.png')
 })

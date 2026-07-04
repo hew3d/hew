@@ -81,12 +81,16 @@ describe('ContextualDock', () => {
     // the actual active tool here — Rectangle must render unselected.
     const rectangleBtn = screen.getByRole('button', { name: 'Rectangle' })
     expect(rectangleBtn.style.border).toBe('1px solid transparent')
+    expect(rectangleBtn).toHaveAttribute('aria-pressed', 'false')
   })
 
   it('highlights the verb matching activeToolId, wherever it sits in the list', () => {
     render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} activeToolId="tool-arc" />)
     const arcBtn = screen.getByRole('button', { name: 'Arc' })
     expect(arcBtn.style.border).toContain('var(--accent-border)')
+    // aria-pressed mirrors the highlight — the machine-readable contract the
+    // E2E ui-chrome spec asserts through.
+    expect(arcBtn).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('highlights nothing when activeToolId is undefined', () => {

@@ -24,6 +24,11 @@ import { settleFrame } from '../helpers/render'
  *      Proves guide rendering: dashed lines (LineDashedMaterial), point cross
  *      markers, and the purple on-guide cue layer.
  *
+ * (No masks since the re-baseline: the pre- floating panels
+ * these specs used to mask are gone; the Studio chrome overlapping the canvas
+ * crop — contextual dock, viewport HUD — is deterministic per scene and is
+ * simply part of each golden.)
+ *
  * GOLDEN MANAGEMENT:
  *   Goldens are committed as `multi.spec.ts-snapshots/<name>-visual-linux.png`.
  *   DO NOT commit PNGs generated on a macOS dev machine — they will not match
@@ -67,9 +72,7 @@ test('multi-object scene (golden)', async ({ page }) => {
 
   const canvas = page.locator('canvas').first()
   await expect(canvas).toBeVisible()
-  await expect(canvas).toHaveScreenshot('multi-object.png', {
-    mask: [page.getByTestId('floating-panel')],
-  })
+  await expect(canvas).toHaveScreenshot('multi-object.png')
 })
 
 // ---------------------------------------------------------------------------
@@ -107,9 +110,7 @@ test('materials and transparency (golden)', async ({ page }) => {
 
   const canvas = page.locator('canvas').first()
   await expect(canvas).toBeVisible()
-  await expect(canvas).toHaveScreenshot('materials.png', {
-    mask: [page.getByTestId('floating-panel')],
-  })
+  await expect(canvas).toHaveScreenshot('materials.png')
 })
 
 // ---------------------------------------------------------------------------
@@ -141,7 +142,5 @@ test('guide lines and points overlay (golden)', async ({ page }) => {
 
   const canvas = page.locator('canvas').first()
   await expect(canvas).toBeVisible()
-  await expect(canvas).toHaveScreenshot('guides.png', {
-    mask: [page.getByTestId('floating-panel')],
-  })
+  await expect(canvas).toHaveScreenshot('guides.png')
 })

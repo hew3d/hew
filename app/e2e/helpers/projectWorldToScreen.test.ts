@@ -3,6 +3,8 @@ import {
   worldToNdc,
   ndcToPagePixel,
   worldToPagePixel,
+  buildViewProjection,
+  PINNED_CAMERA,
   type Mat4,
 } from './projectWorldToScreen'
 
@@ -78,5 +80,69 @@ describe('worldToPagePixel', () => {
     // Negative clip-w via a -1 in the w-row constant term.
     const behind: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1]
     expect(worldToPagePixel({ x: 0, y: 0, z: 0 }, behind, rect)).toBeNull()
+  })
+})
+
+describe('buildViewProjection', () => {
+  const rect = { left: 0, top: 0, width: 800, height: 600 }
+  const vp = buildViewProjection(PINNED_CAMERA, rect.width / rect.height)
+
+  it('projects the camera target to the exact canvas center', () => {
+    const px = worldToPagePixel(PINNED_CAMERA.target, vp, rect)
+    expect(px).not.toBeNull()
+    expect(px!.x).toBeCloseTo(400, 6)
+    expect(px!.y).toBeCloseTo(300, 6)
+  })
+
+  it('respects world-up: a point above the target lands higher on screen', () => {
+    // PINNED_CAMERA's up is +Z, so +Z from the target must reduce page-y.
+    const above = worldToPagePixel({ x: 0, y: 0, z: 1 }, vp, rect)
+    expect(above).not.toBeNull()
+    expect(above!.y).toBeLessThan(300)
+    expect(above!.x).toBeCloseTo(400, 3) // straight above the target: no x drift
+  })
+
+  it('returns null (behind camera) for a point past the eye', () => {
+    // Double the eye offset from the target: squarely behind the camera.
+    const p = PINNED_CAMERA.position
+    const behind = { x: 2 * p.x, y: 2 * p.y, z: 2 * p.z }
+    expect(worldToPagePixel(behind, vp, rect)).toBeNull()
+  })
+
+  it('is scale-consistent with the perspective divide: nearer points subtend more pixels', () => {
+    // Two points 1m apart on the ground: one pair near the camera, one far.
+    const d = (a: { x: number; y: number }, b: { x: number; y: number }): number =>
+      Math.hypot(a.x - b.x, a.y - b.y)
+    const near1 = worldToPagePixel({ x: 2, y: 2, z: 0 }, vp, rect)!
+    const near2 = worldToPagePixel({ x: 3, y: 2, z: 0 }, vp, rect)!
+    const far1 = worldToPagePixel({ x: -8, y: -8, z: 0 }, vp, rect)!
+    const far2 = worldToPagePixel({ x: -7, y: -8, z: 0 }, vp, rect)!
+    expect(d(near1, near2)).toBeGreaterThan(d(far1, far2))
+  })
+
+  it('fov widens the frustum: larger fov pulls off-center points toward the center', () => {
+    const wide = buildViewProjection({ ...PINNED_CAMERA, fovDeg: 80 }, rect.width / rect.height)
+    const p = { x: 2, y: 0, z: 0 }
+    const narrowPx = worldToPagePixel(p, vp, rect)!
+    const widePx = worldToPagePixel(p, wide, rect)!
+    const center = { x: 400, y: 300 }
+    const dist = (a: { x: number; y: number }): number => Math.hypot(a.x - center.x, a.y - center.y)
+    expect(dist(widePx)).toBeLessThan(dist(narrowPx))
+  })
+
+  it('throws on a degenerate camera basis (up parallel to the view direction)', () => {
+    expect(() =>
+      buildViewProjection(
+        {
+          position: { x: 0, y: 0, z: 10 },
+          target: { x: 0, y: 0, z: 0 },
+          up: { x: 0, y: 0, z: 1 }, // parallel to the look axis
+          fovDeg: 50,
+          near: 0.1,
+          far: 1000,
+        },
+        1,
+      ),
+    ).toThrow('degenerate')
   })
 })
