@@ -44,6 +44,12 @@ pub enum RecordedCall {
         a: [f64; 3],
         b: [f64; 3],
     },
+    /// `sketch_begin_gesture(sketch)`.
+    SketchBeginGesture { sketch: u64 },
+    /// `sketch_end_gesture(sketch)`.
+    SketchEndGesture { sketch: u64 },
+    /// `sketch_cancel_gesture()` (recorded only when a gesture was open).
+    SketchCancelGesture,
     /// `extrude_region(sketch, region, distance)`.
     ExtrudeRegion {
         sketch: u64,

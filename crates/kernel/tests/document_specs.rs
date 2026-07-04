@@ -2489,3 +2489,159 @@ fn torture_mode_toggles_and_passes_a_real_op_sequence() {
     doc.set_torture_mode(false);
     assert!(!doc.torture_mode());
 }
+
+// ------------------------------------------------- sketch drawing gestures
+//
+// One drawing gesture (a whole rectangle/circle, or one committed Line
+// segment) = one undo step. The first gesture on a freshly-added sketch folds
+// the sketch's creation into that step, so undoing it removes the sketch from
+// view entirely — no empty ghost in the sketch list.
+
+#[test]
+fn sketch_gesture_groups_a_rectangle_into_one_undo_step() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+
+    doc.begin_sketch_gesture(s).expect("begin gesture");
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    doc.end_sketch_gesture(s).expect("end gesture");
+
+    assert!(doc.can_undo(), "the gesture is one undoable step");
+    let region = only_region(&doc, s);
+
+    // ONE undo removes the whole rectangle — and, because this gesture drew
+    // the first geometry into a fresh sketch, the sketch itself vanishes.
+    doc.undo().expect("undo the gesture");
+    assert!(
+        doc.sketch(s).is_none(),
+        "created-by-gesture sketch is hidden"
+    );
+    assert!(doc.sketch_ids().is_empty(), "no empty ghost in the list");
+    assert!(!doc.can_undo(), "nothing left to undo");
+
+    // Redo brings back the sketch, its rectangle, and the same region handle.
+    doc.redo().expect("redo the gesture");
+    let sk = doc.sketch(s).expect("sketch is visible again");
+    assert_eq!(sk.edges().len(), 4);
+    assert_eq!(only_region(&doc, s), region, "region handle is stable");
+}
+
+#[test]
+fn second_gesture_on_same_sketch_undoes_independently() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+
+    doc.begin_sketch_gesture(s).expect("begin first");
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    doc.end_sketch_gesture(s).expect("end first");
+
+    doc.begin_sketch_gesture(s).expect("begin second");
+    draw_rect(&mut doc, s, 2.0, 0.0, 3.0, 1.0);
+    doc.end_sketch_gesture(s).expect("end second");
+    assert_eq!(doc.sketch(s).expect("live").edges().len(), 8);
+
+    // Undo #1 removes only the second rectangle; the sketch stays visible.
+    doc.undo().expect("undo second gesture");
+    let sk = doc.sketch(s).expect("sketch still visible");
+    assert_eq!(sk.edges().len(), 4, "first rectangle survives");
+
+    // Undo #2 removes the first rectangle AND the sketch (creation folded in).
+    doc.undo().expect("undo first gesture");
+    assert!(doc.sketch(s).is_none());
+
+    // Redo both restores everything.
+    doc.redo().expect("redo first");
+    doc.redo().expect("redo second");
+    assert_eq!(doc.sketch(s).expect("live").edges().len(), 8);
+}
+
+#[test]
+fn unchanged_gesture_records_nothing() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(s).expect("begin");
+    doc.end_sketch_gesture(s).expect("end");
+    assert!(!doc.can_undo(), "an empty gesture is undo-invisible");
+
+    // ... and the NEXT gesture still counts as the creating one.
+    doc.begin_sketch_gesture(s).expect("begin again");
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    doc.end_sketch_gesture(s).expect("end again");
+    doc.undo().expect("undo");
+    assert!(
+        doc.sketch(s).is_none(),
+        "creation folded into the real gesture"
+    );
+}
+
+#[test]
+fn gesture_undo_interleaved_with_extrude_keeps_handles_stable() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(s).expect("begin");
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    doc.end_sketch_gesture(s).expect("end");
+
+    let r = only_region(&doc, s);
+    let (obj, _) = doc.extrude_region(s, r, 1.0).expect("extrude");
+    assert!(doc.visible_object_ids().contains(&obj));
+
+    // LIFO: undo the extrude first, then the drawing gesture.
+    doc.undo().expect("undo extrude");
+    assert!(!doc.visible_object_ids().contains(&obj));
+    assert_eq!(only_region(&doc, s), r, "region extrudable again");
+
+    doc.undo().expect("undo gesture");
+    assert!(doc.sketch(s).is_none());
+
+    // Redo the full history: sketch, then solid.
+    doc.redo().expect("redo gesture");
+    doc.redo().expect("redo extrude");
+    assert!(doc.visible_object_ids().contains(&obj));
+    assert!(
+        doc.is_region_consumed(s, r),
+        "redone extrude re-consumed the same region handle"
+    );
+}
+
+#[test]
+fn gesture_bracket_misuse_errors_loudly() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+
+    // end without begin
+    assert!(matches!(
+        doc.end_sketch_gesture(s),
+        Err(DocumentError::SketchGestureNotOpen)
+    ));
+
+    // begin while open
+    doc.begin_sketch_gesture(s).expect("begin");
+    assert!(matches!(
+        doc.begin_sketch_gesture(s),
+        Err(DocumentError::SketchGestureAlreadyOpen)
+    ));
+
+    // end for a different sketch than the open one
+    let other = doc.add_sketch(ground());
+    assert!(matches!(
+        doc.end_sketch_gesture(other),
+        Err(DocumentError::SketchGestureNotOpen)
+    ));
+
+    // cancel drops the bracket without recording
+    assert!(doc.cancel_sketch_gesture());
+    assert!(!doc.cancel_sketch_gesture(), "nothing left to cancel");
+    assert!(matches!(
+        doc.end_sketch_gesture(s),
+        Err(DocumentError::SketchGestureNotOpen)
+    ));
+    assert!(!doc.can_undo());
+
+    // begin on a deleted (hidden) sketch
+    doc.delete_sketch(s).expect("delete");
+    assert!(matches!(
+        doc.begin_sketch_gesture(s),
+        Err(DocumentError::UnknownSketch)
+    ));
+}

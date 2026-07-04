@@ -677,6 +677,28 @@ impl SketchVertexPickJs {
     }
 }
 
+/// A sketch region picked by ray across all live sketches (see
+/// [`Scene::pick_sketch_region`]): the owning sketch plus the region handle,
+/// ready for `extrude_region`/`region_boundary` without a second round-trip.
+#[wasm_bindgen]
+pub struct SketchRegionPickJs {
+    sketch: u64,
+    region: u64,
+}
+
+#[wasm_bindgen]
+impl SketchRegionPickJs {
+    /// Handle of the sketch owning the picked region.
+    pub fn sketch(&self) -> u64 {
+        self.sketch
+    }
+
+    /// Handle of the picked region within that sketch.
+    pub fn region(&self) -> u64 {
+        self.region
+    }
+}
+
 /// A resolved snap (mirrors `inference::Snap`).
 #[wasm_bindgen]
 pub struct SnapJs {
@@ -1010,6 +1032,39 @@ impl Scene {
     pub fn begin_ground_sketch(&mut self) -> u64 {
         recording::record(recording::RecordedCall::BeginGroundSketch);
         self.doc.add_sketch(ground_plane()).data().as_ffi()
+    }
+
+    /// Opens a drawing gesture on `sketch`: everything drawn until
+    /// `sketch_end_gesture` (a whole rectangle/circle/arc) lands on the undo
+    /// stack as ONE step. The first gesture on a freshly-created sketch folds
+    /// the sketch's creation into that step — undoing it removes the sketch.
+    /// Tools bracket exactly their commit batch; gestures never nest.
+    pub fn sketch_begin_gesture(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.doc
+            .begin_sketch_gesture(sketch_id(sketch))
+            .map_err(doc_err)?;
+        recording::record(recording::RecordedCall::SketchBeginGesture { sketch });
+        Ok(())
+    }
+
+    /// Closes the open drawing gesture on `sketch`, pushing one undo step if
+    /// anything changed (an unchanged gesture records nothing).
+    pub fn sketch_end_gesture(&mut self, sketch: u64) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .end_sketch_gesture(sketch_id(sketch))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SketchEndGesture { sketch });
+        Ok(())
+    }
+
+    /// Drops the open drawing gesture (if any) without recording an undo step
+    /// — the tool-cancel path. Safe to call when no gesture is open.
+    pub fn sketch_cancel_gesture(&mut self) {
+        if self.doc.cancel_sketch_gesture() {
+            recording::record(recording::RecordedCall::SketchCancelGesture);
+        }
     }
 
     /// Handles of every sketch in the document, for rendering all of them.
@@ -2092,6 +2147,58 @@ impl Scene {
             .map(|id| id.data().as_ffi())
     }
 
+    /// Picks the extrudable sketch region under the ray across ALL live
+    /// sketches: intersects the ray with each sketch's plane and returns the
+    /// smallest-area region whose material contains the hit point (nested
+    /// regions resolve to the innermost — the same rule the push/pull tool
+    /// always used, now kernel-side and multi-sketch). Consumed regions and
+    /// hidden sketches never match; `undefined` when nothing is hit.
+    ///
+    /// The "any sketch" targeting primitive: push/pull region targeting,
+    /// select-by-interior, and dock hover all resolve through this, replacing
+    /// the app's old single-active-sketch bookkeeping.
+    pub fn pick_sketch_region(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<SketchRegionPickJs> {
+        let origin = Point3::new(ox, oy, oz);
+        let dir = kernel::Vec3::new(dx, dy, dz);
+        let mut best: Option<(f64, SketchId, SketchRegionId)> = None;
+        for sid in self.doc.sketch_ids() {
+            let Some(sketch) = self.doc.sketch(sid) else {
+                continue;
+            };
+            let plane = sketch.plane();
+            let denom = plane.normal().dot(dir);
+            if denom.abs() < kernel::tol::NORMAL_DIRECTION {
+                continue; // ray parallel to (or grazing) this sketch plane
+            }
+            let t = -plane.signed_distance(origin) / denom;
+            if t <= 0.0 {
+                continue; // plane is behind the ray origin
+            }
+            let hit = origin + dir * t;
+            for rid in self.doc.extrudable_regions(sid).unwrap_or_default() {
+                if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
+                    continue;
+                }
+                let area = sketch.region_area(rid).unwrap_or(f64::INFINITY);
+                if best.is_none_or(|(a, _, _)| area < a) {
+                    best = Some((area, sid, rid));
+                }
+            }
+        }
+        best.map(|(_, s, r)| SketchRegionPickJs {
+            sketch: s.data().as_ffi(),
+            region: r.data().as_ffi(),
+        })
+    }
+
     /// Picks the committed sketch vertex nearest the ray (Phase D per-vertex
     /// edit), for the EditVertex tool. Uses the same fixed `SKETCH_PICK_APERTURE`
     /// as [`Scene::pick_sketch`] (a vertex is a point — exact ray intersection
@@ -2593,6 +2700,15 @@ impl Scene {
                     SketchAddSegment { sketch, a, b } => {
                         self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
                     }
+                    SketchBeginGesture { sketch } => {
+                        self.sketch_begin_gesture(sketch)?;
+                    }
+                    SketchEndGesture { sketch } => {
+                        self.sketch_end_gesture(sketch)?;
+                    }
+                    SketchCancelGesture => {
+                        self.sketch_cancel_gesture();
+                    }
                     ExtrudeRegion {
                         sketch,
                         region,
@@ -2737,6 +2853,108 @@ mod tests {
     #[test]
     fn version_matches_workspace() {
         assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Draw one axis-aligned ground rectangle into `sketch` (4 segments).
+    fn draw_rect(scene: &mut Scene, sketch: u64, x0: f64, y0: f64, x1: f64, y1: f64) {
+        for (a, b) in [
+            ([x0, y0], [x1, y0]),
+            ([x1, y0], [x1, y1]),
+            ([x1, y1], [x0, y1]),
+            ([x0, y1], [x0, y0]),
+        ] {
+            scene
+                .sketch_add_segment(sketch, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+    }
+
+    /// The whole drawn rectangle — and the sketch's creation — undo and redo
+    /// as ONE scene-level step (the M-sketch-interactability Cmd+Z contract).
+    #[test]
+    fn drawn_rectangle_is_one_scene_undo_step() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        assert!(!scene.can_scene_undo(), "an empty sketch is not a step");
+
+        scene.sketch_begin_gesture(sketch).unwrap();
+        draw_rect(&mut scene, sketch, 0.0, 0.0, 1.0, 1.0);
+        scene.sketch_end_gesture(sketch).unwrap();
+
+        assert!(scene.can_scene_undo());
+        assert_eq!(scene.sketch_regions(sketch).unwrap().len(), 1);
+
+        scene.scene_undo().unwrap();
+        assert!(
+            scene.sketch_ids().is_empty(),
+            "one undo removes the rectangle AND the sketch it created"
+        );
+        assert!(!scene.can_scene_undo());
+        assert!(scene.can_scene_redo());
+
+        scene.scene_redo().unwrap();
+        assert_eq!(scene.sketch_ids(), vec![sketch]);
+        assert_eq!(scene.sketch_regions(sketch).unwrap().len(), 1);
+    }
+
+    /// `pick_sketch_region` targets ANY live sketch's regions — not just the
+    /// most recently drawn one — skips consumed regions, and resolves nested
+    /// regions to the innermost.
+    #[test]
+    fn pick_sketch_region_targets_any_sketch() {
+        let mut scene = Scene::new();
+        let s1 = scene.begin_ground_sketch();
+        draw_rect(&mut scene, s1, 0.0, 0.0, 1.0, 1.0);
+        let s2 = scene.begin_ground_sketch();
+        draw_rect(&mut scene, s2, 2.0, 0.0, 3.0, 1.0);
+
+        // A downward ray over each rectangle finds its own sketch — including
+        // s1, which is NOT the most recent.
+        let p1 = scene
+            .pick_sketch_region(0.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert_eq!(p1.sketch(), s1);
+        assert_eq!(vec![p1.region()], scene.sketch_regions(s1).unwrap());
+        let p2 = scene
+            .pick_sketch_region(2.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert_eq!(p2.sketch(), s2);
+
+        // Empty space and a sideways (plane-parallel) ray both miss.
+        assert!(
+            scene
+                .pick_sketch_region(10.0, 10.0, 5.0, 0.0, 0.0, -1.0)
+                .is_none()
+        );
+        assert!(
+            scene
+                .pick_sketch_region(0.5, 0.5, 5.0, 1.0, 0.0, 0.0)
+                .is_none()
+        );
+
+        // A consumed region stops matching once extruded.
+        let r2 = scene.sketch_regions(s2).unwrap()[0];
+        scene.extrude_region(s2, r2, 1.0).unwrap();
+        assert!(
+            scene
+                .pick_sketch_region(2.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+                .is_none()
+        );
+
+        // Nested regions resolve to the innermost (smallest outer area).
+        draw_rect(&mut scene, s1, 0.25, 0.25, 0.75, 0.75);
+        let inner = scene
+            .pick_sketch_region(0.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert_eq!(inner.sketch(), s1);
+        let inner_area_pick = scene
+            .pick_sketch_region(0.1, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert_ne!(
+            inner.region(),
+            inner_area_pick.region(),
+            "a point between the squares picks the outer ring, not the inner"
+        );
     }
 
     /// End-to-end: a real kernel `Document` op emits its `kernel::op`

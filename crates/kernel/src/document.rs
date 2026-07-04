@@ -194,6 +194,18 @@ struct CreatedClone {
     instances: Vec<InstanceId>,
 }
 
+/// An open sketch-drawing gesture: the snapshot taken at
+/// [`Document::begin_sketch_gesture`], waiting for its `end_` to decide
+/// whether anything changed and push a [`DocAction::SketchGesture`].
+/// Session-only bookkeeping — never serialized (like the undo log).
+#[derive(Debug, Clone)]
+struct PendingSketchGesture {
+    sketch: SketchId,
+    before: Box<Sketch>,
+    /// `sketch` was freshly added and still empty at gesture begin.
+    created: bool,
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -271,6 +283,27 @@ enum DocAction {
         vertex: SketchVertexId,
         old_pos: Point3,
         new_pos: Point3,
+    },
+    /// One sketch-drawing gesture (`begin_sketch_gesture` … `end_sketch_gesture`):
+    /// a whole rectangle/circle/arc — or one committed Line segment — as a
+    /// single undo step. Snapshot-based rather than delta-based: post-gesture
+    /// topology is the product of sticky-rule cascades (splits, merges, region
+    /// recomputes), so an exact before/after image is the only inverse that
+    /// cannot drift. `SlotMap` clones preserve keys, so every handle issued
+    /// before the gesture stays valid across undo/redo (the hide-not-delete
+    /// convention's snapshot analogue). Undo restores `before` — and when the
+    /// gesture `created` the sketch, also hides it so no empty ghost lingers;
+    /// redo restores `after` (unhiding first).
+    SketchGesture {
+        sketch: SketchId,
+        /// Sketch contents at gesture begin. Boxed — a `Sketch` is three
+        /// `SlotMap`s and would dominate the enum's inline size.
+        before: Box<Sketch>,
+        /// Sketch contents at gesture end.
+        after: Box<Sketch>,
+        /// The gesture drew the first geometry into a freshly-added sketch,
+        /// folding "the sketch appeared" into this one undo step.
+        created: bool,
     },
     /// `group_nodes` formed a group. Undo dissolves it (reparenting members to
     /// `parent` and restoring the parent's member order), redo re-forms it. The
@@ -492,6 +525,12 @@ pub enum DocumentError {
     UnknownInstance,
     /// The guide handle is stale, hidden, or from another Document.
     UnknownGuide,
+    /// `begin_sketch_gesture` while another gesture is already open. Gestures
+    /// never nest or interleave — a tool brackets exactly one commit batch.
+    SketchGestureAlreadyOpen,
+    /// `end_sketch_gesture` with no gesture open, or for a different sketch
+    /// than the open one.
+    SketchGestureNotOpen,
     /// Guide geometry is degenerate: a zero-length/non-finite direction, or a
     /// non-finite coordinate. Nothing is silently repaired or guessed.
     DegenerateGuide,
@@ -555,6 +594,12 @@ impl std::fmt::Display for DocumentError {
             }
             DocumentError::UnknownInstance => write!(f, "no such instance in this document"),
             DocumentError::UnknownGuide => write!(f, "no such guide in this document"),
+            DocumentError::SketchGestureAlreadyOpen => {
+                write!(f, "a sketch gesture is already open")
+            }
+            DocumentError::SketchGestureNotOpen => {
+                write!(f, "no open sketch gesture for this sketch")
+            }
             DocumentError::DegenerateGuide => write!(
                 f,
                 "guide geometry is degenerate (zero-length direction or non-finite coordinate)"
@@ -632,6 +677,14 @@ pub struct Document {
     /// instance visibility lives on their `*Record` wrappers rather than the
     /// payload type.
     hidden_sketches: BTreeSet<SketchId>,
+    /// Sketches added by [`Document::add_sketch`] that no gesture has recorded
+    /// into yet: the first gesture on one of these folds the sketch's creation
+    /// into its undo step ([`DocAction::SketchGesture::created`]). Session-only
+    /// bookkeeping — never serialized (like the undo log).
+    fresh_sketches: BTreeSet<SketchId>,
+    /// The open sketch gesture, if any ([`Document::begin_sketch_gesture`] …
+    /// [`Document::end_sketch_gesture`]). Session-only, never serialized.
+    pending_sketch_gesture: Option<PendingSketchGesture>,
     undo: Vec<DocAction>,
     redo: Vec<DocAction>,
     /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
@@ -1232,7 +1285,98 @@ impl Document {
     /// — existing sketches are untouched, so independent coplanar shapes can
     /// coexist. Plane choice (ground or a face) is the caller's concern.
     pub fn add_sketch(&mut self, plane: Plane) -> SketchId {
-        self.sketches.insert(Sketch::on_plane(plane))
+        let id = self.sketches.insert(Sketch::on_plane(plane));
+        // Not undoable on its own: an empty sketch draws nothing. The first
+        // gesture recorded into it folds the creation into its undo step.
+        self.fresh_sketches.insert(id);
+        id
+    }
+
+    /// Opens a sketch-drawing gesture on `sketch`: snapshots its contents so
+    /// [`Document::end_sketch_gesture`] can record the whole edit batch — a
+    /// full rectangle/circle/arc, not each sticky segment — as ONE undo step.
+    /// The first gesture on a freshly-added sketch also folds the sketch's
+    /// creation into that step, so undoing it removes the sketch from view.
+    ///
+    /// Between begin and end, callers mutate via [`Document::sketch_mut`] as
+    /// usual, and must not run other document ops (extrude, delete, undo): a
+    /// gesture is a tight bracket around one tool commit.
+    ///
+    /// # Errors
+    /// - [`DocumentError::SketchGestureAlreadyOpen`] — gestures never nest or
+    ///   interleave.
+    /// - [`DocumentError::UnknownSketch`] — stale or hidden handle.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn begin_sketch_gesture(&mut self, sketch: SketchId) -> Result<(), DocumentError> {
+        if self.pending_sketch_gesture.is_some() {
+            return Err(DocumentError::SketchGestureAlreadyOpen);
+        }
+        if self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let s = self
+            .sketches
+            .get(sketch)
+            .ok_or(DocumentError::UnknownSketch)?;
+        let created = self.fresh_sketches.contains(&sketch) && s.edges().is_empty();
+        self.pending_sketch_gesture = Some(PendingSketchGesture {
+            sketch,
+            before: Box::new(s.clone()),
+            created,
+        });
+        Ok(())
+    }
+
+    /// Closes the open gesture on `sketch`. If the sketch changed since
+    /// [`Document::begin_sketch_gesture`], pushes one
+    /// [`DocAction::SketchGesture`] and clears redo; an unchanged gesture
+    /// records nothing (and stays undo-invisible). Either way the gesture is
+    /// closed on return — including the `Err` paths.
+    ///
+    /// # Errors
+    /// - [`DocumentError::SketchGestureNotOpen`] — no gesture is open, or the
+    ///   open one is for a different sketch.
+    /// - [`DocumentError::UnknownSketch`] — the sketch vanished mid-gesture.
+    pub fn end_sketch_gesture(&mut self, sketch: SketchId) -> Result<DocChange, DocumentError> {
+        match &self.pending_sketch_gesture {
+            Some(p) if p.sketch == sketch => {}
+            _ => return Err(DocumentError::SketchGestureNotOpen),
+        }
+        let pending = self
+            .pending_sketch_gesture
+            .take()
+            .expect("matched Some above");
+        if self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let Some(s) = self.sketches.get(sketch) else {
+            return Err(DocumentError::UnknownSketch);
+        };
+        if *s == *pending.before {
+            return Ok(DocChange::default());
+        }
+        self.undo.push(DocAction::SketchGesture {
+            sketch,
+            before: pending.before,
+            after: Box::new(s.clone()),
+            created: pending.created,
+        });
+        self.redo.clear();
+        self.fresh_sketches.remove(&sketch);
+        self.debug_validate();
+        Ok(DocChange {
+            sketches_touched: vec![sketch],
+            ..Default::default()
+        })
+    }
+
+    /// Drops the open gesture (if any) without recording anything — the
+    /// tool-cancel path. Returns whether a gesture was open. Any mutations
+    /// made inside the abandoned bracket stay in the sketch but out of the
+    /// undo log; cancel-before-mutate is the caller's contract.
+    pub fn cancel_sketch_gesture(&mut self) -> bool {
+        self.pending_sketch_gesture.take().is_some()
     }
 
     /// A sketch by handle, or `None` if stale or hidden (deleted).
@@ -3520,6 +3664,28 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            DocAction::SketchGesture {
+                sketch,
+                before,
+                created,
+                ..
+            } => {
+                // Undo a drawing gesture: restore the exact pre-gesture
+                // snapshot (keys preserved — every prior handle stays valid).
+                // A gesture that created the sketch also hides it, so no
+                // empty ghost lingers in the sketch list.
+                let (sketch, created) = (*sketch, *created);
+                if let Some(s) = self.sketches.get_mut(sketch) {
+                    *s = (**before).clone();
+                }
+                if created {
+                    self.hidden_sketches.insert(sketch);
+                }
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    ..Default::default()
+                }
+            }
             DocAction::Grouped {
                 group,
                 parent,
@@ -3960,6 +4126,26 @@ impl Document {
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
                     guides_touched: Vec::new(),
+                }
+            }
+            DocAction::SketchGesture {
+                sketch,
+                after,
+                created,
+                ..
+            } => {
+                // Redo a drawing gesture: unhide first (when the gesture
+                // created the sketch), then restore the post-gesture snapshot.
+                let (sketch, created) = (*sketch, *created);
+                if created {
+                    self.hidden_sketches.remove(&sketch);
+                }
+                if let Some(s) = self.sketches.get_mut(sketch) {
+                    *s = (**after).clone();
+                }
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    ..Default::default()
                 }
             }
             &DocAction::Grouped { group, parent, .. } => {

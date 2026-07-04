@@ -50,7 +50,7 @@ new_key_type! {
 
 /// A point in a sketch. Always on the sketch plane
 /// (within [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SketchVertex {
     /// Position in f64 meters (world frame).
     pub position: Point3,
@@ -61,7 +61,7 @@ pub struct SketchVertex {
 /// Edges never overlap or cross other edges of the same sketch — the sticky
 /// rules split/merge eagerly at insertion time, so this is an invariant, not
 /// a hope.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SketchEdge {
     /// Start vertex.
     pub from: SketchVertexId,
@@ -71,7 +71,7 @@ pub struct SketchEdge {
 
 /// A closed region bounded by sketch edges: what the user perceives as "a
 /// face appeared" while drawing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SketchRegion {
     /// Outer boundary vertices in cycle order, counter-clockwise seen from
     /// the plane normal side.
@@ -510,6 +510,75 @@ impl Sketch {
         // typed error (rule 4) rather than panicking, since a panic at the
         // WASM boundary leaves the Scene unusable.
         Profile::new(self.plane, outer, holes).map_err(|_| SketchError::MalformedRegion)
+    }
+
+    /// The unsigned area of `region`'s outer boundary, in m². Hole areas are
+    /// NOT subtracted — pickers use this to rank nested containing regions
+    /// (smallest outer wins), where the raw outer extent is the right measure.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownRegion`] if the handle is stale.
+    pub fn region_area(&self, region: SketchRegionId) -> Result<f64, SketchError> {
+        let r = self.regions.get(region).ok_or(SketchError::UnknownRegion)?;
+        let pts: Vec<Point3> = r
+            .outer
+            .iter()
+            .map(|&vid| self.vertices[vid].position)
+            .collect();
+        Ok(signed_area_on_plane(&pts, self.plane.normal()).abs())
+    }
+
+    /// Whether `p` (a point on the sketch plane) lies in `region`'s material:
+    /// inside its outer boundary and outside every hole. Boundary-exact hits
+    /// follow [`point_inside_polygon`]'s convention. Pure query.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownRegion`] if the handle is stale.
+    pub fn region_contains_point(
+        &self,
+        region: SketchRegionId,
+        p: Point3,
+    ) -> Result<bool, SketchError> {
+        let r = self.regions.get(region).ok_or(SketchError::UnknownRegion)?;
+        let normal = self.plane.normal();
+        let outer: Vec<Point3> = r
+            .outer
+            .iter()
+            .map(|&vid| self.vertices[vid].position)
+            .collect();
+        if !point_inside_polygon(p, &outer, normal) {
+            return Ok(false);
+        }
+        for hole in &r.holes {
+            let pts: Vec<Point3> = hole
+                .iter()
+                .map(|&vid| self.vertices[vid].position)
+                .collect();
+            if point_inside_polygon(p, &pts, normal) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Content equality: same plane and identical vertex/edge/region storage,
+/// **including handle identity** (same `SlotMap` keys). Gesture undo snapshots
+/// (see `Document::end_sketch_gesture`) rely on the handle-identity part —
+/// restoring a snapshot must keep every previously-issued id valid — so plain
+/// positional equality would be too weak here.
+impl PartialEq for Sketch {
+    fn eq(&self, other: &Sketch) -> bool {
+        fn slotmaps_eq<K: slotmap::Key, V: PartialEq>(
+            a: &SlotMap<K, V>,
+            b: &SlotMap<K, V>,
+        ) -> bool {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+        }
+        self.plane == other.plane
+            && slotmaps_eq(&self.vertices, &other.vertices)
+            && slotmaps_eq(&self.edges, &other.edges)
+            && slotmaps_eq(&self.regions, &other.regions)
     }
 }
 
