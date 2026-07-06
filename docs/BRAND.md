@@ -28,9 +28,8 @@ glyph uses 7 at ~15px).
 
 > **Note on the app UI accent.** The running Studio UI keeps its own accent
 > (blue `#5b8cff`) for selection, active tools, focus rings, and kbd chips —
-> that is a deliberate scope boundary (decision: *brand chrome only*).
-> The brand palette above governs the mark, icons, and OS/PWA chrome, not the
-> in-app themed accent. Revisit only with explicit sign-off.
+> a deliberate scope boundary: the brand palette governs the mark, icons, and
+> OS/PWA chrome, not the in-app themed accent.
 
 ## Typography
 
@@ -86,5 +85,5 @@ Captured now, wired up when the surfaces exist:
 - **Logo lockup** (`brand/hew-lockup*.svg`) — for a README header, docs site,
   splash/about screen. Needs Hanken Grotesk, or use the `-outlined` variants
   offline.
-- **Push/pull animation** — listed on the brand sheet as a separate file; not
-  delivered in this drop.
+- **Push/pull animation** — listed on the brand sheet as a separate asset;
+  not yet produced.

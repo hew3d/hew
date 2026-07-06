@@ -5,9 +5,15 @@ faces, push/pull, pervasive inference snapping) on a solids-first data
 model where every closed extrusion is a discrete, watertight Object and
 combining Objects is always explicit.
 
-Read `docs/DEVELOPMENT.md` before changing anything — it holds the
-repository layout, the commands, and the **non-negotiable rules**. Code
-comments across the kernel cite these as "DEVELOPMENT.md rule N".
+Start with these documents — they are the source of truth:
+
+- `docs/DEVELOPMENT.md` — setup, commands, repository layout, and the
+  **non-negotiable rules**. Code comments across the kernel cite these as
+  "DEVELOPMENT.md rule N". Read them before changing anything.
+- `docs/ARCHITECTURE.md` — the data model and crate topology.
+- `docs/HEW_FILE_FORMAT.md` — the native format spec; it must be updated
+  in the same commit as any serialization change.
+- `docs/ROADMAP.md` — what exists and what's planned.
 
 ## Quick reference
 
@@ -31,3 +37,5 @@ comments across the kernel cite these as "DEVELOPMENT.md rule N".
 - No silent geometry repair — invalid topology fails with a typed error.
 - Ask before: adding a dependency to kernel crates, changing the file
   format, changing the public wasm-api surface, or cross-crate refactors.
+- The licensing wall is absolute: nothing derived from the SketchUp SDK
+  enters this repo or its dependency chain (see CONTRIBUTING.md).
