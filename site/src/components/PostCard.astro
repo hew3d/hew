@@ -1,0 +1,52 @@
+---
+import type { CollectionEntry } from 'astro:content';
+import FormattedDate from './FormattedDate.astro';
+
+interface Props {
+  post: CollectionEntry<'blog'>;
+}
+
+const { post } = Astro.props;
+---
+
+<article class="post-card">
+  <h2><a href={`/blog/${post.id}/`}>{post.data.title}</a></h2>
+  <FormattedDate date={post.data.pubDate} />
+  <p>{post.data.description}</p>
+</article>
+
+<style>
+  .post-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    padding-block: var(--space-lg);
+  }
+
+  .post-card:not(:first-child) {
+    border-top: 1px solid var(--color-border);
+  }
+
+  .post-card h2 {
+    font-size: 1.375rem;
+  }
+
+  .post-card h2 a {
+    color: var(--color-text);
+    text-decoration: none;
+  }
+
+  .post-card h2 a:hover {
+    color: var(--color-accent-text);
+  }
+
+  .post-card time {
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+  }
+
+  .post-card p {
+    color: var(--color-text-muted);
+    line-height: 1.6;
+  }
+</style>

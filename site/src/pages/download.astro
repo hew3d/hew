@@ -1,0 +1,127 @@
+---
+import { getEntry, getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Button from '../components/Button.astro';
+import DownloadCard from '../components/DownloadCard.astro';
+
+const entry = await getEntry('pages', 'download');
+if (!entry) {
+  throw new Error('Missing content/pages/download.md entry');
+}
+
+const { title, description, intro, webCta } = entry.data;
+
+const releases = await getCollection('releases');
+const releaseOrder = ['macos', 'windows', 'linux'] as const;
+const releasesById = new Map(releases.map((r) => [r.data.id, r.data]));
+const orderedReleases = releaseOrder
+  .map((id) => releasesById.get(id))
+  .filter((release): release is NonNullable<typeof release> => Boolean(release));
+---
+
+<BaseLayout title={title} description={description ?? ''} noSiteName>
+  <div class="container download-page">
+    <header class="page-head">
+      <h1>{title}</h1>
+      {intro && <p class="intro">{intro}</p>}
+    </header>
+
+    {
+      webCta && (
+        <div class="web-callout">
+          <div class="web-callout-copy">
+            <p class="eyebrow">Available today</p>
+            <h2>{webCta.label}</h2>
+            {webCta.blurb && <p>{webCta.blurb}</p>}
+          </div>
+          <Button href={webCta.href} variant="primary" size="lg">
+            {webCta.label}
+          </Button>
+        </div>
+      )
+    }
+
+    <div class="cards" id="download-cards">
+      {
+        orderedReleases.map((release) => (
+          <DownloadCard release={release} />
+        ))
+      }
+    </div>
+  </div>
+</BaseLayout>
+
+<script is:inline>
+  (function () {
+    var raw =
+      (navigator.userAgentData && navigator.userAgentData.platform) ||
+      navigator.userAgent ||
+      '';
+    var ua = raw.toLowerCase();
+    var id = null;
+    if (ua.indexOf('mac') !== -1) id = 'macos';
+    else if (ua.indexOf('win') !== -1) id = 'windows';
+    else if (ua.indexOf('linux') !== -1 || ua.indexOf('x11') !== -1) id = 'linux';
+    if (!id) return;
+    var container = document.getElementById('download-cards');
+    var card = container && container.querySelector('[data-os="' + id + '"]');
+    if (!card) return;
+    card.setAttribute('data-detected', '');
+    container.prepend(card);
+  })();
+</script>
+
+<style>
+  .download-page {
+    padding-block: var(--space-2xl) var(--space-3xl);
+  }
+
+  .page-head {
+    max-width: 60ch;
+    margin-bottom: var(--space-xl);
+  }
+
+  .page-head .intro {
+    margin-top: var(--space-sm);
+    font-size: 1.0625rem;
+    color: var(--color-text-muted);
+  }
+
+  .web-callout {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-lg);
+    padding: var(--space-lg);
+    margin-bottom: var(--space-2xl);
+    border: 1.5px solid var(--color-accent);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--color-accent) 8%, var(--color-surface));
+  }
+
+  .web-callout-copy {
+    max-width: 40ch;
+  }
+
+  .web-callout-copy .eyebrow {
+    margin-bottom: var(--space-2xs);
+  }
+
+  .web-callout-copy p:not(.eyebrow) {
+    margin-top: var(--space-2xs);
+    color: var(--color-text-muted);
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-lg);
+  }
+
+  @media (max-width: 56rem) {
+    .cards {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

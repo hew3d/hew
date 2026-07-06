@@ -1,0 +1,57 @@
+---
+import BaseLayout from './BaseLayout.astro';
+
+interface Props {
+  title: string;
+  description: string;
+  ogImage?: string;
+  type?: 'website' | 'article';
+  eyebrow?: string;
+}
+
+const { title, description, ogImage, type, eyebrow } = Astro.props;
+---
+
+<BaseLayout
+  title={title}
+  description={description}
+  ogImage={ogImage}
+  type={type}
+>
+  <article class="container prose-page">
+    <header class="prose-header">
+      {eyebrow && <p class="eyebrow">{eyebrow}</p>}
+      <h1>{title}</h1>
+      <p class="description">{description}</p>
+    </header>
+    <div class="prose">
+      <slot />
+    </div>
+  </article>
+</BaseLayout>
+
+<style>
+  .prose-page {
+    padding-block: var(--space-2xl);
+  }
+
+  .prose-header {
+    max-width: 65ch;
+    margin-inline: auto;
+    margin-bottom: var(--space-xl);
+    text-align: left;
+  }
+
+  .prose-header .eyebrow {
+    margin-bottom: var(--space-2xs);
+  }
+
+  .prose-header h1 {
+    margin-bottom: var(--space-sm);
+  }
+
+  .prose-header .description {
+    color: var(--color-text-muted);
+    font-size: 1.125rem;
+  }
+</style>

@@ -21,6 +21,9 @@ wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 echo "=== pnpm --dir app typecheck && pnpm --dir app test && pnpm --dir app build ==="
 pnpm --dir app typecheck && pnpm --dir app test && pnpm --dir app build
 
+echo "=== pnpm --dir site check && pnpm --dir site build ==="
+pnpm --dir site check && pnpm --dir site build
+
 # ---------------------------------------------------------------------------
 # Desktop shell (Tauri host crate).
 #

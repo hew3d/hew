@@ -1,0 +1,64 @@
+---
+interface Props {
+  title: string;
+  description: string;
+  ogImage?: string;
+  type?: 'website' | 'article';
+  noSiteName?: boolean;
+}
+
+const {
+  title,
+  description,
+  ogImage = '/og-default.png',
+  type = 'website',
+  noSiteName = false,
+} = Astro.props;
+
+const pageTitle = noSiteName ? title : `${title} — Hew`;
+const canonicalUrl = new URL(Astro.url.pathname, Astro.site).toString();
+const ogImageUrl = new URL(ogImage, Astro.site).toString();
+---
+
+<title>{pageTitle}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonicalUrl} />
+
+<!-- Open Graph -->
+<meta property="og:title" content={pageTitle} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonicalUrl} />
+<meta property="og:type" content={type} />
+<meta property="og:image" content={ogImageUrl} />
+<meta property="og:site_name" content="Hew" />
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={pageTitle} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogImageUrl} />
+
+<!-- Icons -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+<!-- Theme colour (matches tokens.css bg for each scheme) -->
+<meta
+  name="theme-color"
+  content="#F3EDE3"
+  media="(prefers-color-scheme: light)"
+/>
+<meta
+  name="theme-color"
+  content="#1B1A17"
+  media="(prefers-color-scheme: dark)"
+/>
+
+<!-- RSS -->
+<link
+  rel="alternate"
+  type="application/rss+xml"
+  title="Hew Blog"
+  href="/rss.xml"
+/>

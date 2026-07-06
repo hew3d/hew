@@ -1,0 +1,77 @@
+---
+import Button from './Button.astro';
+
+interface Cta {
+  label: string;
+  href: string;
+}
+
+interface Props {
+  title: string;
+  body?: string;
+  primaryCta: Cta;
+  secondaryCta?: Cta;
+}
+
+const { title, body, primaryCta, secondaryCta } = Astro.props;
+---
+
+<section class="cta-band">
+  <div class="container band-inner">
+    <div class="copy">
+      <h2>{title}</h2>
+      {body && <p>{body}</p>}
+    </div>
+    <div class="actions">
+      <Button href={primaryCta.href} variant="primary" size="lg">
+        {primaryCta.label}
+      </Button>
+      {
+        secondaryCta && (
+          <Button href={secondaryCta.href} variant="secondary" size="lg">
+            {secondaryCta.label}
+          </Button>
+        )
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .cta-band {
+    margin-top: var(--space-2xl);
+    padding-block: var(--space-2xl);
+    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-bg));
+    border-block: 1px solid var(--color-border);
+  }
+
+  .band-inner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-lg);
+  }
+
+  .copy {
+    max-width: 36rem;
+  }
+
+  .copy p {
+    margin-top: var(--space-sm);
+    color: var(--color-text-muted);
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+  }
+
+  @media (max-width: 40rem) {
+    .band-inner {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  }
+</style>

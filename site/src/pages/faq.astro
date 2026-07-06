@@ -1,0 +1,51 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import FaqItem from '../components/FaqItem.astro';
+
+const entries = (await getCollection('faq')).sort(
+  (a, b) => a.data.order - b.data.order
+);
+---
+
+<BaseLayout
+  title="FAQ"
+  description="Answers to the questions we hear most about Hew — what it is, how it differs from SketchUp, file formats, platforms, and 3D printing."
+>
+  <div class="container faq-page">
+    <header class="page-head">
+      <h1>Frequently asked questions</h1>
+      <p class="intro">
+        The questions we hear most about Hew, answered in one place.
+      </p>
+    </header>
+
+    <div class="faq-list">
+      {entries.map((entry) => <FaqItem entry={entry} />)}
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .faq-page {
+    padding-block: var(--space-2xl) var(--space-3xl);
+  }
+
+  .page-head {
+    max-width: 48rem;
+    margin-bottom: var(--space-xl);
+  }
+
+  .page-head .intro {
+    margin-top: var(--space-sm);
+    font-size: 1.0625rem;
+    color: var(--color-text-muted);
+  }
+
+  .faq-list {
+    max-width: 48rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+  }
+</style>

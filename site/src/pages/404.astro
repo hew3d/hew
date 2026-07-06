@@ -1,0 +1,60 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Button from '../components/Button.astro';
+---
+
+<BaseLayout
+  title="Page not found"
+  description="This page doesn't exist — but the model you're building still can."
+  noSiteName={false}
+>
+  <div class="container not-found">
+    <img
+      src="/brand/hew-mark-terracotta.svg"
+      alt=""
+      width="72"
+      height="72"
+      class="mark"
+    />
+    <p class="eyebrow">404</p>
+    <h1>That face isn't part of the model.</h1>
+    <p class="lede">
+      The page you're looking for has been pushed, pulled, or never
+      extruded in the first place.
+    </p>
+    <div class="actions">
+      <Button href="/" variant="primary">Back home</Button>
+      <Button href="/download" variant="secondary">Download</Button>
+      <Button href="/learn" variant="secondary">Learn</Button>
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .not-found {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--space-sm);
+    padding-block: var(--space-3xl);
+  }
+
+  .mark {
+    margin-bottom: var(--space-sm);
+  }
+
+  .lede {
+    max-width: 40ch;
+    color: var(--color-text-muted);
+    font-size: 1.0625rem;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-md);
+  }
+</style>

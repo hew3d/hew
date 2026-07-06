@@ -1,0 +1,78 @@
+---
+interface Props {
+  href: string;
+  variant?: 'primary' | 'secondary';
+  size?: 'md' | 'lg';
+  class?: string;
+}
+
+const {
+  href,
+  variant = 'primary',
+  size = 'md',
+  class: className,
+} = Astro.props;
+
+const isExternal = /^https?:\/\//.test(href);
+---
+
+<a
+  href={href}
+  class:list={['button', `button--${variant}`, `button--${size}`, className]}
+  target={isExternal ? '_blank' : undefined}
+  rel={isExternal ? 'noopener noreferrer' : undefined}
+>
+  <slot />
+</a>
+
+<style>
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2xs);
+    font-weight: var(--font-weight-semibold);
+    font-size: 0.9375rem;
+    line-height: 1;
+    padding: 0.75rem 1.375rem;
+    border-radius: var(--radius-sm);
+    border: 1.5px solid transparent;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard),
+      transform var(--duration-fast) var(--ease-standard);
+  }
+
+  .button:active {
+    transform: translateY(1px);
+  }
+
+  .button--primary {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+    border-color: var(--color-accent);
+  }
+
+  .button--primary:hover {
+    background: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+  }
+
+  .button--secondary {
+    background: transparent;
+    color: var(--color-text);
+    border-color: var(--color-border-strong);
+  }
+
+  .button--secondary:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent-text);
+  }
+
+  .button--lg {
+    padding: 0.9375rem 1.75rem;
+    font-size: 1.0625rem;
+  }
+</style>

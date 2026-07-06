@@ -1,0 +1,65 @@
+---
+import { getEntry } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Hero from '../components/Hero.astro';
+import ScreenshotFrame from '../components/ScreenshotFrame.astro';
+import FeatureGrid from '../components/FeatureGrid.astro';
+import Comparison from '../components/Comparison.astro';
+import CtaBand from '../components/CtaBand.astro';
+
+const entry = await getEntry('pages', 'landing');
+if (!entry) {
+  throw new Error('Missing content/pages/landing.md entry');
+}
+
+const {
+  title,
+  description,
+  hero,
+  screenshot,
+  features,
+  comparisonTitle,
+  comparisonIntro,
+  comparison,
+  closingCta,
+} = entry.data;
+---
+
+<BaseLayout title={title} description={description ?? ''} noSiteName>
+  {
+    hero && (
+      <Hero
+        eyebrow={hero.eyebrow}
+        title={hero.title}
+        tagline={hero.tagline}
+        primaryCta={hero.primaryCta}
+        secondaryCta={hero.secondaryCta}
+      />
+    )
+  }
+
+  <ScreenshotFrame src={screenshot} />
+
+  {features && features.length > 0 && <FeatureGrid features={features} />}
+
+  {
+    comparisonTitle && comparison && comparison.length > 0 && (
+      <Comparison
+        comparisonTitle={comparisonTitle}
+        comparisonIntro={comparisonIntro}
+        comparison={comparison}
+      />
+    )
+  }
+
+  {
+    closingCta && (
+      <CtaBand
+        title={closingCta.title}
+        body={closingCta.body}
+        primaryCta={closingCta.primaryCta}
+        secondaryCta={closingCta.secondaryCta}
+      />
+    )
+  }
+</BaseLayout>

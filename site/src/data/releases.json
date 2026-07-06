@@ -1,0 +1,20 @@
+[
+  {
+    "id": "macos",
+    "label": "macOS",
+    "available": false,
+    "note": "A native desktop build is on the roadmap. Until it ships, the web app at app.hew3d.com runs fully in Safari/Chrome on macOS — same Rust kernel, same file format."
+  },
+  {
+    "id": "windows",
+    "label": "Windows",
+    "available": false,
+    "note": "A native desktop build is on the roadmap. Until it ships, the web app at app.hew3d.com runs fully in Edge/Chrome on Windows — same Rust kernel, same file format."
+  },
+  {
+    "id": "linux",
+    "label": "Linux",
+    "available": false,
+    "note": "A native desktop build is on the roadmap. Until it ships, the web app at app.hew3d.com runs fully in Chrome/Firefox on Linux — same Rust kernel, same file format."
+  }
+]

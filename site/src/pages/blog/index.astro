@@ -1,0 +1,88 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import PostCard from '../../components/PostCard.astro';
+
+const posts = (await getCollection('blog', ({ data }) => !data.draft)).sort(
+  (a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf()
+);
+---
+
+<BaseLayout
+  title="Blog"
+  description="News and updates from the team building Hew."
+>
+  <div class="container blog-page">
+    <header class="page-head">
+      <div class="head-row">
+        <h1>Blog</h1>
+        <a class="rss-link" href="/rss.xml">
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M4 11a9 9 0 0 1 9 9" />
+            <path d="M4 4a16 16 0 0 1 16 16" />
+            <circle cx="5" cy="19" r="1" fill="currentColor" stroke="none" />
+          </svg>
+          RSS
+        </a>
+      </div>
+      <p class="intro">
+        Notes on building Hew — progress, decisions, and what's next.
+      </p>
+    </header>
+
+    <div class="post-list">
+      {posts.map((post) => <PostCard post={post} />)}
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .blog-page {
+    padding-block: var(--space-2xl) var(--space-3xl);
+  }
+
+  .page-head {
+    max-width: 60ch;
+    margin-bottom: var(--space-xl);
+  }
+
+  .head-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-md);
+  }
+
+  .rss-link {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3xs);
+    font-size: 0.8125rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-muted);
+    text-decoration: none;
+  }
+
+  .rss-link:hover {
+    color: var(--color-accent-text);
+  }
+
+  .page-head .intro {
+    margin-top: var(--space-sm);
+    font-size: 1.0625rem;
+    color: var(--color-text-muted);
+  }
+
+  .post-list {
+    max-width: 60ch;
+  }
+</style>

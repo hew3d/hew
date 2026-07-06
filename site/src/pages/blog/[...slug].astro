@@ -1,0 +1,62 @@
+---
+import { getCollection, render } from 'astro:content';
+import type { InferGetStaticPropsType } from 'astro';
+import ProseLayout from '../../layouts/ProseLayout.astro';
+import FormattedDate from '../../components/FormattedDate.astro';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog', ({ data }) => !data.draft);
+  return posts.map((entry) => ({
+    params: { slug: entry.id },
+    props: { entry },
+  }));
+}
+
+type Props = InferGetStaticPropsType<typeof getStaticPaths>;
+
+const { entry } = Astro.props as Props;
+const { Content } = await render(entry);
+---
+
+<ProseLayout
+  title={entry.data.title}
+  description={entry.data.description}
+  type="article"
+>
+  <div class="post-meta">
+    <FormattedDate date={entry.data.pubDate} />
+    {entry.data.updatedDate && (
+      <span class="updated">
+        (updated <FormattedDate date={entry.data.updatedDate} />)
+      </span>
+    )}
+  </div>
+
+  <Content />
+
+  <p class="back-link"><a href="/blog/">&larr; Back to blog</a></p>
+</ProseLayout>
+
+<style>
+  .post-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2xs);
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-md);
+  }
+
+  .back-link {
+    margin-top: var(--space-2xl);
+    padding-top: var(--space-lg);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .back-link a {
+    color: var(--color-accent-text);
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+    font-weight: var(--font-weight-semibold);
+  }
+</style>

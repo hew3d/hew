@@ -1,0 +1,55 @@
+---
+import FeatureCard from './FeatureCard.astro';
+
+interface Feature {
+  title: string;
+  body: string;
+  icon?: string;
+}
+
+interface Props {
+  features: Feature[];
+}
+
+const { features } = Astro.props;
+---
+
+<section class="features">
+  <div class="container">
+    <div class="grid">
+      {
+        features.map((feature) => (
+          <FeatureCard
+            title={feature.title}
+            body={feature.body}
+            icon={feature.icon}
+          />
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .features {
+    padding-block: var(--space-2xl);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-lg);
+  }
+
+  @media (max-width: 64rem) {
+    .grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (max-width: 40rem) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

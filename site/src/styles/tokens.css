@@ -1,0 +1,129 @@
+/*
+ * Hew brand design tokens.
+ *
+ * Brand palette (docs/BRAND.md): Terracotta #C45D3C (accent, used sparingly),
+ * Charcoal #1B1A17 (dark), Cream #F3EDE3 (light/paper). This is brand chrome
+ * only — the in-app Studio UI's blue accent (#5b8cff) must never appear here.
+ *
+ * Theme resolution order:
+ *   1. html[data-theme="light"] / html[data-theme="dark"] — set by the
+ *      inline theme script in BaseLayout, wins whenever JS ran.
+ *   2. @media (prefers-color-scheme: dark) on html:not([data-theme]) — the
+ *      no-JS fallback, so the page still renders correctly with scripting
+ *      disabled.
+ *   3. :root defaults below (light) — final fallback.
+ */
+
+:root {
+  /* Brand palette (raw) — prefer the semantic tokens below in components. */
+  --brand-terracotta: #c45d3c;
+  --brand-charcoal: #1b1a17;
+  --brand-cream: #f3ede3;
+
+  /* Spacing scale */
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2.5rem;
+  --space-xl: 4rem;
+  --space-2xl: 6rem;
+  --space-3xl: 9rem;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-full: 999px;
+
+  /* Type */
+  --font-family-base: 'Hanken Grotesk Variable', 'Hanken Grotesk', system-ui,
+    -apple-system, 'Segoe UI', sans-serif;
+  --font-family-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Roboto Mono',
+    Menlo, Consolas, monospace;
+  --font-weight-regular: 400;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --font-weight-extrabold: 800;
+  --tracking-tight: -0.03em;
+
+  /* Layout */
+  --container-width: 72rem;
+  --container-padding: var(--space-md);
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+
+  /* Shadows — restrained, single soft layer, never stacked/cheesy */
+  --shadow-sm: 0 1px 2px rgb(27 26 23 / 0.06);
+  --shadow-md: 0 4px 16px rgb(27 26 23 / 0.08);
+
+  /* --- Semantic colour tokens: light theme (default) --- */
+  --color-bg: var(--brand-cream);
+  --color-surface: #fbf8f2;
+  --color-surface-raised: #ffffff;
+  --color-text: var(--brand-charcoal);
+  --color-text-muted: #5a564d;
+  --color-accent: var(--brand-terracotta);
+  --color-accent-hover: #ad4f31;
+  --color-accent-text: #9a3d22; /* AA-safe on cream for links/inline text */
+  --color-accent-contrast: #fffaf5; /* text drawn on an accent-filled surface */
+  --color-border: #ded5c4;
+  --color-border-strong: #c7bba4;
+  --color-focus-ring: var(--brand-terracotta);
+  --color-code-bg: #ece4d4;
+}
+
+html[data-theme='dark'] {
+  --color-bg: var(--brand-charcoal);
+  --color-surface: #232019;
+  --color-surface-raised: #29261e;
+  --color-text: var(--brand-cream);
+  --color-text-muted: #b8b1a2;
+  --color-accent: var(--brand-terracotta);
+  --color-accent-hover: #d3714f;
+  --color-accent-text: #e08561; /* lightened terracotta, AA-safe on charcoal */
+  --color-accent-contrast: #1b1a17;
+  --color-border: #3a362c;
+  --color-border-strong: #4c4737;
+  --color-focus-ring: #e08561;
+  --color-code-bg: #171512;
+}
+
+html[data-theme='light'] {
+  --color-bg: var(--brand-cream);
+  --color-surface: #fbf8f2;
+  --color-surface-raised: #ffffff;
+  --color-text: var(--brand-charcoal);
+  --color-text-muted: #5a564d;
+  --color-accent: var(--brand-terracotta);
+  --color-accent-hover: #ad4f31;
+  --color-accent-text: #9a3d22;
+  --color-accent-contrast: #fffaf5;
+  --color-border: #ded5c4;
+  --color-border-strong: #c7bba4;
+  --color-focus-ring: var(--brand-terracotta);
+  --color-code-bg: #ece4d4;
+}
+
+/* No-JS fallback: honour OS preference when the theme script hasn't run. */
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) {
+    --color-bg: var(--brand-charcoal);
+    --color-surface: #232019;
+    --color-surface-raised: #29261e;
+    --color-text: var(--brand-cream);
+    --color-text-muted: #b8b1a2;
+    --color-accent: var(--brand-terracotta);
+    --color-accent-hover: #d3714f;
+    --color-accent-text: #e08561;
+    --color-accent-contrast: #1b1a17;
+    --color-border: #3a362c;
+    --color-border-strong: #4c4737;
+    --color-focus-ring: #e08561;
+    --color-code-bg: #171512;
+  }
+}

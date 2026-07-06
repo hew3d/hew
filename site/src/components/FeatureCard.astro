@@ -1,0 +1,78 @@
+---
+interface Props {
+  title: string;
+  body: string;
+  icon?: string;
+}
+
+const { title, body, icon } = Astro.props;
+
+// Small self-drawn line-art icons, keyed to the vocabulary hinted at in the
+// design brief (cube / split / printer / push-pull / file / globe). If a
+// feature doesn't specify an `icon`, we fall back to the brand cube mark as
+// a tasteful, on-brand geometric accent rather than inventing per-card
+// meaning that isn't backed by content.
+const icons: Record<string, string> = {
+  cube: `<polygon points="0,-34 29.44,-17 29.44,17 0,34 -29.44,17 -29.44,-17"/><line x1="0" y1="0" x2="0" y2="-34"/><line x1="0" y1="0" x2="-29.44" y2="-17"/><line x1="0" y1="0" x2="29.44" y2="-17"/>`,
+  split: `<rect x="-9" y="-8" width="7" height="16" rx="1.5"/><rect x="2" y="-8" width="7" height="16" rx="1.5"/>`,
+  printer: `<circle cx="0" cy="0" r="9"/><polyline points="-4,0 -1,4 5,-5"/>`,
+  pushpull: `<rect x="-7" y="-7" width="14" height="14" rx="1"/><path d="M0,-16 L-3,-11 M0,-16 L3,-11"/><path d="M0,16 L-3,11 M0,16 L3,11"/><line x1="0" y1="-16" x2="0" y2="16"/>`,
+  file: `<path d="M-6,-11 L2,-11 L7,-6 L7,11 L-6,11 Z"/><path d="M2,-11 L2,-6 L7,-6"/>`,
+  globe: `<circle cx="0" cy="0" r="9"/><ellipse cx="0" cy="0" rx="4" ry="9"/><line x1="-9" y1="0" x2="9" y2="0"/>`,
+};
+
+const key = icon && icons[icon] ? icon : 'cube';
+const markup = icons[key];
+const isCube = key === 'cube';
+---
+
+<article class="card">
+  <div class="icon">
+    <svg
+      viewBox={isCube ? '-50 -50 100 100' : '-20 -20 40 40'}
+      fill="none"
+      stroke="currentColor"
+      stroke-width={isCube ? 6 : 2.4}
+      stroke-linejoin="round"
+      stroke-linecap="round"
+      aria-hidden="true"
+      set:html={markup}
+    />
+  </div>
+  <h3>{title}</h3>
+  <p>{body}</p>
+</article>
+
+<style>
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    padding: var(--space-lg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+  }
+
+  .icon {
+    width: 2.5rem;
+    height: 2.5rem;
+    color: var(--color-accent);
+    margin-bottom: var(--space-2xs);
+  }
+
+  .icon svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .card h3 {
+    font-size: 1.125rem;
+  }
+
+  .card p {
+    color: var(--color-text-muted);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+</style>

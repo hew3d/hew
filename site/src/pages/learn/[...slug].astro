@@ -1,0 +1,102 @@
+---
+import { getCollection, render } from 'astro:content';
+import type { InferGetStaticPropsType } from 'astro';
+import ProseLayout from '../../layouts/ProseLayout.astro';
+
+export async function getStaticPaths() {
+  const entries = await getCollection('learn');
+  const sorted = [...entries].sort((a, b) => a.data.order - b.data.order);
+  return sorted.map((entry, index) => ({
+    params: { slug: entry.id },
+    props: {
+      entry,
+      prev: sorted[index - 1] ?? null,
+      next: sorted[index + 1] ?? null,
+    },
+  }));
+}
+
+type Props = InferGetStaticPropsType<typeof getStaticPaths>;
+
+const { entry, prev, next } = Astro.props as Props;
+const { Content } = await render(entry);
+---
+
+<ProseLayout title={entry.data.title} description={entry.data.description}>
+  <Content />
+
+  <nav class="guide-nav" aria-label="Guide navigation">
+    {prev ? (
+      <a class="guide-nav-link prev" href={`/learn/${prev.id}/`}>
+        <span class="direction">Previous</span>
+        <span class="title">{prev.data.title}</span>
+      </a>
+    ) : (
+      <span />
+    )}
+    {next ? (
+      <a class="guide-nav-link next" href={`/learn/${next.id}/`}>
+        <span class="direction">Next</span>
+        <span class="title">{next.data.title}</span>
+      </a>
+    ) : (
+      <span />
+    )}
+  </nav>
+</ProseLayout>
+
+<style>
+  .guide-nav {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-md);
+    margin-top: var(--space-2xl);
+    padding-top: var(--space-lg);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .guide-nav-link {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3xs);
+    max-width: 20rem;
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    text-decoration: none;
+    color: var(--color-text);
+    transition: border-color var(--duration-fast) var(--ease-standard);
+  }
+
+  .guide-nav-link:hover {
+    border-color: var(--color-accent);
+  }
+
+  .guide-nav-link.next {
+    margin-left: auto;
+    text-align: right;
+  }
+
+  .direction {
+    font-size: 0.75rem;
+    font-weight: var(--font-weight-bold);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-accent-text);
+  }
+
+  .guide-nav-link .title {
+    font-weight: var(--font-weight-semibold);
+  }
+
+  @media (max-width: 40rem) {
+    .guide-nav {
+      flex-direction: column;
+    }
+
+    .guide-nav-link.next {
+      margin-left: 0;
+      text-align: left;
+    }
+  }
+</style>

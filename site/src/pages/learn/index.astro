@@ -1,0 +1,102 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+const entries = (await getCollection('learn')).sort(
+  (a, b) => a.data.order - b.data.order
+);
+---
+
+<BaseLayout
+  title="Learn"
+  description="Guides for getting started with Hew and understanding the ideas behind its solids-first modeling."
+>
+  <div class="container learn-page">
+    <header class="page-head">
+      <h1>Learn Hew</h1>
+      <p class="intro">
+        A short set of guides covering the core workflow and the ideas
+        underneath it.
+      </p>
+    </header>
+
+    <ol class="guide-list">
+      {
+        entries.map((entry, index) => (
+          <li>
+            <a class="guide-card" href={`/learn/${entry.id}/`}>
+              <span class="guide-number">Guide {index + 1}</span>
+              <h2>{entry.data.title}</h2>
+              <p>{entry.data.description}</p>
+            </a>
+          </li>
+        ))
+      }
+    </ol>
+  </div>
+</BaseLayout>
+
+<style>
+  .learn-page {
+    padding-block: var(--space-2xl) var(--space-3xl);
+  }
+
+  .page-head {
+    max-width: 60ch;
+    margin-bottom: var(--space-xl);
+  }
+
+  .page-head .intro {
+    margin-top: var(--space-sm);
+    font-size: 1.0625rem;
+    color: var(--color-text-muted);
+  }
+
+  .guide-list {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-lg);
+  }
+
+  .guide-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    height: 100%;
+    padding: var(--space-lg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+    color: var(--color-text);
+    text-decoration: none;
+    transition: border-color var(--duration-fast) var(--ease-standard);
+  }
+
+  .guide-card:hover {
+    border-color: var(--color-accent);
+  }
+
+  .guide-number {
+    font-size: 0.75rem;
+    font-weight: var(--font-weight-bold);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-accent-text);
+  }
+
+  .guide-card h2 {
+    font-size: 1.25rem;
+  }
+
+  .guide-card p {
+    color: var(--color-text-muted);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+
+  @media (max-width: 40rem) {
+    .guide-list {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

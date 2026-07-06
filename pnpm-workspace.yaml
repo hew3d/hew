@@ -1,6 +1,7 @@
 packages:
   - 'app'
   - 'shells/*'
+  - 'site'
 allowBuilds:
   # Edge/Firefox WebDriver managers pulled in transitively by WebdriverIO; the
   # desktop E2E drives the Tauri binary via tauri-driver + WebKitWebDriver,
@@ -8,5 +9,9 @@ allowBuilds:
   edgedriver: false
   geckodriver: false
   esbuild: true
+  # Astro's optional image encoder; the site uses passthroughImageService (all
+  # images served verbatim from site/public/), so sharp's native build is dead
+  # weight — skip it.
+  sharp: false
 minimumReleaseAgeExclude:
   - '@tauri-apps/api@2.11.1'

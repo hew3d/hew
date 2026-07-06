@@ -1,0 +1,133 @@
+---
+import ThemeToggle from './ThemeToggle.astro';
+import Button from './Button.astro';
+
+const navItems = [
+  { label: 'Download', href: '/download' },
+  { label: 'Learn', href: '/learn' },
+  { label: 'FAQ', href: '/faq' },
+  { label: 'Blog', href: '/blog' },
+];
+
+const currentPath = Astro.url.pathname;
+
+function isCurrent(href: string) {
+  if (href === '/') return currentPath === '/';
+  return currentPath === href || currentPath.startsWith(`${href}/`);
+}
+---
+
+<header class="site-header">
+  <div class="container bar">
+    <a href="/" class="brand">
+      <img src="/favicon.svg" alt="" width="28" height="28" class="brand-mark" />
+      <span class="brand-word">Hew</span>
+    </a>
+
+    <nav class="nav" aria-label="Main">
+      <ul>
+        {
+          navItems.map((item) => (
+            <li>
+              <a
+                href={item.href}
+                aria-current={isCurrent(item.href) ? 'page' : undefined}
+              >
+                {item.label}
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </nav>
+
+    <div class="actions">
+      <ThemeToggle />
+      <Button href="https://app.hew3d.com" size="md">Open the app</Button>
+    </div>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: color-mix(in srgb, var(--color-bg) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    padding-block: var(--space-sm);
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2xs);
+    text-decoration: none;
+    color: var(--color-text);
+    font-family: var(--font-family-base);
+    font-weight: var(--font-weight-extrabold);
+    font-size: 1.25rem;
+    letter-spacing: var(--tracking-tight);
+  }
+
+  .brand-mark {
+    flex-shrink: 0;
+  }
+
+  .nav ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+  }
+
+  .nav a {
+    text-decoration: none;
+    color: var(--color-text-muted);
+    font-weight: var(--font-weight-semibold);
+    font-size: 0.9375rem;
+    padding-block: var(--space-3xs);
+    border-bottom: 2px solid transparent;
+  }
+
+  .nav a:hover {
+    color: var(--color-text);
+  }
+
+  .nav a[aria-current='page'] {
+    color: var(--color-text);
+    border-bottom-color: var(--color-accent);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+
+  @media (max-width: 30rem) {
+    .bar {
+      justify-content: center;
+      text-align: center;
+    }
+
+    .nav {
+      order: 3;
+      width: 100%;
+      display: flex;
+      justify-content: center;
+    }
+
+    .actions {
+      order: 2;
+    }
+  }
+</style>

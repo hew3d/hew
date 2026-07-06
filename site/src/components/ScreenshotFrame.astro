@@ -1,0 +1,116 @@
+---
+interface Props {
+  src?: string;
+  alt?: string;
+}
+
+const { src, alt = '' } = Astro.props;
+---
+
+<section class="screenshot-section">
+  <div class="container">
+    <figure class="frame">
+      <div class="titlebar" aria-hidden="true">
+        <span class="dot"></span>
+        <span class="dot"></span>
+        <span class="dot"></span>
+      </div>
+      <div class="viewport">
+        {
+          src ? (
+            <img src={src} alt={alt} loading="lazy" />
+          ) : (
+            <div class="placeholder">
+              <div class="placeholder-grid" aria-hidden="true" />
+              <img
+                src="/brand/hew-mark-terracotta.svg"
+                width="56"
+                height="56"
+                alt=""
+                class="mark"
+              />
+              <p class="caption">Studio screenshots coming soon</p>
+            </div>
+          )
+        }
+      </div>
+    </figure>
+  </div>
+</section>
+
+<style>
+  .screenshot-section {
+    padding-block: 0 var(--space-2xl);
+  }
+
+  .frame {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    background: var(--color-surface-raised);
+    box-shadow: var(--shadow-md);
+  }
+
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2xs);
+    padding: var(--space-xs) var(--space-sm);
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: var(--color-border-strong);
+  }
+
+  .viewport {
+    position: relative;
+    aspect-ratio: 16 / 9;
+  }
+
+  .viewport img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+  }
+
+  .placeholder-grid {
+    position: absolute;
+    inset: 0;
+    background-image: linear-gradient(var(--color-border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
+    background-size: 32px 32px;
+    opacity: 0.6;
+  }
+
+  .mark {
+    position: relative;
+    opacity: 0.9;
+  }
+
+  .caption {
+    position: relative;
+    color: var(--color-text-muted);
+    font-size: 0.9375rem;
+  }
+
+  @media (max-width: 30rem) {
+    .viewport {
+      aspect-ratio: 4 / 3;
+    }
+  }
+</style>

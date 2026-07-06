@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://hew3d.com/sitemap-index.xml

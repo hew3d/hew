@@ -1,7 +1,8 @@
 # Hew CI — mirrors scripts/verify.sh (the canonical local gate: fmt +
 # clippy -D warnings + cargo test + wasm-pack + Vitest + app build + the
-# Tauri host crate's fmt/clippy), then adds the replay gate, the web-E2E
-# smoke, and the visual goldens, and artifacts the built web app.
+# site build + the Tauri host crate's fmt/clippy), then adds the replay
+# gate, the web-E2E smoke, and the visual goldens, and artifacts the built
+# web app.
 
 name: CI
 
@@ -109,6 +110,15 @@ jobs:
         with:
           name: web-dist
           path: app/dist
+          if-no-files-found: warn
+
+      - name: Upload built site
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-dist
+          path: site/dist
           if-no-files-found: warn
 
       - name: Upload Playwright report on failure

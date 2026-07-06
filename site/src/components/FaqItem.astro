@@ -1,0 +1,88 @@
+---
+import { render } from 'astro:content';
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  entry: CollectionEntry<'faq'>;
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+---
+
+<details class="faq-item">
+  <summary>
+    <span class="question">{entry.data.question}</span>
+    <svg
+      class="chevron"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="6,9 12,15 18,9" />
+    </svg>
+  </summary>
+  <div class="answer prose">
+    <Content />
+  </div>
+</details>
+
+<style>
+  .faq-item {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding: var(--space-md) var(--space-lg);
+    cursor: pointer;
+    font-weight: var(--font-weight-semibold);
+    font-size: 1.0625rem;
+    list-style: none;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+
+  summary::marker {
+    content: '';
+  }
+
+  summary:hover .question {
+    color: var(--color-accent-text);
+  }
+
+  .chevron {
+    width: 1.25rem;
+    height: 1.25rem;
+    flex-shrink: 0;
+    color: var(--color-accent);
+    transition: transform var(--duration-fast) var(--ease-standard);
+  }
+
+  .faq-item[open] .chevron {
+    transform: rotate(180deg);
+  }
+
+  .answer {
+    padding: 0 var(--space-lg) var(--space-lg);
+    max-width: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .chevron {
+      transition: none;
+    }
+  }
+</style>
