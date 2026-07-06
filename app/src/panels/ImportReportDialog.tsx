@@ -1,10 +1,13 @@
 /**
- * ImportReportDialog — modal shown after a successful COLLADA import.
+ * ImportReportDialog — modal shown after a successful model import
+ * (COLLADA, SketchUp, or glTF).
  *
  * Displays the kernel ImportReport fields:
  *   - objects created (watertight vs leaky breakdown)
  *   - skipped meshes (name + reason), if any
  *   - missing texture URIs, if any
+ *   - parser warnings (recovery notes; only the SketchUp importer populates
+ *     this today), if any
  *
  * Dismissed by clicking OK or pressing Escape.
  */
@@ -98,7 +101,7 @@ export function ImportReportDialog({ report, onClose }: ImportReportDialogProps)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [handleKeyDown])
 
-  const { objects_created, watertight, leaky, skipped, textures_missing } = report
+  const { objects_created, watertight, leaky, skipped, textures_missing, warnings } = report
 
   return (
     <div style={OVERLAY_STYLE} onClick={onClose}>
@@ -155,6 +158,21 @@ export function ImportReportDialog({ report, onClose }: ImportReportDialogProps)
             <ul style={LIST_STYLE}>
               {textures_missing.map((uri, i) => (
                 <li key={i} style={{ fontFamily: 'monospace', fontSize: '11px' }}>{uri}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Parser warnings (SketchUp recovery notes) */}
+        {warnings.length > 0 && (
+          <div style={SECTION_STYLE}>
+            <div style={SECTION_LABEL_STYLE}>Parser warnings ({warnings.length})</div>
+            <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+              The file had malformed sections; some content may be missing:
+            </div>
+            <ul style={LIST_STYLE}>
+              {warnings.map((warning, i) => (
+                <li key={i}>{warning}</li>
               ))}
             </ul>
           </div>

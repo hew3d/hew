@@ -477,6 +477,8 @@ enum DocAction {
         instances: Vec<InstanceId>,
         /// Created `GroupId`s.
         groups: Vec<GroupId>,
+        /// Created `GuideId`s (imported construction guides).
+        guides: Vec<GuideId>,
     },
 }
 
@@ -1248,13 +1250,57 @@ impl Document {
 
         let objects_created = all_objects.len();
 
-        // ── 4. Push action + clear redo ───────────────────────────────────
+        // ── 4. Construction guides ─────────────────────────────────
+        // Inserted directly (not via add_guide_line/point, which would push
+        // their own undo steps): the guides belong to the single Imported
+        // action below. Degenerate inputs are skipped and reported, never
+        // fixed up (DEVELOPMENT.md rule 4).
+        let mut all_guides: Vec<GuideId> = Vec::new();
+        for g in scene.guides {
+            match g {
+                crate::import::ImportGuide::Line { origin, direction } => {
+                    let dir = direction.normalized().ok();
+                    match dir {
+                        Some(d) if point_is_finite(origin) && vec_is_finite(d) => {
+                            all_guides.push(self.guides.insert(GuideRecord {
+                                guide: Guide::Line {
+                                    origin,
+                                    direction: d,
+                                },
+                                hidden: false,
+                            }));
+                        }
+                        _ => skipped.push(SkippedMesh {
+                            name: "construction guide".into(),
+                            reason: "degenerate guide line (non-finite origin or zero direction)"
+                                .into(),
+                        }),
+                    }
+                }
+                crate::import::ImportGuide::Point { position } => {
+                    if point_is_finite(position) {
+                        all_guides.push(self.guides.insert(GuideRecord {
+                            guide: Guide::Point { position },
+                            hidden: false,
+                        }));
+                    } else {
+                        skipped.push(SkippedMesh {
+                            name: "construction guide".into(),
+                            reason: "degenerate guide point (non-finite position)".into(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // ── 5. Push action + clear redo ───────────────────────────────────
         self.undo.push(DocAction::Imported {
             roots: top_roots.clone(),
             objects: all_objects.clone(),
             components: all_components.clone(),
             instances: all_instances.clone(),
             groups: all_groups.clone(),
+            guides: all_guides.clone(),
         });
         self.redo.clear();
         self.debug_validate();
@@ -1265,7 +1311,7 @@ impl Document {
             groups_touched: all_groups,
             instances_touched: all_instances,
             components_touched: all_components,
-            guides_touched: Vec::new(),
+            guides_touched: all_guides,
         };
 
         let report = ImportReport {
@@ -3935,6 +3981,7 @@ impl Document {
                 components,
                 instances,
                 groups,
+                guides,
                 ..
             } => {
                 // Undo import: hide every created entity (ids stay stable).
@@ -3959,13 +4006,18 @@ impl Document {
                         rec.hidden = true;
                     }
                 }
+                for &guide in guides.iter() {
+                    if let Some(rec) = self.guides.get_mut(guide) {
+                        rec.hidden = true;
+                    }
+                }
                 DocChange {
                     objects_touched: objects.clone(),
                     sketches_touched: Vec::new(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
                     components_touched: components.clone(),
-                    guides_touched: Vec::new(),
+                    guides_touched: guides.clone(),
                 }
             }
         };
@@ -4382,6 +4434,7 @@ impl Document {
                 components,
                 instances,
                 groups,
+                guides,
                 ..
             } => {
                 // Redo import: unhide every created entity.
@@ -4405,13 +4458,18 @@ impl Document {
                         rec.hidden = false;
                     }
                 }
+                for &guide in guides.iter() {
+                    if let Some(rec) = self.guides.get_mut(guide) {
+                        rec.hidden = false;
+                    }
+                }
                 DocChange {
                     objects_touched: objects.clone(),
                     sketches_touched: Vec::new(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
                     components_touched: components.clone(),
-                    guides_touched: Vec::new(),
+                    guides_touched: guides.clone(),
                 }
             }
         };
@@ -4639,15 +4697,21 @@ fn ingest_build_node(
             )?;
             Some(NodeId::Object(oid))
         }
-        crate::import::ImportNode::Instance { def, pose, tags } => {
+        crate::import::ImportNode::Instance {
+            def,
+            pose,
+            name,
+            tags,
+        } => {
             let cid = def_cid.get(def).copied().flatten()?;
             let iid = doc.instances.insert(InstanceRecord {
                 def: cid,
                 pose,
                 parent,
                 hidden: false,
-                // Display name resolves to the def's name (set on ComponentDef).
-                name: None,
+                // The placement's own name when the source carries one;
+                // None resolves to the def's name (set on ComponentDef).
+                name,
                 tags,
             });
             all_instances.push(iid);

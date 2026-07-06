@@ -651,12 +651,16 @@ export default function App() {
       if (!blankOk) return
 
       // Step 5: import into the now-empty document, dispatched by format.
-      report = (result!.kind === 'gltf'
-        ? scene.import_gltf(result!.bytes)
-        : scene.import_dae(
-            result!.bytes,
-            Object.keys(result!.images).length > 0 ? result!.images : null,
-          )) as ImportReport
+      report = (
+        result!.kind === 'gltf'
+          ? scene.import_gltf(result!.bytes)
+          : result!.kind === 'skp'
+            ? scene.import_skp(result!.bytes)
+            : scene.import_dae(
+                result!.bytes,
+                Object.keys(result!.images).length > 0 ? result!.images : null,
+              )
+      ) as ImportReport
     } catch (err: unknown) {
       const raw = err instanceof Error ? err.message : String(err)
       handleToast(`Import failed: ${raw}`)
@@ -683,7 +687,7 @@ export default function App() {
     setDocSession(afterImport(result!.name, Date.now()))
 
     setImportReport(report)
-    const fmt = result!.kind === 'gltf' ? 'glTF' : 'DAE'
+    const fmt = result!.kind === 'gltf' ? 'glTF' : result!.kind === 'skp' ? 'SKP' : 'DAE'
     LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
   }, [confirmDiscard, handleToast, applyLoadedBytes])
@@ -1964,7 +1968,7 @@ export default function App() {
           so a thrown import error can never leave the overlay stuck. */}
       {isImporting && <ImportingOverlay fileName={importingName} />}
 
-      {/* Import report modal — shown after a successful COLLADA import */}
+      {/* Import report modal — shown after a successful model import */}
       {importReport !== null && (
         <ImportReportDialog
           report={importReport}

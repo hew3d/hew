@@ -104,8 +104,9 @@ export class TauriFileHost implements FileHost {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const result = await open({
       filters: [
-        { name: 'Model files (COLLADA, glTF)', extensions: ['dae', 'glb', 'gltf'] },
+        { name: 'Model files (COLLADA, SketchUp, glTF)', extensions: ['dae', 'skp', 'glb', 'gltf'] },
         { name: 'COLLADA model', extensions: ['dae'] },
+        { name: 'SketchUp 2017 Model', extensions: ['skp'] },
         { name: 'glTF model', extensions: ['glb', 'gltf'] },
       ],
       multiple: false,
@@ -120,6 +121,11 @@ export class TauriFileHost implements FileHost {
     // glTF embeds its own buffers/images — return the bytes, skip texture scan.
     if (/\.(glb|gltf)$/i.test(filePath)) {
       return { kind: 'gltf', name: basename(filePath), bytes: fileBytes }
+    }
+
+    // SketchUp files embed their textures — return the bytes, skip texture scan.
+    if (/\.skp$/i.test(filePath)) {
+      return { kind: 'skp', name: basename(filePath), bytes: fileBytes }
     }
 
     // Scan the sibling directory (and a <stem>_textures / textures subfolder

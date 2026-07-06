@@ -79,8 +79,30 @@ pub enum ImportNode {
         def: usize,
         /// Pose (definition-local → world) for this placement.
         pose: Transform,
+        /// The placement's OWN display name (`.skp` carries instance
+        /// names natively — "Front Wall" on one placement of "Wall"). `None`
+        /// falls back to the definition's name, as before.
+        name: Option<String>,
         /// Tag paths for this instance node (from `__HEWMETA__` decode, WS2).
         tags: Vec<Vec<String>>,
+    },
+}
+
+/// A construction guide carried by an import (`.skp` guides).
+/// Ingested inside the same `DocAction::Imported` step as the geometry, so
+/// one undo removes the whole import, guides included.
+pub enum ImportGuide {
+    /// An infinite construction line: a point on it + a direction.
+    Line {
+        /// A point the line passes through (meters, world space).
+        origin: Point3,
+        /// Line direction; normalized by `ingest` (degenerate → skipped, reported).
+        direction: crate::math::Vec3,
+    },
+    /// A construction point.
+    Point {
+        /// Position (meters, world space).
+        position: Point3,
     },
 }
 
@@ -93,6 +115,8 @@ pub struct ImportScene {
     pub defs: Vec<DefRecipe>,
     /// Top-level world tree nodes to splice in.
     pub roots: Vec<ImportNode>,
+    /// Construction guides to add. Undone with the import.
+    pub guides: Vec<ImportGuide>,
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

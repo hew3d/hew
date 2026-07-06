@@ -8,6 +8,7 @@ members = [
     "crates/mesh-heal",
     "crates/dae-import",
     "crates/gltf-import",
+    "crates/skp-import",
 ]
 # The Tauri host crate is deliberately NOT a workspace member: it drags
 # desktop-only dependencies into `cargo test --workspace` and would slow the
@@ -15,13 +16,9 @@ members = [
 #
 # The vendored dae-parser is likewise excluded: it is third-party code (built via
 # dae-import's path dep) and must not be held to Hew's `clippy -D warnings` bar.
-#
-# skp-import is excluded while its clean-room .skp reader (OpenSKP) is
-# developed externally; it joins the workspace once the reader is published.
 exclude = [
     "shells/tauri/src-tauri",
     "crates/vendor/dae-parser",
-    "crates/skp-import",
 ]
 
 [workspace.package]
@@ -35,6 +32,12 @@ tessellate = { path = "crates/tessellate" }
 mesh-heal = { path = "crates/mesh-heal" }
 dae-import = { path = "crates/dae-import" }
 gltf-import = { path = "crates/gltf-import" }
+skp-import = { path = "crates/skp-import" }
+# Clean-room SketchUp 2017.skp reader : rev-pinned to the
+# hosted OpenSKP repo so CI resolves it like any other dependency. No Trimble
+# SDK material anywhere in its chain (rule 7 admissibility test). Local dev
+# clone: ../openskp.
+openskp = "0.1.0"
 
 slotmap = "1"
 proptest = "1"

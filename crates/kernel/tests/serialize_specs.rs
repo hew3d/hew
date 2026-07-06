@@ -480,6 +480,7 @@ fn tags_round_trip_through_save_load() {
             "roof_box",
             obj_tags.clone(),
         ))],
+        guides: Vec::new(),
     };
     let (_, _) = doc.ingest(scene, vec![]).unwrap();
 

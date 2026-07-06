@@ -26,22 +26,26 @@ export interface ImageEntry {
   format: 'png' | 'jpeg'
 }
 
-/** Result of a successful COLLADA import (mirrors the kernel ImportReport). */
+/** Result of a successful import (mirrors the kernel ImportReport). */
 export interface ImportReport {
   objects_created: number
   watertight: number
   leaky: number
   skipped: Array<{ name: string; reason: string }>
   textures_missing: string[]
+  /** Parser recovery notes — only the SketchUp (.skp) importer populates this today. */
+  warnings: string[]
 }
 
 /**
  * A successfully-picked import file. `kind` selects the kernel importer:
- * COLLADA carries host-resolved `images`; glTF embeds its own resources.
+ * COLLADA carries host-resolved `images`; glTF and SketchUp embed their own
+ * resources, so they carry only bytes.
  */
 export type ImportPick =
   | { kind: 'dae'; name: string; bytes: Uint8Array; images: Record<string, ImageEntry> }
   | { kind: 'gltf'; name: string; bytes: Uint8Array }
+  | { kind: 'skp'; name: string; bytes: Uint8Array }
 
 export interface FileHost {
   /**
@@ -64,14 +68,16 @@ export interface FileHost {
   saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null>
 
   /**
-   * Prompt the user to choose a model file to import — COLLADA (`.dae`) or
-   * glTF (`.glb` / `.gltf`) — the format is chosen by the file the user picks
-   * (the dialog offers a filter for each). Returns null if the user cancels.
+   * Prompt the user to choose a model file to import — COLLADA (`.dae`),
+   * SketchUp 2017 (`.skp`), or glTF (`.glb` / `.gltf`) — the format is chosen
+   * by the file the user picks (the dialog offers a filter for each). Returns
+   * null if the user cancels.
    *
    * The returned `kind` tells the caller which kernel importer to run. For
    * COLLADA, `images` maps each referenced image URI to its encoded bytes +
    * format (missing images are reported by the kernel ImportReport, not an
-   * error here); glTF embeds its own resources, so it carries only the bytes.
+   * error here); glTF and SketchUp both embed their own resources (SketchUp
+   * files embed their textures), so they carry only the bytes.
    *
    * `name` is the display name (basename) of the chosen file, used by the
    * importing overlay to show "Importing "<name>"…" while the parse runs.

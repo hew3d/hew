@@ -68,7 +68,11 @@ pub fn parse_dae(
         let mut meshes: Vec<MeshRecipe> = Vec::new();
         // Def geometry is kept raw (COLLADA units). world_tf is NOT applied here;
         // it is carried in Instance.pose = acc.then(&world_tf) at the placement site.
-        collect_meshes_from_node(node, &geom_map, id_to_dense, &mut meshes);
+        // `acc` seeds with this node's own local transform (mirrors the root
+        // seeding in `walk_visual_scene`), then accumulates through nested
+        // children and nested <instance_node> placements inside the def.
+        let acc = compose_node_local(node);
+        collect_meshes_from_node(node, &acc, &geom_map, id_to_dense, &lib_nodes, &mut meshes);
         if !meshes.is_empty() {
             // The library node's `name` attribute carries the friendly component
             // name (e.g. "Counter_Base"); fall back to its id.
@@ -102,6 +106,7 @@ pub fn parse_dae(
         materials: mat_table.materials,
         defs,
         roots,
+        guides: Vec::new(),
     };
 
     Ok((scene, textures_missing))
@@ -766,6 +771,7 @@ fn convert_node(
     // encodes the component instance's name + tags onto the node that contains the
     // <instance_node> reference).
     let inst_meta = node.name.as_deref().map(decode_meta);
+    let inst_name = inst_meta.as_ref().and_then(|m| m.name.clone());
     let inst_tags = inst_meta.map(|m| m.tags).unwrap_or_default();
     let mut instance_nodes: Vec<ImportNode> = Vec::new();
     for inst_node in &node.instance_node {
@@ -776,6 +782,9 @@ fn convert_node(
             instance_nodes.push(ImportNode::Instance {
                 def: def_idx,
                 pose: world_bake,
+                // The placing node's decoded HEWMETA name is the instance's own
+                // name (the Ruby exporter writes it there); None -> def name.
+                name: inst_name.clone(),
                 tags: inst_tags.clone(),
             });
         }
@@ -871,13 +880,20 @@ fn build_sym_to_dense(
 /// Instance.pose = `acc.then(&world_tf)` already carries the full unit-scale +
 /// up-axis correction. Baking `world_tf` here would double-apply it.
 ///
-/// We pass `Transform::IDENTITY` to `heal_mesh` so positions are only welded
-/// and deduped, not unit-scaled. The kernel applies the pose when baking the
-/// instance into world space.
+/// `acc` is the accumulated def-local (no `world_tf`) transform from the def's
+/// root down to `node` — mirrors `convert_node`'s `acc` for the visual-scene
+/// tree. It captures nested `<node>` placements (child transforms) and nested
+/// `<instance_node>` placements (components nested inside a component, e.g. a
+/// door handle inside a door) so their geometry lands correctly relative to
+/// the rest of the def. `DefRecipe` has no nested-`Instance` concept, so a
+/// nested `<instance_node>` is flattened here rather than represented as its
+/// own `ImportNode::Instance`.
 fn collect_meshes_from_node(
     node: &Node,
+    acc: &Transform,
     geom_map: &HashMap<String, Vec<RawMesh>>,
     id_to_dense: &HashMap<String, u32>,
+    lib_nodes: &HashMap<String, Node>,
     meshes: &mut Vec<MeshRecipe>,
 ) {
     for ig in &node.instance_geometry {
@@ -897,14 +913,15 @@ fn collect_meshes_from_node(
                     })
                     .collect();
 
-                // Def positions stay in COLLADA units (raw). IDENTITY → no transform baked.
+                // Def positions stay in COLLADA units (raw); `acc` carries only
+                // this node's def-local placement, never `world_tf`.
                 let (positions, faces, healed_mats, healed_uvs, healed_holes) = heal_mesh(
                     &raw.positions,
                     &raw.faces,
                     &face_mats,
                     &raw.face_corner_uvs,
                     &raw.face_holes,
-                    &Transform::IDENTITY,
+                    acc,
                 );
 
                 if !faces.is_empty() {
@@ -946,8 +963,34 @@ fn collect_meshes_from_node(
         }
     }
 
-    // Recurse into children of the library node.
+    // Nested components: a def can place another def via <instance_node>
+    // (e.g. a door handle nested inside a door). Flatten the referenced def's
+    // meshes into this one, baking the placement transform — the same
+    // element `convert_node` turns into `ImportNode::Instance` in the
+    // visual-scene tree, but `DefRecipe` has no nested-Instance slot to hold
+    // it, so flattening is the only way to preserve the geometry.
+    for inst_node in &node.instance_node {
+        let node_ref_id = url_as_str(&inst_node.url);
+        if let Some(target) = lib_nodes.get(node_ref_id) {
+            let target_local = compose_node_local(target);
+            let target_acc = target_local.then(acc);
+            collect_meshes_from_node(
+                target,
+                &target_acc,
+                geom_map,
+                id_to_dense,
+                lib_nodes,
+                meshes,
+            );
+        }
+    }
+
+    // Recurse into children of the library node, composing each child's own
+    // local transform the same way `convert_node` does for the visual-scene
+    // tree (child-local innermost, `acc` outermost).
     for child in &node.children {
-        collect_meshes_from_node(child, geom_map, id_to_dense, meshes);
+        let child_local = compose_node_local(child);
+        let child_acc = child_local.then(acc);
+        collect_meshes_from_node(child, &child_acc, geom_map, id_to_dense, lib_nodes, meshes);
     }
 }

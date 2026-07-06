@@ -71,6 +71,7 @@ fn empty_scene(roots: Vec<ImportNode>) -> ImportScene {
         materials: vec![],
         defs: vec![],
         roots,
+        guides: Vec::new(),
     }
 }
 
@@ -140,6 +141,7 @@ fn ingest_is_atomic_undo_hides_all() {
                 tags: Vec::new(),
             },
         ],
+        guides: Vec::new(),
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -216,14 +218,17 @@ fn ingest_instance_shares_one_def() {
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::IDENTITY,
+                name: None,
                 tags: Vec::new(),
             },
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)),
+                name: None,
                 tags: Vec::new(),
             },
         ],
+        guides: Vec::new(),
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -274,9 +279,11 @@ fn ingest_then_save_load_preserves_names() {
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::IDENTITY,
+                name: None,
                 tags: Vec::new(),
             },
         ],
+        guides: Vec::new(),
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -314,4 +321,101 @@ fn ingest_then_save_load_preserves_names() {
     let bytes = doc.save();
     let loaded = Document::load(&bytes).expect("load must succeed");
     assert_names(&loaded);
+}
+
+/// Imported construction guides ride the same atomic undo step as the
+/// geometry: one undo hides them, one redo restores the same ids; degenerate
+/// guide inputs are skipped and reported, never fixed up (rule 4).
+#[test]
+fn ingest_guides_are_atomic_with_the_import() {
+    use kernel::{ImportGuide, Vec3};
+    let mut doc = Document::new();
+
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![ImportNode::Mesh(box_recipe("m1"))],
+        guides: vec![
+            ImportGuide::Line {
+                origin: Point3::ORIGIN,
+                direction: Vec3::new(0.0, 0.0, 3.0), // non-unit: ingest normalizes
+            },
+            ImportGuide::Point {
+                position: Point3::new(1.0, 2.0, 3.0),
+            },
+            ImportGuide::Line {
+                origin: Point3::ORIGIN,
+                direction: Vec3::new(0.0, 0.0, 0.0), // degenerate: skipped + reported
+            },
+        ],
+    };
+    let (report, change) = doc.ingest(scene, vec![]).unwrap();
+
+    let guide_ids = doc.guide_ids();
+    assert_eq!(guide_ids.len(), 2, "two valid guides created");
+    assert_eq!(change.guides_touched.len(), 2);
+    assert_eq!(
+        report.skipped.len(),
+        1,
+        "the zero-direction guide is reported, not repaired"
+    );
+    assert!(report.skipped[0].reason.contains("guide"));
+
+    // One undo removes geometry AND guides; one redo restores the same ids.
+    doc.undo().expect("undo import");
+    assert_eq!(doc.visible_object_ids().len(), 0);
+    assert_eq!(doc.guide_ids().len(), 0);
+    doc.redo().expect("redo import");
+    assert_eq!(doc.visible_object_ids().len(), 1);
+    assert_eq!(
+        doc.guide_ids(),
+        guide_ids,
+        "guide ids stable across undo/redo"
+    );
+}
+
+/// An `ImportNode::Instance` carrying its own name (native `.skp`
+/// instance names) surfaces it as the instance's display name; `None` still
+/// falls back to the definition's name.
+#[test]
+fn ingest_instance_own_name_wins_over_def_name() {
+    let mut doc = Document::new();
+
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![DefRecipe {
+            name: Some("Wall".to_string()),
+            meshes: vec![box_recipe("def_mesh")],
+        }],
+        roots: vec![
+            ImportNode::Instance {
+                def: 0,
+                pose: Transform::IDENTITY,
+                name: Some("Front Wall".to_string()),
+                tags: Vec::new(),
+            },
+            ImportNode::Instance {
+                def: 0,
+                pose: Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)),
+                name: None,
+                tags: Vec::new(),
+            },
+        ],
+        guides: Vec::new(),
+    };
+    doc.ingest(scene, vec![]).unwrap();
+
+    let names: Vec<Option<String>> = doc
+        .instance_ids()
+        .into_iter()
+        .map(|iid| doc.instance_name(iid).map(str::to_string))
+        .collect();
+    assert!(
+        names.contains(&Some("Front Wall".to_string())),
+        "own instance name stored; got {names:?}"
+    );
+    assert!(
+        names.contains(&None),
+        "unnamed instance stays None (UI falls back to the def name); got {names:?}"
+    );
 }

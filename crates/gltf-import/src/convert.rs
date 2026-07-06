@@ -95,6 +95,7 @@ pub fn build_scene(
             materials: mat_table.materials,
             defs,
             roots,
+            guides: Vec::new(),
         },
         mat_table.missing,
     ))
@@ -110,6 +111,7 @@ impl Ctx<'_> {
                 Some(ImportNode::Instance {
                     def,
                     pose: node_world.then(&self.world_tf),
+                    name: node_name(node),
                     tags: Vec::new(),
                 })
             } else {

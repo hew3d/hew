@@ -38,7 +38,7 @@ export interface MenuBarProps {
   onOpen: () => void
   onSave: () => void
   onSaveAs: () => void
-  /** Import a model file (COLLADA / glTF — chosen in the file dialog). */
+  /** Import a model file (COLLADA / SketchUp / glTF — chosen in the file dialog). */
   onImport: () => void
   /** Open the unified Export dialog (format — glTF/GLB or STL — chosen there). */
   onExport: () => void

@@ -224,9 +224,10 @@ export class WebFileHost implements FileHost {
   async openForImport(): Promise<ImportPick | null> {
     const FILE_TYPES: FilePickerAcceptType[] = [
       {
-        description: 'Model files (COLLADA, glTF)',
+        description: 'Model files (COLLADA, SketchUp, glTF)',
         accept: {
           'model/vnd.collada+xml': ['.dae'],
+          'application/octet-stream': ['.skp'],
           'model/gltf-binary': ['.glb'],
           'model/gltf+json': ['.gltf'],
         },
@@ -258,7 +259,7 @@ export class WebFileHost implements FileHost {
       const result = await new Promise<{ bytes: Uint8Array; name: string } | null>((resolve) => {
         const input = document.createElement('input')
         input.type = 'file'
-        input.accept = '.dae,.glb,.gltf'
+        input.accept = '.dae,.skp,.glb,.gltf'
         input.style.display = 'none'
         document.body.appendChild(input)
 
@@ -284,6 +285,11 @@ export class WebFileHost implements FileHost {
     // glTF embeds its own buffers/images — no external resolution needed.
     if (/\.(glb|gltf)$/i.test(fileName)) {
       return { kind: 'gltf', name: fileName, bytes }
+    }
+
+    // SketchUp files embed their textures — no external resolution needed.
+    if (/\.skp$/i.test(fileName)) {
+      return { kind: 'skp', name: fileName, bytes }
     }
 
     // COLLADA: best-effort texture resolution via a directory picker. If the

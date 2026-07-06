@@ -42,7 +42,9 @@ pub use ids::{
     ComponentId, EdgeId, FaceId, GroupId, GuideId, HalfEdgeId, InstanceId, LoopId, MaterialId,
     ObjectId, ShellId, SketchId, VertexId,
 };
-pub use import::{DefRecipe, ImportNode, ImportReport, ImportScene, MeshRecipe, SkippedMesh};
+pub use import::{
+    DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, MeshRecipe, SkippedMesh,
+};
 pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{

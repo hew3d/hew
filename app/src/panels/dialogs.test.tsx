@@ -152,6 +152,7 @@ describe('ImportReportDialog', () => {
     leaky: 1,
     skipped: [],
     textures_missing: [],
+    warnings: [],
   }
 
   it('shows the object count summary', () => {
@@ -193,6 +194,22 @@ describe('ImportReportDialog', () => {
     render(<ImportReportDialog report={withMissing} onClose={vi.fn()} />)
     expect(screen.getByText('textures/wood.png')).toBeInTheDocument()
     expect(screen.getByText(/missing textures \(1\)/i)).toBeInTheDocument()
+  })
+
+  it('shows the parser-warnings section when warnings is non-empty', () => {
+    const withWarnings: ImportReport = {
+      ...baseReport,
+      warnings: ['section "materials" truncated at offset 0x4a10'],
+    }
+    render(<ImportReportDialog report={withWarnings} onClose={vi.fn()} />)
+    expect(screen.getByText(/parser warnings \(1\)/i)).toBeInTheDocument()
+    expect(screen.getByText('section "materials" truncated at offset 0x4a10')).toBeInTheDocument()
+    expect(screen.getByText(/malformed sections/i)).toBeInTheDocument()
+  })
+
+  it('does not show the parser-warnings section when warnings is empty', () => {
+    render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
+    expect(screen.queryByText(/parser warnings/i)).not.toBeInTheDocument()
   })
 
   it('calls onClose when the OK button is clicked', () => {

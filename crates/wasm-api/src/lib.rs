@@ -196,8 +196,10 @@ fn doc_err(e: DocumentError) -> ApiError {
 
 /// Serialize a kernel `ImportReport` to the plain JS object the import UI
 /// consumes: `{ objects_created, watertight, leaky, skipped: [{name, reason}],
-/// textures_missing: [string] }`. Shared by `import_dae` and `import_gltf`.
-fn import_report_to_js(report: &kernel::ImportReport) -> JsValue {
+/// textures_missing: [string], warnings: [string] }`. Shared by `import_dae`,
+/// `import_gltf`, and `import_skp` (only `.skp` populates `warnings` — parser
+/// recovery notes; the other importers pass none).
+fn import_report_to_js(report: &kernel::ImportReport, warnings: &[String]) -> JsValue {
     let js_report = JsObject::new();
     Reflect::set(
         &js_report,
@@ -247,6 +249,12 @@ fn import_report_to_js(report: &kernel::ImportReport) -> JsValue {
         &missing_arr,
     )
     .unwrap();
+
+    let warnings_arr = js_sys::Array::new();
+    for w in warnings {
+        warnings_arr.push(&JsValue::from_str(w));
+    }
+    Reflect::set(&js_report, &JsValue::from_str("warnings"), &warnings_arr).unwrap();
 
     js_report.into()
 }
@@ -2566,7 +2574,7 @@ impl Scene {
         self.reconcile(&change);
 
         // ── 5. Serialize the ImportReport to a plain JS object ────────────────
-        Ok(import_report_to_js(&report))
+        Ok(import_report_to_js(&report, &[]))
     }
 
     /// Import glTF 2.0 / GLB bytes into the current document. Additive: existing
@@ -2590,7 +2598,35 @@ impl Scene {
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
 
-        Ok(import_report_to_js(&report))
+        Ok(import_report_to_js(&report, &[]))
+    }
+
+    /// Import SketchUp 2017 `.skp` bytes into the current document (
+    /// clean-room OpenSKP reader —). Additive: existing
+    /// geometry is untouched. Returns the same `ImportReport` JS shape as
+    /// [`Scene::import_dae`], plus `warnings: [string]` — parser recovery
+    /// notes (non-empty means the reader resynced inside a malformed section
+    /// and content may be missing; clean SketchUp 2017 files produce none).
+    ///
+    /// Textures are embedded in the `.skp` container, so there is no images
+    /// argument; ones without embedded bytes surface in `textures_missing`.
+    ///
+    /// # Errors
+    /// Throws a `"SKP: <message>"` `JsError` on parse failure. Unsupported
+    /// versions (anything but 2017) throw with the file's own version and
+    /// "Save As ▸ SketchUp Version 2017" guidance baked into the message.
+    pub fn import_skp(&mut self, skp_bytes: &[u8]) -> Result<JsValue, JsError> {
+        let out = skp_import::import(skp_bytes).map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+
+        let (report, change) = self
+            .doc
+            .ingest(out.scene, out.textures_missing)
+            .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+
+        // Additive — do NOT clear caches like `load`.
+        self.reconcile(&change);
+
+        Ok(import_report_to_js(&report, &out.warnings))
     }
 
     // --------------------------------------------------------- persistence
