@@ -67,14 +67,19 @@ Node.js with `pnpm`, and for the desktop shell the
 # Build and test everything the verification gate covers
 scripts/verify.sh
 
-# Build the kernel to WASM for the app
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
-
 # Run the app in a browser
 pnpm --dir app dev
 
 # Run the desktop shell
 pnpm --dir shells/tauri dev
+```
+
+Both `dev` and `build` compile the Rust kernel to WASM automatically,
+rebuilding only when the kernel sources change. To build it on its own
+(or if `wasm-pack` isn't on your `PATH` and you want to run it manually):
+
+```sh
+wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 ```
 
 ## Documentation
