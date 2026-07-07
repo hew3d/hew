@@ -61,6 +61,12 @@ obtained under Trimble's license — may enter this repository or its
 dependency chain.** If you have ever accepted the SketchUp SDK license,
 do not contribute to the `.skp` import path. This rule has no exceptions.
 
+## Licensing of contributions
+
+Hew is licensed [AGPL-3.0-only](LICENSE) with the
+[Hew Plugin API Exception](LICENSE-EXCEPTION). By submitting a
+contribution you agree to license it under the same terms.
+
 ## Reporting bugs
 
 File issues at [github.com/hew3d/hew/issues](https://github.com/hew3d/hew/issues).

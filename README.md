@@ -94,3 +94,12 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Note
 the project's licensing wall: nothing derived from the SketchUp SDK may
 enter this repository or its dependency chain. SketchUp import is powered
 by [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader.
+
+## License
+
+Hew is licensed under the [GNU AGPL-3.0-only](LICENSE), together with the
+[Hew Plugin API Exception](LICENSE-EXCEPTION) — an additional permission
+that lets you write and distribute closed-source plugins, as long as they
+interact with Hew solely through the documented Plugin API. The core stays
+copyleft, including over network use; the plugin ecosystem is open to
+commercial authors.
