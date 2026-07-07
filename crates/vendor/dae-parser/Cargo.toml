@@ -15,7 +15,10 @@ categories = ["parser-implementations", "graphics", "game-development"]
 # never enables that feature. Local patches are documented in VENDORED.md.
 [dependencies]
 ref-cast = "1.0"
-minidom-14 = "0.17"
+# Vendored minidom-14 (path dep): upstream 0.17.0 pins quick-xml "^0.36", which
+# carries RUSTSEC-2026-0194/-0195 (XML-parser DoS). Our vendored copy bumps it to
+# quick-xml 0.41 (the patched line). See crates/vendor/minidom-14/VENDORED.md.
+minidom-14 = { path = "../minidom-14" }
 percent-encoding = "2.2"
 chrono = "0.4"
 

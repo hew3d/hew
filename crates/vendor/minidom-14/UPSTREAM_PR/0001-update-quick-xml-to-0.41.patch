@@ -1,0 +1,176 @@
+From 9a41f14a32c515aae1edf3f1fd76abc3f52fdbef Mon Sep 17 00:00:00 2001
+From: Kurt Granroth <kurt.git@granroth.com>
+Date: Mon, 6 Jul 2026 16:13:09 -0700
+Subject: [PATCH] Update quick-xml to 0.41
+
+---
+ CHANGELOG.md   | 10 ++++++++++
+ Cargo.toml     |  4 ++--
+ src/element.rs | 36 ++++++++++++++++++++++++++++++++++--
+ src/error.rs   | 16 ++++++++++++++++
+ src/tests.rs   | 20 ++++++++++++++++++++
+ 5 files changed, 82 insertions(+), 4 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 25398ff..1385ee1 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,13 @@
++Version 0.18.0, released 2026-07-06:
++  * Changes
++    * Update quick-xml to 0.41 (fixes RUSTSEC-2026-0194 / RUSTSEC-2026-0195,
++      two high-severity DoS advisories against quick-xml <0.41)
++    * Port to the quick-xml 0.41 API: `BytesText::unescape` was removed and
++      references are now emitted as `Event::GeneralRef`; text is decoded and
++      character/entity references are resolved explicitly. Deprecated
++      `Attribute::decode_and_unescape_value` replaced with
++      `decoded_and_normalized_value`.
++
+ Version 0.17.0, released 2024-10-04:
+   * Changes
+     * Update quick-xml to 0.36
+diff --git a/Cargo.toml b/Cargo.toml
+index 46efec7..72bcefa 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "minidom-14"
+-version = "0.17.0"
++version = "0.18.0"
+ authors = [
+   "lumi <lumi@pew.im>",
+   "Emmanuel Gil Peyrot <linkmauve@linkmauve.fr>",
+@@ -21,4 +21,4 @@ edition = "2021"
+ name = "minidom"
+ 
+ [dependencies]
+-quick-xml = "0.36"
++quick-xml = "0.41"
+diff --git a/src/element.rs b/src/element.rs
+index 349a2a7..5663d74 100644
+--- a/src/element.rs
++++ b/src/element.rs
+@@ -335,6 +335,7 @@ impl Element {
+                 | Event::CData { .. }
+                 | Event::Decl { .. }
+                 | Event::PI { .. }
++                | Event::GeneralRef { .. } // entity ref before the root: ignore
+                 | Event::DocType { .. } => (), // TODO: may need more errors
+             }
+         };
+@@ -409,12 +410,38 @@ impl Element {
+                     }
+                 }
+                 Event::Text(s) => {
+-                    let text = s.unescape()?;
++                    // quick-xml 0.41 emits entity/character references as their
++                    // own `GeneralRef` events (handled below), so a `Text` event
++                    // is now literal character data — decode only, no unescape.
++                    let text = s.decode()?;
+                     if !text.is_empty() {
+                         let current_elem = stack.last_mut().unwrap();
+                         current_elem.append_text_node(text);
+                     }
+                 }
++                Event::GeneralRef(e) => {
++                    // `&entity;` / `&#char;` — resolve and append as text. Only
++                    // the five XML predefined entities plus numeric character
++                    // references are supported (minidom targets DTD-less docs);
++                    // an unknown entity is an error, matching the pre-0.41
++                    // `BytesText::unescape` behaviour.
++                    let current_elem = stack.last_mut().unwrap();
++                    if let Some(ch) = e.resolve_char_ref()? {
++                        current_elem.append_text_node(ch.to_string());
++                    } else {
++                        let name = e.decode()?;
++                        match quick_xml::escape::resolve_predefined_entity(&name) {
++                            Some(s) => current_elem.append_text_node(s),
++                            None => {
++                                return Err(quick_xml::escape::EscapeError::UnrecognizedEntity(
++                                    0..name.len(),
++                                    name.into_owned(),
++                                )
++                                .into());
++                            }
++                        }
++                    }
++                }
+                 Event::CData(s) => {
+                     let s = s.into_inner();
+                     let text = str::from_utf8(&s)?;
+@@ -852,7 +879,12 @@ fn build_element<R: BufRead>(
+         .map(|o| {
+             let o = o?;
+             let key = str::from_utf8(o.key.0)?.to_owned();
+-            let value = o.decode_and_unescape_value(reader.decoder())?.to_string();
++            // `decode_and_unescape_value` is deprecated in quick-xml 0.41 in
++            // favour of `decoded_and_normalized_value`, which performs XML
++            // attribute-value normalization. XMPP/COLLADA are XML 1.0.
++            let value = o
++                .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, reader.decoder())?
++                .to_string();
+             Ok((key, value))
+         })
+         .filter(|o| match *o {
+diff --git a/src/error.rs b/src/error.rs
+index d4e1936..0551a94 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -94,6 +94,22 @@ impl From<::quick_xml::events::attributes::AttrError> for Error {
+     }
+ }
+ 
++// quick-xml 0.41 split text/attribute decoding into fallible steps that yield
++// `EncodingError` / `EscapeError` (previously folded into `quick_xml::Error` by
++// the now-removed `BytesText::unescape`). `quick_xml::Error` still converts from
++// both, so we route through it and keep a single `XmlError` variant.
++impl From<::quick_xml::encoding::EncodingError> for Error {
++    fn from(err: ::quick_xml::encoding::EncodingError) -> Error {
++        Error::XmlError(err.into())
++    }
++}
++
++impl From<::quick_xml::escape::EscapeError> for Error {
++    fn from(err: ::quick_xml::escape::EscapeError) -> Error {
++        Error::XmlError(err.into())
++    }
++}
++
+ impl From<::std::str::Utf8Error> for Error {
+     fn from(err: ::std::str::Utf8Error) -> Error {
+         Error::Utf8Error(err)
+diff --git a/src/tests.rs b/src/tests.rs
+index 1a41039..23a21c1 100644
+--- a/src/tests.rs
++++ b/src/tests.rs
+@@ -268,6 +268,26 @@ fn writer_escapes_text() {
+     );
+ }
+ 
++#[test]
++fn reader_resolves_entities_and_char_refs() {
++    // quick-xml 0.41 emits each reference as its own `GeneralRef` event; verify
++    // the five XML predefined entities, decimal and hex character references,
++    // and literal text between references all reassemble into one text value.
++    let xml = r#"<root xmlns="ns">a&amp;b&lt;c&gt;d&quot;e&apos;f&#49;g&#x30;h</root>"#;
++    let mut reader = Reader::from_str(xml);
++    let root = Element::from_reader(&mut reader).unwrap();
++    assert_eq!(root.text(), r#"a&b<c>d"e'f1g0h"#);
++}
++
++#[test]
++fn reader_rejects_unknown_entity() {
++    // Minidom targets DTD-less documents: an unrecognized general entity must be
++    // a hard error rather than silently dropped.
++    let xml = r#"<root xmlns="ns">&bogus;</root>"#;
++    let mut reader = Reader::from_str(xml);
++    assert!(Element::from_reader(&mut reader).is_err());
++}
++
+ #[test]
+ fn builder_works() {
+     let elem = Element::builder("a", "b")
+-- 
+2.53.0
+

@@ -1,0 +1,24 @@
+[package]
+name = "minidom-14"
+version = "0.18.0"
+authors = [
+  "lumi <lumi@pew.im>",
+  "Emmanuel Gil Peyrot <linkmauve@linkmauve.fr>",
+  "Bastien Orivel <eijebong+minidom@bananium.fr>",
+  "Astro <astro@spaceboyz.net>",
+  "Maxime “pep” Buquet <pep@bouah.net>",
+]
+description = "A small, simple DOM implementation on top of quick-xml, targeting the subset of XML useful for XMPP"
+homepage = "https://github.com/digama0/minidom-14"
+repository = "https://github.com/digama0/minidom-14"
+documentation = "https://docs.rs/minidom-14"
+readme = "README.md"
+keywords = ["xml", "xmpp"]
+license = "MPL-2.0"
+edition = "2021"
+
+[lib]
+name = "minidom"
+
+[dependencies]
+quick-xml = "0.41"

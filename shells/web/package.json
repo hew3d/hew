@@ -4,6 +4,6 @@
   "version": "0.0.0",
   "license": "AGPL-3.0-only",
   "scripts": {
-    "build": "pnpm --dir ../../app build && rm -rf dist && cp -R ../../app/dist dist"
+    "build": "pnpm --dir ../../app build && rm -rf dist && cp -R ../../app/dist dist && node inject-csp.mjs"
   }
 }

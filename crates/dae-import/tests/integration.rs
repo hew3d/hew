@@ -999,6 +999,74 @@ fn real_file_smoke() {
     }
 }
 
+// ── Security regression: malformed-count resource-exhaustion (DoS) ────────────
+
+/// A hostile `.dae` can declare astronomically large element counts while
+/// carrying only a few bytes of actual data. The importer must clamp every
+/// file-declared count to what the backing arrays can supply, so it never drives
+/// a multi-gigabyte `Vec::with_capacity` or a multi-billion-iteration loop.
+///
+/// Regression for the allocation/CPU-amplification DoS fixed in `parse.rs`
+/// (`extract_xyz_from_source`, `extract_uv2_from_source`, `extract_triangles`,
+/// `extract_polylist`). If the clamps regress, this test aborts under OOM /
+/// hangs rather than returning promptly — which is the signal.
+#[test]
+fn inflated_counts_do_not_exhaust_memory() {
+    // One real vertex worth of floats, but accessor/polylist/vcount all claim
+    // ~4 billion. Pre-clamp, the accessor count alone forced a ~96 GB alloc.
+    let huge: u64 = 4_000_000_000;
+    let mut xml = String::new();
+    xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    xml.push_str(
+        "<COLLADA xmlns=\"http://www.collada.org/2005/11/COLLADASchema\" version=\"1.4.1\">\n",
+    );
+    xml.push_str("  <asset><created>2024-01-01</created><modified>2024-01-01</modified>");
+    xml.push_str("<unit name=\"meter\" meter=\"1.0\"/><up_axis>Z_UP</up_axis></asset>\n");
+    xml.push_str("  <library_geometries><geometry id=\"Geom\" name=\"Geom\"><mesh>\n");
+    xml.push_str(
+        "    <source id=\"Pos\"><float_array id=\"PosArr\" count=\"3\">0 0 0</float_array>\n",
+    );
+    xml.push_str(&format!(
+        "      <technique_common><accessor source=\"#PosArr\" count=\"{huge}\" stride=\"3\">\n"
+    ));
+    xml.push_str("        <param name=\"X\" type=\"float\"/><param name=\"Y\" type=\"float\"/><param name=\"Z\" type=\"float\"/>\n");
+    xml.push_str("      </accessor></technique_common></source>\n");
+    xml.push_str(
+        "    <vertices id=\"Verts\"><input semantic=\"POSITION\" source=\"#Pos\"/></vertices>\n",
+    );
+    xml.push_str(&format!(
+        "    <polylist count=\"{huge}\"><input semantic=\"VERTEX\" source=\"#Verts\" offset=\"0\"/>\n"
+    ));
+    xml.push_str(&format!(
+        "      <vcount>{huge}</vcount><p>0</p></polylist>\n"
+    ));
+    xml.push_str("  </mesh></geometry></library_geometries>\n");
+    xml.push_str("  <library_visual_scenes><visual_scene id=\"Scene\" name=\"Scene\">\n");
+    xml.push_str(
+        "    <node id=\"N\" name=\"N\" type=\"NODE\"><instance_geometry url=\"#Geom\"/></node>\n",
+    );
+    xml.push_str("  </visual_scene></library_visual_scenes>\n");
+    xml.push_str("  <scene><instance_visual_scene url=\"#Scene\"/></scene>\n");
+    xml.push_str("</COLLADA>\n");
+
+    // The contract: return promptly (no panic, no OOM, no multi-minute spin).
+    // The degenerate geometry itself may parse to nothing useful — that's fine;
+    // we only assert the importer survives the hostile counts.
+    let _ = import(&xml.into_bytes(), &empty_images());
+}
+
+/// A `.dae` larger than `MAX_DAE_BYTES` is rejected before it reaches the XML
+/// parser, bounding worst-case parser resource use on hostile input.
+#[test]
+fn oversize_dae_is_rejected() {
+    let over = vec![b' '; dae_import::MAX_DAE_BYTES + 1];
+    match import(&over, &empty_images()) {
+        Err(dae_import::DaeError::Unsupported(_)) => {}
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+        Ok(_) => panic!("oversize file must be rejected"),
+    }
+}
+
 fn shellexpand_tilde(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")

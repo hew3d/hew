@@ -19,6 +19,7 @@ members = [
 exclude = [
     "shells/tauri/src-tauri",
     "crates/vendor/dae-parser",
+    "crates/vendor/minidom-14",
 ]
 
 [workspace.package]

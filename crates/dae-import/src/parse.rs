@@ -223,8 +223,15 @@ fn extract_xyz_from_source(source: &Source) -> Vec<Point3> {
     };
     let stride = source.accessor.stride.max(3);
     let offset = source.accessor.offset;
-    let count = source.accessor.count;
     let floats = &fa.val;
+    // Clamp the file-declared count to what the backing float array can
+    // actually supply. `accessor.count` is attacker-controlled; trusting it for
+    // `Vec::with_capacity` (or the loop bound) lets a few-KB file drive a
+    // multi-gigabyte allocation / multi-billion-iteration spin — a
+    // memory/CPU-amplification DoS. Clamping is behaviour-preserving for valid
+    // files: `base` is strictly increasing in `i`, so any index past the array
+    // never yielded a point anyway.
+    let count = source.accessor.count.min(floats.len() / stride + 1);
 
     let mut positions = Vec::with_capacity(count);
     for i in 0..count {
@@ -235,6 +242,8 @@ fn extract_xyz_from_source(source: &Source) -> Vec<Point3> {
                 floats[base + 1] as f64,
                 floats[base + 2] as f64,
             ));
+        } else {
+            break;
         }
     }
     positions
@@ -300,13 +309,18 @@ fn extract_uv2_from_source(source: &dae_parser::Source) -> Vec<[f64; 2]> {
     };
     let stride = source.accessor.stride.max(2);
     let offset = source.accessor.offset;
-    let count = source.accessor.count;
     let floats = &fa.val;
+    // Clamp file-declared count to available data (see `extract_xyz_from_source`
+    // for the DoS rationale). `base` is monotonic in `i`, so the early break is
+    // behaviour-preserving.
+    let count = source.accessor.count.min(floats.len() / stride + 1);
     let mut uvs = Vec::with_capacity(count);
     for i in 0..count {
         let base = offset + i * stride;
         if base + 1 < floats.len() {
             uvs.push([floats[base] as f64, floats[base + 1] as f64]);
+        } else {
+            break;
         }
     }
     uvs
@@ -329,7 +343,12 @@ fn extract_triangles(
     let mut face_mat_syms = Vec::new();
     let mut face_corner_uvs: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut face_holes: Vec<Vec<Vec<usize>>> = Vec::new();
-    let num_tris = tris.count;
+    // Clamp the file-declared triangle count to what the index array can
+    // supply. `tris.count` is attacker-controlled; an inflated value drives a
+    // multi-billion-iteration loop (and, when `stride` is degenerate, unbounded
+    // duplicate-face growth) — a CPU/memory-amplification DoS. Valid files
+    // declare a count that matches the data, so this never drops real faces.
+    let num_tris = tris.count.min(prim_data.len() / (3 * stride.max(1)) + 1);
 
     for t in 0..num_tris {
         let base = t * 3 * stride;
@@ -409,7 +428,14 @@ fn extract_polylist(
     let mut prim_idx = 0usize;
 
     for &vc in vcount.iter() {
-        let vc = vc as usize;
+        // Clamp the file-declared per-face vertex count to the index data still
+        // available. A single `<vcount>` entry is attacker-controlled; an
+        // inflated value both drives `Vec::with_capacity` into a multi-gigabyte
+        // allocation and spins the inner loop billions of times (it doesn't
+        // break on out-of-range indices) — a memory/CPU-amplification DoS.
+        // Valid files stay within the data, so no real vertices are dropped.
+        let remaining = prim_data.len().saturating_sub(prim_idx);
+        let vc = (vc as usize).min(remaining / stride.max(1) + 1);
         let mut face = Vec::with_capacity(vc);
         let mut corner_uvs: Vec<[f64; 2]> = Vec::new();
         let mut ok = true;

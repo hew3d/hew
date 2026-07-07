@@ -66,6 +66,15 @@ impl std::error::Error for DaeError {}
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
+/// Upper bound on the size of a `.dae` we will hand to the XML parser. COLLADA
+/// is verbose text, so even a heavily detailed SketchUp export stays well under
+/// this; the cap exists so a hostile file can't drive the underlying XML reader
+/// into a resource-exhaustion DoS (e.g. RUSTSEC-2026-0194 / -0195 in the
+/// transitive `quick-xml`, or any future parser pathology) — worst-case cost is
+/// bounded by a known maximum input rather than by the attacker. Defence in
+/// depth, not a substitute for keeping the XML backend patched.
+pub const MAX_DAE_BYTES: usize = 512 * 1024 * 1024;
+
 /// Parse COLLADA 1.4 bytes and pre-resolved images into a kernel `ImportScene`
 /// recipe. I/O-free: images are resolved by the host and passed in.
 ///
@@ -79,5 +88,12 @@ pub fn import(
     dae_bytes: &[u8],
     images: &ImageMap,
 ) -> Result<(kernel::ImportScene, Vec<String>), DaeError> {
+    if dae_bytes.len() > MAX_DAE_BYTES {
+        return Err(DaeError::Unsupported(format!(
+            "COLLADA file is {} bytes, over the {} byte import limit",
+            dae_bytes.len(),
+            MAX_DAE_BYTES
+        )));
+    }
     parse::parse_dae(dae_bytes, images)
 }

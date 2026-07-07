@@ -682,20 +682,37 @@ fn zip_add_stored_entry<W: Write + Seek>(
     Ok(())
 }
 
+/// Upper bound on the decompressed size of any single `.hew` container entry.
+/// Zip entries carry an attacker-controlled compression ratio, so an entry that
+/// is a few KB on disk can inflate to gigabytes in `read_to_end` — a classic
+/// decompression-bomb DoS. Hew writes every entry `Stored` (uncompressed), so a
+/// legitimate file never approaches this cap; it exists purely to reject
+/// hostile/tampered containers. 1 GiB is far above any real model's per-buffer
+/// footprint while still bounding a load to a survivable allocation.
+const MAX_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Read a named entry from a zip archive, returning its bytes.
 fn zip_read_entry(
     zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
     name: &str,
 ) -> Result<Vec<u8>, LoadError> {
-    let mut entry = zip.by_name(name).map_err(|_| LoadError::MissingAsset {
+    let entry = zip.by_name(name).map_err(|_| LoadError::MissingAsset {
         path: name.to_string(),
     })?;
+    // Cap the read at MAX_ENTRY_BYTES + 1: if the entry yields more than the cap
+    // it's a decompression bomb (or corrupt) and the container is rejected. We
+    // read via `take` rather than trusting the header's declared size, which is
+    // itself attacker-controlled.
     let mut buf = Vec::new();
-    entry
+    let mut limited = entry.take(MAX_ENTRY_BYTES + 1);
+    limited
         .read_to_end(&mut buf)
         .map_err(|_| LoadError::MissingAsset {
             path: name.to_string(),
         })?;
+    if buf.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(LoadError::NotAContainer);
+    }
     Ok(buf)
 }
 
