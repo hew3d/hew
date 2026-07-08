@@ -276,3 +276,34 @@ test('Ctrl+Z undoes and Ctrl+Shift+Z redoes through the live keydown path', asyn
   await page.keyboard.press('Control+Shift+Z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
+
+// ---------------------------------------------------------------------------
+// Group / Ungroup through the real keyboard binding (not the menu)
+// ---------------------------------------------------------------------------
+
+test('Ctrl+G groups the selection and Ctrl+Shift+G ungroups, through the live keydown path', async ({
+  page,
+}) => {
+  await setup(page)
+
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    h.drawBox([2, 0, 0], [3, 1, 0], 1)
+    h.selectObjects(h.getObjectIds())
+  })
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 2)
+
+  await page.keyboard.press('Control+g')
+  await page.waitForFunction(() => {
+    const sel = window.__hew_test!.getSelection()
+    return sel.length === 1 && sel[0].kind === 'group'
+  })
+
+  // Uppercase 'G' — a physical Shift+G produces `key === 'G'`; the lowercase
+  // variant would mask case-sensitivity bugs (same rationale as redo above).
+  await page.keyboard.press('Control+Shift+G')
+  // Ungroup clears the selection; both objects are top-level again.
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 0)
+  expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(2)
+})

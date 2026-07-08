@@ -57,13 +57,40 @@ Three colourways, rounded-square tile with the wireframe cube:
 - **Cream · light** — Terracotta cube on a Cream tile.
 
 Corner radius on the 1024 tile is 224px (~22%), an Apple-style squircle
-approximation.
+approximation. These tiles are **full-bleed** — correct for surfaces where
+the OS applies its own mask (iOS touch icons, Android/PWA maskable icons).
+
+### macOS variant
+
+macOS does *not* mask app icons, and per the
+[Apple HIG](https://developer.apple.com/design/human-interface-guidelines/app-icons)
+the artwork itself carries the shape on a transparent canvas: an 824×824
+squircle centered on the 1024 canvas (corner radius ~185), leaving a 100px
+transparent margin on every side. `brand/hew-appicon-macos.svg` is that
+variant — same white cube, scaled up to ~66% of the tile, on a vertical
+Terracotta gradient (`#D4714B` → `#AC4B2B`, averaging to brand Terracotta)
+with a subtle top sheen and the baked drop shadow from Apple's icon template.
+A full-bleed tile shipped to macOS looks oversized next to every other icon
+in the Dock — never send the full-bleed variant there, and never send the
+macOS variant to a masked surface (the OS mask would clip the margins into
+a smaller tile).
+
+Rasterised with headless Chrome (no SVG rasterizer is assumed installed):
+
+```
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --disable-gpu --hide-scrollbars \
+  --default-background-color=00000000 --window-size=1024,1024 \
+  --screenshot=brand/png/hew-appicon-macos-1024.png \
+  "file://$PWD/brand/hew-appicon-macos.svg"
+```
 
 ## Where the brand shows up in the repo
 
 | Surface                     | File(s)                                          | Source asset |
 | --------------------------- | ------------------------------------------------ | ------------ |
-| Desktop app icon (all OSes) | `shells/tauri/src-tauri/icons/*` (generated)     | `brand/png/hew-appicon-1024.png` via `tauri icon` |
+| Desktop app icon (macOS)    | `shells/tauri/src-tauri/icons/icon.icns` (generated) | `brand/png/hew-appicon-macos-1024.png` via `tauri icon` |
+| Desktop app icon (other OSes) | `shells/tauri/src-tauri/icons/*` (generated)   | `brand/png/hew-appicon-1024.png` via `tauri icon` |
 | Web favicon (SVG + PNG)     | `app/public/favicon.svg`, `app/public/favicon.png` | `hew-mark-terracotta.svg`, `hew-favicon-32.png` |
 | Apple touch icon            | `app/public/apple-touch-icon.png`                | `hew-appicon-180.png` |
 | PWA icons (192/512/maskable)| `app/public/pwa-*.png`                           | `hew-appicon-512/1024.png` |
@@ -72,7 +99,11 @@ approximation.
 
 ### Regenerating icons
 
-- **Desktop:** `cd shells/tauri && pnpm exec tauri icon ../../brand/png/hew-appicon-1024.png`
+- **Desktop:** `cd shells/tauri && pnpm exec tauri icon ../../brand/png/hew-appicon-1024.png`,
+  **then** overwrite `icon.icns` with the macOS variant — generate into a temp
+  dir and copy only the icns, so the full-bleed set stays intact for the
+  other platforms:
+  `pnpm exec tauri icon ../../brand/png/hew-appicon-macos-1024.png -o /tmp/hew-macos-icons && cp /tmp/hew-macos-icons/icon.icns src-tauri/icons/icon.icns`
 - **Web:** the `app/public/pwa-*.png`, `favicon.png`, and `apple-touch-icon.png`
   are derived from `brand/png/*` (downscales; the maskable variant is the
   appicon composited at 80% onto a full-bleed Terracotta square so the OS mask

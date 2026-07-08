@@ -30,11 +30,16 @@ describe('toolRegistry', () => {
   })
 
   describe('shortcutFor', () => {
-    it('macOS keeps its pre- Cmd-combo accelerators unchanged', () => {
-      expect(shortcutFor('Rectangle', true)).toBe('⌘K')
-      expect(shortcutFor('Line', true)).toBe('⌘L')
-      expect(shortcutFor('Push/Pull', true)).toBe('⌘=')
-      expect(shortcutFor('Move', true)).toBe('⌘0')
+    it('macOS advertises the same bare-letter scheme the keydown handler dispatches there', () => {
+      // The macOS playtest flagged that the rail displayed shortcuts that
+      // didn't work (Cmd-combos live only in the native menu). The rail now
+      // shows the bare letters, which App.tsx dispatches on every platform.
+      expect(shortcutFor('Rectangle', true)).toBe('R')
+      expect(shortcutFor('Line', true)).toBe('L')
+      expect(shortcutFor('Push/Pull', true)).toBe('P')
+      expect(shortcutFor('Move', true)).toBe('M')
+      expect(shortcutFor('Circle', true)).toBe('C')
+      expect(shortcutFor('Paint', true)).toBe('B')
     })
 
     it('Windows/Linux/Web use the SketchUp-for-Windows bare-letter scheme', () => {
@@ -58,14 +63,16 @@ describe('toolRegistry', () => {
       }
     })
 
-    it('Arc uses Cmd+J on macOS — SketchUp\'s arc-family key (assigned)', () => {
-      expect(shortcutFor('Arc', true)).toBe('⌘J')
+    it('Arc uses the bare A on macOS too — same key as everywhere else', () => {
+      expect(shortcutFor('Arc', true)).toBe('A')
     })
 
-    it('camera tools use SketchUp\'s real O / H / Z on non-Mac', () => {
-      expect(shortcutFor('Orbit', false)).toBe('O')
-      expect(shortcutFor('Pan', false)).toBe('H')
-      expect(shortcutFor('Zoom', false)).toBe('Z')
+    it('camera tools use SketchUp\'s real O / H / Z on every platform', () => {
+      for (const isMac of [true, false]) {
+        expect(shortcutFor('Orbit', isMac)).toBe('O')
+        expect(shortcutFor('Pan', isMac)).toBe('H')
+        expect(shortcutFor('Zoom', isMac)).toBe('Z')
+      }
     })
   })
 })

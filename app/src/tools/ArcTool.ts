@@ -61,9 +61,9 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
-import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
+import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween } from './lineInput'
-import { editLengthBuffer, pointAlong } from './moveInput'
+import { editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
 import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
 import {
   ARC_MIN_CHORD_M,
@@ -293,16 +293,7 @@ export class ArcTool implements Tool {
       return
     }
 
-    if (
-      (ev.key >= '0' && ev.key <= '9') ||
-      ev.key === '.' ||
-      ev.key === '-' ||
-      ev.key === 'Backspace' ||
-      ev.key === "'" ||
-      ev.key === '"' ||
-      ev.key === '/' ||
-      ev.key === ' '
-    ) {
+    if (isLengthInputKey(ev.key)) {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(this._typedReadout())
     }
@@ -310,8 +301,7 @@ export class ArcTool implements Tool {
 
   /** The typed-buffer readout, suffixed for metric formats (mirrors LineTool). */
   private _typedReadout(): string {
-    const suffix = getLengthUnitSuffix()
-    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
+    return typedReadout(this.typed)
   }
 
   /** Show the typed VCB buffer if one is being entered; otherwise the given

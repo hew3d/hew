@@ -34,7 +34,9 @@ describe('paletteShortcut', () => {
   const saveAction = entries.find((e) => e.id === 'save')!
 
   it('returns the mac shortcut for a tool entry when isMac', () => {
-    expect(paletteShortcut(rectangle, true)).toBe('⌘K')
+    // Unified bare-letter scheme — same key the rail shows and App.tsx
+    // dispatches on macOS (the native menu's ⌘K remains a secondary accel).
+    expect(paletteShortcut(rectangle, true)).toBe('R')
   })
 
   it('returns the Windows/Linux/Web shortcut for a tool entry when !isMac', () => {

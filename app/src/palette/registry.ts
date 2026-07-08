@@ -19,7 +19,10 @@
 
 import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry'
 
-export type PaletteGroup = 'Tools' | 'Actions'
+/** 'Model' entries are dynamic (built per-document by App.tsx from the
+ * scene's object/group/component/tag names) and passed to the palette as
+ * `extraEntries` — this module only defines the static Tools/Actions sets. */
+export type PaletteGroup = 'Tools' | 'Actions' | 'Model'
 
 export interface PaletteEntry {
   /** Matches a `menuActionRef.current(id)` payload string in App.tsx. */
@@ -61,7 +64,7 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Paint': 'Apply the current material to a face or object.',
   'Move': 'Translate the selection, with inference snapping.',
   'Rotate': 'Rotate the selection around an inferred axis.',
-  'Scale': 'Resize the selection from a corner or edge handle.',
+  'Scale': 'Resize the selection uniformly about its center.',
   'Tape Measure': 'Measure a distance, or create a parallel guide line.',
   'Protractor': 'Measure an angle, or create an angular guide line.',
   'Slice': 'Cut a solid into two separate watertight Objects.',

@@ -16,11 +16,13 @@ generated copies — regenerate from here.
 | `hew-mark-terracotta.svg`         | Bare mark, Terracotta stroke — primary |
 | `hew-mark-charcoal.svg`           | Bare mark, Charcoal stroke |
 | `hew-mark-white.svg`              | Bare mark, white stroke (on dark) |
-| `hew-appicon-terracotta.svg`      | App-icon tile, Terracotta (primary) |
-| `hew-appicon-charcoal.svg`        | App-icon tile, Charcoal (dark) |
+| `hew-appicon-terracotta.svg`      | App-icon tile, Terracotta (primary, full-bleed) |
+| `hew-appicon-charcoal.svg`        | App-icon tile, Charcoal (dark, full-bleed) |
+| `hew-appicon-macos.svg`           | macOS app icon (HIG grid: transparent margins, gradient, shadow) |
 | `hew-lockup.svg`                  | Mark + "Hew" wordmark (needs Hanken Grotesk) |
 | `hew-lockup-outlined.svg`         | Lockup with wordmark as vector outlines (offline) |
 | `hew-lockup-outlined-white.svg`   | Outlined lockup, white wordmark (on dark) |
 | `png/hew-mark-{512,1024}.png`     | Rasterised mark |
-| `png/hew-appicon-{180,512,1024}.png` | Rasterised app icon |
+| `png/hew-appicon-{180,512,1024}.png` | Rasterised app icon (full-bleed) |
+| `png/hew-appicon-macos-1024.png`  | Rasterised macOS app icon (feeds `icon.icns`) |
 | `png/hew-favicon-{32,64}.png`     | Rasterised favicon-size app icon |

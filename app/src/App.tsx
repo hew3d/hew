@@ -16,7 +16,7 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, nodeKey, nodeKindToNumber, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
+import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, resolveLabel, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -43,8 +43,9 @@ import { StlExportDialog } from './panels/StlExportDialog'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
 import { CommandPalette } from './palette/CommandPalette'
-import { toolHint, toolActionId } from './palette/registry'
-import { UnitsPane } from './settings/UnitsPane'
+import { toolHint, toolActionId, type PaletteEntry } from './palette/registry'
+import type { TagReveal } from './panels/TagsPanel'
+import { SettingsWindow } from './settings/SettingsWindow'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import * as diagnosticLog from './log/diagnosticLog'
@@ -54,6 +55,14 @@ import { TOOLS, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). */
 const AUTOSAVE_INTERVAL_MS = 12000
+/** Right-tray width: default/bounds (px) + localStorage persistence key.
+ *  Default is sized so typical nested tag/outliner labels fit untruncated. */
+const TRAY_WIDTH_DEFAULT = 304
+const TRAY_WIDTH_MIN = 220
+const TRAY_WIDTH_MAX = 560
+const TRAY_WIDTH_KEY = 'hew.trayWidth'
+const clampTrayWidth = (w: number): number =>
+  Math.min(TRAY_WIDTH_MAX, Math.max(TRAY_WIDTH_MIN, Math.round(w)))
 /** Refresh interval (ms) for the "Edited/Saved <relative time>" indicator. */
 const SAVE_STATE_TICK_MS = 30000
 
@@ -70,6 +79,32 @@ interface Toast {
 
 let toastCounter = 0
 
+/** Tools that create new geometry — picking one clears a lingering
+ * top-level selection (the contextual dock should switch to draw context,
+ * not stay pinned to the old object). */
+const DRAW_TOOLS: ReadonlySet<string> = new Set(['Line', 'Rectangle', 'Circle', 'Arc'])
+
+/** Tool name → native menu item id, for the macOS menu's radio checks. */
+const TOOL_MENU_IDS: Record<string, string> = {
+  Select: 'tool-select',
+  Rectangle: 'draw-rectangle',
+  Circle: 'draw-circle',
+  Arc: 'draw-arc',
+  Line: 'draw-line',
+  'Push/Pull': 'tool-pushpull',
+  Paint: 'tool-paint',
+  Move: 'tool-move',
+  Rotate: 'tool-rotate',
+  Scale: 'tool-scale',
+  'Tape Measure': 'tool-tape-measure',
+  Protractor: 'tool-protractor',
+  Slice: 'tool-slice',
+  'Edit Vertex': 'tool-edit-vertex',
+  Orbit: 'cam-orbit',
+  Pan: 'cam-pan',
+  Zoom: 'cam-zoom',
+}
+
 /** Extract the filename from an absolute path (cross-platform / or \). */
 function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
@@ -77,6 +112,18 @@ function basenameOf(path: string): string {
 
 /** Strings that signal the Scene borrow-lock after a Rust panic. */
 const PANIC_SIGNATURES = ['recursive use of an object', 'unreachable']
+
+/** True when the document holds no entities at all (a pristine "Untitled").
+ *  Used by File ▸ New (blank documents are reused instead of spawning a
+ *  second empty window) and by the open-time Zoom Extents (nothing to frame). */
+function isSceneEmpty(scene: Scene): boolean {
+  return (
+    scene.object_ids().length === 0 &&
+    scene.group_ids().length === 0 &&
+    scene.instance_ids().length === 0 &&
+    scene.sketch_ids().length === 0
+  )
+}
 
 function isPanicError(message: string): boolean {
   const lower = message.toLowerCase()
@@ -159,6 +206,12 @@ export default function App() {
   const [importingName, setImportingName] = useState('')
   /** Recovery snapshot to offer at startup (null = no dialog). */
   const [recoveryPrompt, setRecoveryPrompt] = useState<RecoverySnapshot | null>(null)
+  /** Right-tray width (px), user-resizable via the drag handle; persisted. */
+  const [trayWidth, setTrayWidth] = useState<number>(() => {
+    const raw = window.localStorage.getItem(TRAY_WIDTH_KEY)
+    const n = raw !== null ? Number(raw) : NaN
+    return Number.isFinite(n) ? clampTrayWidth(n) : TRAY_WIDTH_DEFAULT
+  })
 
   /** Imperative handle into the viewport (e.g. running a boolean). */
   const viewportApi = useRef<ViewportApi | null>(null)
@@ -307,11 +360,27 @@ export default function App() {
     if (state === null) return
     if (recoveryCheckedRef.current) return
     recoveryCheckedRef.current = true
-    recoveryStoreRef.current.read().then((snapshot) => {
-      if (shouldPromptRecovery(docSessionRef.current, snapshot)) {
-        setRecoveryPrompt(snapshot)
+    void (async () => {
+      // Only the primary window offers crash recovery. Secondary document
+      // windows (File ▸ New while another model is open) start fresh — a
+      // sibling window's live autosave must not be "recovered" into them.
+      if (isTauri) {
+        try {
+          const { getCurrentWindow } = await import('@tauri-apps/api/window')
+          if (getCurrentWindow().label !== 'main') return
+        } catch {
+          /* not fatal — fall through to the recovery check */
+        }
       }
-    }).catch(() => { /* ignore — no recovery prompt */ })
+      try {
+        const snapshot = await recoveryStoreRef.current.read()
+        if (shouldPromptRecovery(docSessionRef.current, snapshot)) {
+          setRecoveryPrompt(snapshot)
+        }
+      } catch {
+        /* ignore — no recovery prompt */
+      }
+    })()
   }, [state])
 
   // Update document.title whenever session state changes. Under Tauri, also
@@ -563,6 +632,113 @@ export default function App() {
     return seeded
   }
 
+  // Selection-dependent command availability — one derivation shared by the
+  // render-body handlers, the native Edit menu (sync_menu_state), and the
+  // in-app MenuBar, so every surface agrees on what's currently possible.
+  // NOTE: hook — must stay above the early returns (Rules of Hooks).
+  const menuGates = useMemo(() => {
+    const scene = state?.scene
+    if (scene == null) return null
+    const objectIdSet = new Set(Array.from(scene.object_ids()))
+    const booleanOperands = selectedIds.filter(
+      (n) => n.kind === 'object' && objectIdSet.has(n.id),
+    )
+    const parentOf = (n: NodeRef) => {
+      if (n.kind === 'sketch') return undefined
+      const k = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
+      return scene.node_parent(k, n.id)
+    }
+    // A sketch has no kernel NodeId — any sketch in the selection
+    // disqualifies the node-level commands.
+    const hasSketch = selectedIds.some((n) => n.kind === 'sketch')
+    return {
+      booleanOperands,
+      canBoolean: activeContext.length === 0 && booleanOperands.length === 2,
+      canGroup: !hasSketch && canGroupHelper(selectedIds, parentOf),
+      canUngroup: !hasSketch && canUngroupHelper(selectedIds),
+      canMakeComponent:
+        activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
+      canPlaceCopy: canPlaceInstance(selectedIds),
+      canExplode: canExplodeInstance(selectedIds),
+      canMakeUnique: canMakeUnique(selectedIds),
+    }
+    // docRev: entity lists change on every mutation without changing identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, selectedIds, activeContext, docRev])
+
+  // Choosing a Draw tool at top level clears the selection: the user is
+  // about to create geometry, so a still-selected object/group/component
+  // would pin the contextual dock (and Entity Info) to stale context.
+  // In-context (edit-mode) selections are the drawing target and are kept.
+  useEffect(() => {
+    if (!DRAW_TOOLS.has(activeTool)) return
+    if (activeContext.length > 0) return
+    setSelectedIds((cur) => (cur.length > 0 ? [] : cur))
+  }, [activeTool, activeContext])
+
+  // ---------------------------------------------------------------- palette: dynamic Model entries
+  // Object/group/component/tag names as searchable palette entries. Selecting
+  // one "jumps" there: nodes get selected + revealed in the Outliner/Entity
+  // Info; tags get revealed + flashed in the Tags panel. Labels match the
+  // Outliner exactly (same resolveLabel fallbacks).
+  const paletteModelEntries = useMemo((): PaletteEntry[] => {
+    const scene = state?.scene
+    if (scene == null) return []
+    const entries: PaletteEntry[] = []
+
+    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string, kindLabel: string) => {
+      entries.push({
+        id: `jump-node:${kind}:${id}`,
+        label: `${kindLabel}: ${label}`,
+        description: `Select it and reveal it in the Outliner.`,
+        group: 'Model',
+        synonyms: [label],
+      })
+    }
+    Array.from(scene.object_ids()).forEach((id, i) => {
+      pushNode('object', id, resolveLabel(scene.object_name(id), undefined, 'object', i), 'Object')
+    })
+    Array.from(scene.group_ids()).forEach((id, i) => {
+      pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', i), 'Group')
+    })
+    Array.from(scene.instance_ids()).forEach((id, i) => {
+      const def = scene.instance_def(id)
+      const defName = def !== undefined ? scene.component_name(def) : undefined
+      pushNode('instance', id, resolveLabel(scene.instance_name(id), defName, 'instance', i), 'Component')
+    })
+
+    // Unique tag paths across all nodes (same walk the Tags panel does).
+    const seenTags = new Set<string>()
+    const allNodes: { kindNum: number; id: bigint }[] = [
+      ...Array.from(scene.object_ids()).map((id) => ({ kindNum: 0, id })),
+      ...Array.from(scene.group_ids()).map((id) => ({ kindNum: 1, id })),
+      ...Array.from(scene.instance_ids()).map((id) => ({ kindNum: 2, id })),
+    ]
+    for (const { kindNum, id } of allNodes) {
+      for (const rawTag of scene.node_tags(kindNum, id)) {
+        const path = rawTag.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
+        if (path.length === 0) continue
+        const key = tagPathKey(path)
+        if (seenTags.has(key)) continue
+        seenTags.add(key)
+        entries.push({
+          id: `jump-tag:${key}`,
+          label: `Tag: ${path.join(' / ')}`,
+          description: 'Reveal this tag in the Tags panel.',
+          group: 'Model',
+          synonyms: path,
+        })
+      }
+    }
+    return entries
+    // docRev: names/tags change on every mutation without changing identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, docRev])
+
+  /** Active Tags-panel reveal (palette jump); cleared after a short flash. */
+  const [revealTag, setRevealTag] = useState<TagReveal | null>(null)
+  const revealNonceRef = useRef(0)
+
   // ---------------------------------------------------------------- shared reset helper
   // Used by New, Open — loads bytes into the scene and resets all UI state.
   const applyLoadedBytes = useCallback((bytes: Uint8Array): boolean => {
@@ -604,6 +780,12 @@ export default function App() {
     // above), so hidden-by-default tags/nodes take effect on first render
     // instead of waiting for the user to touch an eye toggle.
     pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
+    // Frame the freshly-loaded model (Open / Recover / drag-drop / file
+    // association all funnel through here). Empty documents (File ▸ New's
+    // blank bytes) keep the default framing.
+    if (!isSceneEmpty(scene)) {
+      requestAnimationFrame(() => viewportApi.current?.zoomExtents())
+    }
     return true
   }, [handleToast])
   // Keep the harness's Open path ( __hew_test.load) pointed at the latest
@@ -626,7 +808,26 @@ export default function App() {
   // ---------------------------------------------------------------- document lifecycle
 
   const newDocument = useCallback(async () => {
-    if (!(await confirmDiscard())) return
+    const scene = sceneRef.current
+    if (scene === null) return
+    if (!isSceneEmpty(scene)) {
+      // Non-blank model: never overwrite it. On the desktop, File ▸ New opens
+      // a fresh document window (the macOS staple); the current window keeps
+      // its model untouched, so no discard prompt is needed. Only the web
+      // build, which can't open OS windows, falls back to replace-in-place.
+      if (isTauri) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('new_window')
+          return
+        } catch {
+          // fall through to the in-window reset below
+        }
+      }
+      if (!(await confirmDiscard())) return
+    }
+    // Blank (or web fallback): reset in place — a pristine document is
+    // reused rather than spawning a second empty one.
     const blank = blankBytesRef.current
     if (blank === null) return
     if (applyLoadedBytes(blank)) setDocSession(afterOpen(null, Date.now()))
@@ -1013,12 +1214,16 @@ export default function App() {
           await existing.setFocus()
           return
         }
+        // Fixed-size, per macOS Settings convention (HIG: settings windows
+        // aren't resizable; each pane determines its own compact height).
         new WebviewWindow('settings', {
           url: 'index.html#settings',
           title: 'Settings',
           width: 520,
-          height: 380,
-          resizable: true,
+          height: 360,
+          resizable: false,
+          minimizable: false,
+          maximizable: false,
         })
       }).catch(() => { /* ignore */ })
       return
@@ -1080,6 +1285,32 @@ export default function App() {
 
   const menuActionRef = useRef<(payload: string) => void>(() => {})
   menuActionRef.current = (payload: string) => {
+    // Palette "jump" entries (dynamic Model group) carry their target in the
+    // id. Nodes: select + reveal in the Outliner/Entity Info (the tree
+    // scrolls its primary selection into view). Tags: reveal + flash in the
+    // Tags panel.
+    if (payload.startsWith('jump-node:')) {
+      const [, kindStr, idStr] = payload.split(':')
+      const kind = kindStr as NodeRef['kind']
+      if ((kind === 'object' || kind === 'group' || kind === 'instance') && /^\d+$/.test(idStr)) {
+        setSelectedGuide(null)
+        setSelectedIds([{ kind, id: BigInt(idStr) }])
+        setShowModelInfo(true)
+        setShowObjectInfo(true)
+      }
+      return
+    }
+    if (payload.startsWith('jump-tag:')) {
+      const key = payload.slice('jump-tag:'.length)
+      setShowTags(true)
+      const nonce = ++revealNonceRef.current
+      setRevealTag({ key, nonce })
+      // Let the highlight fade back out unless another jump superseded it.
+      setTimeout(() => {
+        setRevealTag((cur) => (cur?.nonce === nonce ? null : cur))
+      }, 2000)
+      return
+    }
     switch (payload) {
       case 'new':      newDocumentRef.current(); break
       case 'open':     openDocumentRef.current(); break
@@ -1150,6 +1381,19 @@ export default function App() {
       case 'ungroup': handleUngroup(); break
       case 'make-unique': handleMakeUnique(); break
       case 'explode-instance': handleExplodeInstance(); break
+      // Edit-menu object commands (also reachable from the contextual dock
+      // via the aliases above). Selection-gated: the native menu items are
+      // enabled/disabled through sync_menu_state, and the handlers themselves
+      // re-check the selection, so a stale click is a no-op.
+      case 'edit-group': handleGroup(); break
+      case 'edit-ungroup': handleUngroup(); break
+      case 'edit-make-component': handleMakeComponent(); break
+      case 'edit-place-copy': handlePlaceInstance(); break
+      case 'edit-explode': handleExplodeInstance(); break
+      case 'edit-make-unique': handleMakeUnique(); break
+      case 'edit-union': handleBoolean(0); break
+      case 'edit-subtract': handleBoolean(1); break
+      case 'edit-intersect': handleBoolean(2); break
     }
   }
 
@@ -1160,8 +1404,12 @@ export default function App() {
     if (!isTauri) return
     let unlisten: (() => void) | undefined
     let cancelled = false
-    import('@tauri-apps/api/event').then(({ listen }) => {
-      return listen<string>('menu-action', (event) => {
+    // Window-scoped listener (NOT the module-level `listen`, whose Any
+    // target also receives events emit_to'd at OTHER document windows —
+    // with File ▸ New's multi-window support, a menu action must only run
+    // in the window it was routed to).
+    import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) => {
+      return getCurrentWebviewWindow().listen<string>('menu-action', (event) => {
         menuActionRef.current(event.payload)
       })
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore if not in Tauri */ })
@@ -1175,8 +1423,9 @@ export default function App() {
     if (!isTauri) return
     let unlisten: (() => void) | undefined
     let cancelled = false
-    import('@tauri-apps/api/event').then(({ listen }) => {
-      return listen<string>('menu-open-path', (event) => {
+    // Window-scoped for the same multi-window reason as menu-action above.
+    import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) => {
+      return getCurrentWebviewWindow().listen<string>('menu-open-path', (event) => {
         openPathRef.current(event.payload)
       })
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore */ })
@@ -1254,15 +1503,15 @@ export default function App() {
 
   // ---------------------------------------------------------------- global keyboard shortcuts
   useEffect(() => {
-    // macOS Tauri uses the native menu bar exclusively, which owns all
-    // keyboard shortcuts there — the JS handler must not double-fire them.
-    // Windows and Linux Tauri, and the web build, all rely on this handler:
-    // Linux and web always have (no native accelerators); Windows joins them
-    // here in so it gets the SketchUp-for-Windows bare-letter
-    // tool shortcuts below (its native menu keeps its own Ctrl-combo
-    // accelerators too, redundantly, until drops Windows' native menu
-    // in favor of this same in-app path).
-    if (isTauri && isMac) return
+    // On macOS Tauri the native menu bar owns every MODIFIER shortcut
+    // (Cmd-combos) — the JS handler must not double-fire those. But the
+    // bare-letter tool shortcuts below have no native accelerator on macOS
+    // (a native bare-letter accelerator would fire even while typing), so
+    // they are handled here on EVERY platform — this is what makes the
+    // shortcuts the tool rail advertises (C for Circle, B for Paint, …)
+    // actually work on macOS. Windows/Linux Tauri and the web build use
+    // this handler for everything.
+    const nativeMenuOwnsModCombos = isTauri && isMac
 
     const onKeyDown = (ev: KeyboardEvent) => {
       const isMod = ev.metaKey || ev.ctrlKey
@@ -1271,7 +1520,11 @@ export default function App() {
       const target = ev.target as HTMLElement
       const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
 
-      if (!isMod && !isTyping) {
+      // A tool mid-measurement-entry (VCB typed buffer) owns the keyboard:
+      // letters may be unit suffixes ("1cm", "5' 2-1/4\""), not tool switches.
+      const toolIsTyping = viewportApi.current?.isCapturingInput?.() ?? false
+
+      if (!isMod && !isTyping && !toolIsTyping) {
         // Space → Select (no modifier required; guard against typing contexts).
         if (ev.key === ' ') {
           ev.preventDefault()
@@ -1303,11 +1556,12 @@ export default function App() {
         if (key === 'z') { ev.preventDefault(); setActiveTool('Zoom'); return }
       }
 
-      // (Delete/Backspace handled by a dedicated always-on effect below, since
-      // this whole handler is disabled under Tauri macOS.)
+      // (Delete/Backspace handled by a dedicated always-on effect below.)
 
       if (!isMod) return
       if (isTyping) return
+      // macOS Tauri: the native menu's accelerators own all Cmd-combos.
+      if (nativeMenuOwnsModCombos) return
 
       if (ev.key === 's' && !ev.shiftKey) {
         ev.preventDefault()
@@ -1327,6 +1581,16 @@ export default function App() {
       if (ev.key === 'n') {
         ev.preventDefault()
         newDocument()
+        return
+      }
+      // Group / Ungroup. The in-app Edit menu has always advertised these
+      // accelerators, but nothing dispatched them outside the macOS native
+      // menu — the shortcut was display-only on Windows/Linux/web. Route
+      // through the same menuActionRef dispatch the menu items use; the
+      // handlers no-op on an ineligible selection, matching a disabled item.
+      if (ev.key.toLowerCase() === 'g') {
+        ev.preventDefault()
+        menuActionRef.current(ev.shiftKey ? 'edit-ungroup' : 'edit-group')
         return
       }
       // (Camera tools moved from Ctrl+B/R/\ to SketchUp's bare O / H / Z in
@@ -1408,6 +1672,55 @@ export default function App() {
   // visible so an early run before the ref is ready is a harmless no-op.
   useEffect(() => { viewportApi.current?.setAxesVisible(showAxes) }, [showAxes])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
+
+  // ---------------------------------------------------------------- native menu state sync (macOS)
+  // Reflect UI state into the native menu bar: the active tool's radio
+  // check, the View/Window toggles' check marks, and the enabled state of
+  // the selection-gated Edit commands. macOS is the only platform that
+  // attaches the native menu (Linux/Windows use the in-app MenuBar, which
+  // reads this state directly as props).
+  useEffect(() => {
+    if (!isTauri || !isMac) return
+    const checked: Record<string, boolean> = {
+      'view-axes': showAxes,
+      'view-guides': showGuides,
+      'win-model-info': showModelInfo,
+      'win-materials': showMaterials,
+      'win-tags': showTags,
+      'win-object-info': showObjectInfo,
+      'win-debug-log': showDebugLog,
+    }
+    for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
+      checked[id] = tool === activeTool
+    }
+    const enabled: Record<string, boolean> = {
+      'edit-delete': selectedIds.length > 0 || selectedGuide !== null,
+      'edit-group': menuGates?.canGroup ?? false,
+      'edit-ungroup': menuGates?.canUngroup ?? false,
+      'edit-make-component': menuGates?.canMakeComponent ?? false,
+      'edit-place-copy': menuGates?.canPlaceCopy ?? false,
+      'edit-explode': menuGates?.canExplode ?? false,
+      'edit-make-unique': menuGates?.canMakeUnique ?? false,
+      'edit-union': menuGates?.canBoolean ?? false,
+      'edit-subtract': menuGates?.canBoolean ?? false,
+      'edit-intersect': menuGates?.canBoolean ?? false,
+    }
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke('sync_menu_state', { checked, enabled }))
+      .catch(() => { /* shell without the command (older build) — ignore */ })
+  }, [
+    activeTool,
+    showAxes,
+    showGuides,
+    showModelInfo,
+    showMaterials,
+    showTags,
+    showObjectInfo,
+    showDebugLog,
+    selectedIds,
+    selectedGuide,
+    menuGates,
+  ])
 
   // ---------------------------------------------------------------- drag-drop open
   const handleDragOver = useCallback((ev: React.DragEvent) => {
@@ -1590,22 +1903,15 @@ export default function App() {
   const canUndo = sceneRef.current?.can_scene_undo() ?? false
   const canRedo = sceneRef.current?.can_scene_redo() ?? false
 
-  // Booleans require exactly two selected OBJECTS at top level.
-  const objectIdSet = new Set(Array.from(state.scene.object_ids()))
-  const booleanOperands = selectedIds.filter(
-    (n) => n.kind === 'object' && objectIdSet.has(n.id),
-  )
-  const canBoolean = activeContext.length === 0 && booleanOperands.length === 2
-
-  // Make Component: sibling multi-selection of objects/groups (no instances).
-  const parentOf = (n: NodeRef) => {
-    const k = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
-    return state.scene.node_parent(k, n.id)
-  }
-  const canMakeComp = activeContext.length === 0 && canMakeComponent(selectedIds, parentOf)
-  const canPlace = canPlaceInstance(selectedIds)
-  const canExplode = canExplodeInstance(selectedIds)
-  const canUnique = canMakeUnique(selectedIds)
+  // Selection-gated command availability — see the menuGates memo above.
+  const booleanOperands = menuGates?.booleanOperands ?? []
+  const canBoolean = menuGates?.canBoolean ?? false
+  const canGroupNow = menuGates?.canGroup ?? false
+  const canUngroupNow = menuGates?.canUngroup ?? false
+  const canMakeComp = menuGates?.canMakeComponent ?? false
+  const canPlace = menuGates?.canPlaceCopy ?? false
+  const canExplode = menuGates?.canExplode ?? false
+  const canUnique = menuGates?.canMakeUnique ?? false
   const handleBoolean = (op: number) => {
     if (booleanOperands.length === 2) {
       viewportApi.current?.runBoolean(op, booleanOperands[0].id, booleanOperands[1].id)
@@ -1672,7 +1978,7 @@ export default function App() {
   return (
     <main
       style={{
-        fontFamily: 'sans-serif',
+        fontFamily: 'var(--font-family-ui, sans-serif)',
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
@@ -1733,6 +2039,16 @@ export default function App() {
         onToggleGuides={() => setShowGuides((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         onDelete={deleteSelection}
+        onEditAction={(id) => menuActionRef.current(id)}
+        editGates={{
+          canGroup: canGroupNow,
+          canUngroup: canUngroupNow,
+          canMakeComponent: canMakeComp,
+          canPlaceCopy: canPlace,
+          canExplode: canExplode,
+          canMakeUnique: canUnique,
+          canBoolean,
+        }}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         onOpenSettings={openSettings}
@@ -1797,6 +2113,11 @@ export default function App() {
           style={{ flex: 1, minWidth: 0, position: 'relative' }}
           onDragOver={handleDragOver}
           onDrop={handleDrop}
+          // The inference cursor (snap dot + tooltip chip) tracks the pointer
+          // inside the viewport; once the pointer leaves for the rail/tray it
+          // would otherwise freeze at the edge and its label could sit on top
+          // of panel content. Clear it on the way out.
+          onPointerLeave={() => setInferenceInfo(null)}
         >
           <Viewport
             wasmScene={state.scene}
@@ -1826,11 +2147,17 @@ export default function App() {
               before this milestone. */}
           <SnapDot info={inferenceInfo} />
           <InferenceTooltip info={inferenceInfo} />
-          <MeasurementBox toolName={toolName} value={measurement} />
-          <ViewportHUD
-            onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
-            onOrbit={() => setActiveTool('Orbit')}
-          />
+          {/* Overlays that live INSIDE the viewport container: hovering them
+              also hides the inference cursor (the container's pointerleave
+              can't see moves into its own children). display:contents keeps
+              them out of the layout while still catching the bubbled events. */}
+          <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
+            <MeasurementBox toolName={toolName} value={measurement} />
+            <ViewportHUD
+              onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
+              onOrbit={() => setActiveTool('Orbit')}
+            />
+          </div>
 
           {/* Contextual dock — bottom-center, self-hides only when
               there's no curated verb set for the current selection (a
@@ -1844,14 +2171,16 @@ export default function App() {
               hoveringSketchRegion previews the Push/Pull verb when
               nothing is selected and the cursor is aimed at a sketch region
               — an explicit selection's dock always wins over this hint. */}
-          <ContextualDock
-            selectedIds={selectedIds}
-            selectedGuide={selectedGuide}
-            hidden={cameraDragging}
-            activeToolId={toolActionId(activeTool)}
-            hoveringSketchRegion={hoveringSketchRegion}
-            onRun={(id) => menuActionRef.current(id)}
-          />
+          <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
+            <ContextualDock
+              selectedIds={selectedIds}
+              selectedGuide={selectedGuide}
+              hidden={cameraDragging}
+              activeToolId={toolActionId(activeTool)}
+              hoveringSketchRegion={hoveringSketchRegion}
+              onRun={(id) => menuActionRef.current(id)}
+            />
+          </div>
 
           {/* Toast stack — positioned inside the viewport container. */}
           <div
@@ -1906,9 +2235,46 @@ export default function App() {
             mean "expanded" instead of "visible," so every existing keyboard
             shortcut (Shift+Cmd+I/C/T/O) and Window-menu checkbox keeps
             working with its original meaning. */}
+        {/* Tray resize handle — drag to adjust the tray width; the width is
+            clamped and persisted so complex models' tag/outliner labels can
+            be given room once and keep it across launches. */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panels"
+          onPointerDown={(ev) => {
+            ev.preventDefault()
+            const startX = ev.clientX
+            const startWidth = trayWidth
+            const el = ev.currentTarget
+            el.setPointerCapture(ev.pointerId)
+            const drag = { width: startWidth }
+            const onMove = (mv: PointerEvent) => {
+              drag.width = clampTrayWidth(startWidth + (startX - mv.clientX))
+              setTrayWidth(drag.width)
+            }
+            const onUp = (up: PointerEvent) => {
+              el.releasePointerCapture(up.pointerId)
+              el.removeEventListener('pointermove', onMove)
+              el.removeEventListener('pointerup', onUp)
+              window.localStorage.setItem(TRAY_WIDTH_KEY, String(drag.width))
+            }
+            el.addEventListener('pointermove', onMove)
+            el.addEventListener('pointerup', onUp)
+          }}
+          style={{
+            width: '5px',
+            marginRight: '-5px',
+            flexShrink: 0,
+            cursor: 'col-resize',
+            zIndex: 5,
+            // Invisible grab strip riding on the tray's hairline border.
+            background: 'transparent',
+          }}
+        />
         <div
           style={{
-            width: '252px',
+            width: `${trayWidth}px`,
             flexShrink: 0,
             display: 'flex',
             flexDirection: 'column',
@@ -1936,18 +2302,6 @@ export default function App() {
               onEnterContext={handleEnterContext}
               onExitContext={handleExitContext}
               onSetContextDepth={handleSetContextDepth}
-              canBoolean={canBoolean}
-              onBoolean={handleBoolean}
-              onGroup={handleGroup}
-              onUngroup={handleUngroup}
-              canMakeComponent={canMakeComp}
-              onMakeComponent={handleMakeComponent}
-              canPlaceInstance={canPlace}
-              onPlaceInstance={handlePlaceInstance}
-              canExplodeInstance={canExplode}
-              onExplodeInstance={handleExplodeInstance}
-              canMakeUnique={canUnique}
-              onMakeUnique={handleMakeUnique}
               hiddenKeys={hiddenKeys}
               onToggleHidden={handleToggleHidden}
             />
@@ -1968,6 +2322,7 @@ export default function App() {
               docRev={docRev}
               hiddenTagPaths={hiddenTagPaths}
               onToggleTagPath={handleToggleTagPath}
+              revealTag={revealTag}
             />
           </TraySection>
         </div>
@@ -2083,6 +2438,7 @@ export default function App() {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onRun={(id) => menuActionRef.current(id)}
+        extraEntries={paletteModelEntries}
       />
 
       {/* Settings modal — web-only fallback (Tauri opens a real, separate OS
@@ -2103,41 +2459,37 @@ export default function App() {
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: '420px',
+              position: 'relative',
+              width: '520px',
+              height: '380px',
               maxHeight: '80vh',
-              overflowY: 'auto',
+              overflow: 'hidden',
               background: 'var(--surface-window, #1a1a1a)',
               color: 'var(--text-secondary, #ddd)',
               border: '1px solid var(--border-hairline, #333)',
-              borderRadius: '6px',
+              borderRadius: '10px',
               boxShadow: 'var(--shadow-palette, 0 8px 32px rgba(0,0,0,0.6))',
-              padding: '16px 20px',
             }}
           >
-            <div
+            {/* Same tabbed Settings UI the desktop's dedicated window shows. */}
+            <SettingsWindow />
+            <button
+              aria-label="Close settings"
+              onClick={() => setShowSettingsModal(false)}
               style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '12px',
+                position: 'absolute',
+                top: '8px',
+                right: '10px',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-faint, #888)',
+                cursor: 'pointer',
+                fontSize: '16px',
+                lineHeight: 1,
               }}
             >
-              <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary, #eee)' }}>Settings</span>
-              <button
-                onClick={() => setShowSettingsModal(false)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--text-faint, #888)',
-                  cursor: 'pointer',
-                  fontSize: '16px',
-                  lineHeight: 1,
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <UnitsPane />
+              ×
+            </button>
           </div>
         </div>
       )}

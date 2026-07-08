@@ -18,8 +18,8 @@ import type { Ray } from '../viewport/math'
 import { intersectGroundPlane } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { projectRayOntoAxis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { editLengthBuffer } from './moveInput'
-import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
+import { editLengthBuffer, isLengthInputKey } from './moveInput'
+import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
@@ -214,18 +214,9 @@ export class PushPullTool implements Tool {
       return
     }
 
-    // Feed digits, dot, minus, Backspace, and (in imperial formats) the
-    // feet/inch/fraction grammar tokens into the buffer.
-    if (
-      (ev.key >= '0' && ev.key <= '9') ||
-      ev.key === '.' ||
-      ev.key === '-' ||
-      ev.key === 'Backspace' ||
-      ev.key === "'" ||
-      ev.key === '"' ||
-      ev.key === '/' ||
-      ev.key === ' '
-    ) {
+    // Feed length-input keys (digits, dot, minus, feet/inch/fraction marks,
+    // explicit unit-suffix letters, Backspace) into the buffer.
+    if (isLengthInputKey(ev.key)) {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       // Report the typed buffer as the measurement readout, tagged with the
       // current display unit so the user knows what they're typing in.
@@ -236,8 +227,7 @@ export class PushPullTool implements Tool {
   /** The typed-buffer readout, suffixed for metric formats (imperial tokens
    * like `'`/`"` are already visible in the buffer itself). */
   private _typedReadout(): string {
-    const suffix = getLengthUnitSuffix()
-    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
+    return typedReadout(this.typed)
   }
 
   cancel(): void {

@@ -10,7 +10,7 @@
  *     non-Mac), Ctrl+Shift+I→toggle Model Info
  *   - Docked tray section collapse/expand state ( — replaced the old
  *     floating, draggable panels; FloatingPanel.tsx deleted)
- *   - Object Info shows "Select an object." when nothing is selected
+ *   - Object Info renders no boilerplate when nothing is selected
  *
  * Stubs only:
  *   - src/wasm/loader  (loadKernel — calls a .wasm file that doesn't exist in CI)
@@ -183,9 +183,11 @@ describe('App — loaded state', () => {
     expect(screen.getByRole('button', { name: /^tags$/i })).toHaveAttribute('aria-expanded', 'false')
   })
 
-  it('Object Info panel shows "Select an object." when selection is empty', async () => {
+  it('Object Info panel shows no boilerplate when selection is empty', async () => {
     await renderAndLoad()
-    expect(screen.getByText(/select an object/i)).toBeInTheDocument()
+    // The empty-selection Entity Info panel renders nothing at all now — the
+    // old "Select an object." prompt was removed as boilerplate.
+    expect(screen.queryByText(/select an object/i)).not.toBeInTheDocument()
   })
 })
 

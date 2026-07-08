@@ -24,9 +24,12 @@ export interface CommandPaletteProps {
   onClose: () => void
   /** Run the given menu-action id (App.tsx wires this to `menuActionRef.current`). */
   onRun: (id: string) => void
+  /** Dynamic per-document entries (Model group: object/group/component/tag
+   * names built by App.tsx) searched alongside the static registry. */
+  extraEntries?: PaletteEntry[]
 }
 
-const GROUP_ORDER: PaletteGroup[] = ['Tools', 'Actions']
+const GROUP_ORDER: PaletteGroup[] = ['Tools', 'Actions', 'Model']
 
 function RowIcon({ entry }: { entry: PaletteEntry }) {
   const raw = entry.group === 'Tools' ? TOOL_ICON_SVG[entry.label as keyof typeof TOOL_ICON_SVG] : boltSvg
@@ -43,7 +46,7 @@ function RowIcon({ entry }: { entry: PaletteEntry }) {
   )
 }
 
-export function CommandPalette({ open, onClose, onRun }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, onRun, extraEntries }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [recentIds, setRecentIds] = useState<string[]>(() => getRecent())
@@ -60,7 +63,10 @@ export function CommandPalette({ open, onClose, onRun }: CommandPaletteProps) {
     return () => cancelAnimationFrame(id)
   }, [open])
 
-  const allEntries = useMemo(() => paletteEntries(), [])
+  const allEntries = useMemo(
+    () => [...paletteEntries(), ...(extraEntries ?? [])],
+    [extraEntries],
+  )
   const ranked = useMemo(() => rankEntries(query, allEntries, recentIds), [query, allEntries, recentIds])
 
   // Clamp selection whenever the ranked list changes shape (e.g. typing narrows it).

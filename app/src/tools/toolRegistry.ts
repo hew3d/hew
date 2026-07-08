@@ -9,19 +9,19 @@
  * display. This registry is that source; `ToolRail.tsx` and `MenuBar.tsx`
  * both read it.
  *
- * Keyboard-shortcut split (extended by): macOS keeps its
- * pre-existing Cmd-combo accelerators unchanged — they're wired to the
- * native Tauri menu (`shells/tauri/src-tauri/src/main.rs`), never routed
- * through the JS keydown handler, and explicitly preserves them as-is.
- * Windows, Linux, and the web build adopt SketchUp-for-Windows' real
- * bare-letter scheme (`winKey` below): the 10 tools `03_tool_rail.md` covers
- * plus the camera tools' O / H / Z ( — verified against the
- * official SketchUp 2024 Windows Quick Reference Card). Protractor / Slice /
+ * Keyboard shortcuts: every platform, macOS included, dispatches the
+ * SketchUp bare-letter scheme through the JS keydown handler in `App.tsx`
+ * (the macOS playtest flagged that the rail displayed keys that only worked
+ * elsewhere — the handler now runs the bare-letter block on macOS too, so
+ * display and dispatch agree everywhere). The pre-existing macOS Cmd-combo
+ * accelerators remain wired to the native Tauri menu
+ * (`shells/tauri/src-tauri/src/main.rs`) as secondary shortcuts — the menu
+ * advertises those, the rail advertises these. The scheme is
+ * SketchUp-for-Windows' real bare letters: the 10 tools `03_tool_rail.md`
+ * covers plus the camera tools' O / H / Z (verified against the official
+ * SketchUp 2024 Windows Quick Reference Card). Protractor / Slice /
  * Edit Vertex stay shortcut-less: SketchUp defines no default key for them
- * either. The native Linux menu advertises the same winKeys (main.rs's
- * `accel()`), so menu, rail, and actual dispatch all agree. See the
- * keydown handler in `App.tsx` for where `winKey` actually gets wired to a
- * key event (this module only holds the data + display strings).
+ * either.
  */
 
 import type { ToolName } from './toolIcons'
@@ -46,32 +46,29 @@ export interface ToolSpec {
 export const TOOL_REGISTRY: readonly ToolSpec[] = [
   // ---- Draw ----
   { name: 'Select', group: 'Draw', macKey: 'Spc', winKey: 'Spc' },
-  { name: 'Line', group: 'Draw', macKey: '⌘L', winKey: 'L' },
-  { name: 'Rectangle', group: 'Draw', macKey: '⌘K', winKey: 'R' },
+  { name: 'Line', group: 'Draw', macKey: 'L', winKey: 'L' },
+  { name: 'Rectangle', group: 'Draw', macKey: 'R', winKey: 'R' },
   { name: 'Circle', group: 'Draw', macKey: 'C', winKey: 'C' },
-  // Arc: 'A' is SketchUp-for-Windows' real arc key. macKey assigned
-  //  — Cmd+J is SketchUp's arc-FAMILY key (it cycles through
-  // 2-point/3-point/pie arc modes there), even though Hew's Arc is only the
-  // simpler 2-point gesture; reusing the same key keeps muscle memory intact
-  // for anyone coming from SketchUp.
-  { name: 'Arc', group: 'Draw', macKey: '⌘J', winKey: 'A' },
+  // Arc: 'A' is SketchUp's real arc key (the arc FAMILY key there — it
+  // cycles 2-point/3-point/pie modes; Hew's Arc is the simpler 2-point
+  // gesture, but the same key keeps muscle memory intact).
+  { name: 'Arc', group: 'Draw', macKey: 'A', winKey: 'A' },
   // ---- Modify ----
-  { name: 'Push/Pull', group: 'Modify', macKey: '⌘=', winKey: 'P' },
-  { name: 'Move', group: 'Modify', macKey: '⌘0', winKey: 'M' },
-  { name: 'Rotate', group: 'Modify', macKey: '⌘8', winKey: 'Q' },
-  { name: 'Scale', group: 'Modify', macKey: '⌘9', winKey: 'S' },
+  { name: 'Push/Pull', group: 'Modify', macKey: 'P', winKey: 'P' },
+  { name: 'Move', group: 'Modify', macKey: 'M', winKey: 'M' },
+  { name: 'Rotate', group: 'Modify', macKey: 'Q', winKey: 'Q' },
+  { name: 'Scale', group: 'Modify', macKey: 'S', winKey: 'S' },
   // ---- Inspect ----
-  { name: 'Tape Measure', group: 'Inspect', macKey: '⌘D', winKey: 'T' },
-  { name: 'Paint', group: 'Inspect', macKey: '4', winKey: 'B' },
+  { name: 'Tape Measure', group: 'Inspect', macKey: 'T', winKey: 'T' },
+  { name: 'Paint', group: 'Inspect', macKey: 'B', winKey: 'B' },
   // ---- Menu/palette-only (no rail slot; see ToolSpec.group doc above) ----
   { name: 'Protractor', macKey: '', winKey: '' },
   { name: 'Slice', macKey: '', winKey: '' },
   { name: 'Edit Vertex', macKey: '', winKey: '' },
-  // Camera tools: SketchUp's real O / H / Z on non-Mac; macOS keeps
-  // its pre-existing Cmd-combos.
-  { name: 'Orbit', macKey: '⌘B', winKey: 'O' },
-  { name: 'Pan', macKey: '⌘R', winKey: 'H' },
-  { name: 'Zoom', macKey: '⌘\\', winKey: 'Z' },
+  // Camera tools: SketchUp's real O / H / Z everywhere.
+  { name: 'Orbit', macKey: 'O', winKey: 'O' },
+  { name: 'Pan', macKey: 'H', winKey: 'H' },
+  { name: 'Zoom', macKey: 'Z', winKey: 'Z' },
 ]
 
 /** Every tool name, in registry order — replaces the old App.tsx `TOOLS` const. */

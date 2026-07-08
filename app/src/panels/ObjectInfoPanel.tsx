@@ -2,12 +2,15 @@
  * ObjectInfoPanel — a closeable pane showing info for the currently selected node.
  *
  * Displays the selected node's:
- *   - Name (editable — commits on Enter/blur → scene.set_node_name; empty clears)
- *   - Type (read-only: "Object", "Group", or "Component")
+ *   - Name (editable — commits on Enter/blur → scene.set_node_name; empty
+ *     clears the kernel name and the field falls back to showing the same
+ *     default label the Outliner shows, via resolveLabel — never "(unnamed)")
+ *   - Type (read-only: "Object", "Group", "Component", or "Sketch")
  *   - Solid / Leaky (only for Objects; calls scene.object_solid)
- *   - Tags (removable chips + add input)
+ *   - Tags (removable chips + a "+" affordance that reveals the add field)
  *
- * Modeled on TagsPanel for styling, close button, and pane mounting patterns.
+ * Empty states are quiet: nothing selected renders nothing at all; a
+ * multi-selection shows only the count ("3 selected").
  *
  * StrictMode notes:
  *   - No impure setState updaters (all updaters are either functional or derive
@@ -22,7 +25,7 @@
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, nodeKindToNumber, type NodeRef } from './treeModel'
+import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, type NodeRef } from './treeModel'
 
 interface Props {
   scene: WasmScene
@@ -62,7 +65,7 @@ const LABEL_STYLE: React.CSSProperties = {
 const VALUE_STYLE: React.CSSProperties = {
   fontSize: '12px',
   color: 'var(--text-secondary, #ccc)',
-  fontFamily: 'monospace',
+  fontFamily: 'var(--font-family-ui)',
 }
 
 const INPUT_STYLE: React.CSSProperties = {
@@ -72,7 +75,7 @@ const INPUT_STYLE: React.CSSProperties = {
   border: '1px solid var(--border-strong, #444)',
   borderRadius: '3px',
   color: 'var(--text-primary, #eee)',
-  fontFamily: 'monospace',
+  fontFamily: 'var(--font-family-ui)',
   fontSize: '12px',
   padding: '3px 6px',
   outline: 'none',
@@ -103,7 +106,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
         id,
         kindNum: null as number | null,
         nameFromScene: undefined as string | undefined,
-        positionalLabel: entityLabel('sketch', idx >= 0 ? idx : 0),
+        defaultLabel: entityLabel('sketch', idx >= 0 ? idx : 0),
         tags: [] as string[][],
         solid: null as boolean | null,
       }
@@ -112,9 +115,24 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
     const kindNum = nodeKindToNumber(kind)
 
     let nameFromScene: string | undefined
-    if (kind === 'object') nameFromScene = scene.object_name(id)
-    else if (kind === 'group') nameFromScene = scene.group_name(id)
-    else nameFromScene = scene.instance_name(id)
+    let idx = 0
+    let defName: string | undefined
+    if (kind === 'object') {
+      nameFromScene = scene.object_name(id)
+      idx = Array.from(scene.object_ids()).indexOf(id)
+    } else if (kind === 'group') {
+      nameFromScene = scene.group_name(id)
+      idx = Array.from(scene.group_ids()).indexOf(id)
+    } else {
+      nameFromScene = scene.instance_name(id)
+      idx = Array.from(scene.instance_ids()).indexOf(id)
+      const def = scene.instance_def(id)
+      defName = def !== undefined ? scene.component_name(def) : undefined
+    }
+
+    // The label the Outliner would show for this node when it carries no
+    // kernel name — the panel falls back to exactly this, never "(unnamed)".
+    const defaultLabel = resolveLabel(undefined, defName, kind, idx >= 0 ? idx : 0)
 
     // Tags: array of "Seg1/Seg2" strings from the kernel, split to string[][]
     const rawTags = scene.node_tags(kindNum, id)
@@ -128,7 +146,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
       solid = scene.object_solid(id)
     }
 
-    return { node, kind, kindNum, id, nameFromScene, tags, solid }
+    return { node, kind, kindNum, id, nameFromScene, defaultLabel, tags, solid }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev, selectedIds])
 
@@ -154,15 +172,30 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
   const commitName = useCallback(() => {
     if (nodeInfo === null || nodeInfo.kindNum === null) return
     const trimmed = localName.trim()
-    // Pass undefined to clear; pass the string to set.
+    // Pass undefined to clear; pass the string to set. Clearing makes the
+    // field fall back to the placeholder default label (Outliner parity).
     scene.set_node_name(nodeInfo.kindNum, nodeInfo.id, trimmed === '' ? undefined : trimmed)
     onDocumentChanged()
   }, [nodeInfo, localName, scene, onDocumentChanged])
 
   // --------------------------------------------------------------------------
-  // Tag add state
+  // Tag add state — hidden behind a "+" affordance (HIG-style disclosure).
+  // The field auto-focuses when revealed; Enter commits, Esc cancels, blurring
+  // with an empty field closes it again.
   // --------------------------------------------------------------------------
+  const [addingTag, setAddingTag] = useState(false)
   const [tagInput, setTagInput] = useState('')
+
+  // Close the add-tag field whenever the selected node changes.
+  const selectedKeyForReset = nodeInfo !== null ? nodeKey(nodeInfo.node) : null
+  const prevSelectedKeyRef = useRef<string | null>(selectedKeyForReset)
+  useEffect(() => {
+    if (prevSelectedKeyRef.current !== selectedKeyForReset) {
+      prevSelectedKeyRef.current = selectedKeyForReset
+      setAddingTag(false)
+      setTagInput('')
+    }
+  }, [selectedKeyForReset])
 
   const handleAddTag = useCallback(() => {
     if (nodeInfo === null || nodeInfo.kindNum === null) return
@@ -170,6 +203,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
     if (segments.length === 0) return
     scene.add_node_tag(nodeInfo.kindNum, nodeInfo.id, segments)
     setTagInput('')
+    setAddingTag(false)
     onDocumentChanged()
   }, [nodeInfo, tagInput, scene, onDocumentChanged])
 
@@ -182,119 +216,146 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
   // --------------------------------------------------------------------------
   // Render
   // --------------------------------------------------------------------------
+
+  // Nothing selected → an empty panel, no boilerplate.
+  if (nodeInfo === null && selectedIds.length === 0) {
+    return <div style={PANEL_STYLE} />
+  }
+
+  // Multi-selection → a single quiet count line (information, not boilerplate).
+  if (nodeInfo === null) {
+    return (
+      <div style={PANEL_STYLE}>
+        <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', padding: '4px 8px' }}>
+          {selectedIds.length} selected
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div style={PANEL_STYLE}>
-      {nodeInfo === null ? (
-        <EmptyState multiSelect={selectedIds.length > 1} />
+      {/* Name — sketches can't be named yet; show the read-only default label instead. */}
+      {nodeInfo.kind === 'sketch' ? (
+        <div>
+          <div style={LABEL_STYLE}>Name</div>
+          <div style={VALUE_STYLE}>{nodeInfo.defaultLabel}</div>
+        </div>
       ) : (
-        <>
-          {/* Name — sketches can't be named yet; show the read-only positional label instead. */}
-          {nodeInfo.kind === 'sketch' ? (
-            <div>
-              <div style={LABEL_STYLE}>Name</div>
-              <div style={VALUE_STYLE}>{nodeInfo.positionalLabel}</div>
-            </div>
-          ) : (
-            <div>
-              <div style={LABEL_STYLE}>Name</div>
-              <input
-                style={INPUT_STYLE}
-                value={localName}
-                onChange={(e) => setLocalName(e.target.value)}
-                onBlur={commitName}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.currentTarget.blur()
-                  }
-                }}
-                placeholder="(unnamed)"
-                spellCheck={false}
-              />
-            </div>
-          )}
+        <div>
+          <div style={LABEL_STYLE}>Name</div>
+          <input
+            style={INPUT_STYLE}
+            value={localName}
+            onChange={(e) => setLocalName(e.target.value)}
+            onBlur={commitName}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur()
+              }
+            }}
+            placeholder={nodeInfo.defaultLabel}
+            spellCheck={false}
+          />
+        </div>
+      )}
 
-          {/* Type */}
-          <div>
-            <div style={LABEL_STYLE}>Type</div>
-            <div style={VALUE_STYLE}>{kindLabel(nodeInfo.kind)}</div>
+      {/* Type */}
+      <div>
+        <div style={LABEL_STYLE}>Type</div>
+        <div style={VALUE_STYLE}>{kindLabel(nodeInfo.kind)}</div>
+      </div>
+
+      {/* Solid / Leaky — only for objects */}
+      {nodeInfo.solid !== null && (
+        <div>
+          <div style={LABEL_STYLE}>Geometry</div>
+          <div
+            style={{
+              ...VALUE_STYLE,
+              color: nodeInfo.solid ? 'var(--status-solid)' : 'var(--status-leaky)',
+              fontWeight: 'bold',
+            }}
+          >
+            {nodeInfo.solid ? 'Solid' : 'Leaky'}
           </div>
+        </div>
+      )}
 
-          {/* A sketch is a thin selectable — no name/tags/solid yet, but it can
-           * be deleted and transformed (Move/Rotate/Scale all support a whole
-           * selected sketch via transform_sketch). */}
-          {nodeInfo.kind === 'sketch' && (
-            <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', fontStyle: 'italic' }}>
-              A drawn line. Delete with ⌫ (undoable), or Move/Rotate/Scale it; naming and tags are not yet supported.
-            </div>
+      {/* Tags — sketches can't be tagged yet. Empty state is just the "+"
+       * button next to the label: no chips, no "No tags" text. */}
+      {nodeInfo.kind !== 'sketch' && (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
+          <div style={{ ...LABEL_STYLE, marginBottom: 0 }}>Tags</div>
+          {!addingTag && (
+            <button
+              onClick={() => setAddingTag(true)}
+              title="Add tag"
+              aria-label="Add tag"
+              style={{
+                background: 'none',
+                border: '1px solid var(--border-strong, #444)',
+                color: 'var(--text-muted, #999)',
+                cursor: 'pointer',
+                borderRadius: '3px',
+                width: '16px',
+                height: '16px',
+                fontSize: '11px',
+                lineHeight: 1,
+                padding: 0,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              +
+            </button>
           )}
+        </div>
 
-          {/* Solid / Leaky — only for objects */}
-          {nodeInfo.solid !== null && (
-            <div>
-              <div style={LABEL_STYLE}>Geometry</div>
-              <div
-                style={{
-                  ...VALUE_STYLE,
-                  color: nodeInfo.solid ? 'var(--status-solid)' : 'var(--status-leaky)',
-                  fontWeight: 'bold',
-                }}
-              >
-                {nodeInfo.solid ? 'Solid' : 'Leaky'}
-              </div>
-            </div>
-          )}
-
-          {/* Tags — sketches can't be tagged yet */}
-          {nodeInfo.kind !== 'sketch' && (
-          <div>
-            <div style={LABEL_STYLE}>Tags</div>
-            {nodeInfo.tags.length === 0 ? (
-              <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', fontStyle: 'italic' }}>No tags</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                {nodeInfo.tags.map((path) => (
-                  <TagChip
-                    key={path.join('/')}
-                    path={path}
-                    onRemove={() => handleRemoveTag(path)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* Add tag input */}
-            <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
-              <input
-                style={{ ...INPUT_STYLE, flex: 1 }}
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleAddTag()
-                }}
-                placeholder="Structure/Roof"
-                spellCheck={false}
+        {nodeInfo.tags.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {nodeInfo.tags.map((path) => (
+              <TagChip
+                key={path.join('/')}
+                path={path}
+                onRemove={() => handleRemoveTag(path)}
               />
-              <button
-                onClick={handleAddTag}
-                disabled={tagInput.trim() === ''}
-                style={{
-                  background: 'var(--accent-base, #3a5e9e)',
-                  border: 'none',
-                  color: 'var(--accent-text-strong, #eee)',
-                  cursor: tagInput.trim() === '' ? 'default' : 'pointer',
-                  borderRadius: '3px',
-                  fontSize: '11px',
-                  padding: '3px 8px',
-                  opacity: tagInput.trim() === '' ? 0.5 : 1,
-                  flexShrink: 0,
-                }}
-              >
-                Add
-              </button>
-            </div>
+            ))}
           </div>
-          )}
-        </>
+        )}
+
+        {/* Add-tag field — revealed by the "+" button. Auto-focused; Enter
+         * commits, Esc cancels, blur with an empty field closes. */}
+        {addingTag && (
+          <input
+            style={{ ...INPUT_STYLE, marginTop: nodeInfo.tags.length > 0 ? '6px' : '2px' }}
+            autoFocus
+            value={tagInput}
+            onChange={(e) => setTagInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleAddTag()
+              } else if (e.key === 'Escape') {
+                setTagInput('')
+                setAddingTag(false)
+              }
+            }}
+            onBlur={() => {
+              if (tagInput.trim() === '') {
+                setTagInput('')
+                setAddingTag(false)
+              } else {
+                handleAddTag()
+              }
+            }}
+            placeholder="Structure/Roof"
+            spellCheck={false}
+          />
+        )}
+      </div>
       )}
     </div>
   )
@@ -317,7 +378,7 @@ function TagChip({ path, onRemove }: { path: string[]; onRemove: () => void }) {
         padding: '2px 6px',
         fontSize: '11px',
         color: 'var(--accent-text-on-tint, #aaccee)',
-        fontFamily: 'monospace',
+        fontFamily: 'var(--font-family-ui)',
       }}
     >
       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -339,26 +400,6 @@ function TagChip({ path, onRemove }: { path: string[]; onRemove: () => void }) {
       >
         ×
       </button>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// EmptyState
-// ---------------------------------------------------------------------------
-
-function EmptyState({ multiSelect }: { multiSelect: boolean }) {
-  return (
-    <div
-      style={{
-        fontSize: '11px',
-        color: 'var(--text-faint, #666)',
-        fontStyle: 'italic',
-        padding: '4px 8px',
-        lineHeight: 1.5,
-      }}
-    >
-      {multiSelect ? 'Multiple nodes selected.' : 'Select an object.'}
     </div>
   )
 }

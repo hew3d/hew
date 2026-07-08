@@ -9,9 +9,13 @@
 // Tauri-shell clippy result was cache-masked until touched main.rs.)
 #![allow(clippy::disallowed_types)]
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    menu::{
+        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder,
+        PredefinedMenuItem, SubmenuBuilder,
+    },
     Emitter, Manager,
 };
 
@@ -67,6 +71,45 @@ fn accel(
     }
 }
 
+/// Build a checkable menu item (per-platform accelerator like `accel`) and
+/// register its handle in `checks` so `sync_menu_state` can reach it later.
+/// Used for every stateful item: the active tool radio group, View toggles,
+/// and the Window pane toggles.
+fn check_item(
+    handle: &tauri::AppHandle,
+    checks: &mut HashMap<String, CheckMenuItem<tauri::Wry>>,
+    id: &str,
+    label: &str,
+    mac: Option<&str>,
+    win: Option<&str>,
+) -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+    let builder = CheckMenuItemBuilder::with_id(id, label).checked(false);
+    let builder = match if cfg!(target_os = "macos") { mac } else { win } {
+        Some(a) => builder.accelerator(a),
+        None => builder,
+    };
+    let item = builder.build(handle)?;
+    checks.insert(id.to_string(), item.clone());
+    Ok(item)
+}
+
+/// Build a plain menu item and register its handle in `items` so
+/// `sync_menu_state` can enable/disable it (selection-dependent Edit
+/// commands: Group, Explode, …).
+fn gated_item(
+    handle: &tauri::AppHandle,
+    items: &mut HashMap<String, MenuItem<tauri::Wry>>,
+    id: &str,
+    label: &str,
+    mac: Option<&str>,
+    win: Option<&str>,
+) -> tauri::Result<MenuItem<tauri::Wry>> {
+    let builder = accel(MenuItemBuilder::with_id(id, label), mac, win);
+    let item = builder.build(handle)?;
+    items.insert(id.to_string(), item.clone());
+    Ok(item)
+}
+
 // ---------------------------------------------------------------------------
 // Managed state
 // ---------------------------------------------------------------------------
@@ -80,6 +123,171 @@ struct RecentState {
 
 /// Pending path to open on app startup (cold-start file association).
 struct PendingOpen(Option<String>);
+
+/// Handles to the stateful native menu items, so the webview can reflect its
+/// state (active tool, Axes/Guides, open panes, selection-gated commands)
+/// into the menu bar via `sync_menu_state`.
+struct MenuHandles {
+    checks: HashMap<String, CheckMenuItem<tauri::Wry>>,
+    items: HashMap<String, MenuItem<tauri::Wry>>,
+}
+
+/// Monotonic counter for extra document windows ("main-2", "main-3", …).
+struct WindowCounter(u32);
+
+// ---------------------------------------------------------------------------
+// Window state — main-window size/position persisted across launches.
+// First run (no state file): ~2/3 of the current monitor, centered.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+struct WindowState {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    maximized: bool,
+}
+
+fn window_state_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("window-state.json"))
+}
+
+fn load_window_state(app: &tauri::AppHandle) -> Option<WindowState> {
+    let text = std::fs::read_to_string(window_state_path(app)?).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Capture the window's current logical geometry and persist it. Logical
+/// (scale-independent) units keep the state portable across DPI changes.
+/// While maximized, only the flag is updated so the restored "un-maximized"
+/// geometry survives a quit-while-maximized.
+fn save_window_state(app: &tauri::AppHandle, window: &tauri::Window) {
+    let Some(path) = window_state_path(app) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let maximized = window.is_maximized().unwrap_or(false);
+    if maximized {
+        if let Some(mut prev) = load_window_state(app) {
+            prev.maximized = true;
+            if let Ok(text) = serde_json::to_string(&prev) {
+                let _ = std::fs::write(&path, text);
+            }
+        }
+        return;
+    }
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (Ok(size), Ok(pos)) = (window.inner_size(), window.outer_position()) else {
+        return;
+    };
+    // Ignore the degenerate geometry some platforms report mid-teardown.
+    if size.width == 0 || size.height == 0 {
+        return;
+    }
+    let state = WindowState {
+        x: f64::from(pos.x) / scale,
+        y: f64::from(pos.y) / scale,
+        width: f64::from(size.width) / scale,
+        height: f64::from(size.height) / scale,
+        maximized: false,
+    };
+    if let Ok(text) = serde_json::to_string(&state) {
+        let _ = std::fs::write(&path, text);
+    }
+}
+
+/// Apply persisted state to the main window, or fall back to ~2/3 of the
+/// current monitor, centered — a first-run default proportional to the
+/// screen instead of a fixed 1280x800.
+fn apply_initial_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    if let Some(state) = load_window_state(app) {
+        if state.width >= 400.0 && state.height >= 300.0 {
+            let _ = window.set_size(tauri::LogicalSize::new(state.width, state.height));
+            let _ = window.set_position(tauri::LogicalPosition::new(state.x, state.y));
+            // If the saved position no longer lands on any monitor (display
+            // unplugged), pull the window back into view.
+            if window.current_monitor().ok().flatten().is_none() {
+                let _ = window.center();
+            }
+            if state.maximized {
+                let _ = window.maximize();
+            }
+            return;
+        }
+    }
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let scale = monitor.scale_factor();
+        let width = f64::from(monitor.size().width) / scale * (2.0 / 3.0);
+        let height = f64::from(monitor.size().height) / scale * (2.0 / 3.0);
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+        let _ = window.center();
+    }
+}
+
+/// Open a new, empty document window (File → New when the current model
+/// isn't blank), cascaded from the calling window.
+#[tauri::command]
+fn new_window(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    let label = {
+        let state = app.state::<Mutex<WindowCounter>>();
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        guard.0 += 1;
+        format!("main-{}", guard.0)
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    // Standard macOS document-window cascade offset.
+    const CASCADE: f64 = 28.0;
+    let builder =
+        tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+            .title("Hew")
+            .inner_size(
+                f64::from(size.width) / scale,
+                f64::from(size.height) / scale,
+            )
+            .position(
+                f64::from(pos.x) / scale + CASCADE,
+                f64::from(pos.y) / scale + CASCADE,
+            );
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let builder = builder.decorations(false);
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reflect webview state into the native menu bar: `checked` drives check
+/// marks (active tool radio group, Axes/Guides, open panes); `enabled` gates
+/// selection-dependent items (Group, Explode, …). Unknown ids are ignored so
+/// the webview can stay ahead of the shell.
+#[tauri::command]
+fn sync_menu_state(
+    app: tauri::AppHandle,
+    checked: HashMap<String, bool>,
+    enabled: HashMap<String, bool>,
+) -> Result<(), String> {
+    let state = app.state::<Mutex<MenuHandles>>();
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    for (id, value) in &checked {
+        if let Some(item) = guard.checks.get(id) {
+            let _ = item.set_checked(*value);
+        }
+    }
+    for (id, value) in &enabled {
+        if let Some(item) = guard.checks.get(id) {
+            let _ = item.set_enabled(*value);
+        } else if let Some(item) = guard.items.get(id) {
+            let _ = item.set_enabled(*value);
+        }
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Autosave / crash-recovery store.
@@ -96,36 +304,84 @@ struct RecoveryPayload {
     meta: String,
 }
 
-/// Persist a recovery snapshot, overwriting any previous one.
+/// Persist a recovery snapshot, overwriting any previous one from the same
+/// window. Snapshots are namespaced per window label ("recovery-main.hew")
+/// so concurrent document windows don't clobber each other's autosaves;
+/// the un-suffixed "recovery.hew" is the pre-multi-window legacy name.
 #[tauri::command]
-fn recovery_write(app: tauri::AppHandle, contents: Vec<u8>, meta: String) -> Result<(), String> {
+fn recovery_write(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    contents: Vec<u8>,
+    meta: String,
+) -> Result<(), String> {
     let Some(config_dir) = app.path().app_config_dir().ok() else {
         return Err("could not resolve app config dir".into());
     };
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    std::fs::write(config_dir.join("recovery.hew"), &contents).map_err(|e| e.to_string())?;
-    std::fs::write(config_dir.join("recovery.json"), &meta).map_err(|e| e.to_string())?;
+    let label = window.label();
+    std::fs::write(config_dir.join(format!("recovery-{label}.hew")), &contents)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(config_dir.join(format!("recovery-{label}.json")), &meta)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Read back the most recent recovery snapshot, or None if either file is
-/// missing/unreadable.
+/// Read back the newest recovery snapshot across all windows (plus the
+/// legacy un-suffixed pair), or None when nothing recoverable exists. Only
+/// the first window at startup runs recovery, so it adopts whichever
+/// window's snapshot is freshest.
 #[tauri::command]
 fn recovery_read(app: tauri::AppHandle) -> Option<RecoveryPayload> {
     let config_dir = app.path().app_config_dir().ok()?;
-    let contents = std::fs::read(config_dir.join("recovery.hew")).ok()?;
-    let meta = std::fs::read_to_string(config_dir.join("recovery.json")).ok()?;
+    let entries = std::fs::read_dir(&config_dir).ok()?;
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let is_snapshot =
+            name == "recovery.hew" || (name.starts_with("recovery-") && name.ends_with(".hew"));
+        if !is_snapshot {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+            newest = Some((modified, path));
+        }
+    }
+    let (_, hew_path) = newest?;
+    let contents = std::fs::read(&hew_path).ok()?;
+    let meta = std::fs::read_to_string(hew_path.with_extension("json")).ok()?;
     Some(RecoveryPayload { contents, meta })
 }
 
-/// Discard the stored recovery snapshot, ignoring not-found errors.
+/// Discard every stored recovery snapshot (all window labels + legacy),
+/// ignoring not-found errors. Called once recovery is accepted or declined.
 #[tauri::command]
 fn recovery_clear(app: tauri::AppHandle) -> Result<(), String> {
     let Some(config_dir) = app.path().app_config_dir().ok() else {
         return Ok(());
     };
-    let _ = std::fs::remove_file(config_dir.join("recovery.hew"));
-    let _ = std::fs::remove_file(config_dir.join("recovery.json"));
+    let Ok(entries) = std::fs::read_dir(&config_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let is_recovery = name == "recovery.hew"
+            || name == "recovery.json"
+            || (name.starts_with("recovery-")
+                && (name.ends_with(".hew") || name.ends_with(".json")));
+        if is_recovery {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
     Ok(())
 }
 
@@ -353,6 +609,8 @@ fn main() {
             write_file,
             list_dir,
             take_pending_open,
+            new_window,
+            sync_menu_state,
             push_recent,
             get_recents,
             clear_recent,
@@ -367,6 +625,11 @@ fn main() {
         // `menu-action` events emitted to the webview.
         .setup(move |app| {
             let handle = app.handle();
+
+            // Handle registries for stateful menu items (filled in as the
+            // menus below are built; managed as MenuHandles at the end).
+            let mut checks: HashMap<String, CheckMenuItem<tauri::Wry>> = HashMap::new();
+            let mut gated: HashMap<String, MenuItem<tauri::Wry>> = HashMap::new();
 
             // ----------------------------------------------------------------
             // App menu (macOS — About + Quit)
@@ -454,10 +717,80 @@ fn main() {
             // is scoped to the Select tool and guards typing contexts. Relying
             // on the JS handler for the keyboard path is the documented
             // fallback when the menu lib's accelerator can't be scoped.
-            let edit_delete = MenuItemBuilder::with_id("edit-delete", "Delete").build(handle)?;
+            let edit_delete = gated_item(handle, &mut gated, "edit-delete", "Delete", None, None)?;
             let edit_delete_guides =
                 MenuItemBuilder::with_id("edit-delete-guides", "Delete Guide Lines")
                     .build(handle)?;
+
+            // Object commands (previously buttons inside the Outliner panel —
+            // they belong in the menu bar, enabled per selection via
+            // `sync_menu_state`). Start disabled: nothing is selected at launch.
+            let edit_group = gated_item(
+                handle,
+                &mut gated,
+                "edit-group",
+                "Group",
+                Some("CmdOrCtrl+G"),
+                Some("CmdOrCtrl+G"),
+            )?;
+            let edit_ungroup = gated_item(
+                handle,
+                &mut gated,
+                "edit-ungroup",
+                "Ungroup",
+                Some("Shift+CmdOrCtrl+G"),
+                Some("Shift+CmdOrCtrl+G"),
+            )?;
+            let edit_make_component = gated_item(
+                handle,
+                &mut gated,
+                "edit-make-component",
+                "Make Component",
+                None,
+                None,
+            )?;
+            let edit_place_copy = gated_item(
+                handle,
+                &mut gated,
+                "edit-place-copy",
+                "Place Copy",
+                None,
+                None,
+            )?;
+            let edit_explode =
+                gated_item(handle, &mut gated, "edit-explode", "Explode", None, None)?;
+            let edit_make_unique = gated_item(
+                handle,
+                &mut gated,
+                "edit-make-unique",
+                "Make Unique",
+                None,
+                None,
+            )?;
+            let edit_union = gated_item(handle, &mut gated, "edit-union", "Union", None, None)?;
+            let edit_subtract =
+                gated_item(handle, &mut gated, "edit-subtract", "Subtract", None, None)?;
+            let edit_intersect = gated_item(
+                handle,
+                &mut gated,
+                "edit-intersect",
+                "Intersect",
+                None,
+                None,
+            )?;
+            for item in [
+                &edit_group,
+                &edit_ungroup,
+                &edit_make_component,
+                &edit_place_copy,
+                &edit_explode,
+                &edit_make_unique,
+                &edit_union,
+                &edit_subtract,
+                &edit_intersect,
+            ] {
+                let _ = item.set_enabled(false);
+            }
 
             let edit_menu = SubmenuBuilder::new(handle, "Edit")
                 .item(&edit_undo)
@@ -465,13 +798,25 @@ fn main() {
                 .separator()
                 .item(&edit_delete)
                 .item(&edit_delete_guides)
+                .separator()
+                .item(&edit_group)
+                .item(&edit_ungroup)
+                .separator()
+                .item(&edit_make_component)
+                .item(&edit_place_copy)
+                .item(&edit_explode)
+                .item(&edit_make_unique)
+                .separator()
+                .item(&edit_union)
+                .item(&edit_subtract)
+                .item(&edit_intersect)
                 .build()?;
 
             // ----------------------------------------------------------------
             // View menu
             // ----------------------------------------------------------------
-            let view_axes = MenuItemBuilder::with_id("view-axes", "Axes").build(handle)?;
-            let view_guides = MenuItemBuilder::with_id("view-guides", "Guides").build(handle)?;
+            let view_axes = check_item(handle, &mut checks, "view-axes", "Axes", None, None)?;
+            let view_guides = check_item(handle, &mut checks, "view-guides", "Guides", None, None)?;
             // Command palette. `Cmd+K` is already Rectangle's
             // accelerator (preserved unchanged) — `Cmd+/` is free and is
             // the same binding Windows/Linux/web reach via the JS keydown
@@ -495,29 +840,35 @@ fn main() {
             // ----------------------------------------------------------------
             // Draw menu
             // ----------------------------------------------------------------
-            let draw_rect = accel(
-                MenuItemBuilder::with_id("draw-rectangle", "Rectangle"),
+            let draw_rect = check_item(
+                handle,
+                &mut checks,
+                "draw-rectangle",
+                "Rectangle",
                 Some("CmdOrCtrl+K"),
                 Some("R"),
-            )
-            .build(handle)?;
+            )?;
 
-            let draw_circle = accel(
-                MenuItemBuilder::with_id("draw-circle", "Circle"),
+            let draw_circle = check_item(
+                handle,
+                &mut checks,
+                "draw-circle",
+                "Circle",
                 None,
                 Some("C"),
-            )
-            .build(handle)?;
+            )?;
 
             // Arc : Cmd+J is SketchUp's arc-family
             // key on macOS, even though Hew's Arc is the simpler 2-point
             // gesture rather than SketchUp's multi-mode arc tool family.
-            let draw_arc = accel(
-                MenuItemBuilder::with_id("draw-arc", "Arc"),
+            let draw_arc = check_item(
+                handle,
+                &mut checks,
+                "draw-arc",
+                "Arc",
                 Some("CmdOrCtrl+J"),
                 Some("A"),
-            )
-            .build(handle)?;
+            )?;
 
             let draw_shapes = SubmenuBuilder::new(handle, "Shapes")
                 .item(&draw_rect)
@@ -525,12 +876,14 @@ fn main() {
                 .item(&draw_arc)
                 .build()?;
 
-            let draw_line = accel(
-                MenuItemBuilder::with_id("draw-line", "Line"),
+            let draw_line = check_item(
+                handle,
+                &mut checks,
+                "draw-line",
+                "Line",
                 Some("CmdOrCtrl+L"),
                 Some("L"),
-            )
-            .build(handle)?;
+            )?;
 
             let draw_lines = SubmenuBuilder::new(handle, "Lines")
                 .item(&draw_line)
@@ -544,53 +897,73 @@ fn main() {
             // ----------------------------------------------------------------
             // Tools menu
             // ----------------------------------------------------------------
-            let tool_select = accel(
-                MenuItemBuilder::with_id("tool-select", "Select"),
+            let tool_select = check_item(
+                handle,
+                &mut checks,
+                "tool-select",
+                "Select",
                 None,
                 Some("Space"),
-            )
-            .build(handle)?;
-            let tool_paint = accel(
-                MenuItemBuilder::with_id("tool-paint", "Paint"),
-                None,
-                Some("B"),
-            )
-            .build(handle)?;
-            let tool_move = accel(
-                MenuItemBuilder::with_id("tool-move", "Move"),
+            )?;
+            let tool_paint =
+                check_item(handle, &mut checks, "tool-paint", "Paint", None, Some("B"))?;
+            let tool_move = check_item(
+                handle,
+                &mut checks,
+                "tool-move",
+                "Move",
                 Some("CmdOrCtrl+0"),
                 Some("M"),
-            )
-            .build(handle)?;
-            let tool_rotate = accel(
-                MenuItemBuilder::with_id("tool-rotate", "Rotate"),
+            )?;
+            let tool_rotate = check_item(
+                handle,
+                &mut checks,
+                "tool-rotate",
+                "Rotate",
                 Some("CmdOrCtrl+8"),
                 Some("Q"),
-            )
-            .build(handle)?;
-            let tool_scale = accel(
-                MenuItemBuilder::with_id("tool-scale", "Scale"),
+            )?;
+            let tool_scale = check_item(
+                handle,
+                &mut checks,
+                "tool-scale",
+                "Scale",
                 Some("CmdOrCtrl+9"),
                 Some("S"),
-            )
-            .build(handle)?;
-            let tool_pushpull = accel(
-                MenuItemBuilder::with_id("tool-pushpull", "Push/Pull"),
+            )?;
+            let tool_pushpull = check_item(
+                handle,
+                &mut checks,
+                "tool-pushpull",
+                "Push/Pull",
                 Some("CmdOrCtrl+="),
                 Some("P"),
-            )
-            .build(handle)?;
-            let tool_tape_measure = accel(
-                MenuItemBuilder::with_id("tool-tape-measure", "Tape Measure"),
+            )?;
+            let tool_tape_measure = check_item(
+                handle,
+                &mut checks,
+                "tool-tape-measure",
+                "Tape Measure",
                 Some("CmdOrCtrl+D"),
                 Some("T"),
-            )
-            .build(handle)?;
-            let tool_protractor =
-                MenuItemBuilder::with_id("tool-protractor", "Protractor").build(handle)?;
-            let tool_slice = MenuItemBuilder::with_id("tool-slice", "Slice").build(handle)?;
-            let tool_edit_vertex =
-                MenuItemBuilder::with_id("tool-edit-vertex", "Edit Vertex").build(handle)?;
+            )?;
+            let tool_protractor = check_item(
+                handle,
+                &mut checks,
+                "tool-protractor",
+                "Protractor",
+                None,
+                None,
+            )?;
+            let tool_slice = check_item(handle, &mut checks, "tool-slice", "Slice", None, None)?;
+            let tool_edit_vertex = check_item(
+                handle,
+                &mut checks,
+                "tool-edit-vertex",
+                "Edit Vertex",
+                None,
+                None,
+            )?;
 
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
@@ -612,24 +985,30 @@ fn main() {
             // Camera tools: SketchUp's real O / H / Z on non-Mac (
             // verified against the official 2024 Windows Quick Reference
             // Card); macOS keeps its pre-existing Cmd-combos.
-            let cam_orbit = accel(
-                MenuItemBuilder::with_id("cam-orbit", "Orbit"),
+            let cam_orbit = check_item(
+                handle,
+                &mut checks,
+                "cam-orbit",
+                "Orbit",
                 Some("CmdOrCtrl+B"),
                 Some("O"),
-            )
-            .build(handle)?;
-            let cam_pan = accel(
-                MenuItemBuilder::with_id("cam-pan", "Pan"),
+            )?;
+            let cam_pan = check_item(
+                handle,
+                &mut checks,
+                "cam-pan",
+                "Pan",
                 Some("CmdOrCtrl+R"),
                 Some("H"),
-            )
-            .build(handle)?;
-            let cam_zoom = accel(
-                MenuItemBuilder::with_id("cam-zoom", "Zoom"),
+            )?;
+            let cam_zoom = check_item(
+                handle,
+                &mut checks,
+                "cam-zoom",
+                "Zoom",
                 Some("CmdOrCtrl+\\"),
                 Some("Z"),
-            )
-            .build(handle)?;
+            )?;
             let cam_zoom_extents =
                 MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents").build(handle)?;
 
@@ -665,22 +1044,53 @@ fn main() {
             // ----------------------------------------------------------------
             // Window menu
             // ----------------------------------------------------------------
-            let win_model_info = MenuItemBuilder::with_id("win-model-info", "Model Info")
-                .accelerator("Shift+CmdOrCtrl+I")
-                .build(handle)?;
-            let win_materials = MenuItemBuilder::with_id("win-materials", "Materials")
-                .accelerator("Shift+CmdOrCtrl+C")
-                .build(handle)?;
-            let win_tags = MenuItemBuilder::with_id("win-tags", "Tags")
-                .accelerator("Shift+CmdOrCtrl+T")
-                .build(handle)?;
-            let win_object_info = MenuItemBuilder::with_id("win-object-info", "Object Info")
-                .accelerator("Shift+CmdOrCtrl+O")
-                .build(handle)?;
-            let win_debug_log =
-                MenuItemBuilder::with_id("win-debug-log", "Debug Log").build(handle)?;
+            let win_model_info = check_item(
+                handle,
+                &mut checks,
+                "win-model-info",
+                "Model Info",
+                Some("Shift+CmdOrCtrl+I"),
+                Some("Shift+CmdOrCtrl+I"),
+            )?;
+            let win_materials = check_item(
+                handle,
+                &mut checks,
+                "win-materials",
+                "Materials",
+                Some("Shift+CmdOrCtrl+C"),
+                Some("Shift+CmdOrCtrl+C"),
+            )?;
+            let win_tags = check_item(
+                handle,
+                &mut checks,
+                "win-tags",
+                "Tags",
+                Some("Shift+CmdOrCtrl+T"),
+                Some("Shift+CmdOrCtrl+T"),
+            )?;
+            let win_object_info = check_item(
+                handle,
+                &mut checks,
+                "win-object-info",
+                "Object Info",
+                Some("Shift+CmdOrCtrl+O"),
+                Some("Shift+CmdOrCtrl+O"),
+            )?;
+            let win_debug_log = check_item(
+                handle,
+                &mut checks,
+                "win-debug-log",
+                "Debug Log",
+                None,
+                None,
+            )?;
 
             let window_menu = SubmenuBuilder::new(handle, "Window")
+                // Standard macOS window management first (HIG: the Window
+                // menu manages windows; the pane toggles follow below).
+                .item(&PredefinedMenuItem::minimize(handle, None)?)
+                .item(&PredefinedMenuItem::maximize(handle, Some("Zoom"))?)
+                .separator()
                 .item(&win_model_info)
                 .item(&win_materials)
                 .item(&win_tags)
@@ -751,13 +1161,64 @@ fn main() {
             // ----------------------------------------------------------------
             app.manage(Mutex::new(PendingOpen(argv_path)));
 
+            // ----------------------------------------------------------------
+            // Managed state: stateful menu handles + document-window counter
+            // ----------------------------------------------------------------
+            app.manage(Mutex::new(MenuHandles {
+                checks,
+                items: gated,
+            }));
+            app.manage(Mutex::new(WindowCounter(1)));
+
+            // ----------------------------------------------------------------
+            // Main window geometry: restore the persisted size/position, or
+            // default to ~2/3 of the screen on first run.
+            // ----------------------------------------------------------------
+            if let Some(main_window) = app.get_webview_window("main") {
+                apply_initial_window_state(handle, &main_window);
+                let _ = main_window.show();
+            }
+
             Ok(())
         })
+        // Persist main-window geometry as it changes so the next launch
+        // restores it (extra "main-N" document windows are transient and
+        // don't overwrite the primary window's saved state).
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                tauri::WindowEvent::Resized(_)
+                | tauri::WindowEvent::Moved(_)
+                | tauri::WindowEvent::CloseRequested { .. } => {
+                    save_window_state(window.app_handle(), window);
+                }
+                _ => {}
+            }
+        })
         // Map menu-item ids to action strings and emit them to the webview.
+        // With multiple document windows, an action targets the focused one;
+        // the fallback broadcast covers the moment when the menu is used
+        // while no webview reports focus (e.g. right after a dialog closes).
         .on_menu_event(|app, event| {
+            let emit_to_active = |name: &str, payload: &str| {
+                let focused = app
+                    .webview_windows()
+                    .into_values()
+                    .find(|w| w.label() != "settings" && w.is_focused().unwrap_or(false));
+                match focused {
+                    Some(w) => {
+                        let _ = app.emit_to(w.label(), name, payload);
+                    }
+                    None => {
+                        let _ = app.emit(name, payload);
+                    }
+                }
+            };
             let id = event.id().as_ref();
             if let Some(path) = id.strip_prefix("recent:") {
-                let _ = app.emit("menu-open-path", path);
+                emit_to_active("menu-open-path", path);
                 return;
             }
             if id == "recent-clear" {
@@ -777,6 +1238,15 @@ fn main() {
                 "edit-redo" => "redo",
                 "edit-delete" => "edit-delete",
                 "edit-delete-guides" => "edit-delete-guides",
+                "edit-group" => "edit-group",
+                "edit-ungroup" => "edit-ungroup",
+                "edit-make-component" => "edit-make-component",
+                "edit-place-copy" => "edit-place-copy",
+                "edit-explode" => "edit-explode",
+                "edit-make-unique" => "edit-make-unique",
+                "edit-union" => "edit-union",
+                "edit-subtract" => "edit-subtract",
+                "edit-intersect" => "edit-intersect",
                 "view-axes" => "toggle-axes",
                 "view-guides" => "toggle-guides",
                 "view-palette" => "open-palette",
@@ -813,7 +1283,7 @@ fn main() {
                 "help-report-bug" => "report-bug",
                 _ => return,
             };
-            let _ = app.emit("menu-action", action);
+            emit_to_active("menu-action", action);
         })
         .build(tauri::generate_context!())
         .expect("error while building Hew desktop")
@@ -843,8 +1313,21 @@ fn main() {
                     if let Ok(mut guard) = app.state::<Mutex<PendingOpen>>().lock() {
                         guard.0 = Some(path_str.clone());
                     }
-                    // Also emit for the warm case (app already running).
-                    let _ = app.emit("menu-open-path", &path_str);
+                    // Also emit for the warm case (app already running) —
+                    // targeted at the focused document window so a Finder
+                    // double-click doesn't open the file in every window.
+                    let focused = app
+                        .webview_windows()
+                        .into_values()
+                        .find(|w| w.label() != "settings" && w.is_focused().unwrap_or(false));
+                    match focused {
+                        Some(w) => {
+                            let _ = app.emit_to(w.label(), "menu-open-path", &path_str);
+                        }
+                        None => {
+                            let _ = app.emit("menu-open-path", &path_str);
+                        }
+                    }
                 }
             }
         });

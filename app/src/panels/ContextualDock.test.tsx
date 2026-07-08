@@ -210,4 +210,59 @@ describe('ContextualDock', () => {
     fireEvent.click(screen.getByText('Push/Pull'))
     expect(onRun).toHaveBeenCalledWith('tool-pushpull')
   })
+
+  // --- Hover-preview disables everything except Push/Pull ------------------
+
+  it('hover-preview: only Push/Pull is enabled; the other sketch verbs render disabled', () => {
+    render(
+      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+    )
+    expect(screen.getByRole('button', { name: 'Push/Pull' })).not.toBeDisabled()
+    for (const label of ['Move', 'Rotate', 'Scale', 'Erase']) {
+      const btn = screen.getByRole('button', { name: label })
+      expect(btn).toBeDisabled()
+      expect(btn).toHaveAttribute('aria-disabled', 'true')
+      // Visually quieted and non-interactive.
+      expect(btn.style.opacity).toBe('0.4')
+      expect(btn.style.pointerEvents).toBe('none')
+    }
+  })
+
+  it('hover-preview: clicking a disabled verb does not dispatch', () => {
+    const onRun = vi.fn()
+    render(
+      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={onRun} hoveringSketchRegion />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+    expect(onRun).not.toHaveBeenCalled()
+  })
+
+  it('hover-preview: disabled verbs do not light up on hover', () => {
+    render(
+      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+    )
+    const btn = screen.getByRole('button', { name: 'Move' })
+    fireEvent.mouseEnter(btn)
+    expect(btn.style.background).toBe('transparent')
+  })
+
+  it('a real sketch SELECTION keeps every sketch verb enabled', () => {
+    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    for (const label of ['Push/Pull', 'Move', 'Rotate', 'Scale', 'Erase']) {
+      const btn = screen.getByRole('button', { name: label })
+      expect(btn).not.toBeDisabled()
+      expect(btn).toHaveAttribute('aria-disabled', 'false')
+    }
+  })
+
+  it('a real sketch selection keeps every verb enabled even while hoveringSketchRegion is set', () => {
+    const onRun = vi.fn()
+    render(
+      <ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={onRun} hoveringSketchRegion />,
+    )
+    const move = screen.getByRole('button', { name: 'Move' })
+    expect(move).not.toBeDisabled()
+    fireEvent.click(move)
+    expect(onRun).toHaveBeenCalledWith('tool-move')
+  })
 })

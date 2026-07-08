@@ -58,29 +58,54 @@ export function editNumericBuffer(buf: string, key: string): string {
 }
 
 /**
- * Immutably edit a length VCB string buffer, format-aware.
+ * Letters that can appear in an explicit unit suffix ("mm", "cm", "km", "m",
+ * "ft", "in") — accepted by the length buffers so an explicit unit can be
+ * typed in ANY display mode. Deliberately excludes `x`/`X` (the dimensions
+ * separator).
+ */
+const UNIT_SUFFIX_LETTER_RE = /^[mckftinMCKFTIN]$/
+
+/**
+ * True if `key` is a keystroke the single-length VCB accepts (digits, dot,
+ * minus, Backspace, the feet/inch/fraction marks `'` `"` `/`, space, and
+ * explicit unit-suffix letters). Tools use this to decide whether to route
+ * a key into `editLengthBuffer`.
+ */
+export function isLengthInputKey(key: string): boolean {
+  return key === 'Backspace' || /^[0-9.\-'"/ ]$/.test(key) || UNIT_SUFFIX_LETTER_RE.test(key)
+}
+
+/**
+ * Immutably edit a length VCB string buffer.
  *
- * For imperial formats ('arch' | 'frac_in' | 'dec_in') this is
- * `editNumericBuffer` PLUS acceptance of the SketchUp feet-inch-fraction
- * grammar tokens: `'` (feet), `"` (inches), `/` (fraction), and a space
- * (separator between inches and a fraction, e.g. "5' 3 1/2\"").
- *
- * For metric formats ('m' | 'cm' | 'mm') this behaves EXACTLY like
- * `editNumericBuffer` — no new tokens accepted.
+ * `editNumericBuffer` PLUS acceptance of the explicit-unit grammar tokens,
+ * in EVERY display format (the display format only governs how a bare
+ * number is interpreted at parse time — an explicit unit is always
+ * typeable, see `parseLengthToMeters`):
+ *   - `'` (feet), `"` (inches), `/` (fraction), space (separator between
+ *     inches and a fraction, e.g. "5' 3 1/2\"", or before a unit suffix,
+ *     e.g. "1 cm");
+ *   - unit-suffix letters for "mm"/"cm"/"km"/"m"/"ft"/"in".
+ * The `_format` parameter is kept for call-site compatibility; the accepted
+ * token set no longer depends on it.
  *
  * No three.js or DOM imports — fully testable in Node/vitest.
  */
-export function editLengthBuffer(buf: string, key: string, format: LengthFormat): string {
-  const isImperial = format === 'arch' || format === 'frac_in' || format === 'dec_in'
-
-  if (!isImperial) return editNumericBuffer(buf, key)
-
+export function editLengthBuffer(buf: string, key: string, _format: LengthFormat): string {
   if (key === 'Backspace') {
     return buf.slice(0, -1)
   }
 
   if (key === '-') {
-    return buf.startsWith('-') ? buf.slice(1) : '-' + buf
+    // Leading `-` is a sign; typed again on an otherwise-empty buffer it
+    // toggles back off. After a digit it's a literal fraction hyphen
+    // ("6-3/4\"") and must appear where typed — NOT flip the sign (the old
+    // behavior turned "5' 6" + `-` into "-5' 6", which read as a negative).
+    if (buf === '') return '-'
+    if (buf === '-') return ''
+    const last = buf[buf.length - 1]
+    if (last >= '0' && last <= '9') return buf + key
+    return buf
   }
 
   if (key === '.') {
@@ -103,6 +128,10 @@ export function editLengthBuffer(buf: string, key: string, format: LengthFormat)
   }
 
   if (key === "'" || key === '"' || key === '/' || key === ' ') {
+    return buf + key
+  }
+
+  if (UNIT_SUFFIX_LETTER_RE.test(key)) {
     return buf + key
   }
 
@@ -136,13 +165,22 @@ export function parseDistance(buf: string): number | null {
  * - `,`, `x`, `X`, and ` ` are all accepted as a separator and appended
  *   verbatim (so the buffer can be reformatted/parsed later); a second
  *   separator is rejected once one is already present.
- * - `-` is ignored (dimensions must be positive; no sign toggling).
+ * - Explicit-unit tokens are appended so each side can carry its own unit
+ *   ("1cm,100mm", "5',23\""): unit-suffix letters (except `x`/`X`, which
+ *   stay separators), `'`, `"`, and `/`.
+ * - `-` after a digit is a literal fraction hyphen ("5' 6-3/4\""); anywhere
+ *   else it's ignored (dimensions must be positive; no sign toggling).
  * - `Backspace` removes the last character.
  * - Any other key is ignored.
  */
 export function editDimsBuffer(buf: string, key: string): string {
   if (key === 'Backspace') {
     return buf.slice(0, -1)
+  }
+
+  if (key === '-') {
+    const last = buf[buf.length - 1]
+    return last >= '0' && last <= '9' ? buf + key : buf
   }
 
   const hasSeparator = /[,xX ]/.test(buf)
@@ -167,6 +205,10 @@ export function editDimsBuffer(buf: string, key: string): string {
   }
 
   if (key >= '0' && key <= '9') {
+    return buf + key
+  }
+
+  if (key === "'" || key === '"' || key === '/' || UNIT_SUFFIX_LETTER_RE.test(key)) {
     return buf + key
   }
 

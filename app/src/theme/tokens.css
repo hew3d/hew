@@ -20,8 +20,6 @@
  */
 
 :root {
-  color-scheme: dark light;
-
   /* ---- Typography ---------------------------------------------------- */
   --font-family-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --font-family-mono: ui-monospace, Menlo, monospace;
@@ -80,6 +78,14 @@
 /* ============================================================ Dark (default) */
 :root,
 [data-theme='dark'] {
+  /* Native controls (inputs, selects, scrollbars) must follow the MANUAL
+     theme, not the OS scheme — the old single `color-scheme: dark light` on
+     :root was never re-keyed by the theme switch, so a light-OS user who
+     switched the app to Dark still got OS-light native input rendering
+     (black text on the dark input surface). Each theme block pins its own
+     value instead. */
+  color-scheme: dark;
+
   /* ---- Surfaces --------------------------------------------------------*/
   --surface-canvas-page: #0c0e11;
   --surface-window: #15181d;
@@ -133,6 +139,8 @@
   --status-leaky: #e0714f;
   --status-warning: #e8c84a;
   --glyph-instance: #7acce8;
+  --glyph-group: #d9bc6e;
+  --glyph-sketch: #b3a1e0;
   --tag-accent: #b07aaa;
   --danger-base: #e0574f;
   /* Filled status badges (white text on top) — the text-oriented
@@ -144,6 +152,9 @@
 
 /* ============================================================ Light (CAD) */
 [data-theme='light'] {
+  /* See the dark block above: native controls follow the manual theme. */
+  color-scheme: light;
+
   /* ---- Surfaces --------------------------------------------------------*/
   --surface-canvas-page: linear-gradient(180deg, #f2f5f9 0%, #e6ebf1 55%, #dde3ea 100%);
   --surface-window: #eef1f5;
@@ -193,6 +204,8 @@
   --status-leaky: #c4543f;
   --status-warning: #b8860b;
   --glyph-instance: #2d78e1;
+  --glyph-group: #a07d2e;
+  --glyph-sketch: #6f5bbd;
   --tag-accent: #9c5aa0;
   --danger-base: #c4543f;
   --status-solid-bg: #2f9e57;

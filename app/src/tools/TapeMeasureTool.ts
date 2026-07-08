@@ -43,8 +43,8 @@ import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { editLengthBuffer, pointAlong } from './moveInput'
-import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
+import { editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
+import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 
 export type OnGuideCreated = () => void
 export type OnToast = (message: string, code?: string) => void
@@ -200,16 +200,7 @@ export class TapeMeasureTool implements Tool {
       return
     }
 
-    if (
-      (ev.key >= '0' && ev.key <= '9') ||
-      ev.key === '.' ||
-      ev.key === '-' ||
-      ev.key === 'Backspace' ||
-      ev.key === "'" ||
-      ev.key === '"' ||
-      ev.key === '/' ||
-      ev.key === ' '
-    ) {
+    if (isLengthInputKey(ev.key)) {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(this._typedReadout())
     }
@@ -218,8 +209,7 @@ export class TapeMeasureTool implements Tool {
   /** The typed-buffer readout, suffixed for metric formats (imperial tokens
    * like `'`/`"` are already visible in the buffer itself). */
   private _typedReadout(): string {
-    const suffix = getLengthUnitSuffix()
-    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
+    return typedReadout(this.typed)
   }
 
   cancel(): void {

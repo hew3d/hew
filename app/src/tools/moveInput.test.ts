@@ -4,6 +4,7 @@ import {
   editNumericBuffer,
   editLengthBuffer,
   editDimsBuffer,
+  isLengthInputKey,
   parseDistance,
   parseDimensions,
   pointAlong,
@@ -112,23 +113,40 @@ describe('parseDistance', () => {
 })
 
 describe('editLengthBuffer', () => {
-  it('behaves exactly like editNumericBuffer for metric formats', () => {
+  it('matches editNumericBuffer for digits/dot/Backspace in metric formats', () => {
     for (const format of ['m', 'cm', 'mm'] as const) {
       expect(editLengthBuffer('', '3', format)).toBe(editNumericBuffer('', '3'))
       expect(editLengthBuffer('3', '.', format)).toBe(editNumericBuffer('3', '.'))
       expect(editLengthBuffer('3.5', '.', format)).toBe(editNumericBuffer('3.5', '.'))
-      expect(editLengthBuffer('5', '-', format)).toBe(editNumericBuffer('5', '-'))
       expect(editLengthBuffer('35', 'Backspace', format)).toBe(editNumericBuffer('35', 'Backspace'))
-      // Imperial-only tokens are rejected in metric formats, same as editNumericBuffer.
-      expect(editLengthBuffer('5', "'", format)).toBe('5')
-      expect(editLengthBuffer('5', '"', format)).toBe('5')
-      expect(editLengthBuffer('5', '/', format)).toBe('5')
-      expect(editLengthBuffer('5', ' ', format)).toBe('5')
     }
   })
 
-  it('accepts feet/inch/fraction tokens in imperial formats', () => {
-    for (const format of ['arch', 'frac_in', 'dec_in'] as const) {
+  it('- is a leading sign on an empty buffer, toggling back off when re-typed', () => {
+    for (const format of ['m', 'arch'] as const) {
+      expect(editLengthBuffer('', '-', format)).toBe('-')
+      expect(editLengthBuffer('-', '-', format)).toBe('')
+      expect(editLengthBuffer('-', '5', format)).toBe('-5')
+    }
+  })
+
+  it('- after a digit is a literal fraction hyphen, not a sign flip', () => {
+    // Typing 5' 6-3/4" keystroke by keystroke must show the hyphen where
+    // typed — the old sign-toggle turned "5' 6" + `-` into "-5' 6", which
+    // read as a negative value.
+    let buf = ''
+    for (const key of ['5', "'", ' ', '6', '-', '3', '/', '4', '"']) {
+      buf = editLengthBuffer(buf, key, 'm')
+    }
+    expect(buf).toBe('5\' 6-3/4"')
+    // But not after a mark, a space, or another hyphen.
+    expect(editLengthBuffer("5'", '-', 'arch')).toBe("5'")
+    expect(editLengthBuffer('5 ', '-', 'arch')).toBe('5 ')
+    expect(editLengthBuffer('6-', '-', 'arch')).toBe('6-')
+  })
+
+  it('accepts feet/inch/fraction tokens in EVERY format (explicit units work in any mode)', () => {
+    for (const format of ['m', 'cm', 'mm', 'arch', 'frac_in', 'dec_in'] as const) {
       expect(editLengthBuffer('5', "'", format)).toBe("5'")
       expect(editLengthBuffer("5'", '3', format)).toBe("5'3")
       expect(editLengthBuffer("5'3", '"', format)).toBe('5\'3"')
@@ -138,12 +156,27 @@ describe('editLengthBuffer', () => {
     }
   })
 
+  it('accepts unit-suffix letters in EVERY format so "1cm"/"5ft" can be typed anywhere', () => {
+    for (const format of ['m', 'cm', 'mm', 'arch', 'frac_in', 'dec_in'] as const) {
+      expect(editLengthBuffer('1', 'c', format)).toBe('1c')
+      expect(editLengthBuffer('1c', 'm', format)).toBe('1cm')
+      expect(editLengthBuffer('5', 'f', format)).toBe('5f')
+      expect(editLengthBuffer('5f', 't', format)).toBe('5ft')
+      expect(editLengthBuffer('6', 'i', format)).toBe('6i')
+      expect(editLengthBuffer('6i', 'n', format)).toBe('6in')
+      expect(editLengthBuffer('3', 'k', format)).toBe('3k')
+      // Uppercase letters are accepted too (parsing is case-insensitive).
+      expect(editLengthBuffer('1', 'M', format)).toBe('1M')
+    }
+  })
+
   it('still accepts digits, dot, minus, Backspace in imperial formats', () => {
     expect(editLengthBuffer('', '6', 'arch')).toBe('6')
     expect(editLengthBuffer('6', '0', 'arch')).toBe('60')
     expect(editLengthBuffer('60', '.', 'arch')).toBe('60.')
     expect(editLengthBuffer('60.', '1', 'arch')).toBe('60.1')
-    expect(editLengthBuffer('5', '-', 'arch')).toBe('-5')
+    expect(editLengthBuffer('', '-', 'arch')).toBe('-')
+    expect(editLengthBuffer('5', '-', 'arch')).toBe('5-')
     expect(editLengthBuffer('60', 'Backspace', 'arch')).toBe('6')
   })
 
@@ -157,6 +190,26 @@ describe('editLengthBuffer', () => {
   it('ignores unknown keys in imperial formats', () => {
     expect(editLengthBuffer('3', 'a', 'arch')).toBe('3')
     expect(editLengthBuffer('3', 'Enter', 'frac_in')).toBe('3')
+  })
+})
+
+describe('isLengthInputKey', () => {
+  it('accepts digits, dot, minus, marks, space, Backspace', () => {
+    for (const key of ['0', '9', '.', '-', "'", '"', '/', ' ', 'Backspace']) {
+      expect(isLengthInputKey(key)).toBe(true)
+    }
+  })
+
+  it('accepts unit-suffix letters (both cases)', () => {
+    for (const key of ['m', 'c', 'k', 'f', 't', 'i', 'n', 'M', 'F', 'N']) {
+      expect(isLengthInputKey(key)).toBe(true)
+    }
+  })
+
+  it('rejects other keys', () => {
+    for (const key of ['a', 'x', 'X', 'q', 'Enter', 'ArrowUp', 'Escape']) {
+      expect(isLengthInputKey(key)).toBe(false)
+    }
   })
 })
 
@@ -200,8 +253,36 @@ describe('editDimsBuffer', () => {
     expect(editDimsBuffer('3.5,4.', '.')).toBe('3.5,4.')
   })
 
-  it('ignores minus (dimensions are unsigned)', () => {
-    expect(editDimsBuffer('3', '-')).toBe('3')
+  it('- after a digit is a literal fraction hyphen; elsewhere ignored (dimensions are unsigned)', () => {
+    expect(editDimsBuffer('3', '-')).toBe('3-') // "6-3/4"-style fraction hyphen
+    expect(editDimsBuffer('', '-')).toBe('')    // no leading sign
+    expect(editDimsBuffer("5'", '-')).toBe("5'") // not after a mark
+    expect(editDimsBuffer('3,', '-')).toBe('3,') // not right after a separator
+    // Full keystroke sequence for one side: 6-3/4"
+    let buf = ''
+    for (const key of ['6', '-', '3', '/', '4', '"']) buf = editDimsBuffer(buf, key)
+    expect(buf).toBe('6-3/4"')
+  })
+
+  it('accepts unit-suffix letters so each side can carry an explicit unit', () => {
+    expect(editDimsBuffer('1', 'c')).toBe('1c')
+    expect(editDimsBuffer('1c', 'm')).toBe('1cm')
+    expect(editDimsBuffer('1cm', ',')).toBe('1cm,')
+    expect(editDimsBuffer('1cm,100m', 'm')).toBe('1cm,100mm')
+    expect(editDimsBuffer('5', 'f')).toBe('5f')
+    expect(editDimsBuffer('5f', 't')).toBe('5ft')
+  })
+
+  it('accepts feet/inch marks and fraction slash', () => {
+    expect(editDimsBuffer('5', "'")).toBe("5'")
+    expect(editDimsBuffer('23', '"')).toBe('23"')
+    expect(editDimsBuffer('5/8', '"')).toBe('5/8"')
+    expect(editDimsBuffer('1', '/')).toBe('1/')
+  })
+
+  it('still treats x/X as the separator, not a unit letter', () => {
+    expect(editDimsBuffer('3cm', 'x')).toBe('3cmx')
+    expect(editDimsBuffer('3cmx4', 'x')).toBe('3cmx4') // second separator rejected
   })
 
   it('Backspace removes the last character', () => {

@@ -60,8 +60,8 @@ import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { editLengthBuffer } from './moveInput'
-import { parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
+import { editLengthBuffer, isLengthInputKey } from './moveInput'
+import { parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
@@ -256,16 +256,7 @@ export class SliceTool implements Tool {
       return
     }
 
-    if (
-      (ev.key >= '0' && ev.key <= '9') ||
-      ev.key === '.' ||
-      ev.key === '-' ||
-      ev.key === 'Backspace' ||
-      ev.key === "'" ||
-      ev.key === '"' ||
-      ev.key === '/' ||
-      ev.key === ' '
-    ) {
+    if (isLengthInputKey(ev.key)) {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(this._typedReadout())
       this._refreshPreview()
@@ -275,8 +266,7 @@ export class SliceTool implements Tool {
   /** The typed-buffer readout, suffixed for metric formats (imperial tokens
    * like `'`/`"` are already visible in the buffer itself). */
   private _typedReadout(): string {
-    const suffix = getLengthUnitSuffix()
-    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
+    return typedReadout(this.typed)
   }
 
   cancel(): void {

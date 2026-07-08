@@ -1,7 +1,8 @@
 /**
  *  — component tests for SettingsWindow, UnitsPane, and DebugPane.
  *
- * SettingsWindow: category nav (Units / Debug).
+ * SettingsWindow: macOS-style toolbar tab strip (Units / Theme / Debug tabs
+ *   with aria-selected) switching the pane rendered in the tabpanel below.
  * UnitsPane: system selector changes format options; selecting a format updates
  *   the singleton (which persists to localStorage via in-memory Storage polyfill).
  * DebugPane: checkbox toggles Debug Mode.
@@ -28,34 +29,53 @@ vi.mock('../log/diagnosticLog', async (importOriginal) => {
 })
 
 describe('SettingsWindow', () => {
-  it('shows "Units" heading by default (Units pane active)', () => {
+  it('shows the toolbar tab strip with one tab per pane', () => {
     render(<SettingsWindow />)
-    expect(screen.getByRole('heading', { name: /units/i })).toBeInTheDocument()
+    const tabs = screen.getAllByRole('tab')
+    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'Theme', 'Debug'])
   })
 
-  it('switches to the Debug pane when Debug category is clicked', () => {
+  it('shows the Units pane by default (Units tab selected)', () => {
     render(<SettingsWindow />)
-    fireEvent.click(screen.getByText('Debug'))
-    expect(screen.getByRole('heading', { name: /debug/i })).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: /^units$/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Units' })).toHaveAttribute('aria-selected', 'true')
+    // Units pane content: the System row label.
+    expect(screen.getByText('System')).toBeInTheDocument()
   })
 
-  it('returns to the Units pane when Units category is clicked after switching', () => {
+  it('switches to the Debug pane when the Debug tab is clicked', () => {
     render(<SettingsWindow />)
-    fireEvent.click(screen.getByText('Debug'))
-    fireEvent.click(screen.getByText('Units'))
-    expect(screen.getByRole('heading', { name: /^units$/i })).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: /^debug$/i })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Debug' }))
+    expect(screen.getByRole('tab', { name: 'Debug' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Units' })).toHaveAttribute('aria-selected', 'false')
+    // Debug pane content replaced Units pane content.
+    expect(screen.getByRole('checkbox', { name: /enable debug mode/i })).toBeInTheDocument()
+    expect(screen.queryByText('System')).not.toBeInTheDocument()
   })
 
-  it('highlights the active category', () => {
+  it('returns to the Units pane when the Units tab is clicked after switching', () => {
     render(<SettingsWindow />)
-    // 'Units' appears twice when the Units pane is active: the nav item and the
-    // pane's <h3> heading. The nav item (not the heading) carries the active
-    // highlight (the accent-on-tint token, Follow-up: — was a
-    // hardcoded '#fff').
-    const unitsNav = screen.getAllByText('Units').find((el) => el.tagName !== 'H3')
-    expect(unitsNav?.style.color).toBe('var(--accent-text-on-tint, #fff)')
+    fireEvent.click(screen.getByRole('tab', { name: 'Debug' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Units' }))
+    expect(screen.getByRole('tab', { name: 'Units' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('System')).toBeInTheDocument()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it('switches to the Theme pane when the Theme tab is clicked', () => {
+    render(<SettingsWindow />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Theme' }))
+    expect(screen.getByRole('tab', { name: 'Theme' })).toHaveAttribute('aria-selected', 'true')
+    // Theme pane content: the Appearance selector.
+    expect(screen.getByLabelText('Appearance')).toBeInTheDocument()
+  })
+
+  it('highlights the active tab with the accent-tint rounded rect (theme tokens, no hardcoded colors)', () => {
+    render(<SettingsWindow />)
+    const units = screen.getByRole('tab', { name: 'Units' })
+    const debug = screen.getByRole('tab', { name: 'Debug' })
+    expect(units.style.background).toContain('--accent-tint-15')
+    expect(units.style.color).toContain('--accent-text-on-tint')
+    expect(debug.style.background).toBe('transparent')
   })
 })
 
@@ -69,12 +89,12 @@ describe('UnitsPane', () => {
     setLengthUnit('m')
   })
 
-  it('renders the System and Format selectors', () => {
+  it('renders the System and Format selectors with associated labels', () => {
     render(<UnitsPane />)
-    // The labels aren't associated to the selects (no htmlFor/id), so query the
-    // two <select>s by role; the System/Format text labels render alongside them.
-    expect(screen.getByText('System')).toBeInTheDocument()
-    expect(screen.getByText('Format')).toBeInTheDocument()
+    // The form-grid labels are real <label htmlFor> now (SettingsForm.tsx), so
+    // the selects are queryable by their accessible names.
+    expect(screen.getByLabelText('System')).toBeInTheDocument()
+    expect(screen.getByLabelText('Format')).toBeInTheDocument()
     expect(screen.getAllByRole('combobox')).toHaveLength(2)
   })
 
@@ -142,9 +162,9 @@ describe('DebugPane', () => {
     setDebugMode(false)
   })
 
-  it('renders the Debug heading and checkbox', () => {
+  it('renders the Debug Mode row label and checkbox', () => {
     render(<DebugPane />)
-    expect(screen.getByRole('heading', { name: /debug/i })).toBeInTheDocument()
+    expect(screen.getByText('Debug Mode')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: /enable debug mode/i })).toBeInTheDocument()
   })
 

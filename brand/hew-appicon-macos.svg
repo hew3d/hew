@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- macOS app icon: Apple HIG icon grid — 824x824 squircle centered on a
+       transparent 1024 canvas (radius ~185.4), baked template drop shadow.
+       Do NOT use this variant for touch/PWA icons; those must stay full-bleed
+       (the OS applies its own mask). See docs/BRAND.md. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#D4714B"/>
+      <stop offset="1" stop-color="#AC4B2B"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.20"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.45"/>
+      <stop offset="0.3" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="cubeShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="0.6" stdDeviation="1" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#tile)" filter="url(#tileShadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#sheen)"/>
+  <rect x="102" y="102" width="820" height="820" rx="183.6" fill="none" stroke="url(#rim)" stroke-width="3"/>
+  <g transform="translate(512,521) scale(8)" filter="url(#cubeShadow)">
+    <g fill="none" stroke="#FFFFFF" stroke-width="4.4" stroke-linejoin="round" stroke-linecap="round">
+      <polygon points="0,-34 29.44,-17 29.44,17 0,34 -29.44,17 -29.44,-17"></polygon>
+      <line x1="0" y1="0" x2="0" y2="-34"></line>
+      <line x1="0" y1="0" x2="-29.44" y2="-17"></line>
+      <line x1="0" y1="0" x2="29.44" y2="-17"></line>
+    </g>
+  </g>
+</svg>

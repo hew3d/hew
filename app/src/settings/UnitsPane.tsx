@@ -8,8 +8,9 @@
  * Changing system selects that system's default format (Meters for Metric,
  * Architectural for Imperial).
  *
- * Reusable from both the standalone Settings window (Tauri) and the in-app
- * modal fallback (web).
+ * Laid out on the shared macOS-HIG form grid (SettingsForm.tsx). Reusable
+ * from both the standalone Settings window (Tauri) and the in-app modal
+ * fallback (web). Changes apply instantly — no OK/Cancel.
  */
 
 import { useEffect, useState } from 'react'
@@ -24,40 +25,19 @@ import {
   type LengthFormat,
   type LengthSystem,
 } from './units'
+import {
+  SettingsForm,
+  SettingsRow,
+  SettingsSeparator,
+  SettingsNote,
+  settingsSelectStyle,
+  settingsOptionStyle,
+} from './SettingsForm'
 
 const SYSTEM_OPTIONS: { value: LengthSystem; label: string }[] = [
   { value: 'metric', label: 'Metric' },
   { value: 'imperial', label: 'Imperial' },
 ]
-
-const selectStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '6px 8px',
-  fontSize: '13px',
-  background: 'var(--surface-input, #2a2a2a)',
-  color: 'var(--text-primary, #eee)',
-  border: '1px solid var(--border-strong, #444)',
-  borderRadius: '4px',
-  fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',
-}
-
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: '12px',
-  color: 'var(--text-tertiary, #aaa)',
-  marginBottom: '6px',
-}
-
-// Follow-up: many browsers/webviews render a <select>'s dropdown
-// popup using OS-native styling that ignores the *parent* element's color
-// (only `selectStyle` above), always showing dark-mode-only or light-mode-
-// only text regardless of theme. Styling each <option> directly is the
-// standard workaround — some engines respect it, closing the gap that
-// styling only the <select> leaves open.
-const optionStyle: React.CSSProperties = {
-  background: 'var(--surface-input, #2a2a2a)',
-  color: 'var(--text-primary, #eee)',
-}
 
 export function UnitsPane() {
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
@@ -75,44 +55,46 @@ export function UnitsPane() {
   }
 
   return (
-    <div>
-      <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: 'var(--text-primary, #eee)', fontWeight: 600 }}>
-        Units
-      </h3>
-
-      <label style={labelStyle}>System</label>
-      <select
-        value={system}
-        onChange={(e) => handleSystemChange(e.target.value as LengthSystem)}
-        style={{ ...selectStyle, marginBottom: '12px' }}
-      >
-        {SYSTEM_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value} style={optionStyle}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-
-      <label style={labelStyle}>Format</label>
-      <select
-        value={format}
-        onChange={(e) => setLengthUnit(e.target.value as LengthFormat)}
-        style={selectStyle}
-      >
-        {formatOptions.map((value) => {
-          const opt = LENGTH_FORMAT_OPTIONS.find((o) => o.value === value)
-          return (
-            <option key={value} value={value} style={optionStyle}>
-              {opt?.label ?? value}
+    <SettingsForm>
+      <SettingsRow label="System" htmlFor="settings-units-system">
+        <select
+          id="settings-units-system"
+          value={system}
+          onChange={(e) => handleSystemChange(e.target.value as LengthSystem)}
+          style={settingsSelectStyle}
+        >
+          {SYSTEM_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value} style={settingsOptionStyle}>
+              {opt.label}
             </option>
-          )
-        })}
-      </select>
+          ))}
+        </select>
+      </SettingsRow>
 
-      <p style={{ fontSize: '11px', color: 'var(--text-faint, #777)', marginTop: '10px', lineHeight: 1.4 }}>
+      <SettingsRow label="Format" htmlFor="settings-units-format">
+        <select
+          id="settings-units-format"
+          value={format}
+          onChange={(e) => setLengthUnit(e.target.value as LengthFormat)}
+          style={settingsSelectStyle}
+        >
+          {formatOptions.map((value) => {
+            const opt = LENGTH_FORMAT_OPTIONS.find((o) => o.value === value)
+            return (
+              <option key={value} value={value} style={settingsOptionStyle}>
+                {opt?.label ?? value}
+              </option>
+            )
+          })}
+        </select>
+      </SettingsRow>
+
+      <SettingsSeparator />
+
+      <SettingsNote>
         Controls how lengths are displayed (e.g. the Move tool's live measurement).
         Model geometry is always stored in meters internally.
-      </p>
-    </div>
+      </SettingsNote>
+    </SettingsForm>
   )
 }

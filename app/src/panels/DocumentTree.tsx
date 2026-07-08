@@ -1,12 +1,15 @@
 /**
  * DocumentTree — the document outliner ( navigation).
  *
- * A recursive tree of the document's top-level nodes (Objects + Groups),
- * with expand/collapse for groups. Sketches remain a flat separate section.
- * Breadcrumb shows the active context path.
+ * One unified tree list: the document's top-level nodes (Objects, Groups,
+ * Component instances — recursive, with expand/collapse for groups) followed
+ * by free-standing sketches as ordinary rows in the same list. Breadcrumb
+ * shows the active context path.
  *
- * Click to select; double-click to enter context. Group/Ungroup buttons added
- * alongside the existing boolean buttons.
+ * Click to select; double-click to enter context. Structural actions
+ * (booleans, group/ungroup, component ops) live in the menus/dock — this
+ * panel is purely navigational. Node types are distinguished by small
+ * stroke-based inline SVG icons tinted per type (see NodeIcon).
  */
 
 import { useMemo, useState, useEffect, useRef } from 'react'
@@ -16,19 +19,17 @@ import {
   resolveLabel,
   breadcrumb,
   isTreeRowDimmed,
-  canGroup as canGroupHelper,
-  canUngroup as canUngroupHelper,
   nodeRefFromJs,
-  nodeKindToNumber,
   nodeKey,
   type NodeRef,
+  type NodeKind,
 } from './treeModel'
 
 interface Props {
   scene: WasmScene
   /** Bumped by the parent on any document change to trigger a re-query. */
   docRev: number
-  /** Per-object watertight state, for the solid/leaky dot. */
+  /** Per-object watertight state, for the solid/leaky icon state. */
   watertightMap: Map<bigint, boolean>
   /** Selected nodes (ordered; index 0 = primary). */
   selectedIds: NodeRef[]
@@ -41,30 +42,6 @@ interface Props {
   onExitContext: () => void
   /** Truncate the context path to a given depth (crumb click). */
   onSetContextDepth: (depth: number) => void
-  /** True when exactly two objects are selected at top level (boolean-ready). */
-  canBoolean: boolean
-  /** Run a boolean on the two selected objects (0=union,1=subtract,2=intersect). */
-  onBoolean: (op: number) => void
-  /** Group selected nodes. */
-  onGroup: () => void
-  /** Ungroup the single selected group. */
-  onUngroup: () => void
-  /** True when the selection can become a component. */
-  canMakeComponent: boolean
-  /** Fold the selection into a component + instance. */
-  onMakeComponent: () => void
-  /** True when exactly one instance is selected (can place a copy). */
-  canPlaceInstance: boolean
-  /** Place another instance of the selected instance's definition. */
-  onPlaceInstance: () => void
-  /** True when exactly one instance is selected (can explode). */
-  canExplodeInstance: boolean
-  /** Bake the instance's pose into independent world objects. */
-  onExplodeInstance: () => void
-  /** True when exactly one instance is selected (can make unique). */
-  canMakeUnique: boolean
-  /** Detach the instance onto a private copy of its definition. */
-  onMakeUnique: () => void
   /** Set of nodeKey strings for nodes that are currently hidden. */
   hiddenKeys: Set<string>
   /** Toggle hide/show for a node (and its descendants if it's a group). */
@@ -77,7 +54,7 @@ const ROW_BASE: React.CSSProperties = {
   gap: '6px',
   padding: '3px 8px',
   fontSize: '12px',
-  fontFamily: 'monospace',
+  fontFamily: 'var(--font-family-ui)',
   color: 'var(--text-secondary, #ccc)',
   cursor: 'pointer',
   borderRadius: '3px',
@@ -95,18 +72,6 @@ export function DocumentTree({
   onEnterContext,
   onExitContext,
   onSetContextDepth,
-  canBoolean,
-  onBoolean,
-  onGroup,
-  onUngroup,
-  canMakeComponent,
-  onMakeComponent,
-  canPlaceInstance,
-  onPlaceInstance,
-  canExplodeInstance,
-  onExplodeInstance,
-  canMakeUnique,
-  onMakeUnique,
   hiddenKeys,
   onToggleHidden,
 }: Props) {
@@ -119,8 +84,6 @@ export function DocumentTree({
   )
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const sketches = useMemo(() => Array.from(scene.sketch_ids()), [scene, docRev])
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const instanceIds = useMemo(() => Array.from(scene.instance_ids()), [scene, docRev])
 
   const selected = new Set(selectedIds.map((n) => nodeKey(n)))
   const isSelected = (n: NodeRef) => selected.has(nodeKey(n))
@@ -149,6 +112,8 @@ export function DocumentTree({
     const keys = new Set<string>()
     if (selectedIds.length === 0) return keys
     const primary = selectedIds[0]
+    // A sketch is always top-level and has no kernel NodeId — no ancestors.
+    if (primary.kind === 'sketch') return keys
     // Walk up the parent chain from the primary node.
     const kindNum = primary.kind === 'object' ? 0 : primary.kind === 'group' ? 1 : 2
     let parentId = scene.node_parent(kindNum, primary.id)
@@ -161,17 +126,6 @@ export function DocumentTree({
   }, [selectedIds, scene, docRev])
 
   const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
-
-  // Compute canGroup / canUngroup for the button row. A sketch is top-level
-  // and has no kernel NodeId (so no group parent and can't be grouped) —
-  // short-circuit before `scene.node_parent` (nodeKindToNumber's -1 sentinel
-  // for 'sketch' is not a real node_id kind), and any sketch in the selection
-  // disqualifies group/ungroup.
-  const parentOf = (n: NodeRef) =>
-    n.kind === 'sketch' ? undefined : scene.node_parent(nodeKindToNumber(n.kind), n.id)
-  const hasSketch = selectedIds.some((n) => n.kind === 'sketch')
-  const canGroupNow = !hasSketch && canGroupHelper(selectedIds, parentOf)
-  const canUngroupNow = !hasSketch && canUngroupHelper(selectedIds)
 
   // Label resolver for breadcrumbs — uses top_level_nodes ordering
   const labelFor = (node: NodeRef): string => {
@@ -197,7 +151,7 @@ export function DocumentTree({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
       {/* Breadcrumb */}
-      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'monospace' }}>
+      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'var(--font-family-ui)' }}>
         {crumbs.map((c, i) => (
           <span key={i} style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
             {i > 0 && <span style={{ color: 'var(--text-faint, #777)' }}>›</span>}
@@ -219,7 +173,7 @@ export function DocumentTree({
                   border: 'none',
                   color: 'var(--accent-base, #7aa7e0)',
                   cursor: 'pointer',
-                  fontFamily: 'monospace',
+                  fontFamily: 'var(--font-family-ui)',
                   fontSize: '12px',
                   padding: 0,
                 }}
@@ -231,76 +185,9 @@ export function DocumentTree({
         ))}
       </div>
 
-      {/* Action buttons row */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-        {/* Boolean actions — active only with exactly two objects selected. */}
-        {canBoolean && (
-          <div style={{ display: 'flex', gap: '4px' }}>
-            <BoolButton label="Union" title="Combine both (A ∪ B)" onClick={() => onBoolean(0)} />
-            <BoolButton label="Subtract" title="First minus second (A − B)" onClick={() => onBoolean(1)} />
-            <BoolButton label="Intersect" title="Overlap only (A ∩ B)" onClick={() => onBoolean(2)} />
-          </div>
-        )}
-        {/* Group / Ungroup */}
-        {(canGroupNow || canUngroupNow) && (
-          <div style={{ display: 'flex', gap: '4px' }}>
-            {canGroupNow && (
-              <ActionButton
-                label="Group"
-                title="Group selected nodes into a merge group"
-                onClick={onGroup}
-              />
-            )}
-            {canUngroupNow && (
-              <ActionButton
-                label="Ungroup"
-                title="Dissolve the selected group"
-                onClick={onUngroup}
-              />
-            )}
-          </div>
-        )}
-        {/* Component actions */}
-        {(canMakeComponent || canPlaceInstance) && (
-          <div style={{ display: 'flex', gap: '4px' }}>
-            {canMakeComponent && (
-              <ActionButton
-                label="Make Component"
-                title="Fold selection into a shared component definition"
-                onClick={onMakeComponent}
-              />
-            )}
-            {canPlaceInstance && (
-              <ActionButton
-                label="Place Copy"
-                title="Stamp another instance of this component (offset by 0.5m)"
-                onClick={onPlaceInstance}
-              />
-            )}
-          </div>
-        )}
-        {(canExplodeInstance || canMakeUnique) && (
-          <div style={{ display: 'flex', gap: '4px' }}>
-            {canExplodeInstance && (
-              <ActionButton
-                label="Explode"
-                title="Bake instance pose into independent world objects"
-                onClick={onExplodeInstance}
-              />
-            )}
-            {canMakeUnique && (
-              <ActionButton
-                label="Make Unique"
-                title="Detach onto a private copy of this component's definition"
-                onClick={onMakeUnique}
-              />
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Recursive node tree */}
-      <Section title="Objects" empty="(no solids yet)">
+      {/* Unified node tree: top-level nodes first, then free-standing sketches.
+          An empty document renders no rows at all — no placeholder text. */}
+      <div>
         {topNodes.map((node, index) => (
           <NodeRow
             key={`${node.kind}:${node.id}`}
@@ -322,15 +209,13 @@ export function DocumentTree({
             onEnterContext={onEnterContext}
           />
         ))}
-      </Section>
-
-      <Section title="Sketches" empty="(no sketches yet)">
         {sketches.map((id, index) => {
           const node: NodeRef = { kind: 'sketch', id }
           return (
             <Row
               key={String(id)}
               label={entityLabel('sketch', index)}
+              icon={<NodeIcon kind="sketch" />}
               selected={isSelected(node)}
               isPrimary={primaryKey === nodeKey(node)}
               active={false}
@@ -341,7 +226,7 @@ export function DocumentTree({
             />
           )
         })}
-      </Section>
+      </div>
     </div>
   )
 }
@@ -384,7 +269,10 @@ function NodeRow({
 }) {
   // Auto-expand when this group is an ancestor of the primary selected node.
   const isAncestor = node.kind === 'group' && ancestorGroupKeys.has(nodeKey(node))
-  const [expanded, setExpanded] = useState(true)
+  // Nested containers start COLLAPSED — an outliner full of pre-expanded
+  // hierarchy is noise; the auto-expand effect below still opens the
+  // ancestors of whatever is selected.
+  const [expanded, setExpanded] = useState(false)
   // Force expand when this group is in the ancestor path of the primary selection.
   useEffect(() => {
     if (isAncestor) setExpanded(true)
@@ -402,13 +290,13 @@ function NodeRow({
     return (
       <Row
         label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
+        icon={<NodeIcon kind="object" solid={watertight} />}
         selected={selected}
         isPrimary={isPrimary}
         active={active}
         dimmed={dimmed}
         hidden={hidden}
         indent={depth}
-        dot={watertight ? 'var(--status-solid)' : 'var(--status-leaky)'}
         rowRef={isPrimary ? selectedRowRef : undefined}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
@@ -423,13 +311,13 @@ function NodeRow({
     return (
       <Row
         label={resolveLabel(scene.instance_name(node.id), defName, 'instance', index)}
+        icon={<NodeIcon kind="instance" />}
         selected={selected}
         isPrimary={isPrimary}
         active={active}
         dimmed={dimmed}
         hidden={hidden}
         indent={depth}
-        isInstance
         rowRef={isPrimary ? selectedRowRef : undefined}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
@@ -450,6 +338,7 @@ function NodeRow({
     <>
       <Row
         label={resolveLabel(scene.group_name(node.id), undefined, 'group', index)}
+        icon={<NodeIcon kind="group" />}
         selected={selected}
         isPrimary={isPrimary}
         active={active}
@@ -489,78 +378,95 @@ function NodeRow({
   )
 }
 
-function BoolButton({ label, title, onClick }: { label: string; title: string; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        flex: 1,
-        padding: '4px 2px',
-        fontSize: '11px',
-        fontFamily: 'monospace',
-        cursor: 'pointer',
-        background: 'var(--accent-tint-18)',
-        color: 'var(--accent-text-on-tint)',
-        border: '1px solid var(--accent-border)',
-        borderRadius: '3px',
-      }}
-    >
-      {label}
-    </button>
-  )
+// ---------------------------------------------------------------------------
+// NodeIcon — 14px stroke-based inline SVG per node type.
+//
+// Matches the minimal line-icon language of the toolbar (thin, geometric,
+// currentColor) while staying quiet: each type gets a subtle theme-aware tint
+// via CSS vars, applied as the SVG's color so `currentColor` picks it up.
+//   object   — isometric cube; solid = solid outline (--status-solid),
+//              leaky = dashed outline (--status-leaky)
+//   group    — folder outline (--glyph-group)
+//   instance — hexagon with a center definition dot (--glyph-instance)
+//   sketch   — pen curve (--glyph-sketch)
+// ---------------------------------------------------------------------------
+
+const ICON_SVG_PROPS = {
+  width: 14,
+  height: 14,
+  viewBox: '0 0 14 14',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.2,
+  strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const,
+  'aria-hidden': true,
+  style: { flexShrink: 0, display: 'block' } as React.CSSProperties,
 }
 
-function ActionButton({ label, title, onClick }: { label: string; title: string; onClick: () => void }) {
+export function NodeIcon({ kind, solid }: { kind: NodeKind; solid?: boolean }) {
+  if (kind === 'object') {
+    const leaky = solid === false
+    return (
+      <svg
+        {...ICON_SVG_PROPS}
+        data-node-icon={leaky ? 'object-leaky' : 'object-solid'}
+        style={{ ...ICON_SVG_PROPS.style, color: leaky ? 'var(--status-leaky)' : 'var(--status-solid)' }}
+      >
+        <path
+          d="M7 1.4 12.1 4.2 12.1 9.8 7 12.6 1.9 9.8 1.9 4.2 Z"
+          strokeDasharray={leaky ? '2 1.7' : undefined}
+        />
+        <path d="M1.9 4.2 7 7 12.1 4.2 M7 7 7 12.6" strokeDasharray={leaky ? '2 1.7' : undefined} />
+      </svg>
+    )
+  }
+  if (kind === 'group') {
+    return (
+      <svg
+        {...ICON_SVG_PROPS}
+        data-node-icon="group"
+        style={{ ...ICON_SVG_PROPS.style, color: 'var(--glyph-group)' }}
+      >
+        <path d="M1.7 4.6v6a1 1 0 0 0 1 1h8.6a1 1 0 0 0 1-1V5.9a1 1 0 0 0-1-1H7.1L5.7 3.4H2.7a1 1 0 0 0-1 1Z" />
+      </svg>
+    )
+  }
+  if (kind === 'instance') {
+    return (
+      <svg
+        {...ICON_SVG_PROPS}
+        data-node-icon="instance"
+        style={{ ...ICON_SVG_PROPS.style, color: 'var(--glyph-instance)' }}
+      >
+        <path d="M7 1.6 11.7 4.3 11.7 9.7 7 12.4 2.3 9.7 2.3 4.3 Z" />
+        <circle cx="7" cy="7" r="1.3" fill="currentColor" stroke="none" />
+      </svg>
+    )
+  }
+  // sketch
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      style={{
-        flex: 1,
-        padding: '4px 2px',
-        fontSize: '11px',
-        fontFamily: 'monospace',
-        cursor: 'pointer',
-        background: 'color-mix(in srgb, var(--status-solid) 18%, transparent)',
-        color: 'var(--status-solid)',
-        border: '1px solid color-mix(in srgb, var(--status-solid) 45%, transparent)',
-        borderRadius: '3px',
-      }}
+    <svg
+      {...ICON_SVG_PROPS}
+      data-node-icon="sketch"
+      style={{ ...ICON_SVG_PROPS.style, color: 'var(--glyph-sketch)' }}
     >
-      {label}
-    </button>
-  )
-}
-
-function Section({ title, empty, children }: { title: string; empty: string; children: React.ReactNode }) {
-  const items = Array.isArray(children) ? children : [children]
-  const isEmpty = items.flat().filter(Boolean).length === 0
-  return (
-    <div>
-      <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-faint, #888)', marginBottom: '4px' }}>
-        {title}
-      </div>
-      {isEmpty ? (
-        <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', fontStyle: 'italic', padding: '2px 8px' }}>{empty}</div>
-      ) : (
-        children
-      )}
-    </div>
+      <path d="M2 12c1.4-5.6 5.4-1.8 10-10" />
+      <circle cx="2" cy="12" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
   )
 }
 
 function Row({
   label,
+  icon,
   selected,
   isPrimary,
   active,
   dimmed,
   hidden,
   indent,
-  dot,
   isGroup,
-  isInstance,
   expanded,
   onToggleExpand,
   rowRef,
@@ -569,15 +475,14 @@ function Row({
   onToggleHidden,
 }: {
   label: string
+  icon: React.ReactNode
   selected: boolean
   isPrimary?: boolean
   active: boolean
   dimmed: boolean
   hidden?: boolean
   indent: number
-  dot?: string
   isGroup?: boolean
-  isInstance?: boolean
   expanded?: boolean
   onToggleExpand?: () => void
   rowRef?: React.Ref<HTMLDivElement>
@@ -632,17 +537,7 @@ function Row({
           {expanded === true ? '▾' : '▸'}
         </button>
       )}
-      {/* Folder icon for groups */}
-      {isGroup === true && (
-        <span style={{ fontSize: '11px', color: 'var(--status-warning)' }}>▤</span>
-      )}
-      {/* Component/instance icon */}
-      {isInstance === true && (
-        <span style={{ fontSize: '11px', color: 'var(--glyph-instance)' }}>⬡</span>
-      )}
-      {dot !== undefined && (
-        <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: dot, flexShrink: 0 }} />
-      )}
+      {icon}
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
       {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}>editing</span>}
       {/* Eye toggle — only visible on hover via CSS would require class, so always show */}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { deriveDockContext, dockVerbsFor, dockChipLabel } from './dockLogic'
+import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
 const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
@@ -99,6 +99,21 @@ describe('dockVerbsFor', () => {
     for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
       expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(6)
       expect(dockVerbsFor(ctx).length).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe('isDockVerbEnabled', () => {
+  it('hover-preview (sketch not selected): only Push/Pull is enabled', () => {
+    const enabled = dockVerbsFor('sketch').filter((v) => isDockVerbEnabled(v, true))
+    expect(enabled.map((v) => v.id)).toEqual(['tool-pushpull'])
+  })
+
+  it('with a real selection every verb is enabled, in every context', () => {
+    for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
+      for (const verb of dockVerbsFor(ctx)) {
+        expect(isDockVerbEnabled(verb, false)).toBe(true)
+      }
     }
   })
 })

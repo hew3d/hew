@@ -39,10 +39,10 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, buildSketchPreviewClone, clearPreview } from './transformPreview'
-import { arrowToAxis, editLengthBuffer, pointAlong } from './moveInput'
+import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
 import type { NodeRef, NodeKind } from '../panels/treeModel'
 import { nodeRefFromJs } from '../panels/treeModel'
-import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
+import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 
 /** FFI node-kind code matching `wasm-api`'s `node_id` (0=object, 1=group, 2=instance). */
 function kindCode(kind: NodeKind): number {
@@ -287,18 +287,9 @@ export class MoveTool implements Tool {
       return
     }
 
-    // Feed digits, dot, minus, Backspace, and (in imperial formats) the
-    // feet/inch/fraction grammar tokens into the buffer.
-    if (
-      (ev.key >= '0' && ev.key <= '9') ||
-      ev.key === '.' ||
-      ev.key === '-' ||
-      ev.key === 'Backspace' ||
-      ev.key === "'" ||
-      ev.key === '"' ||
-      ev.key === '/' ||
-      ev.key === ' '
-    ) {
+    // Feed length-input keys (digits, dot, minus, feet/inch/fraction marks,
+    // explicit unit-suffix letters, Backspace) into the buffer.
+    if (isLengthInputKey(ev.key)) {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       // Report the typed buffer as the measurement readout, tagged with the
       // current display unit so the user knows what they're typing in.
@@ -309,8 +300,7 @@ export class MoveTool implements Tool {
   /** The typed-buffer readout, suffixed for metric formats (imperial tokens
    * like `'`/`"` are already visible in the buffer itself). */
   private _typedReadout(): string {
-    const suffix = getLengthUnitSuffix()
-    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
+    return typedReadout(this.typed)
   }
 
   cancel(): void {

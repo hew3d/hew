@@ -45,8 +45,8 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { circlePolygonGround, circlePolygonFace, facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
-import { formatLength, parseLengthToMeters, getLengthUnit, getLengthUnitSuffix } from '../settings/units'
-import { editLengthBuffer } from './moveInput'
+import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
+import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
 
 /** Number of straight segments approximating the circle ("circle" = faceted
@@ -294,16 +294,7 @@ export class CircleTool implements Tool {
     }
 
     // Feed digits, dot, separators, Backspace into the buffer
-    if (
-      (ev.key >= '0' && ev.key <= '9') ||
-      ev.key === '.' ||
-      ev.key === '-' ||
-      ev.key === 'Backspace' ||
-      ev.key === "'" ||
-      ev.key === '"' ||
-      ev.key === '/' ||
-      ev.key === ' '
-    ) {
+    if (isLengthInputKey(ev.key)) {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(this._typedReadout())
     }
@@ -332,8 +323,7 @@ export class CircleTool implements Tool {
   /** The typed-buffer readout, suffixed for metric formats (imperial tokens
    * like `'`/`"` are already visible in the buffer itself). */
   private _typedReadout(): string {
-    const suffix = getLengthUnitSuffix()
-    return suffix === '' ? this.typed : `${this.typed} ${suffix}`
+    return typedReadout(this.typed)
   }
 
   /** Report the live radius measurement from center to the cursor. */

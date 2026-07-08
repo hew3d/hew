@@ -4,10 +4,15 @@ import {
   metersFromUnit,
   getLengthUnitSuffix,
   parseLengthToMeters,
+  parseDimensionsToMeters,
+  typedReadout,
   LENGTH_SYSTEM_OF,
   LENGTH_FORMATS_BY_SYSTEM,
   DEFAULT_FORMAT_FOR_SYSTEM,
 } from './units'
+
+/** Every display format — explicit units must parse identically in all of them. */
+const ALL_FORMATS = ['m', 'cm', 'mm', 'arch', 'frac_in', 'dec_in'] as const
 
 describe('formatLengthIn — metric (unchanged goldens)', () => {
   it('formats meters with trimmed precision', () => {
@@ -236,6 +241,184 @@ describe('parseLengthToMeters — imperial', () => {
   })
 })
 
+describe('parseLengthToMeters — explicit metric suffixes work in ANY mode', () => {
+  it('parses cm/mm/m/km suffixes regardless of the active format', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('1cm', format)).toBeCloseTo(0.01, 12)
+      expect(parseLengthToMeters('100mm', format)).toBeCloseTo(0.1, 12)
+      expect(parseLengthToMeters('2.5m', format)).toBeCloseTo(2.5, 12)
+      expect(parseLengthToMeters('3km', format)).toBeCloseTo(3000, 9)
+    }
+  })
+
+  it('accepts a space between the number and the suffix', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('1 cm', format)).toBeCloseTo(0.01, 12)
+      expect(parseLengthToMeters('100 mm', format)).toBeCloseTo(0.1, 12)
+    }
+  })
+
+  it('is case-insensitive', () => {
+    expect(parseLengthToMeters('1CM', 'arch')).toBeCloseTo(0.01, 12)
+    expect(parseLengthToMeters('2.5M', 'dec_in')).toBeCloseTo(2.5, 12)
+    expect(parseLengthToMeters('100Mm', 'm')).toBeCloseTo(0.1, 12)
+  })
+
+  it('preserves the sign convention (leading minus negates)', () => {
+    expect(parseLengthToMeters('-1cm', 'm')).toBeCloseTo(-0.01, 12)
+    expect(parseLengthToMeters('-2.5m', 'arch')).toBeCloseTo(-2.5, 12)
+  })
+
+  it('a bare number still follows the display format', () => {
+    expect(parseLengthToMeters('2', 'mm')).toBeCloseTo(0.002, 12)
+    expect(parseLengthToMeters('2', 'cm')).toBeCloseTo(0.02, 12)
+    expect(parseLengthToMeters('2', 'dec_in')).toBeCloseTo(2 * 0.0254, 12)
+  })
+
+  it('returns null for a suffix with no number or an unknown suffix', () => {
+    expect(parseLengthToMeters('cm', 'm')).toBeNull()
+    expect(parseLengthToMeters('1zm', 'm')).toBeNull()
+  })
+
+  it('does not support summed quantities like "1m 20cm"', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('1m 20cm', format)).toBeNull()
+    }
+  })
+})
+
+describe('parseLengthToMeters — ft/in word suffixes work in ANY mode', () => {
+  it('parses "ft" and "in" suffixes regardless of the active format', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('5ft', format)).toBeCloseTo(5 * 0.3048, 12)
+      expect(parseLengthToMeters('6in', format)).toBeCloseTo(6 * 0.0254, 12)
+      expect(parseLengthToMeters('5 ft', format)).toBeCloseTo(5 * 0.3048, 12)
+      expect(parseLengthToMeters('6 IN', format)).toBeCloseTo(6 * 0.0254, 12)
+    }
+  })
+})
+
+describe('parseLengthToMeters — explicit feet/inch marks work in ANY mode', () => {
+  it("parses 5' (feet) in every format, including metric", () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters("5'", format)).toBeCloseTo(5 * 0.3048, 12)
+    }
+  })
+
+  it('parses 23" (inches) in every format, including metric', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('23"', format)).toBeCloseTo(23 * 0.0254, 12)
+    }
+  })
+
+  it("parses 5'6\" (feet + inches) in every format", () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('5\'6"', format)).toBeCloseTo((5 * 12 + 6) * 0.0254, 12)
+    }
+  })
+
+  it('parses fractional inches 5/8" in every format', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('5/8"', format)).toBeCloseTo(0.625 * 0.0254, 12)
+    }
+  })
+
+  it('parses 2-1/4" in every format', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('2-1/4"', format)).toBeCloseTo(2.25 * 0.0254, 12)
+    }
+  })
+
+  it("parses 5' 2-1/4\" in every format", () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('5\' 2-1/4"', format)).toBeCloseTo((5 * 12 + 2.25) * 0.0254, 12)
+    }
+  })
+
+  it("parses 5' 5/8\" in every format", () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('5\' 5/8"', format)).toBeCloseTo((5 * 12 + 0.625) * 0.0254, 12)
+    }
+  })
+
+  it('still rejects garbage carrying a mark', () => {
+    expect(parseLengthToMeters('abc"', 'm')).toBeNull()
+    expect(parseLengthToMeters("abc'", 'arch')).toBeNull()
+    expect(parseLengthToMeters('"', 'm')).toBeNull()
+  })
+})
+
+describe('parseDimensionsToMeters', () => {
+  it('parses mixed explicit-unit components — "1cm,100mm" — in ANY mode', () => {
+    for (const format of ALL_FORMATS) {
+      const dims = parseDimensionsToMeters('1cm,100mm', format)
+      expect(dims).not.toBeNull()
+      expect(dims![0]).toBeCloseTo(0.01, 12)
+      expect(dims![1]).toBeCloseTo(0.1, 12)
+    }
+  })
+
+  it('parses mixed metric/imperial components', () => {
+    const dims = parseDimensionsToMeters("5',23\"", 'm')
+    expect(dims).not.toBeNull()
+    expect(dims![0]).toBeCloseTo(5 * 0.3048, 12)
+    expect(dims![1]).toBeCloseTo(23 * 0.0254, 12)
+  })
+
+  it('interprets bare components in the display format', () => {
+    expect(parseDimensionsToMeters('3,4', 'm')).toEqual([3, 4])
+    const cm = parseDimensionsToMeters('3,4', 'cm')
+    expect(cm![0]).toBeCloseTo(0.03, 12)
+    expect(cm![1]).toBeCloseTo(0.04, 12)
+    const inches = parseDimensionsToMeters('3,4', 'dec_in')
+    expect(inches![0]).toBeCloseTo(3 * 0.0254, 12)
+    expect(inches![1]).toBeCloseTo(4 * 0.0254, 12)
+  })
+
+  it('accepts x/X separators and surrounding spaces', () => {
+    expect(parseDimensionsToMeters('3x4', 'm')).toEqual([3, 4])
+    expect(parseDimensionsToMeters('3X4', 'm')).toEqual([3, 4])
+    expect(parseDimensionsToMeters('3 x 4', 'm')).toEqual([3, 4])
+    expect(parseDimensionsToMeters(' 3 , 4 ', 'm')).toEqual([3, 4])
+  })
+
+  it('keeps the legacy space-separated pair', () => {
+    expect(parseDimensionsToMeters('3 4', 'm')).toEqual([3, 4])
+    const mixed = parseDimensionsToMeters('1cm 2cm', 'arch')
+    expect(mixed![0]).toBeCloseTo(0.01, 12)
+    expect(mixed![1]).toBeCloseTo(0.02, 12)
+  })
+
+  it('treats a single component as a square', () => {
+    expect(parseDimensionsToMeters('3', 'm')).toEqual([3, 3])
+    const cm = parseDimensionsToMeters('1cm', 'arch')
+    expect(cm![0]).toBeCloseTo(0.01, 12)
+    expect(cm![1]).toBeCloseTo(0.01, 12)
+    const archSquare = parseDimensionsToMeters("5' 3\"", 'm')
+    expect(archSquare![0]).toBeCloseTo((5 * 12 + 3) * 0.0254, 12)
+    expect(archSquare![1]).toBeCloseTo((5 * 12 + 3) * 0.0254, 12)
+  })
+
+  it('returns null for empty/malformed input', () => {
+    expect(parseDimensionsToMeters('', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('   ', 'm')).toBeNull()
+    expect(parseDimensionsToMeters(',', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('3,', 'm')).toBeNull()
+    expect(parseDimensionsToMeters(',4', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('3,4,5', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('abc', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('3,abc', 'm')).toBeNull()
+  })
+
+  it('returns null for non-positive components', () => {
+    expect(parseDimensionsToMeters('0', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('-3', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('3,0', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('3,-4', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('-1cm,2cm', 'm')).toBeNull()
+  })
+})
+
 describe('LengthFormat <-> LengthSystem grouping', () => {
   it('groups metric formats', () => {
     expect(LENGTH_SYSTEM_OF.m).toBe('metric')
@@ -257,5 +440,48 @@ describe('LengthFormat <-> LengthSystem grouping', () => {
   it('has a default format per system', () => {
     expect(DEFAULT_FORMAT_FOR_SYSTEM.metric).toBe('m')
     expect(DEFAULT_FORMAT_FOR_SYSTEM.imperial).toBe('arch')
+  })
+})
+
+describe('typedReadout', () => {
+  it('appends the display suffix while the buffer is a bare number', () => {
+    expect(typedReadout('5', 'm')).toBe('5 m')
+    expect(typedReadout('3.5', 'cm')).toBe('3.5 cm')
+    expect(typedReadout('12', 'mm')).toBe('12 mm')
+    expect(typedReadout('3', 'frac_in')).toBe('3 "')
+  })
+
+  it('drops the suffix the instant the buffer carries an explicit unit', () => {
+    expect(typedReadout("5'", 'm')).toBe("5'")
+    expect(typedReadout('60"', 'm')).toBe('60"')
+    expect(typedReadout('10c', 'm')).toBe('10c') // mid-typing "10cm"
+    expect(typedReadout('10cm', 'm')).toBe('10cm')
+    expect(typedReadout('100mm', 'cm')).toBe('100mm')
+    expect(typedReadout('5ft', 'mm')).toBe('5ft')
+    expect(typedReadout("5' 6-3/4\"", 'm')).toBe("5' 6-3/4\"")
+    expect(typedReadout("5'", 'frac_in')).toBe("5'") // imperial mode too
+  })
+
+  it('keeps the suffix for a bare fraction (still display units)', () => {
+    expect(typedReadout('3 1/2', 'frac_in')).toBe('3 1/2 "')
+  })
+
+  it('re-applies the rule per component in a dims buffer', () => {
+    expect(typedReadout('10cm,5', 'm')).toBe('10cm,5 m')   // second side bare again
+    expect(typedReadout('10cm,5mm', 'm')).toBe('10cm,5mm') // …until it gets a unit
+    expect(typedReadout('3,4', 'cm')).toBe('3,4 cm')
+    expect(typedReadout('3x4', 'm')).toBe('3x4 m')
+    expect(typedReadout("5',23\"", 'm')).toBe("5',23\"")
+  })
+
+  it('appends nothing after a dangling separator or on an empty/sign-only buffer', () => {
+    expect(typedReadout('', 'm')).toBe('')
+    expect(typedReadout('-', 'm')).toBe('-')
+    expect(typedReadout('10cm,', 'm')).toBe('10cm,')
+    expect(typedReadout('3x', 'm')).toBe('3x')
+  })
+
+  it('never appends for the composite arch format (no single suffix)', () => {
+    expect(typedReadout('5', 'arch')).toBe('5')
   })
 })

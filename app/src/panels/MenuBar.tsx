@@ -88,6 +88,19 @@ export interface MenuBarProps {
   onDeleteGuides?: () => void
   /** Delete the current selection — whole Object/Group/Instance nodes only (Edit ▸ Delete). */
   onDelete?: () => void
+  /** Run an Edit-menu object command by action id (edit-group, edit-union, …)
+   *  — same dispatch ids the native macOS menu and the contextual dock use. */
+  onEditAction?: (id: string) => void
+  /** Selection-gated availability for the Edit-menu object commands. */
+  editGates?: {
+    canGroup: boolean
+    canUngroup: boolean
+    canMakeComponent: boolean
+    canPlaceCopy: boolean
+    canExplode: boolean
+    canMakeUnique: boolean
+    canBoolean: boolean
+  }
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
   /** Reposition the camera to a standard view (Camera → Standard Views). */
@@ -306,6 +319,8 @@ export function MenuBar({
   onToggleGuides,
   onDeleteGuides,
   onDelete,
+  onEditAction,
+  editGates,
   onZoomExtents,
   onStandardView,
   onOpenSettings,
@@ -415,6 +430,56 @@ export function MenuBar({
             <MenuItem
               label="Delete Guide Lines"
               onClick={withClose(() => onDeleteGuides?.())}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Group"
+              shortcut={`${mod}G`}
+              disabled={!(editGates?.canGroup ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-group'))}
+            />
+            <MenuItem
+              label="Ungroup"
+              shortcut={`${mod}⇧G`}
+              disabled={!(editGates?.canUngroup ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-ungroup'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Make Component"
+              disabled={!(editGates?.canMakeComponent ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-make-component'))}
+            />
+            <MenuItem
+              label="Place Copy"
+              disabled={!(editGates?.canPlaceCopy ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-place-copy'))}
+            />
+            <MenuItem
+              label="Explode"
+              disabled={!(editGates?.canExplode ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-explode'))}
+            />
+            <MenuItem
+              label="Make Unique"
+              disabled={!(editGates?.canMakeUnique ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-make-unique'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Union"
+              disabled={!(editGates?.canBoolean ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-union'))}
+            />
+            <MenuItem
+              label="Subtract"
+              disabled={!(editGates?.canBoolean ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-subtract'))}
+            />
+            <MenuItem
+              label="Intersect"
+              disabled={!(editGates?.canBoolean ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-intersect'))}
             />
           </div>
         )}

@@ -44,6 +44,35 @@ describe('CommandPalette', () => {
     expect(screen.getByText(/no matches/i)).toBeInTheDocument()
   })
 
+  it('searches dynamic Model entries alongside static ones and runs their jump id', () => {
+    const onRun = vi.fn()
+    const extraEntries = [
+      {
+        id: 'jump-tag:["Projector"]',
+        label: 'Tag: Projector',
+        description: 'Reveal this tag in the Tags panel.',
+        group: 'Model' as const,
+        synonyms: ['Projector'],
+      },
+      {
+        id: 'jump-node:instance:7',
+        label: 'Component: Panasonic Projector',
+        description: 'Select it and reveal it in the Outliner.',
+        group: 'Model' as const,
+        synonyms: ['Panasonic Projector'],
+      },
+    ]
+    render(<CommandPalette open onClose={vi.fn()} onRun={onRun} extraEntries={extraEntries} />)
+    fireEvent.change(screen.getByPlaceholderText(/search tools, actions, help/i), { target: { value: 'pr' } })
+    // Static tool still matches ("pr" → Protractor) AND both Model entries do.
+    expect(screen.getByText('Protractor')).toBeInTheDocument()
+    expect(screen.getByText('Model')).toBeInTheDocument()
+    expect(screen.getByText('Tag: Projector')).toBeInTheDocument()
+    expect(screen.getByText('Component: Panasonic Projector')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Tag: Projector'))
+    expect(onRun).toHaveBeenCalledWith('jump-tag:["Projector"]')
+  })
+
   it('Escape calls onClose', () => {
     const onClose = vi.fn()
     render(<CommandPalette open onClose={onClose} onRun={vi.fn()} />)

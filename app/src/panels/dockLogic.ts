@@ -102,6 +102,19 @@ const SKETCH_VERBS: DockVerb[] = [
   { id: 'edit-delete', label: 'Erase' },
 ]
 
+/**
+ * Whether a verb is actually usable given how the dock arrived at its
+ * context. When the dock shows the sketch row only because the cursor is
+ * HOVERING a sketch region (nothing is selected — `hoverPreviewOnly`), the
+ * only verb that genuinely acts on the hovered region from a click-through
+ * is Push/Pull; Move/Rotate/Scale/Erase all need the sketch to actually be
+ * selected first, so they render disabled in the preview. With a real
+ * selection (hoverPreviewOnly = false) every verb is enabled.
+ */
+export function isDockVerbEnabled(verb: DockVerb, hoverPreviewOnly: boolean): boolean {
+  return !hoverPreviewOnly || verb.id === 'tool-pushpull'
+}
+
 /** The curated, ordered verb list for a context — first item is primary. */
 export function dockVerbsFor(context: DockContext): DockVerb[] {
   switch (context) {

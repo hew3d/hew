@@ -18,6 +18,20 @@ const isSettingsWindow = window.location.hash.startsWith('#settings')
 // Settings window (each its own top-level document) stay themed identically.
 initThemeSync()
 
+// Native-app feel in the desktop shell: right-click must never surface the
+// WebView's browser context menu (RMB is camera Pan in the viewport, and no
+// native macOS app shows "Reload"/"Inspect Element" chrome). Editable fields
+// keep it for the expected Copy/Paste menu. Applies to every window (main +
+// Settings) since both load this entry.
+if (isTauri) {
+  window.addEventListener('contextmenu', (ev) => {
+    const target = ev.target as HTMLElement
+    const editable =
+      target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+    if (!editable) ev.preventDefault()
+  })
+}
+
 // Clear any panic recorded by a previous session so the error boundary only
 // ever shows a panic from the *current* run (the wasm hook re-records on panic).
 try {

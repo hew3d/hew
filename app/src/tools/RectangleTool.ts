@@ -28,8 +28,8 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { rectangleCorners, faceRectangleCorners, facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
-import { formatLength, metersFromUnit, getLengthUnitSuffix } from '../settings/units'
-import { editDimsBuffer, parseDimensions } from './moveInput'
+import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
+import { editDimsBuffer } from './moveInput'
 import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
 
 export type RectangleCommitResult = {
@@ -258,16 +258,18 @@ export class RectangleTool implements Tool {
     if (!this.capturingInput()) return
 
     if (ev.key === 'Enter') {
-      const dims = parseDimensions(this.typed)
+      // Each component goes through the length grammar, so explicit units
+      // work (and can be mixed) regardless of the display format —
+      // "1cm,100mm", "5',23\"" — while bare numbers stay in display units.
+      const dims = parseDimensionsToMeters(this.typed)
       if (dims !== null) {
-        const w = metersFromUnit(dims[0])
-        const d = metersFromUnit(dims[1])
-        this._commitTyped(w, d)
+        this._commitTyped(dims[0], dims[1])
       }
       return
     }
 
-    // Feed digits, dot, separators, Backspace into the buffer
+    // Feed digits, dot, separators, explicit-unit tokens, Backspace into
+    // the buffer (editDimsBuffer applies the grammar rules).
     if (
       (ev.key >= '0' && ev.key <= '9') ||
       ev.key === '.' ||
@@ -275,10 +277,15 @@ export class RectangleTool implements Tool {
       ev.key === 'x' ||
       ev.key === 'X' ||
       ev.key === ' ' ||
-      ev.key === 'Backspace'
+      ev.key === 'Backspace' ||
+      ev.key === "'" ||
+      ev.key === '"' ||
+      ev.key === '/' ||
+      ev.key === '-' ||
+      /^[mckftinMCKFTIN]$/.test(ev.key)
     ) {
       this.typed = editDimsBuffer(this.typed, ev.key)
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.onMeasurementCb(typedReadout(this.typed))
     }
   }
 
@@ -305,7 +312,7 @@ export class RectangleTool implements Tool {
   /** Report the live W × D measurement from the four rubber-band corners. */
   private _reportMeasurement(corners: readonly [V3, V3, V3, V3]): void {
     if (this.typed !== '') {
-      this.onMeasurementCb(`${this.typed} ${getLengthUnitSuffix()}`)
+      this.onMeasurementCb(typedReadout(this.typed))
       return
     }
     const [c0, c1, c2] = corners

@@ -26,7 +26,7 @@ import editSvg from '@material-symbols/svg-400/outlined/edit.svg?raw'
 import groupOffSvg from '@material-symbols/svg-400/outlined/group_off.svg?raw'
 import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?raw'
 import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
-import { deriveDockContext, dockVerbsFor, dockChipLabel, type DockContext, type DockVerb } from './dockLogic'
+import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled, type DockContext, type DockVerb } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
 const NON_TOOL_ICON_SVG: Record<string, string> = {
@@ -71,14 +71,17 @@ function VerbIcon({ verb }: { verb: DockVerb }) {
  * selected just because it's first — only Arc lights up while Arc is the
  * live tool.
  */
-function DockItem({ verb, selected, onRun }: { verb: DockVerb; selected: boolean; onRun: (id: string) => void }) {
+function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selected: boolean; disabled?: boolean; onRun: (id: string) => void }) {
   const [hovered, setHovered] = useState(false)
+  const isDisabled = disabled === true
   return (
     <button
       type="button"
       aria-pressed={selected}
-      onClick={() => onRun(verb.id)}
-      onMouseEnter={() => setHovered(true)}
+      aria-disabled={isDisabled}
+      disabled={isDisabled}
+      onClick={isDisabled ? undefined : () => onRun(verb.id)}
+      onMouseEnter={isDisabled ? undefined : () => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={verb.label}
       style={{
@@ -90,9 +93,11 @@ function DockItem({ verb, selected, onRun }: { verb: DockVerb; selected: boolean
         minWidth: '60px',
         border: selected ? '1px solid var(--accent-border)' : '1px solid transparent',
         borderRadius: 'var(--radius-panel-item, 11px)',
-        background: selected ? 'var(--accent-tint-18)' : hovered ? 'rgba(255,255,255,0.04)' : 'transparent',
+        background: selected ? 'var(--accent-tint-18)' : hovered && !isDisabled ? 'rgba(255,255,255,0.04)' : 'transparent',
         color: selected ? 'var(--accent-text-strong)' : 'var(--text-secondary)',
-        cursor: 'pointer',
+        opacity: isDisabled ? 0.4 : 1,
+        pointerEvents: isDisabled ? 'none' : undefined,
+        cursor: isDisabled ? 'default' : 'pointer',
         fontFamily: 'var(--font-family-ui)',
       }}
     >
@@ -144,7 +149,8 @@ export function ContextualDock({
   const baseContext = deriveDockContext(selectedIds, selectedGuide)
   // Hover only ever promotes 'empty' -> 'sketch' — any other context (an
   // actual selection, or null for a selected guide) is left untouched.
-  const context = baseContext === 'empty' && hoveringSketchRegion ? 'sketch' : baseContext
+  const hoverPreviewOnly = baseContext === 'empty' && hoveringSketchRegion
+  const context = hoverPreviewOnly ? 'sketch' : baseContext
   if (context === null) return null
 
   const verbs = dockVerbsFor(context)
@@ -205,7 +211,13 @@ export function ContextualDock({
       </div>
 
       {verbs.map((verb) => (
-        <DockItem key={verb.id} verb={verb} selected={verb.id === activeToolId} onRun={onRun} />
+        <DockItem
+          key={verb.id}
+          verb={verb}
+          selected={verb.id === activeToolId}
+          disabled={!isDockVerbEnabled(verb, hoverPreviewOnly)}
+          onRun={onRun}
+        />
       ))}
     </div>
   )
