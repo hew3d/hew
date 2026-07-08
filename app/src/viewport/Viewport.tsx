@@ -810,6 +810,9 @@ export default function Viewport({
     function refreshScene(): void {
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
+      // Harness mutations can also add/remove construction guides
+      // (addGuideLine/addGuidePoint/deleteGuide); keep their overlay faithful too.
+      sceneRenderer.refreshGuides()
     }
 
     function handleToast(message: string, code?: string): void {

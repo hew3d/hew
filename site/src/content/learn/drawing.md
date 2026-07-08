@@ -1,0 +1,74 @@
+---
+title: "Drawing"
+description: "The four profile tools, what changes when you draw on a face instead of the ground, and every way to type an exact dimension."
+order: 5
+---
+
+Hew's four drawing tools create 2D profiles. On the empty ground plane, a closed profile becomes a **sketch region** ready to extrude. Drawn directly on a solid's face, the same tools **split the face**, carving regions you can push in or pull out. The tool decides which mode to use from what's under your cursor; there is no explicit switch.
+
+While any drawing tool is active, the status bar explains the next step, the top-right readout shows live dimensions, and everything you type goes into that readout (see "Typing exact values" below).
+
+## Line (`L`)
+
+Draws a chain of straight edges.
+
+1. Click to anchor the first point.
+2. Each further click commits one segment and continues the chain, with a rubber-band preview to the cursor.
+3. Closing a loop (clicking back on your starting point, or completing any closed circuit) automatically forms a face and ends the chain.
+
+To finish a chain *without* closing it: double-click, press `Enter` with nothing typed, or press `Esc` once. Pressing `Esc` again cancels the tool's gesture entirely.
+
+**Exact lengths:** once a chain is started, type a length (e.g. `750mm`) and press `Enter` — the next segment commits at exactly that length along the direction you're pointing.
+
+**Axis locking:** hold `Shift` to lock the segment to whichever axis it's already leaning toward, or press an arrow key for an explicit lock: `→` locks to X (red), `←` to Y (green), `↑` to Z (blue). Press `↓` (or the same arrow again) to unlock.
+
+## Rectangle (`R`)
+
+1. Click to set the first corner.
+2. Click again to set the opposite corner.
+
+**Exact dimensions:** after the first click, type both dimensions separated by a comma or an `x` (`2m,1m`, `50 x 30`, `3',18"`) and press `Enter`. A single value makes a square. The rectangle grows in the direction your cursor was heading.
+
+## Circle (`C`)
+
+1. Click to set the center.
+2. Move outward (the readout shows the radius) and click to set a point on the rim, or type an exact radius and press `Enter`.
+
+Hew's circles are faceted: a circle is a regular 24-sided polygon. This matters at export time (a "cylinder" has 24 flat sides) and is currently fixed. True curved geometry, with real circles replacing the faceted approximation, is planned.
+
+## Arc (`A`)
+
+A two-point arc, like SketchUp's:
+
+1. Click one endpoint.
+2. Click the other endpoint to set the chord.
+3. Move perpendicular to the chord to pull out the bulge, then click to commit.
+
+`Esc` steps back one stage at a time. The readout shows the arc's radius. Typed values work at both stages: in the chord stage a typed length places the second endpoint at that distance, and in the bulge stage it sets the bulge depth. A flat, zero-bulge arc is refused ("Pull out the bulge"). Arcs are faceted at 12 segments per quarter turn.
+
+## Drawing on a face
+
+Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level you can draw on any object's face; once you've double-clicked into an object's editing context, drawing is scoped to that object.
+
+## Editing a sketch: Edit Vertex
+
+For a free-standing sketch that hasn't been extruded yet, the **Edit Vertex** tool (Tools ▸ Edit Vertex, or find it in the palette) adjusts a single point:
+
+1. Click a sketch vertex to grab it.
+2. Click its new position — the connected edges stretch to follow.
+
+If a move would break the sketch's topology (collapse a segment, fold a region), Hew refuses with a message and leaves the vertex where it was.
+
+## Inference while drawing
+
+Every click snaps. The colored dot and label at the cursor tell you what you're about to snap to — Endpoint (green), Midpoint (cyan), Intersection (amber), On Edge (red), On Face (blue), On Guide (purple), On Axis (the axis color), or Ground (gray). A dashed helper line appears through the snap point when the snap has a direction, such as an axis alignment. Construction guides let you add snap targets of your own; [Precision, measurement, and guides](/learn/measurement-and-guides/) covers them.
+
+## Typing exact values
+
+There's no input box to click, and none appears. With a tool mid-gesture, start typing: what you type appears in the top-right readout, `Enter` commits, `Backspace` edits. Every length-driven tool accepts:
+
+- A bare number, read in your current display unit (`1.5` = 1.5 m in Meters mode, 1.5" in an imperial mode).
+- An explicit unit that overrides the display unit: `mm`, `cm`, `m`, `km`, `in`, `ft` — `250mm`, `3.5cm`, `6"`, `2'`.
+- Feet-inches-fractions, SketchUp style: `5'3"`, `5' 3-1/2"`, `3 1/2"`, `5/8"`.
+
+Angle tools (Rotate, Protractor) take plain degrees; Scale takes a plain factor. Display units are set in **Settings ▸ Units** ([Settings](/learn/settings/)).

@@ -1,27 +1,59 @@
 ---
 title: "Core concepts"
-description: "Objects, watertightness, explicit combining, sticky geometry, and inference snapping — the ideas underneath Hew's SketchUp-like feel."
+description: "Why objects never fuse on contact, what watertightness buys you, and how inference snapping fits in. Start here if you know SketchUp."
 order: 2
 ---
 
-Hew's interaction model looks a lot like SketchUp's on the surface. Underneath, a few deliberate rules make it behave very differently once your model gets complicated. Understanding these five ideas will save you more time than memorizing any tool.
+If you know SketchUp, your first session in Hew will feel familiar. Sooner or later, though, something you expect to happen won't: two touching boxes refuse to weld, or an operation stops with an error instead of producing something questionable. Those moments are this chapter. A few deliberate rules make Hew behave very differently once your model gets complicated, and understanding them will save you more time than memorizing any tool.
 
 ## Objects
 
-An Object is Hew's unit of "a solid thing." Extruding a closed 2D profile creates one automatically — you never have to remember a "group it" step. Objects can be nested and instanced (think components), but each one is its own island of geometry with its own watertightness state.
+An **Object** is Hew's unit of "a solid thing." Extruding a closed 2D profile creates one automatically; there is no "group it" step to remember. Each Object is its own island of geometry: it has a name, an optional material and tags, and its own watertightness state. Objects can be organized into groups and turned into components (shared definitions with independent instances), but the Object remains the atom the whole application works in terms of.
 
 ## Watertightness is tracked, not assumed
 
-Every Object knows whether it's a closed, manifold solid. If an operation would open up a shell — deleting a face that leaves a gap, for instance — Hew either prevents it or clearly flags the Object as non-solid. Nothing gets silently patched or "healed" behind your back. What you see is what you'll get when you export.
+Every Object knows whether it is a closed, manifold solid. Hew surfaces this constantly:
+
+- The **status bar badge** (bottom right) shows "N objects ✓ solid" in green, or "N leaky" in red, for the whole model.
+- The **Entity Info** panel reports the selected object's geometry as **Solid** or **Leaky**.
+- The **Outliner** draws a leaky object's icon with a dashed outline.
+
+![A selected box with Entity Info showing Geometry: Solid and the green solid badge in the status bar](/docs/box-selected.png)
+
+Nothing gets silently patched or "healed" behind your back. An operation that would produce invalid geometry fails with a clear error instead, and what you see is what you'll get when you export.
 
 ## Combining Objects is always explicit
 
-Two Objects sitting next to each other, even touching, stay two separate Objects. They do not fuse on contact the way ungrouped SketchUp geometry does. When you actually want two Objects to become one, you reach for an explicit union or merge command. This single rule is what prevents the "accidentally welded my whole model together" problem that haunts long SketchUp projects.
+Two Objects sitting next to each other — even touching, even overlapping — stay two separate Objects. They do not fuse on contact the way ungrouped SketchUp geometry does. When you want two Objects to become one, you say so: select both and choose **Edit ▸ Union** (or Subtract, or Intersect). This single rule prevents the "accidentally welded my whole model together" problem that haunts long SketchUp projects. See [Combining and splitting solids](/learn/combining-solids/).
 
 ## Sticky geometry, inside an Object
 
-Within a single Object's editing context, familiar SketchUp-style rules still apply: drawing an edge across a face splits it, a closed loop of coplanar edges automatically becomes a new face, and push/pull works on any face region you select. This stickiness is scoped to the Object you're currently editing — it's what makes detail work (like carving a window into a wall) feel exactly like SketchUp, without leaking across Object boundaries.
+Within a single Object's editing context, the familiar SketchUp rules still apply: drawing an edge across a face splits the face, a closed loop of edges becomes a region you can push/pull, and carving a recess or punching a hole works exactly as you'd expect. This "stickiness" is scoped to the Object you're drawing on, which keeps detail work feeling like SketchUp without letting edits leak across Object boundaries.
+
+Free-standing sketches on the ground plane behave the same way: segments split where they cross, and closed loops become fillable regions.
 
 ## Inference snapping
 
-As you draw, Hew's inference engine is constantly looking for meaningful relationships — endpoints, midpoints, points on an edge or face, axis alignment, parallel and perpendicular relationships — across the whole visible scene, and calling them out so you can snap to them. Inference is a query over everything you can see; sticky merging is scoped to the Object you're editing. Keeping those two concepts separate is what lets Hew give you precise, whole-scene snapping without reintroducing accidental welding.
+As you draw, Hew's inference engine constantly looks for meaningful relationships across everything visible (endpoints, midpoints, intersections, points on an edge or face, construction guides, axis alignment) and calls them out with a colored snap dot and label at the cursor:
+
+| Cue | Color |
+|---|---|
+| Endpoint | Green |
+| Midpoint | Cyan |
+| Intersection | Amber |
+| On Edge | Red |
+| On Face | Blue |
+| On Guide | Purple |
+| On Axis | The axis color (X red, Y green, Z blue) |
+| Ground | Gray |
+
+Point snaps are deliberately "magnetic": the cursor acquires a snap within a small radius and holds it a little longer than that, so precise clicks feel steady rather than jittery.
+
+Inference is a query over everything you can see; sticky merging is scoped to the Object you're editing. Keeping the two separate lets Hew offer precise, whole-scene snapping without reintroducing accidental welding.
+
+## Determinism and honesty
+
+Two smaller principles round out the design:
+
+- **The kernel is deterministic.** The same sequence of operations always produces bit-identical results. Files save byte-stably, and bugs are reproducible instead of intermittent.
+- **Errors leave the model untouched.** When Hew can't do something safely — a push/pull that would tear open a solid, a slice plane that misses — it tells you and does nothing.

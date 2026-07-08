@@ -249,6 +249,29 @@ small {
 
 .prose img {
   border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+
+.prose th,
+.prose td {
+  padding: 0.5em 0.75em;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* ---------- Focus & motion ---------- */
