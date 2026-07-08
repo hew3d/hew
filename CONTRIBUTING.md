@@ -6,6 +6,7 @@ makes coordination before large changes essential.
 
 ## Before you start
 
+- All project spaces follow the [code of conduct](CODE_OF_CONDUCT.md).
 - Read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). It covers setup,
   repository layout, and the project's non-negotiable engineering rules.
   Code throughout the kernel cites those rules by number.
@@ -64,8 +65,30 @@ do not contribute to the `.skp` import path. This rule has no exceptions.
 ## Licensing of contributions
 
 Hew is licensed [AGPL-3.0-only](LICENSE) with the
-[Hew Plugin API Exception](LICENSE-EXCEPTION). By submitting a
-contribution you agree to license it under the same terms.
+[Hew Plugin API Exception](LICENSE-EXCEPTION). Contributions are accepted
+under those same terms (inbound = outbound); there is no CLA.
+
+Every commit must be signed off under the
+[Developer Certificate of Origin 1.1](https://developercertificate.org/):
+
+```sh
+git commit -s
+```
+
+adds the required `Signed-off-by: Your Name <you@example.com>` trailer.
+The sign-off certifies that you wrote the change or otherwise have the
+right to submit it under the project's license. The DCO check flags any
+PR containing unsigned commits, and it cannot merge until they are fixed
+(`git rebase --signoff` amends an existing branch in place).
+
+## AI-assisted contributions
+
+AI agents are welcome to help write Hew. Responsibility for every commit
+rests with the person who submits it: you must understand the change you
+are contributing, be able to answer review questions about it yourself,
+and your DCO sign-off certifies it as your own work. Commits carry the
+human contributor as author and committer, with no AI or tool
+attribution — see the commit conventions in [CLAUDE.md](CLAUDE.md).
 
 ## Reporting bugs
 

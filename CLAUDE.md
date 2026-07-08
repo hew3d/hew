@@ -39,3 +39,16 @@ Start with these documents — they are the source of truth:
   format, changing the public wasm-api surface, or cross-crate refactors.
 - The licensing wall is absolute: nothing derived from the SketchUp SDK
   enters this repo or its dependency chain (see CONTRIBUTING.md).
+
+## Commit conventions
+
+- Author and committer are the human contributor — never a bot or agent
+  identity.
+- Titles follow [Conventional Commits](https://www.conventionalcommits.org/)
+  with an optional scope: `fix(kernel): …`, `docs: …`.
+- No `Co-Authored-By` trailers and no AI or tool attribution anywhere in
+  a message.
+- Bodies are impersonal and timeless: what the change does and why. No
+  dates, no internal task IDs, no references to private infrastructure.
+- Every commit is signed off (`git commit -s`) per the DCO requirement
+  in CONTRIBUTING.md.
