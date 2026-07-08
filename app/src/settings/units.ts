@@ -301,30 +301,51 @@ export function getLengthUnitSuffix(format: LengthFormat = getLengthUnit()): str
   return UNIT_SUFFIX[format]
 }
 
-/** Explicit-unit tokens in a typed component: feet/inch marks or a unit
- * letter ("cm", "ft", …). A bare `/` (fraction) is NOT one — "3 1/2" in an
- * imperial mode is still a bare number in display units. */
-const EXPLICIT_UNIT_TOKEN_RE = /['"a-z]/i
+// A plain decimal number, matching what the numeric VCB buffers can produce
+// (leading '-', trailing '.', leading '.').
+const BARE_NUMBER_RE = /^-?(?:\d+\.?\d*|\.\d+)$/
+
+// A bare fraction with an optional whole part — "1/2", "3 1/2", "6-3/4" —
+// and an optional leading '-' that negates the whole value. Accepted as a
+// bare number in EVERY display mode, so "3 1/2" means 3.5 of the display
+// unit (3.5 m in meters mode, 3.5" in the imperial modes).
+const BARE_FRACTION_RE = /^(-)?(?:(\d+)(?:\s+|-))?(\d+)\/(\d+)$/
+
+/** Parse a bare number in display units: a plain decimal ("60", "-3.5",
+ * ".5") or a fraction ("1/2", "3 1/2", "-6-3/4"). Returns the raw number
+ * (NOT meters), or null if the string is neither. */
+function parseBareNumber(text: string): number | null {
+  if (BARE_NUMBER_RE.test(text)) {
+    const n = parseFloat(text)
+    return isFinite(n) ? n : null
+  }
+  const m = BARE_FRACTION_RE.exec(text)
+  if (m === null) return null
+  const den = parseFloat(m[4])
+  if (den === 0) return null
+  const value = (m[2] !== undefined ? parseFloat(m[2]) : 0) + parseFloat(m[3]) / den
+  return m[1] !== undefined ? -value : value
+}
 
 /**
  * VCB display readout for a typed buffer.
  *
  * The display format's suffix is appended only while the buffer's current
- * component (after the last `,`/`x`/`X` dims separator, if any) is still a
- * bare number: the instant the component carries an explicit unit token
- * (`'`, `"`, or a unit letter), the default suffix disappears — "10cm" must
- * never read "10cm m". In a dims buffer the suffix reappears for the next
- * component after the separator, until that one gets its own unit.
+ * component (after the last `,`/`x`/`X` dims separator, if any) actually
+ * PARSES as a bare number in display units — a plain decimal or a fraction
+ * ("3 1/2"). The instant the component carries an explicit unit token
+ * (`'`, `"`, or a unit letter) or is incomplete ("3 1/", "24-", a lone
+ * "-"), no suffix is shown: "10cm" must never read "10cm m", and a buffer
+ * that would NOT commit on Enter must never be dressed up to look like it
+ * would. In a dims buffer the rule re-applies per component after the
+ * separator.
  */
 export function typedReadout(buf: string, format: LengthFormat = getLengthUnit()): string {
   const suffix = getLengthUnitSuffix(format)
   if (suffix === '' || buf === '') return buf
   const lastSep = Math.max(buf.lastIndexOf(','), buf.lastIndexOf('x'), buf.lastIndexOf('X'))
   const component = buf.slice(lastSep + 1).trim()
-  // Nothing (or just a sign) typed in this component yet — no suffix to
-  // dangle after a bare separator.
-  if (component === '' || component === '-') return buf
-  if (EXPLICIT_UNIT_TOKEN_RE.test(component)) return buf
+  if (parseBareNumber(component) === null) return buf
   return `${buf} ${suffix}`
 }
 
@@ -346,11 +367,10 @@ const EXPLICIT_SUFFIX_METERS: Record<string, number> = {
 // suffixes listed first so "mm"/"cm"/"km" are never truncated to "m".
 const EXPLICIT_SUFFIX_RE = /^(-?(?:\d+\.?\d*|\.\d+))\s*(km|cm|mm|m|ft|in)$/i
 
-// A plain decimal number, matching what the numeric VCB buffers can produce
-// (leading '-', trailing '.', leading '.').
-const BARE_NUMBER_RE = /^-?(?:\d+\.?\d*|\.\d+)$/
-
-// Feet-inch-fraction grammar (SketchUp style):
+// Feet-inch-fraction grammar (SketchUp style), UNSIGNED — the caller
+// (`parseFeetInchesToMeters`) strips one optional leading '-' and applies it
+// to the WHOLE value, so "-5'6\"" is -66" (not -60" + 6") and "-1/2\"" is
+// -0.5" (the minus is never mistaken for the inch-fraction separator).
 //   5'            -> feet only
 //   3"            -> inches only
 //   5'3"  5' 3"   -> feet + inches (space optional)
@@ -358,18 +378,33 @@ const BARE_NUMBER_RE = /^-?(?:\d+\.?\d*|\.\d+)$/
 //   3 1/2"  3-1/2"         -> inches + fraction
 //   1/2"  5/8"             -> fraction only
 //   60  60.125              -> bare number, interpreted as inches
+// A hyphen is ONLY valid as the digit-fraction separator ("3-1/2"): dangling
+// or doubled hyphens ("24-", "3--1/2") do not match, so incomplete input is
+// rejected instead of silently committing.
+// Groups: 1 = feet, 2 = inches, 3/4 = fraction after inches, 5/6 = fraction
+// with no inches part.
 const FEET_INCHES_RE =
-  /^\s*(?:(-?\d+(?:\.\d+)?)\s*'\s*)?(?:(-?\d+(?:\.\d+)?)?(?:[\s-]+)?(?:(\d+)\/(\d+))?\s*"?\s*)?$/
+  /^(?:(\d+(?:\.\d+)?)\s*'\s*)?(?:(?:(\d+(?:\.\d+)?)(?:(?:\s+|-)(\d+)\/(\d+))?|(\d+)\/(\d+))\s*"?)?\s*$/
 
 /** Parse the feet-inch-fraction grammar to meters, or null if it doesn't
  * match. Shared by the explicit-mark path (any mode) and the imperial
- * bare-grammar fallback in `parseLengthToMeters`. */
-function parseFeetInchesToMeters(trimmed: string): number | null {
+ * bare-grammar fallback in `parseLengthToMeters`. One optional leading '-'
+ * negates the whole value; the grammar itself is unsigned, so interior
+ * signs ("5'-6\"") and non-fraction hyphens ("24-") are rejected. */
+function parseFeetInchesToMeters(input: string): number | null {
+  let trimmed = input.trim()
+  let sign = 1
+  if (trimmed.startsWith('-')) {
+    sign = -1
+    trimmed = trimmed.slice(1).trimStart()
+  }
   const m = FEET_INCHES_RE.exec(trimmed)
   if (m === null) return null
-  const [, feetStr, inchStr, fracNumStr, fracDenStr] = m
+  const [, feetStr, inchStr, fracNumA, fracDenA, fracNumB, fracDenB] = m
+  const fracNumStr = fracNumA ?? fracNumB
+  const fracDenStr = fracDenA ?? fracDenB
   // Reject a match with no actual tokens (e.g. blank/whitespace-only, or a
-  // lone `"`/`'` with no digits at all).
+  // lone `-` with no digits at all).
   if (feetStr === undefined && inchStr === undefined && fracNumStr === undefined) return null
 
   const feet = feetStr !== undefined ? parseFloat(feetStr) : 0
@@ -377,12 +412,11 @@ function parseFeetInchesToMeters(trimmed: string): number | null {
   if (fracNumStr !== undefined && fracDenStr !== undefined) {
     const den = parseFloat(fracDenStr)
     if (den === 0) return null
-    const fracValue = parseFloat(fracNumStr) / den
-    inches += inches < 0 ? -fracValue : fracValue
+    inches += parseFloat(fracNumStr) / den
   }
 
   const totalInches = feet * INCHES_PER_FOOT + inches
-  return totalInches * METERS_PER_INCH
+  return sign * totalInches * METERS_PER_INCH
 }
 
 /**
@@ -396,10 +430,13 @@ function parseFeetInchesToMeters(trimmed: string): number | null {
  *     "5' 2-1/4\"" — anything containing a `'` or `"` goes through the
  *     feet-inch-fraction grammar;
  *   - bare number: interpreted in `format` (m/cm/mm for metric formats;
- *     inches for imperial formats). In imperial formats the mark-less
- *     feet-inch-fraction forms (e.g. "3 1/2") are also accepted, as before.
- * Returns null on empty/invalid input. Sign convention is unchanged: a
- * leading '-' negates the value.
+ *     inches for imperial formats). Bare fractions ("1/2", "3 1/2",
+ *     "6-3/4") are accepted as bare numbers in EVERY display mode, so
+ *     "3 1/2" is 3.5 m in meters mode and 3.5" in the imperial modes.
+ * Returns null on empty/invalid input — including a dangling fraction
+ * hyphen ("24-"), which is incomplete input and must not silently commit
+ * as 24. Sign convention: ONE optional leading '-' negates the WHOLE value
+ * ("-5'6\"" is -66", "-1/2\"" is -0.5"); interior signs are rejected.
  */
 export function parseLengthToMeters(
   input: string,
@@ -422,10 +459,10 @@ export function parseLengthToMeters(
   }
 
   if (format === 'm' || format === 'cm' || format === 'mm') {
-    // Bare number in the active metric unit.
-    if (!BARE_NUMBER_RE.test(trimmed)) return null
-    const n = parseFloat(trimmed)
-    if (!isFinite(n)) return null
+    // Bare number — plain decimal OR fraction ("3 1/2" = 3.5) — in the
+    // active metric unit.
+    const n = parseBareNumber(trimmed)
+    if (n === null) return null
     return n * METERS_PER_UNIT[format]
   }
 
@@ -449,10 +486,11 @@ export function parseLengthToMeters(
  *
  * The component separator is a comma or `x`/`X` (whitespace can't be the
  * primary separator because it is part of the length grammar itself:
- * "5' 3\"", "1 cm"). A single component is a square. As a fallback, two
- * whitespace-separated components ("3 4", "1cm 2cm") are accepted when the
- * whole string doesn't parse as one length — preserving the legacy
- * space-separated form.
+ * "5' 3\"", "1 cm" — `editDimsBuffer` follows the same rule and never
+ * treats a typed space as the separator). A single component is a square.
+ * As a fallback, two whitespace-separated components ("3 4", "1cm 2cm") are
+ * accepted when the whole string doesn't parse as one length — preserving
+ * the legacy space-separated form.
  *
  * Returns null if the string is empty/malformed or any component is not a
  * finite length > 0.

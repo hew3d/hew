@@ -101,7 +101,12 @@ export function SettingsWindow() {
       style={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100vh',
+        // 100% (not 100vh): the dedicated settings window fills the viewport
+        // through the html/body/#root height chain anyway, and the web build
+        // embeds this same component inside a fixed-height modal box — a
+        // viewport unit there overflows the clipped box and the tab panel's
+        // scrollbar can never engage.
+        height: '100%',
         background: 'var(--surface-window, #1a1a1a)',
         color: 'var(--text-secondary, #ddd)',
         fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',

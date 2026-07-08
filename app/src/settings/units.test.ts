@@ -168,6 +168,22 @@ describe('parseLengthToMeters — metric', () => {
     expect(parseLengthToMeters('1500', 'mm')).toBeCloseTo(1.5, 10)
   })
 
+  it('parses a bare fraction in the active metric unit (regression: "3 1/2" in meters mode)', () => {
+    // Previously the buffer/readout accepted "3 1/2" in metric modes but the
+    // parse returned null, so Enter silently no-oped.
+    expect(parseLengthToMeters('3 1/2', 'm')).toBeCloseTo(3.5, 10)
+    expect(parseLengthToMeters('1/2', 'm')).toBeCloseTo(0.5, 10)
+    expect(parseLengthToMeters('3-1/2', 'cm')).toBeCloseTo(0.035, 12)
+    expect(parseLengthToMeters('6-3/4', 'mm')).toBeCloseTo(0.00675, 12)
+    expect(parseLengthToMeters('-3 1/2', 'm')).toBeCloseTo(-3.5, 10)
+  })
+
+  it('returns null for an incomplete fraction in metric modes', () => {
+    expect(parseLengthToMeters('3 1/', 'm')).toBeNull()
+    expect(parseLengthToMeters('1/', 'cm')).toBeNull()
+    expect(parseLengthToMeters('1/0', 'm')).toBeNull() // zero denominator
+  })
+
   it('returns null for empty input', () => {
     expect(parseLengthToMeters('', 'm')).toBeNull()
     expect(parseLengthToMeters('   ', 'cm')).toBeNull()
@@ -238,6 +254,53 @@ describe('parseLengthToMeters — imperial', () => {
 
   it('returns null for garbage input', () => {
     expect(parseLengthToMeters('abc', 'arch')).toBeNull()
+  })
+})
+
+describe('parseLengthToMeters — sign handling (leading minus negates the WHOLE value)', () => {
+  it('regression: "-1/2\"" is -0.5", not +0.5"', () => {
+    // The old grammar consumed the leading '-' as the feet-inch separator,
+    // silently dropping the sign.
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('-1/2"', format)).toBeCloseTo(-0.5 * 0.0254, 12)
+    }
+  })
+
+  it('regression: "-5\'6\"" is -66", not -54"', () => {
+    // The old grammar applied the minus to the feet only (-60" + 6").
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters("-5'6\"", format)).toBeCloseTo(-66 * 0.0254, 12)
+    }
+  })
+
+  it('regression: a dangling fraction hyphen ("24-") is incomplete input, not 24', () => {
+    for (const format of ALL_FORMATS) {
+      expect(parseLengthToMeters('24-', format)).toBeNull()
+    }
+  })
+
+  it('keeps working negative forms working', () => {
+    expect(parseLengthToMeters('-24', 'arch')).toBeCloseTo(-24 * 0.0254, 12)
+    expect(parseLengthToMeters('-3.5', 'dec_in')).toBeCloseTo(-3.5 * 0.0254, 12)
+    expect(parseLengthToMeters('-3 1/2', 'arch')).toBeCloseTo(-3.5 * 0.0254, 12)
+    expect(parseLengthToMeters('-6-3/4"', 'arch')).toBeCloseTo(-6.75 * 0.0254, 12)
+    expect(parseLengthToMeters("-5'", 'arch')).toBeCloseTo(-5 * 0.3048, 12)
+    expect(parseLengthToMeters('-3"', 'm')).toBeCloseTo(-3 * 0.0254, 12)
+    expect(parseLengthToMeters("-5' 2-1/4\"", 'arch')).toBeCloseTo(-(5 * 12 + 2.25) * 0.0254, 12)
+  })
+
+  it('rejects interior, doubled, or dangling signs', () => {
+    expect(parseLengthToMeters("5'-6\"", 'arch')).toBeNull() // interior minus
+    expect(parseLengthToMeters('--24', 'arch')).toBeNull()   // doubled sign
+    expect(parseLengthToMeters('3--1/2"', 'arch')).toBeNull() // doubled fraction hyphen
+    expect(parseLengthToMeters('24-"', 'arch')).toBeNull()   // dangling hyphen before mark
+    expect(parseLengthToMeters('-', 'arch')).toBeNull()
+    expect(parseLengthToMeters('-', 'm')).toBeNull()
+  })
+
+  it('parses mark-less imperial fractions with the sign applied to the whole value', () => {
+    expect(parseLengthToMeters('3 1/2', 'arch')).toBeCloseTo(3.5 * 0.0254, 12)
+    expect(parseLengthToMeters('-3 1/2', 'frac_in')).toBeCloseTo(-3.5 * 0.0254, 12)
   })
 })
 
@@ -389,6 +452,18 @@ describe('parseDimensionsToMeters', () => {
     expect(mixed![1]).toBeCloseTo(0.02, 12)
   })
 
+  it('accepts a comma/x after a length that itself contains a space (regression: "5\' 3\"" then ",")', () => {
+    // The typed space inside "5' 3\"" must never consume the dims-separator
+    // slot — a later `,`/`x` starts the second dimension.
+    const dims = parseDimensionsToMeters("5' 3\",2'", 'm')
+    expect(dims).not.toBeNull()
+    expect(dims![0]).toBeCloseTo((5 * 12 + 3) * 0.0254, 12)
+    expect(dims![1]).toBeCloseTo(2 * 0.3048, 12)
+    const x = parseDimensionsToMeters("5' 3\" x 2'", 'arch')
+    expect(x![0]).toBeCloseTo((5 * 12 + 3) * 0.0254, 12)
+    expect(x![1]).toBeCloseTo(2 * 0.3048, 12)
+  })
+
   it('treats a single component as a square', () => {
     expect(parseDimensionsToMeters('3', 'm')).toEqual([3, 3])
     const cm = parseDimensionsToMeters('1cm', 'arch')
@@ -408,6 +483,8 @@ describe('parseDimensionsToMeters', () => {
     expect(parseDimensionsToMeters('3,4,5', 'm')).toBeNull()
     expect(parseDimensionsToMeters('abc', 'm')).toBeNull()
     expect(parseDimensionsToMeters('3,abc', 'm')).toBeNull()
+    expect(parseDimensionsToMeters('24-', 'arch')).toBeNull() // dangling fraction hyphen
+    expect(parseDimensionsToMeters('3,24-', 'arch')).toBeNull()
   })
 
   it('returns null for non-positive components', () => {
@@ -464,6 +541,18 @@ describe('typedReadout', () => {
 
   it('keeps the suffix for a bare fraction (still display units)', () => {
     expect(typedReadout('3 1/2', 'frac_in')).toBe('3 1/2 "')
+    // Metric modes too — and the parse now agrees (see the metric fraction
+    // tests): what the readout shows is what Enter commits.
+    expect(typedReadout('3 1/2', 'm')).toBe('3 1/2 m')
+    expect(typedReadout('1/2', 'cm')).toBe('1/2 cm')
+  })
+
+  it('appends no suffix while the component does not parse as a bare number', () => {
+    // An unparseable buffer must not be dressed up to look committable.
+    expect(typedReadout('3 1/', 'm')).toBe('3 1/')
+    expect(typedReadout('24-', 'm')).toBe('24-')       // dangling fraction hyphen
+    expect(typedReadout('24-', 'frac_in')).toBe('24-')
+    expect(typedReadout('3 1', 'm')).toBe('3 1')       // fraction not yet begun
   })
 
   it('re-applies the rule per component in a dims buffer', () => {

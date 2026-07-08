@@ -839,7 +839,13 @@ export default function Viewport({
 
     function runGroup(nodes: NodeRef[]): bigint | null {
       if (nodes.length === 0) return null
-      const kinds = new Uint8Array(nodes.map((n) => n.kind === 'group' ? 1 : 0))
+      // kind: 0=object, 1=group, 2=instance — the same 3-way mapping as
+      // runDelete/runMakeComponent. Instances must not collapse to 0: the
+      // object and instance slotmaps reuse bit patterns, so a mis-kinded id
+      // can silently address a different live node.
+      const kinds = new Uint8Array(nodes.map((n) =>
+        n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0,
+      ))
       const ids = new BigUint64Array(nodes.map((n) => n.id))
       try {
         const groupId = wasmScene.group_nodes(kinds, ids)
@@ -2131,7 +2137,11 @@ export default function Viewport({
         return
       }
 
-      toolController.activeTool.onKey(ev)
+      // Mod-combos never reach the tool: tools' onKey treats bare letters
+      // as VCB length input, so an unhandled chord like Ctrl+K (palette) or
+      // Ctrl+C would otherwise append its letter to a mid-entry buffer
+      // ("5" → "5k") and wedge it. Tools only consume plain keys.
+      if (!isMod) toolController.activeTool.onKey(ev)
     }
 
     // Record-only pointerup: tools are click-based so nothing else needs

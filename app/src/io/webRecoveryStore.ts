@@ -10,11 +10,14 @@
  * resolves to null. This module must never throw.
  */
 
-import type { RecoveryMeta, RecoverySnapshot, RecoveryStore } from './recoveryStore'
+import type { RecoveryListing, RecoveryMeta, RecoverySnapshot, RecoveryStore } from './recoveryStore'
 
 const DB_NAME = 'hew-recovery'
 const STORE_NAME = 'snapshot'
 const KEY = 'current'
+
+/** The web build has exactly one snapshot slot (one document per tab). */
+const WEB_SLOT = 'web'
 
 interface StoredRecord {
   bytes: Uint8Array
@@ -69,7 +72,8 @@ export class WebRecoveryStore implements RecoveryStore {
     }
   }
 
-  async read(): Promise<RecoverySnapshot | null> {
+  /** Read the single stored snapshot, or null. */
+  private async read(): Promise<RecoverySnapshot | null> {
     if (!hasIndexedDB()) return null
     try {
       const db = await openDb()
@@ -86,6 +90,21 @@ export class WebRecoveryStore implements RecoveryStore {
     } catch {
       return null
     }
+  }
+
+  async list(): Promise<RecoveryListing[]> {
+    const snapshot = await this.read()
+    return snapshot === null ? [] : [{ slot: WEB_SLOT, meta: snapshot.meta }]
+  }
+
+  async claim(slot: string): Promise<RecoverySnapshot | null> {
+    // One slot: claiming it is just reading it — the next write from this
+    // tab overwrites it, which is already the desired re-homing semantics.
+    return slot === WEB_SLOT ? this.read() : null
+  }
+
+  async discardAll(): Promise<void> {
+    return this.clear()
   }
 
   async clear(): Promise<void> {

@@ -17,7 +17,7 @@ import { ImportingOverlay } from './ImportingOverlay'
 import { ImportReportDialog } from './ImportReportDialog'
 import { StlExportDialog } from './StlExportDialog'
 import { ExportDialog } from './ExportDialog'
-import type { RecoverySnapshot } from '../io/recoveryStore'
+import type { RecoveryListing } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
 
 // ---------------------------------------------------------------------------
@@ -25,20 +25,21 @@ import type { ImportReport } from '../io/fileHost'
 // ---------------------------------------------------------------------------
 
 describe('RecoveryDialog', () => {
-  const snapshot: RecoverySnapshot = {
-    bytes: new Uint8Array([]),
+  const listing = (name: string, ageMs: number): RecoveryListing => ({
+    slot: name,
     meta: {
       version: 1,
-      name: 'bridge.hew',
-      savedAt: Date.now() - 120_000, // 2 minutes ago
+      name,
+      savedAt: Date.now() - ageMs,
       path: null,
     },
-  }
+  })
+  const single = [listing('bridge.hew', 120_000)] // 2 minutes ago
 
   it('shows the document name', () => {
     render(
       <RecoveryDialog
-        snapshot={snapshot}
+        listings={single}
         onRecover={vi.fn()}
         onDiscard={vi.fn()}
         onDismiss={vi.fn()}
@@ -50,7 +51,7 @@ describe('RecoveryDialog', () => {
   it('shows a heading about recovering the document', () => {
     render(
       <RecoveryDialog
-        snapshot={snapshot}
+        listings={single}
         onRecover={vi.fn()}
         onDiscard={vi.fn()}
         onDismiss={vi.fn()}
@@ -63,7 +64,7 @@ describe('RecoveryDialog', () => {
     const onRecover = vi.fn()
     render(
       <RecoveryDialog
-        snapshot={snapshot}
+        listings={single}
         onRecover={onRecover}
         onDiscard={vi.fn()}
         onDismiss={vi.fn()}
@@ -77,7 +78,7 @@ describe('RecoveryDialog', () => {
     const onDiscard = vi.fn()
     render(
       <RecoveryDialog
-        snapshot={snapshot}
+        listings={single}
         onRecover={vi.fn()}
         onDiscard={onDiscard}
         onDismiss={vi.fn()}
@@ -92,7 +93,7 @@ describe('RecoveryDialog', () => {
     const onDismiss = vi.fn()
     render(
       <RecoveryDialog
-        snapshot={snapshot}
+        listings={single}
         onRecover={vi.fn()}
         onDiscard={onDiscard}
         onDismiss={onDismiss}
@@ -107,13 +108,48 @@ describe('RecoveryDialog', () => {
   it('has the expected ARIA dialog role and label', () => {
     render(
       <RecoveryDialog
-        snapshot={snapshot}
+        listings={single}
         onRecover={vi.fn()}
         onDiscard={vi.fn()}
         onDismiss={vi.fn()}
       />,
     )
     expect(screen.getByRole('dialog', { name: /recover unsaved document/i })).toBeInTheDocument()
+  })
+
+  it('lists every document by name with multiple snapshots', () => {
+    const multi = [listing('bridge.hew', 120_000), listing('tower.hew', 300_000)]
+    render(
+      <RecoveryDialog
+        listings={multi}
+        onRecover={vi.fn()}
+        onDiscard={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    // With N crashed documents, every one of them is offered — recovery must
+    // never silently drop all but the newest.
+    expect(screen.getByText(/recover 2 unsaved documents/i)).toBeInTheDocument()
+    expect(screen.getByText(/bridge\.hew/)).toBeInTheDocument()
+    expect(screen.getByText(/tower\.hew/)).toBeInTheDocument()
+  })
+
+  it('labels the buttons Recover All / Discard All with multiple snapshots', () => {
+    const multi = [listing('bridge.hew', 120_000), listing('tower.hew', 300_000)]
+    const onRecover = vi.fn()
+    const onDiscard = vi.fn()
+    render(
+      <RecoveryDialog
+        listings={multi}
+        onRecover={onRecover}
+        onDiscard={onDiscard}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /recover all/i }))
+    expect(onRecover).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: /discard all/i }))
+    expect(onDiscard).toHaveBeenCalledOnce()
   })
 })
 

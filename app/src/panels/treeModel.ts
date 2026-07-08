@@ -85,6 +85,34 @@ export function collectLeafIds(
   return { objectIds, instanceIds }
 }
 
+/**
+ * Positional index of every node as the Outliner displays it: position within
+ * its parent container (top-level order at depth 0, member order inside each
+ * group), keyed by `nodeKey`. This is the index `resolveLabel`'s positional
+ * fallback needs anywhere a label must match the Outliner — Entity Info and
+ * the command palette previously numbered from the flat per-kind id lists, so
+ * an unnamed object nested in a group could be "Object 1" in the Outliner but
+ * "Object 3" elsewhere.
+ *
+ * Pure — the caller supplies the top-level list and `getGroupMembers`
+ * (typically `scene.top_level_nodes()` / `scene.group_members()` mapped
+ * through `nodeRefFromJs`), mirroring `collectLeafIds`.
+ */
+export function buildTreeIndexMap(
+  topNodes: NodeRef[],
+  getGroupMembers: (groupId: bigint) => NodeRef[],
+): Map<string, number> {
+  const indices = new Map<string, number>()
+  const walk = (nodes: NodeRef[]) => {
+    nodes.forEach((node, i) => {
+      indices.set(nodeKey(node), i)
+      if (node.kind === 'group') walk(getGroupMembers(node.id))
+    })
+  }
+  walk(topNodes)
+  return indices
+}
+
 /** Kind of a top-level document entity shown in the tree. */
 export type EntityKind = 'object' | 'sketch' | 'group' | 'instance'
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { formatRecoveryTime, shouldPromptRecovery } from './recoveryStore'
-import type { RecoveryMeta, RecoverySnapshot } from './recoveryStore'
+import type { RecoveryListing, RecoveryMeta } from './recoveryStore'
 import { INITIAL_SESSION } from './documentSession'
 import type { DocSessionState } from './documentSession'
 import type { FileRef } from './fileHost'
@@ -14,8 +14,8 @@ const mockMeta = (savedAt: number): RecoveryMeta => ({
   path: null,
 })
 
-const mockSnapshot = (savedAt = 0): RecoverySnapshot => ({
-  bytes: new Uint8Array([1, 2, 3]),
+const mockListing = (slot = 'main', savedAt = 0): RecoveryListing => ({
+  slot,
   meta: mockMeta(savedAt),
 })
 
@@ -55,26 +55,32 @@ describe('formatRecoveryTime', () => {
 })
 
 describe('shouldPromptRecovery', () => {
-  it('returns false when there is no snapshot', () => {
-    expect(shouldPromptRecovery(INITIAL_SESSION, null)).toBe(false)
+  it('returns false when there are no snapshots', () => {
+    expect(shouldPromptRecovery(INITIAL_SESSION, [])).toBe(false)
   })
 
   it('returns true when a snapshot exists and the session is clean with no ref', () => {
-    expect(shouldPromptRecovery(INITIAL_SESSION, mockSnapshot())).toBe(true)
+    expect(shouldPromptRecovery(INITIAL_SESSION, [mockListing()])).toBe(true)
+  })
+
+  it('returns true with several snapshots (multi-window crash)', () => {
+    expect(
+      shouldPromptRecovery(INITIAL_SESSION, [mockListing('main', 5), mockListing('main-2', 3)]),
+    ).toBe(true)
   })
 
   it('returns false when the session already has a currentRef (e.g. cold-start open)', () => {
     const session: DocSessionState = { currentRef: mockRef('opened.hew'), dirty: false, lastEditAt: null, lastSavedAt: null }
-    expect(shouldPromptRecovery(session, mockSnapshot())).toBe(false)
+    expect(shouldPromptRecovery(session, [mockListing()])).toBe(false)
   })
 
   it('returns false when the session is already dirty', () => {
     const session: DocSessionState = { currentRef: null, dirty: true, lastEditAt: null, lastSavedAt: null }
-    expect(shouldPromptRecovery(session, mockSnapshot())).toBe(false)
+    expect(shouldPromptRecovery(session, [mockListing()])).toBe(false)
   })
 
   it('returns false when both currentRef is set and dirty is true', () => {
     const session: DocSessionState = { currentRef: mockRef('opened.hew'), dirty: true, lastEditAt: null, lastSavedAt: null }
-    expect(shouldPromptRecovery(session, mockSnapshot())).toBe(false)
+    expect(shouldPromptRecovery(session, [mockListing()])).toBe(false)
   })
 })

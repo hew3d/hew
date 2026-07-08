@@ -1,23 +1,27 @@
 /**
- * RecoveryDialog — modal shown at startup when an autosaved recovery
- * snapshot exists and nothing else was loaded yet (see shouldPromptRecovery
+ * RecoveryDialog — modal shown at startup when autosaved recovery
+ * snapshots exist and nothing else was loaded yet (see shouldPromptRecovery
  * in ../io/recoveryStore.ts).
  *
- * Dismissed via "Recover" (loads the snapshot) or "Discard" (clears it).
- * Escape only dismisses the dialog WITHOUT clearing the snapshot — an
- * accidental keypress must never destroy recoverable work; the snapshot is
- * simply re-offered on the next launch.
+ * Lists every recoverable document — with several document windows open at
+ * a crash there are several snapshots, and all of them are offered, not just
+ * the newest. "Recover" loads the newest into this window and opens one
+ * window per remaining snapshot; "Discard" clears them all. Escape only
+ * dismisses the dialog WITHOUT clearing — an accidental keypress must never
+ * destroy recoverable work; the snapshots are simply re-offered on the next
+ * launch.
  */
 
 import { useEffect, useCallback } from 'react'
-import type { RecoverySnapshot } from '../io/recoveryStore'
+import type { RecoveryListing } from '../io/recoveryStore'
 import { formatRecoveryTime } from '../io/recoveryStore'
 
 interface RecoveryDialogProps {
-  snapshot: RecoverySnapshot
+  /** Every recoverable snapshot, newest first (non-empty). */
+  listings: RecoveryListing[]
   onRecover: () => void
   onDiscard: () => void
-  /** Dismiss without clearing the snapshot (Escape) — re-offered next launch. */
+  /** Dismiss without clearing the snapshots (Escape) — re-offered next launch. */
   onDismiss: () => void
 }
 
@@ -57,6 +61,11 @@ const BODY_STYLE: React.CSSProperties = {
   lineHeight: '1.5',
 }
 
+const LIST_STYLE: React.CSSProperties = {
+  margin: '10px 0 0',
+  paddingLeft: '18px',
+}
+
 const BUTTON_ROW_STYLE: React.CSSProperties = {
   display: 'flex',
   justifyContent: 'flex-end',
@@ -85,7 +94,9 @@ const RECOVER_BUTTON_STYLE: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-export function RecoveryDialog({ snapshot, onRecover, onDiscard, onDismiss }: RecoveryDialogProps) {
+const NAME_STYLE: React.CSSProperties = { color: 'var(--text-primary)' }
+
+export function RecoveryDialog({ listings, onRecover, onDiscard, onDismiss }: RecoveryDialogProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -101,8 +112,8 @@ export function RecoveryDialog({ snapshot, onRecover, onDiscard, onDismiss }: Re
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [handleKeyDown])
 
-  const { name } = snapshot.meta
-  const when = formatRecoveryTime(snapshot.meta.savedAt, Date.now())
+  const now = Date.now()
+  const single = listings.length === 1
 
   return (
     <div style={OVERLAY_STYLE}>
@@ -111,19 +122,40 @@ export function RecoveryDialog({ snapshot, onRecover, onDiscard, onDismiss }: Re
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Recover unsaved document"
+        aria-label={single ? 'Recover unsaved document' : 'Recover unsaved documents'}
       >
-        <div style={HEADING_STYLE}>Recover Unsaved Document?</div>
+        <div style={HEADING_STYLE}>
+          {single ? 'Recover Unsaved Document?' : `Recover ${listings.length} Unsaved Documents?`}
+        </div>
         <div style={BODY_STYLE}>
-          Hew found an autosaved version of <strong style={{ color: 'var(--text-primary)' }}>{name}</strong>{' '}
-          from {when} that wasn&apos;t saved before the app closed.
+          {single ? (
+            <>
+              Hew found an autosaved version of{' '}
+              <strong style={NAME_STYLE}>{listings[0].meta.name}</strong> from{' '}
+              {formatRecoveryTime(listings[0].meta.savedAt, now)} that wasn&apos;t saved before the
+              app closed.
+            </>
+          ) : (
+            <>
+              Hew found autosaved versions of these documents that weren&apos;t saved before the
+              app closed. Recover opens each one in its own window.
+              <ul style={LIST_STYLE}>
+                {listings.map((l) => (
+                  <li key={l.slot}>
+                    <strong style={NAME_STYLE}>{l.meta.name}</strong>{' '}
+                    ({formatRecoveryTime(l.meta.savedAt, now)})
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </div>
         <div style={BUTTON_ROW_STYLE}>
           <button style={DISCARD_BUTTON_STYLE} onClick={onDiscard}>
-            Discard
+            {single ? 'Discard' : 'Discard All'}
           </button>
           <button style={RECOVER_BUTTON_STYLE} onClick={onRecover} autoFocus>
-            Recover
+            {single ? 'Recover' : 'Recover All'}
           </button>
         </div>
       </div>

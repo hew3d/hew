@@ -18,6 +18,7 @@ import {
   entityLabel,
   resolveLabel,
   breadcrumb,
+  buildTreeIndexMap,
   isTreeRowDimmed,
   nodeRefFromJs,
   nodeKey,
@@ -127,22 +128,32 @@ export function DocumentTree({
 
   const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
 
-  // Label resolver for breadcrumbs — uses top_level_nodes ordering
+  // Positional indices for breadcrumb labels: position within the parent
+  // container, so a crumb for an unnamed nested node reads exactly like its
+  // tree row — the flat per-kind id lists disagree with that as soon as
+  // containers nest. Memoized: building it is a full group_members traversal
+  // across the WASM boundary, far too heavy to run once per crumb per render.
+  const treeIndex = useMemo(
+    () =>
+      buildTreeIndexMap(topNodes, (groupId) =>
+        scene.group_members(groupId).map(nodeRefFromJs),
+      ),
+    // docRev: membership changes on every mutation without changing identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [topNodes, scene, docRev],
+  )
+
+  // Label resolver for breadcrumbs.
   const labelFor = (node: NodeRef): string => {
+    const idx = treeIndex.get(nodeKey(node)) ?? 0
     if (node.kind === 'group') {
-      const groups = Array.from(scene.group_ids())
-      const idx = groups.indexOf(node.id)
-      return resolveLabel(scene.group_name(node.id), undefined, 'group', idx >= 0 ? idx : 0)
+      return resolveLabel(scene.group_name(node.id), undefined, 'group', idx)
     } else if (node.kind === 'instance') {
-      const instances = Array.from(scene.instance_ids())
-      const idx = instances.indexOf(node.id)
       const def = scene.instance_def(node.id)
       const defName = def !== undefined ? scene.component_name(def) : undefined
-      return resolveLabel(scene.instance_name(node.id), defName, 'instance', idx >= 0 ? idx : 0)
+      return resolveLabel(scene.instance_name(node.id), defName, 'instance', idx)
     } else {
-      const objects = Array.from(scene.object_ids())
-      const idx = objects.indexOf(node.id)
-      return resolveLabel(scene.object_name(node.id), undefined, 'object', idx >= 0 ? idx : 0)
+      return resolveLabel(scene.object_name(node.id), undefined, 'object', idx)
     }
   }
 

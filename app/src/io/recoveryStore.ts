@@ -30,13 +30,36 @@ export interface RecoverySnapshot {
   meta: RecoveryMeta
 }
 
+/**
+ * One recoverable snapshot as enumerated at startup — metadata only, no
+ * geometry bytes. `slot` identifies the snapshot for `claim` (the writing
+ * window's label on desktop; a fixed slot name on web, which has one).
+ */
+export interface RecoveryListing {
+  slot: string
+  meta: RecoveryMeta
+}
+
 export interface RecoveryStore {
-  /** Persist a snapshot, overwriting any previous one. */
+  /** Persist a snapshot, overwriting any previous one from this window. */
   write(bytes: Uint8Array, meta: RecoveryMeta): Promise<void>
-  /** Read back the most recent snapshot, or null if none exists. */
-  read(): Promise<RecoverySnapshot | null>
-  /** Discard the stored snapshot (no-op if none exists). */
+  /** Enumerate every recoverable snapshot, newest first. */
+  list(): Promise<RecoveryListing[]>
+  /**
+   * Claim the snapshot in `slot` for this window and return it, or null if
+   * it vanished. On desktop this re-homes the snapshot files to the calling
+   * window's own slot so its next autosave overwrites what it adopted —
+   * never a sibling's snapshot.
+   */
+  claim(slot: string): Promise<RecoverySnapshot | null>
+  /**
+   * Discard this window's own snapshot (no-op if none exists). Called after
+   * a successful save; scoped so one window's save never destroys another
+   * window's snapshot of a different document.
+   */
   clear(): Promise<void>
+  /** Discard every snapshot — the startup dialog's explicit "Discard All". */
+  discardAll(): Promise<void>
 }
 
 // WebRecoveryStore is statically imported — it's always needed for the web build.
@@ -65,8 +88,10 @@ export function makeRecoveryStore(): RecoveryStore {
     )
     return {
       write: (bytes, meta) => storePromise.then((s) => s.write(bytes, meta)),
-      read: () => storePromise.then((s) => s.read()),
+      list: () => storePromise.then((s) => s.list()),
+      claim: (slot) => storePromise.then((s) => s.claim(slot)),
       clear: () => storePromise.then((s) => s.clear()),
+      discardAll: () => storePromise.then((s) => s.discardAll()),
     }
   }
   return new WebRecoveryStore()
@@ -84,16 +109,16 @@ export function makeRecoveryStore(): RecoveryStore {
 export { formatRelativeTime as formatRecoveryTime } from './relativeTime'
 
 /**
- * True when the user should be prompted to recover `snapshot`.
+ * True when the user should be prompted to recover the listed snapshots.
  *
- * Only prompts when there IS a snapshot, AND nothing else was loaded at
- * startup (no currentRef, not dirty) — so a cold-start file-association open,
- * a freshly-restored document, or any other startup path that already
- * populated the session suppresses the prompt.
+ * Only prompts when there IS at least one snapshot, AND nothing else was
+ * loaded at startup (no currentRef, not dirty) — so a cold-start
+ * file-association open, a freshly-restored document, or any other startup
+ * path that already populated the session suppresses the prompt.
  */
 export function shouldPromptRecovery(
   session: DocSessionState,
-  snapshot: RecoverySnapshot | null,
+  listings: RecoveryListing[],
 ): boolean {
-  return snapshot !== null && session.currentRef === null && !session.dirty
+  return listings.length > 0 && session.currentRef === null && !session.dirty
 }

@@ -151,8 +151,8 @@ export function parseDistance(buf: string): number | null {
 
 /**
  * Immutably edit a "dimensions" string buffer — like `editNumericBuffer` but
- * also tolerant of a separator between two values: comma, `x`/`X`, or a
- * space (e.g. while typing "3,4", "3x4", "3 x 4").
+ * also tolerant of a separator between two values: comma or `x`/`X`
+ * (e.g. while typing "3,4", "3x4", "3 x 4").
  *
  * Kept deliberately forgiving — this is only responsible for letting the
  * user type freely; `parseDimensions` does the real validation at commit
@@ -160,11 +160,16 @@ export function parseDistance(buf: string): number | null {
  *
  * Rules:
  * - Digits 0–9 are appended.
- * - `.` is appended, rejected if the buffer already has a dot since the last
- *   separator (i.e. within the current side being typed).
- * - `,`, `x`, `X`, and ` ` are all accepted as a separator and appended
- *   verbatim (so the buffer can be reformatted/parsed later); a second
- *   separator is rejected once one is already present.
+ * - `.` is appended, rejected if the current numeric token (since the last
+ *   separator or length-grammar boundary) already has a dot.
+ * - `,` and `x`/`X` are the ONLY dims separators, appended verbatim (so the
+ *   buffer can be reformatted/parsed later); a second separator is rejected
+ *   once one is already present.
+ * - A space is NOT a separator: it is part of the length grammar itself
+ *   ("5' 3\"", "1 cm", "3 1/2") and is appended freely (except at the start
+ *   of the buffer), so "5' 3\"" followed by `,` still accepts the second
+ *   dimension. This deliberately replaces the old behavior where a typed
+ *   space consumed the one separator slot and locked out `,`/`x`.
  * - Explicit-unit tokens are appended so each side can carry its own unit
  *   ("1cm,100mm", "5',23\""): unit-suffix letters (except `x`/`X`, which
  *   stay separators), `'`, `"`, and `/`.
@@ -183,24 +188,35 @@ export function editDimsBuffer(buf: string, key: string): string {
     return last >= '0' && last <= '9' ? buf + key : buf
   }
 
-  const hasSeparator = /[,xX ]/.test(buf)
+  if (key === ',' || key === 'x' || key === 'X') {
+    if (/[,xX]/.test(buf)) return buf // reject a second separator
+    if (buf === '') return buf        // can't start with a separator
+    return buf + key
+  }
 
-  if (key === ',' || key === 'x' || key === 'X' || key === ' ') {
-    if (hasSeparator) return buf  // reject a second separator
-    if (buf === '') return buf    // can't start with a separator
+  if (key === ' ') {
+    // Space is part of the LENGTH grammar ("5' 3\"", "1 cm", "3 1/2"),
+    // never the dims separator — only `,`/`x`/`X` separate the two
+    // dimensions. Reject it only at the very start of the buffer.
+    if (buf === '') return buf
     return buf + key
   }
 
   if (key === '.') {
-    // Reject a second dot within the current side (i.e. since the last separator)
-    const sideStart = Math.max(
+    // Reject a second dot within the current numeric token — since the last
+    // dims separator or length-grammar boundary (', ", /, space), matching
+    // editLengthBuffer's per-token rule.
+    const lastBoundary = Math.max(
       buf.lastIndexOf(','),
       buf.lastIndexOf('x'),
       buf.lastIndexOf('X'),
+      buf.lastIndexOf("'"),
+      buf.lastIndexOf('"'),
+      buf.lastIndexOf('/'),
       buf.lastIndexOf(' '),
     )
-    const currentSide = buf.slice(sideStart + 1)
-    if (currentSide.includes('.')) return buf
+    const currentToken = buf.slice(lastBoundary + 1)
+    if (currentToken.includes('.')) return buf
     return buf + '.'
   }
 

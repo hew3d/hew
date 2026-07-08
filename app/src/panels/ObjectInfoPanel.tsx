@@ -25,7 +25,7 @@
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, type NodeRef } from './treeModel'
+import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
 
 interface Props {
   scene: WasmScene
@@ -115,24 +115,29 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
     const kindNum = nodeKindToNumber(kind)
 
     let nameFromScene: string | undefined
-    let idx = 0
     let defName: string | undefined
     if (kind === 'object') {
       nameFromScene = scene.object_name(id)
-      idx = Array.from(scene.object_ids()).indexOf(id)
     } else if (kind === 'group') {
       nameFromScene = scene.group_name(id)
-      idx = Array.from(scene.group_ids()).indexOf(id)
     } else {
       nameFromScene = scene.instance_name(id)
-      idx = Array.from(scene.instance_ids()).indexOf(id)
       const def = scene.instance_def(id)
       defName = def !== undefined ? scene.component_name(def) : undefined
     }
 
     // The label the Outliner would show for this node when it carries no
     // kernel name — the panel falls back to exactly this, never "(unnamed)".
-    const defaultLabel = resolveLabel(undefined, defName, kind, idx >= 0 ? idx : 0)
+    // The positional index is the node's position within its parent container
+    // (buildTreeIndexMap), NOT its position in the flat per-kind id list —
+    // the Outliner numbers per container, and the two disagree once an
+    // unnamed node sits inside a group.
+    const treeIndex = buildTreeIndexMap(
+      scene.top_level_nodes().map(nodeRefFromJs),
+      (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
+    )
+    const idx = treeIndex.get(nodeKey(node)) ?? 0
+    const defaultLabel = resolveLabel(undefined, defName, kind, idx)
 
     // Tags: array of "Seg1/Seg2" strings from the kernel, split to string[][]
     const rawTags = scene.node_tags(kindNum, id)

@@ -229,20 +229,33 @@ describe('editDimsBuffer', () => {
     expect(editDimsBuffer('3', 'X')).toBe('3X')
   })
 
-  it('appends a space separator', () => {
+  it('appends a space as part of the length grammar (space is NOT the dims separator)', () => {
     expect(editDimsBuffer('3', ' ')).toBe('3 ')
+    // A space never consumes the separator slot: "5' 3\"" then `,` must
+    // still open the second dimension (regression — the old behavior
+    // recorded the typed space as the one allowed separator and locked out
+    // `,`/`x`, so a space-containing length could never get a second dim).
+    let buf = ''
+    for (const key of ['5', "'", ' ', '3', '"', ',', '2', "'"]) buf = editDimsBuffer(buf, key)
+    expect(buf).toBe('5\' 3",2\'')
   })
 
-  it('rejects a separator at the start of the buffer', () => {
+  it('rejects a separator (or leading space) at the start of the buffer', () => {
     expect(editDimsBuffer('', ',')).toBe('')
     expect(editDimsBuffer('', 'x')).toBe('')
     expect(editDimsBuffer('', ' ')).toBe('')
   })
 
-  it('rejects a second separator', () => {
+  it('rejects a second comma/x separator; a prior space does not count as one', () => {
     expect(editDimsBuffer('3,4', ',')).toBe('3,4')
     expect(editDimsBuffer('3x', 'x')).toBe('3x')
-    expect(editDimsBuffer('3 ', 'x')).toBe('3 ')
+    expect(editDimsBuffer('3,4', 'x')).toBe('3,4')
+    // Deliberate semantic change: '3 ' used to reject the `x` because the
+    // space had "used up" the separator; now the space is length-grammar
+    // and `x` is the first (and only) separator.
+    expect(editDimsBuffer('3 ', 'x')).toBe('3 x')
+    expect(editDimsBuffer('3 x 4', 'x')).toBe('3 x 4')
+    expect(editDimsBuffer('3 x', ',')).toBe('3 x')
   })
 
   it('allows a dot per side, rejects a second dot on the same side', () => {

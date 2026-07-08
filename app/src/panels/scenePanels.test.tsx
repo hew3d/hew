@@ -133,6 +133,10 @@ describe('ObjectInfoPanel', () => {
       <ObjectInfoPanel
         scene={makeScene({
           object_ids: () => new BigUint64Array([7n, 8n]),
+          top_level_nodes: () => [
+            { kind: 'object', id: 7n },
+            { kind: 'object', id: 8n },
+          ],
           object_name: () => undefined,
           node_tags: () => [],
           object_solid: () => true,
@@ -142,11 +146,37 @@ describe('ObjectInfoPanel', () => {
         onDocumentChanged={vi.fn()}
       />,
     )
-    // 8n is index 1 in object_ids() → the same "Object 2" the Outliner shows.
+    // 8n is the second top-level row → the same "Object 2" the Outliner shows.
     const input = screen.getByPlaceholderText('Object 2') as HTMLInputElement
     expect(input.value).toBe('')
     expect(screen.queryByPlaceholderText('(unnamed)')).not.toBeInTheDocument()
     expect(screen.queryByText('(unnamed)')).not.toBeInTheDocument()
+  })
+
+  it('numbers an unnamed nested object by its position in its group, like the Outliner', () => {
+    render(
+      <ObjectInfoPanel
+        scene={makeScene({
+          // Object 8n is globally the second object, but the FIRST member of
+          // its group — the Outliner shows "Object 1", so this panel must
+          // too (the flat object_ids() index would say "Object 2").
+          object_ids: () => new BigUint64Array([7n, 8n]),
+          top_level_nodes: () => [
+            { kind: 'object', id: 7n },
+            { kind: 'group', id: 20n },
+          ],
+          group_members: (id: bigint) =>
+            id === 20n ? [{ kind: 'object', id: 8n }] : [],
+          object_name: () => undefined,
+          node_tags: () => [],
+          object_solid: () => true,
+        })}
+        docRev={0}
+        selectedIds={[{ kind: 'object', id: 8n }]}
+        onDocumentChanged={vi.fn()}
+      />,
+    )
+    expect(screen.getByPlaceholderText('Object 1')).toBeInTheDocument()
   })
 
   it('an unnamed instance falls back to its component definition name (Outliner parity)', () => {

@@ -1,9 +1,13 @@
 /**
  * TauriFileHost — native desktop implementation of FileHost.
  *
- * Uses:
- *   - @tauri-apps/plugin-dialog  for open/save native file dialogs
- *   - @tauri-apps/api/core invoke for custom read_file / write_file commands
+ * Uses custom shell commands throughout:
+ *   - pick_open_path / pick_save_path show the native dialogs FROM RUST and
+ *     record the user's pick in the shell's approved-paths registry before
+ *     the path ever reaches this webview — read_file / write_file / list_dir
+ *     refuse paths with no such approval, so a compromised webview cannot
+ *     use them as arbitrary file I/O.
+ *   - read_file / write_file / list_dir do the gated I/O.
  *
  * All Tauri imports are DYNAMIC so this module is never bundled into the web
  * build.  Vite code-splits dynamic imports into separate chunks.
@@ -35,16 +39,15 @@ function imageFormat(name: string): 'png' | 'jpeg' | null {
 
 export class TauriFileHost implements FileHost {
   async open(): Promise<{ ref: FileRef; bytes: Uint8Array } | null> {
-    const { open } = await import('@tauri-apps/plugin-dialog')
-    const result = await open({
-      filters: [{ name: 'Hew model', extensions: ['hew'] }],
-      multiple: false,
-    })
-    // open() returns null on cancel, or a string path (multiple:false → string)
-    if (result === null) return null
-    const path = result as string
-
     const { invoke } = await import('@tauri-apps/api/core')
+    // write: true — Save writes back to the opened path without a new dialog.
+    const path = await invoke<string | null>('pick_open_path', {
+      filters: [{ name: 'Hew model', extensions: ['hew'] }],
+      write: true,
+      approveDir: false,
+    })
+    if (path === null) return null
+
     // read_file returns Vec<u8> which wasm-bindgen marshals as a JS Array<number>.
     const raw: number[] = await invoke('read_file', { path })
     const bytes = new Uint8Array(raw)
@@ -67,15 +70,13 @@ export class TauriFileHost implements FileHost {
   }
 
   async saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null> {
-    const { save } = await import('@tauri-apps/plugin-dialog')
-    const result = await save({
-      defaultPath: suggestedName.endsWith('.hew') ? suggestedName : suggestedName + '.hew',
+    const { invoke } = await import('@tauri-apps/api/core')
+    const path = await invoke<string | null>('pick_save_path', {
+      defaultName: suggestedName.endsWith('.hew') ? suggestedName : suggestedName + '.hew',
       filters: [{ name: 'Hew model', extensions: ['hew'] }],
     })
-    if (result === null) return null
-    const path = result as string
+    if (path === null) return null
 
-    const { invoke } = await import('@tauri-apps/api/core')
     await invoke('write_file', { path, contents: Array.from(bytes) })
 
     return { name: basename(path), handle: path }
@@ -87,34 +88,33 @@ export class TauriFileHost implements FileHost {
     fileType: ExportFileType,
   ): Promise<boolean> {
     const dotExt = '.' + fileType.ext
-    const { save } = await import('@tauri-apps/plugin-dialog')
-    const result = await save({
-      defaultPath: suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt,
+    const { invoke } = await import('@tauri-apps/api/core')
+    const path = await invoke<string | null>('pick_save_path', {
+      defaultName: suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt,
       filters: [{ name: fileType.description, extensions: [fileType.ext] }],
     })
-    if (result === null) return false
-    const path = result as string
+    if (path === null) return false
 
-    const { invoke } = await import('@tauri-apps/api/core')
     await invoke('write_file', { path, contents: Array.from(bytes) })
     return true
   }
 
   async openForImport(): Promise<ImportPick | null> {
-    const { open } = await import('@tauri-apps/plugin-dialog')
-    const result = await open({
+    const { invoke } = await import('@tauri-apps/api/core')
+    // approveDir: true — the DAE texture scan below reads the picked file's
+    // siblings and textures/-style subfolders; the pick approves that too.
+    const filePath = await invoke<string | null>('pick_open_path', {
       filters: [
         { name: 'Model files (COLLADA, SketchUp, glTF)', extensions: ['dae', 'skp', 'glb', 'gltf'] },
         { name: 'COLLADA model', extensions: ['dae'] },
         { name: 'SketchUp 2017 Model', extensions: ['skp'] },
         { name: 'glTF model', extensions: ['glb', 'gltf'] },
       ],
-      multiple: false,
+      write: false,
+      approveDir: true,
     })
-    if (result === null) return null
-    const filePath = result as string
+    if (filePath === null) return null
 
-    const { invoke } = await import('@tauri-apps/api/core')
     const rawFile: number[] = await invoke('read_file', { path: filePath })
     const fileBytes = new Uint8Array(rawFile)
 

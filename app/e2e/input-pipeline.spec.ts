@@ -307,3 +307,31 @@ test('Ctrl+G groups the selection and Ctrl+Shift+G ungroups, through the live ke
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 0)
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(2)
 })
+
+test('Ctrl+G with a single object selected is a no-op — the keyboard path honors the ≥2-sibling gate', async ({
+  page,
+}) => {
+  await setup(page)
+
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    h.selectObjects(h.getObjectIds())
+  })
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  const hashBefore = await page.evaluate(() => window.__hew_test!.getStateHash())
+
+  // The Edit menu disables Group for a 1-node selection; the accelerator must
+  // agree — before the handler-side gate, this silently made a 1-member group.
+  await page.keyboard.press('Control+g')
+
+  // Positive control: Ctrl+Shift+G on the (still object) selection is also
+  // a no-op, then verify the document hash and selection never changed.
+  await page.keyboard.press('Control+Shift+G')
+  await expect
+    .poll(async () => page.evaluate(() => window.__hew_test!.getStateHash()))
+    .toBe(hashBefore)
+  const sel = await page.evaluate(() => window.__hew_test!.getSelection())
+  expect(sel).toHaveLength(1)
+  expect(sel[0].kind).toBe('object')
+})

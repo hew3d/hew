@@ -121,6 +121,56 @@ describe('MenuBar', () => {
     expect(onUndo).not.toHaveBeenCalled()
   })
 
+  // --- Edit menu: object commands (relocated here from the Outliner's
+  // per-object buttons — this menu is now their only static UI surface) ---
+
+  const openGates = {
+    canGroup: true,
+    canUngroup: true,
+    canMakeComponent: true,
+    canPlaceCopy: true,
+    canExplode: true,
+    canMakeUnique: true,
+    canBoolean: true,
+  }
+
+  it('dispatches every object command id through onEditAction when its gate is open', () => {
+    const onEditAction = vi.fn()
+    render(<MenuBar {...defaultProps} editGates={openGates} onEditAction={onEditAction} />)
+    const commands: Array<[string, string]> = [
+      ['Group', 'edit-group'],
+      ['Ungroup', 'edit-ungroup'],
+      ['Make Component', 'edit-make-component'],
+      ['Place Copy', 'edit-place-copy'],
+      ['Explode', 'edit-explode'],
+      ['Make Unique', 'edit-make-unique'],
+      ['Union', 'edit-union'],
+      ['Subtract', 'edit-subtract'],
+      ['Intersect', 'edit-intersect'],
+    ]
+    for (const [label, action] of commands) {
+      // Each dispatch closes the dropdown (withClose), so re-open per item.
+      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+    expect(onEditAction).toHaveBeenCalledTimes(commands.length)
+  })
+
+  it('does NOT dispatch a gated-off object command (Group with canGroup=false)', () => {
+    const onEditAction = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        editGates={{ ...openGates, canGroup: false }}
+        onEditAction={onEditAction}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    fireEvent.mouseDown(screen.getByText('Group'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
   // --- Tools menu: active tool checkmark ---
 
   it('shows a checkmark next to the active tool in the Tools menu', () => {

@@ -16,7 +16,7 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, resolveLabel, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
+import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -35,7 +35,7 @@ import {
   afterImport,
   type DocSessionState,
 } from './io/documentSession'
-import { makeRecoveryStore, shouldPromptRecovery, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
+import { makeRecoveryStore, shouldPromptRecovery, type RecoveryListing, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
 import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
@@ -205,7 +205,7 @@ export default function App() {
   /** Display name of the file being imported (shown in the overlay). */
   const [importingName, setImportingName] = useState('')
   /** Recovery snapshot to offer at startup (null = no dialog). */
-  const [recoveryPrompt, setRecoveryPrompt] = useState<RecoverySnapshot | null>(null)
+  const [recoveryPrompt, setRecoveryPrompt] = useState<RecoveryListing[] | null>(null)
   /** Right-tray width (px), user-resizable via the drag handle; persisted. */
   const [trayWidth, setTrayWidth] = useState<number>(() => {
     const raw = window.localStorage.getItem(TRAY_WIDTH_KEY)
@@ -239,9 +239,16 @@ export default function App() {
   // (or since the last explicit Save, which also resets it). Avoids redundant
   // writes when the document hasn't changed between ticks.
   const dirtySinceAutosaveRef = useRef(false)
-  // Guards the startup recovery check so it runs exactly once even under
-  // StrictMode's double-invoke or Vite HMR re-renders.
-  const recoveryCheckedRef = useRef(false)
+  // Resolved once this window's menu-open-path listener is registered (or
+  // registration failed) — the startup-handoff effect awaits it before
+  // telling the shell this webview is ready for live open delivery. Created
+  // during render so the promise exists before any effect runs.
+  const openListenerReadyRef = useRef<{ promise: Promise<void>; resolve: () => void } | null>(null)
+  if (openListenerReadyRef.current === null) {
+    let resolve!: () => void
+    const promise = new Promise<void>((r) => { resolve = r })
+    openListenerReadyRef.current = { promise, resolve }
+  }
 
   // Install console capture on mount, restore on unmount.
   useEffect(() => {
@@ -350,38 +357,10 @@ export default function App() {
     return () => clearInterval(interval)
   }, [])
 
-  // ---------------------------------------------------------------- startup recovery check
-  // Runs once, after the scene first becomes available. Guarded by
-  // recoveryCheckedRef so StrictMode's double-invoke / Vite HMR re-renders
-  // can't trigger it twice or re-prompt after the user has already decided.
-  // shouldPromptRecovery suppresses the prompt if anything else (e.g. a
-  // cold-start file-association open) already populated the session.
-  useEffect(() => {
-    if (state === null) return
-    if (recoveryCheckedRef.current) return
-    recoveryCheckedRef.current = true
-    void (async () => {
-      // Only the primary window offers crash recovery. Secondary document
-      // windows (File ▸ New while another model is open) start fresh — a
-      // sibling window's live autosave must not be "recovered" into them.
-      if (isTauri) {
-        try {
-          const { getCurrentWindow } = await import('@tauri-apps/api/window')
-          if (getCurrentWindow().label !== 'main') return
-        } catch {
-          /* not fatal — fall through to the recovery check */
-        }
-      }
-      try {
-        const snapshot = await recoveryStoreRef.current.read()
-        if (shouldPromptRecovery(docSessionRef.current, snapshot)) {
-          setRecoveryPrompt(snapshot)
-        }
-      } catch {
-        /* ignore — no recovery prompt */
-      }
-    })()
-  }, [state])
+  // (The startup recovery check lives in the startup-handoff effect below —
+  // it must run strictly AFTER any pending file-association open or recovery
+  // handoff has been consumed, or the dialog races the open and can appear
+  // over, then replace, a document the user explicitly double-clicked.)
 
   // Update document.title whenever session state changes. Under Tauri, also
   // push the title to the native OS title bar — the in-app MenuBar no longer
@@ -686,6 +665,16 @@ export default function App() {
     if (scene == null) return []
     const entries: PaletteEntry[] = []
 
+    // Positional fallback indices ("Object N") must be the Outliner's — the
+    // tree numbers nodes within their parent container, not within the flat
+    // per-kind id lists these loops iterate.
+    const treeIndex = buildTreeIndexMap(
+      scene.top_level_nodes().map(nodeRefFromJs),
+      (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
+    )
+    const indexOf = (kind: NodeRef['kind'], id: bigint) =>
+      treeIndex.get(nodeKey({ kind, id })) ?? 0
+
     const pushNode = (kind: NodeRef['kind'], id: bigint, label: string, kindLabel: string) => {
       entries.push({
         id: `jump-node:${kind}:${id}`,
@@ -695,16 +684,16 @@ export default function App() {
         synonyms: [label],
       })
     }
-    Array.from(scene.object_ids()).forEach((id, i) => {
-      pushNode('object', id, resolveLabel(scene.object_name(id), undefined, 'object', i), 'Object')
+    Array.from(scene.object_ids()).forEach((id) => {
+      pushNode('object', id, resolveLabel(scene.object_name(id), undefined, 'object', indexOf('object', id)), 'Object')
     })
-    Array.from(scene.group_ids()).forEach((id, i) => {
-      pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', i), 'Group')
+    Array.from(scene.group_ids()).forEach((id) => {
+      pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', indexOf('group', id)), 'Group')
     })
-    Array.from(scene.instance_ids()).forEach((id, i) => {
+    Array.from(scene.instance_ids()).forEach((id) => {
       const def = scene.instance_def(id)
       const defName = def !== undefined ? scene.component_name(def) : undefined
-      pushNode('instance', id, resolveLabel(scene.instance_name(id), defName, 'instance', i), 'Component')
+      pushNode('instance', id, resolveLabel(scene.instance_name(id), defName, 'instance', indexOf('instance', id)), 'Component')
     })
 
     // Unique tag paths across all nodes (same walk the Tags panel does).
@@ -1040,33 +1029,78 @@ export default function App() {
   }, [])
 
   // ---------------------------------------------------------------- recovery prompt actions
-  const handleRecover = useCallback(() => {
-    const snapshot = recoveryPrompt
-    if (snapshot === null) return
+
+  /** Load a claimed snapshot into THIS window's document and session. Shared
+   *  by the startup dialog (first/newest snapshot) and by recovery windows
+   *  spawned for the remaining snapshots (take_pending_recovery below). */
+  const adoptSnapshot = useCallback((snapshot: RecoverySnapshot): boolean => {
     const ok = applyLoadedBytes(snapshot.bytes)
-    if (ok) {
-      const { meta } = snapshot
-      setDocSession({
-        currentRef: meta.path !== null ? { name: meta.name, handle: meta.path } : null,
-        dirty: true,
-        importedName: meta.path !== null ? undefined : meta.name,
-        // meta.savedAt is when the autosave snapshot was written — the best
-        // available lower bound for "edits existed as of here".
-        // lastSavedAt stays null: this snapshot was never actually written to
-        // the real file yet, only to the recovery slot.
-        lastEditAt: meta.savedAt,
-        lastSavedAt: null,
-      })
-      // The recovered document still only exists in the recovery snapshot —
-      // leave it in place (the next autosave tick refreshes it) and mark
-      // dirty-since-autosave so a tick will actually fire if nothing else changes.
-      dirtySinceAutosaveRef.current = true
-    }
+    if (!ok) return false
+    const { meta } = snapshot
+    setDocSession({
+      currentRef: meta.path !== null ? { name: meta.name, handle: meta.path } : null,
+      dirty: true,
+      importedName: meta.path !== null ? undefined : meta.name,
+      // meta.savedAt is when the autosave snapshot was written — the best
+      // available lower bound for "edits existed as of here".
+      // lastSavedAt stays null: this snapshot was never actually written to
+      // the real file yet, only to the recovery slot.
+      lastEditAt: meta.savedAt,
+      lastSavedAt: null,
+    })
+    // The recovered document still only exists in the recovery snapshot —
+    // claim() re-homed it to this window's own slot (the next autosave tick
+    // refreshes it in place); mark dirty-since-autosave so a tick will
+    // actually fire if nothing else changes.
+    dirtySinceAutosaveRef.current = true
+    return true
+  }, [applyLoadedBytes])
+  const adoptSnapshotRef = useRef(adoptSnapshot)
+  useEffect(() => { adoptSnapshotRef.current = adoptSnapshot }, [adoptSnapshot])
+
+  const handleRecover = useCallback(() => {
+    const listings = recoveryPrompt
+    if (listings === null || listings.length === 0) return
+    void (async () => {
+      // One snapshot loads here; every other one opens in its own window
+      // (new_window parks the slot for the new webview to claim at mount).
+      // Claiming re-homes each snapshot, so nothing is shadowed, overwritten,
+      // or silently discarded — with N crashed documents, all N come back.
+      //
+      // This window prefers its OWN slot when one exists (the dialog only
+      // runs in the window labeled "main"): claiming a different slot while
+      // recovery-main.hew still holds an unclaimed document would force the
+      // shell's no-clobber fallbacks instead of the clean rename path.
+      const ownIdx = listings.findIndex((l) => l.slot === 'main')
+      const ordered =
+        ownIdx > 0
+          ? [listings[ownIdx], ...listings.filter((_, i) => i !== ownIdx)]
+          : listings
+      const [first, ...rest] = ordered
+      try {
+        const snapshot = await recoveryStoreRef.current.claim(first.slot)
+        if (snapshot !== null) adoptSnapshot(snapshot)
+      } catch {
+        /* claim failed — leave this window blank rather than guessing */
+      }
+      if (isTauri && rest.length > 0) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          for (const listing of rest) {
+            await invoke('new_window', { recoverSlot: listing.slot })
+          }
+        } catch {
+          /* window spawn failed — the slots stay on disk for next launch */
+        }
+      }
+    })()
     setRecoveryPrompt(null)
-  }, [recoveryPrompt, applyLoadedBytes])
+  }, [recoveryPrompt, adoptSnapshot])
 
   const handleDiscardRecovery = useCallback(() => {
-    recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
+    // The dialog listed every snapshot, so this is an informed Discard All —
+    // per-window saves use clear(), which drops only that window's own slot.
+    recoveryStoreRef.current.discardAll().catch(() => { /* ignore */ })
     setRecoveryPrompt(null)
   }, [])
 
@@ -1208,24 +1242,12 @@ export default function App() {
   // so we fall back to an in-app modal (showSettingsModal below).
   const openSettings = useCallback(() => {
     if (isTauri) {
-      import('@tauri-apps/api/webviewWindow').then(async ({ WebviewWindow }) => {
-        const existing = await WebviewWindow.getByLabel('settings')
-        if (existing !== null) {
-          await existing.setFocus()
-          return
-        }
-        // Fixed-size, per macOS Settings convention (HIG: settings windows
-        // aren't resizable; each pane determines its own compact height).
-        new WebviewWindow('settings', {
-          url: 'index.html#settings',
-          title: 'Settings',
-          width: 520,
-          height: 360,
-          resizable: false,
-          minimizable: false,
-          maximizable: false,
-        })
-      }).catch(() => { /* ignore */ })
+      // Created by the shell (open_settings_window) rather than the JS
+      // WebviewWindow API, so the capability set carries no window-creation
+      // grants — a compromised webview must not be able to mint windows.
+      import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke('open_settings_window'))
+        .catch(() => { /* ignore */ })
       return
     }
     setShowSettingsModal(true)
@@ -1418,7 +1440,9 @@ export default function App() {
 
   // ---------------------------------------------------------------- menu-open-path listener (Tauri only)
   // Emitted by Rust when a recent-file menu item is clicked, or when a file
-  // is opened via the macOS "open document" Apple event (warm case).
+  // is opened via the macOS "open document" Apple event (warm case). The
+  // startup-handoff effect below waits for this registration before telling
+  // the shell the window is ready for live delivery.
   useEffect(() => {
     if (!isTauri) return
     let unlisten: (() => void) | undefined
@@ -1428,22 +1452,76 @@ export default function App() {
       return getCurrentWebviewWindow().listen<string>('menu-open-path', (event) => {
         openPathRef.current(event.payload)
       })
-    }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore */ })
+    }).then((fn) => {
+      if (cancelled) { fn(); return }
+      unlisten = fn
+      openListenerReadyRef.current?.resolve()
+    }).catch(() => {
+      // Registration failed — resolve anyway so the handoff effect (which
+      // only needs the poll path in that case) can proceed.
+      openListenerReadyRef.current?.resolve()
+    })
     return () => { cancelled = true; unlisten?.() }
   }, []) // openPath accessed via openPathRef — no dep needed
 
-  // ---------------------------------------------------------------- cold-start file association (Tauri only)
-  // On first mount, check whether Rust buffered a file path from a cold-start
-  // "open with" (macOS Apple event before the webview listener existed, or
-  // argv on Windows/Linux).
+  // ---------------------------------------------------------------- startup handoff: recovery slot, buffered open, recovery prompt
+  // Runs once, after the scene first becomes available (adopting a snapshot
+  // or opening a buffered path into a still-loading kernel would silently
+  // no-op), in strict order:
+  //
+  //  1. take_pending_recovery — this window was spawned to recover a
+  //     specific crash snapshot; claim it and skip everything else.
+  //  2. take_pending_open — a cold-start file association buffered a path
+  //     before this webview could listen; open it and skip the prompt (the
+  //     user explicitly asked for that document).
+  //  3. frontend_ready — from here on the shell delivers opens live (the
+  //     open-path listener registration is awaited above, and the polls
+  //     have drained the buffer, so nothing can be delivered twice or lost).
+  //  4. Only then, and only in the primary window with nothing loaded, the
+  //     crash-recovery offer. Ordering it after 1–2 (rather than racing
+  //     them from a separate effect) is what keeps the dialog from
+  //     appearing over — and its Recover then replacing — a document the
+  //     user just double-clicked.
+  //
+  // Secondary document windows never prompt: a sibling window's live
+  // autosave must not be "recovered" into them.
+  const pendingHandoffCheckedRef = useRef(false)
   useEffect(() => {
-    if (!isTauri) return
-    import('@tauri-apps/api/core').then(({ invoke }) => {
-      return invoke<string | null>('take_pending_open')
-    }).then((path) => {
-      if (path != null) openPathRef.current(path)
-    }).catch(() => { /* ignore */ })
-  }, []) // runs once on mount; openPath accessed via openPathRef
+    if (state === null || pendingHandoffCheckedRef.current) return
+    pendingHandoffCheckedRef.current = true
+    void (async () => {
+      if (isTauri) {
+        try {
+          await openListenerReadyRef.current?.promise
+          const { invoke } = await import('@tauri-apps/api/core')
+          const slot = await invoke<string | null>('take_pending_recovery')
+          const path = slot == null ? await invoke<string | null>('take_pending_open') : null
+          invoke('frontend_ready').catch(() => { /* older shell — ignore */ })
+          if (slot != null) {
+            const snapshot = await recoveryStoreRef.current.claim(slot)
+            if (snapshot !== null) adoptSnapshotRef.current(snapshot)
+            return
+          }
+          if (path != null) {
+            await openPathRef.current(path)
+            return
+          }
+          const { getCurrentWindow } = await import('@tauri-apps/api/window')
+          if (getCurrentWindow().label !== 'main') return
+        } catch {
+          /* not fatal — fall through to the recovery check */
+        }
+      }
+      try {
+        const listings = await recoveryStoreRef.current.list()
+        if (shouldPromptRecovery(docSessionRef.current, listings)) {
+          setRecoveryPrompt(listings)
+        }
+      } catch {
+        /* ignore — no recovery prompt */
+      }
+    })()
+  }, [state]) // runs once, after the kernel is ready; handlers accessed via refs
 
   // ---------------------------------------------------------------- close guard (Tauri only)
   // Intercepts the native window close to warn about unsaved changes.
@@ -1679,6 +1757,24 @@ export default function App() {
   // the selection-gated Edit commands. macOS is the only platform that
   // attaches the native menu (Linux/Windows use the in-app MenuBar, which
   // reads this state directly as props).
+  //
+  // There is ONE menu bar shared by every document window, so the state it
+  // shows must follow focus: gaining focus re-pushes this window's state
+  // (menuFocusTick), and the shell ignores pushes from unfocused windows —
+  // without this, switching from a window with a selection to one without
+  // left the old window's check marks and Edit gates on the menu.
+  const [menuFocusTick, setMenuFocusTick] = useState(0)
+  useEffect(() => {
+    if (!isTauri || !isMac) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/window').then(({ getCurrentWindow }) =>
+      getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+        if (focused) setMenuFocusTick((t) => t + 1)
+      }),
+    ).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, [])
   useEffect(() => {
     if (!isTauri || !isMac) return
     const checked: Record<string, boolean> = {
@@ -1720,6 +1816,7 @@ export default function App() {
     selectedIds,
     selectedGuide,
     menuGates,
+    menuFocusTick,
   ])
 
   // ---------------------------------------------------------------- drag-drop open
@@ -1919,6 +2016,12 @@ export default function App() {
   }
 
   const handleGroup = () => {
+    // Re-check eligibility: the keyboard accelerator (Ctrl+G) dispatches here
+    // unconditionally, unlike the menu items sync_menu_state disables, so the
+    // handler must enforce the same gate — ≥2 distinct siblings, no sketches.
+    // Without this a single selected node becomes a silent 1-member group
+    // (the kernel accepts any non-empty sibling list).
+    if (!(menuGates?.canGroup ?? false)) return
     const newGroupId = viewportApi.current?.runGroup(selectedIds)
     if (newGroupId != null) {
       setSelectedIds([{ kind: 'group', id: newGroupId }])
@@ -2253,14 +2356,28 @@ export default function App() {
               drag.width = clampTrayWidth(startWidth + (startX - mv.clientX))
               setTrayWidth(drag.width)
             }
-            const onUp = (up: PointerEvent) => {
-              el.releasePointerCapture(up.pointerId)
+            // One teardown for every way the drag can end. pointerup alone
+            // is not enough: an interrupted drag (pointercancel, or the
+            // browser revoking capture) would otherwise leave the move
+            // listener attached with its stale startX — merely hovering the
+            // handle afterwards keeps resizing with no button held, and the
+            // width never persists.
+            const endDrag = () => {
               el.removeEventListener('pointermove', onMove)
-              el.removeEventListener('pointerup', onUp)
+              el.removeEventListener('pointerup', endDrag)
+              el.removeEventListener('pointercancel', endDrag)
+              el.removeEventListener('lostpointercapture', endDrag)
+              try {
+                el.releasePointerCapture(ev.pointerId)
+              } catch {
+                /* capture already gone (lostpointercapture path) */
+              }
               window.localStorage.setItem(TRAY_WIDTH_KEY, String(drag.width))
             }
             el.addEventListener('pointermove', onMove)
-            el.addEventListener('pointerup', onUp)
+            el.addEventListener('pointerup', endDrag)
+            el.addEventListener('pointercancel', endDrag)
+            el.addEventListener('lostpointercapture', endDrag)
           }}
           style={{
             width: '5px',
@@ -2420,11 +2537,12 @@ export default function App() {
         />
       )}
 
-      {/* Recovery prompt — shown once at startup when an autosaved snapshot
-          exists and nothing else was loaded yet. */}
-      {recoveryPrompt !== null && (
+      {/* Recovery prompt — shown once at startup when autosaved snapshots
+          exist and nothing else was loaded yet. Lists every crashed
+          document; Recover opens each beyond the first in its own window. */}
+      {recoveryPrompt !== null && recoveryPrompt.length > 0 && (
         <RecoveryDialog
-          snapshot={recoveryPrompt}
+          listings={recoveryPrompt}
           onRecover={handleRecover}
           onDiscard={handleDiscardRecovery}
           onDismiss={handleDismissRecovery}

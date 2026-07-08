@@ -1338,8 +1338,8 @@ impl Scene {
     /// Non-destructively groups sibling nodes into a new merge group,
     /// returning its handle. Unlike `boolean`, no geometry is welded and no
     /// member is consumed. `kinds`/`ids` are parallel arrays describing each
-    /// member node (kind `0` = object, `1` = group); they must be the same
-    /// length, name live sibling nodes, and not repeat.
+    /// member node (kind `0` = object, `1` = group, `2` = instance); they
+    /// must be the same length, name live sibling nodes, and not repeat.
     pub fn group_nodes(&mut self, kinds: &[u8], ids: &[u64]) -> Result<u64, ApiError> {
         if kinds.len() != ids.len() {
             return Err(ApiError(

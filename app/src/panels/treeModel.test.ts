@@ -16,6 +16,8 @@ import {
   canMakeUnique,
   stripTagSuffix,
   collectLeafIds,
+  buildTreeIndexMap,
+  nodeKey,
   type NodeRef,
 } from './treeModel'
 
@@ -399,5 +401,48 @@ describe('nextSelection (NodeRef)', () => {
     const sameIdGroup: NodeRef = { kind: 'group', id: 10n }
     // a is {object,10n}; sameIdGroup is {group,10n} — different nodes
     expect(nextSelection([a], sameIdGroup, true)).toEqual([a, sameIdGroup])
+  })
+})
+
+describe('buildTreeIndexMap', () => {
+  const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
+  const grp = (id: bigint): NodeRef => ({ kind: 'group', id })
+  const inst = (id: bigint): NodeRef => ({ kind: 'instance', id })
+
+  it('indexes top-level nodes by their position in the tree, not per kind', () => {
+    // Top level: [object 1n, group 2n, object 3n] — the Outliner numbers
+    // rows by container position, so object 3n is index 2, not "second object".
+    const map = buildTreeIndexMap([obj(1n), grp(2n), obj(3n)], () => [])
+    expect(map.get(nodeKey(obj(1n)))).toBe(0)
+    expect(map.get(nodeKey(grp(2n)))).toBe(1)
+    expect(map.get(nodeKey(obj(3n)))).toBe(2)
+  })
+
+  it('numbers group members within the group, restarting from 0', () => {
+    const members = new Map<bigint, NodeRef[]>([[2n, [inst(4n), obj(5n)]]])
+    const map = buildTreeIndexMap(
+      [obj(1n), grp(2n)],
+      (id) => members.get(id) ?? [],
+    )
+    // The nested object is "Object 2" in the Outliner (position 1 in its
+    // group) even though it is the second object globally too — the flat
+    // object_ids() list would call it index 1 only by coincidence here; the
+    // instance before it is what forces the container-relative answer.
+    expect(map.get(nodeKey(inst(4n)))).toBe(0)
+    expect(map.get(nodeKey(obj(5n)))).toBe(1)
+  })
+
+  it('recurses through nested groups', () => {
+    const members = new Map<bigint, NodeRef[]>([
+      [2n, [grp(6n)]],
+      [6n, [obj(7n)]],
+    ])
+    const map = buildTreeIndexMap([grp(2n)], (id) => members.get(id) ?? [])
+    expect(map.get(nodeKey(grp(6n)))).toBe(0)
+    expect(map.get(nodeKey(obj(7n)))).toBe(0)
+  })
+
+  it('returns an empty map for an empty document', () => {
+    expect(buildTreeIndexMap([], () => []).size).toBe(0)
   })
 })
