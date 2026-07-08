@@ -22,3 +22,11 @@ name = "minidom"
 
 [dependencies]
 quick-xml = "0.41"
+
+# Vendoring makes this a path dep, so rustc lints it as local code instead of
+# capping lints as it would for the registry version. Upstream (last released
+# 2024-10) predates the `mismatched_lifetime_syntaxes` lint (warn-by-default
+# since Rust 1.89) and trips it throughout; silence it rather than patch
+# elided lifetimes across a crate we intend to drop once upstream releases.
+[lints.rust]
+mismatched_lifetime_syntaxes = "allow"

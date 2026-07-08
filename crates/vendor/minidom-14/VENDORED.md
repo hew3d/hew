@@ -26,7 +26,11 @@ directory and restore the crates.io dependency.
 All changes are the mechanical consequence of the quick-xml 0.41 API. See
 `CHANGELOG.md` (0.18.0) for the summary. Files touched:
 
-- `Cargo.toml` — `quick-xml = "0.41"`; version `0.18.0`.
+- `Cargo.toml` — `quick-xml = "0.41"`; version `0.18.0`. Also allows the
+  `mismatched_lifetime_syntaxes` lint (Hew-only, not part of the upstream PR):
+  as a path dep this crate is linted as local code, and upstream predates that
+  lint (warn-by-default since Rust 1.89), so it would otherwise spam every
+  fresh build with warnings.
 - `src/element.rs`
   - `Element::from_reader` `Event::Text`: quick-xml 0.41 no longer folds entity
     references into text, so a `Text` event is now literal character data —
