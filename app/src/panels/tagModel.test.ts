@@ -180,6 +180,44 @@ describe('buildTagTree', () => {
     expect(result[0].nodes).toContainEqual(obj(1n))
     expect(result[0].nodes).toContainEqual(inst(2n))
   })
+
+  // -------------------------------------------------------------------------
+  // registryPaths — known tags with no tagged node (e.g. an imported .skp
+  // layer list, empty layers included).
+  // -------------------------------------------------------------------------
+
+  it('includes a registry-only path even with no tagged nodes at all', () => {
+    const result = buildTagTree([], [['EmptyLayer']])
+    expect(result).toHaveLength(1)
+    expect(result[0].segment).toBe('EmptyLayer')
+    expect(result[0].nodes).toEqual([])
+    expect(result[0].children).toHaveLength(0)
+  })
+
+  it('materialises ancestors of a nested registry-only path', () => {
+    const result = buildTagTree([], [['Imported', 'HiddenLayer']])
+    expect(result).toHaveLength(1)
+    expect(result[0].segment).toBe('Imported')
+    expect(result[0].nodes).toEqual([])
+    expect(result[0].children).toHaveLength(1)
+    expect(result[0].children[0].segment).toBe('HiddenLayer')
+    expect(result[0].children[0].nodes).toEqual([])
+  })
+
+  it('does not duplicate a tag that is both tagged and in the registry', () => {
+    const result = buildTagTree(
+      [{ node: obj(1n), path: ['Structure'] }],
+      [['Structure']],
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].nodes).toEqual([obj(1n)])
+  })
+
+  it('ignores empty registry path arrays', () => {
+    const result = buildTagTree([{ node: obj(1n), path: ['Real'] }], [[]])
+    expect(result).toHaveLength(1)
+    expect(result[0].segment).toBe('Real')
+  })
 })
 
 // ---------------------------------------------------------------------------

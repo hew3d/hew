@@ -64,7 +64,14 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath }: Pr
       }
     }
 
-    return buildTagTree(tagged)
+    // Union in every KNOWN tag path from the document's tag registry — this
+    // includes tags no node currently carries (e.g. an imported .skp layer
+    // list survives in full even for empty layers).
+    const registryPaths = Array.from(scene.tag_meta_paths())
+      .map((raw) => raw.split('/').map((s) => s.trim()).filter((s) => s.length > 0))
+      .filter((path) => path.length > 0)
+
+    return buildTagTree(tagged, registryPaths)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev])
 

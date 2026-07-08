@@ -29,7 +29,7 @@
 //! shim can reconcile inference candidates and render caches precisely without
 //! the kernel knowing those concerns exist.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use slotmap::SlotMap;
 use tracing::info;
@@ -479,6 +479,10 @@ enum DocAction {
         groups: Vec<GroupId>,
         /// Created `GuideId`s (imported construction guides).
         guides: Vec<GuideId>,
+        /// Tag paths this import NEWLY registered in the tag metadata
+        /// (with their hidden flags). Undo unregisters exactly these; tags
+        /// that already existed before the import are untouched.
+        tags: Vec<(Vec<String>, bool)>,
     },
 }
 
@@ -687,6 +691,23 @@ pub struct Document {
     /// The open sketch gesture, if any ([`Document::begin_sketch_gesture`] …
     /// [`Document::end_sketch_gesture`]). Session-only, never serialized.
     pending_sketch_gesture: Option<PendingSketchGesture>,
+    /// Tag metadata: every KNOWN tag path → hidden-by-default flag. Tags
+    /// still exist implicitly by appearing on a node; this registry adds
+    /// (a) tags with no content yet (an imported `.skp` layer list survives
+    /// even for empty layers) and (b) the persistent hidden flag the UI
+    /// seeds its visibility state from. Serialized (manifest v5). Toggling
+    /// visibility is view state and NOT undoable (matches palette
+    /// additions' spirit); import-time registration is undone with the
+    /// import's `DocAction::Imported` step.
+    tag_meta: BTreeMap<Vec<String>, bool>,
+    /// USER-hidden nodes (SketchUp "Hide"): view state the user (or an
+    /// import — a `.skp` hidden group/component) toggles per node,
+    /// persisted at manifest v6. DISTINCT from the records' `hidden`
+    /// tombstone (undone creations excluded from save). Not undoable,
+    /// matching the tag-visibility registry.
+    user_hidden_objects: BTreeSet<ObjectId>,
+    user_hidden_groups: BTreeSet<GroupId>,
+    user_hidden_instances: BTreeSet<InstanceId>,
     undo: Vec<DocAction>,
     redo: Vec<DocAction>,
     /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
@@ -858,6 +879,10 @@ impl Document {
             (sdense, rdense)
         });
 
+        // ── Tag metadata registry (manifest v5) ────────────────────────────
+        let tag_meta: Vec<(Vec<String>, bool)> =
+            self.tag_meta.iter().map(|(p, &h)| (p.clone(), h)).collect();
+
         encode_document(DocSaveData {
             materials,
             world_objects,
@@ -871,6 +896,10 @@ impl Document {
             consumed,
             obj_names,
             obj_tags,
+            tag_meta,
+            obj_hidden: self.user_hidden_objects.clone(),
+            group_hidden: self.user_hidden_groups.clone(),
+            instance_hidden: self.user_hidden_instances.clone(),
         })
     }
 
@@ -1142,6 +1171,30 @@ impl Document {
             }
         }
 
+        // ── Tag metadata registry (manifest v5; empty in v1–v4 files) ─────
+        for (path, hidden) in raw.tag_meta {
+            if !path.is_empty() {
+                doc.tag_meta.insert(path, hidden);
+            }
+        }
+
+        // ── USER-hidden view state (manifest v6; empty pre-v6) ────────────
+        for (i, &h) in raw.obj_hidden.iter().enumerate() {
+            if h && let Some(&oid) = dense_obj_ids.get(i) {
+                doc.user_hidden_objects.insert(oid);
+            }
+        }
+        for (i, &h) in raw.group_hidden.iter().enumerate() {
+            if h && let Some(&gid) = grp_ids.get(i) {
+                doc.user_hidden_groups.insert(gid);
+            }
+        }
+        for (i, &h) in raw.instance_hidden.iter().enumerate() {
+            if h && let Some(&iid) = inst_ids.get(i) {
+                doc.user_hidden_instances.insert(iid);
+            }
+        }
+
         // Undo/redo stacks are empty by construction (Document::new() gives empty).
         Ok(doc)
     }
@@ -1293,6 +1346,18 @@ impl Document {
             }
         }
 
+        // ── 4b. Register the source document's declared tag list ──────────
+        // Only NEWLY registered paths are recorded (and undone): a tag that
+        // already exists keeps its current hidden flag — an import must not
+        // flip visibility the user already chose.
+        let mut tags_added: Vec<(Vec<String>, bool)> = Vec::new();
+        for t in scene.tags {
+            if !t.path.is_empty() && !self.tag_meta.contains_key(&t.path) {
+                self.tag_meta.insert(t.path.clone(), t.hidden);
+                tags_added.push((t.path, t.hidden));
+            }
+        }
+
         // ── 5. Push action + clear redo ───────────────────────────────────
         self.undo.push(DocAction::Imported {
             roots: top_roots.clone(),
@@ -1301,6 +1366,7 @@ impl Document {
             instances: all_instances.clone(),
             groups: all_groups.clone(),
             guides: all_guides.clone(),
+            tags: tags_added,
         });
         self.redo.clear();
         self.debug_validate();
@@ -1806,6 +1872,85 @@ impl Document {
                 .filter(|r| !r.hidden)
                 .map_or(&[], |r| r.tags.as_slice()),
         }
+    }
+
+    /// The tag metadata registry: every KNOWN tag path with its
+    /// hidden-by-default flag, sorted by path. Tags carried only by nodes
+    /// (never registered) are NOT listed here — the UI unions this registry
+    /// with the per-node tags it already collects.
+    pub fn tag_meta(&self) -> impl Iterator<Item = (&[String], bool)> {
+        self.tag_meta
+            .iter()
+            .map(|(path, &hidden)| (path.as_slice(), hidden))
+    }
+
+    /// The hidden-by-default flag for `path` (`false` for unregistered tags).
+    pub fn tag_hidden(&self, path: &[String]) -> bool {
+        self.tag_meta.get(path).copied().unwrap_or(false)
+    }
+
+    /// Sets (registering if unknown) a tag's hidden-by-default flag.
+    ///
+    /// View state, deliberately NOT undoable — matching how palette
+    /// additions escape the undo log. Serialized with the document
+    /// (manifest v5) so a hidden `.skp` layer stays hidden across
+    /// save/load.
+    pub fn set_tag_hidden(&mut self, path: Vec<String>, hidden: bool) {
+        if path.is_empty() {
+            return;
+        }
+        self.tag_meta.insert(path, hidden);
+    }
+
+    /// Whether a node is USER-hidden (view state; persisted, manifest v6).
+    pub fn node_user_hidden(&self, node: NodeId) -> bool {
+        match node {
+            NodeId::Object(id) => self.user_hidden_objects.contains(&id),
+            NodeId::Group(id) => self.user_hidden_groups.contains(&id),
+            NodeId::Instance(id) => self.user_hidden_instances.contains(&id),
+        }
+    }
+
+    /// Sets a node's USER-hidden flag (view state, deliberately NOT
+    /// undoable — matching [`Document::set_tag_hidden`]). Stale ids are
+    /// ignored.
+    pub fn set_node_user_hidden(&mut self, node: NodeId, hidden: bool) {
+        match node {
+            NodeId::Object(id) => {
+                if hidden {
+                    self.user_hidden_objects.insert(id);
+                } else {
+                    self.user_hidden_objects.remove(&id);
+                }
+            }
+            NodeId::Group(id) => {
+                if hidden {
+                    self.user_hidden_groups.insert(id);
+                } else {
+                    self.user_hidden_groups.remove(&id);
+                }
+            }
+            NodeId::Instance(id) => {
+                if hidden {
+                    self.user_hidden_instances.insert(id);
+                } else {
+                    self.user_hidden_instances.remove(&id);
+                }
+            }
+        }
+    }
+
+    /// Every USER-hidden node, for seeding the UI's visibility state.
+    pub fn user_hidden_nodes(&self) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = Vec::new();
+        out.extend(self.user_hidden_objects.iter().map(|&i| NodeId::Object(i)));
+        out.extend(self.user_hidden_groups.iter().map(|&i| NodeId::Group(i)));
+        out.extend(
+            self.user_hidden_instances
+                .iter()
+                .map(|&i| NodeId::Instance(i)),
+        );
+        out
     }
 
     /// Returns `true` when `object` is a live, visible, watertight (solid) object.
@@ -3982,10 +4127,15 @@ impl Document {
                 instances,
                 groups,
                 guides,
+                tags,
                 ..
             } => {
                 // Undo import: hide every created entity (ids stay stable).
-                // Materials added to the palette are not hidden.
+                // Materials added to the palette are not hidden. Tags this
+                // import registered are unregistered.
+                for (path, _) in tags.iter() {
+                    self.tag_meta.remove(path);
+                }
                 for &oid in objects.iter() {
                     if let Some(rec) = self.objects.get_mut(oid) {
                         rec.hidden = true;
@@ -4435,9 +4585,14 @@ impl Document {
                 instances,
                 groups,
                 guides,
+                tags,
                 ..
             } => {
-                // Redo import: unhide every created entity.
+                // Redo import: unhide every created entity; re-register the
+                // import's tags with their original hidden flags.
+                for (path, hidden) in tags.iter() {
+                    self.tag_meta.insert(path.clone(), *hidden);
+                }
                 for &oid in objects.iter() {
                     if let Some(rec) = self.objects.get_mut(oid) {
                         rec.hidden = false;
@@ -4702,6 +4857,7 @@ fn ingest_build_node(
             pose,
             name,
             tags,
+            hidden,
         } => {
             let cid = def_cid.get(def).copied().flatten()?;
             let iid = doc.instances.insert(InstanceRecord {
@@ -4714,6 +4870,9 @@ fn ingest_build_node(
                 name,
                 tags,
             });
+            if hidden {
+                doc.user_hidden_instances.insert(iid);
+            }
             all_instances.push(iid);
             Some(NodeId::Instance(iid))
         }
@@ -4721,6 +4880,7 @@ fn ingest_build_node(
             name,
             children,
             tags,
+            hidden,
         } => {
             let gid = doc.groups.insert(GroupRecord {
                 members: Vec::new(),
@@ -4729,6 +4889,9 @@ fn ingest_build_node(
                 name: if name.is_empty() { None } else { Some(name) },
                 tags,
             });
+            if hidden {
+                doc.user_hidden_groups.insert(gid);
+            }
             all_groups.push(gid);
             let mut members: Vec<NodeId> = Vec::new();
             for child in children {

@@ -96,6 +96,8 @@ pub fn build_scene(
             defs,
             roots,
             guides: Vec::new(),
+            // glTF has no layer list; no document-level tags to declare.
+            tags: Vec::new(),
         },
         mat_table.missing,
     ))
@@ -113,6 +115,7 @@ impl Ctx<'_> {
                     pose: node_world.then(&self.world_tf),
                     name: node_name(node),
                     tags: Vec::new(),
+                    hidden: false,
                 })
             } else {
                 let raw = extract_raw_mesh(&mesh, self.buffers, self.mat_remap);
@@ -136,12 +139,14 @@ impl Ctx<'_> {
                     name: group_name(node),
                     children: group_children,
                     tags: Vec::new(),
+                    hidden: false,
                 })
             }
             (None, false) => Some(ImportNode::Group {
                 name: group_name(node),
                 children,
                 tags: Vec::new(),
+                hidden: false,
             }),
             (None, true) => None,
         }

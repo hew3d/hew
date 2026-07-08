@@ -1656,6 +1656,87 @@ impl Scene {
         Ok(tags)
     }
 
+    /// The tag metadata registry: every KNOWN tag path (registered by
+    /// import or [`Scene::set_tag_hidden`]), `/`-joined and sorted. The
+    /// parallel hidden flags come from [`Scene::tag_meta_hidden`] — two
+    /// primitive vecs keep the FFI free of ad-hoc JSON. Includes tags no
+    /// node carries (an imported `.skp` layer list survives in full).
+    ///
+    /// Same `/`-join limitation as [`Scene::node_tags`].
+    pub fn tag_meta_paths(&self) -> Vec<String> {
+        self.doc
+            .tag_meta()
+            .map(|(segments, _)| segments.join("/"))
+            .collect()
+    }
+
+    /// Hidden-by-default flags parallel to [`Scene::tag_meta_paths`].
+    pub fn tag_meta_hidden(&self) -> Vec<u8> {
+        self.doc
+            .tag_meta()
+            .map(|(_, hidden)| u8::from(hidden))
+            .collect()
+    }
+
+    /// Sets (registering if unknown) a tag's hidden-by-default flag. `path`
+    /// is `/`-joined like [`Scene::node_tags`]. View state, not undoable;
+    /// persisted with the document (manifest v5) so hidden `.skp` layers
+    /// stay hidden across save/load.
+    pub fn set_tag_hidden(&mut self, path: String, hidden: bool) {
+        let segments: Vec<String> = path.split('/').map(str::to_string).collect();
+        self.doc.set_tag_hidden(segments, hidden);
+    }
+
+    /// Whether a node is USER-hidden (persisted view state, manifest v6).
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_user_hidden(&self, kind: u8, id: u64) -> Result<bool, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_user_hidden(node))
+    }
+
+    /// Sets a node's USER-hidden flag (persisted view state, not
+    /// undoable — matching [`Scene::set_tag_hidden`]).
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn set_node_user_hidden(
+        &mut self,
+        kind: u8,
+        id: u64,
+        hidden: bool,
+    ) -> Result<(), ApiError> {
+        let node = node_id(kind, id)?;
+        self.doc.set_node_user_hidden(node, hidden);
+        Ok(())
+    }
+
+    /// Every USER-hidden node as parallel kind/id vectors (for seeding the
+    /// UI's visibility state on load/import).
+    pub fn user_hidden_kinds(&self) -> Vec<u8> {
+        self.doc
+            .user_hidden_nodes()
+            .iter()
+            .map(|n| match n {
+                kernel::NodeId::Object(_) => 0,
+                kernel::NodeId::Group(_) => 1,
+                kernel::NodeId::Instance(_) => 2,
+            })
+            .collect()
+    }
+
+    /// Ids parallel to [`Scene::user_hidden_kinds`].
+    pub fn user_hidden_ids(&self) -> Vec<u64> {
+        self.doc
+            .user_hidden_nodes()
+            .iter()
+            .map(|n| match n {
+                kernel::NodeId::Object(id) => id.data().as_ffi(),
+                kernel::NodeId::Group(id) => id.data().as_ffi(),
+                kernel::NodeId::Instance(id) => id.data().as_ffi(),
+            })
+            .collect()
+    }
+
     /// Whether `object` is a live, visible, watertight (solid) object.
     ///
     /// Returns `false` if the id is stale, hidden, or the object is leaky/open.

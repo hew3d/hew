@@ -72,6 +72,9 @@ pub enum ImportNode {
         children: Vec<ImportNode>,
         /// Tag paths for this group node (from `__HEWMETA__` decode, WS2).
         tags: Vec<Vec<String>>,
+        /// USER-hidden in the source (a `.skp` hidden group): imported,
+        /// registered hidden-by-default (manifest v6), never dropped.
+        hidden: bool,
     },
     /// An instance of a shared definition (index into `ImportScene::defs`).
     Instance {
@@ -85,6 +88,8 @@ pub enum ImportNode {
         name: Option<String>,
         /// Tag paths for this instance node (from `__HEWMETA__` decode, WS2).
         tags: Vec<Vec<String>>,
+        /// USER-hidden in the source (a `.skp` hidden component instance).
+        hidden: bool,
     },
 }
 
@@ -106,6 +111,18 @@ pub enum ImportGuide {
     },
 }
 
+/// A tag the source document DECLARES (a `.skp` layer), independent of
+/// whether any imported node carries it. Registered in the document's tag
+/// metadata by `ingest` so the full source layer list survives import —
+/// including empty layers — with its visibility. Content tagged with a
+/// `hidden` tag imports normally and is hidden by default in the UI.
+pub struct ImportTag {
+    /// Root-first tag path (a `.skp` layer maps to a single segment).
+    pub path: Vec<String>,
+    /// Hidden in the source document → hidden by default in Hew.
+    pub hidden: bool,
+}
+
 /// The complete import recipe: produced by `dae-import`, consumed by
 /// `Document::ingest`.
 pub struct ImportScene {
@@ -117,6 +134,9 @@ pub struct ImportScene {
     pub roots: Vec<ImportNode>,
     /// Construction guides to add. Undone with the import.
     pub guides: Vec<ImportGuide>,
+    /// The source document's declared tag list (`.skp` layers) with their
+    /// visibility. Registered by `ingest`; unregistered on undo.
+    pub tags: Vec<ImportTag>,
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

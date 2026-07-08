@@ -19,10 +19,14 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 /// Import a fixture and ingest it into a fresh document.
+///
+/// Clean corpus files never produce parser-RECOVERY warnings. Non-manifold
+/// SPLIT notices are legitimate (rule 4's loud decomposition) and pass
+/// through — specs that care about them assert on the report instead.
 fn ingest(name: &str) -> (kernel::ImportReport, Document) {
     let out = skp_import::import(&fixture(name)).expect(name);
     assert!(
-        out.warnings.is_empty(),
+        !out.warnings.iter().any(|w| w.contains("parser recovered")),
         "{name}: clean corpus files parse without recovery warnings; got {:?}",
         out.warnings
     );
@@ -199,16 +203,16 @@ fn house_ingests_with_shared_defs_and_loud_skips() {
     let (report, doc) = ingest("house.skp");
     // Frozen regression numbers (validated against house.dae, which flattens
     // to 69 baked objects with 34 leaky shells — the .skp path keeps shared
-    // definitions and watertight solids instead).
-    assert_eq!(report.objects_created, 32);
+    // definitions and watertight solids instead). house's two genuinely
+    // non-manifold source meshes now DECOMPOSE into open shells (loud split
+    // warnings) instead of being rejected: 32 watertight solids + 3 leaky
+    // pieces, nothing skipped.
+    assert_eq!(report.objects_created, 35);
     assert_eq!(report.watertight, 32);
-    assert_eq!(report.leaky, 0);
-    assert_eq!(doc.instance_ids().len(), 60);
+    assert_eq!(report.leaky, 3);
+    assert_eq!(doc.instance_ids().len(), 61);
     assert_eq!(doc.group_ids().len(), 17);
-    // Two source meshes are genuinely non-manifold: rejected + reported,
-    // never repaired (rule 4). If an OpenSKP fix upstream makes these import,
-    // this count DROPS — update deliberately with the rev bump.
-    assert_eq!(report.skipped.len(), 2);
+    assert_eq!(report.skipped.len(), 0);
     // One texture has no embedded image bytes in the file.
     assert_eq!(
         report.textures_missing,

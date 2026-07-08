@@ -74,9 +74,16 @@ export interface TagTreeNode {
  * Tag paths are root-first (e.g. `["Structure", "Roof"]`).  A node tagged at
  * `["Structure", "Roof"]` appears in the `nodes` array of the "Roof" child of
  * the "Structure" root tag — NOT at the "Structure" root itself.
+ *
+ * `registryPaths` (optional) are additional known tag paths — from the
+ * document's tag metadata registry (`Scene::tag_meta_paths`) — that should
+ * appear in the tree even when no node currently carries them (e.g. an
+ * imported `.skp` layer with nothing assigned to it). They're merged in with
+ * zero direct `nodes`.
  */
 export function buildTagTree(
   tagged: { node: NodeRef; path: string[] }[],
+  registryPaths: string[][] = [],
 ): TagTreeNode[] {
   // Use a map keyed by JSON-serialised path for O(1) lookup/insertion.
   const byPath = new Map<string, TagTreeNode>()
@@ -103,6 +110,14 @@ export function buildTagTree(
     if (path.length === 0) continue
     const treeNode = getOrCreate(path)
     treeNode.nodes.push(node)
+  }
+
+  // Registry-only paths (no tagged node yet) still get a tree node so they
+  // show up in the panel — getOrCreate is idempotent against paths already
+  // created above, and recursively materialises any missing ancestors.
+  for (const path of registryPaths) {
+    if (path.length === 0) continue
+    getOrCreate(path)
   }
 
   // Collect only the root-level tag nodes (path.length === 1).

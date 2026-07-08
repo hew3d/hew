@@ -11,10 +11,15 @@
 //!   exactly like `dae-import`;
 //! - the **root run** (loose model geometry) becomes a world
 //!   [`ImportNode::Mesh`];
-//! - layers map to tags, guides to [`ImportGuide`]s, and visibility follows
-//!   SketchUp's own export rule (the ground truth): hidden instances
-//!   and hidden-layer *instances* are dropped, but faces always import —
-//!   hidden faces are display state, and dropping them would open solids.
+//! - layers map to tags — the FULL layer list (empty and hidden layers
+//!   included) is declared as [`ImportTag`]s so the document keeps it, with
+//!   hidden layers becoming hidden-by-default tags;
+//! - hidden-layer CONTENT imports (tagged with its hidden tag, hidden by
+//!   default in the UI, never dropped — a layer is visibility state, not
+//!   existence); hidden *instances* (per-entity hide) still drop, matching
+//!   SketchUp's own exports, and faces always import — hidden faces are
+//!   display state, and dropping them would open solids;
+//! - guides map to [`ImportGuide`]s.
 //!
 //! Everything OpenSKP hands us is already metres; poses come from the
 //! composed row-major world matrices, whose first 12 entries are exactly
@@ -23,7 +28,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
-    DefRecipe, ImportGuide, ImportNode, ImportScene, MeshRecipe, Point3, Transform, UvFrame, Vec3,
+    DefRecipe, ImportGuide, ImportNode, ImportScene, ImportTag, MeshRecipe, Point3, Transform,
+    UvFrame, Vec3,
 };
 use mesh_heal::heal_mesh;
 use mesh_heal::uv::fit_uv_frame;
@@ -53,6 +59,7 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
         mats,
         def_variants: BTreeMap::new(),
         defs: Vec::new(),
+        warnings: Vec::new(),
     };
 
     let mut roots: Vec<ImportNode> = Vec::new();
@@ -63,7 +70,7 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
         if is_def {
             continue;
         }
-        if let Some(recipe) = cv.mesh_recipe(ri, "Model".to_string(), 0) {
+        for recipe in cv.mesh_recipes(ri, "Model".to_string(), 0) {
             roots.push(ImportNode::Mesh(recipe));
         }
     }
@@ -103,11 +110,42 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
     // Clean 2017 files parse with zero desync diagnostics (an OpenSKP
     // regression guarantee); anything else means content may be missing and
     // is said out loud, never papered over (rule 4 spirit; fixes go upstream).
-    let warnings: Vec<String> = model
-        .diagnostics
+    // Converter-emitted warnings (non-manifold splits) come first — they are
+    // per-object and actionable. Desync notes AGGREGATE past a handful: a
+    // badly damaged file can desync tens of thousands of times, and 32k
+    // warning strings help nobody (a damaged production model produced 32k).
+    const DESYNC_DETAIL_CAP: usize = 8;
+    let mut warnings = std::mem::take(&mut cv.warnings);
+    let desyncs: Vec<&openskp::Diagnostic> =
+        model.diagnostics.iter().filter(|d| d.is_desync()).collect();
+    warnings.extend(
+        desyncs
+            .iter()
+            .take(DESYNC_DETAIL_CAP)
+            .map(|d| format!("parser recovered from a malformed section: {d:?}")),
+    );
+    if desyncs.len() > DESYNC_DETAIL_CAP {
+        warnings.push(format!(
+            "parser recovered from {} more malformed sections (content from \
+             them may be missing)",
+            desyncs.len() - DESYNC_DETAIL_CAP
+        ));
+    }
+
+    // ── The declared tag list: every named non-default layer ──────────────
+    // Hidden layers become hidden-by-default tags; empty layers survive too
+    // (the document keeps the full source layer list).
+    let tags: Vec<ImportTag> = model
+        .layers
         .iter()
-        .filter(|d| d.is_desync())
-        .map(|d| format!("parser recovered from a malformed section: {d:?}"))
+        .enumerate()
+        // The list-first layer is the default (Layer0) — it maps to
+        // "untagged", exactly as `layer_tags` treats slot 0.
+        .filter(|(i, l)| *i > 0 && !l.name.is_empty())
+        .map(|(_, l)| ImportTag {
+            path: vec![l.name.clone()],
+            hidden: !l.visible,
+        })
         .collect();
 
     let Converter { mats, defs, .. } = cv;
@@ -117,6 +155,7 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
             defs,
             roots,
             guides,
+            tags,
         },
         textures_missing: mats.textures_missing,
         warnings,
@@ -130,6 +169,9 @@ struct Converter<'a> {
     /// (`None` = the run has no importable faces at that variant).
     def_variants: BTreeMap<(usize, u16), Option<usize>>,
     defs: Vec<DefRecipe>,
+    /// User-visible conversion warnings (non-manifold splits — rule 4:
+    /// decomposition happens loudly, never silently).
+    warnings: Vec<String>,
 }
 
 impl Converter<'_> {
@@ -140,11 +182,13 @@ impl Converter<'_> {
         node: &openskp::Node,
         own_name: Option<String>,
     ) -> Option<ImportNode> {
-        // WYSIWYG: hidden instances and hidden-layer instances drop with
-        // their whole subtree (matches SketchUp's own exports).
-        if node.hidden || !self.layer_visible(node.layer) {
-            return None;
-        }
+        // NOTHING visibility-related is dropped: a hidden INSTANCE
+        // (per-entity hide) imports as a user-hidden node (persisted view
+        // state, manifest v6), and hidden-LAYER content imports carrying
+        // its layer tag whose hidden-by-default flag keeps it invisible
+        // until the user shows the tag. Hidden is visibility state, not
+        // existence.
+        let hidden = node.hidden;
 
         let pose = pose_of(&node.world);
         let tags = self.layer_tags(node.layer);
@@ -159,6 +203,7 @@ impl Converter<'_> {
                 pose,
                 name: own_name.clone(),
                 tags: tags.clone(),
+                hidden,
             });
 
         // Children (in-definition placements), expanded per placement site
@@ -178,6 +223,7 @@ impl Converter<'_> {
                     name,
                     children: own.into_iter().chain(children).collect(),
                     tags,
+                    hidden,
                 })
             }
             (own, true) => own,
@@ -185,21 +231,20 @@ impl Converter<'_> {
     }
 
     /// Def index for `(run, inherited material)`, building the `DefRecipe`
-    /// variant on first use.
+    /// variant on first use. A non-manifold run splits into several meshes
+    /// under ONE definition, so every placement keeps all its pieces.
     fn def_variant(&mut self, run_idx: usize, eff_slot: u16) -> Option<usize> {
         if let Some(&cached) = self.def_variants.get(&(run_idx, eff_slot)) {
             return cached;
         }
         let name = self.def_name(run_idx);
-        let built = self
-            .mesh_recipe(run_idx, name.clone().unwrap_or_default(), eff_slot)
-            .map(|recipe| {
-                self.defs.push(DefRecipe {
-                    name,
-                    meshes: vec![recipe],
-                });
-                self.defs.len() - 1
-            });
+        let meshes = self.mesh_recipes(run_idx, name.clone().unwrap_or_default(), eff_slot);
+        let built = if meshes.is_empty() {
+            None
+        } else {
+            self.defs.push(DefRecipe { name, meshes });
+            Some(self.defs.len() - 1)
+        };
         self.def_variants.insert((run_idx, eff_slot), built);
         built
     }
@@ -220,7 +265,12 @@ impl Converter<'_> {
     ///
     /// `eff_slot` is the placing instance's inherited material (0 = none): it
     /// becomes `base_material`, which default-material faces resolve to.
-    fn mesh_recipe(&self, run_idx: usize, name: String, eff_slot: u16) -> Option<MeshRecipe> {
+    ///
+    /// Usually one recipe. A NON-MANIFOLD run (which `from_polygons` would
+    /// reject whole) is decomposed by [`mesh_heal::split::split_non_manifold`]
+    /// into several open-shell recipes — loudly (a warning names the mesh
+    /// and the piece count), never silently (rule 4).
+    fn mesh_recipes(&mut self, run_idx: usize, name: String, eff_slot: u16) -> Vec<MeshRecipe> {
         let mesh = &self.model.geometry[run_idx].mesh;
 
         let positions: Vec<Point3> = mesh
@@ -285,7 +335,7 @@ impl Converter<'_> {
         }
 
         if faces.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         // Native tolerances: `.skp` coordinates are exact f64, like COLLADA
@@ -299,48 +349,63 @@ impl Converter<'_> {
             &Transform::IDENTITY,
         );
         if faces.is_empty() {
-            return None;
+            return Vec::new();
         }
 
-        // Fit per-face affine UV frames from healed corners (same as dae-import).
-        let face_uv_frames: Vec<Option<UvFrame>> = faces
-            .iter()
-            .zip(healed_uvs.iter())
-            .map(|(face, uvs)| {
-                if uvs.len() == face.len() && uvs.len() >= 3 {
-                    let corner_pos: Vec<Point3> = face.iter().map(|&vi| positions[vi]).collect();
-                    fit_uv_frame(&corner_pos, uvs)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         let tags = self.mesh_layer_tags(run_idx);
+        let base_material = if eff_slot != 0 {
+            self.mats.dense(eff_slot)
+        } else {
+            kernel::NO_MATERIAL
+        };
 
-        Some(MeshRecipe {
+        // Non-manifold runs split into buildable open shells (rule 4: the
+        // decomposition is reported, the geometry is never repaired).
+        if let Some(pieces) = mesh_heal::split::split_non_manifold(
+            &positions,
+            &faces,
+            &healed_mats,
+            &healed_uvs,
+            &healed_holes,
+        ) {
+            self.warnings.push(format!(
+                "'{}' is non-manifold; imported as {} open shell{} \
+                 (split at non-manifold edges, geometry unchanged)",
+                if name.is_empty() {
+                    "unnamed mesh"
+                } else {
+                    &name
+                },
+                pieces.len(),
+                if pieces.len() == 1 { "" } else { "s" },
+            ));
+            return pieces
+                .into_iter()
+                .map(|piece| {
+                    recipe_from_arrays(
+                        name.clone(),
+                        piece.positions,
+                        piece.faces,
+                        piece.face_materials,
+                        piece.face_corner_uvs,
+                        piece.face_holes,
+                        base_material,
+                        tags.clone(),
+                    )
+                })
+                .collect();
+        }
+
+        vec![recipe_from_arrays(
             name,
             positions,
             faces,
-            face_materials: healed_mats,
-            face_uv_frames,
-            face_holes: healed_holes,
-            base_material: if eff_slot != 0 {
-                self.mats.dense(eff_slot)
-            } else {
-                kernel::NO_MATERIAL
-            },
+            healed_mats,
+            healed_uvs,
+            healed_holes,
+            base_material,
             tags,
-        })
-    }
-
-    /// Layer slot -> visible? Slot 0 (the default layer) and unlinked slots
-    /// count as visible.
-    fn layer_visible(&self, slot: u16) -> bool {
-        if slot == 0 {
-            return true;
-        }
-        self.model.layer_of(slot).is_none_or(|l| l.visible)
+        )]
     }
 
     /// Tag paths for an entity on `slot`: the layer name as a single-segment
@@ -366,6 +431,43 @@ impl Converter<'_> {
             (1, Some(&slot)) => self.layer_tags(slot),
             _ => Vec::new(),
         }
+    }
+}
+
+/// Healed (or split-piece) parallel arrays -> a `MeshRecipe`, fitting the
+/// per-face affine UV frames from the corner UVs (same as dae-import).
+#[allow(clippy::too_many_arguments)]
+fn recipe_from_arrays(
+    name: String,
+    positions: Vec<Point3>,
+    faces: Vec<Vec<usize>>,
+    face_materials: Vec<u32>,
+    corner_uvs: Vec<Vec<[f64; 2]>>,
+    face_holes: Vec<Vec<Vec<usize>>>,
+    base_material: u32,
+    tags: Vec<Vec<String>>,
+) -> MeshRecipe {
+    let face_uv_frames: Vec<Option<UvFrame>> = faces
+        .iter()
+        .zip(corner_uvs.iter())
+        .map(|(face, uvs)| {
+            if uvs.len() == face.len() && uvs.len() >= 3 {
+                let corner_pos: Vec<Point3> = face.iter().map(|&vi| positions[vi]).collect();
+                fit_uv_frame(&corner_pos, uvs)
+            } else {
+                None
+            }
+        })
+        .collect();
+    MeshRecipe {
+        name,
+        positions,
+        faces,
+        face_materials,
+        face_uv_frames,
+        face_holes,
+        base_material,
+        tags,
     }
 }
 

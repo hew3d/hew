@@ -27,7 +27,7 @@ import { updateFatLineResolutions } from './fatLine'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
 import { SnapService } from './snapService'
-import { SceneRenderer } from './SceneRenderer'
+import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
 import * as inputRecorder from '../recording/inputRecorder'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { exportSceneToStl, type StlBuildResult } from '../io/exporters/stlExport'
@@ -48,7 +48,7 @@ import { EditVertexTool } from '../tools/EditVertexTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 import type { Snap } from '../tools/types'
-import type { NodeRef } from '../panels/treeModel'
+import { collectLeafIds, type NodeRef } from '../panels/treeModel'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
 import { InfiniteGrid } from './InfiniteGrid'
@@ -399,10 +399,25 @@ function updateAxisResolution(group: THREE.Group, width: number, height: number)
 }
 
 /**
- * Walk the ancestor chain of a leaf object up to (and including) any groups,
- * and return the array [objectId, ...parentGroupIds from innermost to outermost].
+ * Walk the ancestor chain of a picked node up to (and including) any groups,
+ * and return the array [pickedNode, ...parentGroupIds from innermost to
+ * outermost]. The chain is rooted at the picked node itself: when the pick
+ * carries an instance id (the ray hit instanced geometry), the chain starts
+ * at that instance (kind 2) and walks group parents from there; otherwise it
+ * starts at the leaf object as before. Rooting at the instance (rather than
+ * the definition-member object, which has no doc-tree parent of its own) is
+ * what lets a nested instance resolve up to its outermost wrapper group.
  */
-function buildAncestorChain(wasmScene: WasmScene, objectId: bigint): NodeRef[] {
+export function buildAncestorChain(wasmScene: WasmScene, objectId: bigint, instanceId?: bigint): NodeRef[] {
+  if (instanceId !== undefined) {
+    const chain: NodeRef[] = [{ kind: 'instance', id: instanceId }]
+    let parentId = wasmScene.node_parent(2, instanceId)
+    while (parentId !== undefined) {
+      chain.push({ kind: 'group', id: parentId })
+      parentId = wasmScene.node_parent(1, parentId)
+    }
+    return chain
+  }
   const chain: NodeRef[] = [{ kind: 'object', id: objectId }]
   let parentId = wasmScene.node_parent(0, objectId)
   while (parentId !== undefined) {
@@ -415,33 +430,34 @@ function buildAncestorChain(wasmScene: WasmScene, objectId: bigint): NodeRef[] {
 /**
  * Resolve a pick to the selectable NodeRef given the active context path.
  *
- * When the pick carries an instance id (the ray hit instanced geometry), the
- * selectable at top level is the instance node. Inside an instance's editing
- * context the pick resolves directly to the object.
+ * Both the top-level and inside-a-group cases root the ancestor chain at the
+ * picked node itself (the instance, if the ray hit instanced geometry;
+ * otherwise the leaf object) via `buildAncestorChain`, so a nested instance
+ * resolves the same way a nested plain object does.
  *
- * For world objects the existing group-walk logic applies.
- *
- * - Top level (ctx empty):
- *   - instance hit → select the instance
- *   - world object hit → topmost ancestor (object or group)
+ * - Top level (ctx empty): selectable = outermost ancestor in the chain — a
+ *   top-level instance/object resolves to itself; a nested one resolves to
+ *   its outermost wrapper group.
  * - Inside instance I (deepest ctx node is instance I):
  *   - pick must be inside I → return the picked definition-member object
  *   - pick is not inside I → null (out of scope)
- * - Inside group G: selectable = direct child of G in the ancestor chain.
+ * - Inside group G: selectable = direct child of G in the ancestor chain
+ *   (may be a group, an instance, or a plain object).
  * - Inside world object O: out-of-scope picks return null.
  */
-function resolvePickToSelectable(
+export function resolvePickToSelectable(
   wasmScene: WasmScene,
   pickedObjectId: bigint,
   activeContext: NodeRef[],
   pickedInstanceId?: bigint,
 ): NodeRef | null {
   if (activeContext.length === 0) {
-    // Top level
-    if (pickedInstanceId !== undefined) {
-      return { kind: 'instance', id: pickedInstanceId }
-    }
-    const chain = buildAncestorChain(wasmScene, pickedObjectId)
+    // Top level: root the chain at the picked node itself (the instance, if
+    // the pick hit instanced geometry; otherwise the leaf object), walk group
+    // parents up, and return the outermost ancestor. A top-level instance has
+    // no group parent, so its chain is length 1 and it resolves to itself; a
+    // nested instance resolves to its outermost wrapper group.
+    const chain = buildAncestorChain(wasmScene, pickedObjectId, pickedInstanceId)
     return chain[chain.length - 1]
   }
 
@@ -461,8 +477,10 @@ function resolvePickToSelectable(
     return null
   }
 
-  // Inside group G: find the direct child of G in the world-object ancestor chain
-  const chain = buildAncestorChain(wasmScene, pickedObjectId)
+  // Inside group G: find the direct child of G in the instance-rooted ancestor
+  // chain (same rooting as the top-level case) — the direct child may be a
+  // group, an instance, or a plain object.
+  const chain = buildAncestorChain(wasmScene, pickedObjectId, pickedInstanceId)
   for (let i = 0; i < chain.length - 1; i++) {
     if (chain[i + 1].kind === 'group' && chain[i + 1].id === deepest.id) {
       return chain[i]
@@ -636,6 +654,11 @@ export default function Viewport({
     // grid, in contrast, only needs a cheap uniform write via `setColors()`.
     let originAxes = buildOriginAxes(getResolvedTheme())
     updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
+    // Seed every other fat-line material (sketch edges, tool-preview
+    // rubber-bands) at the initial canvas size too — mirrors the axes call
+    // just above. Kept current on resize below; no longer walked every
+    // render frame (see fatLine.ts's module doc comment).
+    updateFatLineResolutions(el.clientWidth, el.clientHeight)
     threeScene.add(originAxes)
     const initialGridColors = GROUND_GRID_COLORS[getResolvedTheme()]
     const infiniteGrid = new InfiniteGrid(initialGridColors.ground, initialGridColors.minor, initialGridColors.major)
@@ -751,8 +774,17 @@ export default function Viewport({
     toolControllerRef.current = toolController
 
     // ------------------------------------------------------------------ commit callbacks
-    function handleSceneRefresh(): void {
-      const wtMap = sceneRenderer.refresh()
+    /**
+     * Re-tessellate after a committed kernel mutation. With a `touched` hint
+     * (single-object tool commits: push/pull, paint, move/rotate/scale of one
+     * node) only the touched groups rebuild (`SceneRenderer.refreshTouched`);
+     * without one (load/import/undo/redo/boolean/group/structural ops) the
+     * full rebuild runs as before.
+     */
+    function handleSceneRefresh(touched?: RefreshTouched): void {
+      const wtMap = touched !== undefined
+        ? sceneRenderer.refreshTouched(touched)
+        : sceneRenderer.refresh()
       onSceneChangeRef.current?.(wtMap)
       onDocumentChangedRef.current?.()
       scheduleRender()
@@ -762,6 +794,16 @@ export default function Viewport({
       // stationary mouse across the mutation doesn't leave the contextual
       // dock showing a stale context (see `reevaluateHoverNow`'s doc comment).
       reevaluateHoverNow()
+    }
+
+    // Touched-hint for a single transformed/committed node: objects and
+    // instances get a targeted refresh; groups (many leaves, possibly nested
+    // instances) and sketches (also the Option-copy of either) fall back to
+    // the full rebuild by returning undefined.
+    function touchedForNode(node: NodeRef): RefreshTouched | undefined {
+      if (node.kind === 'object') return { objectIds: [node.id] }
+      if (node.kind === 'instance') return { instanceIds: [node.id] }
+      return undefined
     }
 
     // Re-tessellate after a harness-driven kernel mutation (ViewportApi.refreshScene).
@@ -1097,8 +1139,8 @@ export default function Viewport({
           scheduleRender()
         },
         handleToast,
-        (_objectId) => {
-          handleSceneRefresh()
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
       )
@@ -1121,8 +1163,8 @@ export default function Viewport({
           scheduleRender()
         },
         handleToast,
-        (_objectId) => {
-          handleSceneRefresh()
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
       )
@@ -1145,8 +1187,8 @@ export default function Viewport({
           scheduleRender()
         },
         handleToast,
-        (_objectId) => {
-          handleSceneRefresh()
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
       )
@@ -1169,8 +1211,8 @@ export default function Viewport({
           scheduleRender()
         },
         handleToast,
-        (_objectId) => {
-          handleSceneRefresh()
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
       )
@@ -1186,8 +1228,12 @@ export default function Viewport({
       const tool = new PushPullTool(
         wasmScene,
         previewGroup,
-        (_objectId) => {
-          handleSceneRefresh()
+        // Targeted refresh: the committed object (a world object OR a def
+        // member for push_pull_in_component — refreshTouched rebuilds every
+        // placement of a touched member). A through-cut's extra result
+        // objects / consumed source are caught by refreshTouched's id diff.
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
           sceneRenderer.refreshAllSketches()
           sceneRenderer.refreshGuides()
         },
@@ -1213,8 +1259,11 @@ export default function Viewport({
     function makePaintTool(): PaintTool {
       return new PaintTool(
         wasmScene,
-        (_objectId) => {
-          handleSceneRefresh()
+        // Targeted refresh: only the painted object rebuilds. Painting a def
+        // member (instanced geometry) invalidates all its placements via
+        // refreshTouched's member-cache path.
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
         },
         handleToast,
       )
@@ -1228,7 +1277,7 @@ export default function Viewport({
         sceneRenderer.objectsGroup,
         sel,
         (node) => {
-          handleSceneRefresh()
+          handleSceneRefresh(touchedForNode(node))
           // A sketch move bakes new vertex positions; rebuild sketch buffers so
           // the lines follow (objects refresh via handleSceneRefresh; sketches
           // do not). Mirrors the boolean/undo refresh pairing.
@@ -1250,8 +1299,8 @@ export default function Viewport({
         previewGroup,
         sceneRenderer.objectsGroup,
         sel,
-        (_node) => {
-          handleSceneRefresh()
+        (node) => {
+          handleSceneRefresh(touchedForNode(node))
           // Rebuild sketch buffers so a rotated sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
@@ -1269,8 +1318,8 @@ export default function Viewport({
         previewGroup,
         sceneRenderer.objectsGroup,
         sel,
-        (_node) => {
-          handleSceneRefresh()
+        (node) => {
+          handleSceneRefresh(touchedForNode(node))
           // Rebuild sketch buffers so a scaled sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
@@ -1564,10 +1613,13 @@ export default function Viewport({
         // Feed the shader grid the camera's current position so it can pick
         // the right cell-size decade per fragment.
         infiniteGrid.update(camera.position)
-        // Keep every fat line (axes, sketch edges, tool-preview rubber-bands)
-        // sized to the current canvas — LineMaterial needs its resolution
-        // uniform current or the pixel width is wrong (Refinement pass).
-        updateFatLineResolutions(threeScene, el.clientWidth, el.clientHeight)
+        // Fat-line resolutions (sketch edges, tool-preview rubber-bands) are
+        // NOT refreshed here: LineMaterial's resolution uniform depends only
+        // on the canvas size, so it's set at mount and on resize (see the
+        // ResizeObserver below) through the fat-line material registry. The
+        // old per-frame full-scene traverse walked every Object3D (thousands
+        // on a large document) each orbit frame just to re-set an unchanged
+        // uniform on a handful of materials.
         renderer.render(threeScene, camera)
         needsRender = false
       }
@@ -2098,6 +2150,10 @@ export default function Viewport({
       camera.updateProjectionMatrix()
       renderer.setSize(w, h)
       updateAxisResolution(originAxes, w, h)
+      // Keep every fat line (sketch edges, tool-preview rubber-bands) sized
+      // to the new canvas — resize is the only time the resolution uniform
+      // actually changes (the registry replaces the old per-frame traverse).
+      updateFatLineResolutions(w, h)
       scheduleRender()
     })
     resizeObserver.observe(el)
@@ -2182,9 +2238,10 @@ export default function Viewport({
   }, [activeContext, activeLitSet])
 
   // Reflect the parent's selection into the renderer highlight (e.g. a click in
-  // the tree). Object refs are passed to setSelected; group refs match nothing
-  // in the object groups but the leaf objects inside them are highlighted via
-  // the lit set / isolation mechanism. Instance refs are highlighted via
+  // the tree). Object and instance refs are passed straight through; group
+  // refs own no geometry themselves, so they're expanded (recursively —
+  // groups nest) to their leaf objects/instances via the shared
+  // `collectLeafIds` helper before being handed to setSelected/
   // setSelectedInstances.
   // Push the latest material id into a live PaintTool without re-creating it.
   useEffect(() => {
@@ -2197,19 +2254,23 @@ export default function Viewport({
 
   useEffect(() => {
     selectedIdsRef.current = selectedIds
-    // Collect leaf object ids, instance ids, and sketch ids for highlighting
+    // Collect leaf object ids, instance ids, and sketch ids for highlighting.
+    // Groups recurse via collectLeafIds/group_members so a group selection
+    // (e.g. an imported component's outermost group) highlights every leaf
+    // object and instance it contains, however deeply nested.
     const leafIds: bigint[] = []
     const instanceIds: bigint[] = []
     const sketchIds: bigint[] = []
+    const getGroupMembers = (groupId: bigint): NodeRef[] =>
+      wasmSceneRef.current.group_members(groupId).map((m) => ({ kind: m.kind as NodeRef['kind'], id: m.id }))
     for (const node of selectedIds) {
-      if (node.kind === 'object') {
-        leafIds.push(node.id)
-      } else if (node.kind === 'instance') {
-        instanceIds.push(node.id)
-      } else if (node.kind === 'sketch') {
+      if (node.kind === 'sketch') {
         sketchIds.push(node.id)
+        continue
       }
-      // Groups: isolation/lit set covers visual feedback
+      const { objectIds, instanceIds: leafInstanceIds } = collectLeafIds(node, getGroupMembers)
+      leafIds.push(...objectIds)
+      instanceIds.push(...leafInstanceIds)
     }
     sceneRendererRef.current?.setSelected(leafIds)
     sceneRendererRef.current?.setSelectedInstances(instanceIds)

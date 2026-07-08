@@ -43,7 +43,8 @@ pub use ids::{
     ObjectId, ShellId, SketchId, VertexId,
 };
 pub use import::{
-    DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, MeshRecipe, SkippedMesh,
+    DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, ImportTag, MeshRecipe,
+    SkippedMesh,
 };
 pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame};
 pub use math::{MathError, Plane, Point3, Vec3};

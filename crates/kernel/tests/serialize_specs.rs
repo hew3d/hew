@@ -481,6 +481,7 @@ fn tags_round_trip_through_save_load() {
             obj_tags.clone(),
         ))],
         guides: Vec::new(),
+        tags: Vec::new(),
     };
     let (_, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -528,6 +529,146 @@ fn tags_round_trip_through_save_load() {
         loaded.node_tags(NodeId::Instance(loaded_iid)),
         inst_tags.as_slice()
     );
+}
+
+/// Tag METADATA (the registry of known tags + hidden flags, manifest v5)
+/// round-trips: registered tags — including ones no node carries — survive
+/// save/load with their hidden-by-default flags.
+#[test]
+fn tag_metadata_round_trips_through_save_load() {
+    let mut doc = Document::new();
+
+    let mock = vec!["Mock Walls".to_string()];
+    let carpet = vec!["Carpet".to_string()];
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![ImportNode::Mesh(box_recipe_with_tags(
+            "carpet_box",
+            vec![carpet.clone()],
+        ))],
+        guides: Vec::new(),
+        tags: vec![
+            kernel::ImportTag {
+                path: mock.clone(),
+                hidden: true,
+            },
+            kernel::ImportTag {
+                path: carpet.clone(),
+                hidden: false,
+            },
+        ],
+    };
+    doc.ingest(scene, vec![]).unwrap();
+    assert!(doc.tag_hidden(&mock));
+    assert!(!doc.tag_hidden(&carpet));
+
+    // A user toggle persists too (registering unknown paths on the way).
+    doc.set_tag_hidden(vec!["Later".to_string()], true);
+
+    let loaded = Document::load(&doc.save()).expect("load");
+    assert!(loaded.tag_hidden(&mock), "hidden flag survives reload");
+    assert!(!loaded.tag_hidden(&carpet));
+    assert!(loaded.tag_hidden(&["Later".to_string()]));
+    // The empty "Mock Walls" layer survives even with no content on it.
+    assert_eq!(loaded.tag_meta().count(), 3);
+}
+
+/// Undoing an import unregisters exactly the tags it added; redo restores
+/// them. A pre-existing tag's hidden flag is never clobbered by an import.
+#[test]
+fn import_tag_registration_is_undone_and_never_clobbers() {
+    let mut doc = Document::new();
+    // The user already decided "Carpet" is hidden.
+    doc.set_tag_hidden(vec!["Carpet".to_string()], true);
+
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![ImportNode::Mesh(box_recipe_with_tags(
+            "b",
+            vec![vec!["Carpet".to_string()]],
+        ))],
+        guides: Vec::new(),
+        tags: vec![
+            kernel::ImportTag {
+                path: vec!["Carpet".to_string()],
+                hidden: false, // visible in the source — must NOT clobber
+            },
+            kernel::ImportTag {
+                path: vec!["Mock".to_string()],
+                hidden: true,
+            },
+        ],
+    };
+    doc.ingest(scene, vec![]).unwrap();
+    assert!(
+        doc.tag_hidden(&["Carpet".to_string()]),
+        "import must not flip a user-chosen hidden flag"
+    );
+    assert!(doc.tag_hidden(&["Mock".to_string()]));
+
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.tag_meta().count(),
+        1,
+        "undo removes only the import-registered tag"
+    );
+    assert!(doc.tag_hidden(&["Carpet".to_string()]));
+
+    doc.redo().unwrap();
+    assert!(doc.tag_hidden(&["Mock".to_string()]));
+    assert_eq!(doc.tag_meta().count(), 2);
+}
+
+/// USER-hidden view state (manifest v6) round-trips: a node hidden via
+/// set_node_user_hidden stays hidden across save/load, and an import
+/// carrying hidden nodes seeds the registry.
+#[test]
+fn user_hidden_round_trips_through_save_load() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 0.0, 1.0);
+    doc.set_node_user_hidden(NodeId::Object(a), true);
+    assert!(doc.node_user_hidden(NodeId::Object(a)));
+    assert!(!doc.node_user_hidden(NodeId::Object(b)));
+
+    let loaded = Document::load(&doc.save()).expect("load");
+    let hidden_nodes = loaded.user_hidden_nodes();
+    assert_eq!(hidden_nodes.len(), 1, "exactly one node stays user-hidden");
+    assert!(matches!(hidden_nodes[0], NodeId::Object(_)));
+    // Unhide persists too.
+    let mut loaded = loaded;
+    loaded.set_node_user_hidden(hidden_nodes[0], false);
+    let again = Document::load(&loaded.save()).expect("reload");
+    assert!(again.user_hidden_nodes().is_empty());
+}
+
+/// An import whose nodes carry `hidden` (a `.skp` hidden group/component)
+/// materializes them user-hidden — imported, never dropped.
+#[test]
+fn import_hidden_nodes_arrive_user_hidden() {
+    let mut doc = Document::new();
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![ImportNode::Group {
+            name: "Drains".into(),
+            children: vec![ImportNode::Mesh(box_recipe_with_tags("pipe", vec![]))],
+            tags: Vec::new(),
+            hidden: true,
+        }],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    let (report, _) = doc.ingest(scene, vec![]).unwrap();
+    assert_eq!(report.objects_created, 1, "hidden content still imports");
+    let hidden = doc.user_hidden_nodes();
+    assert_eq!(hidden.len(), 1);
+    assert!(matches!(hidden[0], NodeId::Group(_)));
+    // And it persists.
+    let loaded = Document::load(&doc.save()).expect("load");
+    assert_eq!(loaded.user_hidden_nodes().len(), 1);
 }
 
 /// A v2-style manifest (no `tags` field) loads with empty tags — back-compat.

@@ -72,6 +72,7 @@ fn empty_scene(roots: Vec<ImportNode>) -> ImportScene {
         defs: vec![],
         roots,
         guides: Vec::new(),
+        tags: Vec::new(),
     }
 }
 
@@ -139,9 +140,11 @@ fn ingest_is_atomic_undo_hides_all() {
                 name: "g1".to_string(),
                 children: vec![ImportNode::Mesh(box_recipe("m2"))],
                 tags: Vec::new(),
+                hidden: false,
             },
         ],
         guides: Vec::new(),
+        tags: Vec::new(),
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -220,15 +223,18 @@ fn ingest_instance_shares_one_def() {
                 pose: Transform::IDENTITY,
                 name: None,
                 tags: Vec::new(),
+                hidden: false,
             },
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)),
                 name: None,
                 tags: Vec::new(),
+                hidden: false,
             },
         ],
         guides: Vec::new(),
+        tags: Vec::new(),
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -275,15 +281,18 @@ fn ingest_then_save_load_preserves_names() {
                 name: "MyGroup".to_string(),
                 children: vec![ImportNode::Mesh(box_recipe("MyBox"))],
                 tags: Vec::new(),
+                hidden: false,
             },
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::IDENTITY,
                 name: None,
                 tags: Vec::new(),
+                hidden: false,
             },
         ],
         guides: Vec::new(),
+        tags: Vec::new(),
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -348,6 +357,7 @@ fn ingest_guides_are_atomic_with_the_import() {
                 direction: Vec3::new(0.0, 0.0, 0.0), // degenerate: skipped + reported
             },
         ],
+        tags: Vec::new(),
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
 
@@ -393,15 +403,18 @@ fn ingest_instance_own_name_wins_over_def_name() {
                 pose: Transform::IDENTITY,
                 name: Some("Front Wall".to_string()),
                 tags: Vec::new(),
+                hidden: false,
             },
             ImportNode::Instance {
                 def: 0,
                 pose: Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)),
                 name: None,
                 tags: Vec::new(),
+                hidden: false,
             },
         ],
         guides: Vec::new(),
+        tags: Vec::new(),
     };
     doc.ingest(scene, vec![]).unwrap();
 

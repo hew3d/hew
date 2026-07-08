@@ -155,21 +155,43 @@ fn theater_production_model_end_to_end() {
         return;
     };
     let out = skp_import::import(&bytes).expect("theater parses");
+    // A clean production file produces NO parser-recovery warnings. It DOES
+    // produce non-manifold split notices (rule 4: decomposition is loud):
+    // theater carries 28 non-manifold source meshes (ceiling speakers,
+    // La-Z-Boy chair sides, the projector body, PVC fittings).
     assert!(
-        out.warnings.is_empty(),
+        !out.warnings.iter().any(|w| w.contains("parser recovered")),
         "clean production file, no parser recovery: {:?}",
         out.warnings
+    );
+    assert_eq!(
+        out.warnings
+            .iter()
+            .filter(|w| w.contains("is non-manifold; imported as"))
+            .count(),
+        28
     );
 
     let mut doc = kernel::Document::new();
     let (report, _) = doc.ingest(out.scene, out.textures_missing).unwrap();
-    // Frozen  (OpenSKP pin 1b2434f): 524 objects (478 watertight,
-    // 46 leaky), 26 genuinely non-manifold source meshes rejected loudly,
-    // 1009 instances, 109 groups. If an OpenSKP or heal improvement moves
-    // these, update deliberately with the rev bump.
-    assert_eq!(report.objects_created, 524);
-    assert_eq!(report.watertight, 478);
-    assert_eq!(report.skipped.len(), 26);
-    assert_eq!(doc.instance_ids().len(), 1009);
-    assert_eq!(doc.group_ids().len(), 109);
+    // Frozen with hidden-layer-content import + the non-manifold splitter
+    // + per-node hidden import (hidden layers become hidden-by-default
+    // tags whose content IMPORTS, non-manifold meshes decompose into open
+    // shells instead of being rejected, and per-entity-hidden
+    // groups/components import as USER-hidden nodes instead of dropping —
+    // the original 524-object baseline did none of these): 738 objects
+    // (602 watertight), NOTHING skipped, 1319 instances, 118 groups, 26
+    // user-hidden nodes. If an OpenSKP or heal improvement moves these,
+    // update deliberately with the rev bump.
+    assert_eq!(report.objects_created, 738);
+    assert_eq!(report.watertight, 602);
+    assert_eq!(report.skipped.len(), 0);
+    assert_eq!(doc.instance_ids().len(), 1319);
+    assert_eq!(doc.group_ids().len(), 118);
+    assert_eq!(doc.user_hidden_nodes().len(), 26);
+    // The full 94-layer list survives as tags: 93 registered (Layer0 maps
+    // to "untagged"), 40 of them hidden-by-default.
+    let tags: Vec<(&[String], bool)> = doc.tag_meta().collect();
+    assert_eq!(tags.len(), 93);
+    assert_eq!(tags.iter().filter(|(_, hidden)| *hidden).count(), 40);
 }

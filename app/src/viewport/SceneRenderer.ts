@@ -13,7 +13,7 @@ import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { makeFatSegments } from './fatLine'
+import { makeFatSegments, disposeFatSegments } from './fatLine'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -46,6 +46,24 @@ const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
  * constant in pixels regardless of zoom (screen-constant, like the cursor).
  */
 const GUIDE_DASH_SCREEN_K = 0.01
+
+/**
+ * Touched-entity hints for a targeted (incremental) refresh — see
+ * `SceneRenderer.refreshTouched`. All fields optional; ids the renderer does
+ * not currently draw are ignored, and creations/deletions the caller cannot
+ * enumerate (e.g. a through-cut splitting a solid in two) are still caught by
+ * an id-set diff against the wasm scene.
+ */
+export interface RefreshTouched {
+  /** Touched object ids — world objects AND definition members (a def-member
+   * id invalidates its shared geometry cache and rebuilds every placement). */
+  objectIds?: bigint[]
+  /** Touched instance ids (e.g. a transformed placement). */
+  instanceIds?: bigint[]
+  /** Touched component definition ids — invalidates every member's shared
+   * geometry and rebuilds all placements of the definition. */
+  componentIds?: bigint[]
+}
 
 /** Disposable group for one object's faces + edges */
 interface ObjectMeshGroup {
@@ -105,6 +123,9 @@ export class SceneRenderer {
     groupStarts: Uint32Array
     groupCounts: Uint32Array
     edgePositions: Float32Array
+    /** Whether the member object encloses a volume — drives double-sided
+     * rendering for open (non-watertight) shells (see `_refreshInstance`). */
+    watertight: boolean
   }> = new Map()
 
   /**
@@ -216,6 +237,110 @@ export class SceneRenderer {
   }
 
   /**
+   * Targeted (incremental) refresh: rebuild only the geometry a mutation
+   * actually touched, leaving every other group's GPU buffers alone. On a
+   * large document (hundreds of objects, thousands of instances) the full
+   * `refresh()` re-clones every mesh across the wasm boundary and re-uploads
+   * every GPU buffer for ANY document change — this path makes a single-object
+   * edit O(touched) instead.
+   *
+   * `touched` carries the ids the caller knows about (see `RefreshTouched`).
+   * Creations and deletions the caller cannot enumerate (a through-cut
+   * yielding two objects, an Option-copy, a boolean consuming its operands)
+   * are caught by diffing live wasm ids against the rendered groups — new ids
+   * are built, stale ids removed, and only touched survivors are rebuilt.
+   *
+   * A touched **definition member** id (or a touched component id) drops the
+   * shared member-geometry cache entry and rebuilds every rendered placement
+   * of it, so def edits (push_pull_in_component, painting instanced geometry)
+   * propagate to all instances — mirroring how the kernel's own reconcile
+   * lands every placement in `instances_touched` on a def edit.
+   *
+   * Callers with no touched-set (load/import/undo/redo/structural ops) must
+   * keep using the full `refresh()`.
+   *
+   * Returns the (full) watertight map, like `refresh()`.
+   */
+  refreshTouched(touched: RefreshTouched): Map<bigint, boolean> {
+    const touchedObjects = touched.objectIds ?? []
+    const touchedInstances = touched.instanceIds ?? []
+    const touchedComponents = touched.componentIds ?? []
+
+    // ---- objects: diff live ids against rendered groups.
+    const liveIds = new Set<bigint>(this.wasmScene.object_ids())
+    for (const oldId of [...this.objectGroups.keys()]) {
+      if (!liveIds.has(oldId)) {
+        this._removeObjectGroup(oldId)
+      }
+    }
+    const rebuiltObjects = new Set<bigint>()
+    for (const id of liveIds) {
+      if (!this.objectGroups.has(id)) {
+        this._refreshObject(id)
+        rebuiltObjects.add(id)
+      }
+    }
+    for (const id of touchedObjects) {
+      if (liveIds.has(id) && !rebuiltObjects.has(id)) {
+        this._refreshObject(id)
+        rebuiltObjects.add(id)
+      }
+    }
+
+    // ---- shared definition geometry: a touched id that is cached as a def
+    // member (or any member of a touched component) is stale — drop it so the
+    // instance rebuilds below re-pull it from the kernel.
+    const dirtyMembers = new Set<bigint>()
+    for (const id of touchedObjects) {
+      if (this.memberGeometryCache.has(id)) {
+        this.memberGeometryCache.delete(id)
+        dirtyMembers.add(id)
+      }
+    }
+    for (const cid of touchedComponents) {
+      for (const mid of this.wasmScene.component_member_objects(cid)) {
+        this.memberGeometryCache.delete(mid)
+        dirtyMembers.add(mid)
+      }
+    }
+
+    // ---- instances: same id-set diff, then rebuild touched placements and
+    // every placement rendering a dirty member.
+    const liveInstanceIds = new Set<bigint>(this.wasmScene.instance_ids())
+    for (const oldId of [...this.instanceGroups.keys()]) {
+      if (!liveInstanceIds.has(oldId)) {
+        this._removeInstanceGroup(oldId)
+      }
+    }
+    const rebuiltInstances = new Set<bigint>()
+    for (const iid of liveInstanceIds) {
+      if (!this.instanceGroups.has(iid)) {
+        this._refreshInstance(iid)
+        rebuiltInstances.add(iid)
+      }
+    }
+    const needsRebuild = (iid: bigint): boolean => {
+      if (rebuiltInstances.has(iid)) return false
+      if (touchedInstances.includes(iid)) return true
+      const g = this.instanceGroups.get(iid)
+      return g !== undefined && g.memberIds.some((m) => dirtyMembers.has(m))
+    }
+    for (const iid of [...this.instanceGroups.keys()]) {
+      if (needsRebuild(iid)) {
+        this._refreshInstance(iid)
+        rebuiltInstances.add(iid)
+      }
+    }
+
+    // Rebuilt groups start opaque/visible; re-apply isolation + hidden state
+    // (cheap CPU-side property writes — no wasm calls, no GPU uploads).
+    this._applyIsolation()
+    this._applyHidden()
+
+    return new Map(this.watertightMap)
+  }
+
+  /**
    * Rebuild all instance groups from instance_ids(). Call after any mutation
    * that may add/remove instances or change definition geometry.
    *
@@ -291,9 +416,9 @@ export class SceneRenderer {
     group.matrix.copy(m4)
     group.matrixWorldNeedsUpdate = true
 
-    // Reflected pose: flip front/back face winding.
+    // Reflected pose: flip front/back face winding (watertight members only —
+    // an open shell always renders double-sided regardless of reflection).
     const reflected = this._poseDet(pose) < 0
-    const side = reflected ? THREE.BackSide : THREE.FrontSide
 
     const facesMeshes: THREE.Mesh[] = []
     const edgesLinesList: THREE.LineSegments[] = []
@@ -315,12 +440,20 @@ export class SceneRenderer {
             groupStarts: mesh.group_starts(),
             groupCounts: mesh.group_counts(),
             edgePositions: mesh.edge_positions(),
+            watertight: mesh.watertight(),
           }
           this.memberGeometryCache.set(memberId, cached)
         } finally {
           mesh.free()
         }
       }
+
+      // Open (non-watertight) shells have inward-wound faces on some triangles,
+      // so a single-sided material renders them invisible from the "wrong"
+      // side; render those double-sided instead of picking Front/BackSide.
+      const side = cached.watertight
+        ? (reflected ? THREE.BackSide : THREE.FrontSide)
+        : THREE.DoubleSide
 
       // Face mesh — each instance gets its own BufferAttribute wrappers wrapping
       // the shared TypedArrays.  geometry.dispose() on this instance frees only
@@ -519,11 +652,18 @@ export class SceneRenderer {
       faceGeo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
       faceGeo.setIndex(new THREE.BufferAttribute(indices, 1))
 
+      // Open (non-watertight) shells have inward-wound faces on some
+      // triangles, so a single-sided material renders them invisible from
+      // the "wrong" side (looks like an empty wireframe) — render those
+      // double-sided. Standalone objects are never reflected (only instance
+      // poses can be), so watertight ones keep the plain default FrontSide.
+      const side = watertight ? THREE.FrontSide : THREE.DoubleSide
       const faceMaterials = this._buildMaterialArray(
         groupMaterialIds,
         groupStarts,
         groupCounts,
         faceGeo,
+        side,
       )
       const facesMesh = new THREE.Mesh(faceGeo, faceMaterials)
 
@@ -598,7 +738,8 @@ export class SceneRenderer {
       // `linewidth` on WebGL and renders 1px, which read as almost-invisible
       // sketch edges (Refinement pass). `transparent: true` so the
       // sketch-isolation fade can animate opacity. Resolution is kept current
-      // by Viewport's render loop via updateFatLineResolutions(sketchGroup).
+      // by the fat-line registry (makeFatSegments registers the material;
+      // Viewport calls updateFatLineResolutions on mount/resize).
       this.sketchLines = makeFatSegments(new Float32Array(allLinePositions), {
         color: SKETCH_LINE_COLOR,
         widthPx: SKETCH_LINE_WIDTH_PX,
@@ -905,8 +1046,7 @@ export class SceneRenderer {
    * sketches are gone (e.g. deleted). */
   private _rebuildSketchHighlight(): void {
     if (this.sketchHighlight !== null) {
-      this.sketchHighlight.geometry.dispose()
-      ;(this.sketchHighlight.material as THREE.Material).dispose()
+      disposeFatSegments(this.sketchHighlight)
       this.sketchGroup.remove(this.sketchHighlight)
       this.sketchHighlight = null
     }
@@ -929,8 +1069,8 @@ export class SceneRenderer {
     // Fat line (LineSegments2), like the base sketch lines — a plain
     // THREE.LineSegments/LineBasicMaterial ignores `linewidth` on WebGL and
     // renders 1px, which is thinner than the 2.2px fat sketch lines it's
-    // meant to highlight and reads as nearly invisible. `updateFatLineResolutions(sketchGroup)` (Viewport's render
-    // loop) keeps this correctly sized since it's added to `sketchGroup`.
+    // meant to highlight and reads as nearly invisible. The fat-line registry
+    // (makeFatSegments + updateFatLineResolutions on resize) keeps it sized.
     this.sketchHighlight = makeFatSegments(new Float32Array(positions), {
       color: EDGE_COLOR_SELECTED,
       widthPx: SKETCH_HIGHLIGHT_WIDTH_PX,
@@ -1177,8 +1317,7 @@ export class SceneRenderer {
 
   private _clearSketchLines(): void {
     if (this.sketchLines !== null) {
-      this.sketchLines.geometry.dispose()
-      ;(this.sketchLines.material as THREE.Material).dispose()
+      disposeFatSegments(this.sketchLines)
       this.sketchGroup.remove(this.sketchLines)
       this.sketchLines = null
     }

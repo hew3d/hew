@@ -41,7 +41,7 @@ skp-import = { path = "crates/skp-import" }
 # hosted OpenSKP repo so CI resolves it like any other dependency. No Trimble
 # SDK material anywhere in its chain (rule 7 admissibility test). Local dev
 # clone: ../openskp.
-openskp = "0.1.0"
+openskp = "0.1.4"
 
 slotmap = "1"
 proptest = "1"

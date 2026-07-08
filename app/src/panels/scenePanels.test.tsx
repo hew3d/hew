@@ -34,6 +34,9 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     group_name: (_id: bigint) => undefined as string | undefined,
     instance_name: (_id: bigint) => undefined as string | undefined,
     node_tags: (_kind: number, _id: bigint) => [] as string[],
+    tag_meta_paths: () => [] as string[],
+    tag_meta_hidden: () => new Uint8Array(),
+    set_tag_hidden: vi.fn(),
     object_solid: (_id: bigint) => true,
     set_node_name: vi.fn(),
     add_node_tag: vi.fn(),
@@ -689,5 +692,29 @@ describe('TagsPanel', () => {
     render(<TagsPanel {...baseTagProps} scene={scene} />)
     // "Roof" is a child of "Structure" — both should appear in the expanded tree
     expect(screen.getByText('Roof')).toBeInTheDocument()
+  })
+
+  it('shows a registry tag path even when no node carries it (e.g. an empty imported .skp layer)', () => {
+    const scene = makeScene({
+      // No node is tagged at all — the tag only exists in the registry.
+      tag_meta_paths: () => ['Imported/EmptyLayer'],
+      tag_meta_hidden: () => new Uint8Array([0]),
+    })
+    render(<TagsPanel {...baseTagProps} scene={scene} />)
+    expect(screen.queryByText(/no tags found/i)).not.toBeInTheDocument()
+    expect(screen.getByText('Imported')).toBeInTheDocument()
+    expect(screen.getByText('EmptyLayer')).toBeInTheDocument()
+  })
+
+  it('unions registry tags with node-derived tags rather than replacing them', () => {
+    const scene = makeScene({
+      object_ids: () => new BigUint64Array([1n]),
+      node_tags: (_kind: number, id: bigint) => (id === 1n ? ['Walls'] : []),
+      tag_meta_paths: () => ['Walls', 'EmptyLayer'],
+      tag_meta_hidden: () => new Uint8Array([0, 0]),
+    })
+    render(<TagsPanel {...baseTagProps} scene={scene} />)
+    expect(screen.getByText('Walls')).toBeInTheDocument()
+    expect(screen.getByText('EmptyLayer')).toBeInTheDocument()
   })
 })

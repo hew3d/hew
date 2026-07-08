@@ -21,7 +21,7 @@
  */
 
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 /**
  * Scope a query to the top menu bar. Tool/panel names (e.g. "Select",
@@ -48,6 +48,13 @@ const mockScene = {
   group_name: () => undefined as string | undefined,
   instance_name: () => undefined as string | undefined,
   node_tags: () => [] as string[],
+  tag_meta_paths: () => [] as string[],
+  tag_meta_hidden: () => new Uint8Array(),
+  set_tag_hidden: vi.fn(),
+  user_hidden_kinds: () => new Uint8Array(),
+  user_hidden_ids: () => new BigUint64Array(),
+  node_user_hidden: () => false,
+  set_node_user_hidden: vi.fn(),
   object_solid: () => true,
   can_scene_undo: () => false,
   can_scene_redo: () => false,
@@ -71,6 +78,14 @@ const mockScene = {
   add_material: vi.fn(),
   add_texture_material: vi.fn(),
   set_object_material: vi.fn(),
+  import_skp: vi.fn(() => ({
+    objects_created: 0,
+    watertight: 0,
+    leaky: 0,
+    skipped: [] as { name: string; reason: string }[],
+    textures_missing: [] as string[],
+    warnings: [] as string[],
+  })),
 }
 
 vi.mock('./wasm/loader', () => ({
@@ -89,8 +104,19 @@ vi.mock('./viewport/Viewport', () => ({
   default: vi.fn(() => null),
 }))
 
+// io/fileHost — only makeFileHost is mocked (as a spy defaulting to the real
+// implementation) so the "import seeds hidden state" test can substitute a
+// FileHost stub whose openForImport() resolves without a real file dialog.
+// Every other test never triggers Open/Import, so the real WebFileHost is
+// harmless there.
+vi.mock('./io/fileHost', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./io/fileHost')>()
+  return { ...actual, makeFileHost: vi.fn(actual.makeFileHost) }
+})
+
 import App from './App'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
+import { makeFileHost, type FileHost } from './io/fileHost'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -373,5 +399,223 @@ describe('App — tray layout persistence', () => {
     await renderAndLoad()
     fireEvent.keyDown(document, { key: 'I', ctrlKey: true, shiftKey: true })
     await waitFor(() => expect(getTrayLayout().modelInfo).toBe(false))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — hidden-by-default tags: seed from the document's tag registry on
+// load, and persist the eye toggle back to it.
+// ---------------------------------------------------------------------------
+
+describe('App — hidden-by-default tag registry', () => {
+  // mockScene is a shared singleton across the whole file — restore these
+  // overridable methods after each test so other describe blocks (and other
+  // tests here) always see the plain defaults.
+  const defaultTagMetaPaths = mockScene.tag_meta_paths
+  const defaultTagMetaHidden = mockScene.tag_meta_hidden
+  const defaultNodeTags = mockScene.node_tags
+  const defaultObjectIds = mockScene.object_ids
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+  })
+
+  afterEach(() => {
+    mockScene.tag_meta_paths = defaultTagMetaPaths
+    mockScene.tag_meta_hidden = defaultTagMetaHidden
+    mockScene.node_tags = defaultNodeTags
+    mockScene.object_ids = defaultObjectIds
+  })
+
+  it('seeds hiddenTagPaths from the registry on File ▸ New and pushes the hide to the kernel', async () => {
+    // The registry knows a tag no node carries yet (e.g. an imported .skp
+    // layer) and marks it hidden-by-default.
+    mockScene.tag_meta_paths = () => ['Imported/HiddenLayer']
+    mockScene.tag_meta_hidden = () => new Uint8Array([1])
+
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^tags$/i }))
+
+    // Before any load reconciles the registry, the session-only hidden set is
+    // still empty — the tag renders as visible.
+    expect(screen.getByText('HiddenLayer')).toBeInTheDocument()
+    expect(screen.queryByTitle('Show tagged objects')).not.toBeInTheDocument()
+
+    // File ▸ New runs applyLoadedBytes, which must re-seed hiddenTagPaths from
+    // the (just-loaded) document's tag registry.
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('New'))
+
+    await waitFor(() => {
+      expect(screen.getByTitle('Show tagged objects')).toBeInTheDocument()
+    })
+    // The union push reached the kernel, not just the panel UI.
+    expect(mockScene.set_hidden).toHaveBeenCalled()
+  })
+
+  it('clicking a tag eye toggle calls scene.set_tag_hidden with the path and new hidden state', async () => {
+    // A single tagged object is enough — node_tags is called once per node,
+    // and there's only one node in the scene, so a fixed return is unambiguous.
+    mockScene.object_ids = () => new BigUint64Array([1n])
+    mockScene.node_tags = () => ['Walls']
+
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^tags$/i }))
+
+    fireEvent.click(screen.getByTitle('Hide tagged objects'))
+    expect(mockScene.set_tag_hidden).toHaveBeenCalledWith('Walls', true)
+
+    // Toggling again shows it — set_tag_hidden persists the flip back to false.
+    fireEvent.click(screen.getByTitle('Show tagged objects'))
+    expect(mockScene.set_tag_hidden).toHaveBeenCalledWith('Walls', false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — user-hidden node registry (manifest v6 per-node persisted hide):
+// seed hiddenKeys from the registry on load, and persist the eye toggle
+// back to it.
+// ---------------------------------------------------------------------------
+
+describe('App — user-hidden node registry', () => {
+  // mockScene is a shared singleton across the whole file — restore these
+  // overridable methods after each test so other describe blocks (and other
+  // tests here) always see the plain defaults.
+  const defaultUserHiddenKinds = mockScene.user_hidden_kinds
+  const defaultUserHiddenIds = mockScene.user_hidden_ids
+  const defaultTopLevelNodes = mockScene.top_level_nodes
+  const defaultGroupIds = mockScene.group_ids
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+  })
+
+  afterEach(() => {
+    mockScene.user_hidden_kinds = defaultUserHiddenKinds
+    mockScene.user_hidden_ids = defaultUserHiddenIds
+    mockScene.top_level_nodes = defaultTopLevelNodes
+    mockScene.group_ids = defaultGroupIds
+  })
+
+  it('seeds hiddenKeys from the registry on File ▸ New and pushes the hide to the kernel', async () => {
+    // One top-level group node throughout — before New, the registry hasn't
+    // been consulted yet (hiddenKeys starts empty), so it renders visible.
+    mockScene.top_level_nodes = () => [{ kind: 'group', id: 7n }]
+    mockScene.group_ids = () => new BigUint64Array([7n])
+
+    await renderAndLoad()
+    expect(screen.getByTitle('Hide')).toBeInTheDocument()
+
+    // The registry says this group is user-hidden (e.g. a hidden imported
+    // .skp component) — File ▸ New re-loads and must re-seed hiddenKeys from
+    // the (just-loaded) document's registry.
+    mockScene.user_hidden_kinds = () => new Uint8Array([1]) // 1 = group
+    mockScene.user_hidden_ids = () => new BigUint64Array([7n])
+
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('New'))
+
+    await waitFor(() => {
+      expect(screen.getByTitle('Show')).toBeInTheDocument()
+    })
+    // The union push reached the kernel, not just the tree UI.
+    expect(mockScene.set_hidden).toHaveBeenCalled()
+  })
+
+  it('clicking a node eye toggle calls scene.set_node_user_hidden with kind/id/flag', async () => {
+    mockScene.top_level_nodes = () => [{ kind: 'group', id: 3n }]
+    mockScene.group_ids = () => new BigUint64Array([3n])
+
+    await renderAndLoad()
+
+    fireEvent.click(screen.getByTitle('Hide'))
+    expect(mockScene.set_node_user_hidden).toHaveBeenCalledWith(1, 3n, true)
+
+    // Toggling again shows it — set_node_user_hidden persists the flip back.
+    fireEvent.click(screen.getByTitle('Show'))
+    expect(mockScene.set_node_user_hidden).toHaveBeenCalledWith(1, 3n, false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — import: the .skp import path must seed BOTH the hidden-tag registry
+// and the user-hidden-node registry, since imported hidden layers/components
+// arrive through the same document registries a load populates.
+// ---------------------------------------------------------------------------
+
+describe('App — import seeds hidden tags and hidden node keys', () => {
+  const defaultTagMetaPaths = mockScene.tag_meta_paths
+  const defaultTagMetaHidden = mockScene.tag_meta_hidden
+  const defaultUserHiddenKinds = mockScene.user_hidden_kinds
+  const defaultUserHiddenIds = mockScene.user_hidden_ids
+  const defaultTopLevelNodes = mockScene.top_level_nodes
+  const defaultGroupIds = mockScene.group_ids
+  const defaultImportSkp = mockScene.import_skp
+
+  let fakeFileHost: FileHost
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+    fakeFileHost = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      openForImport: vi.fn().mockResolvedValue({
+        kind: 'skp',
+        name: 'theater.skp',
+        bytes: new Uint8Array(),
+      }),
+      exportBinary: vi.fn(),
+    }
+    vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
+  })
+
+  afterEach(() => {
+    mockScene.tag_meta_paths = defaultTagMetaPaths
+    mockScene.tag_meta_hidden = defaultTagMetaHidden
+    mockScene.user_hidden_kinds = defaultUserHiddenKinds
+    mockScene.user_hidden_ids = defaultUserHiddenIds
+    mockScene.top_level_nodes = defaultTopLevelNodes
+    mockScene.group_ids = defaultGroupIds
+    mockScene.import_skp = defaultImportSkp
+    vi.mocked(makeFileHost).mockReset()
+  })
+
+  it('File ▸ Import… seeds both hiddenTagPaths and hiddenKeys from the post-import registries', async () => {
+    // The import populates one hidden tag and one hidden (imported) group —
+    // both registries only reflect this *after* scene.import_skp runs.
+    mockScene.tag_meta_paths = () => ['Imported/HiddenLayer']
+    mockScene.tag_meta_hidden = () => new Uint8Array([1])
+    mockScene.user_hidden_kinds = () => new Uint8Array([1]) // 1 = group
+    mockScene.user_hidden_ids = () => new BigUint64Array([9n])
+    mockScene.top_level_nodes = () => [{ kind: 'group', id: 9n }]
+    mockScene.group_ids = () => new BigUint64Array([9n])
+
+    await renderAndLoad()
+
+    // Before Import, the outliner renders the group visible.
+    expect(screen.getByTitle('Hide')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Import…'))
+
+    await waitFor(() => {
+      expect(mockScene.import_skp).toHaveBeenCalled()
+    })
+
+    // Hidden node: the group's eye toggle now reads "Show" (hidden).
+    await waitFor(() => {
+      expect(screen.getByTitle('Show')).toBeInTheDocument()
+    })
+
+    // Hidden tag: the Tags panel shows the imported layer as hidden too.
+    fireEvent.click(screen.getByRole('button', { name: /^tags$/i }))
+    expect(screen.getByTitle('Show tagged objects')).toBeInTheDocument()
+
+    // Both hides reached the kernel via the same union push.
+    expect(mockScene.set_hidden).toHaveBeenCalled()
   })
 })

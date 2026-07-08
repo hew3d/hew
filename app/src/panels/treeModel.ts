@@ -54,6 +54,37 @@ export function nodeRefFromJs(n: { kind: string; id: bigint }): NodeRef {
   return { kind: n.kind as NodeKind, id: n.id }
 }
 
+/**
+ * Recursively expand a node to the leaf object/instance ids that actually own
+ * renderable geometry. Objects and instances are already leaves; groups have
+ * no geometry of their own (DESIGN: groups are pure organization) and are
+ * expanded via `getGroupMembers`, which may itself return nested groups —
+ * this recurses until only objects/instances remain. Sketches contribute no
+ * leaves (they have their own selection/highlight path).
+ *
+ * Pure — the caller supplies `getGroupMembers` (typically backed by the wasm
+ * `scene.group_members()` FFI call) so this stays free of wasm/three deps.
+ * Shared by the hidden-tag union path (App.tsx) and the selection-highlight
+ * path (Viewport.tsx) so both agree on what a group "contains".
+ */
+export function collectLeafIds(
+  node: NodeRef,
+  getGroupMembers: (groupId: bigint) => NodeRef[],
+): { objectIds: bigint[]; instanceIds: bigint[] } {
+  if (node.kind === 'object') return { objectIds: [node.id], instanceIds: [] }
+  if (node.kind === 'instance') return { objectIds: [], instanceIds: [node.id] }
+  if (node.kind === 'sketch') return { objectIds: [], instanceIds: [] }
+  // Group: recurse into members (may themselves be nested groups).
+  const objectIds: bigint[] = []
+  const instanceIds: bigint[] = []
+  for (const child of getGroupMembers(node.id)) {
+    const { objectIds: os, instanceIds: is_ } = collectLeafIds(child, getGroupMembers)
+    objectIds.push(...os)
+    instanceIds.push(...is_)
+  }
+  return { objectIds, instanceIds }
+}
+
 /** Kind of a top-level document entity shown in the tree. */
 export type EntityKind = 'object' | 'sketch' | 'group' | 'instance'
 

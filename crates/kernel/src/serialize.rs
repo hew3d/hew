@@ -57,7 +57,21 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
 /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so v1-v3 files
 /// still load (guides default to empty) — back-compatible. The geometry buffer
 /// is unchanged by this bump (`GEOMETRY_FORMAT_VERSION` stays 3).
-pub const MANIFEST_FORMAT_VERSION: u32 = 4;
+///
+/// v5: added an optional top-level `tags: Vec<TagDto>` — the tag metadata
+/// registry (known tag paths + hidden-by-default flags; a `.skp` import
+/// registers the source layer list here, hidden layers included). The field
+/// is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so v1-v4
+/// files still load (registry defaults to empty, node-carried tags all
+/// visible) — back-compatible. The geometry buffer is unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 3).
+///
+/// v6: added optional `hidden: bool` to object/group/instance entries —
+/// the USER-hidden (view-state) flag, distinct from tag hiding. The field
+/// is `#[serde(default, skip_serializing_if ...)]`, so v1-v5 files still
+/// load (nothing user-hidden) — back-compatible. The geometry buffer is
+/// unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
+pub const MANIFEST_FORMAT_VERSION: u32 = 6;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -532,6 +546,21 @@ pub(crate) struct Manifest {
     /// no guides.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guides: Vec<GuideDto>,
+    /// Tag metadata registry (manifest v5+): known tag paths with their
+    /// hidden-by-default flags, sorted by path. Absent/empty in v1-v4
+    /// files → empty registry (all node-carried tags visible).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<TagDto>,
+}
+
+/// A tag metadata entry (manifest v5+).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct TagDto {
+    /// Root-first tag path segments.
+    pub path: Vec<String>,
+    /// Hidden by default (seeds the UI's tag visibility on load).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// A construction-geometry guide entry.
@@ -583,6 +612,9 @@ pub(crate) struct ObjectDto {
     /// Per-node tag paths (manifest v3+). Absent in v1/v2 files → empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Vec<String>>,
+    /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// A merge group entry.
@@ -596,6 +628,9 @@ pub(crate) struct GroupDto {
     /// Per-node tag paths (manifest v3+). Absent in v1/v2 files → empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Vec<String>>,
+    /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// A component definition.
@@ -622,6 +657,9 @@ pub(crate) struct InstanceDto {
     /// Per-node tag paths (manifest v3+). Absent in v1/v2 files → empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<Vec<String>>,
+    /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// A first-class sketch.
@@ -758,6 +796,13 @@ pub(crate) struct DocSaveData {
     pub roots: Vec<crate::document::NodeId>,
     /// (sketch_id, region_id) pairs that are consumed.
     pub consumed: Vec<(SketchId, SketchRegionId)>,
+    /// Tag metadata registry (path → hidden), sorted by path (manifest v5).
+    pub tag_meta: Vec<(Vec<String>, bool)>,
+    /// USER-hidden flags keyed by id (manifest v6), same key spaces as the
+    /// name/tag maps.
+    pub obj_hidden: std::collections::BTreeSet<ObjectId>,
+    pub group_hidden: std::collections::BTreeSet<GroupId>,
+    pub instance_hidden: std::collections::BTreeSet<InstanceId>,
 }
 
 /// Encodes a complete document into `.hew` zip bytes (HEW_FILE_FORMAT.md).
@@ -880,6 +925,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 base_material: base_mat.map(&material_dense),
                 name: data.obj_names.get(oid).cloned().flatten(),
                 tags: data.obj_tags.get(oid).cloned().unwrap_or_default(),
+                hidden: data.obj_hidden.contains(oid),
             }
         })
         .collect();
@@ -888,11 +934,12 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .groups
         .iter()
         .enumerate()
-        .map(|(i, (_, members, name, tags))| GroupDto {
+        .map(|(i, (gid, members, name, tags))| GroupDto {
             id: i as u32,
             members: members.iter().map(&node_to_dto).collect(),
             name: name.clone(),
             tags: tags.clone(),
+            hidden: data.group_hidden.contains(gid),
         })
         .collect();
 
@@ -911,12 +958,13 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .instances
         .iter()
         .enumerate()
-        .map(|(i, (_, def, pose, name, tags))| InstanceDto {
+        .map(|(i, (iid, def, pose, name, tags))| InstanceDto {
             id: i as u32,
             def: comp_to_dense[def],
             pose: pose.to_affine(),
             name: name.clone(),
             tags: tags.clone(),
+            hidden: data.instance_hidden.contains(iid),
         })
         .collect();
 
@@ -997,6 +1045,14 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         roots: root_dtos,
         consumed: consumed_pairs,
         guides: guide_dtos,
+        tags: data
+            .tag_meta
+            .iter()
+            .map(|(path, hidden)| TagDto {
+                path: path.clone(),
+                hidden: *hidden,
+            })
+            .collect(),
     };
 
     let manifest_json =
@@ -1110,6 +1166,13 @@ pub(crate) struct DocLoadRaw {
     pub obj_tags: Vec<Vec<Vec<String>>>,
     pub group_tags: Vec<Vec<Vec<String>>>,
     pub instance_tags: Vec<Vec<Vec<String>>>,
+    /// Tag metadata registry (manifest v5+; empty for v1–v4 files).
+    pub tag_meta: Vec<(Vec<String>, bool)>,
+    /// USER-hidden flags per object/group/instance dense id (manifest v6+;
+    /// all false for older files).
+    pub obj_hidden: Vec<bool>,
+    pub group_hidden: Vec<bool>,
+    pub instance_hidden: Vec<bool>,
 }
 
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
@@ -1236,6 +1299,14 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         obj_tags,
         group_tags,
         instance_tags,
+        tag_meta: manifest
+            .tags
+            .iter()
+            .map(|t| (t.path.clone(), t.hidden))
+            .collect(),
+        obj_hidden: manifest.objects.iter().map(|o| o.hidden).collect(),
+        group_hidden: manifest.groups.iter().map(|g| g.hidden).collect(),
+        instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
     })
 }
 

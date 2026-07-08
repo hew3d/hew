@@ -53,7 +53,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 4,
+  "format_version": 6,
   "geometry_version": 3,
   "app": "hew",
   "app_version": "0.1.0",
@@ -98,13 +98,15 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     { "id": 1, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
   "roots": [ {"kind":"object","id":0}, {"kind":"instance","id":0} ],
-  "consumed": [ [0, 0] ]
+  "consumed": [ [0, 0] ],
+  "tags": [ {"path": ["Architecture", "Walls"]},
+            {"path": ["Mock Walls"], "hidden": true} ]
 }
 ```
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `4`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `6`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `3`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -121,6 +123,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 - **`guides`** — construction lines and points ().
 - **`roots`** — the document's top-level nodes, in display order ().
 - **`consumed`** — `(sketch, region)` id pairs already extruded ().
+- **`tags`** — the tag metadata registry: known tag paths with their
+  hidden-by-default flags.
 
 ### `NodeRef`
 
@@ -163,6 +167,8 @@ of the manifest:
 | `objects[].name`, `groups[].name`, `components[].name`, `instances[].name` | 2 | no display name |
 | `objects[].tags`, `groups[].tags`, `instances[].tags` | 3 | empty list (no tags) |
 | `guides` (top-level array) | 4 | empty list (no guides) |
+| `tags` (top-level array) | 5 | empty registry (all node-carried tags visible) |
+| `objects[].hidden`, `groups[].hidden`, `instances[].hidden` | 6 | `false` (visible) |
 
 Note `components[]` entries never carry a `tags` field at any version —
 tags are attached to *placements* (objects, groups, instances), not to
@@ -397,12 +403,35 @@ reached only through an instance's `def`, never through `roots` or a group.
 
 ### 4.9 Tags
 
-`tags`, wherever it appears (objects, groups, instances), is a list of
-**tag-paths** — each an ordered, root-first list of string segments.
-`[["Architecture", "Walls"], ["Level", "L1"]]` means two independent tags:
-`Architecture > Walls` and `Level > L1`. Absent/empty means untagged.
-Component definitions never carry tags — only their instances do, since one
-definition may be placed multiple times under different tag assignments.
+`tags`, wherever it appears on a NODE entry (objects, groups, instances), is
+a list of **tag-paths** — each an ordered, root-first list of string
+segments. `[["Architecture", "Walls"], ["Level", "L1"]]` means two
+independent tags: `Architecture > Walls` and `Level > L1`. Absent/empty
+means untagged. Component definitions never carry tags — only their
+instances do, since one definition may be placed multiple times under
+different tag assignments.
+
+The TOP-LEVEL `tags` array (manifest v5+) is the **tag metadata registry**:
+`{"path": [..segments..], "hidden": bool}` entries, sorted by path, one per
+*known* tag. It serves two purposes beyond the implicit per-node tags:
+
+- a tag can exist with **no content** (an imported `.skp` layer list
+  survives in full, empty layers included);
+- `hidden` (default `false`, omitted when false) is the tag's
+  **hidden-by-default** flag — content carrying a hidden tag loads
+  invisible until the user shows the tag. A `.skp` import maps hidden
+  layers here; the UI's tag show/hide toggle persists here.
+
+A node-carried tag path absent from the registry is implicitly visible. A
+reader MUST NOT drop content because its tag is hidden — hidden is view
+state, not existence.
+
+Separately from tags, each object/group/instance entry MAY carry a
+`hidden: true` flag (manifest v6+): the node's own **user-hidden** view
+state (a per-node "Hide", covering `.skp` hidden groups/components on
+import and the UI's per-node eye toggle). Hiding a group or instance hides
+its whole subtree in the UI. The same rule applies: a reader MUST NOT drop
+user-hidden content.
 
 ## 5. Versioning policy
 

@@ -16,7 +16,7 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, nodeKey, type NodeRef } from './panels/treeModel'
+import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, nodeKey, nodeKindToNumber, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -177,6 +177,11 @@ export default function App() {
   const suppressDirtyRef = useRef(false)
   // Stable recovery-store instance (autosave / crash recovery).
   const recoveryStoreRef = useRef(makeRecoveryStore())
+  // pushUnionHidden is defined further down (it depends on `state`); reach it
+  // through a ref (kept current beside its definition) like reconcileRef /
+  // applyLoadedBytesRef, so applyLoadedBytes and importDocument — both defined
+  // earlier — can push freshly-seeded hidden state without a stale closure.
+  const pushUnionHiddenRef = useRef<(nextHiddenKeys: Set<string>, nextHiddenTagPaths: Set<string>) => void>(() => {})
   // True when a mutation has occurred since the last successful autosave tick
   // (or since the last explicit Save, which also resets it). Avoids redundant
   // writes when the document hasn't changed between ticks.
@@ -523,6 +528,41 @@ export default function App() {
     return new Set(leaves)
   }, [activeContext, state])
 
+  // Build the set of tag path keys marked hidden-by-default in the document's
+  // tag metadata registry (scene.tag_meta_paths()/tag_meta_hidden()) — this
+  // covers tags no node carries (e.g. an imported .skp layer list, empty
+  // layers included), so a hidden empty layer still comes up hidden.
+  const seedHiddenTagPathsFromRegistry = (scene: Scene): Set<string> => {
+    const paths = scene.tag_meta_paths()
+    const hidden = scene.tag_meta_hidden()
+    const seeded = new Set<string>()
+    for (let i = 0; i < paths.length; i++) {
+      if (hidden[i] !== 1) continue
+      const path = paths[i].split('/').map((s) => s.trim()).filter((s) => s.length > 0)
+      if (path.length > 0) seeded.add(tagPathKey(path))
+    }
+    return seeded
+  }
+
+  // Build the set of hiddenKeys (nodeKey strings) from the document's
+  // persisted USER-hidden registry (scene.user_hidden_kinds()/
+  // user_hidden_ids(), manifest v6) — this is how imported .skp hidden
+  // groups/components/instances (and a re-opened .hew with nodes previously
+  // eye-toggled) arrive, since hiddenKeys itself is session-only React state
+  // that gets reset on every load.
+  const seedHiddenKeysFromRegistry = (scene: Scene): Set<string> => {
+    const kinds = scene.user_hidden_kinds()
+    const ids = scene.user_hidden_ids()
+    const kindNames: NodeRef['kind'][] = ['object', 'group', 'instance']
+    const seeded = new Set<string>()
+    for (let i = 0; i < kinds.length; i++) {
+      const kind = kindNames[kinds[i]]
+      if (kind === undefined) continue
+      seeded.add(nodeKey({ kind, id: ids[i] }))
+    }
+    return seeded
+  }
+
   // ---------------------------------------------------------------- shared reset helper
   // Used by New, Open — loads bytes into the scene and resets all UI state.
   const applyLoadedBytes = useCallback((bytes: Uint8Array): boolean => {
@@ -540,8 +580,14 @@ export default function App() {
     }
     setSelectedIds([])
     setActiveContext([])
-    setHiddenKeys(new Set())
-    setHiddenTagPaths(new Set())
+    // Seed from the just-loaded document's registries rather than clearing —
+    // hidden .skp layers/nodes (or a re-opened .hew with tags/nodes previously
+    // hidden via the eye toggle) must come up hidden on first render, not
+    // visible.
+    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
+    setHiddenKeys(seededHiddenKeys)
+    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
+    setHiddenTagPaths(seededHiddenTagPaths)
     // Also clear the renderer's hidden set: it keys by dense ids that the new
     // document reuses, so stale ids would silently hide (and un-pick) unrelated
     // objects after a load. (No-op if the viewport isn't mounted yet.)
@@ -554,6 +600,10 @@ export default function App() {
     } finally {
       suppressDirtyRef.current = false
     }
+    // Push the seeded hides now that the scene is tessellated (notifyLoaded
+    // above), so hidden-by-default tags/nodes take effect on first render
+    // instead of waiting for the user to touch an eye toggle.
+    pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
     return true
   }, [handleToast])
   // Keep the harness's Open path ( __hew_test.load) pointed at the latest
@@ -677,6 +727,17 @@ export default function App() {
     // mark would normally fire — but we immediately set afterImport() which
     // owns dirty=true, so the net effect is correct.
     viewportApi.current?.notifyLoaded()
+
+    // Re-seed hidden tags and hidden nodes from the registries the import just
+    // populated — the applyLoadedBytes(blank) call above seeded from an empty
+    // document, so hidden-by-default tags/nodes (e.g. a hidden .skp layer or
+    // hidden group/component) only show up now that scene.import_* has
+    // registered them.
+    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
+    setHiddenKeys(seededHiddenKeys)
+    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
+    setHiddenTagPaths(seededHiddenTagPaths)
+    pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
 
     // Step 7: commit the session state.
     //
@@ -1371,25 +1432,15 @@ export default function App() {
 
   // ── Hide/Show + Tags (must be declared BEFORE the early returns below so the
   // hook count is stable across the loading and loaded renders — Rules of Hooks).
-  /** Collect all leaf object and instance ids for a node (recurse into groups). */
-  const collectLeafIds = (node: NodeRef): { objectIds: bigint[]; instanceIds: bigint[] } => {
-    if (node.kind === 'object') return { objectIds: [node.id], instanceIds: [] }
-    if (node.kind === 'instance') return { objectIds: [], instanceIds: [node.id] }
-    // Group: recurse into members; group_members() returns {kind, id} values
-    // via nodeRefFromJs. We recurse manually so instances inside groups are caught.
-    const members = state!.scene.group_members(node.id)
-    const objectIds: bigint[] = []
-    const instanceIds: bigint[] = []
-    for (let i = 0; i < members.length; i++) {
-      const m = members[i]
-      const mKind: NodeRef['kind'] = m.kind as NodeRef['kind']
-      const child: NodeRef = { kind: mKind, id: m.id }
-      const { objectIds: os, instanceIds: is_ } = collectLeafIds(child)
-      objectIds.push(...os)
-      instanceIds.push(...is_)
-    }
-    return { objectIds, instanceIds }
-  }
+  /**
+   * Collect all leaf object and instance ids for a node (recurse into
+   * groups). Thin wrapper over the shared `collectLeafIds` in treeModel —
+   * supplies the wasm `group_members` lookup as plain NodeRefs.
+   */
+  const collectLeafIds = (node: NodeRef): { objectIds: bigint[]; instanceIds: bigint[] } =>
+    collectLeafIdsShared(node, (groupId) =>
+      state!.scene.group_members(groupId).map((m) => ({ kind: m.kind as NodeRef['kind'], id: m.id })),
+    )
 
   /**
    * Derive the union hidden id sets from both manual-hide and tag-hide sources,
@@ -1473,11 +1524,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state],
   )
+  // Keep the ref pointed at the latest pushUnionHidden closure so callbacks
+  // defined earlier (applyLoadedBytes, importDocument) never call a stale one.
+  pushUnionHiddenRef.current = pushUnionHidden
 
   const handleToggleHidden = (node: NodeRef) => {
     const key = nodeKey(node)
     // Compute the next hidden set purely (no setState updater side effects).
     const next = new Set(hiddenKeys)
+    const nowHidden = !next.has(key)
     if (next.has(key)) {
       next.delete(key)
     } else {
@@ -1485,10 +1540,16 @@ export default function App() {
     }
     setHiddenKeys(next)
     pushUnionHidden(next, hiddenTagPaths)
+    // Persist the choice in the document's USER-hidden registry (view state,
+    // not undoable) so it survives save/load, mirroring how
+    // handleToggleTagPath persists via set_tag_hidden.
+    const kindNum = nodeKindToNumber(node.kind)
+    if (kindNum >= 0) sceneRef.current?.set_node_user_hidden(kindNum, node.id, nowHidden)
   }
 
   const handleToggleTagPath = useCallback((path: string[]) => {
     const key = tagPathKey(path)
+    const nowHidden = !hiddenTagPaths.has(key)
     const next = new Set(hiddenTagPaths)
     if (next.has(key)) {
       next.delete(key)
@@ -1497,6 +1558,10 @@ export default function App() {
     }
     setHiddenTagPaths(next)
     pushUnionHidden(hiddenKeys, next)
+    // Persist the choice in the document's tag registry (view state, not
+    // undoable) so it survives save/load, in addition to the session-only
+    // hiddenTagPaths set above (which drives this render's UI immediately).
+    sceneRef.current?.set_tag_hidden(path.join('/'), nowHidden)
   }, [hiddenTagPaths, hiddenKeys, pushUnionHidden])
 
   if (error !== null) {

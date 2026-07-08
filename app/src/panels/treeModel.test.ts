@@ -15,6 +15,7 @@ import {
   canExplodeInstance,
   canMakeUnique,
   stripTagSuffix,
+  collectLeafIds,
   type NodeRef,
 } from './treeModel'
 
@@ -229,6 +230,49 @@ describe('nodeRefFromJs', () => {
     const js = { kind: 'group', id: 5n }
     const ref = nodeRefFromJs(js)
     expect(ref).toEqual({ kind: 'group', id: 5n })
+  })
+})
+
+describe('collectLeafIds', () => {
+  it('a plain object is its own leaf', () => {
+    const result = collectLeafIds({ kind: 'object', id: 1n }, () => [])
+    expect(result).toEqual({ objectIds: [1n], instanceIds: [] })
+  })
+
+  it('a plain instance is its own leaf', () => {
+    const result = collectLeafIds({ kind: 'instance', id: 5n }, () => [])
+    expect(result).toEqual({ objectIds: [], instanceIds: [5n] })
+  })
+
+  it('a sketch contributes no leaves', () => {
+    const result = collectLeafIds({ kind: 'sketch', id: 9n }, () => [])
+    expect(result).toEqual({ objectIds: [], instanceIds: [] })
+  })
+
+  it('a group expands to its direct object and instance members', () => {
+    const members: Record<string, NodeRef[]> = {
+      '10': [{ kind: 'object', id: 1n }, { kind: 'instance', id: 2n }],
+    }
+    const result = collectLeafIds({ kind: 'group', id: 10n }, (id) => members[String(id)] ?? [])
+    expect(result.objectIds).toEqual([1n])
+    expect(result.instanceIds).toEqual([2n])
+  })
+
+  it('recurses through nested subgroups (imported components arrive as a group-of-groups)', () => {
+    // group 10 -> [object 1, group 20 -> [instance 2, group 30 -> [object 3]]]
+    const members: Record<string, NodeRef[]> = {
+      '10': [{ kind: 'object', id: 1n }, { kind: 'group', id: 20n }],
+      '20': [{ kind: 'instance', id: 2n }, { kind: 'group', id: 30n }],
+      '30': [{ kind: 'object', id: 3n }],
+    }
+    const result = collectLeafIds({ kind: 'group', id: 10n }, (id) => members[String(id)] ?? [])
+    expect(result.objectIds.sort()).toEqual([1n, 3n].sort())
+    expect(result.instanceIds).toEqual([2n])
+  })
+
+  it('an empty group contributes no leaves', () => {
+    const result = collectLeafIds({ kind: 'group', id: 10n }, () => [])
+    expect(result).toEqual({ objectIds: [], instanceIds: [] })
   })
 })
 

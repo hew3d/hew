@@ -107,6 +107,8 @@ pub fn parse_dae(
         defs,
         roots,
         guides: Vec::new(),
+        // COLLADA has no layer list; tags ride on nodes via __HEWMETA__.
+        tags: Vec::new(),
     };
 
     Ok((scene, textures_missing))
@@ -812,6 +814,7 @@ fn convert_node(
                 // name (the Ruby exporter writes it there); None -> def name.
                 name: inst_name.clone(),
                 tags: inst_tags.clone(),
+                hidden: false,
             });
         }
     }
@@ -860,6 +863,7 @@ fn convert_node(
                 name,
                 children: all,
                 tags,
+                hidden: false,
             })
         }
     }

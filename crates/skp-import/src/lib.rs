@@ -35,6 +35,14 @@ pub enum SkpError {
     },
     /// A 2017 container that failed to parse.
     Parse(String),
+    /// The file parsed but yielded NO importable content (no meshes, no
+    /// placements) — with the recovery-note count when the parser had to
+    /// resync, since heavy recovery is the usual cause. Failing loudly here
+    /// beats a silent empty document pretending the import succeeded.
+    EmptyScene {
+        /// How many parser recovery notes accompanied the empty result.
+        recovery_notes: usize,
+    },
 }
 
 impl std::fmt::Display for SkpError {
@@ -47,6 +55,15 @@ impl std::fmt::Display for SkpError {
                  File \u{25b8} Save As \u{25b8} SketchUp Version 2017, then import that"
             ),
             SkpError::Parse(msg) => write!(f, ".skp parse error: {msg}"),
+            SkpError::EmptyScene { recovery_notes: 0 } => {
+                write!(f, "the .skp file contains no importable geometry")
+            }
+            SkpError::EmptyScene { recovery_notes } => write!(
+                f,
+                "no importable geometry survived parsing ({recovery_notes} \
+                 malformed sections skipped) — the file may be damaged; \
+                 re-saving it from SketchUp usually rewrites it cleanly"
+            ),
         }
     }
 }
@@ -84,6 +101,20 @@ pub fn import(bytes: &[u8]) -> Result<SkpScene, SkpError> {
 
     let model = openskp::Model::parse(bytes).map_err(|e| SkpError::Parse(e.to_string()))?;
     let out = convert::convert(&model);
+    // A DAMAGED parse that composes NOTHING importable is a loud failure,
+    // not a silent empty success (the failure mode that motivated this: a
+    // 57 MB house model desyncing 32k times and importing as an empty
+    // document). A CLEAN parse that yields nothing is trusted — genuinely
+    // empty models and guide-only files exist, and their uninstanced
+    // template-figure faces are correctly not imported.
+    let recovery_notes = model.diagnostics.iter().filter(|d| d.is_desync()).count();
+    if recovery_notes > 0
+        && out.scene.roots.is_empty()
+        && out.scene.defs.is_empty()
+        && out.scene.guides.is_empty()
+    {
+        return Err(SkpError::EmptyScene { recovery_notes });
+    }
     Ok(SkpScene {
         scene: out.scene,
         textures_missing: out.textures_missing,

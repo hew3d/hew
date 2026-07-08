@@ -31,6 +31,9 @@
 
 use kernel::{Point3, Transform, Vec3, tol};
 
+/// Non-manifold mesh splitting: cut kernel-rejectable meshes into
+/// buildable open shells (never repaired, always reported by the caller).
+pub mod split;
 /// Per-face affine UV-frame fitting from corner positions + corner UVs.
 pub mod uv;
 
