@@ -1410,6 +1410,60 @@ impl Scene {
         Ok(())
     }
 
+    /// Move/rotate/scale a whole mixed selection — objects, groups,
+    /// instances, and free-standing sketches — as **one undoable step**
+    /// (select-all → Move). `kinds`/`ids` are parallel arrays naming the
+    /// tree nodes (kind `0` = object, `1` = group, `2` = instance, as in
+    /// [`Scene::group_nodes`]); `sketches` lists free-standing sketch
+    /// handles (a distinct FFI concept from tree nodes, as in
+    /// [`Scene::delete_sketch`]). Objects and group leaves bake the affine;
+    /// instances compose it into their pose; nested/duplicate listings
+    /// transform once. `affine` is the same row-major 3×4 12-float matrix as
+    /// [`Scene::transform_object`].
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad kind.
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `EmptySelection` — nothing to transform.
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownSketch` — a
+    ///   stale or hidden handle; the document is untouched.
+    /// - `Transform` — singular affine, or one that reflects a baked target.
+    pub fn transform_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        sketches: &[u64],
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sketch_ids: Vec<_> = sketches.iter().map(|&s| sketch_id(s)).collect();
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_selection(&nodes, &sketch_ids, &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            sketches: sketches.to_vec(),
+            affine: *rows,
+        });
+        Ok(())
+    }
+
     /// Handles of all currently visible groups (ungrouped groups are hidden,
     /// not listed).
     pub fn group_ids(&self) -> Vec<u64> {
@@ -2842,6 +2896,14 @@ impl Scene {
                     TransformObject { object, affine } => {
                         self.transform_object(object, &affine)?;
                     }
+                    TransformSelection {
+                        kinds,
+                        ids,
+                        sketches,
+                        affine,
+                    } => {
+                        self.transform_selection(&kinds, &ids, &sketches, &affine)?;
+                    }
                     DeleteNode { kind, id } => {
                         self.delete_node(kind, id)?;
                     }
@@ -3741,6 +3803,46 @@ mod tests {
         assert!(scene.group_ids().is_empty());
         assert_eq!(scene.top_level_nodes().len(), 2);
         assert_eq!(scene.node_parent(0, o1).unwrap(), None);
+    }
+
+    /// A mixed selection — a bare object, a group, and a free sketch —
+    /// transforms across the FFI as one undoable step, and bad inputs are
+    /// refused with typed codes.
+    #[test]
+    fn transform_selection_round_trips_and_rejects_bad_input() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square(&mut scene);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[o2]).unwrap();
+        let free = scene.begin_ground_sketch();
+
+        let hash_before = scene.state_hash();
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        scene
+            .transform_selection(&[0, 1], &[o1, g], &[free], &affine)
+            .unwrap();
+        assert_ne!(scene.state_hash(), hash_before, "the selection moved");
+
+        // One undo restores the whole act.
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), hash_before, "one undo restores all");
+
+        let err = scene
+            .transform_selection(&[0, 0], &[o1], &[], &affine)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        let err = scene.transform_selection(&[], &[], &[], &affine).unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
+        let err = scene
+            .transform_selection(&[0], &[o1], &[], &affine[..7])
+            .unwrap_err();
+        assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
     }
 
     #[test]

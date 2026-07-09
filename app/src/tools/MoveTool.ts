@@ -5,8 +5,10 @@
  * Gesture:
  *   1. First click  : set the base point (snapped).
  *   2. Move         : rubber-band preview by moving a three.js clone of the
- *                     selected object's mesh (no kernel calls mid-drag).
- *   3. Second click : commit translation = dest − base via transform_object.
+ *                     selection's meshes (no kernel calls mid-drag).
+ *   3. Second click : commit translation = dest − base (one node → the
+ *                     per-kind transform method; a multi-selection → one
+ *                     transform_selection call, one undo step).
  *   4. Esc          : cancel.
  *
  * Axis lock (while in 'base' stage):
@@ -28,8 +30,8 @@
  *   "Length" measurement.  Press Enter to commit that exact distance along
  *   the current direction (locked axis or cursor direction).
  *
- * If no object is selected, the tool shows a hint toast and remains idle.
- * On commit: one transform_object call, then handleSceneRefresh + onDocumentChanged.
+ * If nothing is selected, the tool shows a hint toast and remains idle.
+ * On commit: one kernel transform call, then handleSceneRefresh + onDocumentChanged.
  */
 
 import * as THREE from 'three'
@@ -38,18 +40,14 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, buildSketchPreviewClone, clearPreview } from './transformPreview'
+import { clearPreview } from './transformPreview'
+import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
-import type { NodeRef, NodeKind } from '../panels/treeModel'
-import { nodeRefFromJs } from '../panels/treeModel'
+import type { NodeRef } from '../panels/treeModel'
+import { nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 
-/** FFI node-kind code matching `wasm-api`'s `node_id` (0=object, 1=group, 2=instance). */
-function kindCode(kind: NodeKind): number {
-  return kind === 'object' ? 0 : kind === 'group' ? 1 : 2
-}
-
-export type OnMoveCommit = (node: NodeRef) => void
+export type OnMoveCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
@@ -74,7 +72,7 @@ type Stage =
   | { kind: 'idle' }
   | {
       kind: 'base'
-      node: NodeRef
+      nodes: NodeRef[]
       base: [number, number, number]
       previewMesh: THREE.Object3D | null
       /** Last snapped/computed destination (updated every pointer move). */
@@ -103,8 +101,8 @@ export class MoveTool implements Tool {
   /** THREE.js LineSegments for the axis guide drawn in the preview group */
   private guideLine: THREE.LineSegments | null = null
 
-  /** The node currently selected (set by Viewport via selectedIds[0]). */
-  private selectedNode: NodeRef | null = null
+  /** The full selection at tool activation (set by Viewport from selectedIds). */
+  private selection: NodeRef[] = []
   /** THREE.js object group from the SceneRenderer (read-only reference for cloning). */
   private objectsGroup: THREE.Group | null = null
   /** THREE.js instances group from the SceneRenderer (read-only reference for cloning). */
@@ -114,7 +112,7 @@ export class MoveTool implements Tool {
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     objectsGroup: THREE.Group | null,
-    selectedNode: NodeRef | null,
+    selection: NodeRef[],
     onCommit: OnMoveCommit,
     onToast: OnToast,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
@@ -123,7 +121,7 @@ export class MoveTool implements Tool {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.objectsGroup = objectsGroup
-    this.selectedNode = selectedNode
+    this.selection = selection
     this.onCommit = onCommit
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
@@ -219,23 +217,23 @@ export class MoveTool implements Tool {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const node = this.selectedNode
-      if (node === null) {
+      const nodes = this.selection
+      if (nodes.length === 0) {
         this.onToast('Select an object first, then use Move')
         return
       }
 
-      const previewMesh = this._buildPreview(node)
+      const previewMesh = this._buildPreview(nodes)
       const base: [number, number, number] = [snap.x, snap.y, snap.z]
       if (previewMesh !== null) {
         previewMesh.position.set(0, 0, 0)
         this.preview.add(previewMesh)
       }
 
-      this.stage = { kind: 'base', node, base, previewMesh, dest: [...base] }
+      this.stage = { kind: 'base', nodes, base, previewMesh, dest: [...base] }
       this._updateGuideLine()
     } else if (this.stage.kind === 'base') {
-      const { node, base } = this.stage
+      const { nodes, base } = this.stage
       const tx = snap.x - base[0]
       const ty = snap.y - base[1]
       const tz = snap.z - base[2]
@@ -246,7 +244,7 @@ export class MoveTool implements Tool {
         return
       }
 
-      this._commitAndReset(node, tx, ty, tz)
+      this._commitAndReset(nodes, tx, ty, tz)
     }
   }
 
@@ -310,9 +308,9 @@ export class MoveTool implements Tool {
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   /** Commit the move via translationAffine, then reset to idle. */
-  private _commitAndReset(node: NodeRef, tx: number, ty: number, tz: number): void {
+  private _commitAndReset(nodes: NodeRef[], tx: number, ty: number, tz: number): void {
     this._resetToIdle()
-    this._commit(node, tx, ty, tz)
+    this._commit(nodes, tx, ty, tz)
   }
 
   /**
@@ -322,7 +320,7 @@ export class MoveTool implements Tool {
    */
   private _commitFromTyped(dist: number): void {
     if (this.stage.kind !== 'base') return
-    const { node, base, dest } = this.stage
+    const { nodes, base, dest } = this.stage
 
     let dir: [number, number, number]
     if (this.lockAxis !== null) {
@@ -348,7 +346,7 @@ export class MoveTool implements Tool {
       return
     }
 
-    this._commitAndReset(node, tx, ty, tz)
+    this._commitAndReset(nodes, tx, ty, tz)
   }
 
   private _resetToIdle(): void {
@@ -361,45 +359,46 @@ export class MoveTool implements Tool {
     this.onMeasurementCb('')
   }
 
-  private _buildPreview(node: NodeRef): THREE.Object3D | null {
-    if (node.kind === 'group') {
-      const leafIds = Array.from(this.wasmScene.node_leaf_objects(1, node.id))
-      return buildMultiPreviewClone(this.objectsGroup, leafIds)
-    }
-    if (node.kind === 'instance') {
-      const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
-      return buildInstancePreviewClone(group)
-    }
-    if (node.kind === 'sketch') {
-      return buildSketchPreviewClone(this.wasmScene.sketch_lines(node.id))
-    }
-    return buildPreviewClone(this.objectsGroup, node.id)
+  private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
+    return buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
   }
 
-  private _commit(node: NodeRef, tx: number, ty: number, tz: number): void {
+  private _commit(nodes: NodeRef[], tx: number, ty: number, tz: number): void {
     try {
       const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
-      if (node.kind === 'sketch') {
-        // Sketches have no `duplicate_node` support — Alt/copy mode is ignored
-        // and this always falls through to a plain move (never the copy path).
-        this.wasmScene.transform_sketch(node.id, affineF64)
-        this.onCommit(node)
-      } else if (this.copyMode) {
-        // Option/Alt: duplicate at the offset instead of moving. The copy
-        // is the same kind as the source; select it and chain further copies.
-        const created = this.wasmScene.duplicate_node(kindCode(node.kind), node.id, affineF64)
-        const copy = nodeRefFromJs(created)
-        this.selectedNode = copy
-        this.onCommit(copy)
-      } else if (node.kind === 'group') {
-        this.wasmScene.transform_group(node.id, affineF64)
-        this.onCommit(node)
-      } else if (node.kind === 'instance') {
-        this.wasmScene.transform_instance(node.id, affineF64)
-        this.onCommit(node)
+      if (this.copyMode && nodes.some((n) => n.kind !== 'sketch')) {
+        // Option/Alt: duplicate at the offset instead of moving. Each copy is
+        // the same kind as its source; the copies become the selection so a
+        // follow-up Alt-drag chains off them. Sketches have no
+        // `duplicate_node` support — they fall through to a plain move, as
+        // they always have in single-selection copy mode.
+        //
+        // Per-node kernel calls mean a mid-loop failure leaves the earlier
+        // copies committed in the document — the finally block refreshes and
+        // reselects whatever landed, so the viewport never renders a scene
+        // that diverges from the kernel (the error still surfaces as a toast).
+        const committed: NodeRef[] = []
+        try {
+          for (const node of nodes) {
+            if (node.kind === 'sketch') {
+              this.wasmScene.transform_sketch(node.id, affineF64)
+              committed.push(node)
+            } else {
+              const created = this.wasmScene.duplicate_node(
+                nodeKindToNumber(node.kind), node.id, affineF64,
+              )
+              committed.push(nodeRefFromJs(created))
+            }
+          }
+        } finally {
+          if (committed.length > 0) {
+            this.selection = committed
+            this.onCommit(committed)
+          }
+        }
       } else {
-        this.wasmScene.transform_object(node.id, affineF64)
-        this.onCommit(node)
+        commitSelectionTransform(this.wasmScene, nodes, affineF64)
+        this.onCommit(nodes)
       }
     } catch (err) {
       const code = parseKernelErrorCode(err)

@@ -274,6 +274,21 @@ enum DocAction {
         forward: Transform,
         inverse: Transform,
     },
+    /// A move/rotate/scale applied to a whole mixed selection in one step
+    /// (`transform_selection`: select-all → Move). Baked into every world
+    /// leaf object and listed sketch; composed into every leaf instance's
+    /// pose. Undo bakes `inverse` into the baked targets and restores each
+    /// instance's exact prior pose; redo bakes `forward` and re-composes
+    /// each prior pose with it (bit-identical to the original application).
+    /// All handles are stable across undo/redo.
+    TransformSelection {
+        objects: Vec<ObjectId>,
+        sketches: Vec<SketchId>,
+        /// `(instance, prior pose)` pairs, in flattening order.
+        instances: Vec<(InstanceId, Transform)>,
+        forward: Transform,
+        inverse: Transform,
+    },
     /// A single sketch vertex dragged to a new position (Phase D per-vertex
     /// edit). Topology-preserving, so the inverse is just the old position:
     /// undo restores `old_pos`, redo re-applies `new_pos`; both the `SketchId`
@@ -542,6 +557,9 @@ pub enum DocumentError {
     DegenerateGuide,
     /// `group_nodes` was called with no members.
     EmptyGroup,
+    /// `transform_selection` was called with nothing to transform (no nodes
+    /// and no sketches, or every listed node flattened to nothing visible).
+    EmptySelection,
     /// `make_component` was called with no nodes selected.
     EmptyComponent,
     /// `make_component` was given a selection containing a component instance.
@@ -611,6 +629,9 @@ impl std::fmt::Display for DocumentError {
                 "guide geometry is degenerate (zero-length direction or non-finite coordinate)"
             ),
             DocumentError::EmptyGroup => write!(f, "cannot group an empty selection"),
+            DocumentError::EmptySelection => {
+                write!(f, "cannot transform an empty selection")
+            }
             DocumentError::EmptyComponent => {
                 write!(f, "cannot make a component from an empty selection")
             }
@@ -3086,6 +3107,184 @@ impl Document {
         })
     }
 
+    /// Move/rotate/scale a whole mixed selection — world objects, groups,
+    /// component instances, and free-standing sketches — as **one undoable
+    /// step** ([`DocAction::TransformSelection`]; select-all → Move).
+    ///
+    /// Each listed node is flattened the way [`Document::transform_group`]
+    /// flattens a group: `t` is **baked** into every visible world leaf
+    /// object beneath it, and **composed** into the pose of every instance
+    /// beneath it (exactly like [`Document::transform_instance`], geometry
+    /// shared, never baked). Each listed sketch is baked like
+    /// [`Document::transform_sketch`]. Flattened targets are deduplicated in
+    /// first-listing order, so listing a node alongside its ancestor group
+    /// transforms it once — never twice. All handles stay stable.
+    ///
+    /// # Errors
+    /// - [`DocumentError::EmptySelection`] — nothing listed, or every listed
+    ///   node flattened to nothing visible.
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] / [`DocumentError::UnknownSketch`]
+    ///   — a listed handle is stale or hidden.
+    /// - [`DocumentError::Transform`] — `t` is singular, or it reflects and
+    ///   the selection contains a baked target (an object or sketch), which
+    ///   [`Object::apply_transform`] refuses.
+    ///
+    /// On `Err` the document is untouched (the strong guarantee).
+    pub fn transform_selection(
+        &mut self,
+        nodes: &[NodeId],
+        sketches: &[SketchId],
+        t: &Transform,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "transform_selection");
+        // Pre-validate invertibility before mutating; this is also undo's bake.
+        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+
+        // Validate every listed handle up front — nothing mutates until the
+        // whole selection is known live.
+        for &node in nodes {
+            match node {
+                NodeId::Object(id) => {
+                    if !self
+                        .objects
+                        .get(id)
+                        .is_some_and(|r| !r.hidden && r.is_world())
+                    {
+                        return Err(DocumentError::UnknownObject);
+                    }
+                }
+                NodeId::Group(id) => {
+                    if !self.group_is_live(id) {
+                        return Err(DocumentError::UnknownGroup);
+                    }
+                }
+                NodeId::Instance(id) => {
+                    if self.instances.get(id).is_none_or(|r| r.hidden) {
+                        return Err(DocumentError::UnknownInstance);
+                    }
+                }
+            }
+        }
+        for &s in sketches {
+            if !self.sketches.contains_key(s) || self.hidden_sketches.contains(&s) {
+                return Err(DocumentError::UnknownSketch);
+            }
+        }
+
+        // Flatten to unique leaf targets in first-listing order. Select-all →
+        // Move visits every leaf in the model, so membership checks use
+        // BTreeSets (deterministic, per clippy.toml) beside the order-keeping
+        // Vecs rather than an O(n²) Vec::contains scan.
+        let mut objects: Vec<ObjectId> = Vec::new();
+        let mut object_set: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut instances: Vec<InstanceId> = Vec::new();
+        let mut instance_set: BTreeSet<InstanceId> = BTreeSet::new();
+        for &node in nodes {
+            for obj in self.leaf_objects_under(node) {
+                if object_set.insert(obj) {
+                    objects.push(obj);
+                }
+            }
+            for inst in self.leaf_instances_under(node) {
+                if instance_set.insert(inst) {
+                    instances.push(inst);
+                }
+            }
+        }
+        let mut sketch_targets: Vec<SketchId> = Vec::new();
+        let mut sketch_set: BTreeSet<SketchId> = BTreeSet::new();
+        for &s in sketches {
+            if sketch_set.insert(s) {
+                sketch_targets.push(s);
+            }
+        }
+
+        if objects.is_empty() && instances.is_empty() && sketch_targets.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+
+        // Bake into objects, then sketches. `t` is invertible, so a per-target
+        // failure (a reflecting `t` hitting a baked target) can only happen on
+        // the first bake — but roll back whatever was already baked either
+        // way, to preserve the strong guarantee.
+        let mut baked_objects: Vec<ObjectId> = Vec::new();
+        let mut baked_sketches: Vec<SketchId> = Vec::new();
+        for &obj in &objects {
+            if let Err(e) = self.objects[obj].object.apply_transform(t) {
+                self.rollback_selection_bakes(&baked_objects, &baked_sketches, &inverse);
+                return Err(DocumentError::Transform(e));
+            }
+            baked_objects.push(obj);
+        }
+        for &s in &sketch_targets {
+            if let Err(e) = self.sketches[s].apply_transform(t) {
+                self.rollback_selection_bakes(&baked_objects, &baked_sketches, &inverse);
+                return Err(DocumentError::Transform(e));
+            }
+            baked_sketches.push(s);
+        }
+
+        // Compose into instance poses last — cannot fail once `t` is known
+        // invertible, so no rollback is reachable past this point.
+        let mut instance_prevs: Vec<(InstanceId, Transform)> = Vec::with_capacity(instances.len());
+        for &inst in &instances {
+            let rec = &mut self.instances[inst];
+            let prev = rec.pose;
+            rec.pose = prev.then(t);
+            instance_prevs.push((inst, prev));
+        }
+
+        let groups_touched: Vec<GroupId> = nodes
+            .iter()
+            .filter_map(|&n| match n {
+                NodeId::Group(g) => Some(g),
+                _ => None,
+            })
+            .collect();
+
+        self.undo.push(DocAction::TransformSelection {
+            objects: objects.clone(),
+            sketches: sketch_targets.clone(),
+            instances: instance_prevs,
+            forward: *t,
+            inverse,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(DocChange {
+            objects_touched: objects,
+            sketches_touched: sketch_targets,
+            groups_touched,
+            instances_touched: instances,
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        })
+    }
+
+    /// Bake `inverse` back into targets a failed `transform_selection` had
+    /// already transformed — the strong-guarantee rollback shared by its bake
+    /// arms. The inverse of a validated transform cannot fail to re-apply.
+    fn rollback_selection_bakes(
+        &mut self,
+        baked_objects: &[ObjectId],
+        baked_sketches: &[SketchId],
+        inverse: &Transform,
+    ) {
+        for &s in baked_sketches {
+            self.sketches[s]
+                .apply_transform(inverse)
+                .expect("inverse of a validated transform must re-apply");
+        }
+        for &d in baked_objects {
+            self.objects[d]
+                .object
+                .apply_transform(inverse)
+                .expect("inverse of a validated transform must re-apply");
+        }
+    }
+
     // ------------------------------------------------- component mutations
 
     /// Folds a selection of sibling nodes into a new component definition plus
@@ -3835,6 +4034,38 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            DocAction::TransformSelection {
+                objects,
+                sketches,
+                instances,
+                inverse,
+                ..
+            } => {
+                // Undo by baking the exact inverse into every baked target and
+                // restoring every instance's exact prior pose.
+                for &obj in objects {
+                    self.objects[obj]
+                        .object
+                        .apply_transform(inverse)
+                        .expect("inverse of a validated transform must re-apply");
+                }
+                for &s in sketches {
+                    self.sketches[s]
+                        .apply_transform(inverse)
+                        .expect("inverse of a validated transform must re-apply");
+                }
+                for &(inst, prev) in instances {
+                    self.instances[inst].pose = prev;
+                }
+                DocChange {
+                    objects_touched: objects.clone(),
+                    sketches_touched: sketches.clone(),
+                    groups_touched: Vec::new(),
+                    instances_touched: instances.iter().map(|&(i, _)| i).collect(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             &DocAction::MovedSketchVertex {
                 sketch,
                 vertex,
@@ -4307,6 +4538,39 @@ impl Document {
                     sketches_touched: vec![sketch],
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::TransformSelection {
+                objects,
+                sketches,
+                instances,
+                forward,
+                ..
+            } => {
+                // Redo by re-baking the forward and re-composing each prior
+                // pose with it — the same computation as the original
+                // application, so the result is bit-identical.
+                for &obj in objects {
+                    self.objects[obj]
+                        .object
+                        .apply_transform(forward)
+                        .expect("forward of a validated transform must re-apply");
+                }
+                for &s in sketches {
+                    self.sketches[s]
+                        .apply_transform(forward)
+                        .expect("forward of a validated transform must re-apply");
+                }
+                for &(inst, prev) in instances.iter() {
+                    self.instances[inst].pose = prev.then(forward);
+                }
+                DocChange {
+                    objects_touched: objects.clone(),
+                    sketches_touched: sketches.clone(),
+                    groups_touched: Vec::new(),
+                    instances_touched: instances.iter().map(|&(i, _)| i).collect(),
                     components_touched: Vec::new(),
                     guides_touched: Vec::new(),
                 }

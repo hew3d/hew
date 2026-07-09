@@ -10,7 +10,7 @@ Hew's window has the same layout on the web, macOS, Windows, and Linux. The only
 
 ## The viewport
 
-The center of the window is the 3D viewport. A ground grid sits at height zero, and the three world axes cross at the origin: **X is red, Y is green, Z is blue**. Each axis is drawn solid on its positive side and dashed on its negative side. You can hide the grid and axes with **View ▸ Axes**.
+The center of the window is the 3D viewport. A ground grid sits at height zero, and the three world axes cross at the origin: **X is red, Y is green, Z is blue**. Each axis is drawn solid on its positive side and dashed on its negative side. You can hide the axes with **View ▸ Axes** and the grid with **View ▸ Grid**.
 
 The small chip row in the viewport's top-left corner offers an **Orbit** button and one-click **Top / Iso / Front** standard views. A floating readout in the top-right corner shows live measurements (distance, angle, scale factor) while a tool is **mid-gesture** — that is, partway through an operation, after the first click but before the commit. You'll meet that term throughout this manual. Anything you type also appears in this readout.
 

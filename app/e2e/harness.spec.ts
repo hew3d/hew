@@ -58,6 +58,21 @@ test('harness drives kernel ops and reflects state', async ({ page }) => {
   expect(selection).toEqual([{ kind: 'object', id: result.box }])
 })
 
+test('select-all selects every top-level node', async ({ page }) => {
+  const boxes = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const a = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    const b = h.drawBox([3, 0, 0], [4, 1, 0], 1)
+    h.selectAll()
+    return { a, b }
+  })
+  // Selection goes through React state — poll until it reflects both nodes.
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 2)
+  const selection = await page.evaluate(() => window.__hew_test!.getSelection())
+  expect(selection.map((n) => n.id).sort()).toEqual([boxes.a, boxes.b].sort())
+  expect(selection.every((n) => n.kind === 'object')).toBe(true)
+})
+
 test('recording captures the high-level call stream + low-level input', async ({
   page,
 }) => {

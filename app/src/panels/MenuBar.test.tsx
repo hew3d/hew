@@ -256,6 +256,23 @@ describe('MenuBar', () => {
     expect(onToggleAxes).toHaveBeenCalledOnce()
   })
 
+  it('shows a checkmark for Grid when showGrid=true', () => {
+    render(<MenuBar {...defaultProps} showGrid={true} onToggleGrid={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    const gridEl = screen.getByText('Grid')
+    expect(gridEl.closest('div')?.textContent).toContain('✓')
+  })
+
+  it('calls onToggleGrid when View > Grid is mousedown-clicked', () => {
+    const onToggleGrid = vi.fn()
+    render(<MenuBar {...defaultProps} showGrid={false} onToggleGrid={onToggleGrid} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    const gridEl = screen.getByText('Grid')
+    expect(gridEl.closest('div')?.textContent).not.toContain('✓')
+    fireEvent.mouseDown(gridEl)
+    expect(onToggleGrid).toHaveBeenCalledOnce()
+  })
+
   // --- Help menu ---
 
   it('calls onReportBug when Help > Report Bug… is mousedown-clicked', () => {

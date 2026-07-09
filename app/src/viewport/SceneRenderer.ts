@@ -14,6 +14,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { makeFatSegments, disposeFatSegments } from './fatLine'
+import { srgbColorsToLinear } from './colorSpace'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -434,7 +435,7 @@ export class SceneRenderer {
             positions: mesh.positions(),
             normals: mesh.normals(),
             indices: mesh.indices(),
-            colors: mesh.colors(),
+            colors: srgbColorsToLinear(mesh.colors()),
             uvs: mesh.uvs(),
             groupMaterialIds: BigUint64Array.from(mesh.group_material_ids()),
             groupStarts: mesh.group_starts(),
@@ -575,6 +576,9 @@ export class SceneRenderer {
               const loader = new THREE.TextureLoader()
               // Revoke the object URL once the image has been decoded.
               const t = loader.load(url, () => URL.revokeObjectURL(url))
+              // Image textures are sRGB-encoded; without declaring it three
+              // samples them as linear and the output re-encode washes them out.
+              t.colorSpace = THREE.SRGBColorSpace
               t.wrapS = THREE.RepeatWrapping
               t.wrapT = THREE.RepeatWrapping
               this.textureCache.set(midStr, t)
@@ -583,9 +587,11 @@ export class SceneRenderer {
           tex = this.textureCache.get(midStr)
         }
 
+        // Palette colors are sRGB bytes; setRGB with an explicit color space
+        // converts to linear (the Color(r, g, b) constructor would not).
         const color = info !== undefined
-          ? new THREE.Color(info.r() / 255, info.g() / 255, info.b() / 255)
-          : new THREE.Color(FACE_COLOR_DEFAULT / 0xffffff)
+          ? new THREE.Color().setRGB(info.r() / 255, info.g() / 255, info.b() / 255, THREE.SRGBColorSpace)
+          : new THREE.Color(FACE_COLOR_DEFAULT)
 
         // Per-material opacity (glass etc.): alpha < 255 → render transparent.
         // Stored as userData.baseOpacity so isolation dimming multiplies into it
@@ -637,7 +643,7 @@ export class SceneRenderer {
       const positions = mesh.positions()
       const normals = mesh.normals()
       const indices = mesh.indices()
-      const colors = mesh.colors()
+      const colors = srgbColorsToLinear(mesh.colors())
       const uvs = mesh.uvs()
       const groupMaterialIds = BigUint64Array.from(mesh.group_material_ids())
       const groupStarts = mesh.group_starts()
@@ -1313,6 +1319,12 @@ export class SceneRenderer {
    */
   getInstanceGroup(instanceId: bigint): THREE.Group | null {
     return this.instanceGroups.get(instanceId)?.group ?? null
+  }
+
+  /** The rendered group for one object id — map-backed, unlike a name walk
+   * over `objectsGroup` (marquee hit-testing calls this per candidate). */
+  getObjectGroup(objectId: bigint): THREE.Group | null {
+    return this.objectGroups.get(objectId)?.group ?? null
   }
 
   private _clearSketchLines(): void {

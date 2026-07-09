@@ -15,6 +15,7 @@ use kernel::{
     KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
     SketchError, SketchId, SketchVertexId, Transform, TransformError, Vec3, WatertightState,
 };
+use proptest::prelude::*;
 use std::collections::HashSet;
 
 // ----------------------------------------------------------------- helpers
@@ -825,6 +826,231 @@ fn transform_group_moves_all_leaves_and_round_trips() {
     doc.redo().expect("redo group transform");
     assert!(approx_pt(centroid(doc.object(a).unwrap()), ca + offset));
     assert!(approx_pt(centroid(doc.object(c).unwrap()), cc + offset));
+}
+
+// ------------------------------------------- transform a whole mixed selection
+
+/// `transform_selection` moves a mixed selection — a bare object, a group, a
+/// component instance, and a free-standing sketch — and the entire act is
+/// **one** undo step: a single undo restores every target exactly, a single
+/// redo re-applies.
+#[test]
+fn transform_selection_moves_mixed_selection_in_one_undo_step() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let d = extrude_box(&mut doc, 6.0, 0.0, 7.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(b), NodeId::Object(c)])
+        .unwrap();
+    let (_comp, inst, _) = doc.make_component(&[NodeId::Object(d)]).unwrap();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 10.0, 10.0, 11.0, 11.0);
+
+    let orig_a = doc.object(a).unwrap().clone();
+    let (ca, cb, cc) = (
+        centroid(doc.object(a).unwrap()),
+        centroid(doc.object(b).unwrap()),
+        centroid(doc.object(c).unwrap()),
+    );
+    let sc = sketch_centroid(&doc, s);
+    let probe = Point3::new(0.3, 0.7, 0.2);
+
+    let offset = Vec3::new(5.0, -2.0, 3.0);
+    let t = Transform::translation(offset);
+    let change = doc
+        .transform_selection(
+            &[NodeId::Object(a), NodeId::Group(g), NodeId::Instance(inst)],
+            &[s],
+            &t,
+        )
+        .expect("transform the mixed selection");
+
+    // Every target moved: baked objects, group leaves, sketch, instance pose.
+    assert!(approx_pt(centroid(doc.object(a).unwrap()), ca + offset));
+    assert!(approx_pt(centroid(doc.object(b).unwrap()), cb + offset));
+    assert!(approx_pt(centroid(doc.object(c).unwrap()), cc + offset));
+    assert!(approx_pt(sketch_centroid(&doc, s), sc + offset));
+    assert!(
+        doc.instance_pose(inst)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(t.apply_point(probe), 1e-9),
+        "instance pose composed with t"
+    );
+
+    // The change reports everything it touched.
+    assert_eq!(
+        HashSet::from_iter(change.objects_touched.iter().copied()),
+        HashSet::from([a, b, c])
+    );
+    assert_eq!(change.sketches_touched, vec![s]);
+    assert_eq!(change.groups_touched, vec![g]);
+    assert_eq!(change.instances_touched, vec![inst]);
+
+    // ONE undo restores the whole selection.
+    doc.undo().expect("undo the selection transform");
+    assert!(objects_equivalent(doc.object(a).unwrap(), &orig_a));
+    assert!(approx_pt(centroid(doc.object(b).unwrap()), cb));
+    assert!(approx_pt(centroid(doc.object(c).unwrap()), cc));
+    assert!(approx_pt(sketch_centroid(&doc, s), sc));
+    assert!(
+        doc.instance_pose(inst)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(probe, 1e-9),
+        "undo restores the exact prior (identity) pose"
+    );
+    // ONE redo re-applies it all.
+    doc.redo().expect("redo the selection transform");
+    assert!(approx_pt(centroid(doc.object(a).unwrap()), ca + offset));
+    assert!(approx_pt(centroid(doc.object(c).unwrap()), cc + offset));
+    assert!(approx_pt(sketch_centroid(&doc, s), sc + offset));
+    assert!(
+        doc.instance_pose(inst)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(t.apply_point(probe), 1e-9)
+    );
+}
+
+/// A node listed alongside its ancestor group transforms once, not twice.
+#[test]
+fn transform_selection_dedups_a_node_listed_with_its_ancestor_group() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let ca = centroid(doc.object(a).unwrap());
+
+    let offset = Vec3::new(1.0, 2.0, 3.0);
+    doc.transform_selection(
+        &[NodeId::Group(g), NodeId::Object(a)],
+        &[],
+        &Transform::translation(offset),
+    )
+    .expect("group and member listed together");
+
+    assert!(
+        approx_pt(centroid(doc.object(a).unwrap()), ca + offset),
+        "the doubly-listed leaf moved exactly once"
+    );
+}
+
+proptest! {
+    /// Property (DEVELOPMENT.md rule 3): for an arbitrary orientation-
+    /// preserving similarity (scale → rotate → translate), transforming a
+    /// mixed selection (bare object + group + free sketch) moves every
+    /// baked centroid by exactly the map, one undo restores every target
+    /// exactly, and re-listing a group member alongside its ancestor group
+    /// is the identity on the outcome (dedup: one bake per leaf).
+    #[test]
+    fn transform_selection_round_trips_and_dedups_under_random_maps(
+        dx in -10.0..10.0f64,
+        dy in -10.0..10.0f64,
+        dz in -10.0..10.0f64,
+        angle in -3.0..3.0f64,
+        scale in 0.25..4.0f64,
+    ) {
+        fn build(doc: &mut Document) -> (ObjectId, ObjectId, ObjectId, GroupId, SketchId) {
+            let a = extrude_box(doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+            let b = extrude_box(doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+            let c = extrude_box(doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+            let (g, _) = doc
+                .group_nodes(&[NodeId::Object(b), NodeId::Object(c)])
+                .unwrap();
+            let s = doc.add_sketch(ground());
+            draw_rect(doc, s, 8.0, 8.0, 9.0, 9.0);
+            (a, b, c, g, s)
+        }
+        let t = Transform::uniform_scale(scale)
+            .then(&Transform::rotation(Vec3::new(0.0, 0.0, 1.0), angle).unwrap())
+            .then(&Transform::translation(Vec3::new(dx, dy, dz)));
+
+        let mut doc = Document::new();
+        let (a, b, c, g, s) = build(&mut doc);
+        let originals = [
+            doc.object(a).unwrap().clone(),
+            doc.object(b).unwrap().clone(),
+            doc.object(c).unwrap().clone(),
+        ];
+        let centroids = [
+            centroid(doc.object(a).unwrap()),
+            centroid(doc.object(b).unwrap()),
+            centroid(doc.object(c).unwrap()),
+        ];
+        let sc = sketch_centroid(&doc, s);
+
+        doc.transform_selection(&[NodeId::Object(a), NodeId::Group(g)], &[s], &t)
+            .expect("transform the mixed selection");
+
+        // An affine map commutes with centroids, so each baked centroid
+        // lands exactly on the mapped original.
+        for (&obj, &c0) in [a, b, c].iter().zip(&centroids) {
+            prop_assert!(approx_pt(centroid(doc.object(obj).unwrap()), t.apply_point(c0)));
+        }
+        prop_assert!(approx_pt(sketch_centroid(&doc, s), t.apply_point(sc)));
+
+        // One undo restores every target exactly.
+        doc.undo().expect("undo the selection transform");
+        for (&obj, orig) in [a, b, c].iter().zip(&originals) {
+            prop_assert!(objects_equivalent(doc.object(obj).unwrap(), orig));
+        }
+        prop_assert!(approx_pt(sketch_centroid(&doc, s), sc));
+
+        // Dedup: listing a member with its ancestor group changes nothing.
+        let mut doc2 = Document::new();
+        let (a2, b2, c2, g2, s2) = build(&mut doc2);
+        doc2.transform_selection(
+            &[NodeId::Object(a2), NodeId::Group(g2), NodeId::Object(b2)],
+            &[s2],
+            &t,
+        )
+        .expect("transform with a doubly-listed member");
+        for (&obj, &c0) in [a2, b2, c2].iter().zip(&centroids) {
+            prop_assert!(approx_pt(centroid(doc2.object(obj).unwrap()), t.apply_point(c0)));
+        }
+    }
+}
+
+/// Empty, stale, and degenerate inputs are refused loudly, leaving the
+/// document untouched (the strong guarantee).
+#[test]
+fn transform_selection_refuses_empty_stale_and_degenerate() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let ca = centroid(doc.object(a).unwrap());
+    let t = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
+
+    assert_eq!(
+        doc.transform_selection(&[], &[], &t),
+        Err(DocumentError::EmptySelection)
+    );
+    assert_eq!(
+        doc.transform_selection(&[NodeId::Object(kernel::ObjectId::default())], &[], &t),
+        Err(DocumentError::UnknownObject)
+    );
+    assert_eq!(
+        doc.transform_selection(&[], &[SketchId::default()], &t),
+        Err(DocumentError::UnknownSketch)
+    );
+    // Reflection is refused for a selection with baked targets; the object is
+    // untouched afterwards.
+    assert_eq!(
+        doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(-1.0)),
+        Err(DocumentError::Transform(TransformError::Reflection))
+    );
+    assert_eq!(
+        doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(0.0)),
+        Err(DocumentError::Transform(TransformError::Singular))
+    );
+    assert!(
+        approx_pt(centroid(doc.object(a).unwrap()), ca),
+        "object untouched after refused transforms"
+    );
 }
 
 /// Group then ungroup restores the original top-level shape; the members keep

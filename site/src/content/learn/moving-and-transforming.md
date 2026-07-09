@@ -14,9 +14,9 @@ A quick refresher, since every transform starts here:
 
 - **Click** an object, sketch, or guide to select it. Clicking empty space clears the selection.
 - **Shift-click** adds to or removes from the selection.
+- **Drag** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid rectangle and selects what falls **entirely inside** it; dragging right→left draws a dashed rectangle and selects everything the rectangle **touches**. Hold `Shift` to add the result to the current selection; `Esc` cancels a drag in progress.
+- **Select All** (`⌘A` / `Ctrl+A`, or Edit ▸ Select All) selects every visible object, group, component, and free-standing sketch — the whole model. Inside a group's editing context it selects that group's contents instead.
 - **Double-click** a group, component, or object to enter its editing context (the rest of the scene dims); press `Esc` to step back out.
-
-There is no rubber-band/marquee selection yet; use Shift-click or the Outliner for multiple selections.
 
 ## Move (`M`)
 
@@ -46,7 +46,7 @@ Scaling is **uniform**, about the selection's bounding-box center. For an exact 
 
 ## What transforms apply to
 
-Move, Rotate, and Scale act on one selected thing at a time: an object, a group (with everything inside it), a component instance (each instance transforms independently), or a free-standing sketch. To move several things as one, group them first ([Groups and components](/learn/groups-and-components/)); transforming a whole multi-selection in one gesture is planned but not available yet.
+Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Multi-selections scale about the selection's overall bounding-box center. The one multi-selection caveat: an `Option`/`Alt` copy-move duplicates each solid but plain-moves any sketches in the selection (sketches have no copy support yet), and undoing a multi-copy takes one undo per copied node.
 
 ## Deleting
 

@@ -7,26 +7,29 @@
  *                     center from the object mesh positions.
  *   2. Move         : compute scale factor as |dest − center| / |base − center|;
  *                     update a THREE.js ghost preview.
- *   3. Second click : commit the uniform scale via transform_object.
+ *   3. Second click : commit the uniform scale (one node → the per-kind
+ *                     transform method; a multi-selection → one
+ *                     transform_selection call, one undo step).
  *   4. Esc          : cancel.
  *
  * Scale factor is clamped to a minimum of 0.01 to avoid degenerate / reflection
  * results (the kernel rejects factor ≤ 0 with "Singular" / "Reflection").
  *
- * If no object is selected, shows a hint toast and stays idle.
+ * If nothing is selected, shows a hint toast and stays idle.
  */
 
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { scaleAboutCenter, meshBoundingBoxCenter, affineToFloat64 } from './transformMath'
+import { scaleAboutCenter, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, buildSketchPreviewClone, clearPreview } from './transformPreview'
+import { clearPreview } from './transformPreview'
+import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { editNumericBuffer, parseDistance } from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
 
-export type OnScaleCommit = (node: NodeRef) => void
+export type OnScaleCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
@@ -36,7 +39,7 @@ type Stage =
   | { kind: 'idle' }
   | {
       kind: 'dragging'
-      node: NodeRef
+      nodes: NodeRef[]
       center: [number, number, number]
       baseDist: number
       previewMesh: THREE.Object3D | null
@@ -51,7 +54,7 @@ export class ScaleTool implements Tool {
   private onCommit: OnScaleCommit
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
-  private selectedNode: NodeRef | null = null
+  private selection: NodeRef[] = []
   private objectsGroup: THREE.Group | null = null
   private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
   /** VCB buffer — raw string being typed by the user (unitless factor) */
@@ -61,7 +64,7 @@ export class ScaleTool implements Tool {
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     objectsGroup: THREE.Group | null,
-    selectedNode: NodeRef | null,
+    selection: NodeRef[],
     onCommit: OnScaleCommit,
     onToast: OnToast,
     instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
@@ -70,7 +73,7 @@ export class ScaleTool implements Tool {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.objectsGroup = objectsGroup
-    this.selectedNode = selectedNode
+    this.selection = selection
     this.onCommit = onCommit
     this.onToast = onToast
     this.instanceGroupGetter = instanceGroupGetter
@@ -93,35 +96,35 @@ export class ScaleTool implements Tool {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const node = this.selectedNode
-      if (node === null) {
+      const nodes = this.selection
+      if (nodes.length === 0) {
         this.onToast('Select an object first, then use Scale')
         return
       }
 
-      // Bounding-box center to scale about. For a group this is the aggregate
-      // center across every leaf object, so the whole group scales as a unit
-      // rather than pivoting on one member.
+      // Bounding-box center to scale about. For a group or multi-selection
+      // this is the aggregate center across every target, so the whole
+      // selection scales as a unit rather than pivoting on one member.
       const center: [number, number, number] =
-        this._nodeCenter(node) ?? [snap.x, snap.y, snap.z]
+        this._selectionCenter(nodes) ?? [snap.x, snap.y, snap.z]
 
       const baseDist = this._dist(center, [snap.x, snap.y, snap.z])
-      const previewMesh = this._buildPreview(node)
+      const previewMesh = this._buildPreview(nodes)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)
       }
 
-      this.stage = { kind: 'dragging', node, center, baseDist, previewMesh }
+      this.stage = { kind: 'dragging', nodes, center, baseDist, previewMesh }
       this.onMeasurementCb('×1.00')
     } else if (this.stage.kind === 'dragging') {
-      const { node, center, baseDist } = this.stage
+      const { nodes, center, baseDist } = this.stage
       const f = this._computeFactor(center, [snap.x, snap.y, snap.z], baseDist)
 
       this.stage = { kind: 'idle' }
       this.typed = ''
       clearPreview(this.preview)
       this.onMeasurementCb('')
-      this._commit(node, center, f)
+      this._commit(nodes, center, f)
     }
   }
 
@@ -167,13 +170,13 @@ export class ScaleTool implements Tool {
   /** Commit the scale from the typed VCB buffer, then reset to idle. */
   private _commitFromTyped(f: number): void {
     if (this.stage.kind !== 'dragging') return
-    const { node, center } = this.stage
+    const { nodes, center } = this.stage
 
     this.stage = { kind: 'idle' }
     this.typed = ''
     clearPreview(this.preview)
     this.onMeasurementCb('')
-    this._commit(node, center, f)
+    this._commit(nodes, center, f)
   }
 
   private _dist(a: [number, number, number], b: [number, number, number]): number {
@@ -194,115 +197,59 @@ export class ScaleTool implements Tool {
     return Math.max(f, MIN_SCALE)
   }
 
-  private _buildPreview(node: NodeRef): THREE.Object3D | null {
-    if (node.kind === 'group') {
-      const leafIds = Array.from(this.wasmScene.node_leaf_objects(1, node.id))
-      return buildMultiPreviewClone(this.objectsGroup, leafIds)
-    }
-    if (node.kind === 'instance') {
-      const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
-      return buildInstancePreviewClone(group)
-    }
-    if (node.kind === 'sketch') {
-      return buildSketchPreviewClone(this.wasmScene.sketch_lines(node.id))
-    }
-    return buildPreviewClone(this.objectsGroup, node.id)
+  private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
+    return buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
   }
 
   /**
-   * Bounding-box center to scale about: the node's own mesh for an object, or
-   * the aggregate bbox center across all leaf meshes for a group (so a group
-   * scales about its overall center, not one member's). Null if no mesh data.
+   * World-space bounding-box center of the whole selection, computed from
+   * the rendered meshes — pose-correct for instances (their definition-local
+   * geometry is mapped through the instance group's matrix) and free of FFI
+   * buffer copies. Free sketches contribute their world-space line
+   * endpoints. Null when nothing in the selection has geometry.
    */
-  private _nodeCenter(node: NodeRef): [number, number, number] | null {
-    if (node.kind === 'sketch') {
-      const lines = this.wasmScene.sketch_lines(node.id)
-      if (lines.length === 0) return null
-      const positions = lines instanceof Float32Array ? lines : new Float32Array(lines)
-      return meshBoundingBoxCenter(positions)
-    }
-    if (node.kind === 'instance') {
-      // For an instance, use the member objects' positions mapped through the pose.
-      // Simplest: fetch member meshes and average their positions (definition-local).
-      const componentId = this.wasmScene.instance_def(node.id)
-      if (componentId === undefined) return null
-      const memberIds = Array.from(this.wasmScene.component_member_objects(componentId))
-      const chunks: Float32Array[] = []
-      for (const id of memberIds) {
-        let mesh
-        try {
-          mesh = this.wasmScene.object_mesh(id)
-        } catch {
-          continue
+  private _selectionCenter(nodes: NodeRef[]): [number, number, number] | null {
+    const box = new THREE.Box3()
+    const pt = new THREE.Vector3()
+    for (const node of nodes) {
+      if (node.kind === 'sketch') {
+        const lines = this.wasmScene.sketch_lines(node.id)
+        for (let i = 0; i + 2 < lines.length; i += 3) {
+          box.expandByPoint(pt.set(lines[i], lines[i + 1], lines[i + 2]))
         }
-        try {
-          chunks.push(mesh.positions())
-        } finally {
-          mesh.free()
+      } else if (node.kind === 'instance') {
+        const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
+        if (group !== null) box.expandByObject(group)
+      } else {
+        const leafIds = node.kind === 'group'
+          ? Array.from(this.wasmScene.node_leaf_objects(1, node.id))
+          : [node.id]
+        for (const id of leafIds) {
+          const objGroup = this.objectsGroup?.getObjectByName(`Object_${id}`)
+          if (objGroup !== undefined) box.expandByObject(objGroup)
         }
       }
-      if (chunks.length === 0) return null
-      const total = chunks.reduce((n, c) => n + c.length, 0)
-      const all = new Float32Array(total)
-      let off = 0
-      for (const c of chunks) {
-        all.set(c, off)
-        off += c.length
-      }
-      return meshBoundingBoxCenter(all)
     }
-    const leafIds = node.kind === 'group'
-      ? Array.from(this.wasmScene.node_leaf_objects(1, node.id))
-      : [node.id]
-    const chunks: Float32Array[] = []
-    for (const id of leafIds) {
-      let mesh
-      try {
-        mesh = this.wasmScene.object_mesh(id)
-      } catch {
-        continue
-      }
-      try {
-        chunks.push(mesh.positions())
-      } finally {
-        mesh.free()
-      }
-    }
-    if (chunks.length === 0) return null
-    if (chunks.length === 1) return meshBoundingBoxCenter(chunks[0])
-    const total = chunks.reduce((n, c) => n + c.length, 0)
-    const all = new Float32Array(total)
-    let off = 0
-    for (const c of chunks) {
-      all.set(c, off)
-      off += c.length
-    }
-    return meshBoundingBoxCenter(all)
+    if (box.isEmpty()) return null
+    const c = box.getCenter(pt)
+    return [c.x, c.y, c.z]
   }
 
   private _commit(
-    node: NodeRef,
+    nodes: NodeRef[],
     center: [number, number, number],
     f: number,
   ): void {
     if (Math.abs(f - 1) < 1e-9) {
       // Near-identity scale; skip the kernel call
-      this.onCommit(node)
+      this.onCommit(nodes)
       return
     }
     try {
       const affine = scaleAboutCenter(center[0], center[1], center[2], f)
       const affineF64 = affineToFloat64(affine)
-      if (node.kind === 'group') {
-        this.wasmScene.transform_group(node.id, affineF64)
-      } else if (node.kind === 'instance') {
-        this.wasmScene.transform_instance(node.id, affineF64)
-      } else if (node.kind === 'sketch') {
-        this.wasmScene.transform_sketch(node.id, affineF64)
-      } else {
-        this.wasmScene.transform_object(node.id, affineF64)
-      }
-      this.onCommit(node)
+      commitSelectionTransform(this.wasmScene, nodes, affineF64)
+      this.onCommit(nodes)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

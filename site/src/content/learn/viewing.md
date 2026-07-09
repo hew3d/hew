@@ -36,7 +36,8 @@ When you're done navigating, press `Space` to return to the Select tool (or the 
 
 ## Controlling what you see
 
-- **View ▸ Axes** shows or hides the ground grid and the world axes together.
+- **View ▸ Axes** shows or hides the world axes.
+- **View ▸ Grid** shows or hides the ground grid, independently of the axes. The ground is a virtual backdrop — it never hides your model, so a Bottom view sees the model straight through it, and geometry lying exactly on the ground stays visible.
 - **View ▸ Guides** shows or hides all construction guides (see [Precision, measurement, and guides](/learn/measurement-and-guides/)). Hidden guides also stop participating in snapping.
 - The **Outliner** and **Tags** panels have per-object and per-tag visibility toggles ([Organizing your model](/learn/organizing/)).
 - When you double-click into a group, component, or object to edit it, the rest of the scene dims so your editing context is unmistakable. Press `Esc` to step back out one level.

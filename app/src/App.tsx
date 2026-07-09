@@ -179,8 +179,9 @@ export default function App() {
   const [showObjectInfo, setShowObjectInfo] = useState(() => getTrayLayout().objectInfo)
   /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
   const [showDebugLog, setShowDebugLog] = useState(false)
-  /** View ▸ Axes / Guides visibility. Default both shown. */
+  /** View ▸ Axes / Grid / Guides visibility. Default all shown. */
   const [showAxes, setShowAxes] = useState(true)
+  const [showGrid, setShowGrid] = useState(true)
   const [showGuides, setShowGuides] = useState(true)
   /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
   const [showSettingsModal, setShowSettingsModal] = useState(false)
@@ -409,6 +410,17 @@ export default function App() {
     // Node and guide selection are mutually exclusive.
     setSelectedGuide(null)
     setSelectedIds((cur) => nextSelection(cur, node, additive))
+  }, [])
+
+  /** Lift a multi-node selection (marquee, Select All) from the viewport.
+   * Non-additive replaces; additive (shift-drag) merges without duplicates. */
+  const handleSelectMany = useCallback((nodes: NodeRef[], additive: boolean) => {
+    setSelectedGuide(null)
+    setSelectedIds((cur) => {
+      if (!additive) return nodes
+      const seen = new Set(cur.map(nodeKey))
+      return [...cur, ...nodes.filter((n) => !seen.has(nodeKey(n)))]
+    })
   }, [])
 
   /** Lift a guide pick from the viewport; clears node selection. */
@@ -1342,6 +1354,7 @@ export default function App() {
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
       case 'redo':     handleRedoRef.current(); break
+      case 'edit-select-all': viewportApi.current?.selectAll(); break
       case 'edit-delete': deleteSelection(); break
       case 'close':
         // Trigger the beforeunload / close-guard path by emitting the
@@ -1375,6 +1388,7 @@ export default function App() {
       case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'toggle-axes':         setShowAxes((v) => !v); break
+      case 'toggle-grid':         setShowGrid((v) => !v); break
       case 'toggle-guides':       setShowGuides((v) => !v); break
       case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
@@ -1745,10 +1759,31 @@ export default function App() {
     return () => window.removeEventListener('keydown', onDeleteKey)
   }, [])
 
-  // Mirror the View ▸ Axes / Guides toggles into the viewport. The
-  // viewport API ref is populated once the viewport mounts; both default to
+  // Cmd/Ctrl+A → Select All. Like Delete above, this is handled in JS on
+  // BOTH web and desktop: the native menu item deliberately carries no
+  // accelerator, because a native CmdOrCtrl+A fires even while typing in a
+  // text field and would hijack select-all-text into a scene-wide selection.
+  // Here a focused text field keeps the browser's own select-all.
+  useEffect(() => {
+    const onSelectAllKey = (ev: KeyboardEvent) => {
+      if (!(ev.metaKey || ev.ctrlKey) || ev.shiftKey || ev.altKey) return
+      if (ev.key.toLowerCase() !== 'a') return
+      const target = ev.target as HTMLElement
+      const isTyping =
+        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+      if (isTyping) return // let the focused field select its own text
+      ev.preventDefault()
+      menuActionRef.current('edit-select-all')
+    }
+    window.addEventListener('keydown', onSelectAllKey)
+    return () => window.removeEventListener('keydown', onSelectAllKey)
+  }, [])
+
+  // Mirror the View ▸ Axes / Grid / Guides toggles into the viewport. The
+  // viewport API ref is populated once the viewport mounts; all default to
   // visible so an early run before the ref is ready is a harmless no-op.
   useEffect(() => { viewportApi.current?.setAxesVisible(showAxes) }, [showAxes])
+  useEffect(() => { viewportApi.current?.setGridVisible(showGrid) }, [showGrid])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
 
   // ---------------------------------------------------------------- native menu state sync (macOS)
@@ -1779,6 +1814,7 @@ export default function App() {
     if (!isTauri || !isMac) return
     const checked: Record<string, boolean> = {
       'view-axes': showAxes,
+      'view-grid': showGrid,
       'view-guides': showGuides,
       'win-model-info': showModelInfo,
       'win-materials': showMaterials,
@@ -1807,6 +1843,7 @@ export default function App() {
   }, [
     activeTool,
     showAxes,
+    showGrid,
     showGuides,
     showModelInfo,
     showMaterials,
@@ -2137,8 +2174,10 @@ export default function App() {
         onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
         showAxes={showAxes}
+        showGrid={showGrid}
         showGuides={showGuides}
         onToggleAxes={() => setShowAxes((v) => !v)}
+        onToggleGrid={() => setShowGrid((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         onDelete={deleteSelection}
@@ -2232,6 +2271,7 @@ export default function App() {
             selectedIds={selectedIds}
             activeLitSet={activeLitSet}
             onSelect={handleSelect}
+            onSelectMany={handleSelectMany}
             onSelectGuide={handleSelectGuide}
             selectedGuide={selectedGuide}
             onEnterContext={handleEnterContext}

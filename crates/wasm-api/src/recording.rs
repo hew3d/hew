@@ -62,6 +62,14 @@ pub enum RecordedCall {
     SliceObject { object: u64, plane: [f64; 6] },
     /// `transform_object(object, affine)`.
     TransformObject { object: u64, affine: [f64; 12] },
+    /// `transform_selection(kinds, ids, sketches, affine)` — a whole
+    /// multi-selection moved/rotated/scaled as one undo step.
+    TransformSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        sketches: Vec<u64>,
+        affine: [f64; 12],
+    },
     /// `delete_node(kind, id)`.
     DeleteNode { kind: u8, id: u64 },
 }

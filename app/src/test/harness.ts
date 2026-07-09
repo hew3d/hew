@@ -82,6 +82,9 @@ export interface HewTestHarness {
   boolean(op: number, a: string, b: string): string
   deleteObject(id: string): void
   selectObjects(ids: string[]): void
+  /** Edit ▸ Select All: every visible top-level node + free sketch (or a
+   * group context's direct members) — the same path ⌘A takes. */
+  selectAll(): void
   setCamera(pose: CameraPose): void
   replay(recordingJson: string): string
   // serialization ( — round-trips the live `.hew` container through the
@@ -388,6 +391,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     selectObjects: (ids) => deps.setSelectedObjects(ids.map((id) => BigInt(id))),
+
+    selectAll: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.selectAll()
+    },
 
     setCamera: (pose) => {
       const api = deps.getViewportApi()

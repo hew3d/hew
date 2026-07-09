@@ -1456,6 +1456,13 @@ fn main() {
             // on the JS handler for the keyboard path is the documented
             // fallback when the menu lib's accelerator can't be scoped.
             let edit_delete = gated_item(handle, &mut gated, "edit-delete", "Delete", None, None)?;
+            // No accelerator, for the same reason as Delete above: a native
+            // CmdOrCtrl+A would fire even while typing in a text field,
+            // hijacking select-all-text into a scene-wide selection. The JS
+            // keydown handler (App.tsx) owns the keyboard path with a typing
+            // guard on every platform.
+            let edit_select_all =
+                MenuItemBuilder::with_id("edit-select-all", "Select All").build(handle)?;
             let edit_delete_guides =
                 MenuItemBuilder::with_id("edit-delete-guides", "Delete Guide Lines")
                     .build(handle)?;
@@ -1534,6 +1541,7 @@ fn main() {
                 .item(&edit_undo)
                 .item(&edit_redo)
                 .separator()
+                .item(&edit_select_all)
                 .item(&edit_delete)
                 .item(&edit_delete_guides)
                 .separator()
@@ -1554,6 +1562,7 @@ fn main() {
             // View menu
             // ----------------------------------------------------------------
             let view_axes = check_item(handle, &mut checks, "view-axes", "Axes", None, None)?;
+            let view_grid = check_item(handle, &mut checks, "view-grid", "Grid", None, None)?;
             let view_guides = check_item(handle, &mut checks, "view-guides", "Guides", None, None)?;
             // Command palette. `Cmd+K` is already Rectangle's
             // accelerator (preserved unchanged) — `Cmd+/` is free and is
@@ -1570,6 +1579,7 @@ fn main() {
 
             let view_menu = SubmenuBuilder::new(handle, "View")
                 .item(&view_axes)
+                .item(&view_grid)
                 .item(&view_guides)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&view_palette)
@@ -2027,6 +2037,7 @@ fn main() {
                 "edit-redo" => "redo",
                 "edit-delete" => "edit-delete",
                 "edit-delete-guides" => "edit-delete-guides",
+                "edit-select-all" => "edit-select-all",
                 "edit-group" => "edit-group",
                 "edit-ungroup" => "edit-ungroup",
                 "edit-make-component" => "edit-make-component",
@@ -2037,6 +2048,7 @@ fn main() {
                 "edit-subtract" => "edit-subtract",
                 "edit-intersect" => "edit-intersect",
                 "view-axes" => "toggle-axes",
+                "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",
                 "view-palette" => "open-palette",
                 "draw-rectangle" => "tool-rectangle",

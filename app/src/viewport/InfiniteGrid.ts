@@ -115,7 +115,18 @@ export class InfiniteGrid {
         uMinorColor: { value: new THREE.Color(minorColor) },
         uMajorColor: { value: new THREE.Color(majorColor) },
       },
-      transparent: true,
+      // A BACKDROP, not an occluder: opaque-pass (transparent: false) so it
+      // draws before the model, at renderOrder -1 so it's first within that
+      // pass, and with no depth write so everything drawn after paints over
+      // it regardless of depth. The ground is virtual — it must never hide
+      // the model: with `transparent: true` it rendered in the transparent
+      // pass AFTER the opaque model and depth-tested against it, so a Bottom
+      // view showed only ground (grid nearer → test passed → opaque fill
+      // over the model) and a face lying exactly at z=0 flickered as the
+      // depth tie broke differently pixel to pixel. As a backdrop the model
+      // always wins the sightline; geometry below z=0 likewise stays visible
+      // through the ground instead of being buried.
+      transparent: false,
       depthWrite: false,
       // Defensive: don't rely on the plane's winding order matching what a
       // default front-face culling test expects.
@@ -123,12 +134,10 @@ export class InfiniteGrid {
     })
     this.mesh = new THREE.Mesh(geometry, this.material)
     this.mesh.name = 'InfiniteGrid'
-    // Render before every other transparent overlay (sketch region fills, sketch
-    // edges, axes, tool previews — all just above the ground at z≈0.001). The
-    // grid paints an opaque ground base, so without this it can paint OVER those
-    // overlays in the transparent pass — that's why sketch fills showed "only
-    // sometimes" (they survived only where the grid's old distance-fade happened
-    // to be transparent). renderOrder -1 makes the grid always paint first.
+    // First in the opaque pass (see the material comment above): the model
+    // overdraws it, and the transparent overlays just above the ground
+    // (sketch region fills, sketch edges, axes, tool previews at z≈0.001)
+    // blend over it later in the transparent pass.
     this.mesh.renderOrder = -1
     // Defensive: a 600x600 plane's bounding sphere should always intersect
     // the frustum near the origin, but skip the computed-bounds culling test

@@ -162,6 +162,7 @@ literal internal handles from the recording session.
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
+| `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
 
 Coverage grows over time; adding a new `method` variant is a non-breaking

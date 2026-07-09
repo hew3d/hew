@@ -10,8 +10,9 @@
  *   3. Move         : rubber-band preview showing rotation angle (snapped to
  *                     15° increments unless a value is typed); ghost preview
  *                     via a THREE.js clone.
- *   4. Third click  : commit rotation by the live delta about pivot via
- *                     transform_object/transform_group/transform_instance.
+ *   4. Third click  : commit rotation by the live delta about pivot (one
+ *                     node → the per-kind transform method; a multi-selection
+ *                     → one transform_selection call, one undo step).
  *   5. Esc          : cancel current stage.
  *
  * Axis lock (while in 'pivot' or 'ref' stage):
@@ -29,7 +30,7 @@
  * floating in space), the live preview during 'ref' uses ray/plane
  * intersection rather than the resolved snap point.
  *
- * If no object is selected, shows a hint toast and stays idle.
+ * If nothing is selected, shows a hint toast and stays idle.
  */
 
 import * as THREE from 'three'
@@ -43,11 +44,12 @@ import {
   affineToFloat64,
 } from './transformMath'
 import { rayPlaneIntersect, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
-import { buildPreviewClone, buildMultiPreviewClone, buildInstancePreviewClone, buildSketchPreviewClone, clearPreview } from './transformPreview'
+import { clearPreview } from './transformPreview'
+import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { arrowToAxis, editNumericBuffer, parseDistance } from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
 
-export type OnRotateCommit = (node: NodeRef) => void
+export type OnRotateCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
@@ -55,14 +57,14 @@ type Stage =
   | { kind: 'idle' }
   | {
       kind: 'pivot'
-      node: NodeRef
+      nodes: NodeRef[]
       pivot: [number, number, number]
       /** Unit axis derived from the face under the pivot (or world +Z). */
       faceAxis: [number, number, number]
     }
   | {
       kind: 'ref'
-      node: NodeRef
+      nodes: NodeRef[]
       pivot: [number, number, number]
       faceAxis: [number, number, number]
       /** The 3D reference point (2nd click), stored so the reference vector
@@ -91,7 +93,7 @@ export class RotateTool implements Tool {
   private onCommit: OnRotateCommit
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
-  private selectedNode: NodeRef | null = null
+  private selection: NodeRef[] = []
   private objectsGroup: THREE.Group | null = null
   private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
 
@@ -104,7 +106,7 @@ export class RotateTool implements Tool {
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     objectsGroup: THREE.Group | null,
-    selectedNode: NodeRef | null,
+    selection: NodeRef[],
     onCommit: OnRotateCommit,
     onToast: OnToast,
     instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
@@ -113,7 +115,7 @@ export class RotateTool implements Tool {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.objectsGroup = objectsGroup
-    this.selectedNode = selectedNode
+    this.selection = selection
     this.onCommit = onCommit
     this.onToast = onToast
     this.instanceGroupGetter = instanceGroupGetter
@@ -161,8 +163,8 @@ export class RotateTool implements Tool {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const node = this.selectedNode
-      if (node === null) {
+      const nodes = this.selection
+      if (nodes.length === 0) {
         this.onToast('Select an object first, then use Rotate')
         return
       }
@@ -170,20 +172,20 @@ export class RotateTool implements Tool {
       const faceAxis = this._pickFaceAxis(ray)
       this.axisLock = null
       this.typed = ''
-      this.stage = { kind: 'pivot', node, pivot, faceAxis }
+      this.stage = { kind: 'pivot', nodes, pivot, faceAxis }
       this.onMeasurementCb('')
     } else if (this.stage.kind === 'pivot') {
-      const { node, pivot, faceAxis } = this.stage
+      const { nodes, pivot, faceAxis } = this.stage
       const refPoint: [number, number, number] = [snap.x, snap.y, snap.z]
-      const previewMesh = this._buildPreview(node)
+      const previewMesh = this._buildPreview(nodes)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)
       }
-      this.stage = { kind: 'ref', node, pivot, faceAxis, refPoint, previewMesh, lastDelta: 0 }
+      this.stage = { kind: 'ref', nodes, pivot, faceAxis, refPoint, previewMesh, lastDelta: 0 }
       this.typed = ''
       this.onMeasurementCb('0.0°')
     } else if (this.stage.kind === 'ref') {
-      const { node, pivot, lastDelta } = this.stage
+      const { nodes, pivot, lastDelta } = this.stage
       const delta = lastDelta
       const axis = this._effectiveAxis()
 
@@ -194,7 +196,7 @@ export class RotateTool implements Tool {
         return
       }
 
-      this._commit(node, pivot, axis, delta)
+      this._commit(nodes, pivot, axis, delta)
     }
   }
 
@@ -221,11 +223,11 @@ export class RotateTool implements Tool {
       if (n !== null) {
         // Degrees are unitless — commit directly, no metersFromUnit conversion.
         const theta = (n * Math.PI) / 180
-        const { node, pivot } = this.stage
+        const { nodes, pivot } = this.stage
         const axis = this._effectiveAxis()
         this._resetToIdle()
         if (Math.abs(theta) > 1e-9) {
-          this._commit(node, pivot, axis, theta)
+          this._commit(nodes, pivot, axis, theta)
         }
       }
       return
@@ -312,23 +314,12 @@ export class RotateTool implements Tool {
     this._reportAngle(deltaRad)
   }
 
-  private _buildPreview(node: NodeRef): THREE.Object3D | null {
-    if (node.kind === 'group') {
-      const leafIds = Array.from(this.wasmScene.node_leaf_objects(1, node.id))
-      return buildMultiPreviewClone(this.objectsGroup, leafIds)
-    }
-    if (node.kind === 'instance') {
-      const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
-      return buildInstancePreviewClone(group)
-    }
-    if (node.kind === 'sketch') {
-      return buildSketchPreviewClone(this.wasmScene.sketch_lines(node.id))
-    }
-    return buildPreviewClone(this.objectsGroup, node.id)
+  private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
+    return buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
   }
 
   private _commit(
-    node: NodeRef,
+    nodes: NodeRef[],
     pivot: [number, number, number],
     axis: [number, number, number],
     theta: number,
@@ -336,16 +327,8 @@ export class RotateTool implements Tool {
     try {
       const affine = rotateAboutPivotAxis(pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2], theta)
       const affineF64 = affineToFloat64(affine)
-      if (node.kind === 'group') {
-        this.wasmScene.transform_group(node.id, affineF64)
-      } else if (node.kind === 'instance') {
-        this.wasmScene.transform_instance(node.id, affineF64)
-      } else if (node.kind === 'sketch') {
-        this.wasmScene.transform_sketch(node.id, affineF64)
-      } else {
-        this.wasmScene.transform_object(node.id, affineF64)
-      }
-      this.onCommit(node)
+      commitSelectionTransform(this.wasmScene, nodes, affineF64)
+      this.onCommit(nodes)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

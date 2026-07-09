@@ -76,12 +76,16 @@ export interface MenuBarProps {
   onToggleObjectInfo?: () => void
   /** Toggle the Debug Log panel. */
   onToggleDebugLog?: () => void
-  /** Whether the world axes/grid are shown (View ▸ Axes). */
+  /** Whether the world axes are shown (View ▸ Axes). */
   showAxes?: boolean
+  /** Whether the ground grid is shown (View ▸ Grid). */
+  showGrid?: boolean
   /** Whether construction guides are shown (View ▸ Guides). */
   showGuides?: boolean
-  /** Toggle the world axes/grid. */
+  /** Toggle the world axes. */
   onToggleAxes?: () => void
+  /** Toggle the ground grid. */
+  onToggleGrid?: () => void
   /** Toggle construction-guide visibility. */
   onToggleGuides?: () => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
@@ -314,8 +318,10 @@ export function MenuBar({
   onToggleObjectInfo,
   onToggleDebugLog,
   showAxes = true,
+  showGrid = true,
   showGuides = true,
   onToggleAxes,
+  onToggleGrid,
   onToggleGuides,
   onDeleteGuides,
   onDelete,
@@ -423,6 +429,11 @@ export function MenuBar({
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
+              label="Select All"
+              shortcut={`${mod}A`}
+              onClick={withClose(() => onEditAction?.('edit-select-all'))}
+            />
+            <MenuItem
               label="Delete"
               shortcut="⌫"
               onClick={withClose(() => onDelete?.())}
@@ -499,6 +510,11 @@ export function MenuBar({
               label="Axes"
               checked={showAxes}
               onClick={withClose(() => onToggleAxes?.())}
+            />
+            <CheckMenuItem
+              label="Grid"
+              checked={showGrid}
+              onClick={withClose(() => onToggleGrid?.())}
             />
             <CheckMenuItem
               label="Guides"

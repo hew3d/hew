@@ -39,6 +39,7 @@ Protractor, Slice, and Edit Vertex have no default key (as in SketchUp); reach t
 | Close window | `⌘W` (desktop) | — |
 | Undo | `⌘Z` | `Ctrl+Z` |
 | Redo | `⇧⌘Z` | `Ctrl+Shift+Z` |
+| Select All | `⌘A` | `Ctrl+A` |
 | Delete selection | `Delete` / `⌫` | `Delete` / `Backspace` |
 | Group | `⌘G` | `Ctrl+G` |
 | Ungroup | `⇧⌘G` | `Ctrl+Shift+G` |

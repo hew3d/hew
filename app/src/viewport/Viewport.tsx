@@ -48,7 +48,8 @@ import { EditVertexTool } from '../tools/EditVertexTool'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 import type { Snap } from '../tools/types'
-import { collectLeafIds, type NodeRef } from '../panels/treeModel'
+import { collectLeafIds, nodeRefFromJs, type NodeRef } from '../panels/treeModel'
+import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
 import { InfiniteGrid } from './InfiniteGrid'
@@ -123,6 +124,9 @@ interface Props {
   activeLitSet?: Set<bigint> | null
   /** Lift an in-viewport selection up to the parent. `additive` = shift-click. */
   onSelect?: (node: NodeRef | null, additive: boolean) => void
+  /** Lift a multi-node selection (marquee, Select All) up to the parent.
+   * `additive` = shift held: merge into the current selection. */
+  onSelectMany?: (nodes: NodeRef[], additive: boolean) => void
   /** Lift a construction-guide pick to the parent; `null` clears. */
   onSelectGuide?: (id: bigint | null) => void
   /** The currently selected guide, reflected into the renderer highlight. */
@@ -259,8 +263,13 @@ export interface ViewportApi {
    * the kernel pick results in the Select tool path.
    */
   setHidden: (hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[]) => void
-  /** Show/hide the ground grid + origin axes (View ▸ Axes). */
+  /** Select every visible top-level node + free sketch (Edit ▸ Select All);
+   * inside a group's editing context, its direct members. */
+  selectAll: () => void
+  /** Show/hide the origin axes (View ▸ Axes). */
   setAxesVisible: (visible: boolean) => void
+  /** Show/hide the ground grid (View ▸ Grid). */
+  setGridVisible: (visible: boolean) => void
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible: (visible: boolean) => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
@@ -501,6 +510,7 @@ export default function Viewport({
   selectedIds = [],
   activeLitSet = null,
   onSelect,
+  onSelectMany,
   onSelectGuide,
   selectedGuide = null,
   onEnterContext,
@@ -525,6 +535,8 @@ export default function Viewport({
   onToastRef.current = onToast
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
+  const onSelectManyRef = useRef(onSelectMany)
+  onSelectManyRef.current = onSelectMany
   const onSelectGuideRef = useRef(onSelectGuide)
   onSelectGuideRef.current = onSelectGuide
   const onEnterContextRef = useRef(onEnterContext)
@@ -639,10 +651,28 @@ export default function Viewport({
     camera.up.set(0, 0, 1)
     camera.lookAt(0, 0, 0)
 
-    // Lights
-    const ambient = new THREE.AmbientLight(0xffffff, 0.4)
+    // Lights — theme-aware intensities. Dark keeps the original dim rig: its
+    // low floor is what makes the dark viewport read as deliberately muted.
+    // Light is tuned so a face square to the sun totals a surface multiplier
+    // of ~1.0 — it renders its authored material color at full value
+    // (SketchUp's look: white is 255, not grey) — with a high ambient floor
+    // so no face falls into murk.
+    //
+    // The ×π: three r155+ interprets light intensity in physical units — the
+    // Lambert BRDF divides irradiance by π — so an intensity of 1 lights a
+    // white face to only 1/π (~0.32, i.e. 153 grey). Scaling by π makes each
+    // value below read as the effective surface multiplier it produces;
+    // verified against screen pixels with the Digital Color Meter approach
+    // (a white face square to the sun measures 255, a shaded one ~221).
+    // Dark's values stay raw (sub-physical) on purpose — that IS its mute.
+    const MODEL_LIGHT_RIG: Record<'light' | 'dark', { ambient: number; directional: number }> = {
+      dark: { ambient: 0.4, directional: 0.9 },
+      light: { ambient: 0.72 * Math.PI, directional: 0.55 * Math.PI },
+    }
+    const initialRig = MODEL_LIGHT_RIG[getResolvedTheme()]
+    const ambient = new THREE.AmbientLight(0xffffff, initialRig.ambient)
     threeScene.add(ambient)
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.9)
+    const dirLight = new THREE.DirectionalLight(0xffffff, initialRig.directional)
     dirLight.position.set(3, -5, 8)
     threeScene.add(dirLight)
 
@@ -676,12 +706,15 @@ export default function Viewport({
     }
 
     // Live theme reactivity: Settings > Theme can change at any time while
-    // the viewport is mounted, so the clear color and ground plane need to
-    // follow it without a reload — everything else in the app (CSS
-    // variables) already updates live via `data-theme`.
+    // the viewport is mounted, so the clear color, light rig, and ground
+    // plane need to follow it without a reload — everything else in the app
+    // (CSS variables) already updates live via `data-theme`.
     const unsubscribeTheme = subscribeTheme(() => {
       const theme = getResolvedTheme()
       renderer.setClearColor(CANVAS_CLEAR_COLOR[theme])
+      const rig = MODEL_LIGHT_RIG[theme]
+      ambient.intensity = rig.ambient
+      dirLight.intensity = rig.directional
       const gridColors = GROUND_GRID_COLORS[theme]
       infiniteGrid.setColors(gridColors.ground, gridColors.minor, gridColors.major)
       const wasVisible = originAxes.visible
@@ -773,6 +806,200 @@ export default function Viewport({
     const toolController = new ToolController(wasmScene, handleSelect)
     toolControllerRef.current = toolController
 
+    // ------------------------------------------------- select-all + marquee
+    /**
+     * Top-level selectable candidates with their visible leaf geometry ids.
+     * Nodes whose every leaf is hidden (manually or via tags) are skipped —
+     * neither Select All nor a marquee should sweep up invisible geometry.
+     */
+    /** Expand a node to its non-hidden leaf ids; null when every leaf is
+     * hidden (the node has nothing on screen to select). */
+    function visibleLeaves(node: NodeRef): { leafObjects: bigint[]; leafInstances: bigint[] } | null {
+      const getGroupMembers = (gid: bigint): NodeRef[] =>
+        wasmScene.group_members(gid).map(nodeRefFromJs)
+      const { objectIds, instanceIds } = collectLeafIds(node, getGroupMembers)
+      const leafObjects = objectIds.filter((id) => !hiddenObjectIdsRef.current.has(id))
+      const leafInstances = instanceIds.filter((id) => !hiddenInstanceIdsRef.current.has(id))
+      if (leafObjects.length === 0 && leafInstances.length === 0) return null
+      return { leafObjects, leafInstances }
+    }
+
+    function visibleTopLevelCandidates(): {
+      node: NodeRef
+      leafObjects: bigint[]
+      leafInstances: bigint[]
+    }[] {
+      const out: { node: NodeRef; leafObjects: bigint[]; leafInstances: bigint[] }[] = []
+      for (const nj of wasmScene.top_level_nodes()) {
+        const node = nodeRefFromJs(nj)
+        const leaves = visibleLeaves(node)
+        if (leaves === null) continue
+        out.push({ node, ...leaves })
+      }
+      return out
+    }
+
+    /** Free-standing sketch refs (the kernel lists visible sketches only). */
+    function visibleSketchRefs(): NodeRef[] {
+      return Array.from(wasmScene.sketch_ids()).map((id) => ({ kind: 'sketch' as const, id }))
+    }
+
+    /**
+     * Select All (Edit ▸ Select All / ⌘A). At the top level: every visible
+     * top-level node plus every free-standing sketch. Inside a group's
+     * editing context: the group's direct members (what clicks select
+     * there). Inside an instance/object context there is no multi-selectable
+     * child set yet — no-op.
+     */
+    function selectAll(): void {
+      const ctx = activeContextRef.current
+      if (ctx.length > 0) {
+        const top = ctx[ctx.length - 1]
+        if (top.kind !== 'group') return
+        // Same visibility rule as the top level: hidden members stay out.
+        const members = wasmScene.group_members(top.id)
+          .map(nodeRefFromJs)
+          .filter((m) => visibleLeaves(m) !== null)
+        if (members.length > 0) {
+          onSelectManyRef.current?.(members, false)
+          scheduleRender()
+        }
+        return
+      }
+      const refs = [...visibleTopLevelCandidates().map((c) => c.node), ...visibleSketchRefs()]
+      if (refs.length > 0) {
+        onSelectManyRef.current?.(refs, false)
+        scheduleRender()
+      }
+    }
+
+    /** The face meshes rendered for one node's visible leaves. */
+    function candidateMeshes(cand: { leafObjects: bigint[]; leafInstances: bigint[] }): THREE.Mesh[] {
+      const meshes: THREE.Mesh[] = []
+      for (const id of cand.leafObjects) {
+        sceneRenderer.getObjectGroup(id)?.traverse((child) => {
+          if (child instanceof THREE.Mesh) meshes.push(child)
+        })
+      }
+      for (const id of cand.leafInstances) {
+        sceneRenderer.getInstanceGroup(id)?.traverse((child) => {
+          if (child instanceof THREE.Mesh) meshes.push(child)
+        })
+      }
+      return meshes
+    }
+
+    /**
+     * The nodes a completed marquee selects. Window mode (L→R) requires every
+     * vertex of every visible leaf mesh inside the rect; crossing mode (R→L)
+     * takes any triangle/segment touching it. Construction guides keep their
+     * own click-selection path and are not swept up.
+     */
+    function computeMarqueeSelection(rect: MarqueeRect, mode: MarqueeMode): NodeRef[] {
+      // Matrices are current from the last render; a non-forced update only
+      // touches nodes still flagged dirty.
+      threeScene.updateMatrixWorld()
+      const projector = new MarqueeProjector(camera, el.clientWidth, el.clientHeight)
+      const out: NodeRef[] = []
+
+      for (const cand of visibleTopLevelCandidates()) {
+        const meshes = candidateMeshes(cand)
+        if (meshes.length === 0) continue
+        let hit: boolean
+        if (mode === 'window') {
+          hit = meshes.every((m) =>
+            projector.allVerticesInRect(
+              m.geometry.getAttribute('position').array, m.matrixWorld, rect,
+            ),
+          )
+        } else {
+          hit = meshes.some((m) =>
+            projector.meshTouchesRect(
+              m.geometry.getAttribute('position').array,
+              m.geometry.index?.array ?? null,
+              m.matrixWorld,
+              rect,
+            ),
+          )
+        }
+        if (hit) out.push(cand.node)
+      }
+
+      const identity = new THREE.Matrix4()
+      for (const s of visibleSketchRefs()) {
+        const lines = wasmScene.sketch_lines(s.id)
+        if (lines.length === 0) continue
+        const hit = mode === 'window'
+          ? projector.allVerticesInRect(lines, identity, rect)
+          : projector.segmentsTouchRect(lines, identity, rect)
+        if (hit) out.push(s)
+      }
+      return out
+    }
+
+    /**
+     * The Select tool's click-pick chain — a construction guide first (thin
+     * deliberate targets beat the object beneath), then the tool's ray-pick
+     * fallback chain. Shared by the in-context immediate press and the
+     * top-level deferred (pointerup) click so the two paths stay in lockstep.
+     */
+    function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
+      const g = pickGuide(ndcX, ndcY)
+      if (g !== null) {
+        onSelectGuideRef.current?.(g)
+        scheduleRender()
+        return
+      }
+      const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov)
+      toolController.activeTool.onPointerDown(snap, ray)
+    }
+
+    // Marquee drag state (Select tool, top-level context only). Armed on
+    // pointerdown; becomes active past a small threshold. While armed, the
+    // click-pick is DEFERRED to pointerup so a drag can become a marquee
+    // instead of selecting whatever was under the initial press.
+    const MARQUEE_DRAG_THRESHOLD_PX = 5
+    interface MarqueeDrag {
+      startX: number
+      startY: number
+      additive: boolean
+      active: boolean
+    }
+    let marqueeDrag: MarqueeDrag | null = null
+
+    const marqueeOverlay = document.createElement('div')
+    marqueeOverlay.style.position = 'absolute'
+    marqueeOverlay.style.display = 'none'
+    marqueeOverlay.style.pointerEvents = 'none'
+    marqueeOverlay.style.boxSizing = 'border-box'
+    marqueeOverlay.style.background = 'rgba(74, 144, 226, 0.12)'
+    marqueeOverlay.style.zIndex = '5'
+    if (el.style.position === '') el.style.position = 'relative'
+    el.appendChild(marqueeOverlay)
+
+    function canvasPoint(ev: PointerEvent): [number, number] {
+      const r = renderer.domElement.getBoundingClientRect()
+      return [ev.clientX - r.left, ev.clientY - r.top]
+    }
+
+    function updateMarqueeOverlay(x: number, y: number): void {
+      if (marqueeDrag === null) return
+      const rect = normalizedRect(marqueeDrag.startX, marqueeDrag.startY, x, y)
+      // Solid border = window (L→R), dashed = crossing (R→L) — SketchUp's cue.
+      marqueeOverlay.style.border =
+        x >= marqueeDrag.startX ? '1px solid #4a90e2' : '1px dashed #4a90e2'
+      marqueeOverlay.style.left = `${rect.minX}px`
+      marqueeOverlay.style.top = `${rect.minY}px`
+      marqueeOverlay.style.width = `${rect.maxX - rect.minX}px`
+      marqueeOverlay.style.height = `${rect.maxY - rect.minY}px`
+      marqueeOverlay.style.display = 'block'
+    }
+
+    function clearMarquee(): void {
+      marqueeDrag = null
+      marqueeOverlay.style.display = 'none'
+    }
+
     // ------------------------------------------------------------------ commit callbacks
     /**
      * Re-tessellate after a committed kernel mutation. With a `touched` hint
@@ -800,10 +1027,17 @@ export default function Viewport({
     // instances get a targeted refresh; groups (many leaves, possibly nested
     // instances) and sketches (also the Option-copy of either) fall back to
     // the full rebuild by returning undefined.
-    function touchedForNode(node: NodeRef): RefreshTouched | undefined {
-      if (node.kind === 'object') return { objectIds: [node.id] }
-      if (node.kind === 'instance') return { instanceIds: [node.id] }
-      return undefined
+    /** Merged refresh hints for a tool commit — undefined (full refresh)
+     * as soon as any node is a group/sketch. */
+    function touchedForNodes(nodes: NodeRef[]): RefreshTouched | undefined {
+      const objectIds: bigint[] = []
+      const instanceIds: bigint[] = []
+      for (const node of nodes) {
+        if (node.kind === 'object') objectIds.push(node.id)
+        else if (node.kind === 'instance') instanceIds.push(node.id)
+        else return undefined
+      }
+      return { objectIds, instanceIds }
     }
 
     // Re-tessellate after a harness-driven kernel mutation (ViewportApi.refreshScene).
@@ -1083,9 +1317,13 @@ export default function Viewport({
 
     function setAxesVisible(visible: boolean): void {
       originAxes.visible = visible
-      infiniteGrid.mesh.visible = visible
       // Hidden axes must not snap or flash a cue — gate inference too.
       wasmScene.set_axes_snappable(visible)
+      scheduleRender()
+    }
+
+    function setGridVisible(visible: boolean): void {
+      infiniteGrid.mesh.visible = visible
       scheduleRender()
     }
 
@@ -1133,7 +1371,7 @@ export default function Viewport({
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, setAxesVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -1279,21 +1517,21 @@ export default function Viewport({
     }
 
     function makeMoveTool(): MoveTool {
-      const sel = selectedIdsRef.current[0] ?? null
       return new MoveTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
-        sel,
-        (node) => {
-          handleSceneRefresh(touchedForNode(node))
+        [...selectedIdsRef.current],
+        (nodes) => {
+          handleSceneRefresh(touchedForNodes(nodes))
           // A sketch move bakes new vertex positions; rebuild sketch buffers so
           // the lines follow (objects refresh via handleSceneRefresh; sketches
           // do not). Mirrors the boolean/undo refresh pairing.
           sceneRenderer.refreshAllSketches()
-          // Select the committed node — for an Option-copy this is the fresh
-          // clone, so a follow-up Alt-drag chains off the new copy.
-          onSelectRef.current?.(node, false)
+          // Select the committed nodes — for an Option-copy these are the
+          // fresh clones, so a follow-up Alt-drag chains off the new copies.
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
+          else onSelectManyRef.current?.(nodes, false)
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
@@ -1302,14 +1540,13 @@ export default function Viewport({
     }
 
     function makeRotateTool(): RotateTool {
-      const sel = selectedIdsRef.current[0] ?? null
       return new RotateTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
-        sel,
-        (node) => {
-          handleSceneRefresh(touchedForNode(node))
+        [...selectedIdsRef.current],
+        (nodes) => {
+          handleSceneRefresh(touchedForNodes(nodes))
           // Rebuild sketch buffers so a rotated sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
@@ -1321,14 +1558,13 @@ export default function Viewport({
     }
 
     function makeScaleTool(): ScaleTool {
-      const sel = selectedIdsRef.current[0] ?? null
       return new ScaleTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
-        sel,
-        (node) => {
-          handleSceneRefresh(touchedForNode(node))
+        [...selectedIdsRef.current],
+        (nodes) => {
+          handleSceneRefresh(touchedForNodes(nodes))
           // Rebuild sketch buffers so a scaled sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
@@ -1704,8 +1940,8 @@ export default function Viewport({
       ev: PointerEvent,
     ): void {
       if (!inputRecorder.isActive()) return
-      const rect = renderer.domElement.getBoundingClientRect()
-      inputRecorder.recordPointer(kind, ev.clientX - rect.left, ev.clientY - rect.top, ev)
+      const [px, py] = canvasPoint(ev)
+      inputRecorder.recordPointer(kind, px, py, ev)
     }
 
     // ------------------------------------------------------------------ sketch-region hover probe
@@ -1809,6 +2045,27 @@ export default function Viewport({
 
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
       if (cameraModeRef.current) return
+
+      // Armed marquee: past the drag threshold the rubber-band owns the
+      // pointer — update the rectangle and skip hover/snap work entirely.
+      if (marqueeDrag !== null) {
+        if ((ev.buttons & 1) === 0) {
+          // The release happened outside our listeners (focus loss) — drop it.
+          clearMarquee()
+        } else {
+          const [px, py] = canvasPoint(ev)
+          if (
+            !marqueeDrag.active &&
+            Math.hypot(px - marqueeDrag.startX, py - marqueeDrag.startY) >= MARQUEE_DRAG_THRESHOLD_PX
+          ) {
+            marqueeDrag.active = true
+          }
+          if (marqueeDrag.active) {
+            updateMarqueeOverlay(px, py)
+            return
+          }
+        }
+      }
       if (ev.buttons !== 0 && ev.button !== -1) return
 
       const viewportH = el.clientHeight
@@ -1954,16 +2211,20 @@ export default function Viewport({
       // treat this click as additive multi-select.
       selectAdditiveRef.current = ev.shiftKey
 
-      // Guide pick: when selecting, a click near a construction guide
-      // selects that guide (thin deliberate targets take priority over the
-      // object beneath). Other tools ignore guides.
       if (toolController.activeToolName === 'Select') {
-        const g = pickGuide(ndcX, ndcY)
-        if (g !== null) {
-          onSelectGuideRef.current?.(g)
-          scheduleRender()
-          return
+        // Top level: arm a marquee and DEFER the pick to pointerup — a drag
+        // becomes a rubber-band selection, a plain release runs the click-pick
+        // at the release position. Inside an editing context the marquee is
+        // out of scope; the press is an immediate click-pick.
+        if (activeContextRef.current.length === 0) {
+          const [px, py] = canvasPoint(ev)
+          marqueeDrag = { startX: px, startY: py, additive: ev.shiftKey, active: false }
+          // Track the drag even when it leaves the canvas.
+          renderer.domElement.setPointerCapture(ev.pointerId)
+        } else {
+          dispatchSelectPick(ndcX, ndcY, ray)
         }
+        return
       }
 
       const activeTool = toolController.activeTool
@@ -2041,6 +2302,12 @@ export default function Viewport({
     // ------------------------------------------------------------------ keyboard
     function onKeyDown(ev: KeyboardEvent): void {
       const isMod = ev.metaKey || ev.ctrlKey
+
+      // Esc cancels an in-flight marquee before anything else.
+      if (ev.key === 'Escape' && marqueeDrag !== null) {
+        clearMarquee()
+        return
+      }
 
       // Esc pops one level off the context path before tool cancel.
       if (ev.key === 'Escape' && activeContextRef.current.length > 0) {
@@ -2144,14 +2411,45 @@ export default function Viewport({
       if (!isMod) toolController.activeTool.onKey(ev)
     }
 
-    // Record-only pointerup: tools are click-based so nothing else needs
-    // it, but capturing it makes low-level replay faithful (drag releases).
-    function onPointerUpRecord(ev: PointerEvent): void {
+    // Pointerup completes the Select tool's deferred press: a no-drag release
+    // replays the press as the usual click-pick (guide first, then the tool's
+    // pick chain); a dragged release commits the marquee selection. Other
+    // tools are click-based, so beyond input recording nothing else needs it.
+    function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
+      if (ev.button !== 0 || marqueeDrag === null) return
+      const drag = marqueeDrag
+      clearMarquee()
+
+      // The tool changed mid-drag (keyboard shortcut) — drop the gesture.
+      if (toolController.activeToolName !== 'Select') return
+
+      if (!drag.active) {
+        // A plain click: run the pick chain at the RELEASE position — if the
+        // camera moved between press and release (scroll zoom, inertia), the
+        // pick lands on what is visibly under the cursor now.
+        const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+        dispatchSelectPick(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
+        return
+      }
+
+      const [px, py] = canvasPoint(ev)
+      const rect = normalizedRect(drag.startX, drag.startY, px, py)
+      // Drag direction picks the mode: L→R window, R→L crossing (SketchUp).
+      const mode: MarqueeMode = px >= drag.startX ? 'window' : 'crossing'
+      const refs = computeMarqueeSelection(rect, mode)
+      // An empty marquee clears a non-additive selection, like clicking air.
+      onSelectManyRef.current?.(refs, drag.additive)
+      scheduleRender()
+    }
+    function onPointerCancel(ev: PointerEvent): void {
+      recordPointerInput('pointerup', ev)
+      clearMarquee()
     }
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerdown', onPointerDown)
-    renderer.domElement.addEventListener('pointerup', onPointerUpRecord)
+    renderer.domElement.addEventListener('pointerup', onPointerUp)
+    renderer.domElement.addEventListener('pointercancel', onPointerCancel)
     renderer.domElement.addEventListener('dblclick', onDoubleClick)
     window.addEventListener('keydown', onKeyDown)
 
@@ -2193,8 +2491,10 @@ export default function Viewport({
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('pointermove', onPointerMove)
       renderer.domElement.removeEventListener('pointerdown', onPointerDown)
-      renderer.domElement.removeEventListener('pointerup', onPointerUpRecord)
+      renderer.domElement.removeEventListener('pointerup', onPointerUp)
+      renderer.domElement.removeEventListener('pointercancel', onPointerCancel)
       renderer.domElement.removeEventListener('dblclick', onDoubleClick)
+      marqueeOverlay.remove()
       window.removeEventListener('keydown', onKeyDown)
       resizeObserver.disconnect()
       unsubscribeTheme()
