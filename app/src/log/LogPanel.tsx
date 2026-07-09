@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as LogStore from './LogStore'
 import type { LogEntry } from './LogStore'
+import { RenderStatsReadout } from './RenderStatsReadout'
 
 /** Format a Date as HH:MM:SS */
 function fmtTime(d: Date): string {
@@ -117,6 +118,9 @@ export function LogPanel({ panelHeight = 160 }: Props) {
           {badgeText}
         </span>
         <div style={{ flex: 1 }} />
+        {/* Render stats — permanent readout, visible even when collapsed.
+            Mounting it is what switches stats collection on (renderStats.ts). */}
+        <RenderStatsReadout />
         <button
           onClick={(e) => {
             e.stopPropagation()

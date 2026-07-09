@@ -1,7 +1,10 @@
 /**
  * Tests for SceneRenderer: double-sided rendering of open (non-watertight)
- * shells, and the targeted (incremental) refresh path (`refreshTouched`) that
- * rebuilds only touched groups on large documents.
+ * shells, the targeted (incremental) refresh path (`refreshTouched`) that
+ * rebuilds only touched groups on large documents, GPU-instanced component
+ * placements (RR16), and the interactions between the per-instance visibility
+ * mechanisms — hidden set, selection materialization, isolation, and the
+ * pose fast path — plus instance-aware bounds for zoom-extents (RR17).
  *
  * An open shell's tessellation can carry inward-wound triangles, so a
  * single-sided material (`FrontSide`/`BackSide`) renders those faces
@@ -9,6 +12,11 @@
  * solids keep the previous single-sided behavior (`FrontSide`, or `BackSide`
  * for a reflected instance pose); non-watertight ones always render
  * `THREE.DoubleSide` regardless of reflection.
+ *
+ * Instances draw as one THREE.InstancedMesh (+ one instanced-edge
+ * LineSegments) per (definition member, side bucket); per-instance state
+ * (selection, transform preview) MATERIALIZES the placement into a classic
+ * `Instance_${id}` Group and zeroes its batch slot.
  *
  * Only object construction is exercised — no renderer/WebGL — so a plain
  * `THREE.Scene()` stands in for the live scene, matching the pattern already
@@ -86,6 +94,60 @@ function facesMaterial(root: THREE.Group, name: string): THREE.MeshPhongMaterial
   return (Array.isArray(mat) ? mat[0] : mat) as THREE.MeshPhongMaterial
 }
 
+/** All instanced face batches under the renderer's instances group. */
+function instancedBatches(root: THREE.Group): THREE.InstancedMesh[] {
+  const out: THREE.InstancedMesh[] = []
+  root.traverse((o) => {
+    if ((o as THREE.InstancedMesh).isInstancedMesh === true) out.push(o as THREE.InstancedMesh)
+  })
+  return out
+}
+
+/** All instanced edge objects (LineSegments over an InstancedBufferGeometry). */
+function instancedEdges(root: THREE.Group): THREE.LineSegments[] {
+  const out: THREE.LineSegments[] = []
+  root.traverse((o) => {
+    if (
+      o instanceof THREE.LineSegments &&
+      (o.geometry as THREE.InstancedBufferGeometry).isInstancedBufferGeometry === true
+    ) {
+      out.push(o)
+    }
+  })
+  return out
+}
+
+/** All MATERIALIZED per-instance groups (`Instance_${id}`). */
+function materializedGroups(root: THREE.Group): THREE.Group[] {
+  const out: THREE.Group[] = []
+  root.traverse((o) => {
+    if (o instanceof THREE.Group && o.name.startsWith('Instance_')) out.push(o)
+  })
+  return out
+}
+
+function batchMaterial(mesh: THREE.InstancedMesh): THREE.MeshPhongMaterial {
+  const mat = mesh.material
+  return (Array.isArray(mat) ? mat[0] : mat) as THREE.MeshPhongMaterial
+}
+
+function slotMatrices(mesh: THREE.InstancedMesh): THREE.Matrix4[] {
+  const out: THREE.Matrix4[] = []
+  for (let i = 0; i < mesh.count; i++) {
+    const m = new THREE.Matrix4()
+    mesh.getMatrixAt(i, m)
+    out.push(m)
+  }
+  return out
+}
+
+/** True when the slot matrix's linear part is all-zero (suppressed slot —
+ * zero scale draws nothing; translation is kept for bounding boxes). */
+function isDegenerate(m: THREE.Matrix4): boolean {
+  const e = m.elements
+  return [0, 1, 2, 4, 5, 6, 8, 9, 10].every((i) => e[i] === 0)
+}
+
 describe('SceneRenderer — double-sided rendering for open shells', () => {
   it('a watertight object keeps THREE.FrontSide', () => {
     const scene = makeScene({ objects: { '1': true } })
@@ -121,7 +183,9 @@ describe('SceneRenderer — double-sided rendering for open shells', () => {
     })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
     renderer.refresh()
-    expect(facesMaterial(renderer.instancesGroup, 'Instance_10').side).toBe(THREE.FrontSide)
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(1)
+    expect(batchMaterial(batches[0]).side).toBe(THREE.FrontSide)
   })
 
   it('a watertight instance member with a reflected pose keeps THREE.BackSide', () => {
@@ -132,7 +196,9 @@ describe('SceneRenderer — double-sided rendering for open shells', () => {
     })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
     renderer.refresh()
-    expect(facesMaterial(renderer.instancesGroup, 'Instance_11').side).toBe(THREE.BackSide)
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(1)
+    expect(batchMaterial(batches[0]).side).toBe(THREE.BackSide)
   })
 
   it('a non-watertight instance member renders THREE.DoubleSide even with a reflected pose', () => {
@@ -143,7 +209,9 @@ describe('SceneRenderer — double-sided rendering for open shells', () => {
     })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
     renderer.refresh()
-    expect(facesMaterial(renderer.instancesGroup, 'Instance_12').side).toBe(THREE.DoubleSide)
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(1)
+    expect(batchMaterial(batches[0]).side).toBe(THREE.DoubleSide)
   })
 })
 
@@ -204,28 +272,40 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
     expect(renderer.objectsGroup.getObjectByName('Object_1')).toBe(survivorBefore)
   })
 
-  it('a touched instance rebuilds only that placement, without re-pulling shared member geometry', () => {
-    const scene = makeScene({
-      instances: {
-        '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
-        '11': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
-      },
-    })
+  it('a touched instance updates its batch slot in place, without re-pulling shared member geometry', () => {
+    const instances = {
+      '10': { def: 100n, pose: [...IDENTITY_POSE], memberIds: [1n], memberWatertight: { '1': true } },
+      '11': { def: 100n, pose: [...IDENTITY_POSE], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
     renderer.refresh()
-    const otherBefore = renderer.instancesGroup.getObjectByName('Instance_11')
-    const touchedBefore = renderer.instancesGroup.getObjectByName('Instance_10')
+    const batchBefore = instancedBatches(renderer.instancesGroup)[0]
     meshSpy(scene).mockClear()
 
+    // Move instance 10 by +5 in X (row-major 3×4: tx is element 3).
+    instances['10'].pose = [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0]
     renderer.refreshTouched({ instanceIds: [10n] })
 
-    // Member cache intact (a pose change never invalidates def geometry).
+    // Member cache intact (a pose change never invalidates def geometry),
+    // and the batch is the SAME object — no GPU buffer rebuild.
     expect(meshSpy(scene)).not.toHaveBeenCalled()
-    expect(renderer.instancesGroup.getObjectByName('Instance_11')).toBe(otherBefore)
-    expect(renderer.instancesGroup.getObjectByName('Instance_10')).not.toBe(touchedBefore)
+    const batchAfter = instancedBatches(renderer.instancesGroup)[0]
+    expect(batchAfter).toBe(batchBefore)
+    // One slot carries the new translation; the other is untouched.
+    const tx = slotMatrices(batchAfter).map((m) => m.elements[12])
+    expect(tx).toContain(5)
+    expect(tx).toContain(0)
+    // The instanced edge rows follow the same pose (imRow0.w = tx).
+    const edgeGeo = instancedEdges(renderer.instancesGroup)[0]
+      .geometry as THREE.InstancedBufferGeometry
+    const row0 = edgeGeo.getAttribute('imRow0') as THREE.InstancedBufferAttribute
+    const edgeTx = [row0.getW(0), row0.getW(1)]
+    expect(edgeTx).toContain(5)
+    expect(edgeTx).toContain(0)
   })
 
-  it('a def-member edit invalidates ALL placements of that definition', () => {
+  it('a def-member edit rebuilds the member batch once for ALL placements', () => {
     const scene = makeScene({
       instances: {
         '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
@@ -234,8 +314,7 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
     })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
     renderer.refresh()
-    const g10 = renderer.instancesGroup.getObjectByName('Instance_10')
-    const g11 = renderer.instancesGroup.getObjectByName('Instance_11')
+    const batchBefore = instancedBatches(renderer.instancesGroup)[0]
     meshSpy(scene).mockClear()
 
     // e.g. push_pull_in_component / painting instanced geometry commits the
@@ -243,14 +322,17 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
     renderer.refreshTouched({ objectIds: [1n] })
 
     // Shared geometry re-pulled exactly once (cache dropped, then re-filled
-    // by the first placement rebuild), and BOTH placements rebuilt.
+    // by the batch rebuild), and the batch replaced, still covering both
+    // placements.
     expect(meshSpy(scene)).toHaveBeenCalledTimes(1)
     expect(meshSpy(scene)).toHaveBeenCalledWith(1n)
-    expect(renderer.instancesGroup.getObjectByName('Instance_10')).not.toBe(g10)
-    expect(renderer.instancesGroup.getObjectByName('Instance_11')).not.toBe(g11)
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(1)
+    expect(batches[0]).not.toBe(batchBefore)
+    expect(batches[0].count).toBe(2)
   })
 
-  it('a touched component id also invalidates all placements (components_touched path)', () => {
+  it('a touched component id also rebuilds the member batches (components_touched path)', () => {
     const scene = makeScene({
       instances: {
         '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
@@ -259,15 +341,15 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
     })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
     renderer.refresh()
-    const g10 = renderer.instancesGroup.getObjectByName('Instance_10')
-    const g11 = renderer.instancesGroup.getObjectByName('Instance_11')
+    const batchBefore = instancedBatches(renderer.instancesGroup)[0]
     meshSpy(scene).mockClear()
 
     renderer.refreshTouched({ componentIds: [100n] })
 
     expect(meshSpy(scene)).toHaveBeenCalledTimes(1)
-    expect(renderer.instancesGroup.getObjectByName('Instance_10')).not.toBe(g10)
-    expect(renderer.instancesGroup.getObjectByName('Instance_11')).not.toBe(g11)
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(1)
+    expect(batches[0]).not.toBe(batchBefore)
   })
 
   it('full refresh() still rebuilds every group (fallback path unchanged)', () => {
@@ -294,5 +376,394 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
 
     expect(wt.get(1n)).toBe(true)
     expect(wt.get(2n)).toBe(false)
+  })
+})
+
+describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
+  /** Three placements of one single-member definition. */
+  function threePlacements() {
+    return makeScene({
+      instances: {
+        '10': { def: 100n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+        '11': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+        '12': { def: 100n, pose: [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+  }
+
+  it('N placements of one definition draw as ONE batch (InstancedMesh + instanced edges), not N groups', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), threePlacements())
+    renderer.refresh()
+
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(1)
+    expect(batches[0].count).toBe(3)
+    const edges = instancedEdges(renderer.instancesGroup)
+    expect(edges).toHaveLength(1)
+    expect((edges[0].geometry as THREE.InstancedBufferGeometry).instanceCount).toBe(3)
+    expect(materializedGroups(renderer.instancesGroup)).toHaveLength(0)
+
+    // Draw-object count via traversal: exactly 2 renderable objects (the
+    // batch mesh + the batch edges) regardless of placement count.
+    let drawObjects = 0
+    renderer.instancesGroup.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh === true || o instanceof THREE.LineSegments) drawObjects++
+    })
+    expect(drawObjects).toBe(2)
+
+    // Every slot carries its placement's translation.
+    const tx = slotMatrices(batches[0]).map((m) => m.elements[12]).sort()
+    expect(tx).toEqual([0, 2, 4])
+  })
+
+  it('selecting an instance materializes it (orange edges) and zero-scales its batch slot; deselecting restores it', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), threePlacements())
+    renderer.refresh()
+
+    renderer.setSelectedInstances([11n])
+
+    const group = renderer.instancesGroup.getObjectByName('Instance_11') as THREE.Group
+    expect(group).toBeDefined()
+    const edgeLines = group.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
+    expect((edgeLines.material as THREE.LineBasicMaterial).color.getHex()).toBe(0xffaa00)
+    // The materialized group carries the placement pose.
+    expect(group.matrix.elements[12]).toBe(2)
+    // Its batch slot is suppressed (zero linear part, translation kept);
+    // the other two slots still draw.
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    const slots = slotMatrices(batch)
+    expect(slots.filter(isDegenerate)).toHaveLength(1)
+    expect(slots.find(isDegenerate)?.elements[12]).toBe(2)
+
+    renderer.setSelectedInstances([])
+
+    expect(renderer.instancesGroup.getObjectByName('Instance_11')).toBeUndefined()
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(0)
+  })
+
+  it('hidden instances zero their slot without materializing; setHidden round-trips', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), threePlacements())
+    renderer.refresh()
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+
+    renderer.setHidden([], [10n])
+
+    expect(materializedGroups(renderer.instancesGroup)).toHaveLength(0)
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
+
+    renderer.setHidden([], [])
+
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(0)
+  })
+
+  it('reflected placements split into their own bucket with BackSide', () => {
+    const scene = makeScene({
+      instances: {
+        '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+        '11': { def: 100n, pose: REFLECTED_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(2)
+    expect(batches.map((b) => b.count)).toEqual([1, 1])
+    const sides = batches.map((b) => batchMaterial(b).side).sort()
+    expect(sides).toEqual([THREE.FrontSide, THREE.BackSide].sort())
+    expect(instancedEdges(renderer.instancesGroup)).toHaveLength(2)
+  })
+
+  it('getInstanceGroup materializes on demand for transform preview and restores on the next refresh', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), threePlacements())
+    renderer.refresh()
+    expect(materializedGroups(renderer.instancesGroup)).toHaveLength(0)
+
+    const group = renderer.getInstanceGroup(12n)
+
+    expect(group).not.toBeNull()
+    expect(group?.name).toBe('Instance_12')
+    expect(renderer.instancesGroup.getObjectByName('Instance_12')).toBe(group)
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
+
+    // The commit that ends a preview refreshes the scene — the placement
+    // returns to its batch.
+    renderer.refreshTouched({})
+
+    expect(renderer.instancesGroup.getObjectByName('Instance_12')).toBeUndefined()
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(0)
+  })
+
+  it('a selected instance survives a full refresh materialized (selection re-applied)', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), threePlacements())
+    renderer.refresh()
+    renderer.setSelectedInstances([10n])
+
+    renderer.refresh()
+
+    const group = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+    expect(group).toBeDefined()
+    const edgeLines = group.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
+    expect((edgeLines.material as THREE.LineBasicMaterial).color.getHex()).toBe(0xffaa00)
+  })
+
+  it('buildExportScene still emits node-per-instance with shared geometry', () => {
+    const scene = makeScene({
+      objects: { '1': true },
+      instances: {
+        '10': { def: 100n, pose: [1, 0, 0, 3, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [2n], memberWatertight: { '2': true } },
+        '11': { def: 100n, pose: IDENTITY_POSE, memberIds: [2n], memberWatertight: { '2': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    const root = renderer.buildExportScene()
+
+    expect(root.getObjectByName('Object_1')).toBeDefined()
+    const node10 = root.getObjectByName('Instance_10') as THREE.Group
+    const node11 = root.getObjectByName('Instance_11') as THREE.Group
+    expect(node10).toBeDefined()
+    expect(node11).toBeDefined()
+    // The node carries the pose as a node transform.
+    expect(node10.matrix.elements[12]).toBe(3)
+    const member = node10.getObjectByName('Instance_10_member_2') as THREE.Mesh
+    expect(member).toBeDefined()
+    // Geometry is shared by reference with the live batch; materials are
+    // fresh MeshStandardMaterial.
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    expect(member.geometry).toBe(batch.geometry)
+    const mat = Array.isArray(member.material) ? member.material[0] : member.material
+    expect((mat as THREE.MeshStandardMaterial).isMeshStandardMaterial).toBe(true)
+
+    renderer.disposeExportScene(root)
+  })
+
+  it('adding a placement of an existing definition rebuilds its batch to cover it', () => {
+    const instances: Record<string, { def: bigint; pose: number[]; memberIds: bigint[]; memberWatertight: Record<string, boolean> }> = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(instancedBatches(renderer.instancesGroup)[0].count).toBe(1)
+
+    instances['11'] = { def: 100n, pose: [1, 0, 0, 7, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } }
+    renderer.refreshTouched({ instanceIds: [11n] })
+
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(1)
+    expect(batches[0].count).toBe(2)
+    const tx = slotMatrices(batches[0]).map((m) => m.elements[12]).sort()
+    expect(tx).toEqual([0, 7])
+  })
+})
+
+describe('SceneRenderer — instance-aware bounds for zoom-extents (RR17)', () => {
+  it('batch edge geometry bounds follow the instance poses, not the definition-space soup', () => {
+    // One placement far from the origin. The edge geometry's own position
+    // attribute spans [0,1] in definition space; without the bounds
+    // delegation to the face InstancedMesh, Box3.expandByObject would union
+    // in that phantom region at the origin.
+    const scene = makeScene({
+      instances: {
+        '10': { def: 100n, pose: [1, 0, 0, 100, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    const box = new THREE.Box3().expandByObject(renderer.instancesGroup)
+    expect(box.min.x).toBeGreaterThanOrEqual(99)
+    expect(box.max.x).toBeLessThanOrEqual(102)
+
+    // The bounding sphere delegates the same way.
+    const edgeGeo = instancedEdges(renderer.instancesGroup)[0].geometry
+    edgeGeo.computeBoundingSphere()
+    expect(edgeGeo.boundingSphere?.center.x).toBeGreaterThanOrEqual(99)
+  })
+
+  it('a pose fast-path write invalidates the edge bounds (zoom-extents follows the move)', () => {
+    const instances = {
+      '10': { def: 100n, pose: [...IDENTITY_POSE], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    // Compute (and thereby cache) the bounds once at the identity pose.
+    const before = new THREE.Box3().expandByObject(renderer.instancesGroup)
+    expect(before.max.x).toBeLessThanOrEqual(2)
+
+    // Move the instance via the in-place slot-write fast path.
+    instances['10'].pose = [1, 0, 0, 50, 0, 1, 0, 0, 0, 0, 1, 0]
+    renderer.refreshTouched({ instanceIds: [10n] })
+
+    const after = new THREE.Box3().expandByObject(renderer.instancesGroup)
+    expect(after.min.x).toBeGreaterThanOrEqual(49)
+    expect(after.max.x).toBeLessThanOrEqual(52)
+  })
+
+  it('a hidden placement contributes nothing to bounds, not even its translation', () => {
+    // The guest-house regression: a file-hidden stray instance ~900 m out.
+    // Its degenerate slot keeps the translation (so restoring is a matrix
+    // write), but bounds must skip it entirely — otherwise zoom-extents
+    // frames the stray and the camera re-frames past its own far plane.
+    const scene = makeScene({
+      instances: {
+        '10': { def: 100n, pose: [...IDENTITY_POSE], memberIds: [1n], memberWatertight: { '1': true } },
+        '11': { def: 100n, pose: [1, 0, 0, -921, 0, 1, 0, -144, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setHidden([], [11n])
+
+    const box = new THREE.Box3().expandByObject(renderer.instancesGroup)
+    expect(box.min.x).toBeGreaterThanOrEqual(-1)
+    expect(box.max.x).toBeLessThanOrEqual(2)
+
+    // Unhide: the stray placement's true pose returns to the bounds.
+    renderer.setHidden([], [])
+    const unhidden = new THREE.Box3().expandByObject(renderer.instancesGroup)
+    expect(unhidden.min.x).toBeLessThanOrEqual(-920)
+  })
+
+  it('a batch whose every placement is hidden yields empty bounds', () => {
+    const scene = makeScene({
+      instances: {
+        '10': { def: 100n, pose: [1, 0, 0, 77, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setHidden([], [10n])
+
+    const box = new THREE.Box3().expandByObject(renderer.instancesGroup)
+    expect(box.isEmpty()).toBe(true)
+  })
+})
+
+describe('SceneRenderer — hidden/selected/isolation interactions (RR17)', () => {
+  /** Three placements of one single-member definition, with mutable poses. */
+  function threePlacementsMutable() {
+    const instances: Record<string, { def: bigint; pose: number[]; memberIds: bigint[]; memberWatertight: Record<string, boolean> }> = {
+      '10': { def: 100n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      '11': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      '12': { def: 100n, pose: [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    return { instances, scene: makeScene({ instances }) }
+  }
+
+  it('hiding a selected (materialized) instance hides its Group; unhide restores visibility, slot stays suppressed', () => {
+    const { scene } = threePlacementsMutable()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSelectedInstances([11n])
+    const group = renderer.instancesGroup.getObjectByName('Instance_11') as THREE.Group
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    expect(group.visible).toBe(true)
+
+    renderer.setHidden([], [11n])
+
+    expect(group.visible).toBe(false)
+    // The slot stays suppressed (it was already, for materialization).
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
+
+    renderer.setHidden([], [])
+
+    // Unhidden but still selected: visible group, slot still suppressed so
+    // the placement is not drawn twice.
+    expect(group.visible).toBe(true)
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
+  })
+
+  it('selecting an already-hidden instance materializes it invisible; deselect leaves the slot degenerate (still hidden)', () => {
+    const { scene } = threePlacementsMutable()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    renderer.setHidden([], [11n])
+
+    renderer.setSelectedInstances([11n])
+
+    const group = renderer.instancesGroup.getObjectByName('Instance_11') as THREE.Group
+    expect(group).toBeDefined()
+    // The materialized group respects the hidden set.
+    expect(group.visible).toBe(false)
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
+
+    renderer.setSelectedInstances([])
+
+    // Deselecting must NOT restore the slot to the live pose — the instance
+    // is still hidden.
+    expect(renderer.instancesGroup.getObjectByName('Instance_11')).toBeUndefined()
+    const slots = slotMatrices(batch)
+    expect(slots.filter(isDegenerate)).toHaveLength(1)
+    expect(slots.find(isDegenerate)?.elements[12]).toBe(2)
+  })
+
+  it('a pose fast-path write on a hidden instance keeps the slot degenerate; the new pose lands on unhide', () => {
+    const { instances, scene } = threePlacementsMutable()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setHidden([], [10n])
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+
+    // Move the hidden instance via the in-place slot-write fast path.
+    instances['10'].pose = [1, 0, 0, 9, 0, 1, 0, 0, 0, 0, 1, 0]
+    renderer.refreshTouched({ instanceIds: [10n] })
+
+    // The write must not resurrect the instance: still exactly one
+    // suppressed slot, now carrying the NEW translation (kept for bounds).
+    const slots = slotMatrices(batch)
+    const degenIdx = slots.findIndex(isDegenerate)
+    expect(slots.filter(isDegenerate)).toHaveLength(1)
+    expect(slots[degenIdx].elements[12]).toBe(9)
+    // The instanced edge rows are suppressed the same way (zero linear part,
+    // translation kept in imRow0.w).
+    const edgeGeo = instancedEdges(renderer.instancesGroup)[0]
+      .geometry as THREE.InstancedBufferGeometry
+    const row0 = edgeGeo.getAttribute('imRow0') as THREE.InstancedBufferAttribute
+    expect(row0.getX(degenIdx)).toBe(0)
+    expect(row0.getW(degenIdx)).toBe(9)
+
+    renderer.setHidden([], [])
+
+    // Unhiding restores the live pose written while hidden.
+    const live = slotMatrices(batch)
+    expect(live.filter(isDegenerate)).toHaveLength(0)
+    expect(live.map((m) => m.elements[12])).toContain(9)
+  })
+
+  it('isolation (setActiveContext) materializes the lit instance, dims the batch, and exit restores the batch', () => {
+    const { scene } = threePlacementsMutable()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+
+    renderer.setActiveContext(null, new Set([11n]))
+
+    // The lit placement materializes at full strength...
+    const group = renderer.instancesGroup.getObjectByName('Instance_11') as THREE.Group
+    expect(group).toBeDefined()
+    const faceMesh = group.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    const faceMat = (Array.isArray(faceMesh.material) ? faceMesh.material[0] : faceMesh.material) as THREE.MeshPhongMaterial
+    expect(faceMat.opacity).toBe(1)
+    // ...its batch slot is suppressed so it doesn't double-draw...
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
+    // ...and the remaining batched placements dim.
+    expect(batchMaterial(batch).opacity).toBeCloseTo(0.15)
+    const batchEdges = instancedEdges(renderer.instancesGroup)[0]
+    expect((batchEdges.material as THREE.LineBasicMaterial).opacity).toBeCloseTo(0.15)
+
+    renderer.setActiveContext(null, null)
+
+    // Exit: the placement returns to its batch, and the batch un-dims.
+    expect(renderer.instancesGroup.getObjectByName('Instance_11')).toBeUndefined()
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(0)
+    expect(batchMaterial(batch).opacity).toBe(1)
+    expect((batchEdges.material as THREE.LineBasicMaterial).opacity).toBe(1)
   })
 })

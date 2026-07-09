@@ -27,6 +27,30 @@ pub const NORMALIZE_MIN_LENGTH: f64 = 1e-12;
 /// same direction (dimensionless).
 pub const NORMAL_DIRECTION: f64 = 1e-9;
 
+/// Guard band for the inference index's pick-cone node test (dimensionless).
+///
+/// The exact per-candidate test (`cone_test` in the inference crate) accepts
+/// a candidate when `acos(depth / dist) <= aperture`, where `depth` (a dot
+/// product) and `dist` (a square-rooted squared length) round independently.
+/// The computed cosine therefore carries a few ulps of absolute error —
+/// bounded by e ≈ 8 · 2⁻⁵³ ≈ 9e-16 across the dot product, squared length,
+/// square root, division, and acos. Because cos θ ≈ 1 − θ²/2 near zero,
+/// that error is √-amplified in angle: candidates up to
+/// √(a² + 2e) − a ≤ √(2e) ≈ 4.2e-8 rad *outside* the true cone of
+/// half-angle `a` can pass (when the quotient rounds to exactly 1.0 the
+/// computed angle saturates to 0 and passes ANY aperture). Away from zero
+/// the same cosine error inflates the admitted cone's tangent by at most a
+/// factor of 1 + e/(sin²a · cos a) ≤ 1 + e/CONE_SLACK for every aperture at
+/// least CONE_SLACK short of π/2.
+///
+/// A conservative box-vs-cone test must therefore admit a band outside the
+/// mathematically exact cone: `CONE_SLACK · depth` of extra lateral radius
+/// plus a `(1 + CONE_SLACK)` factor on the tangent dominates both regimes,
+/// provided cone pruning is disabled for apertures within CONE_SLACK of
+/// π/2. 1e-7 (≈ 6.7 · √(f64::EPSILON)) leaves ≥ 2× margin over the
+/// 4.2e-8 rad saturation bound and ≥ 10× over the multiplicative bound.
+pub const CONE_SLACK: f64 = 1e-7;
+
 /// Relative depth skin for snap-occlusion culling in the inference layer
 /// (dimensionless fraction). When deciding whether an opaque face hides a snap
 /// candidate, a face counts as an occluder only if it lies at least this

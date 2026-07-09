@@ -6,6 +6,13 @@
  *   2. Rebuild the viewport meshes (flat-shaded faces + edge LineSegments)
  *   3. Dispose old GPU buffers
  *
+ * Component placements draw as GPU-instanced batches: one THREE.InstancedMesh
+ * (+ one instanced edge LineSegments) per (definition member, side bucket), so
+ * draw calls scale with distinct members × material groups instead of with
+ * placements. Per-instance state (selection color, isolation lighting,
+ * transform preview) is handled by MATERIALIZING the affected placement out of
+ * its batch into the classic per-instance Group path — see `_syncMaterialized`.
+ *
  * Also manages sketch geometry for every document sketch (refreshAllSketches).
  */
 
@@ -57,7 +64,8 @@ const GUIDE_DASH_SCREEN_K = 0.01
  */
 export interface RefreshTouched {
   /** Touched object ids — world objects AND definition members (a def-member
-   * id invalidates its shared geometry cache and rebuilds every placement). */
+   * id invalidates its shared geometry cache and rebuilds its instanced
+   * batches, i.e. every placement). */
   objectIds?: bigint[]
   /** Touched instance ids (e.g. a transformed placement). */
   instanceIds?: bigint[]
@@ -75,9 +83,10 @@ interface ObjectMeshGroup {
 }
 
 /**
- * One rendered instance: a THREE.Group holding clones of each member object's
- * mesh, positioned at the instance pose.  All member meshes are drawn from the
- * shared BufferGeometry cache so we never duplicate GPU buffers.
+ * One MATERIALIZED instance: a THREE.Group holding per-instance meshes for
+ * each member object at the instance pose. Only placements that need
+ * per-instance state (selection color, isolation lighting, transform preview)
+ * are materialized; everything else renders through `MemberBatch`.
  */
 interface InstanceMeshGroup {
   instanceId: bigint
@@ -88,6 +97,73 @@ interface InstanceMeshGroup {
   facesMeshes: THREE.Mesh[]
   edgesLines: THREE.LineSegments[]
 }
+
+/** Shared per-member typed arrays pulled once across the wasm boundary. */
+interface MemberGeometry {
+  positions: Float32Array
+  normals: Float32Array
+  indices: Uint32Array
+  colors: Float32Array
+  uvs: Float32Array
+  groupMaterialIds: BigUint64Array
+  groupStarts: Uint32Array
+  groupCounts: Uint32Array
+  edgePositions: Float32Array
+  /** Whether the member object encloses a volume — drives double-sided
+   * rendering for open (non-watertight) shells (see `_bucketTag`). */
+  watertight: boolean
+}
+
+/**
+ * Side bucket for one instanced batch: 'F' = watertight, normal pose
+ * (FrontSide); 'B' = watertight, reflected pose (det < 0 flips winding, so
+ * BackSide); 'D' = non-watertight member (DoubleSide — culling off, so normal
+ * and reflected placements share one bucket).
+ */
+type BucketTag = 'F' | 'B' | 'D'
+
+/**
+ * One GPU batch: every non-materialized placement of one definition member
+ * sharing a side bucket. Faces are a single THREE.InstancedMesh carrying the
+ * member's material array + geometry groups (one instanced draw per material
+ * group); edges are one LineSegments over an InstancedBufferGeometry whose
+ * per-instance 3×4 pose rows (imRow0..2) are consumed by a patched
+ * LineBasicMaterial (three.js has no instanced LineSegments).
+ */
+interface MemberBatch {
+  memberId: bigint
+  side: THREE.Side
+  mesh: THREE.InstancedMesh
+  edges: THREE.LineSegments
+  /** Per-instance pose rows for the edge shader, one vec4 per row. */
+  edgeRows: [THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute]
+  /** Slot ownership: slot i belongs to instance slots[i]. A hidden or
+   * materialized instance keeps its slot (written degenerate — zero linear
+   * part draws nothing) so restoring it is a matrix write, not a rebuild. */
+  slots: bigint[]
+  slotOf: Map<bigint, number>
+  /** Slots currently written degenerate (hidden/materialized). Bounds
+   * computation skips these — a suppressed placement must not contribute
+   * even its translation point to zoom-extents or culling volumes. */
+  suppressedSlots: Set<number>
+}
+
+/** Renderer-side book-keeping for one placement, batched or materialized. */
+interface InstanceRecord {
+  instanceId: bigint
+  componentId: bigint
+  memberIds: bigint[]
+  /** Full 4×4 pose built from the kernel's row-major 3×4. */
+  matrix: THREE.Matrix4
+  /** det(linear part) < 0 — reflected placements land in the 'B' bucket. */
+  reflected: boolean
+}
+
+/** Scratch matrix for slot writes (module-level to avoid per-write alloc). */
+const _slotMatrix = new THREE.Matrix4()
+/** Scratch bounds for the live-slots-only batch bounds computation. */
+const _boundsBox = new THREE.Box3()
+const _boundsSphere = new THREE.Sphere()
 
 export class SceneRenderer {
   private scene: THREE.Scene
@@ -103,31 +179,31 @@ export class SceneRenderer {
   readonly guidesGroup: THREE.Group
 
   private objectGroups: Map<bigint, ObjectMeshGroup> = new Map()
-  /** Rendered instance groups, keyed by instance id */
+  /** MATERIALIZED instances only (selected / isolation-lit / transform-preview
+   * placements pulled out of their batch), keyed by instance id. All the
+   * per-instance mutation paths (_applyInstanceColors, _setInstanceOpacity,
+   * getInstanceGroup) operate on this map and therefore only ever touch
+   * materialized placements. */
   private instanceGroups: Map<bigint, InstanceMeshGroup> = new Map()
+  /** Every rendered placement, batched or materialized, keyed by instance id. */
+  private instanceRecords: Map<bigint, InstanceRecord> = new Map()
+  /** Instanced batches, keyed `${memberId}|${BucketTag}`. Batch geometry and
+   * materials are owned per batch and disposed on rebuild/removal. */
+  private batches: Map<string, MemberBatch> = new Map()
+  /** Instances materialized on demand by `getInstanceGroup` (transform
+   * preview). Cleared on the next refresh/refreshTouched — the commit that
+   * follows a preview — so they restore to their batch. */
+  private previewMaterialized: Set<bigint> = new Set()
   /**
    * Shared typed-array cache for definition member objects.
-   * Keyed by member object id; the raw arrays are shared across all instances of
-   * one def, but each instance creates its own BufferAttribute wrappers (so that
-   * geometry.dispose() on one instance does not delete GPU buffers shared with
-   * another instance — three.js ties GPU buffer lifetime to the BufferAttribute,
-   * not to the underlying TypedArray).
+   * Keyed by member object id; the raw arrays are shared across every consumer
+   * (batches, materialized groups), but each consumer creates its own
+   * BufferAttribute wrappers (so that geometry.dispose() on one does not delete
+   * GPU buffers shared with another — three.js ties GPU buffer lifetime to the
+   * BufferAttribute, not to the underlying TypedArray).
    * Invalidated when a component definition is edited (refreshInstances re-builds it).
    */
-  private memberGeometryCache: Map<bigint, {
-    positions: Float32Array
-    normals: Float32Array
-    indices: Uint32Array
-    colors: Float32Array
-    uvs: Float32Array
-    groupMaterialIds: BigUint64Array
-    groupStarts: Uint32Array
-    groupCounts: Uint32Array
-    edgePositions: Float32Array
-    /** Whether the member object encloses a volume — drives double-sided
-     * rendering for open (non-watertight) shells (see `_refreshInstance`). */
-    watertight: boolean
-  }> = new Map()
+  private memberGeometryCache: Map<bigint, MemberGeometry> = new Map()
 
   /**
    * THREE.Texture cache, keyed by material id (as string). Built once per id
@@ -252,10 +328,13 @@ export class SceneRenderer {
    * are built, stale ids removed, and only touched survivors are rebuilt.
    *
    * A touched **definition member** id (or a touched component id) drops the
-   * shared member-geometry cache entry and rebuilds every rendered placement
-   * of it, so def edits (push_pull_in_component, painting instanced geometry)
-   * propagate to all instances — mirroring how the kernel's own reconcile
-   * lands every placement in `instances_touched` on a def edit.
+   * shared member-geometry cache entry and rebuilds that member's instanced
+   * batches (plus any materialized placement drawing it), so def edits
+   * (push_pull_in_component, painting instanced geometry) propagate to all
+   * instances — mirroring how the kernel's own reconcile lands every
+   * placement in `instances_touched` on a def edit. A touched **instance** id
+   * with an unchanged bucket is the fast path: an in-place matrix write into
+   * its batch slots, no geometry re-pull, no GPU buffer rebuild.
    *
    * Callers with no touched-set (load/import/undo/redo/structural ops) must
    * keep using the full `refresh()`.
@@ -290,7 +369,7 @@ export class SceneRenderer {
 
     // ---- shared definition geometry: a touched id that is cached as a def
     // member (or any member of a touched component) is stale — drop it so the
-    // instance rebuilds below re-pull it from the kernel.
+    // batch rebuilds below re-pull it from the kernel.
     const dirtyMembers = new Set<bigint>()
     for (const id of touchedObjects) {
       if (this.memberGeometryCache.has(id)) {
@@ -305,33 +384,87 @@ export class SceneRenderer {
       }
     }
 
-    // ---- instances: same id-set diff, then rebuild touched placements and
-    // every placement rendering a dirty member.
+    // A commit ends any transform preview — restore preview-only
+    // materializations to their batch (in _syncMaterialized below).
+    this.previewMaterialized.clear()
+
+    // ---- instances: id-set diff, then per-touched-instance pose fast path.
+    // Batch membership changes (instance added/removed, def/member change,
+    // reflectedness flip, dirty member geometry) rebuild the affected member
+    // batches; a plain pose change is an in-place matrix write.
     const liveInstanceIds = new Set<bigint>(this.wasmScene.instance_ids())
-    for (const oldId of [...this.instanceGroups.keys()]) {
+    const membersToRebuild = new Set<bigint>(dirtyMembers)
+    for (const oldId of [...this.instanceRecords.keys()]) {
       if (!liveInstanceIds.has(oldId)) {
-        this._removeInstanceGroup(oldId)
+        const rec = this.instanceRecords.get(oldId)
+        if (rec !== undefined) {
+          for (const m of rec.memberIds) membersToRebuild.add(m)
+        }
+        this._removeInstance(oldId)
       }
     }
-    const rebuiltInstances = new Set<bigint>()
+    const addedInstances = new Set<bigint>()
     for (const iid of liveInstanceIds) {
-      if (!this.instanceGroups.has(iid)) {
-        this._refreshInstance(iid)
-        rebuiltInstances.add(iid)
+      if (!this.instanceRecords.has(iid)) {
+        const rec = this._pullInstanceRecord(iid)
+        if (rec !== undefined) {
+          for (const m of rec.memberIds) membersToRebuild.add(m)
+        }
+        addedInstances.add(iid)
       }
     }
-    const needsRebuild = (iid: bigint): boolean => {
-      if (rebuiltInstances.has(iid)) return false
-      if (touchedInstances.includes(iid)) return true
+    for (const iid of touchedInstances) {
+      if (addedInstances.has(iid)) continue
+      const prev = this.instanceRecords.get(iid)
+      if (prev === undefined) continue
+      const next = this._pullInstanceRecord(iid)
+      if (next === undefined) {
+        for (const m of prev.memberIds) membersToRebuild.add(m)
+        this._removeInstance(iid)
+        continue
+      }
+      const sameMembers =
+        next.componentId === prev.componentId &&
+        next.memberIds.length === prev.memberIds.length &&
+        next.memberIds.every((m, i) => m === prev.memberIds[i])
+      if (!sameMembers || next.reflected !== prev.reflected) {
+        // Bucket membership changed — the slow (rebuild) path.
+        for (const m of prev.memberIds) membersToRebuild.add(m)
+        for (const m of next.memberIds) membersToRebuild.add(m)
+        continue
+      }
+      // Fast path: same buckets, new pose — write the slot matrices in place.
+      for (const m of next.memberIds) {
+        if (membersToRebuild.has(m)) continue // rebuilt below anyway
+        const key = this._batchKeyFor(m, next)
+        const batch = key !== undefined ? this.batches.get(key) : undefined
+        const slot = batch?.slotOf.get(iid)
+        if (batch !== undefined && slot !== undefined) {
+          this._writeSlot(batch, slot, next)
+        }
+      }
+      // A materialized placement follows the new pose too.
       const g = this.instanceGroups.get(iid)
-      return g !== undefined && g.memberIds.some((m) => dirtyMembers.has(m))
-    }
-    for (const iid of [...this.instanceGroups.keys()]) {
-      if (needsRebuild(iid)) {
-        this._refreshInstance(iid)
-        rebuiltInstances.add(iid)
+      if (g !== undefined) {
+        g.group.matrix.copy(next.matrix)
+        g.group.matrixWorldNeedsUpdate = true
       }
     }
+    for (const m of membersToRebuild) {
+      this._rebuildMemberBatches(m)
+    }
+    // Materialized placements drawing a rebuilt member re-pull from the
+    // (refilled) shared cache — mirrors the kernel landing every placement in
+    // instances_touched on a def edit.
+    if (membersToRebuild.size > 0) {
+      for (const iid of [...this.instanceGroups.keys()]) {
+        const rec = this.instanceRecords.get(iid)
+        if (rec !== undefined && rec.memberIds.some((m) => membersToRebuild.has(m))) {
+          this._materialize(iid)
+        }
+      }
+    }
+    this._syncMaterialized()
 
     // Rebuilt groups start opaque/visible; re-apply isolation + hidden state
     // (cheap CPU-side property writes — no wasm calls, no GPU uploads).
@@ -342,34 +475,42 @@ export class SceneRenderer {
   }
 
   /**
-   * Rebuild all instance groups from instance_ids(). Call after any mutation
+   * Rebuild all instance batches from instance_ids(). Call after any mutation
    * that may add/remove instances or change definition geometry.
    *
-   * Invalidates the member geometry cache so shared member BufferGeometries are
+   * Invalidates the member geometry cache so shared member arrays are
    * re-pulled from the kernel (which has invalidated its tessellation cache on
-   * mutation). Then re-builds each instance group from scratch.
+   * mutation), then re-builds every (member, bucket) batch from scratch and
+   * re-materializes the placements that need per-instance state.
    */
   refreshInstances(): void {
     // Invalidate the shared member geometry cache — definition may have changed.
     this.memberGeometryCache.clear()
+    this._disposeAllBatches()
+    for (const id of [...this.instanceGroups.keys()]) {
+      this._disposeMaterializedGroup(id)
+    }
+    this.instanceRecords.clear()
+    // A full rebuild only happens on commit points — any preview is over.
+    this.previewMaterialized.clear()
 
     const instanceIds = this.wasmScene.instance_ids()
-    const newIds = new Set<bigint>(instanceIds)
-
-    // Remove stale instances
-    for (const oldId of [...this.instanceGroups.keys()]) {
-      if (!newIds.has(oldId)) {
-        this._removeInstanceGroup(oldId)
+    const members = new Set<bigint>()
+    for (let i = 0; i < instanceIds.length; i++) {
+      const rec = this._pullInstanceRecord(instanceIds[i])
+      if (rec !== undefined) {
+        for (const m of rec.memberIds) members.add(m)
       }
     }
-
-    // Add or update each instance
-    for (let i = 0; i < instanceIds.length; i++) {
-      this._refreshInstance(instanceIds[i])
+    for (const m of members) {
+      this._rebuildMemberBatches(m)
     }
 
+    // Selected / isolation-lit placements come back out of their batches.
+    this._syncMaterialized()
     this._applyInstanceIsolation()
-    // Re-apply hidden visibility for instances (groups rebuilt above).
+    // Re-apply hidden visibility for materialized groups (batched placements
+    // read hiddenInstanceIds during the slot writes above).
     for (const [id, g] of this.instanceGroups) {
       g.group.visible = !this.hiddenInstanceIds.has(id)
     }
@@ -386,79 +527,357 @@ export class SceneRenderer {
     return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
   }
 
-  /** Build or re-build the THREE.js group for one instance. */
-  private _refreshInstance(instanceId: bigint): void {
-    // Always rebuild from scratch (cheap: member geometry comes from cache).
-    if (this.instanceGroups.has(instanceId)) {
-      this._removeInstanceGroup(instanceId)
-    }
-
+  /** Pull one placement's def/pose/members into its InstanceRecord (creating
+   * or overwriting it). Returns undefined (and leaves no record) when the
+   * kernel no longer knows the instance. */
+  private _pullInstanceRecord(instanceId: bigint): InstanceRecord | undefined {
     const componentId = this.wasmScene.instance_def(instanceId)
-    if (componentId === undefined) return
-
+    if (componentId === undefined) return undefined
     const pose = this.wasmScene.instance_pose(instanceId)
-    if (pose === undefined) return
-
+    if (pose === undefined) return undefined
     const memberIds = Array.from(this.wasmScene.component_member_objects(componentId))
-
-    const group = new THREE.Group()
-    group.name = `Instance_${instanceId}`
-
-    // Build the THREE.Matrix4 from the row-major 3×4 pose.
     // THREE Matrix4 is column-major; set() takes row-major.
-    const m4 = new THREE.Matrix4()
-    m4.set(
+    const matrix = new THREE.Matrix4().set(
       pose[0], pose[1], pose[2],  pose[3],
       pose[4], pose[5], pose[6],  pose[7],
       pose[8], pose[9], pose[10], pose[11],
       0,       0,       0,        1,
     )
-    group.matrixAutoUpdate = false
-    group.matrix.copy(m4)
-    group.matrixWorldNeedsUpdate = true
+    const rec: InstanceRecord = {
+      instanceId,
+      componentId,
+      memberIds,
+      matrix,
+      // Reflected pose: flips face winding (watertight members only — an open
+      // shell renders double-sided regardless of reflection).
+      reflected: this._poseDet(pose) < 0,
+    }
+    this.instanceRecords.set(instanceId, rec)
+    return rec
+  }
 
-    // Reflected pose: flip front/back face winding (watertight members only —
-    // an open shell always renders double-sided regardless of reflection).
-    const reflected = this._poseDet(pose) < 0
+  /** Fetch (and cache) one member's typed arrays — raw data only, not
+   * BufferAttributes, to avoid GPU buffer aliasing on dispose. */
+  private _getMemberGeometry(memberId: bigint): MemberGeometry {
+    let cached = this.memberGeometryCache.get(memberId)
+    if (cached === undefined) {
+      const mesh = this.wasmScene.object_mesh(memberId)
+      try {
+        cached = {
+          positions: mesh.positions(),
+          normals: mesh.normals(),
+          indices: mesh.indices(),
+          // Baked vertex colors are sRGB; convert to linear so the
+          // theme-aware light rig lights them correctly (as the object path
+          // does), shared across every instanced placement of this member.
+          colors: srgbColorsToLinear(mesh.colors()),
+          uvs: mesh.uvs(),
+          groupMaterialIds: BigUint64Array.from(mesh.group_material_ids()),
+          groupStarts: mesh.group_starts(),
+          groupCounts: mesh.group_counts(),
+          edgePositions: mesh.edge_positions(),
+          watertight: mesh.watertight(),
+        }
+        this.memberGeometryCache.set(memberId, cached)
+      } finally {
+        mesh.free()
+      }
+    }
+    return cached
+  }
+
+  /** Bucket tag for one (member, placement) pair — see `BucketTag`. */
+  private _bucketTag(watertight: boolean, reflected: boolean): BucketTag {
+    return watertight ? (reflected ? 'B' : 'F') : 'D'
+  }
+
+  /** Batch key for one member as rendered by one placement, or undefined when
+   * the member's geometry has not been pulled (no batch can exist either). */
+  private _batchKeyFor(memberId: bigint, rec: InstanceRecord): string | undefined {
+    const cached = this.memberGeometryCache.get(memberId)
+    if (cached === undefined) return undefined
+    return `${memberId}|${this._bucketTag(cached.watertight, rec.reflected)}`
+  }
+
+  /** Dispose and rebuild every batch of one definition member from the current
+   * instance records (grouped by side bucket). */
+  private _rebuildMemberBatches(memberId: bigint): void {
+    for (const [key, batch] of [...this.batches]) {
+      if (batch.memberId === memberId) this._disposeBatch(key)
+    }
+    const placements: InstanceRecord[] = []
+    for (const rec of this.instanceRecords.values()) {
+      if (rec.memberIds.includes(memberId)) placements.push(rec)
+    }
+    if (placements.length === 0) return
+
+    const cached = this._getMemberGeometry(memberId)
+    const byTag = new Map<BucketTag, InstanceRecord[]>()
+    for (const rec of placements) {
+      const tag = this._bucketTag(cached.watertight, rec.reflected)
+      const list = byTag.get(tag)
+      if (list === undefined) byTag.set(tag, [rec])
+      else list.push(rec)
+    }
+    for (const [tag, recs] of byTag) {
+      this._buildBatch(memberId, tag, recs, cached)
+    }
+  }
+
+  /** Build one (member, bucket) batch: an InstancedMesh for faces and an
+   * instanced-edge LineSegments, with one slot per placement. */
+  private _buildBatch(memberId: bigint, tag: BucketTag, recs: InstanceRecord[], cached: MemberGeometry): void {
+    const side = tag === 'F' ? THREE.FrontSide : tag === 'B' ? THREE.BackSide : THREE.DoubleSide
+
+    // Fresh BufferAttribute wrappers over the shared TypedArrays — the batch
+    // owns these GPU buffers, so disposing it cannot free another batch's.
+    const faceGeo = new THREE.BufferGeometry()
+    faceGeo.setAttribute('position', new THREE.BufferAttribute(cached.positions, 3))
+    faceGeo.setAttribute('normal', new THREE.BufferAttribute(cached.normals, 3))
+    faceGeo.setAttribute('color', new THREE.BufferAttribute(cached.colors, 3))
+    faceGeo.setAttribute('uv', new THREE.BufferAttribute(cached.uvs, 2))
+    faceGeo.setIndex(new THREE.BufferAttribute(cached.indices, 1))
+
+    const materials = this._buildMaterialArray(
+      cached.groupMaterialIds,
+      cached.groupStarts,
+      cached.groupCounts,
+      faceGeo,
+      side,
+    )
+    const mesh = new THREE.InstancedMesh(faceGeo, materials, recs.length)
+    mesh.name = `InstanceBatch_${memberId}_${tag}`
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+
+    const edgeGeo = new THREE.InstancedBufferGeometry()
+    edgeGeo.setAttribute('position', new THREE.BufferAttribute(cached.edgePositions, 3))
+    edgeGeo.instanceCount = recs.length
+    const mkRow = () => {
+      const attr = new THREE.InstancedBufferAttribute(new Float32Array(recs.length * 4), 4)
+      attr.setUsage(THREE.DynamicDrawUsage)
+      return attr
+    }
+    const edgeRows: MemberBatch['edgeRows'] = [mkRow(), mkRow(), mkRow()]
+    edgeGeo.setAttribute('imRow0', edgeRows[0])
+    edgeGeo.setAttribute('imRow1', edgeRows[1])
+    edgeGeo.setAttribute('imRow2', edgeRows[2])
+    const edges = new THREE.LineSegments(edgeGeo, this._makeInstancedEdgeMaterial())
+    edges.name = `InstanceBatchEdges_${memberId}_${tag}`
+    // The base geometry's bounding sphere ignores the per-instance transforms
+    // applied in the shader, so frustum culling would drop visible edges.
+    edges.frustumCulled = false
+    // The edge positions are the member's DEFINITION-space soup — the real
+    // poses live only in the imRow0..2 instanced attributes the vertex shader
+    // applies. Anything that reads geometry bounds (Box3.expandByObject in
+    // zoom-extents / standard views treats a plain LineSegments as
+    // geometry.boundingBox) would therefore frame a phantom region at the
+    // definition origin. The sibling face InstancedMesh for this bucket
+    // already computes exactly the true instance-aware bounds, so delegate
+    // both bounds to it; computing lazily here (instead of copying eagerly on
+    // every slot write) keeps pose writes O(1). `_writeSlot` invalidates the
+    // mesh and edge bounds together, so every write path (build, pose fast
+    // path, materialize/restore, hide/unhide) stays consistent.
+    edgeGeo.computeBoundingBox = () => {
+      if (mesh.boundingBox === null) mesh.computeBoundingBox()
+      edgeGeo.boundingBox = (edgeGeo.boundingBox ?? new THREE.Box3()).copy(
+        mesh.boundingBox as THREE.Box3,
+      )
+    }
+    edgeGeo.computeBoundingSphere = () => {
+      if (mesh.boundingSphere === null) mesh.computeBoundingSphere()
+      edgeGeo.boundingSphere = (edgeGeo.boundingSphere ?? new THREE.Sphere()).copy(
+        mesh.boundingSphere as THREE.Sphere,
+      )
+    }
+
+    const batch: MemberBatch = {
+      memberId,
+      side,
+      mesh,
+      edges,
+      edgeRows,
+      slots: recs.map((r) => r.instanceId),
+      slotOf: new Map(recs.map((r, i) => [r.instanceId, i])),
+      suppressedSlots: new Set(),
+    }
+    // Instance-aware bounds over LIVE slots only. three's stock
+    // InstancedMesh bounds union every slot, and a degenerate slot still
+    // contributes its translation point — a far-away hidden placement (real
+    // models carry strays hundreds of metres out) would inflate zoom-extents
+    // until the camera re-frames past its own far plane and the viewport
+    // blanks. A suppressed placement's true bounds are the materialized
+    // Group's (selection/preview) or nothing at all (hidden).
+    const geoBounds = { box: null as THREE.Box3 | null, sphere: null as THREE.Sphere | null }
+    mesh.computeBoundingBox = () => {
+      if (geoBounds.box === null) {
+        if (faceGeo.boundingBox === null) faceGeo.computeBoundingBox()
+        geoBounds.box = faceGeo.boundingBox as THREE.Box3
+      }
+      const box = (mesh.boundingBox ??= new THREE.Box3())
+      box.makeEmpty()
+      for (let i = 0; i < mesh.count; i++) {
+        if (batch.suppressedSlots.has(i)) continue
+        mesh.getMatrixAt(i, _slotMatrix)
+        box.union(_boundsBox.copy(geoBounds.box).applyMatrix4(_slotMatrix))
+      }
+    }
+    mesh.computeBoundingSphere = () => {
+      if (geoBounds.sphere === null) {
+        if (faceGeo.boundingSphere === null) faceGeo.computeBoundingSphere()
+        geoBounds.sphere = faceGeo.boundingSphere as THREE.Sphere
+      }
+      const sphere = (mesh.boundingSphere ??= new THREE.Sphere())
+      sphere.makeEmpty()
+      for (let i = 0; i < mesh.count; i++) {
+        if (batch.suppressedSlots.has(i)) continue
+        mesh.getMatrixAt(i, _slotMatrix)
+        sphere.union(_boundsSphere.copy(geoBounds.sphere).applyMatrix4(_slotMatrix))
+      }
+    }
+    recs.forEach((rec, i) => this._writeSlot(batch, i, rec))
+
+    this.instancesGroup.add(mesh)
+    this.instancesGroup.add(edges)
+    this.batches.set(`${memberId}|${tag}`, batch)
+  }
+
+  /**
+   * LineBasicMaterial patched (onBeforeCompile) to transform each vertex by a
+   * per-instance 3×4 pose carried in the imRow0..2 instanced attributes —
+   * three.js has no instanced LineSegments, so the batch edge soup instances
+   * in the vertex shader. `customProgramCacheKey` keeps the patched program
+   * from colliding with the stock line program in the shader cache.
+   */
+  private _makeInstancedEdgeMaterial(): THREE.LineBasicMaterial {
+    const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR })
+    mat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nattribute vec4 imRow0;\nattribute vec4 imRow1;\nattribute vec4 imRow2;',
+        )
+        .replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n\ttransformed = vec3( dot( imRow0, vec4( transformed, 1.0 ) ), dot( imRow1, vec4( transformed, 1.0 ) ), dot( imRow2, vec4( transformed, 1.0 ) ) );',
+        )
+    }
+    mat.customProgramCacheKey = () => 'hew_instanced_edges'
+    return mat
+  }
+
+  /**
+   * Write one batch slot from the instance's current state: the live pose when
+   * the placement draws batched, or a degenerate matrix (linear part zeroed,
+   * translation kept) when hidden or materialized. Zero scale collapses every
+   * primitive to a point, which rasterizes nothing; bounds skip suppressed
+   * slots entirely (see the overrides in `_buildBatch`), so the kept
+   * translation never leaks into zoom-extents or culling volumes.
+   */
+  private _writeSlot(batch: MemberBatch, slot: number, rec: InstanceRecord): void {
+    const suppressed =
+      this.hiddenInstanceIds.has(rec.instanceId) || this.instanceGroups.has(rec.instanceId)
+    const e = rec.matrix.elements
+    if (suppressed) {
+      batch.suppressedSlots.add(slot)
+      _slotMatrix.set(
+        0, 0, 0, e[12],
+        0, 0, 0, e[13],
+        0, 0, 0, e[14],
+        0, 0, 0, 1,
+      )
+    } else {
+      batch.suppressedSlots.delete(slot)
+      _slotMatrix.copy(rec.matrix)
+    }
+    batch.mesh.setMatrixAt(slot, _slotMatrix)
+    const s = _slotMatrix.elements
+    batch.edgeRows[0].setXYZW(slot, s[0], s[4], s[8], s[12])
+    batch.edgeRows[1].setXYZW(slot, s[1], s[5], s[9], s[13])
+    batch.edgeRows[2].setXYZW(slot, s[2], s[6], s[10], s[14])
+    batch.mesh.instanceMatrix.needsUpdate = true
+    for (const row of batch.edgeRows) row.needsUpdate = true
+    // Invalidate object-level bounds so frustum culling / zoom-extents
+    // recompute over the new instance matrices. The edge geometry's bounds
+    // mirror the face mesh's (see the delegation in `_buildBatch`), so the
+    // two invalidate together — no write path can leave them stale.
+    batch.mesh.boundingBox = null
+    batch.mesh.boundingSphere = null
+    batch.edges.geometry.boundingBox = null
+    batch.edges.geometry.boundingSphere = null
+  }
+
+  /** Re-write every batch slot owned by one placement (visibility change,
+   * materialize/restore). No-op for slots whose batch is gone (rebuild will
+   * re-seed them). */
+  private _refreshSlots(instanceId: bigint): void {
+    const rec = this.instanceRecords.get(instanceId)
+    if (rec === undefined) return
+    for (const memberId of rec.memberIds) {
+      const key = this._batchKeyFor(memberId, rec)
+      const batch = key !== undefined ? this.batches.get(key) : undefined
+      const slot = batch?.slotOf.get(instanceId)
+      if (batch !== undefined && slot !== undefined) {
+        this._writeSlot(batch, slot, rec)
+      }
+    }
+  }
+
+  /**
+   * Reconcile which placements are materialized: desired = selected ∪
+   * isolation-lit ∪ preview-materialized; everything else renders batched.
+   * Restoring drops the classic group and un-degenerates the batch slots;
+   * materializing zeroes them (slot ownership is kept either way).
+   */
+  private _syncMaterialized(): void {
+    const desired = new Set<bigint>()
+    for (const id of this.selectedInstanceIds) {
+      if (this.instanceRecords.has(id)) desired.add(id)
+    }
+    if (this.activeLitInstanceSet !== null) {
+      for (const id of this.activeLitInstanceSet) {
+        if (this.instanceRecords.has(id)) desired.add(id)
+      }
+    }
+    for (const id of [...this.previewMaterialized]) {
+      if (this.instanceRecords.has(id)) desired.add(id)
+      else this.previewMaterialized.delete(id)
+    }
+    for (const id of [...this.instanceGroups.keys()]) {
+      if (!desired.has(id)) this._restoreToBatch(id)
+    }
+    for (const id of desired) {
+      if (!this.instanceGroups.has(id)) this._materialize(id)
+    }
+  }
+
+  /** Pull one placement out of its batches into the classic per-instance
+   * Group path (`Instance_${id}`), re-applying its per-instance state. */
+  private _materialize(instanceId: bigint): void {
+    const rec = this.instanceRecords.get(instanceId)
+    if (rec === undefined) return
+    if (this.instanceGroups.has(instanceId)) {
+      this._disposeMaterializedGroup(instanceId)
+    }
+
+    const group = new THREE.Group()
+    group.name = `Instance_${instanceId}`
+    group.matrixAutoUpdate = false
+    group.matrix.copy(rec.matrix)
+    group.matrixWorldNeedsUpdate = true
 
     const facesMeshes: THREE.Mesh[] = []
     const edgesLinesList: THREE.LineSegments[] = []
-
-    for (const memberId of memberIds) {
-      // Fetch and cache member typed arrays (raw data only — not BufferAttributes,
-      // to avoid GPU buffer aliasing on dispose).
-      let cached = this.memberGeometryCache.get(memberId)
-      if (cached === undefined) {
-        const mesh = this.wasmScene.object_mesh(memberId)
-        try {
-          cached = {
-            positions: mesh.positions(),
-            normals: mesh.normals(),
-            indices: mesh.indices(),
-            colors: srgbColorsToLinear(mesh.colors()),
-            uvs: mesh.uvs(),
-            groupMaterialIds: BigUint64Array.from(mesh.group_material_ids()),
-            groupStarts: mesh.group_starts(),
-            groupCounts: mesh.group_counts(),
-            edgePositions: mesh.edge_positions(),
-            watertight: mesh.watertight(),
-          }
-          this.memberGeometryCache.set(memberId, cached)
-        } finally {
-          mesh.free()
-        }
-      }
-
-      // Open (non-watertight) shells have inward-wound faces on some triangles,
-      // so a single-sided material renders them invisible from the "wrong"
-      // side; render those double-sided instead of picking Front/BackSide.
+    for (const memberId of rec.memberIds) {
+      const cached = this._getMemberGeometry(memberId)
+      // Open (non-watertight) shells have inward-wound faces on some
+      // triangles, so a single-sided material renders them invisible from the
+      // "wrong" side; render those double-sided instead of Front/BackSide.
       const side = cached.watertight
-        ? (reflected ? THREE.BackSide : THREE.FrontSide)
+        ? (rec.reflected ? THREE.BackSide : THREE.FrontSide)
         : THREE.DoubleSide
 
-      // Face mesh — each instance gets its own BufferAttribute wrappers wrapping
-      // the shared TypedArrays.  geometry.dispose() on this instance frees only
-      // this instance's GPU buffers without affecting others.
+      // Face mesh — its own BufferAttribute wrappers over the shared
+      // TypedArrays, so geometry.dispose() frees only this group's GPU buffers.
       const faceGeo = new THREE.BufferGeometry()
       faceGeo.setAttribute('position', new THREE.BufferAttribute(cached.positions, 3))
       faceGeo.setAttribute('normal', new THREE.BufferAttribute(cached.normals, 3))
@@ -478,7 +897,6 @@ export class SceneRenderer {
       group.add(facesMesh)
       facesMeshes.push(facesMesh)
 
-      // Edge lines
       const edgeGeo = new THREE.BufferGeometry()
       edgeGeo.setAttribute('position', new THREE.BufferAttribute(cached.edgePositions, 3))
       const edgeMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR })
@@ -489,19 +907,42 @@ export class SceneRenderer {
     }
 
     this.instancesGroup.add(group)
-    this.instanceGroups.set(instanceId, { instanceId, memberIds, group, facesMeshes, edgesLines: edgesLinesList })
+    this.instanceGroups.set(instanceId, {
+      instanceId,
+      memberIds: rec.memberIds,
+      group,
+      facesMeshes,
+      edgesLines: edgesLinesList,
+    })
 
-    // Re-apply selection highlight if selected
+    // The batch keeps the slot but stops drawing it.
+    this._refreshSlots(instanceId)
+
+    // Re-apply the per-instance state that forced materialization.
     if (this.selectedInstanceIds.includes(instanceId)) {
       this._applyInstanceColors(instanceId, true)
     }
+    group.visible = !this.hiddenInstanceIds.has(instanceId)
+    const dimmed = this.activeLitSet !== null ||
+      (this.activeLitInstanceSet !== null && !this.activeLitInstanceSet.has(instanceId))
+    const g = this.instanceGroups.get(instanceId)
+    if (g !== undefined) {
+      this._setInstanceOpacity(g, dimmed ? DIMMED_OPACITY : 1)
+    }
   }
 
-  private _removeInstanceGroup(instanceId: bigint): void {
+  /** Return a materialized placement to its batch slots. */
+  private _restoreToBatch(instanceId: bigint): void {
+    this._disposeMaterializedGroup(instanceId)
+    this._refreshSlots(instanceId)
+  }
+
+  /** Dispose one materialized group's GPU wrappers (selection list untouched —
+   * restore-to-batch must not clear a live selection). */
+  private _disposeMaterializedGroup(instanceId: bigint): void {
     const g = this.instanceGroups.get(instanceId)
     if (g === undefined) return
 
-    // Dispose only materials (geometry is either shared from cache or per-instance)
     for (const mesh of g.facesMeshes) {
       // Material may be a single material or an array (multi-material mesh).
       const mat = mesh.material
@@ -512,7 +953,8 @@ export class SceneRenderer {
       } else {
         ;(mat as THREE.Material).dispose()
       }
-      // The geometry references shared attributes; just dispose the container
+      // The geometry references shared TypedArrays; dispose frees only the
+      // wrappers' GPU buffers.
       mesh.geometry.dispose()
     }
     for (const lines of g.edgesLines) {
@@ -522,7 +964,41 @@ export class SceneRenderer {
 
     this.instancesGroup.remove(g.group)
     this.instanceGroups.delete(instanceId)
+  }
+
+  /** Drop one placement entirely (kernel no longer has it). The caller
+   * rebuilds the member batches that carried its slots. */
+  private _removeInstance(instanceId: bigint): void {
+    this._disposeMaterializedGroup(instanceId)
+    this.instanceRecords.delete(instanceId)
+    this.previewMaterialized.delete(instanceId)
     this.selectedInstanceIds = this.selectedInstanceIds.filter((id) => id !== instanceId)
+  }
+
+  /** Dispose one batch's GPU resources (geometry, materials, instance
+   * attributes). Textures stay in `textureCache`. */
+  private _disposeBatch(key: string): void {
+    const batch = this.batches.get(key)
+    if (batch === undefined) return
+    batch.mesh.geometry.dispose()
+    const mat = batch.mesh.material
+    if (Array.isArray(mat)) {
+      for (const m of mat) m.dispose()
+    } else {
+      ;(mat as THREE.Material).dispose()
+    }
+    batch.mesh.dispose() // frees the instanceMatrix GPU buffer
+    batch.edges.geometry.dispose()
+    ;(batch.edges.material as THREE.Material).dispose()
+    this.instancesGroup.remove(batch.mesh)
+    this.instancesGroup.remove(batch.edges)
+    this.batches.delete(key)
+  }
+
+  private _disposeAllBatches(): void {
+    for (const key of [...this.batches.keys()]) {
+      this._disposeBatch(key)
+    }
   }
 
   /**
@@ -1019,20 +1495,19 @@ export class SceneRenderer {
   }
 
   /**
-   * Highlight exactly the given instances (orange edges, brighter faces).
+   * Highlight exactly the given instances (orange edges). Selection is
+   * per-instance state, so selected placements materialize out of their
+   * batches; deselected ones restore (the orange goes with the group).
    * Pass `[]` to clear the instance highlight.
    */
   setSelectedInstances(instanceIds: bigint[]): void {
-    const next = new Set(instanceIds)
-    for (const id of this.selectedInstanceIds) {
-      if (!next.has(id)) {
-        this._applyInstanceColors(id, false)
-      }
-    }
-    for (const id of instanceIds) {
-      this._applyInstanceColors(id, true)
-    }
     this.selectedInstanceIds = [...instanceIds]
+    this._syncMaterialized()
+    // Instances materialized for another reason (isolation-lit, preview)
+    // still need their edge color to track selection membership.
+    for (const id of this.instanceGroups.keys()) {
+      this._applyInstanceColors(id, this.selectedInstanceIds.includes(id))
+    }
   }
 
   /**
@@ -1096,6 +1571,9 @@ export class SceneRenderer {
   setActiveContext(lit: Set<bigint> | null, litInstances: Set<bigint> | null = null): void {
     this.activeLitSet = lit
     this.activeLitInstanceSet = litInstances
+    // Lit instances need per-instance opacity — materialize them; formerly
+    // lit ones restore to their batch.
+    this._syncMaterialized()
     this._applyIsolation()
   }
 
@@ -1110,7 +1588,9 @@ export class SceneRenderer {
     this._applyHidden()
   }
 
-  /** Re-apply group.visible for all object / instance groups. */
+  /** Re-apply visibility for all objects and instances. Batched instances
+   * hide by degenerating their slot matrices (no materialization needed);
+   * materialized ones use group.visible. */
   private _applyHidden(): void {
     for (const [id, g] of this.objectGroups) {
       g.group.visible = !this.hiddenObjectIds.has(id)
@@ -1118,12 +1598,15 @@ export class SceneRenderer {
     for (const [id, g] of this.instanceGroups) {
       g.group.visible = !this.hiddenInstanceIds.has(id)
     }
+    for (const id of this.instanceRecords.keys()) {
+      this._refreshSlots(id)
+    }
   }
 
   /** Apply the context fade to all objects, instances, and sketches. */
   /** True when there is any solid geometry (objects or instances) to export. */
   hasExportableGeometry(): boolean {
-    return this.objectGroups.size > 0 || this.instanceGroups.size > 0
+    return this.objectGroups.size > 0 || this.instanceRecords.size > 0
   }
 
   /**
@@ -1182,15 +1665,22 @@ export class SceneRenderer {
       root.add(exportMesh(g.facesMesh, `Object_${id}`))
     }
 
-    for (const [id, g] of this.instanceGroups) {
+    // Node-per-instance with geometry shared by reference — the batch exists
+    // for every rendered placement (materializing only zeroes its slot), so
+    // its geometry + materials are the export source for batched AND
+    // materialized instances alike.
+    for (const [id, rec] of this.instanceRecords) {
       const node = new THREE.Group()
       node.name = `Instance_${id}`
       node.matrixAutoUpdate = false
-      node.matrix.copy(g.group.matrix)
+      node.matrix.copy(rec.matrix)
       node.matrixWorldNeedsUpdate = true
-      g.facesMeshes.forEach((fm, i) => {
-        node.add(exportMesh(fm, `Instance_${id}_member_${g.memberIds[i]}`))
-      })
+      for (const memberId of rec.memberIds) {
+        const key = this._batchKeyFor(memberId, rec)
+        const batch = key !== undefined ? this.batches.get(key) : undefined
+        if (batch === undefined) continue
+        node.add(exportMesh(batch.mesh, `Instance_${id}_member_${memberId}`))
+      }
       root.add(node)
     }
 
@@ -1224,11 +1714,38 @@ export class SceneRenderer {
   }
 
   private _applyInstanceIsolation(): void {
+    // Batched placements are never in a lit set (lit instances materialize in
+    // _syncMaterialized), so batch dimming is uniform: dim whenever any
+    // isolation context is active.
+    const batchDimmed = this.activeLitSet !== null || this.activeLitInstanceSet !== null
+    for (const batch of this.batches.values()) {
+      this._setBatchOpacity(batch, batchDimmed ? DIMMED_OPACITY : 1)
+    }
     for (const [id, g] of this.instanceGroups) {
       const dimmed = this.activeLitSet !== null ||
         (this.activeLitInstanceSet !== null && !this.activeLitInstanceSet.has(id))
       this._setInstanceOpacity(g, dimmed ? DIMMED_OPACITY : 1)
     }
+  }
+
+  private _setBatchOpacity(batch: MemberBatch, opacity: number): void {
+    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
+      const eff = opacity * ((m.userData.baseOpacity as number | undefined) ?? 1)
+      m.opacity = eff
+      m.transparent = eff < 1
+      m.depthWrite = eff >= 1
+    }
+    const mat = batch.mesh.material
+    if (Array.isArray(mat)) {
+      for (const m of mat) {
+        setFaceMatOpacity(m as THREE.MeshPhongMaterial)
+      }
+    } else {
+      setFaceMatOpacity(mat as THREE.MeshPhongMaterial)
+    }
+    const edgeMat = batch.edges.material as THREE.LineBasicMaterial
+    edgeMat.opacity = opacity
+    edgeMat.transparent = opacity < 1
   }
 
   private _setInstanceOpacity(g: InstanceMeshGroup, opacity: number): void {
@@ -1315,9 +1832,16 @@ export class SceneRenderer {
 
   /**
    * Look up the rendered THREE.Group for a given instance id (for preview
-   * cloning in transform tools). Returns null if the instance is not rendered.
+   * cloning in transform tools), MATERIALIZING the placement out of its batch
+   * on demand — the commit's refresh restores it. Returns null if the
+   * instance is not rendered.
    */
   getInstanceGroup(instanceId: bigint): THREE.Group | null {
+    const existing = this.instanceGroups.get(instanceId)
+    if (existing !== undefined) return existing.group
+    if (!this.instanceRecords.has(instanceId)) return null
+    this.previewMaterialized.add(instanceId)
+    this._materialize(instanceId)
     return this.instanceGroups.get(instanceId)?.group ?? null
   }
 
@@ -1350,8 +1874,11 @@ export class SceneRenderer {
       this._removeObjectGroup(id)
     }
     for (const id of [...this.instanceGroups.keys()]) {
-      this._removeInstanceGroup(id)
+      this._disposeMaterializedGroup(id)
     }
+    this._disposeAllBatches()
+    this.instanceRecords.clear()
+    this.previewMaterialized.clear()
     this.memberGeometryCache.clear()
     // Dispose and revoke cached textures.
     for (const tex of this.textureCache.values()) {

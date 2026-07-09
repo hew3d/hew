@@ -54,6 +54,7 @@ import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
 import { InfiniteGrid } from './InfiniteGrid'
 import { SketchHoverGate } from './sketchHoverGate'
+import { isRenderStatsActive, recordRender } from './renderStats'
 
 /**
  * Centered message overlay shown over the viewport when the WebGL2 context is
@@ -1865,7 +1866,16 @@ export default function Viewport({
         // old per-frame full-scene traverse walked every Object3D (thousands
         // on a large document) each orbit frame just to re-set an unchanged
         // uniform on a handful of materials.
+        // Render stats (debug-log readout): only timed while the readout is
+        // mounted — with it closed this is a single boolean check per
+        // rendered frame. Read renderer.info right after render(), before
+        // three.js auto-resets the per-frame counters on the next frame.
+        const statsActive = isRenderStatsActive()
+        const renderStart = statsActive ? performance.now() : 0
         renderer.render(threeScene, camera)
+        if (statsActive) {
+          recordRender(renderer.info, performance.now() - renderStart)
+        }
         needsRender = false
       }
     }

@@ -160,6 +160,15 @@ export a file a slicer accepts as watertight, with no repair step.
   existing destructive Slice tool
 - **A WebGPU rendering path**, as a progressive enhancement over the
   current WebGL2 baseline
+- **Shared inference geometry across component instances.** The snapping
+  engine keeps its own world-space copy of every placement's geometry, so
+  a model with thousands of component instances pays registration time
+  and memory for each placement at load, import, and undo. Storing
+  candidates once per definition member and resolving each placement's
+  transform at query time — the same idea GPU instancing applies to draw
+  calls — collapses that cost to one copy per definition. It requires a
+  two-level spatial index (per-definition trees under a tree of placement
+  bounds), which is why it is staged after the flat index has proven out.
 - **An out-of-process kernel option** for very large models
 - **Multi-user collaboration**
 - **A plugin/extension API**

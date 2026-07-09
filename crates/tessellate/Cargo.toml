@@ -6,3 +6,9 @@ license.workspace = true
 
 [dependencies]
 kernel.workspace = true
+
+# Test-only, mirroring crates/inference (DEVELOPMENT.md rule 3): property-based
+# equivalence tests for the pruned ear-clipping path. Never a runtime
+# dependency (rule 1).
+[dev-dependencies]
+proptest.workspace = true

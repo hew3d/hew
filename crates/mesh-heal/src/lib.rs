@@ -398,6 +398,185 @@ fn lerp_uv(ua: [f64; 2], ub: [f64; 2], t: f64) -> [f64; 2] {
     [ua[0] + t * (ub[0] - ua[0]), ua[1] + t * (ub[1] - ua[1])]
 }
 
+/// Floor for the T-junction candidate grid's cell size (meters).
+///
+/// The cell size itself is query granularity, not a geometric tolerance —
+/// membership on an edge is still decided solely by [`point_on_open_segment`]
+/// at `tol::POINT_MERGE` (DEVELOPMENT.md rule 6); the grid only prunes
+/// vertices that provably cannot pass that predicate. The floor is derived
+/// from that same tolerance: [`CandidateGrid::gather`] spaces its samples at
+/// most `cell − tol::POINT_MERGE` apart, so the cell must exceed
+/// `POINT_MERGE` for the spacing budget to stay positive; 2 × POINT_MERGE
+/// keeps at least half the cell as budget.
+const T_JUNCTION_MIN_CELL: f64 = 2.0 * tol::POINT_MERGE;
+
+/// Uniform spatial grid over the T-junction candidate vertices, using the
+/// same quantized bucketing as welding ([`bucket_key`]). Built once per
+/// [`split_t_junctions`] call so each edge queries only the vertices near its
+/// own segment instead of linearly scanning every candidate in the mesh —
+/// the full scan is O(edges × vertices), quadratic in mesh size, and
+/// dominates large SketchUp imports.
+///
+/// The grid is pruning-only: [`CandidateGrid::gather`] returns a superset of
+/// every candidate that can lie within `tol::POINT_MERGE` of the queried
+/// segment, and the exact [`point_on_open_segment`] predicate then decides
+/// membership — so per-edge results are identical to the full scan.
+struct CandidateGrid {
+    /// Cell edge length (meters): the mesh's mean outer-loop edge length, so
+    /// a typical edge overlaps O(1) cells and a typical cell holds O(1)
+    /// vertices, floored at [`T_JUNCTION_MIN_CELL`] so the sample-spacing
+    /// budget `cell − POINT_MERGE` in [`CandidateGrid::gather`] is positive.
+    cell: f64,
+    /// `bucket_key(position, cell)` → candidate vertex ids, ascending.
+    cells: BTreeMap<(i64, i64, i64), Vec<usize>>,
+    /// Lazily memoized 3×3×3-neighbourhood unions (sorted vertex ids), keyed
+    /// by the centre cell. The cell size tracks the mean edge length, so a
+    /// typical edge samples only one or two distinct cells — memoizing the
+    /// union lets the O(edges) queries share it instead of re-probing 27
+    /// cells each. Bounded: each occupied cell stores at most its 27
+    /// neighbours' ids, and only cells some edge actually samples are built.
+    neighborhoods: BTreeMap<(i64, i64, i64), Vec<usize>>,
+}
+
+impl CandidateGrid {
+    /// Bucket `candidates` (ascending vertex ids) by quantized position.
+    fn build(candidates: &[usize], positions: &[Point3], faces: &[Vec<usize>]) -> Self {
+        // Mean outer-loop edge length (the same edges gather() is queried
+        // with). A non-finite mean (garbage coordinates) falls to the floor;
+        // gather() then serves such edges via its full-scan fallback.
+        let mut total = 0.0_f64;
+        let mut count = 0usize;
+        for face in faces {
+            let n = face.len();
+            for k in 0..n {
+                let ab = positions[face[(k + 1) % n]] - positions[face[k]];
+                total += ab.length();
+                count += 1;
+            }
+        }
+        let mean = if count > 0 { total / count as f64 } else { 0.0 };
+        let cell = if mean.is_finite() {
+            mean.max(T_JUNCTION_MIN_CELL)
+        } else {
+            T_JUNCTION_MIN_CELL
+        };
+
+        let mut cells: BTreeMap<(i64, i64, i64), Vec<usize>> = BTreeMap::new();
+        for &v in candidates {
+            cells
+                .entry(bucket_key(positions[v], cell))
+                .or_default()
+                .push(v);
+        }
+        Self {
+            cell,
+            cells,
+            neighborhoods: BTreeMap::new(),
+        }
+    }
+
+    /// The sorted union of the candidate ids in the 3×3×3 cells around
+    /// `base`, memoized. Ids are unique without a dedup: every candidate
+    /// lives in exactly one cell. (Associated fn over disjoint field borrows
+    /// so the memo can be grown while `cells` is read.)
+    fn neighborhood<'a>(
+        cells: &BTreeMap<(i64, i64, i64), Vec<usize>>,
+        memo: &'a mut BTreeMap<(i64, i64, i64), Vec<usize>>,
+        base: (i64, i64, i64),
+    ) -> &'a [usize] {
+        memo.entry(base).or_insert_with(|| {
+            let mut ids: Vec<usize> = Vec::new();
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        let key = (base.0 + dx, base.1 + dy, base.2 + dz);
+                        if let Some(cell_ids) = cells.get(&key) {
+                            ids.extend_from_slice(cell_ids);
+                        }
+                    }
+                }
+            }
+            ids.sort_unstable();
+            ids
+        })
+    }
+
+    /// Collect into `out` a superset of every candidate vertex that can lie
+    /// within `tol::POINT_MERGE` of segment `(pa, pb)`, in ascending
+    /// vertex-id order (so downstream stable sorting ties out exactly like
+    /// the full scan, which also visits candidates in ascending order).
+    ///
+    /// Coverage argument — why no on-segment vertex is ever missed: sample
+    /// points are placed along the segment at Euclidean spacing
+    /// ≤ `cell − POINT_MERGE`. A hit vertex `p` lies within `POINT_MERGE` of
+    /// some segment point `q`, and `q` lies within one sample spacing of its
+    /// nearest sample `s`, so per axis `|p − s| ≤ (cell − POINT_MERGE) +
+    /// POINT_MERGE = cell` — and two coordinates at most one cell apart
+    /// quantize (monotonic floor, [`bucket`]) to indices at most 1 apart.
+    /// Every possible hit therefore lives in the 3×3×3 cell neighbourhood of
+    /// some sample's cell, all of which are gathered. The one-cell inflation
+    /// also covers a vertex sitting exactly on a cell boundary: floor
+    /// assigns it to one side deterministically, and both sides are visited.
+    ///
+    /// Degenerate segments (`pa == pb` within tolerance) gather their local
+    /// neighbourhood; the predicate then rejects every vertex, exactly as
+    /// the full scan does. A segment so long (or non-finite) that walking it
+    /// would visit more cells than the grid has falls back to gathering
+    /// every occupied cell — never worse than the full scan, and the same
+    /// superset guarantee holds trivially.
+    fn gather(&mut self, pa: Point3, pb: Point3, out: &mut Vec<usize>) {
+        out.clear();
+
+        let ab = pb - pa;
+        let len = ab.length();
+        let max_step = self.cell - tol::POINT_MERGE; // > 0: cell ≥ 2·POINT_MERGE
+        let steps = (len / max_step).ceil();
+        if !steps.is_finite() || steps > self.cells.len() as f64 {
+            // Full-scan fallback (cost cap + non-finite guard). Cells are in
+            // key order with ascending ids inside; a global sort restores
+            // ascending vertex-id order across cells.
+            for ids in self.cells.values() {
+                out.extend_from_slice(ids);
+            }
+            out.sort_unstable();
+            return;
+        }
+
+        let n = (steps as usize).max(1);
+        // Each coordinate of `pa + ab·t` is weakly monotone in `t` (even under
+        // rounding), so sample cell keys repeat only consecutively — skipping
+        // a repeated key never skips a cell seen earlier in the walk. Distinct
+        // samples' 3×3×3 neighbourhoods can still overlap, so ids are deduped
+        // after the sort (a stray duplicate is harmless there, so per-axis
+        // monotonicity is a perf observation, not a correctness requirement).
+        let mut prev_base: Option<(i64, i64, i64)> = None;
+        let mut sampled_cells = 0usize;
+        for i in 0..=n {
+            let t = i as f64 / n as f64;
+            let s = pa + ab * t;
+            let base = bucket_key(s, self.cell);
+            if prev_base == Some(base) {
+                continue;
+            }
+            prev_base = Some(base);
+            sampled_cells += 1;
+            out.extend_from_slice(Self::neighborhood(
+                &self.cells,
+                &mut self.neighborhoods,
+                base,
+            ));
+        }
+        // A single sampled cell yields its memoized union verbatim — already
+        // sorted and unique. Multiple cells' unions can overlap: sort to
+        // restore the ascending vertex-id order the full scan iterates in,
+        // then dedup the overlap.
+        if sampled_cells > 1 {
+            out.sort_unstable();
+            out.dedup();
+        }
+    }
+}
+
 /// Heal T-junctions: where a vertex lies on the interior of another face's edge
 /// (a "T"), splice it into that edge so the half-edges pair up manifold.
 ///
@@ -415,12 +594,66 @@ fn lerp_uv(ua: [f64; 2], ub: [f64; 2], t: f64) -> [f64; 2] {
 /// Hole loops are threaded through unchanged (conservative: hole edges are not
 /// spliced). Face order and count are preserved so the parallel `face_holes`
 /// array stays aligned.
+///
+/// Candidate lookup goes through a [`CandidateGrid`] (one build per call), so
+/// the cost is near-linear in mesh size instead of the full scan's
+/// O(edges × vertices) — with per-edge results identical to that scan (the
+/// grid only prunes vertices provably beyond the on-segment tolerance;
+/// see `split_t_junctions_reference` and the property test pinning identity).
 pub fn split_t_junctions(
     faces: &[Vec<usize>],
     face_materials: &[u32],
     face_corner_uvs: &[Vec<[f64; 2]>],
     face_holes: &[Vec<Vec<usize>>],
     positions: &[Point3],
+) -> FilteredFaces {
+    split_t_junctions_impl(
+        faces,
+        face_materials,
+        face_corner_uvs,
+        face_holes,
+        positions,
+        true,
+    )
+}
+
+/// Reference implementation of [`split_t_junctions`] with the candidate grid
+/// bypassed — an honest linear scan of every candidate vertex per edge, kept
+/// so the executable specs and property tests can assert the grid path
+/// returns byte-for-byte identical results (DEVELOPMENT.md rule 3),
+/// mirroring `ear_clip_reference` in crates/tessellate. Not part of the
+/// supported API.
+#[cfg(test)]
+fn split_t_junctions_reference(
+    faces: &[Vec<usize>],
+    face_materials: &[u32],
+    face_corner_uvs: &[Vec<[f64; 2]>],
+    face_holes: &[Vec<Vec<usize>>],
+    positions: &[Point3],
+) -> FilteredFaces {
+    split_t_junctions_impl(
+        faces,
+        face_materials,
+        face_corner_uvs,
+        face_holes,
+        positions,
+        false,
+    )
+}
+
+/// Shared body of `split_t_junctions`/`split_t_junctions_reference`: with
+/// `use_grid` set, each edge tests only the candidates a [`CandidateGrid`]
+/// gathers near its segment; without it, every candidate is tested. Both
+/// paths visit candidates in ascending vertex-id order and share
+/// [`point_on_open_segment`] and the stable sort by parameter `t`, so they
+/// emit identical output on any input.
+fn split_t_junctions_impl(
+    faces: &[Vec<usize>],
+    face_materials: &[u32],
+    face_corner_uvs: &[Vec<[f64; 2]>],
+    face_holes: &[Vec<Vec<usize>>],
+    positions: &[Point3],
+    use_grid: bool,
 ) -> FilteredFaces {
     // Candidate vertices: those used as a corner by some face (outer loops only).
     let mut used: Vec<bool> = vec![false; positions.len()];
@@ -432,6 +665,10 @@ pub fn split_t_junctions(
         }
     }
     let candidates: Vec<usize> = (0..positions.len()).filter(|&i| used[i]).collect();
+
+    let mut grid = use_grid.then(|| CandidateGrid::build(&candidates, positions, faces));
+    // Per-edge scratch, reused across the loop to avoid reallocation.
+    let mut near: Vec<usize> = Vec::new();
 
     let mut out_faces: Vec<Vec<usize>> = Vec::with_capacity(faces.len());
     let mut out_uvs: Vec<Vec<[f64; 2]>> = Vec::with_capacity(faces.len());
@@ -453,9 +690,20 @@ pub fn split_t_junctions(
             }
 
             // Collect interior vertices on edge (a, b), sorted by parameter.
+            // With the grid, only candidates near the segment are tested — a
+            // superset of every possible hit (see CandidateGrid::gather), in
+            // the same ascending vertex-id order as the full scan, so the
+            // stable sort below breaks equal-t ties identically.
             let pa = positions[a];
             let pb = positions[b];
-            let mut hits: Vec<(f64, usize)> = candidates
+            let edge_candidates: &[usize] = match grid.as_mut() {
+                Some(g) => {
+                    g.gather(pa, pb, &mut near);
+                    &near
+                }
+                None => &candidates,
+            };
+            let mut hits: Vec<(f64, usize)> = edge_candidates
                 .iter()
                 .filter(|&&v| v != a && v != b)
                 .filter_map(|&v| point_on_open_segment(positions[v], pa, pb).map(|t| (t, v)))
@@ -1440,6 +1688,117 @@ mod tests {
         assert!(out_uvs[1].is_empty(), "UV-less face stays UV-less");
     }
 
+    /// Vertices sitting EXACTLY on candidate-grid cell boundaries are still
+    /// found, and the grid path matches the full-scan reference byte for
+    /// byte. The mesh is built so the mean edge length — hence the cell
+    /// size — is exactly 1.0 m: 6 + 4 unit-sum quad edges plus two
+    /// zero-length edges from a degenerate 2-gon ring (10 m over 10 edges),
+    /// which puts every integer-coordinate vertex exactly on a cell
+    /// boundary in all three axes and exercises degenerate (a == b within
+    /// tolerance) edges at the same time.
+    #[test]
+    fn split_t_junctions_grid_matches_reference_on_cell_boundaries() {
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0), // 0
+            Point3::new(2.0, 0.0, 0.0), // 1
+            Point3::new(2.0, 1.0, 0.0), // 2
+            Point3::new(0.0, 1.0, 0.0), // 3
+            Point3::new(1.0, 0.0, 0.0), // 4 — midpoint of edge (0,1)
+            Point3::new(1.0, 1.0, 0.0), // 5 — midpoint of edge (2,3)
+            Point3::new(5.0, 5.0, 0.0), // 6 — degenerate 2-gon vertex
+        ];
+        let faces = vec![
+            vec![0usize, 1, 2, 3], // edges of length 2, 1, 2, 1
+            vec![0usize, 4, 5, 3], // edges of length 1, 1, 1, 1
+            vec![6usize, 6],       // two zero-length edges (degenerate ring)
+        ];
+        let mats = vec![0u32, 1, 2];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![
+            vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            Vec::new(),
+            Vec::new(),
+        ];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 3];
+
+        let grid = split_t_junctions(&faces, &mats, &uvs, &holes, &positions);
+        let reference = split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions);
+        assert_eq!(grid, reference, "grid path must equal the full scan");
+        assert_eq!(
+            grid.0[0],
+            vec![0, 4, 1, 2, 5, 3],
+            "both boundary-sitting mid-edge vertices spliced in"
+        );
+        assert_eq!(grid.0[2], vec![6, 6], "degenerate ring passes through");
+    }
+
+    /// Grid ≡ reference on a mesh stressing the gather walk: an edge long
+    /// enough to span many grid cells (and to trip the full-scan cost-cap
+    /// fallback), plus candidates a hair inside and a hair outside the
+    /// on-segment tolerance — the borderline hits/misses must be decided
+    /// identically by both paths.
+    #[test]
+    fn split_t_junctions_grid_matches_reference_on_long_edges_and_tol_probes() {
+        let mut positions = vec![
+            Point3::new(0.0, 0.0, 0.0),    // 0
+            Point3::new(1000.0, 0.0, 0.0), // 1
+            Point3::new(1000.0, 1.0, 0.0), // 2
+            Point3::new(0.0, 1.0, 0.0),    // 3
+            // On the long bottom edge, 0.4·tol off-axis → within tolerance.
+            Point3::new(250.0, 0.4 * tol::POINT_MERGE, 0.0), // 4
+            // 2·tol off-axis → outside tolerance, must NOT be spliced.
+            Point3::new(500.0, 2.0 * tol::POINT_MERGE, 0.0), // 5
+            // Exactly on the long edge.
+            Point3::new(750.0, 0.0, 0.0), // 6
+            // Mid-length quad: a 100 m edge crosses several cells without
+            // tripping the fallback, with a probe halfway along it.
+            Point3::new(0.0, 30.0, 0.0),   // 7
+            Point3::new(100.0, 30.0, 0.0), // 8
+            Point3::new(100.0, 31.0, 0.0), // 9
+            Point3::new(0.0, 31.0, 0.0),   // 10
+            Point3::new(50.0, 30.0, 0.0),  // 11 — on edge (7,8)
+        ];
+        let mut faces = vec![vec![0usize, 1, 2, 3], vec![7usize, 8, 9, 10]];
+        // Tiny triangles make each probe a used vertex (a candidate).
+        for &probe in &[4usize, 5, 6, 11] {
+            let p = positions[probe];
+            let base = positions.len();
+            positions.push(Point3::new(p.x + 0.5, p.y + 2.0, p.z));
+            positions.push(Point3::new(p.x - 0.5, p.y + 2.0, p.z));
+            faces.push(vec![probe, base, base + 1]);
+        }
+        // Many short edges drag the mean edge length (the cell size) far
+        // below the 1000 m edge, so that edge spans many more cells than the
+        // grid holds and takes the fallback.
+        for i in 0..30 {
+            let base = positions.len();
+            let x = -10.0 - i as f64 * 3.0;
+            positions.push(Point3::new(x, 0.0, 0.0));
+            positions.push(Point3::new(x + 1.0, 0.0, 0.0));
+            positions.push(Point3::new(x + 1.0, 1.0, 0.0));
+            faces.push(vec![base, base + 1, base + 2]);
+        }
+        let mats: Vec<u32> = (0..faces.len() as u32).collect();
+        let uvs: Vec<Vec<[f64; 2]>> = faces
+            .iter()
+            .map(|f| f.iter().map(|&v| [v as f64, 0.0]).collect())
+            .collect();
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); faces.len()];
+
+        let grid = split_t_junctions(&faces, &mats, &uvs, &holes, &positions);
+        let reference = split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions);
+        assert_eq!(grid, reference, "grid path must equal the full scan");
+        assert_eq!(
+            grid.0[0],
+            vec![0, 4, 6, 1, 2, 3],
+            "in-tolerance probes spliced in t-order; out-of-tolerance probe excluded"
+        );
+        assert_eq!(
+            grid.0[1],
+            vec![7, 11, 8, 9, 10],
+            "mid-walk probe on the 100 m edge spliced in"
+        );
+    }
+
     /// T-junction healing is idempotent: a second pass finds nothing to splice.
     #[test]
     fn split_t_junctions_idempotent() {
@@ -1740,5 +2099,57 @@ mod tests {
         let p = tf.apply_point(Point3::new(100.0, 0.0, 0.0));
         // unit_meter is f32 (0.01f32); f32→f64 precision loss is ~1e-8.
         assert!((p.x - 1.0).abs() < 1e-6, "100 cm → 1 m: x={}", p.x);
+    }
+
+    /// THE identity (property): the grid-accelerated [`split_t_junctions`]
+    /// emits byte-identical output to the full-scan reference on arbitrary
+    /// meshes (DEVELOPMENT.md rule 3). The lattice positions force exact
+    /// collinear/T-junction configurations; per-coordinate jitter of
+    /// ±0.4·POINT_MERGE / ±2·POINT_MERGE probes both sides of the on-segment
+    /// tolerance (and both sides of grid cell boundaries); the scale factor
+    /// varies the cell size across six orders of magnitude; rings of length
+    /// 1–6 with repeats include degenerate and zero-length edges.
+    #[test]
+    fn property_grid_split_equals_reference() {
+        use proptest::prelude::*;
+        // 24 lattice points on a 4×3×2 grid — dense enough that random faces
+        // share collinear runs and mid-edge vertices.
+        let ring = proptest::collection::vec(0usize..24, 1..7);
+        let mesh = proptest::collection::vec(ring, 0..14);
+        let jitter = proptest::collection::vec(-2i8..=2, 72);
+        let scale = prop_oneof![Just(0.001), Just(1.0), Just(1000.0)];
+        proptest!(
+            ProptestConfig::with_cases(512),
+            |(faces in mesh, jit in jitter, s in scale)| {
+                let off = |j: i8| {
+                    f64::from(j) * if j.abs() == 1 { 0.4 } else { 1.0 } * tol::POINT_MERGE
+                };
+                let positions: Vec<Point3> = (0..24usize)
+                    .map(|i| {
+                        Point3::new(
+                            (i % 4) as f64 * s + off(jit[3 * i]),
+                            ((i / 4) % 3) as f64 * s + off(jit[3 * i + 1]),
+                            (i / 12) as f64 * s + off(jit[3 * i + 2]),
+                        )
+                    })
+                    .collect();
+                let mats: Vec<u32> = (0..faces.len() as u32).collect();
+                // Corner UVs on every face so spliced-in UV lerping is compared too.
+                let uvs: Vec<Vec<[f64; 2]>> = faces
+                    .iter()
+                    .map(|f| {
+                        f.iter()
+                            .enumerate()
+                            .map(|(k, &v)| [v as f64, k as f64])
+                            .collect()
+                    })
+                    .collect();
+                let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); faces.len()];
+                prop_assert_eq!(
+                    split_t_junctions(&faces, &mats, &uvs, &holes, &positions),
+                    split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions)
+                );
+            }
+        );
     }
 }

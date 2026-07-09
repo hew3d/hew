@@ -37,16 +37,25 @@
 //! returned snap keeps the candidate's `kind`/`source` so the UI can still
 //! say *why* (e.g. "on axis, from endpoint").
 //!
-//! M1 status: implemented with a linear scan over candidates. A spatial
-//! index lives behind `InferenceScene` later; the API deliberately hides the
-//! storage so the index strategy can change without touching callers.
-//! Intersection snaps (`SnapKind::Intersection`) are M2 — the variant exists
-//! but `resolve` does not emit it yet.
+//! M1 status: point/segment/face candidates are pruned through a lazily
+//! rebuilt AABB BVH (see `index`) before the exact per-candidate tests run;
+//! constant-count candidates (guides, world axes/origin) and gesture-scoped
+//! ones (sketch/transient segments) stay on a linear walk. The API
+//! deliberately hides the storage so the index strategy can change without
+//! touching callers. Intersection snaps (`SnapKind::Intersection`) are M2 —
+//! the variant exists but `resolve` does not emit it yet.
+
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::BTreeSet;
 
 use kernel::{
     EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchId,
     SketchVertexId, Transform, Vec3, VertexId, tol,
 };
+
+mod index;
+
+use index::SceneIndex;
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -277,6 +286,40 @@ pub struct InferenceScene {
     /// When `false`, the world-origin/axis candidates are suppressed (View ▸
     /// Axes off): hidden axes must not snap or flash a cue. Defaults to `true`.
     axes_enabled: bool,
+    /// Lazily rebuilt spatial index over `points`/`segments`/`faces`; `None`
+    /// means dirty (a mutator ran since the last build). Interior mutability
+    /// because the hot pointer-move queries (`resolve`, `pick_face`) take
+    /// `&self` while a rebuild must write the cache. Panic-free by
+    /// construction: the only `borrow_mut` lives in
+    /// [`InferenceScene::spatial_index`], whose build reads the candidate
+    /// Vecs and calls nothing that touches this cell again (no reentrancy);
+    /// `RefCell` additionally makes the scene `!Sync`, so a future threaded
+    /// caller fails to compile instead of racing.
+    spatial: RefCell<Option<SceneIndex>>,
+    /// Cumulative count of exact ray-vs-face occlusion tests (see
+    /// [`InferenceScene::occlusion_face_tests`]). `Cell` because queries
+    /// take `&self`; single-threaded for the same reason as `spatial`.
+    occlusion_tests: Cell<u64>,
+    /// World-object ids currently registered via
+    /// [`InferenceScene::add_object`] — exactly the ids for which candidates
+    /// with `instance == None` can exist (`register` only emits such
+    /// candidates on the `add_object` path). Lets
+    /// [`InferenceScene::remove_object`] answer "nothing to remove" in
+    /// O(log owners) instead of three O(scene) retain passes: bulk registration (document
+    /// load, undo/redo re-registration) calls the replace-semantics `add_*`
+    /// once per object, and paying a full-scene scan for each never-present
+    /// id made that accidentally quadratic.
+    world_owners: BTreeSet<ObjectId>,
+    /// Instance ids currently registered via
+    /// [`InferenceScene::add_instance`] — exactly the ids for which
+    /// candidates with `instance == Some(id)` can exist (across every
+    /// definition member the instance places). Same fast path for
+    /// [`InferenceScene::remove_instance`].
+    instance_owners: BTreeSet<InstanceId>,
+    /// Cumulative count of candidates walked by the removal retain passes
+    /// (see [`InferenceScene::removal_candidates_visited`]). Plain `u64`
+    /// (not `Cell`) because removal takes `&mut self`.
+    removal_visits: u64,
 }
 
 impl Default for InferenceScene {
@@ -291,6 +334,11 @@ impl Default for InferenceScene {
             transient_segments: Vec::new(),
             guides_enabled: true,
             axes_enabled: true,
+            spatial: RefCell::new(None),
+            occlusion_tests: Cell::new(0),
+            world_owners: BTreeSet::new(),
+            instance_owners: BTreeSet::new(),
+            removal_visits: 0,
         }
     }
 }
@@ -319,6 +367,47 @@ impl InferenceScene {
         (self.points.len(), self.segments.len(), self.faces.len())
     }
 
+    /// Cumulative number of exact ray-vs-face tests performed by occlusion
+    /// culling across all queries so far — cheap introspection for tests and
+    /// debug overlays, like [`InferenceScene::candidate_counts`]. The
+    /// spatial index exists to keep the per-query delta far below the total
+    /// face count; the perf-sanity spec asserts exactly that.
+    pub fn occlusion_face_tests(&self) -> u64 {
+        self.occlusion_tests.get()
+    }
+
+    /// Cumulative number of candidates walked by the retain passes of
+    /// [`InferenceScene::remove_object`] and
+    /// [`InferenceScene::remove_instance`] across all calls so far — cheap
+    /// introspection for tests and debug overlays, like
+    /// [`InferenceScene::occlusion_face_tests`]. The owner-set fast path
+    /// exists to make removal of a never-registered id visit zero candidates
+    /// (bulk registration calls the replace-semantics `add_*` once per
+    /// object, so anything else is accidentally quadratic in scene size);
+    /// the removal perf-sanity spec asserts exactly that.
+    pub fn removal_candidates_visited(&self) -> u64 {
+        self.removal_visits
+    }
+
+    /// The spatial index, rebuilding it first if a mutator marked it dirty.
+    ///
+    /// Rebuild cost is O(n log n) in the candidate count and amortizes
+    /// across the many pointer-move queries between committed mutations —
+    /// mutators only invalidate, they never rebuild. Panic-free: this holds
+    /// the crate's only `borrow_mut`, and [`SceneIndex::build`] reads the
+    /// candidate Vecs without re-entering the cell (see the `spatial` field
+    /// docs).
+    fn spatial_index(&self) -> Ref<'_, SceneIndex> {
+        if self.spatial.borrow().is_none() {
+            *self.spatial.borrow_mut() =
+                Some(SceneIndex::build(&self.points, &self.segments, &self.faces));
+        }
+        Ref::map(self.spatial.borrow(), |slot| {
+            slot.as_ref()
+                .expect("built above; nothing can mutate the scene through &self in between")
+        })
+    }
+
     /// Extracts snap candidates from `object` (vertices, edges with
     /// midpoints derived at query time, faces) transformed by `placement`
     /// into world space, replacing any candidates previously registered for
@@ -329,6 +418,10 @@ impl InferenceScene {
     pub fn add_object(&mut self, id: ObjectId, object: &Object, placement: &Transform) {
         // Replace semantics: drop any prior candidates for this id first.
         self.remove_object(id);
+        // Record the owner before registering: `id` is now the one world
+        // object whose candidates carry `instance == None`, which is exactly
+        // what `remove_object`'s fast path keys on.
+        self.world_owners.insert(id);
         self.register(object, placement, id, None);
     }
 
@@ -345,6 +438,10 @@ impl InferenceScene {
         object: &Object,
         pose: &Transform,
     ) {
+        // Record the owner (idempotent across the instance's members):
+        // candidates carrying `instance == Some(instance)` now exist, which
+        // is exactly what `remove_instance`'s fast path keys on.
+        self.instance_owners.insert(instance);
         self.register(object, pose, member, Some(instance));
     }
 
@@ -359,6 +456,12 @@ impl InferenceScene {
         owner: ObjectId,
         instance: Option<InstanceId>,
     ) {
+        // The candidate Vecs are about to change shape: drop the spatial
+        // index and let the next query rebuild it. Invalidation is
+        // per-committed-op (this is never called per-frame), so the rebuild
+        // amortizes across the many pointer-move queries in between.
+        *self.spatial.get_mut() = None;
+
         // --- Vertices -> ScenePoint (Endpoint source) ---
         for (vid, vertex) in object.vertices() {
             self.points.push(ScenePoint {
@@ -431,8 +534,25 @@ impl InferenceScene {
     /// Drops all **world-object** candidates registered for `id` (instanced
     /// candidates are keyed by instance, see [`InferenceScene::remove_instance`]).
     /// Unknown ids are a no-op — removal must be idempotent so document undo can
-    /// call it freely.
+    /// call it freely, and the no-op never scans candidates (see
+    /// [`InferenceScene::removal_candidates_visited`]).
     pub fn remove_object(&mut self, id: ObjectId) {
+        // Owner-set fast path: candidates matching `world` below exist only
+        // for ids in `world_owners` (`register` emits `instance == None`
+        // candidates solely on the `add_object` path, which inserts). For a
+        // never-registered id the retain passes would walk every candidate
+        // to remove nothing, so idempotent callers — document load and
+        // undo/redo re-register N objects, each `add_*` starting with this
+        // removal — went accidentally quadratic. Nothing is removed here, no
+        // index shifts, so the spatial index stays valid too: skip the dirty.
+        if !self.world_owners.remove(&id) {
+            return;
+        }
+        // The retain passes shift every index behind the removed candidates,
+        // so the whole spatial index is stale: mark it dirty for a lazy full
+        // rebuild on the next query (per-committed-op, never per-frame).
+        *self.spatial.get_mut() = None;
+        self.removal_visits += (self.points.len() + self.segments.len() + self.faces.len()) as u64;
         let world = |s: &SnapSource| s.object == id && s.instance.is_none();
         self.points.retain(|p| !world(&p.source));
         self.segments.retain(|s| !world(&s.source));
@@ -440,12 +560,42 @@ impl InferenceScene {
     }
 
     /// Drops all candidates registered for `instance` (across every definition
-    /// member it places). Idempotent, so document undo can call it freely.
+    /// member it places). Idempotent, so document undo can call it freely —
+    /// and the unknown-id no-op never scans candidates (see
+    /// [`InferenceScene::removal_candidates_visited`]).
     pub fn remove_instance(&mut self, instance: InstanceId) {
+        // Owner-set fast path, mirroring `remove_object`: candidates with
+        // `instance == Some(instance)` exist only for ids in
+        // `instance_owners` (`add_instance` inserts before registering), so
+        // a never-registered id has nothing to remove — return without
+        // scanning, and without dirtying the still-valid spatial index.
+        if !self.instance_owners.remove(&instance) {
+            return;
+        }
+        // Same index-shifting retain passes as `remove_object`: dirty the
+        // spatial index for a lazy rebuild.
+        *self.spatial.get_mut() = None;
+        self.removal_visits += (self.points.len() + self.segments.len() + self.faces.len()) as u64;
         let key = Some(instance);
         self.points.retain(|p| p.source.instance != key);
         self.segments.retain(|s| s.source.instance != key);
         self.faces.retain(|f| f.source.instance != key);
+    }
+
+    /// Drops every object- and instance-sourced candidate at once, leaving
+    /// guides, sketches, and transient segments registered. For bulk
+    /// visibility rebuilds (e.g. applying a whole hidden set): removing N
+    /// registered owners one at a time scans the candidate vectors once per
+    /// owner, while clearing and re-registering the visible remainder is one
+    /// linear pass in total — each re-registration's replace-semantics
+    /// removal hits the empty-owner fast path.
+    pub fn clear_solids(&mut self) {
+        *self.spatial.get_mut() = None;
+        self.points.clear();
+        self.segments.clear();
+        self.faces.clear();
+        self.world_owners.clear();
+        self.instance_owners.clear();
     }
 
     /// Registers (or re-registers) one construction guide as a
@@ -530,8 +680,30 @@ impl InferenceScene {
     /// uses its own fallback (e.g. ground-plane intersection).
     ///
     /// Must be cheap enough to call on every mouse-move at interactive
-    /// rates; that budget is what the spatial index exists for.
+    /// rates: the spatial index (lazily rebuilt after committed mutations)
+    /// prunes the point/segment/face candidates to a conservative superset
+    /// before the exact tests run.
     pub fn resolve(&self, query: &SnapQuery) -> Option<Snap> {
+        let index = self.spatial_index();
+        self.resolve_impl(query, Some(&index))
+    }
+
+    /// Reference implementation of [`resolve`](Self::resolve) with the
+    /// spatial index bypassed — an honest full linear scan, kept so the
+    /// executable specs and property tests can assert the indexed path
+    /// returns byte-for-byte identical snaps (DEVELOPMENT.md rule 3). Not
+    /// part of the supported API.
+    #[doc(hidden)]
+    pub fn resolve_linear(&self, query: &SnapQuery) -> Option<Snap> {
+        self.resolve_impl(query, None)
+    }
+
+    /// Shared body of `resolve`/`resolve_linear`: with `index == None` every
+    /// candidate is scanned; with `Some` only the index's conservative
+    /// superset is, in ascending-index (= linear emission) order, so the
+    /// exact tests, ranking, tie-breaks, and occlusion behave identically on
+    /// both paths.
+    fn resolve_impl(&self, query: &SnapQuery, index: Option<&SceneIndex>) -> Option<Snap> {
         // Normalize the ray direction; degenerate direction -> None.
         let dir = match query.ray.direction.normalized() {
             Ok(d) => d,
@@ -540,12 +712,42 @@ impl InferenceScene {
         let origin = query.ray.origin;
         let aperture = query.aperture;
 
+        // tan(aperture) bounds the cone's radius growth per unit depth for
+        // the index's conservative node test. At or past a 90° half-angle
+        // the cone covers the whole front half-space, so the radius prune is
+        // disabled (`None`); FRAC_PI_2 is a domain bound, not a tolerance.
+        // The cutoff backs off by tol::CONE_SLACK: within that band of π/2
+        // the tangent is so ill-conditioned that the node test's guard band
+        // (see `Aabb::maybe_in_cone`) could no longer provably cover the
+        // exact test's rounding, so those cones are treated as the whole
+        // front half-space too. Only pruning strength is affected — the
+        // exact tests always use `aperture` itself.
+        let tan_aperture =
+            (aperture < std::f64::consts::FRAC_PI_2 - tol::CONE_SLACK).then(|| aperture.tan());
+
+        // Candidate index sets. The spatial index prunes to a conservative
+        // superset (the exact tests below re-filter); the linear reference
+        // takes everything.
+        let (point_ids, segment_ids, face_ids) = match index {
+            Some(ix) => (
+                ix.points_in_cone(origin, dir, tan_aperture),
+                ix.segments_in_cone(origin, dir, tan_aperture),
+                ix.faces_crossing_ray(origin, dir),
+            ),
+            None => (
+                (0..self.points.len()).collect::<Vec<_>>(),
+                (0..self.segments.len()).collect::<Vec<_>>(),
+                (0..self.faces.len()).collect::<Vec<_>>(),
+            ),
+        };
+
         // Collect all candidates that fall inside the pick cone.
         // Tuple: (kind, angular_dist, depth, position, source, direction)
         let mut candidates: Vec<Candidate> = Vec::new();
 
         // --- Endpoint candidates: from ScenePoints ---
-        for sp in &self.points {
+        for &pi in &point_ids {
+            let sp = &self.points[pi];
             if let Some((ang, depth)) = cone_test(origin, dir, sp.position, aperture) {
                 candidates.push((
                     SnapKind::Endpoint,
@@ -559,7 +761,8 @@ impl InferenceScene {
         }
 
         // --- Segment candidates: Midpoint and OnEdge ---
-        for seg in &self.segments {
+        for &si in &segment_ids {
+            let seg = &self.segments[si];
             let mid = midpoint(seg.a, seg.b);
 
             // Midpoint candidate: emitted when the midpoint itself is in the cone.
@@ -608,7 +811,8 @@ impl InferenceScene {
         }
 
         // --- Face candidates: OnFace ---
-        for face in &self.faces {
+        for &fi in &face_ids {
+            let face = &self.faces[fi];
             if let Some((pos, ang, depth)) = face_cone_hit(
                 origin,
                 dir,
@@ -696,7 +900,7 @@ impl InferenceScene {
         let winner = candidates
             .iter()
             .copied()
-            .find(|c| !self.is_occluded(origin, c.3));
+            .find(|c| !self.is_occluded(origin, c.3, index));
 
         // TRACE only — `resolve` runs on every pointer move, so this is a
         // firehose filtered out by default; raise the capture level to debug a
@@ -764,10 +968,33 @@ impl InferenceScene {
     /// for "what surface is under the cursor"; this is the right one. Returns
     /// the face's [`SnapSource`], or `None` if the ray hits no face.
     pub fn pick_face(&self, ray: &PickRay) -> Option<SnapSource> {
+        let index = self.spatial_index();
+        self.pick_face_impl(ray, Some(&index))
+    }
+
+    /// Reference implementation of [`pick_face`](Self::pick_face) with the
+    /// spatial index bypassed, mirroring
+    /// [`resolve_linear`](Self::resolve_linear) (DEVELOPMENT.md rule 3). Not
+    /// part of the supported API.
+    #[doc(hidden)]
+    pub fn pick_face_linear(&self, ray: &PickRay) -> Option<SnapSource> {
+        self.pick_face_impl(ray, None)
+    }
+
+    /// Shared body of `pick_face`/`pick_face_linear`. The indexed superset
+    /// is scanned in ascending order with the same strict `<` depth
+    /// comparison, so equal-depth ties resolve to the lowest candidate
+    /// index on both paths.
+    fn pick_face_impl(&self, ray: &PickRay, index: Option<&SceneIndex>) -> Option<SnapSource> {
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
+        let face_ids: Vec<usize> = match index {
+            Some(ix) => ix.faces_crossing_ray(origin, dir),
+            None => (0..self.faces.len()).collect(),
+        };
         let mut best: Option<(f64, SnapSource)> = None;
-        for face in &self.faces {
+        for &fi in &face_ids {
+            let face = &self.faces[fi];
             // `face_cone_hit` ignores its aperture arg for faces (a face hit
             // is pure ray-polygon containment), so any value works here.
             if let Some((_pos, _ang, depth)) =
@@ -795,7 +1022,7 @@ impl InferenceScene {
     /// distance to `pos`, not nearer. A ray that passes through a face's *hole*
     /// is not occluded by that face (`face_cone_hit` already rejects holes), so
     /// snaps seen through an imprinted opening stay visible.
-    fn is_occluded(&self, origin: Point3, pos: Point3) -> bool {
+    fn is_occluded(&self, origin: Point3, pos: Point3, index: Option<&SceneIndex>) -> bool {
         let to_pos = pos - origin;
         let dist = to_pos.length();
         let dir = match to_pos.normalized() {
@@ -803,12 +1030,25 @@ impl InferenceScene {
             Err(_) => return false, // candidate at the eye — nothing can occlude it
         };
         let near_threshold = dist * (1.0 - tol::OCCLUSION_REL);
-        self.faces.iter().any(|face| {
+        // The exact hole-aware test, shared verbatim by the indexed and
+        // linear paths. The counter feeds `occlusion_face_tests` — the
+        // introspection the perf-sanity spec uses to prove the index prunes.
+        let occludes = |face: &SceneFace| {
+            self.occlusion_tests.set(self.occlusion_tests.get() + 1);
             // `face_cone_hit` ignores its aperture arg for faces (pure
             // ray-polygon containment); 0.0 is fine.
             face_cone_hit(origin, dir, &face.plane, &face.boundary, &face.holes, 0.0)
                 .is_some_and(|(_pos, _ang, depth)| depth < near_threshold)
-        })
+        };
+        match index {
+            // Early-out walk: only subtrees whose boxes the ray enters
+            // nearer than the threshold can hold an occluder, and the walk
+            // stops at the first face that actually occludes.
+            Some(ix) => {
+                ix.any_face_hit_before(origin, dir, near_threshold, |fi| occludes(&self.faces[fi]))
+            }
+            None => self.faces.iter().any(occludes),
+        }
     }
 
     /// Picks the live sketch whose nearest edge is closest to the ray, for
