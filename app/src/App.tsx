@@ -11,6 +11,7 @@ import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
 import { TitleBar } from './TitleBar'
 import { isLinux, isMac, isWindows } from './platform'
+import { nextPaint } from './paint'
 import { TagsPanel } from './panels/TagsPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
@@ -862,6 +863,12 @@ export default function App() {
 
     // Step 2: show the file-open dialog.  If the user cancels (null), we
     // return immediately without touching the current document.
+    //
+    // Known limitation: openForImport() couples the picker with the file read
+    // (and, for COLLADA on the web, a texture-directory picker AFTER the
+    // read), so reading a large file happens before the overlay below can
+    // appear.  Separating "picker closed" from "bytes read" needs a FileHost
+    // API change; until then the overlay covers everything from here on.
     let result: Awaited<ReturnType<typeof fileHostRef.current.openForImport>>
     try {
       result = await fileHostRef.current.openForImport()
@@ -875,8 +882,11 @@ export default function App() {
     //
     // flushSync forces a synchronous DOM commit so the overlay card is in the
     // DOM immediately, rather than waiting for React's next async render cycle.
-    // After the commit we wait one requestAnimationFrame so the browser has a
-    // chance to actually paint the committed DOM before we freeze the main thread.
+    // nextPaint() then waits two animation frames before we freeze the main
+    // thread.  One rAF is NOT enough: rAF callbacks run before their frame is
+    // painted, so resolving there would let the awaiting continuation start
+    // the synchronous import ahead of the paint and the overlay would not
+    // show until partway through the freeze.  See nextPaint() in paint.ts.
     //
     // NOTE: import_dae runs synchronously on the main thread, so the CSS
     // spinner animation will freeze while it parses.  The text message still
@@ -887,7 +897,7 @@ export default function App() {
       setImportingName(result!.name)
       setIsImporting(true)
     })
-    await new Promise<void>((r) => requestAnimationFrame(() => r()))
+    await nextPaint()
 
     let report: ImportReport
     try {
@@ -1008,8 +1018,8 @@ export default function App() {
   const openPath = useCallback(async (path: string) => {
     if (!(await confirmDiscard())) return
     const { invoke } = await import('@tauri-apps/api/core')
-    const raw: number[] = await invoke('read_file', { path })
-    const bytes = new Uint8Array(raw)
+    const buf = await invoke<ArrayBuffer>('read_file', { path })
+    const bytes = new Uint8Array(buf)
     if (applyLoadedBytes(bytes)) {
       setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
       invoke('push_recent', { path }).catch(() => { /* ignore */ })

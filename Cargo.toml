@@ -37,11 +37,11 @@ mesh-heal = { path = "crates/mesh-heal" }
 dae-import = { path = "crates/dae-import" }
 gltf-import = { path = "crates/gltf-import" }
 skp-import = { path = "crates/skp-import" }
-# Clean-room SketchUp 2017.skp reader : rev-pinned to the
-# hosted OpenSKP repo so CI resolves it like any other dependency. No Trimble
+# Clean-room SketchUp 2017 .skp reader: a crates.io semver pin on the hosted
+# OpenSKP releases, so CI resolves it like any other dependency. No Trimble
 # SDK material anywhere in its chain (rule 7 admissibility test). Local dev
 # clone: ../openskp.
-openskp = "0.1.4"
+openskp = "0.2.0"
 
 slotmap = "1"
 proptest = "1"

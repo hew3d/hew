@@ -54,8 +54,10 @@ Objects**.
    This is boundary normalization, not silent repair of kernel invariants:
    the healing steps are geometric operations on the *input*, applied before
    anything reaches the kernel's own validated data structures. A mesh that
-   is still degenerate or non-manifold after healing is not patched further —
-   it is handed to the kernel, which refuses it and reports why.
+   is still non-manifold after healing is split at the offending edges into
+   separate open shells — the geometry is unchanged, and the import report
+   says so loudly. Anything still invalid after that is handed to the
+   kernel, which refuses it and reports why.
 
 3. **Build Objects.** The healed geometry, now expressed as a
    format-independent recipe (materials, meshes, component definitions,
@@ -105,17 +107,20 @@ effectively all SketchUp content in circulation.
   message pointing at the Save As 2017 workaround, rather than partially
   imported.
 - `.skp` write/export does not exist — OpenSKP is a reader only.
-- As with all imports, a mesh that is invalid even after healing (genuinely
-  non-manifold source geometry) is skipped and reported, not repaired.
+- As with all imports, a mesh that is still non-manifold after healing
+  imports as separate open shells with a warning; geometry the kernel
+  rejects outright is skipped and reported, not repaired.
 
 ## Known limitations & future work
 
-- **Non-manifold input is reported, not fixed.** Across every import path,
-  a face or mesh that the kernel's topology validator rejects — even after
-  the full healing pipeline — is dropped and listed in the import report
-  with its reason. Hew will not silently produce a solid that doesn't match
-  its source; this is a deliberate project-wide rule, not a gap to be closed
-  later.
+- **Non-manifold input is split or reported, never fixed.** Across every
+  import path, a mesh that is still non-manifold after the healing pipeline
+  imports as separate open shells, split at the offending edges with the
+  geometry left untouched, and the import report calls it out. A face or
+  mesh that the kernel's topology validator still rejects is dropped and
+  listed with its reason. Hew will not silently produce a solid that
+  doesn't match its source; this is a deliberate project-wide rule, not a
+  gap to be closed later.
 - **glTF/GLB flattens component instancing.** glTF has no first-class concept
   of a shared, editable component, so repeated geometry re-imports as
   independent Objects rather than instances of one definition. `.hew`,

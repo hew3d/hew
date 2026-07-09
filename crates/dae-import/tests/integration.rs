@@ -6,7 +6,7 @@
 //! Property tests are at the bottom: random kernel Object → minimal COLLADA →
 //! import → ingest → `objects_equivalent`.
 
-use dae_import::{ImageMap, import};
+use dae_import::{DaeScene, ImageMap, import};
 use kernel::{Document, ImportNode, Point3, UvFrame};
 use proptest::prelude::*;
 
@@ -29,7 +29,11 @@ fn empty_images() -> ImageMap {
 #[test]
 fn closed_box_yields_one_watertight_object() {
     let bytes = fixture("box_closed.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse box_closed.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse box_closed.dae");
     assert!(missing.is_empty(), "no textures in this file");
 
     let mut doc = Document::new();
@@ -49,7 +53,11 @@ fn closed_box_yields_one_watertight_object() {
 #[test]
 fn two_sided_box_deduplicates_to_one_watertight_object() {
     let bytes = fixture("box_two_sided.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse box_two_sided.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse box_two_sided.dae");
 
     let mut doc = Document::new();
     let (report, _) = doc.ingest(scene, missing).expect("ingest");
@@ -66,7 +74,11 @@ fn two_sided_box_deduplicates_to_one_watertight_object() {
 #[test]
 fn open_shell_yields_one_leaky_object() {
     let bytes = fixture("box_open.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse box_open.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse box_open.dae");
 
     let mut doc = Document::new();
     let (report, _) = doc.ingest(scene, missing).expect("ingest");
@@ -77,6 +89,81 @@ fn open_shell_yields_one_leaky_object() {
     assert_eq!(doc.visible_object_ids().len(), 1, "object still created");
 }
 
+// ─────────────────── fixture (c'): non-manifold fin ──────────────────────────
+
+/// Three quads sharing one edge (a fin): the kernel would reject the whole
+/// mesh (`NonManifoldEdge`), so the importer must decompose it into three
+/// open shells at the non-manifold edge — loudly, with nothing skipped.
+#[test]
+fn non_manifold_fin_splits_into_open_shells_with_warning() {
+    let bytes = fixture("fin_nonmanifold.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        warnings,
+    } = import(&bytes, &empty_images()).expect("parse fin_nonmanifold.dae");
+    assert_eq!(
+        warnings,
+        vec![
+            "'Fin' is non-manifold; imported as 3 open shells \
+             (split at non-manifold edges, geometry unchanged)"
+                .to_string()
+        ],
+        "the split is reported loudly, exactly once"
+    );
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+
+    assert_eq!(report.objects_created, 3, "one object per fin quad");
+    assert_eq!(report.leaky, 3, "every piece is an honest open shell");
+    assert_eq!(report.watertight, 0);
+    assert!(
+        report.skipped.is_empty(),
+        "nothing skipped, got: {:?}",
+        report
+            .skipped
+            .iter()
+            .map(|s| (&s.name, &s.reason))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─────────────── fixture (c''): split-warning order + dedup ──────────────────
+
+/// Split warnings are deterministic and deduplicated by geometry id.
+///
+/// The fixture holds four copies of the non-manifold fin:
+/// - `DefA`/`DefB`/`DefC` are `library_nodes` defs in document order; their
+///   warnings must come out in exactly that order (defs are built in document
+///   order, not randomized `HashMap` order — this exact-vector assertion pins
+///   it).
+/// - `DefA` and `DefB` are DISTINCT geometries sharing the display name
+///   "Fin", so their messages are byte-identical; both must appear (dedup is
+///   by geometry id, never by message text — a colliding name must not
+///   suppress another mesh's mandated report, rule 4).
+/// - `FinGeoD` is placed twice in the visual scene; it heals once per
+///   placement but must warn only once.
+#[test]
+fn split_warnings_are_deterministic_and_deduped_by_geometry_id() {
+    let bytes = fixture("fins_split_warnings.dae");
+    let DaeScene { warnings, .. } =
+        import(&bytes, &empty_images()).expect("parse fins_split_warnings.dae");
+
+    let msg = |name: &str| {
+        format!(
+            "'{name}' is non-manifold; imported as 3 open shells \
+             (split at non-manifold edges, geometry unchanged)"
+        )
+    };
+    assert_eq!(
+        warnings,
+        vec![msg("Fin"), msg("Fin"), msg("FinC"), msg("SceneFin")],
+        "def warnings in document order, name collisions not suppressed, \
+         repeated placements of one geometry reported once"
+    );
+}
+
 // ──────────────────── fixture (d): group + library_nodes instance ─────────────
 
 /// `<node>` group with a child mesh + `<instance_node>` referencing a
@@ -85,7 +172,11 @@ fn open_shell_yields_one_leaky_object() {
 #[test]
 fn group_and_instance_node_produce_correct_tree() {
     let bytes = fixture("group_and_instance.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse group_and_instance.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse group_and_instance.dae");
     assert!(missing.is_empty());
 
     // The scene should have at least one def (from library_nodes) and at least
@@ -120,7 +211,11 @@ fn group_and_instance_node_produce_correct_tree() {
 #[test]
 fn yup_cm_vertex_lands_at_expected_z_up_meter_position() {
     let bytes = fixture("yup_cm.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse yup_cm.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse yup_cm.dae");
     assert!(missing.is_empty());
 
     // The import scene contains a mesh recipe; inspect its positions directly.
@@ -156,7 +251,11 @@ fn yup_cm_vertex_lands_at_expected_z_up_meter_position() {
 #[test]
 fn color_material_is_resolved() {
     let bytes = fixture("material_color.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse material_color.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse material_color.dae");
     assert!(missing.is_empty(), "no textures referenced");
     assert!(!scene.materials.is_empty(), "at least one material");
 
@@ -191,7 +290,11 @@ fn color_material_is_resolved() {
 #[test]
 fn transparent_constant_material_resolves_color_and_alpha() {
     let bytes = fixture("material_transparent.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse material_transparent.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse material_transparent.dae");
     assert!(missing.is_empty(), "no textures referenced");
     assert_eq!(scene.materials.len(), 1, "one glass material");
 
@@ -236,7 +339,11 @@ fn texture_resolved_via_image_map() {
         (fake_png, kernel::ImageFormat::Png),
     );
 
-    let (scene, missing) = import(&bytes, &images).expect("parse material_texture.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &images).expect("parse material_texture.dae");
     assert!(
         missing.is_empty(),
         "texture was resolved; missing should be empty but got: {missing:?}"
@@ -249,7 +356,11 @@ fn unresolved_texture_appears_in_missing() {
     let bytes = fixture("material_texture.dae");
 
     // Empty image map → texture cannot be resolved.
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse");
 
     assert!(
         missing.contains(&"textures/wood.png".to_string()),
@@ -283,7 +394,7 @@ fn unresolved_texture_appears_in_missing() {
 #[test]
 fn countertop_experiment_imports_correctly() {
     let bytes = fixture("countertop-experiment.dae");
-    let (scene, _missing) =
+    let DaeScene { scene, .. } =
         import(&bytes, &empty_images()).expect("parse countertop-experiment.dae");
 
     let mut doc = Document::new();
@@ -393,7 +504,7 @@ fn countertop_experiment_imports_correctly() {
 #[test]
 fn countertop_meshes_are_outward_oriented() {
     let bytes = fixture("countertop-experiment.dae");
-    let (scene, _missing) = import(&bytes, &empty_images()).expect("parse countertop");
+    let DaeScene { scene, .. } = import(&bytes, &empty_images()).expect("parse countertop");
 
     let signed_vol6 = |positions: &[Point3], faces: &[Vec<usize>]| -> f64 {
         let mut v6 = 0.0;
@@ -437,7 +548,7 @@ fn countertop_meshes_are_outward_oriented() {
 #[test]
 fn countertop_triangles_merge_into_real_faces() {
     let bytes = fixture("countertop-experiment.dae");
-    let (scene, _missing) = import(&bytes, &empty_images()).expect("parse countertop");
+    let DaeScene { scene, .. } = import(&bytes, &empty_images()).expect("parse countertop");
 
     let mesh = |name: &str| {
         scene
@@ -486,7 +597,7 @@ fn countertop_uv_frames_populated_for_textured_faces() {
     use dae_import::uv::UV_AFFINE_RESIDUAL_TOL;
 
     let bytes = fixture("countertop-experiment.dae");
-    let (scene, _missing) =
+    let DaeScene { scene, .. } =
         import(&bytes, &empty_images()).expect("parse countertop-experiment.dae");
 
     // The countertop geometry lives in defs (library_nodes → DefRecipe).
@@ -760,7 +871,7 @@ proptest! {
         let dae_bytes = emit_minimal_dae(&positions, &faces);
 
         // Import + ingest.
-        let (scene, missing) = import(&dae_bytes, &empty_images())
+        let DaeScene { scene, textures_missing: missing, .. } = import(&dae_bytes, &empty_images())
             .expect("emit_minimal_dae produces valid COLLADA");
         prop_assert!(missing.is_empty());
 
@@ -858,7 +969,11 @@ proptest! {
 #[test]
 fn polygons_with_hole_imports_inner_loop() {
     let bytes = fixture("polygons_with_hole.dae");
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse polygons_with_hole.dae");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse polygons_with_hole.dae");
     assert!(missing.is_empty(), "no textures referenced");
 
     let mut doc = Document::new();
@@ -911,7 +1026,11 @@ fn real_file_smoke() {
     eprintln!("file: {path} ({} bytes)", bytes.len());
 
     let t0 = std::time::Instant::now();
-    let (scene, missing) = import(&bytes, &empty_images()).expect("parse");
+    let DaeScene {
+        scene,
+        textures_missing: missing,
+        ..
+    } = import(&bytes, &empty_images()).expect("parse");
     eprintln!(
         "parsed in {:?}: {} materials, {} defs, {} roots, {} missing textures",
         t0.elapsed(),

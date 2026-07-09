@@ -360,6 +360,7 @@ name = "inference"
 version = "0.1.0"
 dependencies = [
  "kernel",
+ "proptest",
  "tracing",
 ]
 
@@ -466,9 +467,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openskp"
-version = "0.1.4"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8423e6d8d0ffbf4b9a782a8ce55ee02f1157f22ab6eb7e8ce83d591fce9fcec1"
+checksum = "aa730a3e76fde1ff31c2d7f31c045ac2fe2372aa85a06d77769dcabb3d8144ec"
 
 [[package]]
 name = "percent-encoding"
@@ -770,6 +771,7 @@ name = "tessellate"
 version = "0.1.0"
 dependencies = [
  "kernel",
+ "proptest",
 ]
 
 [[package]]

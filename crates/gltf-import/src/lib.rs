@@ -57,18 +57,35 @@ impl std::fmt::Display for GltfError {
 
 impl std::error::Error for GltfError {}
 
+/// A parsed glTF/GLB, ready for `Document::ingest`.
+pub struct GltfScene {
+    /// The import recipe (`ingest` consumes it).
+    pub scene: kernel::ImportScene,
+    /// External resource URIs (buffers/images) that could not be resolved
+    /// in-memory; the affected geometry/textures are dropped, not faked
+    /// (DEVELOPMENT.md rule 4) — pass to `ingest` as `textures_missing`.
+    pub missing: Vec<String>,
+    /// User-visible conversion warnings (non-manifold splits — rule 4:
+    /// decomposition happens loudly, never silently). Surface these in the
+    /// import report.
+    pub warnings: Vec<String>,
+}
+
 /// Parse glTF 2.0 / GLB bytes into a kernel [`ImportScene`](kernel::ImportScene)
 /// recipe. I/O-free: all referenced data must be embedded (GLB blob or `data:`
 /// URIs).
 ///
-/// On success returns `(ImportScene, missing)` where `missing` lists external
-/// resource URIs (buffers/images) that could not be resolved in-memory; the
-/// affected geometry/textures are dropped, not faked (DEVELOPMENT.md rule 4). A
-/// totally unparseable file returns `Err(GltfError)`.
-pub fn import(bytes: &[u8]) -> Result<(kernel::ImportScene, Vec<String>), GltfError> {
+/// On success returns a [`GltfScene`]: the scene, the unresolved external
+/// resource URIs, and any conversion warnings (non-manifold splits). A totally
+/// unparseable file returns `Err(GltfError)`.
+pub fn import(bytes: &[u8]) -> Result<GltfScene, GltfError> {
     let gltf = gltf::Gltf::from_slice(bytes).map_err(|e| GltfError::Parse(e.to_string()))?;
     let (buffers, mut missing) = buffers::resolve(&gltf);
-    let (scene, mat_missing) = convert::build_scene(&gltf, &buffers)?;
+    let (scene, mat_missing, warnings) = convert::build_scene(&gltf, &buffers)?;
     missing.extend(mat_missing);
-    Ok((scene, missing))
+    Ok(GltfScene {
+        scene,
+        missing,
+        warnings,
+    })
 }

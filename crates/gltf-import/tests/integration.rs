@@ -2,6 +2,7 @@
 //! base64 buffer) in memory, run it through the full parse → heal → ingest
 //! pipeline, and assert the reconstructed solid is editable + watertight.
 
+use gltf_import::GltfScene;
 use gltf_import::buffers::base64_decode;
 use kernel::Document;
 
@@ -207,7 +208,7 @@ fn f32_scale_cube_welds_to_a_watertight_solid() {
     // 30 m cube, per-corner copies ~5 µm apart — far above the 1 nm native weld,
     // so without the scale-aware glTF weld this imports as a leaky triangle soup.
     let bytes = cube_perface_gltf(30.0, 2.5e-6);
-    let (scene, missing) = gltf_import::import(&bytes).expect("import scaled cube");
+    let GltfScene { scene, missing, .. } = gltf_import::import(&bytes).expect("import scaled cube");
 
     let mut doc = Document::new();
     let (report, _) = doc.ingest(scene, missing).expect("ingest");
@@ -286,7 +287,7 @@ fn shared_texture_gltf() -> Vec<u8> {
 #[test]
 fn materials_sharing_a_texture_are_deduplicated() {
     let bytes = shared_texture_gltf();
-    let (scene, _missing) = gltf_import::import(&bytes).expect("import");
+    let GltfScene { scene, .. } = gltf_import::import(&bytes).expect("import");
 
     // Three glTF materials, one shared image → a single kernel material.
     assert_eq!(
@@ -319,7 +320,7 @@ fn materials_sharing_a_texture_are_deduplicated() {
 #[test]
 fn cube_imports_as_one_watertight_object_with_six_faces() {
     let bytes = cube_gltf();
-    let (scene, missing) = gltf_import::import(&bytes).expect("import cube");
+    let GltfScene { scene, missing, .. } = gltf_import::import(&bytes).expect("import cube");
     assert!(missing.is_empty(), "no missing resources");
 
     // One root, a single Mesh (single-use mesh → baked world Object).
@@ -338,4 +339,185 @@ fn cube_imports_as_one_watertight_object_with_six_faces() {
     assert_eq!(report.watertight, 1, "watertight");
     assert_eq!(report.leaky, 0, "not leaky");
     assert!(report.skipped.is_empty(), "nothing skipped");
+}
+
+// ── A non-manifold fin as a triangle-soup .gltf ──────────────────────────────
+
+/// Build a minimal `.gltf` for a "fin": three triangles sharing the edge
+/// v0-v1 (every one traversing the directed edge 0→1), each in its own plane
+/// so no pair can coplanar-merge. The kernel would reject the mesh whole
+/// (`NonManifoldEdge`); the importer must split it instead.
+fn fin_gltf() -> Vec<u8> {
+    let verts: [[f32; 3]; 5] = [
+        [0.0, 0.0, 0.0],  // v0 ─ shared edge
+        [0.0, 1.0, 0.0],  // v1 ─ shared edge
+        [1.0, 0.0, 0.0],  // tip A (plane z=0)
+        [0.0, 0.0, 1.0],  // tip B (plane x=0)
+        [-1.0, 0.0, 1.0], // tip C (a third, diagonal plane)
+    ];
+    let tris: [[u32; 3]; 3] = [[0, 1, 2], [0, 1, 3], [0, 1, 4]];
+
+    let mut buf = Vec::new();
+    for v in &verts {
+        for x in v {
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    let pos_len = buf.len();
+    for t in &tris {
+        for i in t {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+    }
+    let idx_len = buf.len() - pos_len;
+    let total = buf.len();
+
+    let b64 = base64_encode(&buf);
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0] }}],
+  "nodes": [{{ "mesh": 0, "name": "Fin" }}],
+  "meshes": [{{ "name": "Fin", "primitives": [
+      {{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "mode": 4 }}
+  ]}}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 5, "type": "VEC3", "min": [-1,0,0], "max": [1,1,1] }},
+    {{ "bufferView": 1, "componentType": 5125, "count": 9, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": {pos_len}, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {pos_len}, "byteLength": {idx_len}, "target": 34963 }}
+  ],
+  "buffers": [{{ "byteLength": {total}, "uri": "data:application/octet-stream;base64,{b64}" }}]
+}}"#
+    )
+    .into_bytes()
+}
+
+/// Two DISTINCT fin meshes that share the name "Fin" (glTF does not require
+/// mesh names to be unique), each referenced by its own node. Both are
+/// non-manifold with the same piece count, so their warning messages are
+/// byte-identical.
+fn two_fins_same_name_gltf() -> Vec<u8> {
+    // Fin A at the origin, fin B shifted +5 in x — same topology, distinct
+    // meshes (indices 0 and 1) with colliding names.
+    let verts_a: [[f32; 3]; 5] = [
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 1.0],
+    ];
+    let verts_b: Vec<[f32; 3]> = verts_a.iter().map(|v| [v[0] + 5.0, v[1], v[2]]).collect();
+    let tris: [[u32; 3]; 3] = [[0, 1, 2], [0, 1, 3], [0, 1, 4]];
+
+    let mut buf = Vec::new();
+    for v in verts_a.iter().chain(verts_b.iter()) {
+        for x in v {
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    let pos_len = buf.len(); // two 5-vertex position blocks
+    for t in &tris {
+        for i in t {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+    }
+    let idx_len = buf.len() - pos_len; // one shared 9-index block layout, reused per view
+    let total = buf.len();
+    let pos_b_off = pos_len / 2;
+
+    let b64 = base64_encode(&buf);
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0, 1] }}],
+  "nodes": [{{ "mesh": 0 }}, {{ "mesh": 1 }}],
+  "meshes": [
+    {{ "name": "Fin", "primitives": [{{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "mode": 4 }}] }},
+    {{ "name": "Fin", "primitives": [{{ "attributes": {{ "POSITION": 2 }}, "indices": 3, "mode": 4 }}] }}
+  ],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 5, "type": "VEC3", "min": [-1,0,0], "max": [1,1,1] }},
+    {{ "bufferView": 2, "componentType": 5125, "count": 9, "type": "SCALAR" }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 5, "type": "VEC3", "min": [4,0,0], "max": [6,1,1] }},
+    {{ "bufferView": 2, "componentType": 5125, "count": 9, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": {pos_b_off}, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {pos_b_off}, "byteLength": {pos_b_off}, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {pos_len}, "byteLength": {idx_len}, "target": 34963 }}
+  ],
+  "buffers": [{{ "byteLength": {total}, "uri": "data:application/octet-stream;base64,{b64}" }}]
+}}"#
+    )
+    .into_bytes()
+}
+
+/// Two distinct non-manifold meshes with the same name must each get their
+/// own split warning: the report is mandated per mesh (rule 4), and a name +
+/// piece-count collision on a DIFFERENT mesh must never suppress it.
+#[test]
+fn distinct_meshes_with_colliding_names_each_get_their_own_warning() {
+    let bytes = two_fins_same_name_gltf();
+    let GltfScene {
+        scene,
+        missing,
+        warnings,
+    } = gltf_import::import(&bytes).expect("import two fins");
+    let fin_msg = "'Fin' is non-manifold; imported as 3 open shells \
+                   (split at non-manifold edges, geometry unchanged)"
+        .to_string();
+    assert_eq!(
+        warnings,
+        vec![fin_msg.clone(), fin_msg],
+        "each distinct mesh reports its own split, even with colliding names"
+    );
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+    assert_eq!(report.objects_created, 6, "three open shells per fin");
+    assert_eq!(report.leaky, 6, "every piece is an honest open shell");
+    assert!(report.skipped.is_empty(), "nothing skipped");
+}
+
+/// Three triangles sharing one edge: previously the whole mesh was rejected
+/// into `skipped`; now it imports as three open shells, split at the
+/// non-manifold edge, with the split reported loudly and nothing skipped.
+#[test]
+fn non_manifold_fin_splits_into_open_shells_with_warning() {
+    let bytes = fin_gltf();
+    let GltfScene {
+        scene,
+        missing,
+        warnings,
+    } = gltf_import::import(&bytes).expect("import fin");
+    assert!(missing.is_empty(), "no missing resources");
+    assert_eq!(
+        warnings,
+        vec![
+            "'Fin' is non-manifold; imported as 3 open shells \
+             (split at non-manifold edges, geometry unchanged)"
+                .to_string()
+        ],
+        "the split is reported loudly, exactly once"
+    );
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+    assert_eq!(report.objects_created, 3, "one object per fin triangle");
+    assert_eq!(report.leaky, 3, "every piece is an honest open shell");
+    assert_eq!(report.watertight, 0);
+    assert!(
+        report.skipped.is_empty(),
+        "nothing skipped, got: {:?}",
+        report
+            .skipped
+            .iter()
+            .map(|s| (&s.name, &s.reason))
+            .collect::<Vec<_>>()
+    );
 }

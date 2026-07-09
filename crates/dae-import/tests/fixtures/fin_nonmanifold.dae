@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Three quads sharing the edge (0,0,0)-(0,0,1) — a "fin". The shared edge
+     has three face-uses, so the mesh violates the kernel's directed-edge
+     precondition and must be split into three open shells at import. The
+     quads lie in three distinct planes so no pair can coplanar-merge. -->
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2024-01-01</created>
+    <modified>2024-01-01</modified>
+    <unit name="meter" meter="1.0"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_geometries>
+    <geometry id="Fin" name="Fin">
+      <mesh>
+        <source id="Fin-positions">
+          <float_array id="Fin-positions-array" count="24">
+            0 0 0  0 0 1
+            1 0 0  1 0 1
+            0 1 0  0 1 1
+            -1 1 0  -1 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#Fin-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="Fin-vertices">
+          <input semantic="POSITION" source="#Fin-positions"/>
+        </vertices>
+        <!-- 3 quads, all traversing the directed edge 1->0. -->
+        <polylist count="3">
+          <input semantic="VERTEX" source="#Fin-vertices" offset="0"/>
+          <vcount>4 4 4</vcount>
+          <p>
+            0 2 3 1
+            0 4 5 1
+            0 6 7 1
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="Fin" name="Fin" type="NODE">
+        <instance_geometry url="#Fin"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

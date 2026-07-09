@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Four copies of the non-manifold "fin" (three quads sharing one edge, see
+     fin_nonmanifold.dae), arranged to pin the split-warning contract:
+
+     - library_nodes DefA / DefB / DefC each wrap their own geometry, in this
+       document order, so the warnings they emit must come out in exactly this
+       order (defs are built in document order, never HashMap order).
+     - DefA and DefB share the display name "Fin": two DISTINCT geometries
+       whose warning messages are byte-identical. Both must be reported —
+       deduplication is by geometry id, never by message text.
+     - FinGeoD is placed twice in the visual scene: the same geometry heals
+       (and splits) once per placement and must warn only once. -->
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <created>2024-01-01</created>
+    <modified>2024-01-01</modified>
+    <unit name="meter" meter="1.0"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_geometries>
+    <geometry id="FinGeoA" name="FinGeoA">
+      <mesh>
+        <source id="FinGeoA-positions">
+          <float_array id="FinGeoA-positions-array" count="24">
+            0 0 0  0 0 1
+            1 0 0  1 0 1
+            0 1 0  0 1 1
+            -1 1 0  -1 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#FinGeoA-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="FinGeoA-vertices">
+          <input semantic="POSITION" source="#FinGeoA-positions"/>
+        </vertices>
+        <polylist count="3">
+          <input semantic="VERTEX" source="#FinGeoA-vertices" offset="0"/>
+          <vcount>4 4 4</vcount>
+          <p>
+            0 2 3 1
+            0 4 5 1
+            0 6 7 1
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+    <geometry id="FinGeoB" name="FinGeoB">
+      <mesh>
+        <source id="FinGeoB-positions">
+          <float_array id="FinGeoB-positions-array" count="24">
+            5 0 0  5 0 1
+            6 0 0  6 0 1
+            5 1 0  5 1 1
+            4 1 0  4 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#FinGeoB-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="FinGeoB-vertices">
+          <input semantic="POSITION" source="#FinGeoB-positions"/>
+        </vertices>
+        <polylist count="3">
+          <input semantic="VERTEX" source="#FinGeoB-vertices" offset="0"/>
+          <vcount>4 4 4</vcount>
+          <p>
+            0 2 3 1
+            0 4 5 1
+            0 6 7 1
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+    <geometry id="FinGeoC" name="FinGeoC">
+      <mesh>
+        <source id="FinGeoC-positions">
+          <float_array id="FinGeoC-positions-array" count="24">
+            10 0 0  10 0 1
+            11 0 0  11 0 1
+            10 1 0  10 1 1
+            9 1 0  9 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#FinGeoC-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="FinGeoC-vertices">
+          <input semantic="POSITION" source="#FinGeoC-positions"/>
+        </vertices>
+        <polylist count="3">
+          <input semantic="VERTEX" source="#FinGeoC-vertices" offset="0"/>
+          <vcount>4 4 4</vcount>
+          <p>
+            0 2 3 1
+            0 4 5 1
+            0 6 7 1
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+    <geometry id="FinGeoD" name="FinGeoD">
+      <mesh>
+        <source id="FinGeoD-positions">
+          <float_array id="FinGeoD-positions-array" count="24">
+            15 0 0  15 0 1
+            16 0 0  16 0 1
+            15 1 0  15 1 1
+            14 1 0  14 1 1
+          </float_array>
+          <technique_common>
+            <accessor source="#FinGeoD-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="FinGeoD-vertices">
+          <input semantic="POSITION" source="#FinGeoD-positions"/>
+        </vertices>
+        <polylist count="3">
+          <input semantic="VERTEX" source="#FinGeoD-vertices" offset="0"/>
+          <vcount>4 4 4</vcount>
+          <p>
+            0 2 3 1
+            0 4 5 1
+            0 6 7 1
+          </p>
+        </polylist>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_nodes>
+    <node id="DefA" name="Fin">
+      <instance_geometry url="#FinGeoA"/>
+    </node>
+    <node id="DefB" name="Fin">
+      <instance_geometry url="#FinGeoB"/>
+    </node>
+    <node id="DefC" name="FinC">
+      <instance_geometry url="#FinGeoC"/>
+    </node>
+  </library_nodes>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="PlaceA" type="NODE">
+        <instance_node url="#DefA"/>
+      </node>
+      <node id="PlaceB" type="NODE">
+        <instance_node url="#DefB"/>
+      </node>
+      <node id="PlaceC" type="NODE">
+        <instance_node url="#DefC"/>
+      </node>
+      <node id="SceneFin1" name="SceneFin" type="NODE">
+        <instance_geometry url="#FinGeoD"/>
+      </node>
+      <node id="SceneFin2" name="SceneFin2" type="NODE">
+        <instance_geometry url="#FinGeoD"/>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>

@@ -197,8 +197,9 @@ fn doc_err(e: DocumentError) -> ApiError {
 /// Serialize a kernel `ImportReport` to the plain JS object the import UI
 /// consumes: `{ objects_created, watertight, leaky, skipped: [{name, reason}],
 /// textures_missing: [string], warnings: [string] }`. Shared by `import_dae`,
-/// `import_gltf`, and `import_skp` (only `.skp` populates `warnings` — parser
-/// recovery notes; the other importers pass none).
+/// `import_gltf`, and `import_skp`; `warnings` carries each importer's
+/// conversion notes (non-manifold split decompositions, plus `.skp` parser
+/// recovery notes).
 fn import_report_to_js(report: &kernel::ImportReport, warnings: &[String]) -> JsValue {
     let js_report = JsObject::new();
     Reflect::set(
@@ -2399,18 +2400,22 @@ impl Scene {
         self.hidden_objects = object_ids.iter().map(|&h| object_id(h)).collect();
         self.hidden_instances = instance_ids.iter().map(|&h| instance_id(h)).collect();
 
-        // Rebuild inference registration to match the new sets: every live world
-        // object is either (re)registered at identity or dropped; likewise each
-        // instance is re-placed at its pose or dropped.
+        // Rebuild inference registration to match the new sets: clear every
+        // object/instance candidate wholesale, then register only the visible
+        // remainder. Per-id removal here would scan the candidate vectors once
+        // per registered owner — quadratic on documents with many instances —
+        // while the clear makes every re-registration's replace-semantics
+        // removal a fast no-op. Guides and sketches are unaffected by
+        // visibility sets and survive the clear.
+        self.inference.clear_solids();
         for id in self.doc.visible_object_ids() {
-            if self.hidden_objects.contains(&id) {
-                self.inference.remove_object(id);
-            } else if let Some(object) = self.doc.object(id) {
+            if !self.hidden_objects.contains(&id)
+                && let Some(object) = self.doc.object(id)
+            {
                 self.inference.add_object(id, object, &Transform::IDENTITY);
             }
         }
         for iid in self.doc.instance_ids() {
-            self.inference.remove_instance(iid);
             if !self.hidden_instances.contains(&iid) {
                 self.register_instance(iid);
             }
@@ -2656,7 +2661,9 @@ impl Scene {
     /// Additive: existing geometry is untouched. Returns the `ImportReport` as a
     /// JS object with fields:
     ///   `{ objects_created, watertight, leaky, skipped: [{name, reason}],
-    ///      textures_missing: [string] }`.
+    ///      textures_missing: [string], warnings: [string] }`.
+    /// `warnings` carries conversion notes — non-manifold meshes import as
+    /// open shells split at their non-manifold edges, said out loud.
     ///
     /// `images` is a JS object shaped:
     ///   `{ "<uri>": { bytes: Uint8Array, format: "png" | "jpeg" } }`
@@ -2696,20 +2703,20 @@ impl Scene {
         }
 
         // ── 2. Parse COLLADA ──────────────────────────────────────────────────
-        let (scene, textures_missing) = dae_import::import(dae_bytes, &image_map)
+        let out = dae_import::import(dae_bytes, &image_map)
             .map_err(|e| JsError::new(&format!("DAE: {e}")))?;
 
         // ── 3. Ingest into the document (additive) ────────────────────────────
         let (report, change) = self
             .doc
-            .ingest(scene, textures_missing)
+            .ingest(out.scene, out.textures_missing)
             .map_err(|e| JsError::new(&format!("DAE: {e}")))?;
 
         // ── 4. Reconcile caches (additive — do NOT clear like `load`) ─────────
         self.reconcile(&change);
 
         // ── 5. Serialize the ImportReport to a plain JS object ────────────────
-        Ok(import_report_to_js(&report, &[]))
+        Ok(import_report_to_js(&report, &out.warnings))
     }
 
     /// Import glTF 2.0 / GLB bytes into the current document. Additive: existing
@@ -2722,18 +2729,18 @@ impl Scene {
     /// # Errors
     /// Throws a `"glTF: <message>"` `JsError` on parse failure.
     pub fn import_gltf(&mut self, gltf_bytes: &[u8]) -> Result<JsValue, JsError> {
-        let (scene, missing) =
+        let out =
             gltf_import::import(gltf_bytes).map_err(|e| JsError::new(&format!("glTF: {e}")))?;
 
         let (report, change) = self
             .doc
-            .ingest(scene, missing)
+            .ingest(out.scene, out.missing)
             .map_err(|e| JsError::new(&format!("glTF: {e}")))?;
 
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
 
-        Ok(import_report_to_js(&report, &[]))
+        Ok(import_report_to_js(&report, &out.warnings))
     }
 
     /// Import SketchUp 2017 `.skp` bytes into the current document (
@@ -3837,7 +3844,9 @@ mod tests {
             .transform_selection(&[0, 0], &[o1], &[], &affine)
             .unwrap_err();
         assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
-        let err = scene.transform_selection(&[], &[], &[], &affine).unwrap_err();
+        let err = scene
+            .transform_selection(&[], &[], &[], &affine)
+            .unwrap_err();
         assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
         let err = scene
             .transform_selection(&[0], &[o1], &[], &affine[..7])

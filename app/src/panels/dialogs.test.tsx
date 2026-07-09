@@ -232,20 +232,49 @@ describe('ImportReportDialog', () => {
     expect(screen.getByText(/missing textures \(1\)/i)).toBeInTheDocument()
   })
 
-  it('shows the parser-warnings section when warnings is non-empty', () => {
+  it('shows a SketchUp recovery note in the warnings section', () => {
     const withWarnings: ImportReport = {
       ...baseReport,
-      warnings: ['section "materials" truncated at offset 0x4a10'],
+      warnings: ['parser recovered from a malformed section: Desync { offset: 0x4a10 }'],
     }
     render(<ImportReportDialog report={withWarnings} onClose={vi.fn()} />)
-    expect(screen.getByText(/parser warnings \(1\)/i)).toBeInTheDocument()
-    expect(screen.getByText('section "materials" truncated at offset 0x4a10')).toBeInTheDocument()
-    expect(screen.getByText(/malformed sections/i)).toBeInTheDocument()
+    expect(screen.getByText(/warnings \(1\)/i)).toBeInTheDocument()
+    expect(
+      screen.getByText('parser recovered from a malformed section: Desync { offset: 0x4a10 }'),
+    ).toBeInTheDocument()
+    // No "content may be missing" lead-in — each warning line carries its own
+    // context, and the old banner contradicted split notices.
+    expect(screen.queryByText(/some content may be missing/i)).not.toBeInTheDocument()
   })
 
-  it('does not show the parser-warnings section when warnings is empty', () => {
+  it('shows a non-manifold split notice (dae/gltf/skp) without contradicting it', () => {
+    const withSplit: ImportReport = {
+      ...baseReport,
+      warnings: [
+        "'Roof' is non-manifold; imported as 2 open shells (split at non-manifold edges, geometry unchanged)",
+      ],
+    }
+    render(<ImportReportDialog report={withSplit} onClose={vi.fn()} />)
+    expect(screen.getByText(/warnings \(1\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/geometry unchanged/)).toBeInTheDocument()
+    expect(screen.queryByText(/some content may be missing/i)).not.toBeInTheDocument()
+  })
+
+  it('counts every warning in the section header', () => {
+    const withBoth: ImportReport = {
+      ...baseReport,
+      warnings: [
+        "'Roof' is non-manifold; imported as 2 open shells (split at non-manifold edges, geometry unchanged)",
+        'parser recovered from a malformed section: Desync { offset: 0x4a10 }',
+      ],
+    }
+    render(<ImportReportDialog report={withBoth} onClose={vi.fn()} />)
+    expect(screen.getByText(/warnings \(2\)/i)).toBeInTheDocument()
+  })
+
+  it('does not show the warnings section when warnings is empty', () => {
     render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
-    expect(screen.queryByText(/parser warnings/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/warnings \(\d+\)/i)).not.toBeInTheDocument()
   })
 
   it('calls onClose when the OK button is clicked', () => {

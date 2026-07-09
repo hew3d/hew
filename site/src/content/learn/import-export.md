@@ -16,7 +16,7 @@ order: 14
 
 **File ▸ Import…** accepts SketchUp, COLLADA, and glTF files; the format is detected from the file you pick. Imported geometry is rebuilt into real, editable Hew Objects that you can keep modeling, and each object's watertightness is assessed on the way in.
 
-After every import, an **Import Complete** report summarizes what happened: how many objects were created (and how many are solid vs. leaky), any meshes that had to be skipped and why, and any texture images the file referenced but Hew couldn't find. Nothing is silently repaired or silently dropped.
+After every import, an **Import Complete** report summarizes what happened: how many objects were created (and how many are solid vs. leaky), any meshes that had to be skipped and why, any texture images the file referenced but Hew couldn't find, and warnings — for instance a non-manifold mesh imported as separate open shells rather than one solid. Nothing is silently repaired or silently dropped.
 
 ### SketchUp (`.skp`)
 

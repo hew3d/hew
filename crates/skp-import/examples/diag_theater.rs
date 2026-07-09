@@ -205,7 +205,9 @@ fn main() {
     // ── Ground truth: SketchUp's own .dae export ──
     if let Ok(dae_bytes) = std::fs::read(&dae_path) {
         let images = dae_import::ImageMap::new();
-        let (dscene, _missing) = dae_import::import(&dae_bytes, &images).expect("dae import");
+        let dscene = dae_import::import(&dae_bytes, &images)
+            .expect("dae import")
+            .scene;
         let (d_faces, d_lo, d_hi) = flatten(&dscene);
         let mut dae_tags = BTreeSet::new();
         collect_tags(&dscene, &mut dae_tags);

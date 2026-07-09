@@ -48,9 +48,10 @@ export class TauriFileHost implements FileHost {
     })
     if (path === null) return null
 
-    // read_file returns Vec<u8> which wasm-bindgen marshals as a JS Array<number>.
-    const raw: number[] = await invoke('read_file', { path })
-    const bytes = new Uint8Array(raw)
+    // read_file returns a raw IPC response, which resolves to an ArrayBuffer.
+    // new Uint8Array(buf) is a zero-copy view over it.
+    const buf = await invoke<ArrayBuffer>('read_file', { path })
+    const bytes = new Uint8Array(buf)
 
     return {
       ref: { name: basename(path), handle: path },
@@ -115,8 +116,8 @@ export class TauriFileHost implements FileHost {
     })
     if (filePath === null) return null
 
-    const rawFile: number[] = await invoke('read_file', { path: filePath })
-    const fileBytes = new Uint8Array(rawFile)
+    const fileBuf = await invoke<ArrayBuffer>('read_file', { path: filePath })
+    const fileBytes = new Uint8Array(fileBuf)
 
     // glTF embeds its own buffers/images — return the bytes, skip texture scan.
     if (/\.(glb|gltf)$/i.test(filePath)) {
@@ -141,8 +142,8 @@ export class TauriFileHost implements FileHost {
         const fmt = imageFormat(name)
         if (fmt !== null) {
           try {
-            const rawImg: number[] = await invoke('read_file', { path: entry })
-            const imgBytes = new Uint8Array(rawImg)
+            const imgBuf = await invoke<ArrayBuffer>('read_file', { path: entry })
+            const imgBytes = new Uint8Array(imgBuf)
             images[name] = { bytes: imgBytes, format: fmt }
           } catch {
             // ignore unreadable files
@@ -167,8 +168,8 @@ export class TauriFileHost implements FileHost {
           const fmt = imageFormat(name)
           if (fmt !== null) {
             try {
-              const rawImg: number[] = await invoke('read_file', { path: entry })
-              const imgBytes = new Uint8Array(rawImg)
+              const imgBuf = await invoke<ArrayBuffer>('read_file', { path: entry })
+              const imgBytes = new Uint8Array(imgBuf)
               // Key by both bare filename and subdir-relative path so COLLADA
               // references like "textures/wood.png" and "wood.png" both resolve.
               const relKey = `${basename(texDir)}/${name}`

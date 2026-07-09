@@ -64,6 +64,20 @@ impl std::fmt::Display for DaeError {
 
 impl std::error::Error for DaeError {}
 
+/// A parsed `.dae`, ready for `Document::ingest`.
+pub struct DaeScene {
+    /// The import recipe (`ingest` consumes it).
+    pub scene: kernel::ImportScene,
+    /// Image URIs that could not be found in the host-resolved `images` map
+    /// (their materials fall back to plain color) — pass to `ingest` as
+    /// `textures_missing`.
+    pub textures_missing: Vec<String>,
+    /// User-visible conversion warnings (non-manifold splits — DEVELOPMENT.md
+    /// rule 4: decomposition happens loudly, never silently). Surface these
+    /// in the import report.
+    pub warnings: Vec<String>,
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Upper bound on the size of a `.dae` we will hand to the XML parser. COLLADA
@@ -78,16 +92,13 @@ pub const MAX_DAE_BYTES: usize = 512 * 1024 * 1024;
 /// Parse COLLADA 1.4 bytes and pre-resolved images into a kernel `ImportScene`
 /// recipe. I/O-free: images are resolved by the host and passed in.
 ///
-/// On success returns the `(ImportScene, textures_missing)` pair where
-/// `textures_missing` lists image URIs that could not be found in `images`.
+/// On success returns a [`DaeScene`]: the scene, the image URIs that could not
+/// be found in `images`, and any conversion warnings (non-manifold splits).
 /// Per-mesh geometry issues are NOT errors here — the mesh is emitted as-is;
 /// if its geometry is degenerate, `Document::ingest` will skip and report it.
 ///
 /// A totally unparseable file returns `Err(DaeError)`.
-pub fn import(
-    dae_bytes: &[u8],
-    images: &ImageMap,
-) -> Result<(kernel::ImportScene, Vec<String>), DaeError> {
+pub fn import(dae_bytes: &[u8], images: &ImageMap) -> Result<DaeScene, DaeError> {
     if dae_bytes.len() > MAX_DAE_BYTES {
         return Err(DaeError::Unsupported(format!(
             "COLLADA file is {} bytes, over the {} byte import limit",

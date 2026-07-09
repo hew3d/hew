@@ -80,7 +80,9 @@ fn skp_flat(name: &str) -> Flat {
 
 fn dae_flat(name: &str) -> Flat {
     let images = dae_import::ImageMap::new();
-    let (scene, _missing) = dae_import::import(&fixture(name), &images).expect(name);
+    let scene = dae_import::import(&fixture(name), &images)
+        .expect(name)
+        .scene;
     flatten(&scene)
 }
 
@@ -170,6 +172,15 @@ fn theater_production_model_end_to_end() {
             .filter(|w| w.contains("is non-manifold; imported as"))
             .count(),
         28
+    );
+
+    // Nothing missing: theater's shared-texture records (four, across three
+    // owning materials) resolve to the owners' image bytes (OpenSKP 0.2.0
+    // back-ref resolution), so the loud rule-4 channel stays empty.
+    assert!(
+        out.textures_missing.is_empty(),
+        "shared-texture back-refs resolve: {:?}",
+        out.textures_missing
     );
 
     let mut doc = kernel::Document::new();

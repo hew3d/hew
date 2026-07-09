@@ -9,7 +9,7 @@
 //!
 //! No I/O; all external data passes in through `dae_bytes` and `images`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dae_parser::{Document as DaeDoc, Geometry, Node, ParseLibrary, Source, VisualScene};
 use kernel::{ImportNode, ImportScene, MeshRecipe, Point3, Transform, UvFrame, Vec3};
@@ -18,7 +18,7 @@ use crate::heal::{heal_mesh, world_transform};
 use crate::material::build_material_table;
 use crate::meta::decode_meta;
 use crate::uv::fit_uv_frame;
-use crate::{DaeError, ImageMap};
+use crate::{DaeError, DaeScene, ImageMap};
 
 // ── Url helper ────────────────────────────────────────────────────────────────
 
@@ -33,11 +33,12 @@ fn url_as_str(url: &dae_parser::Url) -> &str {
 
 // ── Public entry ──────────────────────────────────────────────────────────────
 
-pub fn parse_dae(
-    dae_bytes: &[u8],
-    images: &ImageMap,
-) -> Result<(ImportScene, Vec<String>), DaeError> {
+pub fn parse_dae(dae_bytes: &[u8], images: &ImageMap) -> Result<DaeScene, DaeError> {
     let doc = DaeDoc::try_from(dae_bytes).map_err(|e| DaeError::Parse(format!("{e:?}")))?;
+
+    // User-visible conversion warnings (non-manifold splits — rule 4:
+    // decomposition happens loudly, never silently).
+    let mut warnings = SplitWarnings::default();
 
     // ── Asset: unit scale + up-axis ────────────────────────────────────────
     let unit_meter = doc.asset.unit.meter; // f32
@@ -54,8 +55,9 @@ pub fn parse_dae(
     let geom_map = build_geometry_map(&doc);
 
     // ── Library nodes map (for instance_node references) ──────────────────
-    // node-id → Node (cloned for shared access)
-    let lib_nodes = build_lib_node_map(&doc);
+    // node-id → Node (cloned for shared access), plus the ids in document
+    // order (HashMap iteration order is randomized per process).
+    let (lib_node_order, lib_nodes) = build_lib_node_map(&doc);
 
     // ── Build DefRecipes from library_nodes ────────────────────────────────
     // A library node becomes a ComponentDef; any instance_node in the visual
@@ -63,7 +65,10 @@ pub fn parse_dae(
     let mut defs: Vec<kernel::DefRecipe> = Vec::new();
     let mut lib_node_to_def_idx: HashMap<String, usize> = HashMap::new();
 
-    for (node_id, node) in &lib_nodes {
+    // Guarantee: defs — and the split warnings they emit — are built in the
+    // order the library nodes appear in the file, so output is deterministic.
+    for node_id in &lib_node_order {
+        let node = &lib_nodes[node_id];
         let def_idx = defs.len();
         let mut meshes: Vec<MeshRecipe> = Vec::new();
         // Def geometry is kept raw (COLLADA units). world_tf is NOT applied here;
@@ -72,7 +77,15 @@ pub fn parse_dae(
         // seeding in `walk_visual_scene`), then accumulates through nested
         // children and nested <instance_node> placements inside the def.
         let acc = compose_node_local(node);
-        collect_meshes_from_node(node, &acc, &geom_map, id_to_dense, &lib_nodes, &mut meshes);
+        collect_meshes_from_node(
+            node,
+            &acc,
+            &geom_map,
+            id_to_dense,
+            &lib_nodes,
+            &mut meshes,
+            &mut warnings,
+        );
         if !meshes.is_empty() {
             // The library node's `name` attribute carries the friendly component
             // name (e.g. "Counter_Base"); fall back to its id.
@@ -97,6 +110,7 @@ pub fn parse_dae(
             &world_tf,
             &lib_node_to_def_idx,
             &lib_nodes,
+            &mut warnings,
         )
     } else {
         Vec::new()
@@ -111,7 +125,13 @@ pub fn parse_dae(
         tags: Vec::new(),
     };
 
-    Ok((scene, textures_missing))
+    let mut warnings = warnings.messages;
+    cap_split_warnings(&mut warnings);
+    Ok(DaeScene {
+        scene,
+        textures_missing,
+        warnings,
+    })
 }
 
 // ── Geometry map ─────────────────────────────────────────────────────────────
@@ -602,19 +622,163 @@ fn extract_polygons(
 
 // ── Library nodes ─────────────────────────────────────────────────────────────
 
-fn build_lib_node_map(doc: &DaeDoc) -> HashMap<String, Node> {
+/// Returns the library-node ids in document order alongside the id → Node
+/// map. The ordered list drives def building so imported defs (and their
+/// split warnings) come out in the order the nodes appear in the file rather
+/// than in randomized `HashMap` iteration order.
+fn build_lib_node_map(doc: &DaeDoc) -> (Vec<String>, HashMap<String, Node>) {
+    let mut order = Vec::new();
     let mut map = HashMap::new();
     for lib_elem in &doc.library {
         let Some(lib) = dae_parser::Node::extract_element(lib_elem) else {
             continue;
         };
         for node in &lib.items {
-            if let Some(id) = &node.id {
-                map.insert(id.clone(), node.clone());
+            if let Some(id) = &node.id
+                && map.insert(id.clone(), node.clone()).is_none()
+            {
+                order.push(id.clone());
             }
         }
     }
-    map
+    (order, map)
+}
+
+// ── Non-manifold split (shared by world meshes and def meshes) ───────────────
+
+/// Cap on individual non-manifold split warnings: a badly damaged model can
+/// hold hundreds of such meshes, and a wall of near-identical strings helps
+/// nobody. Past the cap the remainder aggregates into one line (mirrors
+/// skp-import's desync aggregation).
+const SPLIT_DETAIL_CAP: usize = 8;
+
+/// Non-manifold split warnings, deduplicated by COLLADA geometry id: the same
+/// geometry heals (and splits) once per placement — per `<instance_geometry>`
+/// node, and again wherever a nested `<instance_node>` flattens it into
+/// another def — and must not say so N times. Keying on the geometry id
+/// rather than the message text matters because display names need not be
+/// unique: a DISTINCT geometry whose name and piece count happen to collide
+/// still gets its own mandated loud report (rule 4).
+#[derive(Default)]
+struct SplitWarnings {
+    /// Geometry ids that have already produced a split warning.
+    warned_geoms: HashSet<String>,
+    messages: Vec<String>,
+}
+
+fn cap_split_warnings(warnings: &mut Vec<String>) {
+    if warnings.len() > SPLIT_DETAIL_CAP {
+        let extra = warnings.len() - SPLIT_DETAIL_CAP;
+        warnings.truncate(SPLIT_DETAIL_CAP);
+        warnings.push(format!(
+            "{extra} more non-manifold mesh{} imported as open shells \
+             (split at non-manifold edges, geometry unchanged)",
+            if extra == 1 { "" } else { "es" },
+        ));
+    }
+}
+
+/// Healed (or split-piece) parallel arrays -> a `MeshRecipe`, fitting the
+/// per-face affine UV frames from the corner UVs.
+fn recipe_from_arrays(
+    name: String,
+    positions: Vec<Point3>,
+    faces: Vec<Vec<usize>>,
+    face_materials: Vec<u32>,
+    corner_uvs: Vec<Vec<[f64; 2]>>,
+    face_holes: Vec<Vec<Vec<usize>>>,
+    tags: Vec<Vec<String>>,
+) -> MeshRecipe {
+    let face_uv_frames: Vec<Option<UvFrame>> = faces
+        .iter()
+        .zip(corner_uvs.iter())
+        .map(|(face, uvs)| {
+            if uvs.len() == face.len() && uvs.len() >= 3 {
+                let corner_pos: Vec<Point3> = face.iter().map(|&vi| positions[vi]).collect();
+                fit_uv_frame(&corner_pos, uvs)
+            } else {
+                None
+            }
+        })
+        .collect();
+    MeshRecipe {
+        name,
+        positions,
+        faces,
+        face_materials,
+        face_uv_frames,
+        face_holes,
+        base_material: kernel::NO_MATERIAL,
+        tags,
+    }
+}
+
+/// Healed arrays -> one or more `MeshRecipe`s. Usually one. A NON-MANIFOLD
+/// mesh (which `from_polygons` would reject whole) is decomposed by
+/// [`mesh_heal::split::split_non_manifold`] into several open-shell recipes —
+/// loudly (a warning names the mesh and the piece count), never silently
+/// (rule 4) — the same contract as skp-import. The warning is deduplicated by
+/// `geom_id` (see [`SplitWarnings`]): geometry instanced N times heals (and
+/// splits) once per placement and must not say so N times.
+#[allow(clippy::too_many_arguments)]
+fn recipes_from_healed(
+    name: String,
+    geom_id: &str,
+    positions: Vec<Point3>,
+    faces: Vec<Vec<usize>>,
+    face_materials: Vec<u32>,
+    corner_uvs: Vec<Vec<[f64; 2]>>,
+    face_holes: Vec<Vec<Vec<usize>>>,
+    tags: Vec<Vec<String>>,
+    warnings: &mut SplitWarnings,
+) -> Vec<MeshRecipe> {
+    if let Some(pieces) = mesh_heal::split::split_non_manifold(
+        &positions,
+        &faces,
+        &face_materials,
+        &corner_uvs,
+        &face_holes,
+    ) {
+        // One loud report per source geometry, keyed by id — never suppressed
+        // by another geometry's identical message text.
+        if warnings.warned_geoms.insert(geom_id.to_string()) {
+            warnings.messages.push(format!(
+                "'{}' is non-manifold; imported as {} open shell{} \
+                 (split at non-manifold edges, geometry unchanged)",
+                if name.is_empty() {
+                    "unnamed mesh"
+                } else {
+                    &name
+                },
+                pieces.len(),
+                if pieces.len() == 1 { "" } else { "s" },
+            ));
+        }
+        return pieces
+            .into_iter()
+            .map(|piece| {
+                recipe_from_arrays(
+                    name.clone(),
+                    piece.positions,
+                    piece.faces,
+                    piece.face_materials,
+                    piece.face_corner_uvs,
+                    piece.face_holes,
+                    tags.clone(),
+                )
+            })
+            .collect();
+    }
+
+    vec![recipe_from_arrays(
+        name,
+        positions,
+        faces,
+        face_materials,
+        corner_uvs,
+        face_holes,
+        tags,
+    )]
 }
 
 // ── Visual scene walker ───────────────────────────────────────────────────────
@@ -626,6 +790,7 @@ fn walk_visual_scene(
     world_tf: &Transform,
     lib_node_to_def_idx: &HashMap<String, usize>,
     lib_nodes: &HashMap<String, Node>,
+    warnings: &mut SplitWarnings,
 ) -> Vec<ImportNode> {
     let mut roots = Vec::new();
     for node in &vs.nodes {
@@ -639,6 +804,7 @@ fn walk_visual_scene(
             id_to_dense,
             lib_node_to_def_idx,
             lib_nodes,
+            warnings,
         ) {
             roots.push(import_node);
         }
@@ -705,7 +871,7 @@ fn dae_to_kernel_transform(t: &dae_parser::Transform) -> Transform {
 ///     parent accumulation is outermost → `acc(child_local(p))`.
 ///   - world mesh bake:    `acc.then(&world_tf)`     → COLLADA units first, unit-scale last.
 ///   - instance pose:      `acc.then(&world_tf)`     → same; def geometry stays raw (inches).
-#[allow(clippy::only_used_in_recursion)]
+#[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
 fn convert_node(
     node: &Node,
     acc: &Transform, // accumulated COLLADA-unit transform (no world_tf)
@@ -714,6 +880,7 @@ fn convert_node(
     id_to_dense: &HashMap<String, u32>,
     lib_node_to_def_idx: &HashMap<String, usize>,
     lib_nodes: &HashMap<String, Node>,
+    warnings: &mut SplitWarnings,
 ) -> Option<ImportNode> {
     // Case 1: instance_geometry → world mesh(es)
     // Case 2: instance_node → Instance referencing a DefRecipe
@@ -756,21 +923,6 @@ fn convert_node(
                     );
 
                 if !faces.is_empty() {
-                    // Fit per-face UV frames from healed positions + healed corner UVs.
-                    let face_uv_frames: Vec<Option<UvFrame>> = faces
-                        .iter()
-                        .zip(healed_uvs.iter())
-                        .map(|(face, corner_uvs)| {
-                            if corner_uvs.len() == face.len() && corner_uvs.len() >= 3 {
-                                let corner_pos: Vec<Point3> =
-                                    face.iter().map(|&vi| positions[vi]).collect();
-                                fit_uv_frame(&corner_pos, corner_uvs)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
                     // Decode HEWMETA/HEWTAG payload to recover real name + tags.
                     let node_meta = node.name.as_deref().map(decode_meta);
                     let name = node_meta
@@ -779,16 +931,21 @@ fn convert_node(
                         .or_else(|| node.id.clone())
                         .unwrap_or_else(|| geom_id.clone());
                     let tags = node_meta.map(|m| m.tags).unwrap_or_default();
-                    mesh_nodes.push(ImportNode::Mesh(MeshRecipe {
+                    // Usually one recipe; a non-manifold mesh splits into
+                    // several open-shell recipes, recorded in `warnings`.
+                    for recipe in recipes_from_healed(
                         name,
+                        &geom_id,
                         positions,
                         faces,
-                        face_materials: healed_mats,
-                        face_uv_frames,
-                        face_holes: healed_holes,
-                        base_material: kernel::NO_MATERIAL,
+                        healed_mats,
+                        healed_uvs,
+                        healed_holes,
                         tags,
-                    }));
+                        warnings,
+                    ) {
+                        mesh_nodes.push(ImportNode::Mesh(recipe));
+                    }
                 }
             }
         }
@@ -835,6 +992,7 @@ fn convert_node(
             id_to_dense,
             lib_node_to_def_idx,
             lib_nodes,
+            warnings,
         ) {
             child_nodes.push(cn);
         }
@@ -925,6 +1083,7 @@ fn collect_meshes_from_node(
     id_to_dense: &HashMap<String, u32>,
     lib_nodes: &HashMap<String, Node>,
     meshes: &mut Vec<MeshRecipe>,
+    warnings: &mut SplitWarnings,
 ) {
     for ig in &node.instance_geometry {
         let geom_id = url_as_str(&ig.url).to_string();
@@ -955,21 +1114,6 @@ fn collect_meshes_from_node(
                 );
 
                 if !faces.is_empty() {
-                    // Fit per-face UV frames from def-local positions + healed corner UVs.
-                    let face_uv_frames: Vec<Option<UvFrame>> = faces
-                        .iter()
-                        .zip(healed_uvs.iter())
-                        .map(|(face, corner_uvs)| {
-                            if corner_uvs.len() == face.len() && corner_uvs.len() >= 3 {
-                                let corner_pos: Vec<Point3> =
-                                    face.iter().map(|&vi| positions[vi]).collect();
-                                fit_uv_frame(&corner_pos, corner_uvs)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
                     // Decode HEWMETA/HEWTAG payload to recover real name + tags.
                     let def_meta = node.name.as_deref().map(decode_meta);
                     let name = def_meta
@@ -978,16 +1122,20 @@ fn collect_meshes_from_node(
                         .or_else(|| node.id.clone())
                         .unwrap_or_else(|| geom_id.clone());
                     let tags = def_meta.map(|m| m.tags).unwrap_or_default();
-                    meshes.push(MeshRecipe {
+                    // A non-manifold mesh splits into several open-shell
+                    // recipes under this ONE definition, so every placement
+                    // keeps all its pieces (recorded in `warnings`).
+                    meshes.extend(recipes_from_healed(
                         name,
+                        &geom_id,
                         positions,
                         faces,
-                        face_materials: healed_mats,
-                        face_uv_frames,
-                        face_holes: healed_holes,
-                        base_material: kernel::NO_MATERIAL,
+                        healed_mats,
+                        healed_uvs,
+                        healed_holes,
                         tags,
-                    });
+                        warnings,
+                    ));
                 }
             }
         }
@@ -1011,6 +1159,7 @@ fn collect_meshes_from_node(
                 id_to_dense,
                 lib_nodes,
                 meshes,
+                warnings,
             );
         }
     }
@@ -1021,6 +1170,14 @@ fn collect_meshes_from_node(
     for child in &node.children {
         let child_local = compose_node_local(child);
         let child_acc = child_local.then(acc);
-        collect_meshes_from_node(child, &child_acc, geom_map, id_to_dense, lib_nodes, meshes);
+        collect_meshes_from_node(
+            child,
+            &child_acc,
+            geom_map,
+            id_to_dense,
+            lib_nodes,
+            meshes,
+            warnings,
+        );
     }
 }

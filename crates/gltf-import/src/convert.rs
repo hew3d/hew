@@ -13,11 +13,13 @@
 //! rotation is applied as the outermost transform at every leaf (bake / pose),
 //! mirroring `dae-import`'s `world_tf` handling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gltf::mesh::Mode;
 use gltf::{Gltf, Mesh, Node};
-use kernel::{DefRecipe, ImportNode, ImportScene, MeshRecipe, NO_MATERIAL, Point3, Transform};
+use kernel::{
+    DefRecipe, ImportNode, ImportScene, MeshRecipe, NO_MATERIAL, Point3, Transform, UvFrame,
+};
 use mesh_heal::heal_mesh_with_tol;
 use mesh_heal::uv::fit_uv_frame;
 
@@ -43,13 +45,15 @@ struct Ctx<'a> {
     world_tf: Transform,
 }
 
-/// Build the full `ImportScene`, plus any missing image URIs from materials.
+/// Build the full `ImportScene`, plus any missing image URIs from materials
+/// and user-visible conversion warnings (non-manifold splits).
 pub fn build_scene(
     gltf: &Gltf,
     buffers: &[Option<Vec<u8>>],
-) -> Result<(ImportScene, Vec<String>), GltfError> {
+) -> Result<(ImportScene, Vec<String>, Vec<String>), GltfError> {
     let mat_table = material::build(gltf, buffers);
     let world_tf = mesh_heal::y_up_to_z_up();
+    let mut warnings = SplitWarnings::default();
 
     // Pass 1: count node references to each mesh (instancing signal).
     let mut refcount: HashMap<usize, usize> = HashMap::new();
@@ -66,12 +70,21 @@ pub fn build_scene(
         }
         let raw = extract_raw_mesh(&mesh, buffers, &mat_table.remap);
         // Definition geometry stays mesh-local (IDENTITY bake); the per-instance
-        // pose carries the node world transform + Y-up→Z-up.
-        if let Some(recipe) = build_recipe(&raw, &Transform::IDENTITY, mesh_name(&mesh)) {
+        // pose carries the node world transform + Y-up→Z-up. A non-manifold
+        // mesh splits into several open-shell recipes under this ONE
+        // definition, so every placement keeps all its pieces.
+        let recipes = build_recipes(
+            &raw,
+            &Transform::IDENTITY,
+            mesh_name(&mesh),
+            mesh.index(),
+            &mut warnings,
+        );
+        if !recipes.is_empty() {
             mesh_to_def.insert(mesh.index(), defs.len());
             defs.push(DefRecipe {
                 name: Some(mesh_name(&mesh)),
-                meshes: vec![recipe],
+                meshes: recipes,
             });
         }
     }
@@ -85,11 +98,13 @@ pub fn build_scene(
     };
     let mut roots: Vec<ImportNode> = Vec::new();
     for node in scene_roots(gltf) {
-        if let Some(n) = ctx.convert_node(&node, &Transform::IDENTITY) {
+        if let Some(n) = ctx.convert_node(&node, &Transform::IDENTITY, &mut warnings) {
             roots.push(n);
         }
     }
 
+    let mut warnings = warnings.messages;
+    cap_split_warnings(&mut warnings);
     Ok((
         ImportScene {
             materials: mat_table.materials,
@@ -100,11 +115,17 @@ pub fn build_scene(
             tags: Vec::new(),
         },
         mat_table.missing,
+        warnings,
     ))
 }
 
 impl Ctx<'_> {
-    fn convert_node(&self, node: &Node, acc: &Transform) -> Option<ImportNode> {
+    fn convert_node(
+        &self,
+        node: &Node,
+        acc: &Transform,
+        warnings: &mut SplitWarnings,
+    ) -> Option<ImportNode> {
         let node_world = node_transform(node).then(acc);
 
         // This node's own geometry (instance of a shared def, or a baked object).
@@ -120,13 +141,31 @@ impl Ctx<'_> {
             } else {
                 let raw = extract_raw_mesh(&mesh, self.buffers, self.mat_remap);
                 let name = node_name(node).unwrap_or_else(|| mesh_name(&mesh));
-                build_recipe(&raw, &node_world.then(&self.world_tf), name).map(ImportNode::Mesh)
+                let mut recipes = build_recipes(
+                    &raw,
+                    &node_world.then(&self.world_tf),
+                    name,
+                    mesh.index(),
+                    warnings,
+                );
+                match recipes.len() {
+                    0 => None,
+                    1 => Some(ImportNode::Mesh(recipes.pop().expect("len checked"))),
+                    // A split mesh stays one scene entity: group the
+                    // open-shell pieces under the node's name.
+                    _ => Some(ImportNode::Group {
+                        name: group_name(node),
+                        children: recipes.into_iter().map(ImportNode::Mesh).collect(),
+                        tags: Vec::new(),
+                        hidden: false,
+                    }),
+                }
             }
         });
 
         let children: Vec<ImportNode> = node
             .children()
-            .filter_map(|c| self.convert_node(&c, &node_world))
+            .filter_map(|c| self.convert_node(&c, &node_world, warnings))
             .collect();
 
         match (self_node, children.is_empty()) {
@@ -153,10 +192,56 @@ impl Ctx<'_> {
     }
 }
 
-/// Build one `MeshRecipe` by healing `raw` (welds, dedups, T-junction repair,
-/// outward orientation, coplanar-triangle merge) under `bake`, then fitting a
-/// per-face UV frame from healed corner UVs. `None` if nothing survives heal.
-fn build_recipe(raw: &RawMesh, bake: &Transform, name: String) -> Option<MeshRecipe> {
+/// Cap on individual non-manifold split warnings: a badly damaged model can
+/// hold hundreds of such meshes, and a wall of near-identical strings helps
+/// nobody. Past the cap the remainder aggregates into one line (mirrors
+/// skp-import's desync aggregation).
+const SPLIT_DETAIL_CAP: usize = 8;
+
+/// Non-manifold split warnings, deduplicated by glTF mesh index. The same
+/// mesh CAN heal (and split) more than once: a shared mesh whose definition
+/// build yields no recipes under the IDENTITY bake is not entered in
+/// `mesh_to_def`, so each referencing node re-heals it under its own bake —
+/// and because the weld tolerance and degeneracy culling are scale-dependent,
+/// a per-node bake can produce faces (and a split) where the IDENTITY bake
+/// produced none. Keying on the mesh index rather than the message text
+/// matters because glTF mesh names need not be unique: a DISTINCT mesh whose
+/// name and piece count happen to collide still gets its own mandated loud
+/// report (rule 4).
+#[derive(Default)]
+struct SplitWarnings {
+    /// glTF mesh indices that have already produced a split warning.
+    warned_meshes: HashSet<usize>,
+    messages: Vec<String>,
+}
+
+fn cap_split_warnings(warnings: &mut Vec<String>) {
+    if warnings.len() > SPLIT_DETAIL_CAP {
+        let extra = warnings.len() - SPLIT_DETAIL_CAP;
+        warnings.truncate(SPLIT_DETAIL_CAP);
+        warnings.push(format!(
+            "{extra} more non-manifold mesh{} imported as open shells \
+             (split at non-manifold edges, geometry unchanged)",
+            if extra == 1 { "" } else { "es" },
+        ));
+    }
+}
+
+/// Build the `MeshRecipe`s for one raw mesh: heal (welds, dedups, T-junction
+/// repair, outward orientation, coplanar-triangle merge) under `bake`, then
+/// fit per-face UV frames from healed corner UVs. Usually one recipe; a
+/// NON-MANIFOLD mesh (which `from_polygons` would reject whole) is decomposed
+/// by [`mesh_heal::split::split_non_manifold`] into several open-shell
+/// recipes — loudly (a warning names the mesh and the piece count), never
+/// silently (rule 4) — the same contract as skp-import. Empty if nothing
+/// survives heal.
+fn build_recipes(
+    raw: &RawMesh,
+    bake: &Transform,
+    name: String,
+    mesh_index: usize,
+    warnings: &mut SplitWarnings,
+) -> Vec<MeshRecipe> {
     let no_holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); raw.faces.len()];
     let (positions, faces, face_materials, healed_uvs, face_holes) = heal_mesh_with_tol(
         &raw.positions,
@@ -173,22 +258,81 @@ fn build_recipe(raw: &RawMesh, bake: &Transform, name: String) -> Option<MeshRec
         kernel::tol::IMPORT_PLANE_DIST,
     );
     if faces.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let face_uv_frames = faces
+
+    if let Some(pieces) = mesh_heal::split::split_non_manifold(
+        &positions,
+        &faces,
+        &face_materials,
+        &healed_uvs,
+        &face_holes,
+    ) {
+        // One loud report per glTF mesh, keyed by mesh index — never
+        // suppressed by another mesh's identical message text (see
+        // [`SplitWarnings`]).
+        if warnings.warned_meshes.insert(mesh_index) {
+            warnings.messages.push(format!(
+                "'{}' is non-manifold; imported as {} open shell{} \
+                 (split at non-manifold edges, geometry unchanged)",
+                if name.is_empty() {
+                    "unnamed mesh"
+                } else {
+                    &name
+                },
+                pieces.len(),
+                if pieces.len() == 1 { "" } else { "s" },
+            ));
+        }
+        return pieces
+            .into_iter()
+            .map(|piece| {
+                recipe_from_arrays(
+                    name.clone(),
+                    piece.positions,
+                    piece.faces,
+                    piece.face_materials,
+                    piece.face_corner_uvs,
+                    piece.face_holes,
+                )
+            })
+            .collect();
+    }
+
+    vec![recipe_from_arrays(
+        name,
+        positions,
+        faces,
+        face_materials,
+        healed_uvs,
+        face_holes,
+    )]
+}
+
+/// Healed (or split-piece) parallel arrays -> a `MeshRecipe`, fitting the
+/// per-face affine UV frames from the corner UVs.
+fn recipe_from_arrays(
+    name: String,
+    positions: Vec<Point3>,
+    faces: Vec<Vec<usize>>,
+    face_materials: Vec<u32>,
+    corner_uvs: Vec<Vec<[f64; 2]>>,
+    face_holes: Vec<Vec<Vec<usize>>>,
+) -> MeshRecipe {
+    let face_uv_frames: Vec<Option<UvFrame>> = faces
         .iter()
-        .zip(healed_uvs.iter())
-        .map(|(face, corner_uvs)| {
-            if corner_uvs.len() == face.len() && corner_uvs.len() >= 3 {
+        .zip(corner_uvs.iter())
+        .map(|(face, uvs)| {
+            if uvs.len() == face.len() && uvs.len() >= 3 {
                 let corner_pos: Vec<Point3> = face.iter().map(|&vi| positions[vi]).collect();
-                fit_uv_frame(&corner_pos, corner_uvs)
+                fit_uv_frame(&corner_pos, uvs)
             } else {
                 None
             }
         })
         .collect();
 
-    Some(MeshRecipe {
+    MeshRecipe {
         name,
         positions,
         faces,
@@ -197,7 +341,7 @@ fn build_recipe(raw: &RawMesh, bake: &Transform, name: String) -> Option<MeshRec
         face_holes,
         base_material: NO_MATERIAL,
         tags: Vec::new(),
-    })
+    }
 }
 
 /// Choose a weld tolerance for f32-sourced glTF positions.

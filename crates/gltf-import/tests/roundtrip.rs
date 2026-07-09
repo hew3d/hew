@@ -34,7 +34,7 @@ fn import_summary(rel: &str) -> Summary {
         .join("tests/fixtures")
         .join(rel);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-    let (scene, missing) =
+    let gltf_import::GltfScene { scene, missing, .. } =
         gltf_import::import(&bytes).unwrap_or_else(|e| panic!("import {rel}: {e}"));
     let materials = scene.materials.len();
     let textured = scene

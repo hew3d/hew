@@ -58,8 +58,10 @@ impl MatTable {
                     applied_size_in: size_in,
                     image_bytes,
                     avg_rgba,
+                    opacity,
                 } => {
                     let avg = avg_rgba.unwrap_or([200, 200, 200, 255]);
+                    let opacity = opacity.clamp(0.0, 1.0);
                     match image_bytes {
                         Some(bytes) if !bytes.is_empty() => {
                             let format = sniff_format(bytes);
@@ -72,11 +74,13 @@ impl MatTable {
                                 }
                                 _ => [1.0, 1.0],
                             };
+                            // Opacity folds into the tint alpha, same as the
+                            // solid arm (the tint's color stays white: the
+                            // image is authoritative, matching dae-import).
+                            let a = (opacity * 255.0).round() as u8;
                             materials.push(Material::textured(
                                 name.clone(),
-                                // White tint: the image is authoritative
-                                // (matches dae-import).
-                                Rgba8::rgb(255, 255, 255),
+                                Rgba8::rgba(255, 255, 255, a),
                                 Texture {
                                     image: bytes.clone(),
                                     format,
@@ -86,14 +90,18 @@ impl MatTable {
                         }
                         _ => {
                             // No embedded image: keep the material usable as
-                            // its average color and report the texture.
+                            // its average color and report the texture. Rare
+                            // since OpenSKP resolves shared-texture back-refs
+                            // to the owning material's bytes, but stays as
+                            // the honest fallback (rule 4: loud, not silent).
                             let label = texture.clone().unwrap_or_else(|| name.clone());
                             if !textures_missing.contains(&label) {
                                 textures_missing.push(label);
                             }
+                            let a = (opacity * f64::from(avg[3])).round() as u8;
                             materials.push(Material::solid(
                                 name.clone(),
-                                Rgba8::rgba(avg[0], avg[1], avg[2], avg[3]),
+                                Rgba8::rgba(avg[0], avg[1], avg[2], a),
                             ));
                         }
                     }

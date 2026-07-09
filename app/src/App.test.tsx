@@ -621,3 +621,96 @@ describe('App — import seeds hidden tags and hidden node keys', () => {
     expect(mockScene.set_hidden).toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// App — import overlay lifecycle: the ImportingOverlay (role="status") must
+// be committed to the DOM *before* the blocking scene.import_* call runs, and
+// must always be cleared afterwards — on success, on throw, and on a picker
+// cancel it must never appear at all.  (Whether the browser actually paints
+// the committed overlay before the freeze is the double-rAF nextPaint()
+// barrier's job — see paint.test.ts; here we assert the state sequencing.)
+// ---------------------------------------------------------------------------
+
+describe('App — import overlay lifecycle', () => {
+  const defaultImportSkp = mockScene.import_skp
+  const emptyReport = {
+    objects_created: 0,
+    watertight: 0,
+    leaky: 0,
+    skipped: [] as { name: string; reason: string }[],
+    textures_missing: [] as string[],
+    warnings: [] as string[],
+  }
+
+  let fakeFileHost: FileHost
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+    fakeFileHost = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      openForImport: vi.fn().mockResolvedValue({
+        kind: 'skp',
+        name: 'guest-house.skp',
+        bytes: new Uint8Array(),
+      }),
+      exportBinary: vi.fn(),
+    }
+    vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
+  })
+
+  afterEach(() => {
+    mockScene.import_skp = defaultImportSkp
+    vi.mocked(makeFileHost).mockReset()
+  })
+
+  const triggerImport = () => {
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Import…'))
+  }
+
+  it('shows the overlay before scene.import_skp runs and clears it after success', async () => {
+    // Snapshot overlay visibility at the exact moment the blocking import
+    // starts — the overlay must already be in the DOM by then.
+    let overlayVisibleAtImport = false
+    mockScene.import_skp = vi.fn(() => {
+      overlayVisibleAtImport = screen.queryByRole('status') !== null
+      return emptyReport
+    })
+
+    await renderAndLoad()
+    triggerImport()
+
+    await waitFor(() => expect(mockScene.import_skp).toHaveBeenCalled())
+    expect(overlayVisibleAtImport).toBe(true)
+
+    // finally-clause: the overlay clears once the import completes.
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument())
+  })
+
+  it('clears the overlay when the import throws, and surfaces a toast', async () => {
+    mockScene.import_skp = vi.fn(() => {
+      throw new Error('corrupt chunk')
+    })
+
+    await renderAndLoad()
+    triggerImport()
+
+    await waitFor(() => expect(mockScene.import_skp).toHaveBeenCalled())
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument())
+    expect(screen.getByText(/Import failed: corrupt chunk/)).toBeInTheDocument()
+  })
+
+  it('never shows the overlay when the user cancels the file picker', async () => {
+    vi.mocked(fakeFileHost.openForImport).mockResolvedValue(null)
+
+    await renderAndLoad()
+    triggerImport()
+
+    await waitFor(() => expect(fakeFileHost.openForImport).toHaveBeenCalled())
+    expect(mockScene.import_skp).not.toHaveBeenCalled()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+})

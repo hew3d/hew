@@ -1018,12 +1018,20 @@ fn write_allowed(app: &tauri::AppHandle, path: &Path) -> bool {
 }
 
 /// Read a user-approved file and return its raw bytes.
+///
+/// Returns the bytes as a raw IPC response (`tauri::ipc::Response`) rather than
+/// a `Vec<u8>`: a `Vec<u8>` return is marshalled as a JSON array of numbers,
+/// which for a multi-megabyte model is a huge JSON string that blocks the
+/// webview main thread while it parses. A raw response transfers the bytes as
+/// an `ArrayBuffer` with no JSON round-trip. `Err` is still serialized and
+/// rejects the JS promise, preserving the error contract.
 #[tauri::command]
-fn read_file(app: tauri::AppHandle, path: String) -> Result<Vec<u8>, String> {
+fn read_file(app: tauri::AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
     if !read_allowed(&app, Path::new(&path)) {
         return Err(format!("read_file: {path:?} is not a user-approved path"));
     }
-    std::fs::read(&path).map_err(|e| format!("read_file failed for {path:?}: {e}"))
+    let bytes = std::fs::read(&path).map_err(|e| format!("read_file failed for {path:?}: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Write raw bytes to a user-approved file, creating or overwriting it.

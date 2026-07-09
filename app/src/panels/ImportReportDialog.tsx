@@ -6,8 +6,9 @@
  *   - objects created (watertight vs leaky breakdown)
  *   - skipped meshes (name + reason), if any
  *   - missing texture URIs, if any
- *   - parser warnings (recovery notes; only the SketchUp importer populates
- *     this today), if any
+ *   - warnings, if any: parser recovery notes from damaged SketchUp files
+ *     and non-manifold split notices from any importer (COLLADA, glTF,
+ *     SketchUp)
  *
  * Dismissed by clicking OK or pressing Escape.
  */
@@ -163,13 +164,13 @@ export function ImportReportDialog({ report, onClose }: ImportReportDialogProps)
           </div>
         )}
 
-        {/* Parser warnings (SketchUp recovery notes) */}
+        {/* Warnings — no lead-in: each line carries its own context (a skp
+            recovery note says a section was malformed; a non-manifold split
+            notice says the geometry is unchanged), and a shared "content may
+            be missing" banner would contradict the latter. */}
         {warnings.length > 0 && (
           <div style={SECTION_STYLE}>
-            <div style={SECTION_LABEL_STYLE}>Parser warnings ({warnings.length})</div>
-            <div style={{ fontSize: '12px', marginBottom: '6px' }}>
-              The file had malformed sections; some content may be missing:
-            </div>
+            <div style={SECTION_LABEL_STYLE}>Warnings ({warnings.length})</div>
             <ul style={LIST_STYLE}>
               {warnings.map((warning, i) => (
                 <li key={i}>{warning}</li>

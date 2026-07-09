@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use kernel::{Document, ImportNode};
+use kernel::{Document, ImportNode, Rgba8};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -213,11 +213,10 @@ fn house_ingests_with_shared_defs_and_loud_skips() {
     assert_eq!(doc.instance_ids().len(), 61);
     assert_eq!(doc.group_ids().len(), 17);
     assert_eq!(report.skipped.len(), 0);
-    // One texture has no embedded image bytes in the file.
-    assert_eq!(
-        report.textures_missing,
-        vec!["Wood_Floor_Light.jpg".to_string()]
-    );
+    // Nothing missing: the one material without inline image bytes
+    // ("[Wood Floor Light]1") is a shared-texture record whose back-ref
+    // OpenSKP (0.2.0) resolves to the owning material's bytes.
+    assert_eq!(report.textures_missing, Vec::<String>::new());
 }
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -243,6 +242,49 @@ fn textured_material_arrives_with_embedded_image_and_uv_frames() {
     });
     assert!(has_uv_frame, "painted face gets a per-face UV frame");
     assert!(out.textures_missing.is_empty());
+}
+
+#[test]
+fn shared_texture_and_textured_opacity_survive_import() {
+    let out = skp_import::import(&fixture("house.skp")).unwrap();
+    let find = |name: &str| {
+        out.scene
+            .materials
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("house has material {name:?}"))
+    };
+
+    // "[Wood Floor Light]1" is a shared-texture record: a back-reference to
+    // "[Wood Floor Light]"'s image with no inline bytes of its own. OpenSKP
+    // 0.2.0 resolves the back-ref, so the sharing material imports textured
+    // with the owning material's exact bytes instead of falling back to its
+    // average color (and nothing lands in textures_missing).
+    let owner_tex = find("[Wood Floor Light]")
+        .texture
+        .as_ref()
+        .expect("owning material is textured")
+        .clone();
+    let shared_tex = find("[Wood Floor Light]1")
+        .texture
+        .as_ref()
+        .expect("shared-texture record resolves to a texture");
+    assert_eq!(
+        shared_tex.image, owner_tex.image,
+        "shared record carries the owner's image bytes"
+    );
+    assert!(out.textures_missing.is_empty());
+
+    // Textured opacity folds into the tint alpha exactly like the solid arm:
+    // "[Translucent Glass Tinted]" stores 0.52 with its use-opacity flag set
+    // -> alpha round(0.52 * 255) = 133; opaque textured materials stay 255.
+    let glass = find("[Translucent Glass Tinted]");
+    assert!(glass.texture.is_some());
+    assert_eq!(glass.color, Rgba8::rgba(255, 255, 255, 133));
+    assert_eq!(
+        find("[Wood Floor Light]").color,
+        Rgba8::rgba(255, 255, 255, 255)
+    );
 }
 
 #[test]
