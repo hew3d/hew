@@ -9,9 +9,11 @@
  * An open shell's tessellation can carry inward-wound triangles, so a
  * single-sided material (`FrontSide`/`BackSide`) renders those faces
  * invisible from the "wrong" side (looks like an empty wireframe). Watertight
- * solids keep the previous single-sided behavior (`FrontSide`, or `BackSide`
- * for a reflected instance pose); non-watertight ones always render
- * `THREE.DoubleSide` regardless of reflection.
+ * solids keep the previous single-sided behavior; non-watertight ones always
+ * render `THREE.DoubleSide` regardless of reflection. Reflected (det < 0)
+ * poses need side compensation only on the BATCH path (`BackSide` bucket —
+ * per-slot poses live in a shader attribute), never on a MATERIALIZED group,
+ * whose `group.matrix` pose already gets the renderer's own winding flip.
  *
  * Instances draw as one THREE.InstancedMesh (+ one instanced-edge
  * LineSegments) per (definition member, side bucket); per-instance state
@@ -472,6 +474,57 @@ describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
     const sides = batches.map((b) => batchMaterial(b).side).sort()
     expect(sides).toEqual([THREE.FrontSide, THREE.BackSide].sort())
     expect(instancedEdges(renderer.instancesGroup)).toHaveLength(2)
+  })
+
+  it('a selected reflected placement materializes with FrontSide (renderer already flips winding for det<0 world matrices)', () => {
+    const scene = makeScene({
+      instances: {
+        '11': { def: 101n, pose: REFLECTED_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    renderer.setSelectedInstances([11n])
+
+    const group = renderer.instancesGroup.getObjectByName('Instance_11') as THREE.Group
+    expect(group).toBeDefined()
+    // The materialized group carries the reflected pose as an Object3D
+    // matrix — WebGLRenderer reverses the front-face winding for any Mesh
+    // whose world matrix has a negative determinant, so the materials must
+    // stay FrontSide. BackSide here double-flips: the solid renders
+    // inside-out and per-face paint disappears behind the culled faces.
+    expect(group.matrix.determinant()).toBeLessThan(0)
+    const faceMesh = group.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    const mats = Array.isArray(faceMesh.material) ? faceMesh.material : [faceMesh.material]
+    expect(mats.length).toBeGreaterThan(0)
+    for (const m of mats) {
+      expect((m as THREE.MeshPhongMaterial).side).toBe(THREE.FrontSide)
+    }
+    // The batch bucket keeps its BackSide compensation — there the pose
+    // lives in a per-slot shader attribute the renderer's determinant
+    // check cannot see.
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    expect(batchMaterial(batch).side).toBe(THREE.BackSide)
+  })
+
+  it('a non-watertight member of a selected reflected placement still materializes DoubleSide', () => {
+    const scene = makeScene({
+      instances: {
+        '12': { def: 102n, pose: REFLECTED_POSE, memberIds: [1n], memberWatertight: { '1': false } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    renderer.setSelectedInstances([12n])
+
+    const group = renderer.instancesGroup.getObjectByName('Instance_12') as THREE.Group
+    const faceMesh = group.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    const mats = Array.isArray(faceMesh.material) ? faceMesh.material : [faceMesh.material]
+    for (const m of mats) {
+      expect((m as THREE.MeshPhongMaterial).side).toBe(THREE.DoubleSide)
+    }
   })
 
   it('getInstanceGroup materializes on demand for transform preview and restores on the next refresh', () => {

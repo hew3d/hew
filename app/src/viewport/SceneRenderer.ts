@@ -871,10 +871,17 @@ export class SceneRenderer {
       const cached = this._getMemberGeometry(memberId)
       // Open (non-watertight) shells have inward-wound faces on some
       // triangles, so a single-sided material renders them invisible from the
-      // "wrong" side; render those double-sided instead of Front/BackSide.
-      const side = cached.watertight
-        ? (rec.reflected ? THREE.BackSide : THREE.FrontSide)
-        : THREE.DoubleSide
+      // "wrong" side; render those double-sided.
+      //
+      // Watertight members stay FrontSide EVEN FOR A REFLECTED POSE: here the
+      // pose rides on `group.matrix`, and WebGLRenderer already reverses the
+      // front-face winding for any Mesh whose world matrix has a negative
+      // determinant. Adding BackSide on top double-flips and renders the
+      // solid inside-out (per-face paint vanishes behind the culled faces).
+      // Only the BATCH path needs the explicit 'B' (BackSide) bucket — its
+      // per-slot poses live in a shader attribute the renderer's determinant
+      // check cannot see (see `_bucketTag`).
+      const side = cached.watertight ? THREE.FrontSide : THREE.DoubleSide
 
       // Face mesh — its own BufferAttribute wrappers over the shared
       // TypedArrays, so geometry.dispose() frees only this group's GPU buffers.
