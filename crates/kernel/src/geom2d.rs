@@ -139,6 +139,18 @@ pub(crate) fn on_segment(p: Point3, q: Point3, t: Point3) -> bool {
         && t.z <= max_z + tol::POINT_MERGE
 }
 
+/// True if `p` lies within `tol` of the closed segment `[a, b]`.
+pub(crate) fn point_near_segment(p: Point3, a: Point3, b: Point3, tol: f64) -> bool {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    let t = if len_sq <= tol * tol {
+        0.0
+    } else {
+        ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0)
+    };
+    (p - (a + ab * t)).length_squared() <= tol * tol
+}
+
 /// Check whether two separate polygons share any point, cross, or touch.
 pub(crate) fn boundaries_contact(a: &[Point3], b: &[Point3]) -> bool {
     let na = a.len();

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc da5ccc10cbb1c1d0403e15f45dfd72fb7734ba47db955931fe5191e6d70967c9 # shrinks to seeds = [((0.0, 0.0), (1.0, 1.0), 0.5), ((0.0, 0.0), (1.0, 1.0), 0.5)], ops = [SplitFace { obj_sel: 0, face_sel: 0, edge_a: 237704701, edge_b: 18629424587095398, ta: 0.25, tb: 0.25 }, Group { count: 2 }, PushPull { obj_sel: 0, face_sel: 0, distance: 1.9517919806020803 }, SplitFace { obj_sel: 0, face_sel: 3576290684, edge_a: 2303387955956557570, edge_b: 5522761704381226509, ta: 0.6677184794123432, tb: 0.5800346651208398 }]
+cc 1bb01d4e7b9d4a810bed70f341ecb20b8d8d2a897a2dede38f79adf5192cf548 # shrinks to seeds = [((0.0, 0.0), (1.0, 1.0), 0.5), ((0.0, 0.0), (1.0, 1.0), 0.5)], ops = [MakeComponent { node_sel: 0 }, Group { count: 2 }, MakeComponent { node_sel: 0 }]

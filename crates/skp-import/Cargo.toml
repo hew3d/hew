@@ -17,6 +17,7 @@ mesh-heal = { workspace = true }
 openskp = "0.2.0"
 
 [dev-dependencies]
+proptest.workspace = true
 tessellate = { workspace = true }
 # Differential validation: fixture pairs ship a `.dae` ground-truth
 # export next to each `.skp`; both importers must agree.

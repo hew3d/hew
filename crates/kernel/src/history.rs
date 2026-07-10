@@ -25,11 +25,12 @@
 //! after undo, never hoard handles across it.
 
 use crate::ids::{EdgeId, FaceId, HalfEdgeId};
-use crate::math::Point3;
+use crate::math::{Point3, Vec3};
 use crate::ops::{
     CollapseSubFaceReport, FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport,
     FaceSplitReport, PushPullError, PushPullReport, StickyError,
 };
+use crate::tol;
 use crate::topo::Object;
 
 /// A replayable, invertible mutation of one Object. Plain data — serializable
@@ -165,16 +166,25 @@ pub struct HistoryEntry {
 /// # Stack invariants
 ///
 /// `applied` holds full [`HistoryEntry`] records (op + derived inverse).
-/// `undone` holds only the operations to re-apply on redo; the inverse is
+/// `undone` holds the operations to re-apply on redo; each inverse is
 /// re-derived at redo-time from the fresh report, so stale handles never
-/// appear in the wrong slot. This is the key to handle-staleness safety:
-/// every inverse is derived from the *post-op* report at the moment the op
-/// runs, never stored across a mutation that would invalidate its handles.
+/// appear in the wrong slot.
+///
+/// # Handle-staleness safety
+///
+/// Ops on both stacks carry generational ids, and any mutation that runs
+/// between an op's derivation and its dispatch may reallocate those ids even
+/// though the geometry round-trips exactly (undoing a split merges the cut
+/// faces away; redoing it mints *new* face ids). So each stack entry also
+/// carries a geometric [`Anchor`] for its target — captured when the op is
+/// derived, resolved against the live object when the op finally dispatches.
+/// This is the stack-level analogue of the module rule above: tools re-query
+/// after undo, and so does the history itself.
 #[derive(Debug, Clone, Default)]
 pub struct History {
-    applied: Vec<HistoryEntry>,
+    applied: Vec<(HistoryEntry, Anchor)>,
     /// Ops to re-apply on redo. Inverses are re-derived at redo-time.
-    undone: Vec<KernelOp>,
+    undone: Vec<(KernelOp, Anchor)>,
 }
 
 impl History {
@@ -191,6 +201,20 @@ impl History {
     /// True if [`History::redo`] has something to do.
     pub fn can_redo(&self) -> bool {
         !self.undone.is_empty()
+    }
+
+    /// The op the next [`History::undo`] would dispatch (the recorded
+    /// inverse), if any. Its handle may be re-anchored before dispatch; the
+    /// op KIND and parameters are what callers may rely on (undo menu
+    /// labels, tooling).
+    pub fn peek_undo(&self) -> Option<&KernelOp> {
+        self.applied.last().map(|(entry, _)| &entry.inverse)
+    }
+
+    /// The op the next [`History::redo`] would dispatch, if any. Same handle
+    /// caveat as [`History::peek_undo`].
+    pub fn peek_redo(&self) -> Option<&KernelOp> {
+        self.undone.last().map(|(op, _)| op)
     }
 
     /// Runs `op` on `object`, records its inverse, and clears the redo stack
@@ -214,11 +238,13 @@ impl History {
         // Dispatch the op. On error the object is untouched (strong guarantee).
         let report = dispatch(object, &op)?;
 
-        // Derive the inverse from the report (post-apply handles).
+        // Derive the inverse from the report (post-apply handles) and anchor
+        // its target geometrically for dispatch after intervening mutations.
         let inverse = derive_inverse(&op, &report, pre_merge_path);
+        let anchor = anchor_of(object, &inverse);
 
         // Push the entry and clear the redo stack (branch-discard).
-        self.applied.push(HistoryEntry { op, inverse });
+        self.applied.push((HistoryEntry { op, inverse }, anchor));
         self.undone.clear();
 
         Ok(report)
@@ -230,25 +256,33 @@ impl History {
     /// report — i.e., the freshly re-anchored forward op. Its inverse is
     /// re-derived at redo-time, never stale.
     pub fn undo(&mut self, object: &mut Object) -> Result<KernelOpReport, HistoryError> {
-        let entry = self.applied.pop().ok_or(HistoryError::NothingToUndo)?;
+        let (entry, anchor) = self.applied.last().ok_or(HistoryError::NothingToUndo)?;
+
+        // Re-resolve the inverse's target from its geometric anchor: redo
+        // cycles since `apply` may have reallocated the recorded handle.
+        let inverse =
+            re_anchor(object, &entry.inverse, anchor).map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces in the inverse, capture path before dispatch.
-        let pre_merge_path: Option<Vec<Point3>> =
-            if let KernelOp::MergeFaces { edge } = &entry.inverse {
-                Some(reconstruct_merge_path(object, *edge))
-            } else {
-                None
-            };
+        let pre_merge_path: Option<Vec<Point3>> = if let KernelOp::MergeFaces { edge } = &inverse {
+            Some(reconstruct_merge_path(object, *edge))
+        } else {
+            None
+        };
 
-        // Run the inverse. On kernel bug this surfaces as InverseFailed.
-        let report = dispatch(object, &entry.inverse).map_err(HistoryError::InverseFailed)?;
+        // Run the inverse. On kernel bug this surfaces as InverseFailed; the
+        // object is untouched (ops' strong guarantee), so the entry stays on
+        // the stack — pop only after success.
+        let report = dispatch(object, &inverse).map_err(HistoryError::InverseFailed)?;
+        self.applied.pop();
 
         // The op to push onto the redo stack is the RE-ANCHORED forward op:
         // derived from the inverse's report (post-undo handles).  This is the
         // fresh op that redo will replay; its own inverse will be derived at
         // redo-time from the redo's report.
-        let redo_op = derive_inverse(&entry.inverse, &report, pre_merge_path);
-        self.undone.push(redo_op);
+        let redo_op = derive_inverse(&inverse, &report, pre_merge_path);
+        let redo_anchor = anchor_of(object, &redo_op);
+        self.undone.push((redo_op, redo_anchor));
 
         Ok(report)
     }
@@ -258,7 +292,13 @@ impl History {
     /// Pops the redo op, runs it, derives a fresh inverse from the report,
     /// and pushes a complete [`HistoryEntry`] onto the undo stack.
     pub fn redo(&mut self, object: &mut Object) -> Result<KernelOpReport, HistoryError> {
-        let redo_op = self.undone.pop().ok_or(HistoryError::NothingToRedo)?;
+        let (op, anchor) = self.undone.last().ok_or(HistoryError::NothingToRedo)?;
+
+        // Re-resolve the redo op's target from its geometric anchor: undos
+        // that ran after this entry was pushed (unwinding earlier ops) may
+        // have destroyed the recorded handle, and the redos that rebuilt the
+        // geometry minted fresh ids.
+        let redo_op = re_anchor(object, op, anchor).map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces, capture path before dispatch.
         let pre_merge_path: Option<Vec<Point3>> = if let KernelOp::MergeFaces { edge } = &redo_op {
@@ -267,21 +307,159 @@ impl History {
             None
         };
 
-        // Run the redo op. Failure here is a kernel bug.
+        // Run the redo op. Failure here is a kernel bug; pop only after
+        // success so a failed redo doesn't discard the entry.
         let report = dispatch(object, &redo_op).map_err(HistoryError::InverseFailed)?;
+        self.undone.pop();
 
         // Derive a fresh inverse from this redo's report and push onto applied.
         let new_inverse = derive_inverse(&redo_op, &report, pre_merge_path);
-        self.applied.push(HistoryEntry {
-            op: redo_op,
-            inverse: new_inverse,
-        });
+        let inverse_anchor = anchor_of(object, &new_inverse);
+        self.applied.push((
+            HistoryEntry {
+                op: redo_op,
+                inverse: new_inverse,
+            },
+            inverse_anchor,
+        ));
 
         Ok(report)
     }
 }
 
 // ================================================================= private helpers
+
+/// Geometric fingerprint of a stack entry's target. Captured when the entry's
+/// op is derived (its handle is fresh then) and resolved against the live
+/// object when the op finally dispatches, because intervening undo/redo
+/// mutations reallocate generational ids even though geometry round-trips
+/// exactly (see the "Handle-staleness safety" section on [`History`]).
+///
+/// Positions round-trip to within floating-point noise, far below
+/// [`tol::POINT_MERGE`], so fingerprints match positionally at that tolerance.
+#[derive(Debug, Clone)]
+enum Anchor {
+    /// A face: its outer-loop vertex positions (order-independent) and its
+    /// plane normal. The normal disambiguates coincident opposite-side faces;
+    /// the full vertex set disambiguates coplanar faces sharing a centroid
+    /// (e.g. a parent face and a concentric imprinted sub-face).
+    Face { verts: Vec<Point3>, normal: Vec3 },
+    /// An edge: its two endpoint positions (order-independent).
+    Edge { a: Point3, b: Point3 },
+}
+
+/// Captures the [`Anchor`] for `op`'s target handle, which must be live in
+/// `object` (ops on the stacks are always derived from a fresh report).
+fn anchor_of(object: &Object, op: &KernelOp) -> Anchor {
+    match op {
+        KernelOp::PushPull { face, .. }
+        | KernelOp::SplitFace { face, .. }
+        | KernelOp::SplitFaceInner { face, .. }
+        | KernelOp::MergeInnerFace { sub_face: face }
+        | KernelOp::ExtrudeSubFace { sub_face: face, .. }
+        | KernelOp::CollapseSubFace { sub_face: face } => {
+            let f = &object.faces()[*face];
+            Anchor::Face {
+                verts: object.loop_positions(f.outer_loop).collect(),
+                normal: f.plane.normal(),
+            }
+        }
+        KernelOp::MergeFaces { edge } => {
+            let (a, b) = object
+                .edge_endpoints(*edge)
+                .expect("anchored op holds a fresh handle from its report");
+            Anchor::Edge { a, b }
+        }
+    }
+}
+
+/// True if `a` and `b` contain the same positions up to reordering, each
+/// matched within [`tol::POINT_MERGE`]. Matching is greedy pairwise rather
+/// than sort-and-zip: round-trip noise near a coordinate boundary (a 0.0 that
+/// comes back as -4e-15) would flip lexicographic sort order and mispair
+/// otherwise-identical sets. Distinct mesh vertices are separated by far more
+/// than the tolerance, so greedy matching is unambiguous.
+fn same_position_set(a: &[Point3], b: &[Point3]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut unmatched: Vec<Point3> = b.to_vec();
+    for p in a {
+        let Some(i) = unmatched
+            .iter()
+            .position(|q| (*p - *q).length() <= tol::POINT_MERGE)
+        else {
+            return false;
+        };
+        unmatched.swap_remove(i);
+    }
+    true
+}
+
+/// Finds the live face matching a [`Anchor::Face`] fingerprint.
+fn resolve_face(object: &Object, verts: &[Point3], normal: Vec3) -> Option<FaceId> {
+    object.faces().iter().find_map(|(fid, f)| {
+        if f.plane.normal().dot(normal) < 1.0 - tol::POINT_MERGE {
+            return None;
+        }
+        let fverts: Vec<Point3> = object.loop_positions(f.outer_loop).collect();
+        same_position_set(&fverts, verts).then_some(fid)
+    })
+}
+
+/// Finds the live edge matching a [`Anchor::Edge`] fingerprint.
+fn resolve_edge(object: &Object, a: Point3, b: Point3) -> Option<EdgeId> {
+    object.edges().keys().find(|&eid| {
+        let (p, q) = object.edge_endpoints(eid).expect("iterating live edge ids");
+        ((p - a).length() <= tol::POINT_MERGE && (q - b).length() <= tol::POINT_MERGE)
+            || ((p - b).length() <= tol::POINT_MERGE && (q - a).length() <= tol::POINT_MERGE)
+    })
+}
+
+/// Rebuilds `op` with its target handle re-resolved from `anchor` against the
+/// live object. Failure to resolve means the geometry the anchor fingerprints
+/// no longer exists — a kernel bug by the history contract — reported as the
+/// op's own unknown-target error so callers see the familiar typed failure.
+fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp, KernelOpError> {
+    let face = |unknown: KernelOpError| -> Result<FaceId, KernelOpError> {
+        match anchor {
+            Anchor::Face { verts, normal } => resolve_face(object, verts, *normal).ok_or(unknown),
+            Anchor::Edge { .. } => Err(unknown),
+        }
+    };
+    let unknown_face_sticky = KernelOpError::Sticky(StickyError::UnknownFace);
+    let unknown_face_pp = KernelOpError::PushPull(PushPullError::UnknownFace);
+    match op {
+        KernelOp::PushPull { distance, .. } => Ok(KernelOp::PushPull {
+            face: face(unknown_face_pp)?,
+            distance: *distance,
+        }),
+        KernelOp::SplitFace { path, .. } => Ok(KernelOp::SplitFace {
+            face: face(unknown_face_sticky)?,
+            path: path.clone(),
+        }),
+        KernelOp::SplitFaceInner { loop_path, .. } => Ok(KernelOp::SplitFaceInner {
+            face: face(unknown_face_sticky)?,
+            loop_path: loop_path.clone(),
+        }),
+        KernelOp::MergeInnerFace { .. } => Ok(KernelOp::MergeInnerFace {
+            sub_face: face(unknown_face_sticky)?,
+        }),
+        KernelOp::ExtrudeSubFace { distance, .. } => Ok(KernelOp::ExtrudeSubFace {
+            sub_face: face(unknown_face_pp)?,
+            distance: *distance,
+        }),
+        KernelOp::CollapseSubFace { .. } => Ok(KernelOp::CollapseSubFace {
+            sub_face: face(unknown_face_pp)?,
+        }),
+        KernelOp::MergeFaces { .. } => match anchor {
+            Anchor::Edge { a, b } => resolve_edge(object, *a, *b)
+                .map(|edge| KernelOp::MergeFaces { edge })
+                .ok_or(KernelOpError::Sticky(StickyError::UnknownEdge)),
+            Anchor::Face { .. } => Err(KernelOpError::Sticky(StickyError::UnknownEdge)),
+        },
+    }
+}
 
 /// Dispatch a [`KernelOp`] to the appropriate `Object` method.
 fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, KernelOpError> {
@@ -459,6 +637,26 @@ fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> Vec<Point3> {
         }
     }
 
+    // Canonical orientation. This path is reconstructed geometry for a
+    // replayed split, not the user's original stroke, and "face_a's
+    // perspective" flips with whichever half-edge happens to be the edge's
+    // primary — which varies across undo/redo cycles. Orient the path
+    // deterministically (lexicographically smaller endpoint first) so that
+    // replaying the same log repeatedly assigns vertex slots identically and
+    // saves stay byte-identical (DEVELOPMENT.md determinism lane).
+    if let (Some(first), Some(last)) = (path.first(), path.last()) {
+        let key = |p: &Point3| (p.x, p.y, p.z);
+        let (f, l) = (key(first), key(last));
+        let reversed =
+            l.0.total_cmp(&f.0)
+                .then(l.1.total_cmp(&f.1))
+                .then(l.2.total_cmp(&f.2))
+                == std::cmp::Ordering::Less;
+        if reversed {
+            path.reverse();
+        }
+    }
+
     path
 }
 
@@ -506,6 +704,37 @@ mod tests {
             })
             .map(|(id, _)| id)
             .expect("face with that normal must exist")
+    }
+
+    #[test]
+    fn peek_exposes_pending_ops_without_consuming() {
+        let mut cube = unit_cube();
+        let mut history = History::new();
+        assert!(history.peek_undo().is_none());
+        assert!(history.peek_redo().is_none());
+
+        let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+        history
+            .apply(
+                &mut cube,
+                KernelOp::PushPull {
+                    face: top,
+                    distance: 0.5,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            history.peek_undo(),
+            Some(KernelOp::PushPull { distance, .. }) if *distance == -0.5
+        ));
+        assert!(history.peek_redo().is_none());
+
+        history.undo(&mut cube).unwrap();
+        assert!(history.peek_undo().is_none());
+        assert!(matches!(
+            history.peek_redo(),
+            Some(KernelOp::PushPull { distance, .. }) if *distance == 0.5
+        ));
     }
 
     /// Same multiset of faces as cyclically-matching position lists, within POINT_MERGE.

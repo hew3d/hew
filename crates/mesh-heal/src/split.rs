@@ -17,9 +17,11 @@
 //!    are honestly *open* (leaky) shells, never patched shut.
 //! 2. **Pinch fallback (vertex split)** — when both traversals of a
 //!    duplicated directed edge end up in the SAME component (connected
-//!    around a pinch), the later face-use is detached by re-indexing that
-//!    face's endpoints onto duplicated (coincident) vertices. The crack is
-//!    real and stays visible; the piece is leaky by construction.
+//!    around a pinch), the later edge-use is detached by re-indexing one
+//!    endpoint of that specific occurrence onto a duplicated (coincident)
+//!    vertex — the minimal cut: clean paired edges elsewhere in the same
+//!    ring stay connected. The crack is real and stays visible; the piece
+//!    is leaky by construction.
 //!
 //! Geometry is never altered — no vertex moves, no face drops, no loop
 //! rewinding. Every output piece satisfies the kernel's directed-edge
@@ -128,64 +130,77 @@ pub fn split_non_manifold(
         let mut extra_positions: Vec<Point3> = Vec::new(); // appended past globals
 
         // Pinch fallback: re-scan for duplicate directed edges within the
-        // component; detach every repeat face-use by re-indexing that
-        // ring's endpoints onto fresh coincident duplicates. Loop until
-        // clean — each detach strictly reduces duplicate uses.
+        // component; detach the repeat use by re-indexing ONE endpoint of
+        // that specific edge occurrence onto a fresh coincident duplicate.
+        // Loop until clean — each detach strictly reduces duplicate uses
+        // (the rewritten occurrence gains a brand-new vertex id, so its
+        // edges can collide with nothing).
+        //
+        // The cut is minimal: re-labelling a ring corner necessarily also
+        // renames the ONE neighbouring ring edge at that corner, so the
+        // endpoint whose neighbouring edge is NOT a shared connection (a
+        // boundary edge — only this use) is preferred, leaving clean paired
+        // edges elsewhere in the ring untouched. Only when both neighbours
+        // are shared does one of them get severed — never both, and never
+        // unrelated occurrences of the same vertex ids elsewhere in the
+        // ring or its holes.
         loop {
-            let mut seen: BTreeMap<(usize, usize), (usize, bool)> = BTreeMap::new(); // -> (local face, is_hole)
-            let mut dup: Option<(usize, bool, usize, usize)> = None; // (local face, is_hole, a, b)
-            'scan: for (lf, ring) in rings.iter().enumerate() {
+            let mut seen: std::collections::BTreeSet<(usize, usize)> =
+                std::collections::BTreeSet::new();
+            // Undirected use counts decide which neighbouring edge is safe
+            // to rename (count 1 = boundary, nothing else uses it).
+            let mut undirected: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+            // First duplicate found: (local face, hole index, corner slot).
+            let mut dup: Option<(usize, Option<usize>, usize)> = None;
+            for (lf, ring) in rings.iter().enumerate() {
                 for k in 0..ring.len() {
                     let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
-                    if seen.insert((a, b), (lf, false)).is_some() {
-                        dup = Some((lf, false, a, b));
-                        break 'scan;
+                    *undirected.entry((a.min(b), a.max(b))).or_default() += 1;
+                    if !seen.insert((a, b)) && dup.is_none() {
+                        dup = Some((lf, None, k));
                     }
                 }
-                for hole in &holes[lf] {
+                for (hi, hole) in holes[lf].iter().enumerate() {
                     for k in 0..hole.len() {
                         let (a, b) = (hole[k], hole[(k + 1) % hole.len()]);
-                        if seen.insert((a, b), (lf, true)).is_some() {
-                            dup = Some((lf, true, a, b));
-                            break 'scan;
+                        *undirected.entry((a.min(b), a.max(b))).or_default() += 1;
+                        if !seen.insert((a, b)) && dup.is_none() {
+                            dup = Some((lf, Some(hi), k));
                         }
                     }
                 }
             }
-            let Some((lf, is_hole, a, b)) = dup else {
+            let Some((lf, hole_idx, k)) = dup else {
                 break;
             };
-            // Duplicate both endpoints for THIS face (outer ring + its
-            // holes re-index together so the face stays self-consistent).
+            let uses = |x: usize, y: usize| -> usize {
+                undirected.get(&(x.min(y), x.max(y))).copied().unwrap_or(0)
+            };
+            let ring: &mut Vec<usize> = match hole_idx {
+                None => &mut rings[lf],
+                Some(hi) => &mut holes[lf][hi],
+            };
+            let n = ring.len();
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            let prev = ring[(k + n - 1) % n];
+            let next = ring[(k + 2) % n];
+            // Duplicating b renames neighbouring edge {b, next}; duplicating
+            // a renames {prev, a}. Prefer the endpoint whose neighbour is a
+            // boundary edge (a single use — this ring's own), so no paired
+            // connection is severed as collateral.
+            let (slot, old) = if uses(b, next) <= 1 || uses(prev, a) > 1 {
+                ((k + 1) % n, b)
+            } else {
+                (k, a)
+            };
             let base = positions.len() + extra_positions.len();
-            let pos_of = |v: usize, extra: &[Point3]| -> Point3 {
-                if v < positions.len() {
-                    positions[v]
-                } else {
-                    extra[v - positions.len()]
-                }
+            let dup_pos = if old < positions.len() {
+                positions[old]
+            } else {
+                extra_positions[old - positions.len()]
             };
-            let (pa, pb) = (pos_of(a, &extra_positions), pos_of(b, &extra_positions));
-            extra_positions.push(pa); // base     = a'
-            extra_positions.push(pb); // base + 1 = b'
-            let remap = |v: usize| -> usize {
-                if v == a {
-                    base
-                } else if v == b {
-                    base + 1
-                } else {
-                    v
-                }
-            };
-            let _ = is_hole; // the whole face re-indexes either way
-            for v in rings[lf].iter_mut() {
-                *v = remap(*v);
-            }
-            for hole in holes[lf].iter_mut() {
-                for v in hole.iter_mut() {
-                    *v = remap(*v);
-                }
-            }
+            extra_positions.push(dup_pos); // coincident duplicate, not welded
+            ring[slot] = base;
         }
 
         // Compact: global/extra indices → piece-local, keeping only
@@ -426,8 +441,60 @@ mod specs {
         let piece = &pieces[0];
         assert_clean(piece);
         assert_eq!(piece.faces.len(), 2);
-        // The detached endpoints were duplicated (coincident, not welded).
-        assert_eq!(piece.positions.len(), 6);
+        // Exactly one endpoint of the offending edge use is duplicated
+        // (coincident, not welded) — the minimal cut.
+        assert_eq!(piece.positions.len(), 5);
+    }
+
+    /// Count directed edges of a piece whose reverse is also present —
+    /// i.e. edges that survived as real two-sided connections.
+    fn paired_directed_edges(piece: &MeshPiece) -> usize {
+        let mut set = std::collections::BTreeSet::new();
+        for ring in &piece.faces {
+            for k in 0..ring.len() {
+                set.insert((ring[k], ring[(k + 1) % ring.len()]));
+            }
+        }
+        set.iter().filter(|&&(a, b)| set.contains(&(b, a))).count()
+    }
+
+    /// The pinch vertex-split must cut ONLY the offending duplicated edge
+    /// pair: clean two-use opposite-direction edges elsewhere in the same
+    /// face's ring must remain paired. Here F0–F2 share clean edge {0,2}
+    /// and F0–F1 share clean edge {3,4}, while F1 and F2 both traverse the
+    /// directed edge 0→1 (the pinch). Detaching the pinch by re-indexing
+    /// EVERY occurrence of its endpoints in the ring would sever the clean
+    /// {0,2} connection as collateral damage.
+    #[test]
+    fn pinch_split_preserves_unrelated_clean_edges() {
+        let pos = [
+            p(0., 0., 0.),
+            p(1., 0., 0.),
+            p(0., 1., 0.),
+            p(1., 1., 0.),
+            p(2., 1., 0.),
+            p(9., 9., 9.), // unused
+            p(2., 0., 0.),
+        ];
+        let faces = vec![
+            vec![0, 2, 4, 3], // F0
+            vec![0, 1, 3, 4], // F1
+            vec![2, 0, 1, 6], // F2
+        ];
+        let pieces = split(&pos, &faces).expect("must split (pinch)");
+        assert_eq!(pieces.len(), 1, "clean edges keep all three faces together");
+        let piece = &pieces[0];
+        assert_clean(piece);
+        assert_eq!(piece.faces.len(), 3, "no face lost");
+        // Both pre-existing clean pairs ({0,2} and {3,4}) must survive:
+        // 2 undirected pairs = 4 paired directed edges.
+        assert_eq!(
+            paired_directed_edges(piece),
+            4,
+            "both clean shared edges stay paired; only the pinch is cut"
+        );
+        // Exactly one duplicated endpoint: 6 referenced globals + 1 copy.
+        assert_eq!(piece.positions.len(), 7);
     }
 
     /// THE invariant (property): for arbitrary index soups, every piece

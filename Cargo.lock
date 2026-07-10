@@ -278,6 +278,7 @@ dependencies = [
  "gltf",
  "kernel",
  "mesh-heal",
+ "proptest",
 ]
 
 [[package]]
@@ -724,6 +725,7 @@ dependencies = [
  "kernel",
  "mesh-heal",
  "openskp",
+ "proptest",
  "tessellate",
 ]
 

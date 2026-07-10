@@ -41,7 +41,8 @@
 //! it closes). This keeps every committed state a valid solid.
 
 use crate::geom2d::{
-    point_inside_polygon, polygon_is_simple, segments_intersect, signed_area_on_plane,
+    boundaries_contact, point_inside_polygon, point_near_segment, polygon_is_simple,
+    segments_intersect, signed_area_on_plane,
 };
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
@@ -803,13 +804,22 @@ impl Object {
             if (-distance) >= extent - tol::POINT_MERGE {
                 return Err(PushPullError::WouldVanish);
             }
+        }
 
-            // Interior-obstruction guard: translate mode moves the shared
-            // ring, so a neighbor face whose FIXED vertices sit closer along
-            // the sweep than the push depth would fold past them into a
-            // self-intersecting shell — every face stays planar and manifold,
-            // so the validator cannot see it. Refuse at the nearest fixed
-            // neighbor vertex strictly in front of the sweep.
+        // Interior-obstruction guard, both sweep directions: translate mode
+        // moves the shared ring, so a neighbor face whose FIXED vertices sit
+        // closer along the sweep than the push depth would fold past them
+        // into a self-intersecting shell — every face stays planar and
+        // manifold, so the validator cannot see it. Outward sweeps hit this
+        // exactly like inward ones (pushing a cavity wall out through the
+        // opposite wall folds the stretched side walls the same way — and
+        // records an inverse the inward guard would then refuse, breaking
+        // undo). Refuse at the nearest fixed neighbor vertex strictly in
+        // front of the sweep.
+        if !is_collapse {
+            let moved_face_plane = self.faces[face].plane;
+            // +1 along the outward normal for an outward push, -1 inward.
+            let along = distance.signum();
             let mut neighbor_limit = f64::INFINITY;
             for &nf in &neighbor_faces {
                 let loops: Vec<LoopId> = std::iter::once(self.faces[nf].outer_loop)
@@ -823,17 +833,15 @@ impl Object {
                         {
                             continue;
                         }
-                        let inward = -moved_face_plane.signed_distance(self.vertices[vid].position);
-                        if inward > tol::POINT_MERGE && inward < neighbor_limit {
-                            neighbor_limit = inward;
+                        let ahead =
+                            along * moved_face_plane.signed_distance(self.vertices[vid].position);
+                        if ahead > tol::POINT_MERGE && ahead < neighbor_limit {
+                            neighbor_limit = ahead;
                         }
                     }
                 }
             }
-            if (-distance) >= neighbor_limit - tol::POINT_MERGE {
-                eprintln!(
-                    "DEBUG obstruction guard refuse: distance={distance} neighbor_limit={neighbor_limit}"
-                );
+            if distance.abs() >= neighbor_limit - tol::POINT_MERGE {
                 return Err(PushPullError::NonManifoldResult);
             }
         }
@@ -867,15 +875,9 @@ impl Object {
             for &vid in &moved_vertices {
                 obj.vertices[vid].position = obj.vertices[vid].position + sweep;
             }
-            let outer_loop = obj.faces[face].outer_loop;
-            let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-            obj.faces[face].plane =
-                Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+            refit_face_plane(&mut obj, face)?;
             for &nf in &neighbor_faces {
-                let outer_loop = obj.faces[nf].outer_loop;
-                let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-                obj.faces[nf].plane =
-                    Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+                refit_face_plane(&mut obj, nf)?;
             }
         } else {
             created_faces = push_pull_coplanar_aware(
@@ -917,10 +919,8 @@ impl Object {
         //: a near-degenerate sweep that slips past the guards above yet
         // produces invalid topology must be refused, not committed.
         obj.check_invariants();
-        obj.validate().map_err(|e| {
-            eprintln!("DEBUG final validate failed: {:?}", e);
-            PushPullError::NonManifoldResult
-        })?;
+        obj.validate()
+            .map_err(|_| PushPullError::NonManifoldResult)?;
         *self = obj;
 
         // Step 7: Report.
@@ -992,6 +992,22 @@ impl Object {
         // Simple closed polygon.
         if !polygon_is_simple(loop_path) {
             return Err(StickyError::LoopSelfIntersects);
+        }
+
+        // The loop's enclosed REGION must avoid existing holes entirely, not
+        // just its vertices: a loop that encircles an existing hole (or
+        // crosses/touches its ring) would claim area already belonging to
+        // another sub-face — an unrepresentable nesting whose merge could
+        // never be undone (the enclosed hole's re-imprint would no longer be
+        // strictly inside the parent).
+        for hole in &hole_pts {
+            if hole
+                .iter()
+                .any(|&hp| point_inside_polygon(hp, loop_path, normal))
+                || boundaries_contact(loop_path, hole)
+            {
+                return Err(StickyError::LoopNotStrictlyInside { index: 0 });
+            }
         }
 
         // Normalise winding to CCW seen from the face normal, so the sub-face
@@ -1256,6 +1272,57 @@ impl Object {
         let normal = self.faces[sub_face].plane.normal();
         let sweep = normal * distance;
 
+        // Obstruction guard: unlike `push_pull`, an extrusion has no
+        // push-through semantics — a recess deeper than the material under
+        // the sub-face (or a boss driven through geometry in front of it)
+        // would self-intersect while staying manifold, invisibly to the
+        // validator. Probe with a ray from the ring's vertex average along
+        // the sweep and refuse at the nearest face it crosses. Best-effort
+        // like `push_pull`'s neighbor-vertex guard: for a non-convex ring the
+        // vertex average can fall outside the sub-face, where the probe would
+        // test a line the sweep never occupies and refuse legal extrusions
+        // (including recorded inverses, which must never fail) — the guard is
+        // skipped there rather than guessed.
+        {
+            let ring: Vec<Point3> = self
+                .loop_positions(self.faces[sub_face].outer_loop)
+                .collect();
+            let inv = 1.0 / ring.len() as f64;
+            let centroid = ring.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
+                Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
+            });
+            let mut limit = f64::INFINITY;
+            if point_inside_polygon(centroid, &ring, normal) {
+                let dir = normal * distance.signum();
+                for (f, face_data) in &self.faces {
+                    if f == sub_face || f == parent {
+                        continue;
+                    }
+                    let denom = face_data.plane.normal().dot(dir);
+                    if denom.abs() < tol::NORMAL_DIRECTION {
+                        continue; // ray parallel to the face's plane
+                    }
+                    let t = -face_data.plane.signed_distance(centroid) / denom;
+                    if t <= tol::POINT_MERGE || t >= limit {
+                        continue;
+                    }
+                    let hit = centroid + dir * t;
+                    let outer: Vec<Point3> = self.loop_positions(face_data.outer_loop).collect();
+                    // A hit anywhere inside the outer ring counts — including
+                    // inside a hole: the swept region is wider than one ray,
+                    // so crossing an annular face's opening still intersects
+                    // its material for any realistically sized sub-face, and
+                    // the validator cannot catch what slips through here.
+                    if point_inside_polygon(hit, &outer, face_data.plane.normal()) {
+                        limit = t;
+                    }
+                }
+            }
+            if distance.abs() >= limit - tol::POINT_MERGE {
+                return Err(PushPullError::NonManifoldResult);
+            }
+        }
+
         let mut obj = self.clone();
 
         // The shared loop vertices stay with the parent hole; the sub-face gets a
@@ -1371,9 +1438,7 @@ impl Object {
         }
 
         // Refit the moved sub-face plane (translated; same normal).
-        let pts: Vec<Point3> = obj.loop_positions(obj.faces[sub_face].outer_loop).collect();
-        obj.faces[sub_face].plane =
-            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+        refit_face_plane(&mut obj, sub_face)?;
 
         let shell = obj
             .shells
@@ -1439,7 +1504,16 @@ impl Object {
             if self.half_edges[wd[k]].next != a {
                 return Err(PushPullError::NotASubFace); // not a quad wall
             }
-            walls.push(self.loops[self.half_edges[a].loop_id].face);
+            let wall_face = self.loops[self.half_edges[a].loop_id].face;
+            // A wall that has been built upon (it carries imprinted rings) is
+            // no longer a sacrificial quad: removing it would orphan its
+            // inner loops and their sub-faces. (History unwinds are immune —
+            // LIFO order undoes the imprint before the extrude — so this
+            // refusal only ever hits forward collapses.)
+            if !self.faces[wall_face].inner_loops.is_empty() {
+                return Err(PushPullError::NotASubFace);
+            }
+            walls.push(wall_face);
             let hh = self.half_edges[wc[k]]
                 .twin
                 .ok_or(PushPullError::NotASubFace)?;
@@ -1467,6 +1541,26 @@ impl Object {
         let vt: Vec<VertexId> = (0..n).map(|k| self.half_edges[h_sub[k]].origin).collect();
         let normal = self.faces[parent].plane.normal();
         let distance = normal.dot(self.vertices[vt[0]].position - self.vertices[a[0]].position);
+
+        // Every vertical must be exactly the sweep: vt[k] = a[k] + normal·d.
+        // A wall subdivided by a later corner-to-corner cut still presents
+        // quad pieces whose shape and hole-loop wiring masquerade as
+        // sacrificial walls, but the cut edge poses as a NON-sweep-aligned
+        // "vertical" — collapsing would silently destroy that user geometry
+        // and orphan the cut's recorded inverse. Refuse instead.
+        // Gate at the object's planarity regime: native geometry constructs
+        // verticals exactly (POINT_MERGE-scale noise at most), but imported
+        // objects carry f32 quantization and Newell-fitted normals, so their
+        // legitimate verticals deviate up to the same tolerance the validator
+        // itself honors for their faces.
+        let sweep = normal * distance;
+        let gate = self.planarity_tol.max(tol::POINT_MERGE);
+        for k in 0..n {
+            let delta = self.vertices[vt[k]].position - self.vertices[a[k]].position;
+            if (delta - sweep).length() > gate {
+                return Err(PushPullError::NotASubFace);
+            }
+        }
 
         // ---- removal surgery on a clone ----
         let mut obj = self.clone();
@@ -1646,6 +1740,71 @@ impl Object {
                     if segments_intersect(a, b, c, d) {
                         return Err(StickyError::PathNotSimple);
                     }
+                }
+            }
+        }
+
+        // The open interior of every cut segment must stay strictly inside
+        // the face. Endpoints anchor ON the boundary by construction, but a
+        // segment interior that touches it — running along a boundary edge,
+        // passing through a boundary vertex, or spanning a concave notch
+        // outside the face — would not produce exactly two faces (the
+        // PathNotSimple contract). The interior-POINT checks above cannot see
+        // these cases: a two-point chord has no interior points at all.
+        let boundary_polys: Vec<&[Point3]> = std::iter::once(outer_pts.as_slice())
+            .chain(hole_pts.iter().map(|h| h.as_slice()))
+            .collect();
+        for w in resolved_path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            // No boundary vertex may lie strictly inside a cut segment.
+            for poly in &boundary_polys {
+                for &v in *poly {
+                    if point_near_segment(v, a, b, tol::POINT_MERGE)
+                        && !v.approx_eq(a, tol::POINT_MERGE)
+                        && !v.approx_eq(b, tol::POINT_MERGE)
+                    {
+                        return Err(StickyError::PathNotSimple);
+                    }
+                }
+            }
+            // The midpoint must be strictly inside the face and clear of the
+            // boundary (catches chords collinear with a boundary edge and
+            // chords spanning a notch outside the face).
+            let mid = a + (b - a) * 0.5;
+            if !point_inside_polygon(mid, &outer_pts, face_plane.normal()) {
+                return Err(StickyError::PathNotSimple);
+            }
+            for hole in &hole_pts {
+                if point_inside_polygon(mid, hole, face_plane.normal()) {
+                    return Err(StickyError::PathNotSimple);
+                }
+            }
+            for poly in &boundary_polys {
+                let n = poly.len();
+                for i in 0..n {
+                    if point_near_segment(mid, poly[i], poly[(i + 1) % n], tol::POINT_MERGE) {
+                        return Err(StickyError::PathNotSimple);
+                    }
+                }
+            }
+        }
+        // A cut segment may not CROSS the outer boundary at all (a midpoint
+        // sample cannot see a chord that exits through an off-center concave
+        // notch and re-enters). Contact at the two anchored endpoints is the
+        // only legal touch: skip boundary segments the resolved endpoints lie
+        // on, and only for the path's first/last segment respectively.
+        let n_outer = outer_pts.len();
+        for (si, w) in resolved_path.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            for i in 0..n_outer {
+                let (c, d) = (outer_pts[i], outer_pts[(i + 1) % n_outer]);
+                let anchor_exempt = (si == 0 && point_near_segment(a, c, d, tol::POINT_MERGE))
+                    || (si == n_seg - 1 && point_near_segment(b, c, d, tol::POINT_MERGE));
+                if anchor_exempt {
+                    continue;
+                }
+                if segments_intersect(a, b, c, d) {
+                    return Err(StickyError::PathNotSimple);
                 }
             }
         }
@@ -2283,6 +2442,13 @@ fn try_collapse_coplanar_step(
     // keeps starting at a vertex the moved face no longer shares, breaking the
     // twin-origin involution (validate.rs `twin.origin == next.origin`).
     let mut welds: Vec<(VertexId, VertexId)> = Vec::new();
+    // Loops of every wall being collapsed: a vertical whose twin lives in one
+    // of these is shared with an ADJACENT collapsing wall (interior cut
+    // vertex), not spliced into a transverse wall — see the unsplice below.
+    let collapsing_wall_loops: std::collections::BTreeSet<LoopId> = plans
+        .iter()
+        .map(|p| obj.faces[p.wall_face].outer_loop)
+        .collect();
     for plan in &plans {
         // Weld `h` directly onto whatever the wall's far edge (`hc`) was
         // twinned with — exactly reversing `build_coplanar_wall`'s "wc
@@ -2320,9 +2486,21 @@ fn try_collapse_coplanar_step(
 
         // Un-splice the two junction steps (`hb`/`hd`) from the straddling
         // transverse walls, undoing whichever of `splice_after`/`splice_before`
-        // created each one.
+        // created each one. A vertical shared with an ADJACENT collapsing
+        // wall is not a junction step: its twin is that wall's own vertical,
+        // which dies with that wall's removal (and may already be gone if the
+        // adjacent plan ran first) — skip it instead of unsplicing.
         for &step in &[plan.hb, plan.hd] {
-            let step_twin = obj.half_edges[step].twin.expect("junction step is twinned");
+            let Some(step_he) = obj.half_edges.get(step) else {
+                continue; // removed with an already-collapsed adjacent wall
+            };
+            let step_twin = step_he.twin.expect("junction step is twinned");
+            let Some(twin_he) = obj.half_edges.get(step_twin) else {
+                continue; // twin removed with an already-collapsed adjacent wall
+            };
+            if collapsing_wall_loops.contains(&twin_he.loop_id) {
+                continue; // shared vertical of an adjacent collapsing wall
+            }
             unsplice_step(obj, step_twin);
         }
 
@@ -2375,10 +2553,7 @@ fn try_collapse_coplanar_step(
 
     // Refit the moved face's plane (its Coplanar edges now sit on the
     // sibling's old boundary again).
-    let outer_loop = obj.faces[face].outer_loop;
-    let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-    obj.faces[face].plane =
-        Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    refit_face_plane(obj, face)?;
 
     // Refit the straddling transverse walls' planes too (they un-stepped
     // back to quads/pentagons and the planarity check must see the new
@@ -2397,10 +2572,7 @@ fn try_collapse_coplanar_step(
         }
     }
     for nf in refit_faces {
-        let outer_loop = obj.faces[nf].outer_loop;
-        let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-        obj.faces[nf].plane =
-            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+        refit_face_plane(obj, nf)?;
     }
 
     Ok(Some(removed_faces))
@@ -2431,6 +2603,11 @@ fn unsplice_step(obj: &mut Object, step_twin: HalfEdgeId) {
     }
     obj.half_edges[prev].next = next;
     obj.half_edges[next].prev = prev;
+    // The loop's anchor may be the half-edge being removed.
+    let loop_id = obj.half_edges[step_twin].loop_id;
+    if obj.loops[loop_id].first_half_edge == step_twin {
+        obj.loops[loop_id].first_half_edge = next;
+    }
     // `prev` (and `next`, in the splice_before shape) already have valid
     // `outgoing` half-edges that survive this removal — `step_twin` was
     // never anyone's recorded `outgoing` except possibly transiently, and
@@ -2651,19 +2828,13 @@ fn push_pull_coplanar_aware(
     // --- Pass 5: refit planes. ---
     // Moved face.
     {
-        let outer_loop = obj.faces[face].outer_loop;
-        let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-        obj.faces[face].plane =
-            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+        refit_face_plane(obj, face)?;
     }
     // Every original neighbor face — transverse walls (stretched or
     // reshaped) and the coplanar sibling(s) are all unaffected in count here;
     // `neighbor_faces` already excludes the moved face itself.
     for &nf in neighbor_faces {
-        let outer_loop = obj.faces[nf].outer_loop;
-        let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-        obj.faces[nf].plane =
-            Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+        refit_face_plane(obj, nf)?;
     }
 
     Ok(created_faces)
@@ -2694,6 +2865,41 @@ impl Object {
             loop_id: LoopId::default(),
         })
     }
+}
+
+/// Refits `face`'s plane from its current outer loop, refusing the two
+/// silent in-plane corruptions a vertex translation can produce: a boundary
+/// that self-intersects (the face folded over itself laterally), and a
+/// winding whose Newell normal flipped against the face's previous
+/// orientation (net signed area crossed zero). Both keep every vertex on the
+/// plane and every twin consistent, so the final validator backstop cannot
+/// see them — this refit is the only place they are observable.
+fn refit_face_plane(obj: &mut Object, face: FaceId) -> Result<(), PushPullError> {
+    let outer_loop = obj.faces[face].outer_loop;
+    let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+    if !polygon_is_simple(&pts) {
+        return Err(PushPullError::NonManifoldResult);
+    }
+    let new_plane = Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    if new_plane.normal().dot(obj.faces[face].plane.normal()) <= 0.0 {
+        return Err(PushPullError::NonManifoldResult);
+    }
+    // Inner loops must stay strictly inside the (possibly reshaped) outer
+    // boundary: a translation that swings a boundary edge across an imprinted
+    // ring leaves the ring poking outside its face — planar, twin-consistent,
+    // invisible to the validator, and fatal to the ring's own inverses.
+    for &il in &obj.faces[face].inner_loops {
+        let hole: Vec<Point3> = obj.loop_positions(il).collect();
+        if boundaries_contact(&pts, &hole)
+            || hole
+                .iter()
+                .any(|&hp| !point_inside_polygon(hp, &pts, new_plane.normal()))
+        {
+            return Err(PushPullError::NonManifoldResult);
+        }
+    }
+    obj.faces[face].plane = new_plane;
+    Ok(())
 }
 
 /// Links two half-edges as twins of a shared (new) `Edge`. Does not touch
@@ -2770,12 +2976,15 @@ fn splice_before(
 /// `h_sub` is the moved face's edge, already repointed by Pass 2 to run
 /// `va_raised -> vb_raised`. `h_hole` is the sibling's existing boundary
 /// half-edge, untouched, running `v_b -> v_a`. `wb` (`va_raised -> v_a`) and
-/// `wd` (`v_b -> vb_raised`) are the two verticals: already minted and
-/// already twinned by the caller (either against a Pass-3 junction splice
-/// embedded in a transverse wall's loop, or against a sibling coplanar wall's
-/// own vertical at an interior cut vertex) — this function only wires their
-/// `next`/`prev`/`loop_id` into the new wall's own quad loop, never their
-/// `twin`/`edge`.
+/// `wd` (`v_b -> vb_raised`) are the two verticals, already minted by the
+/// caller. Each is twinned either before this call (against a Pass-3
+/// junction splice embedded in a transverse wall's loop, or against an
+/// earlier coplanar wall's vertical) or retroactively, when the NEXT
+/// coplanar wall around an interior cut vertex takes it from `steps` — so a
+/// vertical may legitimately still be twin-less here. This function only
+/// wires their `next`/`prev`/`loop_id` into the new wall's own quad loop,
+/// never their `twin`/`edge`; the final validator backstop refuses any
+/// pairing the pass fails to complete.
 #[allow(clippy::too_many_arguments)]
 fn build_coplanar_wall(
     obj: &mut Object,
@@ -2788,9 +2997,6 @@ fn build_coplanar_wall(
     v_a: VertexId,
     v_b: VertexId,
 ) -> Result<FaceId, PushPullError> {
-    debug_assert!(obj.half_edges[wb].twin.is_some(), "wb must be pre-twinned");
-    debug_assert!(obj.half_edges[wd].twin.is_some(), "wd must be pre-twinned");
-
     // wa twins h_sub: h_sub runs va_raised -> vb_raised, so wa runs the
     // opposite direction, vb_raised -> va_raised.
     let wa = obj.new_half_edge(vb_raised);
@@ -3425,6 +3631,12 @@ fn split_boundary_edge(
         // use it to heal `dest_v.outgoing` if it cached the about-to-die twin.
         dest_outgoing_fix = Some(t_a);
 
+        // The twin's loop needs the same first_half_edge repair as `he`'s own
+        // loop below: the removed twin may be the neighbor loop's anchor.
+        if obj.loops[twin_loop].first_half_edge == twin_he_id {
+            obj.loops[twin_loop].first_half_edge = t_a;
+        }
+
         // Remove old twin half-edge.
         obj.half_edges.remove(twin_he_id);
     } else {
@@ -3716,10 +3928,13 @@ fn do_merge_faces(
             obj.loops[neighbor_loop].first_half_edge = t_into_v;
         }
 
-        // Repair the Edge: keep the Edge for h_in, set its twin to t_into_v.
-        // Retire the Edge for h_out.
+        // Repair the Edge: keep the Edge for h_in with (h_in, t_into_v) as
+        // its half-edge pair. h_in may have been the TWIN side of its edge
+        // (the primary being t_out_of_v, which dies below), so the primary
+        // must be reset explicitly, not assumed. Retire the Edge for h_out.
         let edge_to_keep = obj.half_edges[h_in].edge;
         let edge_to_remove = obj.half_edges[h_out].edge;
+        obj.edges[edge_to_keep].half_edge = h_in;
         obj.edges[edge_to_keep].twin_half_edge = Some(t_into_v);
         obj.half_edges[h_in].twin = Some(t_into_v);
         obj.half_edges[t_into_v].twin = Some(h_in);

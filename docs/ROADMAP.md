@@ -193,6 +193,41 @@ export a file a slicer accepts as watertight, with no repair step.
 - **Signed, notarized installers, auto-update, and a hosted web build**
   with no install step
 
+### Deferred until after initial public release
+
+Four kernel architecture decisions surfaced by the op-sequence and
+document-level fuzz harnesses. Each is a contained, typed failure or a
+byte-level wart — never silent corruption — and each has an `#[ignore]`d
+acceptance spec in `crates/kernel/tests/` that the implementing change
+un-ignores.
+
+- **Generalized step-wall recognition for collapse.** `find_collapse_plans`
+  only matches pristine quad walls, so undoing a push whose pocket walls
+  were subdivided by adjacent geometry fails typed instead of closing the
+  step. Needs wall matching (and the collapse surgery) extended to
+  subdivided and L-shaped prismatic walls. Spec:
+  `op_fuzz_repro_nonquad_wall_undo.rs`.
+- **One obstruction-guard fidelity across inverse op pairs.** `push_pull`
+  guards sweeps with a neighbor-vertex heuristic while `extrude_sub_face`
+  uses a centroid ray, so a recess the first accepts can record a collapse
+  whose inverse the second refuses. Either unify on one guard or let
+  recorded inverses carry proof they revert to a previously accepted state
+  and bypass the guards — the latter also retires the class behind the
+  previous item. Spec: `op_fuzz_repro_guard_regime_undo.rs`.
+- **Canonical geometry serialization.** `save()` emits vertices and faces
+  in slotmap order, so undo/redo cycles (which reallocate slots) drift the
+  saved bytes of semantically identical documents. A canonical writer —
+  topology-derived order — is format-compatible but regenerates every
+  stored golden, so it lands as its own change. Spec:
+  `doc_replay_diverge_repro.rs`.
+- **An explicit contract for guards versus inverses.** The general form of
+  the second item: any forward-op guard that reads surrounding geometry
+  can refuse a recorded inverse after intermediate ops changed that
+  geometry. Decide once whether inverses are guard-exempt with proof, or
+  the History contract is officially "undo fails typed, never corrupts" —
+  the fuzz harnesses currently tolerate exactly the two known signatures
+  and nothing else.
+
 ## Non-goals
 
 - **Silent geometry repair.** An operation that would produce invalid

@@ -9,6 +9,10 @@
 //! Operates per-mesh, producing the deduplicated `(positions, faces)`. Passes,
 //! in order:
 //!
+//! 0. **Index validation** — a face loop referencing a vertex index outside
+//!    the position array (corrupt or crafted import data) is foreign garbage:
+//!    the face is dropped (a garbage hole loop is dropped, its face kept), so
+//!    untrusted input can never panic the pipeline.
 //! 1. **Unit + up-axis transform** — apply a `unit.meter` scale and rotate the
 //!    source up-axis onto Hew's +Z. Positions land in meters, Z-up.
 //! 2. **Weld** — bucket by quantized cell; merge positions within
@@ -50,19 +54,6 @@ type FaceHoles = Vec<Vec<Vec<usize>>>;
 /// Output of the face-filtering steps: (faces, materials, corner_uvs, holes).
 type FilteredFaces = (Vec<Vec<usize>>, Vec<u32>, FaceCornerUvs, FaceHoles);
 
-// ── Degenerate-face threshold ─────────────────────────────────────────────────
-
-/// Minimum triangle half-cross-product magnitude (squared) for a face to be
-/// considered non-degenerate.  Derived from `tol::POINT_MERGE`: two points
-/// that are tol::POINT_MERGE apart produce a triangle of area ~tol::POINT_MERGE²/2,
-/// so we use tol::POINT_MERGE² as the area² floor.
-///
-/// This is **boundary normalization** at the import seam: zero-area sliver
-/// triangles from SketchUp T-junction collinear vertices are foreign input
-/// artefacts, not kernel invariant violations.  Dropping them here is safe and
-/// explicitly documented (DEVELOPMENT.md rule 4 applies to kernel operations; this
-/// is pre-kernel filtering).
-const MIN_FACE_AREA_SQ: f64 = tol::POINT_MERGE * tol::POINT_MERGE;
 use std::collections::BTreeMap;
 
 // ── Up-axis rotation ──────────────────────────────────────────────────────────
@@ -142,7 +133,13 @@ pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<u
         'outer: for dk0 in -1i64..=1 {
             for dk1 in -1i64..=1 {
                 for dk2 in -1i64..=1 {
-                    let probe = (key.0 + dk0, key.1 + dk1, key.2 + dk2);
+                    // Saturating: corrupted input can carry coordinates that
+                    // bucket to i64::MAX/MIN, where +1 overflows in debug.
+                    let probe = (
+                        key.0.saturating_add(dk0),
+                        key.1.saturating_add(dk1),
+                        key.2.saturating_add(dk2),
+                    );
                     if let Some(&rep_idx) = cell_to_rep.get(&probe) {
                         let rep = unique[rep_idx];
                         let dx = p.x - rep.x;
@@ -225,6 +222,59 @@ pub fn remap_faces(
         out_mats.push(mat);
         out_uvs.push(corner_uvs.clone());
         out_holes.push(remapped_holes);
+    }
+
+    (out_faces, out_mats, out_uvs, out_holes)
+}
+
+/// Drop faces whose outer loop references a vertex index outside the position
+/// array, and hole loops likewise (the face is kept when only a hole is
+/// garbage). Runs before anything else in [`heal_mesh_with_tol`] so untrusted
+/// import data (a crafted glTF index buffer, a corrupt source file) can never
+/// panic the pipeline with an out-of-bounds index.
+///
+/// This is **boundary normalization** at the import seam: an index that
+/// points outside the mesh's own vertex array is foreign garbage that no
+/// healing step could interpret, not kernel geometry (DEVELOPMENT.md rule 4
+/// applies to kernel operations; this is pre-kernel filtering, the same
+/// category as `drop_zero_area_faces`).
+fn drop_out_of_range_faces(
+    faces: &[Vec<usize>],
+    face_materials: &[u32],
+    face_corner_uvs: &[Vec<[f64; 2]>],
+    face_holes: &[Vec<Vec<usize>>],
+    position_count: usize,
+) -> FilteredFaces {
+    let mut out_faces: Vec<Vec<usize>> = Vec::with_capacity(faces.len());
+    let mut out_mats: Vec<u32> = Vec::with_capacity(faces.len());
+    let mut out_uvs: Vec<Vec<[f64; 2]>> = Vec::with_capacity(faces.len());
+    let mut out_holes: FaceHoles = Vec::with_capacity(faces.len());
+
+    let empty_holes: Vec<Vec<usize>> = Vec::new();
+    for (((face, &mat), corner_uvs), holes) in faces
+        .iter()
+        .zip(face_materials.iter())
+        .zip(face_corner_uvs.iter())
+        .zip(
+            face_holes
+                .iter()
+                .map(Some)
+                .chain(std::iter::repeat(None))
+                .map(|h| h.unwrap_or(&empty_holes)),
+        )
+    {
+        if !face.iter().all(|&i| i < position_count) {
+            continue; // garbage outer loop → drop the face (and its holes)
+        }
+        let valid_holes: Vec<Vec<usize>> = holes
+            .iter()
+            .filter(|hole| hole.iter().all(|&i| i < position_count))
+            .cloned()
+            .collect();
+        out_faces.push(face.clone());
+        out_mats.push(mat);
+        out_uvs.push(corner_uvs.clone());
+        out_holes.push(valid_holes);
     }
 
     (out_faces, out_mats, out_uvs, out_holes)
@@ -366,26 +416,31 @@ fn is_cyclic_equal(a: &[usize], b: &[usize]) -> bool {
 // ── T-junction healing ────────────────────────────────────────────────────────
 
 /// If `p` lies on the **open** segment `(a, b)` — strictly between the endpoints
-/// and within `tol::POINT_MERGE` perpendicular distance — return its parameter
+/// and within `on_tol` perpendicular distance — return its parameter
 /// `t ∈ (0, 1)` (so `closest = a + (b−a)·t`). Otherwise `None`.
 ///
-/// "Strictly between" excludes points within `tol::POINT_MERGE` of either
-/// endpoint, so shared corners are never treated as T-junctions.
-fn point_on_open_segment(p: Point3, a: Point3, b: Point3) -> Option<f64> {
+/// "Strictly between" excludes points within `on_tol` of either endpoint, so
+/// shared corners are never treated as T-junctions.
+///
+/// `on_tol` is the caller's weld tolerance: a genuine T-vertex from an
+/// f32-quantised source sits off the exact edge line by the same order of
+/// noise the weld pass merges, so the on-segment gate must scale with it
+/// (the native `tol::POINT_MERGE` would reject every f32-sourced T-junction).
+fn point_on_open_segment(p: Point3, a: Point3, b: Point3, on_tol: f64) -> Option<f64> {
     let ab = b - a;
     let len_sq = ab.length_squared();
-    if len_sq <= tol::POINT_MERGE * tol::POINT_MERGE {
+    if len_sq <= on_tol * on_tol {
         return None; // degenerate edge
     }
     let len = len_sq.sqrt();
     let t = (p - a).dot(ab) / len_sq;
     // Reject if the foot of the perpendicular is within tol of either endpoint.
-    let margin = tol::POINT_MERGE / len;
+    let margin = on_tol / len;
     if t <= margin || t >= 1.0 - margin {
         return None;
     }
     let closest = a + ab * t;
-    if (p - closest).length_squared() <= tol::POINT_MERGE * tol::POINT_MERGE {
+    if (p - closest).length_squared() <= on_tol * on_tol {
         Some(t)
     } else {
         None
@@ -398,18 +453,6 @@ fn lerp_uv(ua: [f64; 2], ub: [f64; 2], t: f64) -> [f64; 2] {
     [ua[0] + t * (ub[0] - ua[0]), ua[1] + t * (ub[1] - ua[1])]
 }
 
-/// Floor for the T-junction candidate grid's cell size (meters).
-///
-/// The cell size itself is query granularity, not a geometric tolerance —
-/// membership on an edge is still decided solely by [`point_on_open_segment`]
-/// at `tol::POINT_MERGE` (DEVELOPMENT.md rule 6); the grid only prunes
-/// vertices that provably cannot pass that predicate. The floor is derived
-/// from that same tolerance: [`CandidateGrid::gather`] spaces its samples at
-/// most `cell − tol::POINT_MERGE` apart, so the cell must exceed
-/// `POINT_MERGE` for the spacing budget to stay positive; 2 × POINT_MERGE
-/// keeps at least half the cell as budget.
-const T_JUNCTION_MIN_CELL: f64 = 2.0 * tol::POINT_MERGE;
-
 /// Uniform spatial grid over the T-junction candidate vertices, using the
 /// same quantized bucketing as welding ([`bucket_key`]). Built once per
 /// [`split_t_junctions`] call so each edge queries only the vertices near its
@@ -418,15 +461,21 @@ const T_JUNCTION_MIN_CELL: f64 = 2.0 * tol::POINT_MERGE;
 /// dominates large SketchUp imports.
 ///
 /// The grid is pruning-only: [`CandidateGrid::gather`] returns a superset of
-/// every candidate that can lie within `tol::POINT_MERGE` of the queried
-/// segment, and the exact [`point_on_open_segment`] predicate then decides
-/// membership — so per-edge results are identical to the full scan.
+/// every candidate that can lie within `on_tol` (the caller's on-segment
+/// tolerance) of the queried segment, and the exact
+/// [`point_on_open_segment`] predicate then decides membership — so per-edge
+/// results are identical to the full scan.
 struct CandidateGrid {
     /// Cell edge length (meters): the mesh's mean outer-loop edge length, so
     /// a typical edge overlaps O(1) cells and a typical cell holds O(1)
-    /// vertices, floored at [`T_JUNCTION_MIN_CELL`] so the sample-spacing
-    /// budget `cell − POINT_MERGE` in [`CandidateGrid::gather`] is positive.
+    /// vertices. The cell size itself is query granularity, not a geometric
+    /// tolerance; it is floored at `2·on_tol` so the sample-spacing budget
+    /// `cell − on_tol` in [`CandidateGrid::gather`] stays positive (with at
+    /// least half the cell as budget).
     cell: f64,
+    /// The on-segment tolerance [`point_on_open_segment`] is queried with —
+    /// the pruning radius the gather walk must cover.
+    on_tol: f64,
     /// `bucket_key(position, cell)` → candidate vertex ids, ascending.
     cells: BTreeMap<(i64, i64, i64), Vec<usize>>,
     /// Lazily memoized 3×3×3-neighbourhood unions (sorted vertex ids), keyed
@@ -440,7 +489,13 @@ struct CandidateGrid {
 
 impl CandidateGrid {
     /// Bucket `candidates` (ascending vertex ids) by quantized position.
-    fn build(candidates: &[usize], positions: &[Point3], faces: &[Vec<usize>]) -> Self {
+    /// `on_tol` is the on-segment tolerance the grid's queries must cover.
+    fn build(
+        candidates: &[usize],
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        on_tol: f64,
+    ) -> Self {
         // Mean outer-loop edge length (the same edges gather() is queried
         // with). A non-finite mean (garbage coordinates) falls to the floor;
         // gather() then serves such edges via its full-scan fallback.
@@ -455,10 +510,14 @@ impl CandidateGrid {
             }
         }
         let mean = if count > 0 { total / count as f64 } else { 0.0 };
+        // Floor: cell must exceed on_tol for gather()'s sample-spacing
+        // budget `cell − on_tol` to stay positive; 2·on_tol keeps at least
+        // half the cell as budget.
+        let min_cell = 2.0 * on_tol;
         let cell = if mean.is_finite() {
-            mean.max(T_JUNCTION_MIN_CELL)
+            mean.max(min_cell)
         } else {
-            T_JUNCTION_MIN_CELL
+            min_cell
         };
 
         let mut cells: BTreeMap<(i64, i64, i64), Vec<usize>> = BTreeMap::new();
@@ -470,6 +529,7 @@ impl CandidateGrid {
         }
         Self {
             cell,
+            on_tol,
             cells,
             neighborhoods: BTreeMap::new(),
         }
@@ -489,7 +549,12 @@ impl CandidateGrid {
             for dx in -1i64..=1 {
                 for dy in -1i64..=1 {
                     for dz in -1i64..=1 {
-                        let key = (base.0 + dx, base.1 + dy, base.2 + dz);
+                        // Saturating for the same reason as weld_with_tol's probe.
+                        let key = (
+                            base.0.saturating_add(dx),
+                            base.1.saturating_add(dy),
+                            base.2.saturating_add(dz),
+                        );
                         if let Some(cell_ids) = cells.get(&key) {
                             ids.extend_from_slice(cell_ids);
                         }
@@ -502,16 +567,16 @@ impl CandidateGrid {
     }
 
     /// Collect into `out` a superset of every candidate vertex that can lie
-    /// within `tol::POINT_MERGE` of segment `(pa, pb)`, in ascending
-    /// vertex-id order (so downstream stable sorting ties out exactly like
-    /// the full scan, which also visits candidates in ascending order).
+    /// within `on_tol` of segment `(pa, pb)`, in ascending vertex-id order
+    /// (so downstream stable sorting ties out exactly like the full scan,
+    /// which also visits candidates in ascending order).
     ///
     /// Coverage argument — why no on-segment vertex is ever missed: sample
     /// points are placed along the segment at Euclidean spacing
-    /// ≤ `cell − POINT_MERGE`. A hit vertex `p` lies within `POINT_MERGE` of
+    /// ≤ `cell − on_tol`. A hit vertex `p` lies within `on_tol` of
     /// some segment point `q`, and `q` lies within one sample spacing of its
-    /// nearest sample `s`, so per axis `|p − s| ≤ (cell − POINT_MERGE) +
-    /// POINT_MERGE = cell` — and two coordinates at most one cell apart
+    /// nearest sample `s`, so per axis `|p − s| ≤ (cell − on_tol) +
+    /// on_tol = cell` — and two coordinates at most one cell apart
     /// quantize (monotonic floor, [`bucket`]) to indices at most 1 apart.
     /// Every possible hit therefore lives in the 3×3×3 cell neighbourhood of
     /// some sample's cell, all of which are gathered. The one-cell inflation
@@ -529,7 +594,7 @@ impl CandidateGrid {
 
         let ab = pb - pa;
         let len = ab.length();
-        let max_step = self.cell - tol::POINT_MERGE; // > 0: cell ≥ 2·POINT_MERGE
+        let max_step = self.cell - self.on_tol; // > 0: cell ≥ 2·on_tol
         let steps = (len / max_step).ceil();
         if !steps.is_finite() || steps > self.cells.len() as f64 {
             // Full-scan fallback (cost cap + non-finite guard). Cells are in
@@ -591,6 +656,16 @@ impl CandidateGrid {
 /// Runs after `dedup_two_sided` so it only touches the kept front shell.
 /// Idempotent: a second pass finds no interior hits (endpoints are excluded).
 ///
+/// A face's own vertices are never spliced into its own loop (a weakly-simple
+/// polygon whose corner touches the interior of one of its other edges would
+/// otherwise come out with a repeated index, which `from_polygons` rejects as
+/// `DegenerateFace` — turning valid input into a skipped face).
+///
+/// `on_tol` is the on-segment tolerance (see [`point_on_open_segment`]):
+/// callers pass the same weld tolerance the mesh was welded with, so
+/// f32-quantised sources recognise T-vertices at their own precision. It is
+/// floored at `tol::POINT_MERGE`, the tightest meaningful gate.
+///
 /// Hole loops are threaded through unchanged (conservative: hole edges are not
 /// spliced). Face order and count are preserved so the parallel `face_holes`
 /// array stays aligned.
@@ -606,6 +681,7 @@ pub fn split_t_junctions(
     face_corner_uvs: &[Vec<[f64; 2]>],
     face_holes: &[Vec<Vec<usize>>],
     positions: &[Point3],
+    on_tol: f64,
 ) -> FilteredFaces {
     split_t_junctions_impl(
         faces,
@@ -613,6 +689,7 @@ pub fn split_t_junctions(
         face_corner_uvs,
         face_holes,
         positions,
+        on_tol,
         true,
     )
 }
@@ -630,6 +707,7 @@ fn split_t_junctions_reference(
     face_corner_uvs: &[Vec<[f64; 2]>],
     face_holes: &[Vec<Vec<usize>>],
     positions: &[Point3],
+    on_tol: f64,
 ) -> FilteredFaces {
     split_t_junctions_impl(
         faces,
@@ -637,6 +715,7 @@ fn split_t_junctions_reference(
         face_corner_uvs,
         face_holes,
         positions,
+        on_tol,
         false,
     )
 }
@@ -653,8 +732,14 @@ fn split_t_junctions_impl(
     face_corner_uvs: &[Vec<[f64; 2]>],
     face_holes: &[Vec<Vec<usize>>],
     positions: &[Point3],
+    on_tol: f64,
     use_grid: bool,
 ) -> FilteredFaces {
+    // The tightest meaningful on-segment gate is the native point-merge
+    // tolerance; floor a degenerate caller tolerance there so the grid's
+    // sample-spacing budget stays positive.
+    let on_tol = on_tol.max(tol::POINT_MERGE);
+
     // Candidate vertices: those used as a corner by some face (outer loops only).
     let mut used: Vec<bool> = vec![false; positions.len()];
     for face in faces {
@@ -666,7 +751,7 @@ fn split_t_junctions_impl(
     }
     let candidates: Vec<usize> = (0..positions.len()).filter(|&i| used[i]).collect();
 
-    let mut grid = use_grid.then(|| CandidateGrid::build(&candidates, positions, faces));
+    let mut grid = use_grid.then(|| CandidateGrid::build(&candidates, positions, faces, on_tol));
     // Per-edge scratch, reused across the loop to avoid reallocation.
     let mut near: Vec<usize> = Vec::new();
 
@@ -680,6 +765,13 @@ fn split_t_junctions_impl(
         let has_uv = corner_uvs.len() == n && n > 0;
         let mut new_face: Vec<usize> = Vec::with_capacity(n);
         let mut new_uv: Vec<[f64; 2]> = Vec::with_capacity(n);
+
+        // Vertices already on this face's boundary: its own corners, plus
+        // any vertex spliced into one of its earlier edges. A face's own
+        // vertex must never be spliced into its own loop — the repeated
+        // index would make `from_polygons` reject the (otherwise valid)
+        // face as `DegenerateFace`.
+        let mut boundary: std::collections::BTreeSet<usize> = face.iter().copied().collect();
 
         for k in 0..n {
             let a = face[k];
@@ -705,12 +797,15 @@ fn split_t_junctions_impl(
             };
             let mut hits: Vec<(f64, usize)> = edge_candidates
                 .iter()
-                .filter(|&&v| v != a && v != b)
-                .filter_map(|&v| point_on_open_segment(positions[v], pa, pb).map(|t| (t, v)))
+                .filter(|&&v| !boundary.contains(&v))
+                .filter_map(|&v| {
+                    point_on_open_segment(positions[v], pa, pb, on_tol).map(|t| (t, v))
+                })
                 .collect();
             hits.sort_by(|x, y| x.0.total_cmp(&y.0));
 
             for (t, v) in hits {
+                boundary.insert(v);
                 new_face.push(v);
                 if has_uv {
                     new_uv.push(lerp_uv(corner_uvs[k], corner_uvs[(k + 1) % n], t));
@@ -740,20 +835,61 @@ fn split_t_junctions_impl(
 /// Signed volume × 6 of an oriented face set (fan-triangulated). Positive when
 /// the faces are wound CCW-from-outside (outward normals); negative when the
 /// whole shell is inside-out. Meaningful only for a closed mesh.
+///
+/// Tetrahedra are summed relative to the shell's own first vertex, not the
+/// world origin: for a closed shell the sum is independent of the reference
+/// point, but summing from the origin makes every term O(offset³) for a shell
+/// baked far from the origin, and the near-cancelling sum's rounding error
+/// (O(offset³·ε)) can exceed the true O(extent³) volume and flip its sign.
 fn signed_volume6(faces: &[Vec<usize>], positions: &[Point3]) -> f64 {
+    let Some(reference) = faces.iter().find(|f| f.len() >= 3).map(|f| positions[f[0]]) else {
+        return 0.0;
+    };
     let mut v6 = 0.0;
     for face in faces {
         if face.len() < 3 {
             continue;
         }
-        let p0 = positions[face[0]].to_vec();
+        let p0 = positions[face[0]] - reference;
         for i in 1..face.len() - 1 {
-            let p1 = positions[face[i]].to_vec();
-            let p2 = positions[face[i + 1]].to_vec();
+            let p1 = positions[face[i]] - reference;
+            let p2 = positions[face[i + 1]] - reference;
             v6 += p0.dot(p1.cross(p2));
         }
     }
     v6
+}
+
+/// Winding-number magnitude above which a point counts as enclosed by a
+/// closed shell. The generalized winding number is ±1 for a point strictly
+/// inside a closed oriented shell and 0 strictly outside; the half-integer
+/// midpoint discriminates the two robustly (this is a topological threshold,
+/// not a length tolerance).
+const WINDING_ENCLOSED: f64 = 0.5;
+
+/// Generalized winding number of point `p` with respect to an oriented face
+/// set: the sum of the signed solid angles its fan triangles subtend at `p`
+/// (Van Oosterom–Strackee), divided by 4π. For a closed shell this is ±1
+/// when `p` is strictly inside (sign per orientation) and 0 strictly
+/// outside, and it needs no epsilon tie-breaking on rays through edges or
+/// vertices — unlike ray-parity counting.
+fn winding_number(p: Point3, faces: &[Vec<usize>], positions: &[Point3]) -> f64 {
+    let mut total = 0.0_f64;
+    for face in faces {
+        if face.len() < 3 {
+            continue;
+        }
+        let a = positions[face[0]] - p;
+        for i in 1..face.len() - 1 {
+            let b = positions[face[i]] - p;
+            let c = positions[face[i + 1]] - p;
+            let (la, lb, lc) = (a.length(), b.length(), c.length());
+            let det = a.dot(b.cross(c));
+            let denom = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
+            total += 2.0 * det.atan2(denom);
+        }
+    }
+    total / (4.0 * std::f64::consts::PI)
 }
 
 /// True if every directed edge `(a, b)` of the face set has its reverse
@@ -771,11 +907,24 @@ fn is_closed(faces: &[Vec<usize>]) -> bool {
     dir.iter().all(|&(a, b)| dir.contains(&(b, a)))
 }
 
-/// Normalize a **closed** shell to outward orientation: if its signed volume is
-/// negative the whole solid is inside-out (e.g. SketchUp faces reversed in the
-/// source model — invisible there because SketchUp renders double-sided, but a
-/// single-sided renderer culls every face and push/pull inverts). Reverse every
-/// face's winding (and its corner UVs) so normals point outward.
+/// Normalize each **closed** shell to outward orientation: if a shell's signed
+/// volume is negative that solid is inside-out (e.g. SketchUp faces reversed in
+/// the source model — invisible there because SketchUp renders double-sided,
+/// but a single-sided renderer culls every face and push/pull inverts). Reverse
+/// each of its faces' winding (and corner UVs) so normals point outward.
+///
+/// The decision is made **per connected component** (faces joined by shared
+/// undirected edges — the same adjacency [`orient_consistent`]'s flood fill
+/// walks): one raw mesh can carry several disjoint shells (a multi-primitive
+/// glTF mesh, a SketchUp geometry run, a multi-group COLLADA `<mesh>`), and a
+/// global closed/volume test would let the largest shell mask an inside-out
+/// sibling — or wrongly flip a correct one.
+///
+/// A closed negative shell **enclosed by** a closed positive shell is left
+/// alone: that is a hollow solid's cavity, and inward winding is its correct
+/// orientation (the kernel's boolean subtraction emits exactly this shape —
+/// cavity walls facing into the removed volume). Only free-standing
+/// inside-out shells are flipped.
 ///
 /// When flipping, hole loops are also reversed (their winding is relative to the
 /// outer loop's normal, so they must be flipped together).
@@ -790,41 +939,130 @@ pub fn orient_outward(
     face_holes: &[Vec<Vec<usize>>],
     positions: &[Point3],
 ) -> FilteredFaces {
-    // Only a closed, inside-out shell is flipped.
-    if !is_closed(faces) || signed_volume6(faces, positions) >= 0.0 {
-        let out_holes: FaceHoles = (0..faces.len())
-            .map(|i| face_holes.get(i).cloned().unwrap_or_default())
-            .collect();
-        return (
-            faces.to_vec(),
-            face_materials.to_vec(),
-            face_corner_uvs.to_vec(),
-            out_holes,
-        );
+    let n = faces.len();
+
+    // Union faces across shared undirected edges into components. Hole rings
+    // participate in adjacency too: a face filling another face's hole pairs
+    // its outer edges against the hole's edges, and the two must share one
+    // flip decision — flipping only one side would invert a clean pairing
+    // into duplicate directed edges.
+    let mut uf = UnionFind::new(n);
+    let mut edge_first: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let empty_holes: Vec<Vec<usize>> = Vec::new();
+    for (fi, face) in faces.iter().enumerate() {
+        let holes = face_holes.get(fi).unwrap_or(&empty_holes);
+        for ring in std::iter::once(face).chain(holes.iter()) {
+            let m = ring.len();
+            for k in 0..m {
+                let (a, b) = (ring[k], ring[(k + 1) % m]);
+                let key = if a < b { (a, b) } else { (b, a) };
+                match edge_first.get(&key) {
+                    Some(&f0) => uf.union(f0, fi),
+                    None => {
+                        edge_first.insert(key, fi);
+                    }
+                }
+            }
+        }
+    }
+    let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for fi in 0..n {
+        components.entry(uf.find(fi)).or_default().push(fi);
     }
 
-    let out_faces: Vec<Vec<usize>> = faces
-        .iter()
-        .map(|f| f.iter().rev().copied().collect())
-        .collect();
-    let out_uvs: Vec<Vec<[f64; 2]>> = face_corner_uvs
-        .iter()
-        .map(|uvs| uvs.iter().rev().copied().collect())
-        .collect();
-    // Reverse each hole loop when flipping the shell.
-    let out_holes: FaceHoles = (0..faces.len())
-        .map(|i| {
-            face_holes
-                .get(i)
-                .map(|holes| {
-                    holes
-                        .iter()
-                        .map(|h| h.iter().rev().copied().collect())
-                        .collect()
-                })
-                .unwrap_or_default()
+    // Classify each component once: its faces, whether it is closed, and its
+    // signed volume.
+    struct Comp {
+        face_ids: Vec<usize>,
+        faces: Vec<Vec<usize>>,
+        closed: bool,
+        volume6: f64,
+    }
+    let comps: Vec<Comp> = components
+        .into_values()
+        .map(|face_ids| {
+            let comp_faces: Vec<Vec<usize>> = face_ids.iter().map(|&f| faces[f].clone()).collect();
+            let closed = is_closed(&comp_faces);
+            let volume6 = if closed {
+                signed_volume6(&comp_faces, positions)
+            } else {
+                0.0
+            };
+            Comp {
+                face_ids,
+                faces: comp_faces,
+                closed,
+                volume6,
+            }
         })
         .collect();
+
+    // Per component: only a closed, inside-out, FREE-STANDING shell is
+    // flipped. A closed negative shell enclosed by a closed positive one is
+    // a hollow-solid cavity whose inward winding is the kernel's own
+    // convention (boolean subtraction emits cavity walls facing into the
+    // removed volume) — "correcting" it would turn a hollow solid inside
+    // out. Enclosure is tested by the winding number of one of the negative
+    // shell's vertices with respect to each positive closed shell.
+    let mut flip = vec![false; n];
+    for (i, comp) in comps.iter().enumerate() {
+        if !comp.closed || comp.volume6 >= 0.0 {
+            continue;
+        }
+        let Some(probe) = comp.faces.iter().find(|f| !f.is_empty()).map(|f| f[0]) else {
+            continue;
+        };
+        let p = positions[probe];
+        let enclosed = comps.iter().enumerate().any(|(j, other)| {
+            j != i
+                && other.closed
+                && other.volume6 > 0.0
+                && winding_number(p, &other.faces, positions).abs() > WINDING_ENCLOSED
+        });
+        if !enclosed {
+            for &f in &comp.face_ids {
+                flip[f] = true;
+            }
+        }
+    }
+
+    apply_winding_flips(&flip, faces, face_materials, face_corner_uvs, face_holes)
+}
+
+/// Emit `(faces, materials, corner_uvs, holes)` with every face whose `flip`
+/// flag is set reversed (outer loop, corner UVs, and hole loops together).
+/// Shared by [`orient_outward`] and [`orient_consistent`].
+fn apply_winding_flips(
+    flip: &[bool],
+    faces: &[Vec<usize>],
+    face_materials: &[u32],
+    face_corner_uvs: &[Vec<[f64; 2]>],
+    face_holes: &[Vec<Vec<usize>>],
+) -> FilteredFaces {
+    let n = faces.len();
+    let mut out_faces: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut out_uvs: Vec<Vec<[f64; 2]>> = Vec::with_capacity(n);
+    let mut out_holes: FaceHoles = Vec::with_capacity(n);
+    for i in 0..n {
+        if flip[i] {
+            out_faces.push(faces[i].iter().rev().copied().collect());
+            out_uvs.push(face_corner_uvs[i].iter().rev().copied().collect());
+            out_holes.push(
+                face_holes
+                    .get(i)
+                    .map(|hs| {
+                        hs.iter()
+                            .map(|h| h.iter().rev().copied().collect())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            );
+        } else {
+            out_faces.push(faces[i].clone());
+            out_uvs.push(face_corner_uvs[i].clone());
+            out_holes.push(face_holes.get(i).cloned().unwrap_or_default());
+        }
+    }
     (out_faces, face_materials.to_vec(), out_uvs, out_holes)
 }
 
@@ -935,31 +1173,7 @@ pub fn orient_consistent(
         }
     }
 
-    let mut out_faces: Vec<Vec<usize>> = Vec::with_capacity(n);
-    let mut out_uvs: Vec<Vec<[f64; 2]>> = Vec::with_capacity(n);
-    let mut out_holes: FaceHoles = Vec::with_capacity(n);
-    for i in 0..n {
-        if flip[i] {
-            out_faces.push(faces[i].iter().rev().copied().collect());
-            out_uvs.push(face_corner_uvs[i].iter().rev().copied().collect());
-            out_holes.push(
-                face_holes
-                    .get(i)
-                    .map(|hs| {
-                        hs.iter()
-                            .map(|h| h.iter().rev().copied().collect())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            );
-        } else {
-            out_faces.push(faces[i].clone());
-            out_uvs.push(face_corner_uvs[i].clone());
-            out_holes.push(face_holes.get(i).cloned().unwrap_or_default());
-        }
-    }
-
-    (out_faces, face_materials.to_vec(), out_uvs, out_holes)
+    apply_winding_flips(&flip, faces, face_materials, face_corner_uvs, face_holes)
 }
 
 // ── Coplanar merge ────────────────────────────────────────────────────────────
@@ -1333,6 +1547,17 @@ pub fn heal_mesh_with_tol(
     FaceCornerUvs,
     FaceHoles,
 ) {
+    // 0. Validate face/hole vertex indices against the position array:
+    //    untrusted import data (crafted glTF index buffers, corrupt sources)
+    //    must be dropped here, never panic a later unchecked index.
+    let (valid_faces, valid_mats, valid_uvs, valid_holes) = drop_out_of_range_faces(
+        raw_faces,
+        raw_face_materials,
+        raw_face_corner_uvs,
+        raw_face_holes,
+        raw_positions.len(),
+    );
+
     // 1. Apply bake transform (unit + up-axis for world meshes; identity for defs).
     let transformed: Vec<Point3> = raw_positions
         .iter()
@@ -1342,14 +1567,16 @@ pub fn heal_mesh_with_tol(
     // 2. Weld.
     let (unique_positions, old_to_new) = weld_with_tol(&transformed, weld_tol);
     let (remapped_faces, remapped_mats, remapped_uvs, remapped_holes) = remap_faces(
-        raw_faces,
-        raw_face_materials,
-        raw_face_corner_uvs,
-        raw_face_holes,
+        &valid_faces,
+        &valid_mats,
+        &valid_uvs,
+        &valid_holes,
         &old_to_new,
     );
 
     // 3. Drop zero-area faces (collinear T-junction slivers from SketchUp).
+    //    The sliver gate is on effective height at `weld_tol` — the source's
+    //    own precision — never on raw size.
     //    This is boundary normalization at the import seam: these are foreign
     //    input artefacts, not kernel invariant violations (DEVELOPMENT.md rule 4).
     let (nondegenerate_faces, nondegenerate_mats, nondegenerate_uvs, nondegenerate_holes) =
@@ -1359,6 +1586,7 @@ pub fn heal_mesh_with_tol(
             &remapped_uvs,
             &remapped_holes,
             &unique_positions,
+            weld_tol,
         );
 
     // 4. Two-sided dedup.
@@ -1372,6 +1600,9 @@ pub fn heal_mesh_with_tol(
     // 5. T-junction healing: splice mid-edge vertices into the faces whose edges
     //    they sit on, so half-edges pair up manifold (SketchUp triangulation
     //    leaves coplanar T-junctions that otherwise read as an open shell).
+    //    The on-segment gate scales with `weld_tol`: an f32-quantised source's
+    //    T-vertices sit off the exact edge line by weld-scale noise, which the
+    //    native 1 nm gate would reject wholesale.
     //    Hole loops are threaded through unchanged (conservative).
     let (split_faces, split_mats, split_uvs, split_holes) = split_t_junctions(
         &dedup_faces,
@@ -1379,6 +1610,7 @@ pub fn heal_mesh_with_tol(
         &dedup_uvs,
         &dedup_holes,
         &unique_positions,
+        weld_tol,
     );
 
     // 5b. Consistent orientation: flood-fill so adjacent faces agree across every
@@ -1437,13 +1669,30 @@ pub fn heal_mesh_with_tol(
     )
 }
 
-/// Drop faces whose area is below [`MIN_FACE_AREA_SQ`].
+/// Drop degenerate sliver faces: those whose effective height (relative to
+/// their longest edge) is at or below `weld_tol`.
 ///
 /// Triangles from SketchUp can include collinear slivers (three points on a
 /// line, zero cross-product). The general polygon case is handled by testing
 /// the fan-triangulation area sum. Only triangles degenerate in this way in
 /// practice (SketchUp always emits triangles); the fan check is correct for
 /// all convex polygons.
+///
+/// The gate is on sliver HEIGHT, not raw area — a raw-area floor is
+/// dimensionally wrong (the fan sum is m⁴, a tolerance floor m²) and turns
+/// into a shape-blind size cull at f32-scale tolerances, dropping well-formed
+/// small triangles. A face is a sliver when its total fan area `A` satisfies
+/// `2A ≤ longest_edge · weld_tol`, i.e. its effective height
+/// `2A / longest_edge` is within the source's own coincidence precision
+/// (`weld_tol`, the native `tol::POINT_MERGE` for f64 sources): every point
+/// of the face is within weld-noise of its longest edge's line, degenerate at
+/// that source's precision regardless of how long the face is.
+///
+/// This is **boundary normalization** at the import seam: zero-area sliver
+/// triangles from SketchUp T-junction collinear vertices are foreign input
+/// artefacts, not kernel invariant violations. Dropping them here is safe and
+/// explicitly documented (DEVELOPMENT.md rule 4 applies to kernel operations;
+/// this is pre-kernel filtering).
 ///
 /// This runs AFTER welding so positions are already in their final (potentially
 /// meter-scale) coordinates. Holes are carried parallel to faces; they are
@@ -1454,6 +1703,7 @@ fn drop_zero_area_faces(
     face_corner_uvs: &[Vec<[f64; 2]>],
     face_holes: &[Vec<Vec<usize>>],
     positions: &[Point3],
+    weld_tol: f64,
 ) -> FilteredFaces {
     let mut out_faces = Vec::new();
     let mut out_mats = Vec::new();
@@ -1476,25 +1726,34 @@ fn drop_zero_area_faces(
         if face.len() < 3 {
             continue; // already filtered by remap_faces, but be safe
         }
-        // Fan-triangulate from face[0] and accumulate cross-product magnitudes squared.
+        // Fan-triangulate from face[0] and accumulate cross-product
+        // magnitudes: Σ|cross| = Σ 2·triangle_area = 2·A (total fan area).
         let p0 = positions[face[0]];
-        let mut area_sq_sum = 0.0_f64;
+        let mut area2 = 0.0_f64; // 2 × total fan area
         for i in 1..(face.len() - 1) {
             let p1 = positions[face[i]];
             let p2 = positions[face[i + 1]];
             let v1 = p1 - p0;
             let v2 = p2 - p0;
-            let cross = v1.cross(v2);
-            // |cross|² = (2·triangle_area)² ; using this avoids a sqrt
-            area_sq_sum += cross.dot(cross);
+            area2 += v1.cross(v2).length();
         }
-        if area_sq_sum > MIN_FACE_AREA_SQ {
+        // Longest outer-loop edge (squared — compared squared to avoid the
+        // sqrt): the base the effective height is measured against.
+        let m = face.len();
+        let mut longest_edge_sq = 0.0_f64;
+        for k in 0..m {
+            let e = positions[face[(k + 1) % m]] - positions[face[k]];
+            longest_edge_sq = longest_edge_sq.max(e.length_squared());
+        }
+        // Keep iff effective height 2A/longest_edge exceeds weld_tol,
+        // i.e. (2A)² > longest_edge² · weld_tol².
+        if area2 * area2 > longest_edge_sq * weld_tol * weld_tol {
             out_faces.push(face.clone());
             out_mats.push(mat);
             out_uvs.push(corner_uvs.clone());
             out_holes.push(holes.clone());
         }
-        // Faces with area_sq_sum ≤ MIN_FACE_AREA_SQ are collinear slivers;
+        // Faces at or below the height gate are collinear slivers;
         // drop silently (import boundary normalization, not silent repair).
     }
 
@@ -1667,7 +1926,7 @@ mod tests {
 
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
         let (out_faces, out_mats, out_uvs, _) =
-            split_t_junctions(&faces, &mats, &uvs, &holes, &positions);
+            split_t_junctions(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE);
 
         // Vertex 4 spliced into the quad's first edge; the triangle is untouched.
         assert_eq!(
@@ -1720,8 +1979,9 @@ mod tests {
         ];
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 3];
 
-        let grid = split_t_junctions(&faces, &mats, &uvs, &holes, &positions);
-        let reference = split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions);
+        let grid = split_t_junctions(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE);
+        let reference =
+            split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE);
         assert_eq!(grid, reference, "grid path must equal the full scan");
         assert_eq!(
             grid.0[0],
@@ -1784,8 +2044,9 @@ mod tests {
             .collect();
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); faces.len()];
 
-        let grid = split_t_junctions(&faces, &mats, &uvs, &holes, &positions);
-        let reference = split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions);
+        let grid = split_t_junctions(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE);
+        let reference =
+            split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE);
         assert_eq!(grid, reference, "grid path must equal the full scan");
         assert_eq!(
             grid.0[0],
@@ -1814,8 +2075,9 @@ mod tests {
         let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(), Vec::new()];
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
 
-        let (f1, m1, u1, h1) = split_t_junctions(&faces, &mats, &uvs, &holes, &positions);
-        let (f2, m2, _, _) = split_t_junctions(&f1, &m1, &u1, &h1, &positions);
+        let (f1, m1, u1, h1) =
+            split_t_junctions(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE);
+        let (f2, m2, _, _) = split_t_junctions(&f1, &m1, &u1, &h1, &positions, tol::POINT_MERGE);
         assert_eq!(f1, f2, "second pass must change nothing");
         assert_eq!(m1, m2);
     }
@@ -2075,11 +2337,21 @@ mod tests {
     fn point_on_open_segment_excludes_endpoints() {
         let a = Point3::new(0.0, 0.0, 0.0);
         let b = Point3::new(1.0, 0.0, 0.0);
-        assert!(point_on_open_segment(Point3::new(0.5, 0.0, 0.0), a, b).is_some());
-        assert!(point_on_open_segment(a, a, b).is_none(), "endpoint a");
-        assert!(point_on_open_segment(b, a, b).is_none(), "endpoint b");
+        assert!(
+            point_on_open_segment(Point3::new(0.5, 0.0, 0.0), a, b, tol::POINT_MERGE).is_some()
+        );
+        assert!(
+            point_on_open_segment(a, a, b, tol::POINT_MERGE).is_none(),
+            "endpoint a"
+        );
+        assert!(
+            point_on_open_segment(b, a, b, tol::POINT_MERGE).is_none(),
+            "endpoint b"
+        );
         // Off the segment (perpendicular distance too large).
-        assert!(point_on_open_segment(Point3::new(0.5, 0.5, 0.0), a, b).is_none());
+        assert!(
+            point_on_open_segment(Point3::new(0.5, 0.5, 0.0), a, b, tol::POINT_MERGE).is_none()
+        );
     }
 
     /// Y-up → Z-up transform: point (0,1,0) in Y-up lands at (0,0,1) in Z-up.
@@ -2099,6 +2371,402 @@ mod tests {
         let p = tf.apply_point(Point3::new(100.0, 0.0, 0.0));
         // unit_meter is f32 (0.01f32); f32→f64 precision loss is ~1e-8.
         assert!((p.x - 1.0).abs() < 1e-6, "100 cm → 1 m: x={}", p.x);
+    }
+
+    /// Foreign input with face/hole vertex indices outside the position
+    /// array must be dropped at the heal entry point, not panic the import
+    /// (a crafted glTF index buffer reaches `heal_mesh` unvalidated).
+    #[test]
+    fn heal_mesh_drops_out_of_range_face_indices() {
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        // Outer loop references vertex 99 (>= positions.len()) → face dropped.
+        let faces = vec![vec![0usize, 1, 99]];
+        let mats = vec![0u32];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new()];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new()];
+        let (_, out_faces, _, _, _) = heal_mesh(
+            &positions,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+        );
+        assert!(out_faces.is_empty(), "out-of-range face dropped, no panic");
+
+        // A hole loop with an out-of-range index is dropped; its face is kept.
+        let faces = vec![vec![0usize, 1, 2]];
+        let holes = vec![vec![vec![0usize, 1, 99]]];
+        let (_, out_faces, _, _, out_holes) = heal_mesh(
+            &positions,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+        );
+        assert_eq!(out_faces.len(), 1, "face with a garbage hole is kept");
+        assert!(out_holes[0].is_empty(), "the garbage hole is dropped");
+    }
+
+    /// A face's own vertex must never be spliced into its own loop: a
+    /// weakly-simple polygon (notch apex E touching the interior of its own
+    /// edge (A,B)) would otherwise come out with a repeated index —
+    /// `[0, 4, 1, 2, 3, 4, 5, 6]` — which `from_polygons` rejects as
+    /// `DegenerateFace`, turning valid input into a skipped face.
+    #[test]
+    fn t_junction_never_splices_a_faces_own_vertex() {
+        // Rectangle with a triangular notch cut from the top; the notch apex
+        // E = index 4 touches the bottom edge (A,B) at its interior.
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),   // 0 A
+            Point3::new(10.0, 0.0, 0.0),  // 1 B
+            Point3::new(10.0, 10.0, 0.0), // 2 C
+            Point3::new(6.0, 10.0, 0.0),  // 3 D
+            Point3::new(5.0, 0.0, 0.0),   // 4 E — on edge (A,B)
+            Point3::new(4.0, 10.0, 0.0),  // 5 F
+            Point3::new(0.0, 10.0, 0.0),  // 6 G
+        ];
+        let faces = vec![vec![0usize, 1, 2, 3, 4, 5, 6]];
+        let mats = vec![0u32];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new()];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new()];
+        let (_, out_faces, _, _, _) = heal_mesh(
+            &positions,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+        );
+        for face in &out_faces {
+            let mut seen = std::collections::BTreeSet::new();
+            assert!(
+                face.iter().all(|v| seen.insert(*v)),
+                "face repeats a vertex index: {face:?}"
+            );
+        }
+    }
+
+    /// The T-junction on-segment test must scale with the caller's
+    /// `weld_tol`: an f32-quantised (glTF) source leaves a genuine T-vertex
+    /// microns off the exact edge line, far outside the native 1 nm gate but
+    /// well inside the scale-appropriate weld tolerance.
+    #[test]
+    fn t_junction_tolerance_scales_with_weld_tol() {
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),   // 0
+            Point3::new(20.0, 0.0, 0.0),  // 1
+            Point3::new(20.0, 10.0, 0.0), // 2
+            Point3::new(0.0, 10.0, 0.0),  // 3
+            // 2 µm off edge (0,1) — f32 noise at this scale.
+            Point3::new(10.0, 2e-6, 0.0), // 4
+            Point3::new(10.0, 5.0, 1.0),  // 5
+            Point3::new(11.0, 5.0, 1.0),  // 6
+        ];
+        // The distant triangle makes vertex 4 a used (candidate) vertex.
+        let faces = vec![vec![0usize, 1, 2, 3], vec![4usize, 5, 6]];
+        let mats = vec![0u32, 1u32];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(), Vec::new()];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
+
+        // At a 10 µm weld tolerance the T-vertex must be spliced in.
+        let (_, out_faces, _, _, _) = heal_mesh_with_tol(
+            &positions,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+            1e-5,
+            tol::PLANE_DIST,
+        );
+        assert_eq!(
+            out_faces[0].len(),
+            5,
+            "T-vertex 2 µm off the edge is spliced at weld_tol=1e-5, got {:?}",
+            out_faces[0]
+        );
+
+        // At the native 1 nm tolerance it must NOT be (2 µm is a real gap).
+        let (_, out_faces, _, _, _) = heal_mesh(
+            &positions,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+        );
+        assert_eq!(
+            out_faces[0].len(),
+            4,
+            "native tolerance leaves the off-edge vertex alone"
+        );
+    }
+
+    /// The zero-area sliver filter must scale with the caller's `weld_tol`:
+    /// a collinear sliver whose height is f32 quantization noise (1 µm) is
+    /// zero-area at glTF precision, but sits far above the native
+    /// `POINT_MERGE²` floor.
+    #[test]
+    fn sliver_filter_scales_with_weld_tol() {
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.5, 1e-6, 0.0), // 1 µm off the base line
+        ];
+        let faces = vec![vec![0usize, 1, 2]];
+        let mats = vec![0u32];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new()];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new()];
+
+        let (_, coarse_faces, _, _, _) = heal_mesh_with_tol(
+            &positions,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+            1e-5,
+            tol::PLANE_DIST,
+        );
+        assert!(
+            coarse_faces.is_empty(),
+            "1 µm-high sliver is dropped at weld_tol=1e-5"
+        );
+
+        let (_, native_faces, _, _, _) = heal_mesh(
+            &positions,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+        );
+        assert_eq!(
+            native_faces.len(),
+            1,
+            "at native precision the same triangle is real geometry"
+        );
+    }
+
+    /// The sliver filter gates on effective HEIGHT (2·area / longest edge),
+    /// not raw area: a raw-area floor of `weld_tol²` is dimensionally wrong
+    /// (area² is m⁴, the floor m²) and becomes a shape-blind size cull at
+    /// glTF tolerances — a well-formed 9 mm right triangle must survive a
+    /// 0.1 mm weld tolerance, while a genuine weld-scale-height sliver with
+    /// long edges must still be dropped.
+    #[test]
+    fn sliver_filter_gates_on_height_not_size() {
+        let mats = vec![0u32];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new()];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new()];
+
+        // Well-formed right triangle, 9 mm legs: keep at weld_tol = 1e-4.
+        let small = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(9e-3, 0.0, 0.0),
+            Point3::new(0.0, 9e-3, 0.0),
+        ];
+        let faces = vec![vec![0usize, 1, 2]];
+        let (_, kept, _, _, _) = heal_mesh_with_tol(
+            &small,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+            1e-4,
+            tol::PLANE_DIST,
+        );
+        assert_eq!(
+            kept.len(),
+            1,
+            "a well-formed 9 mm triangle is real geometry at weld_tol=1e-4"
+        );
+
+        // Genuine sliver: 1 m base, 50 µm height — below the 100 µm weld
+        // tolerance, so it is quantization noise regardless of its length.
+        let sliver = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.5, 5e-5, 0.0),
+        ];
+        let (_, dropped, _, _, _) = heal_mesh_with_tol(
+            &sliver,
+            &faces,
+            &mats,
+            &uvs,
+            &holes,
+            &Transform::IDENTITY,
+            1e-4,
+            tol::PLANE_DIST,
+        );
+        assert!(
+            dropped.is_empty(),
+            "a 50 µm-high sliver is noise at weld_tol=1e-4, whatever its length"
+        );
+    }
+
+    /// A closed inward-wound shell nested INSIDE a closed outward shell is a
+    /// hollow-solid cavity — the kernel's own convention (boolean subtraction
+    /// emits cavity walls facing into the removed volume). It must NOT be
+    /// "corrected" to outward; only free-standing inside-out shells flip.
+    #[test]
+    fn orient_outward_preserves_enclosed_cavity() {
+        // Outer 2×2×2 cube (0..2) wound outward; inner 1×1×1 cube (0.5..1.5)
+        // wound inward (a cavity).
+        let mut positions: Vec<Point3> = cube_positions()
+            .iter()
+            .map(|p| Point3::new(p.x * 2.0, p.y * 2.0, p.z * 2.0))
+            .collect();
+        positions.extend(
+            cube_positions()
+                .iter()
+                .map(|p| Point3::new(p.x + 0.5, p.y + 0.5, p.z + 0.5)),
+        );
+        let outward = |off: usize| -> Vec<Vec<usize>> {
+            vec![
+                vec![off, off + 3, off + 2, off + 1],
+                vec![off + 4, off + 5, off + 6, off + 7],
+                vec![off, off + 1, off + 5, off + 4],
+                vec![off + 1, off + 2, off + 6, off + 5],
+                vec![off + 2, off + 3, off + 7, off + 6],
+                vec![off + 3, off, off + 4, off + 7],
+            ]
+        };
+        let mut faces = outward(0);
+        faces.extend(
+            outward(8)
+                .iter()
+                .map(|f| f.iter().rev().copied().collect::<Vec<_>>()),
+        );
+        assert!(
+            signed_volume6(&faces[6..], &positions) < 0.0,
+            "cavity setup"
+        );
+
+        let mats = vec![0u32; 12];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 12];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 12];
+        let (out, _, _, _) = orient_outward(&faces, &mats, &uvs, &holes, &positions);
+        assert!(
+            signed_volume6(&out[..6], &positions) > 0.0,
+            "outer shell stays outward"
+        );
+        assert!(
+            signed_volume6(&out[6..], &positions) < 0.0,
+            "enclosed cavity must keep its inward winding"
+        );
+    }
+
+    /// Two disjoint closed shells in one raw mesh must each get their own
+    /// outward-orientation decision: a global signed-volume sum lets the
+    /// larger correct shell mask the smaller inside-out one (or a dominant
+    /// inverted shell wrongly flip a correct one).
+    #[test]
+    fn orient_outward_orients_each_disjoint_shell() {
+        // Shell A: 2×2×2 cube at the origin (volume 8). Shell B: unit cube
+        // at (5,0,0) (volume 1).
+        let mut positions: Vec<Point3> = cube_positions()
+            .iter()
+            .map(|p| Point3::new(p.x * 2.0, p.y * 2.0, p.z * 2.0))
+            .collect();
+        positions.extend(
+            cube_positions()
+                .iter()
+                .map(|p| Point3::new(p.x + 5.0, p.y, p.z)),
+        );
+        let outward = |off: usize| -> Vec<Vec<usize>> {
+            vec![
+                vec![off, off + 3, off + 2, off + 1],
+                vec![off + 4, off + 5, off + 6, off + 7],
+                vec![off, off + 1, off + 5, off + 4],
+                vec![off + 1, off + 2, off + 6, off + 5],
+                vec![off + 2, off + 3, off + 7, off + 6],
+                vec![off + 3, off, off + 4, off + 7],
+            ]
+        };
+        let invert = |faces: &[Vec<usize>]| -> Vec<Vec<usize>> {
+            faces
+                .iter()
+                .map(|f| f.iter().rev().copied().collect())
+                .collect()
+        };
+        let mats = vec![0u32; 12];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 12];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 12];
+
+        // Case 1: big shell correct, small shell inverted (combined volume
+        // positive — the global gate would skip the needed flip).
+        let mut faces = outward(0);
+        faces.extend(invert(&outward(8)));
+        let (out, _, _, _) = orient_outward(&faces, &mats, &uvs, &holes, &positions);
+        assert!(
+            signed_volume6(&out[..6], &positions) > 0.0,
+            "correct big shell stays outward"
+        );
+        assert!(
+            signed_volume6(&out[6..], &positions) > 0.0,
+            "inverted small shell is flipped outward"
+        );
+
+        // Case 2: big shell inverted, small shell correct (combined volume
+        // negative — the global gate would flip BOTH, corrupting B).
+        let mut faces = invert(&outward(0));
+        faces.extend(outward(8));
+        let (out, _, _, _) = orient_outward(&faces, &mats, &uvs, &holes, &positions);
+        assert!(
+            signed_volume6(&out[..6], &positions) > 0.0,
+            "inverted big shell is flipped outward"
+        );
+        assert!(
+            signed_volume6(&out[6..], &positions) > 0.0,
+            "correct small shell is left alone"
+        );
+    }
+
+    /// Signed volume must be computed relative to a local reference point:
+    /// summing tetrahedra from the world origin loses the whole signal to
+    /// cancellation for a shell far from the origin (offset³·ε ≫ extent³),
+    /// flipping the orientation decision.
+    #[test]
+    fn orient_outward_is_exact_far_from_origin() {
+        // Unit cube at (1e8, 1e8, 1e8): with origin-based tetrahedra the
+        // fan-sum for the INVERTED cube comes out ≈ +2e8 (true value −6),
+        // so the flip is skipped.
+        let positions: Vec<Point3> = cube_positions()
+            .iter()
+            .map(|p| Point3::new(p.x + 1e8, p.y + 1e8, p.z + 1e8))
+            .collect();
+        let outward = vec![
+            vec![0usize, 3, 2, 1],
+            vec![4usize, 5, 6, 7],
+            vec![0usize, 1, 5, 4],
+            vec![1usize, 2, 6, 5],
+            vec![2usize, 3, 7, 6],
+            vec![3usize, 0, 4, 7],
+        ];
+        let inverted: Vec<Vec<usize>> = outward
+            .iter()
+            .map(|f| f.iter().rev().copied().collect())
+            .collect();
+        let mats = vec![0u32; 6];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); 6];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); 6];
+
+        let (flipped, _, _, _) = orient_outward(&inverted, &mats, &uvs, &holes, &positions);
+        assert_eq!(
+            flipped, outward,
+            "far-from-origin inside-out cube must still be flipped outward"
+        );
+
+        let (kept, _, _, _) = orient_outward(&outward, &mats, &uvs, &holes, &positions);
+        assert_eq!(kept, outward, "far-from-origin outward cube left as-is");
     }
 
     /// THE identity (property): the grid-accelerated [`split_t_junctions`]
@@ -2146,8 +2814,8 @@ mod tests {
                     .collect();
                 let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); faces.len()];
                 prop_assert_eq!(
-                    split_t_junctions(&faces, &mats, &uvs, &holes, &positions),
-                    split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions)
+                    split_t_junctions(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE),
+                    split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE)
                 );
             }
         );

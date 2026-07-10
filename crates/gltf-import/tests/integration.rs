@@ -521,3 +521,202 @@ fn non_manifold_fin_splits_into_open_shells_with_warning() {
             .collect::<Vec<_>>()
     );
 }
+
+// ── Malformed index buffers must not panic the import ────────────────────────
+
+/// A cube whose index buffer contains one out-of-range vertex index (999 with
+/// only 8 positions). The glTF crate's JSON validation checks accessor/buffer
+/// *references*, never buffer *values*, so this reaches the importer — which
+/// must skip the garbage triangle instead of panicking in the heal pass.
+fn bad_index_cube_gltf() -> Vec<u8> {
+    let corners: [[f32; 3]; 8] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ];
+    let mut tris: [[u32; 3]; 12] = [
+        [0, 1, 2],
+        [0, 2, 3],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [3, 2, 6],
+        [3, 6, 7],
+        [0, 3, 7],
+        [0, 7, 4],
+        [1, 2, 6],
+        [1, 6, 5],
+    ];
+    tris[11][2] = 999; // out-of-range vertex index
+
+    let mut buf = Vec::new();
+    for c in &corners {
+        for v in c {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    let pos_len = buf.len();
+    for t in &tris {
+        for i in t {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+    }
+    let idx_len = buf.len() - pos_len;
+    let total = buf.len();
+
+    let b64 = base64_encode(&buf);
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0] }}],
+  "nodes": [{{ "mesh": 0, "name": "BadCube" }}],
+  "meshes": [{{ "name": "BadCube", "primitives": [
+      {{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "mode": 4 }}
+  ]}}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 8, "type": "VEC3", "min": [0,0,0], "max": [1,1,1] }},
+    {{ "bufferView": 1, "componentType": 5125, "count": 36, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": {pos_len}, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {pos_len}, "byteLength": {idx_len}, "target": 34963 }}
+  ],
+  "buffers": [{{ "byteLength": {total}, "uri": "data:application/octet-stream;base64,{b64}" }}]
+}}"#
+    )
+    .into_bytes()
+}
+
+/// An out-of-range index-buffer value must not panic the import: the garbage
+/// triangle is skipped and the rest of the mesh still imports (as an honest
+/// open shell, one triangle short of closing).
+#[test]
+fn out_of_range_index_buffer_does_not_panic() {
+    let bytes = bad_index_cube_gltf();
+    let GltfScene {
+        scene,
+        missing,
+        warnings,
+    } = gltf_import::import(&bytes).expect("import must not panic on a bad index buffer");
+
+    // The skipped garbage triangle is reported loudly (rule 4), once per
+    // affected mesh.
+    assert_eq!(
+        warnings,
+        vec![
+            "'BadCube' index buffer references vertices past the end of its \
+             vertex array; 1 triangle skipped"
+                .to_string()
+        ],
+        "the skipped out-of-range triangle is reported loudly"
+    );
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+    assert_eq!(report.objects_created, 1, "the rest of the cube imports");
+    assert_eq!(report.leaky, 1, "one triangle short of closing → leaky");
+}
+
+// ── Weld tolerance must follow the node transform ────────────────────────────
+
+/// A per-face-vertex unit cube (36 vertices, deterministic sub-µm x jitter)
+/// under a node `scale` — the shape a model authored in local units and
+/// scaled to meters takes. The weld tolerance must be computed at the
+/// post-bake (world) scale: computed from the raw local positions it is 100×
+/// too tight and every seam stays split.
+fn scaled_perface_cube_gltf(node_scale: f32, jitter: f32) -> Vec<u8> {
+    let c: [[f32; 3]; 8] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ];
+    let tris: [[usize; 3]; 12] = [
+        [0, 1, 2],
+        [0, 2, 3],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [3, 2, 6],
+        [3, 6, 7],
+        [0, 3, 7],
+        [0, 7, 4],
+        [1, 2, 6],
+        [1, 6, 5],
+    ];
+
+    let mut verts: Vec<[f32; 3]> = Vec::new();
+    for (ti, t) in tris.iter().enumerate() {
+        for (ci, &corner) in t.iter().enumerate() {
+            let j = (((ti * 3 + ci) % 5) as f32 - 2.0) * jitter; // [-2j, 2j]
+            verts.push([c[corner][0] + j, c[corner][1], c[corner][2]]);
+        }
+    }
+
+    let mut buf = Vec::new();
+    for v in &verts {
+        for x in v {
+            buf.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    let pos_len = buf.len();
+    for i in 0..verts.len() as u32 {
+        buf.extend_from_slice(&i.to_le_bytes());
+    }
+    let idx_len = buf.len() - pos_len;
+    let total = buf.len();
+    let count = verts.len();
+    let hi = 1.0 + 2.0 * jitter;
+
+    let b64 = base64_encode(&buf);
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0] }}],
+  "nodes": [{{ "mesh": 0, "name": "ScaledCube", "scale": [{node_scale}, {node_scale}, {node_scale}] }}],
+  "meshes": [{{ "primitives": [{{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "mode": 4 }}] }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": {count}, "type": "VEC3", "min": [-1,0,0], "max": [{hi},1,1] }},
+    {{ "bufferView": 1, "componentType": 5125, "count": {count}, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": {pos_len}, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {pos_len}, "byteLength": {idx_len}, "target": 34963 }}
+  ],
+  "buffers": [{{ "byteLength": {total}, "uri": "data:application/octet-stream;base64,{b64}" }}]
+}}"#
+    )
+    .into_bytes()
+}
+
+#[test]
+fn scaled_node_cube_welds_to_a_watertight_solid() {
+    // Local unit cube under node scale=100 with ~0.24 µm local seams
+    // (~24 µm world). A weld tolerance computed from the LOCAL positions
+    // (max_abs≈1 → 1 µm) misses every world-scale seam; computed post-bake
+    // (max_abs≈100 → 100 µm) it welds them all.
+    let bytes = scaled_perface_cube_gltf(100.0, 2.4e-7);
+    let GltfScene { scene, missing, .. } = gltf_import::import(&bytes).expect("import scaled cube");
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+    assert_eq!(report.objects_created, 1, "one object");
+    assert_eq!(
+        report.watertight, 1,
+        "scaled-node cube must weld watertight (tolerance follows the bake)"
+    );
+    assert_eq!(report.leaky, 0, "no leaky shell");
+}

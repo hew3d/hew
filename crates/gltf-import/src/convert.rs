@@ -34,6 +34,9 @@ struct RawMesh {
     faces: Vec<Vec<usize>>,
     face_materials: Vec<u32>,
     face_corner_uvs: Vec<Vec<[f64; 2]>>,
+    /// Triangles skipped because their index-buffer values exceeded the
+    /// primitive's vertex count (corrupt input); reported loudly per mesh.
+    skipped_bad_index_tris: usize,
 }
 
 /// Shared context for the node walk.
@@ -69,6 +72,7 @@ pub fn build_scene(
             continue;
         }
         let raw = extract_raw_mesh(&mesh, buffers, &mat_table.remap);
+        warnings.note_skipped_indices(mesh.index(), &mesh_name(&mesh), raw.skipped_bad_index_tris);
         // Definition geometry stays mesh-local (IDENTITY bake); the per-instance
         // pose carries the node world transform + Y-up→Z-up. A non-manifold
         // mesh splits into several open-shell recipes under this ONE
@@ -103,8 +107,16 @@ pub fn build_scene(
         }
     }
 
-    let mut warnings = warnings.messages;
+    let SplitWarnings {
+        messages,
+        index_messages,
+        ..
+    } = warnings;
+    let mut warnings = messages;
     cap_split_warnings(&mut warnings);
+    // Bad-index reports ride after the (capped) split notices: one line per
+    // affected mesh, never absorbed into the non-manifold aggregate.
+    warnings.extend(index_messages);
     Ok((
         ImportScene {
             materials: mat_table.materials,
@@ -140,6 +152,11 @@ impl Ctx<'_> {
                 })
             } else {
                 let raw = extract_raw_mesh(&mesh, self.buffers, self.mat_remap);
+                warnings.note_skipped_indices(
+                    mesh.index(),
+                    &mesh_name(&mesh),
+                    raw.skipped_bad_index_tris,
+                );
                 let name = node_name(node).unwrap_or_else(|| mesh_name(&mesh));
                 let mut recipes = build_recipes(
                     &raw,
@@ -213,6 +230,33 @@ struct SplitWarnings {
     /// glTF mesh indices that have already produced a split warning.
     warned_meshes: HashSet<usize>,
     messages: Vec<String>,
+    /// glTF mesh indices that have already produced a bad-index warning
+    /// (a non-def mesh is re-extracted once per referencing node).
+    warned_bad_indices: HashSet<usize>,
+    /// Bad-index warnings, kept apart from `messages` so the non-manifold
+    /// aggregation cap never truncates or mislabels them.
+    index_messages: Vec<String>,
+}
+
+impl SplitWarnings {
+    /// Report triangles skipped for out-of-range index-buffer values (rule 4:
+    /// dropped foreign garbage is reported loudly), once per glTF mesh.
+    fn note_skipped_indices(&mut self, mesh_index: usize, name: &str, skipped: usize) {
+        if skipped == 0 || !self.warned_bad_indices.insert(mesh_index) {
+            return;
+        }
+        self.index_messages.push(format!(
+            "'{}' index buffer references vertices past the end of its \
+             vertex array; {} triangle{} skipped",
+            if name.is_empty() {
+                "unnamed mesh"
+            } else {
+                name
+            },
+            skipped,
+            if skipped == 1 { "" } else { "s" },
+        ));
+    }
 }
 
 fn cap_split_warnings(warnings: &mut Vec<String>) {
@@ -243,14 +287,22 @@ fn build_recipes(
     warnings: &mut SplitWarnings,
 ) -> Vec<MeshRecipe> {
     let no_holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); raw.faces.len()];
+    // Bake the node/world transform BEFORE choosing the weld tolerance: the
+    // heal pass welds post-bake coordinates, so a tolerance computed from the
+    // raw (mesh-local) positions is wrong by the node's scale factor — a
+    // scale=100 node would weld world-scale f32 gaps with a local-scale
+    // tolerance and leave every seam split. Baking here once (heal then gets
+    // the identity) keeps the tolerance and the welded coordinates in the
+    // same space.
+    let baked: Vec<Point3> = raw.positions.iter().map(|&p| bake.apply_point(p)).collect();
     let (positions, faces, face_materials, healed_uvs, face_holes) = heal_mesh_with_tol(
-        &raw.positions,
+        &baked,
         &raw.faces,
         &raw.face_materials,
         &raw.face_corner_uvs,
         &no_holes,
-        bake,
-        gltf_weld_tol(&raw.positions),
+        &Transform::IDENTITY,
+        gltf_weld_tol(&baked),
         // Merge coplanar triangles at the kernel's import planarity (1 mm), not
         // the 1 nm native tolerance — f32 flat surfaces sit microns off-plane,
         // so the strict gate would leave every wall/floor as triangle soup
@@ -351,6 +403,11 @@ fn recipe_from_arrays(
 /// native 1 nm `POINT_MERGE` is far too tight and would leave every shared edge
 /// split (a "leaky" shell), so we scale the tolerance to the mesh's coordinate
 /// magnitude (≈4× the worst-case f32 gap), floored for tiny meshes.
+///
+/// `positions` must be the POST-BAKE (world-space) coordinates the weld will
+/// actually run on: welding happens after the node transform is applied, so a
+/// tolerance derived from pre-transform locals would be off by the node's
+/// scale factor.
 fn gltf_weld_tol(positions: &[Point3]) -> f64 {
     let max_abs = positions
         .iter()
@@ -396,6 +453,15 @@ fn extract_raw_mesh(mesh: &Mesh, buffers: &[Option<Vec<u8>>], mat_remap: &[u32])
 
         for tri in indices.chunks_exact(3) {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            // An index buffer can carry values past the primitive's POSITION
+            // count (corrupt or crafted input — the gltf crate validates JSON
+            // references, never buffer values). Such a triangle is foreign
+            // garbage: skip it, mirroring dae-import's per-index bound guards
+            // and mesh-heal's own entry validation.
+            if a >= count || b >= count || c >= count {
+                rm.skipped_bad_index_tris += 1;
+                continue;
+            }
             rm.faces.push(vec![base + a, base + b, base + c]);
             rm.face_materials.push(mat);
             rm.face_corner_uvs.push(match &uvs {

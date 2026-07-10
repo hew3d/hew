@@ -3386,8 +3386,12 @@ impl Document {
                     NodeId::Instance(_) => DocumentError::UnknownInstance,
                 });
             }
-            // Nesting a component inside a definition is deferred.
-            if matches!(m, NodeId::Instance(_)) {
+            // Nesting a component inside a definition is deferred — and that
+            // covers instances anywhere in a member's subtree, not just
+            // direct ones: consuming a group while an instance inside it
+            // still names the group as its parent would strand the
+            // instance's parent link.
+            if matches!(m, NodeId::Instance(_)) || !self.leaf_instances_under(m).is_empty() {
                 return Err(DocumentError::NestedComponentUnsupported);
             }
         }
@@ -3951,6 +3955,26 @@ impl Document {
 
     /// Reverses the most recent document action (LIFO across creations and
     /// per-Object ops alike) and returns what it touched.
+    /// The kernel op the next [`Document::undo`] would reverse, when the
+    /// pending document action is a per-object op (`None` otherwise or when
+    /// there is nothing to undo). Mirrors [`History::peek_undo`].
+    pub fn peek_undo_object_op(&self) -> Option<&KernelOp> {
+        match self.undo.last()? {
+            DocAction::ObjectOp { object } => self.objects.get(*object)?.history.peek_undo(),
+            _ => None,
+        }
+    }
+
+    /// The kernel op the next [`Document::redo`] would replay, when the
+    /// pending document action is a per-object op. Mirrors
+    /// [`History::peek_redo`].
+    pub fn peek_redo_object_op(&self) -> Option<&KernelOp> {
+        match self.redo.last()? {
+            DocAction::ObjectOp { object } => self.objects.get(*object)?.history.peek_redo(),
+            _ => None,
+        }
+    }
+
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.undo.pop().ok_or(DocumentError::NothingToUndo)?;
         let change = match &action {
@@ -3983,7 +4007,13 @@ impl Document {
             }
             &DocAction::ObjectOp { object } => {
                 let rec = &mut self.objects[object];
-                rec.history.undo(&mut rec.object).map_err(map_history_err)?;
+                // The object-level History keeps its entry when a dispatch is
+                // refused; push the document action back too, or the two logs
+                // desync and the next undo panics.
+                if let Err(e) = rec.history.undo(&mut rec.object) {
+                    self.undo.push(action);
+                    return Err(map_history_err(e));
+                }
                 DocChange {
                     objects_touched: vec![object],
                     sketches_touched: Vec::new(),
@@ -4497,7 +4527,11 @@ impl Document {
             }
             &DocAction::ObjectOp { object } => {
                 let rec = &mut self.objects[object];
-                rec.history.redo(&mut rec.object).map_err(map_history_err)?;
+                // Mirror undo: keep the two logs aligned on a refused replay.
+                if let Err(e) = rec.history.redo(&mut rec.object) {
+                    self.redo.push(action);
+                    return Err(map_history_err(e));
+                }
                 DocChange {
                     objects_touched: vec![object],
                     sketches_touched: Vec::new(),

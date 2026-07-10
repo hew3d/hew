@@ -62,6 +62,20 @@ pub fn fit_uv_frame(positions: &[Point3], uvs: &[[f64; 2]]) -> Option<UvFrame> {
         return None;
     }
 
+    // Reject non-finite input outright: a single NaN corner poisons the
+    // normal-equation sums, and every residual computed from a NaN-carrying
+    // frame is itself NaN — which compares FALSE against the residual guard
+    // (IEEE-754), so the guard would silently pass a poisoned frame through.
+    if positions
+        .iter()
+        .any(|p| !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()))
+        || uvs
+            .iter()
+            .any(|uv| !(uv[0].is_finite() && uv[1].is_finite()))
+    {
+        return None;
+    }
+
     // ── Step 1: face-plane orthonormal basis ───────────────────────────────────
     let o = positions[0];
     let raw_normal = newell_normal(positions);
@@ -208,6 +222,13 @@ pub fn fit_uv_frame(positions: &[Point3], uvs: &[[f64; 2]]) -> Option<UvFrame> {
         let du = fitted[0] - uvs[i][0];
         let dv = fitted[1] - uvs[i][1];
         let r = (du * du + dv * dv).sqrt();
+        // A non-finite residual (numerical breakdown despite the input checks
+        // above, e.g. overflow to inf) must reject the frame. It cannot be
+        // left to the max/threshold comparisons: NaN compares false against
+        // both, so it would silently pass the guard.
+        if !r.is_finite() {
+            return None;
+        }
         if r > max_residual {
             max_residual = r;
         }
@@ -274,6 +295,45 @@ mod tests {
         let uvs: Vec<[f64; 2]> = vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]];
         let result = fit_uv_frame(&pts, &uvs);
         assert!(result.is_none(), "collinear corners must return None");
+    }
+
+    /// A non-finite UV (or position) must yield `None`, never a poisoned
+    /// frame: NaN residuals compare false against the residual guard, so
+    /// without an explicit finiteness check a NaN-carrying frame is
+    /// returned as `Some` and corrupts the stored material mapping.
+    #[test]
+    fn fit_rejects_non_finite_input() {
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        let good: Vec<[f64; 2]> = pts
+            .iter()
+            .map(|p| [2.0 * p.x + 0.5, 3.0 * p.y - 1.0])
+            .collect();
+
+        let mut nan_uv = good.clone();
+        nan_uv[2][0] = f64::NAN;
+        assert!(
+            fit_uv_frame(&pts, &nan_uv).is_none(),
+            "NaN corner UV must be rejected"
+        );
+
+        let mut inf_uv = good.clone();
+        inf_uv[1][1] = f64::INFINITY;
+        assert!(
+            fit_uv_frame(&pts, &inf_uv).is_none(),
+            "infinite corner UV must be rejected"
+        );
+
+        let mut nan_pos = pts.clone();
+        nan_pos[1] = Point3::new(f64::NAN, 0.0, 0.0);
+        assert!(
+            fit_uv_frame(&nan_pos, &good).is_none(),
+            "NaN corner position must be rejected"
+        );
     }
 
     /// Frame on a tilted plane should also work.
