@@ -241,6 +241,10 @@ export default function App() {
   // (or since the last explicit Save, which also resets it). Avoids redundant
   // writes when the document hasn't changed between ticks.
   const dirtySinceAutosaveRef = useRef(false)
+  // The autosave write currently in flight (never rejects), or null before
+  // the first write. clearRecoverySnapshot awaits it so a discard's clear
+  // can't interleave with a write of the very snapshot being discarded.
+  const autosaveWriteRef = useRef<Promise<void> | null>(null)
   // Resolved once this window's menu-open-path listener is registered (or
   // registration failed) — the startup-handoff effect awaits it before
   // telling the shell this webview is ready for live open delivery. Created
@@ -342,9 +346,17 @@ export default function App() {
         path: typeof session.currentRef?.handle === 'string' ? session.currentRef.handle : null,
         savedAt: Date.now(),
       }
-      recoveryStoreRef.current.write(bytes, meta).then(() => {
-        dirtySinceAutosaveRef.current = false
+      // Keep the in-flight write observable so clearRecoverySnapshot can
+      // wait it out — the shell does not order recovery_write against
+      // recovery_clear, so a clear overlapping a write can leave the
+      // snapshot (or half of it) on disk. The stored promise never rejects.
+      const write = recoveryStoreRef.current.write(bytes, meta).then(() => {
+        // Only mark clean while this write is still the latest — a stale
+        // disarm could suppress the re-write that follows a superseding
+        // edit-plus-clear interleave.
+        if (autosaveWriteRef.current === write) dirtySinceAutosaveRef.current = false
       }).catch(() => { /* ignore — try again next tick */ })
+      autosaveWriteRef.current = write
     }, AUTOSAVE_INTERVAL_MS)
     return () => clearInterval(interval)
   }, [])
@@ -807,6 +819,33 @@ export default function App() {
     return window.confirm(message)
   }, [])
 
+  // Drop this window's autosave snapshot once its document has actually been
+  // discarded (replaced in place, or the window is closing) — a discarded
+  // document must not resurface in the next launch's recovery prompt. Called
+  // only AFTER the discard is irreversible, never at confirm time: a
+  // confirmed-then-cancelled Open leaves the dirty document (and its crash
+  // snapshot) untouched. Replace-in-place call sites additionally gate on
+  // the pre-replace dirty flag — replacing a clean document discards
+  // nothing, and clearing anyway could delete an Escape-deferred startup
+  // snapshot on the web's single, unprotected slot (desktop slots are
+  // claim-protected by the shell).
+  //
+  // Disarms the autosave tick first, then waits out any write already in
+  // flight — the shell does not order recovery_write against recovery_clear,
+  // so an overlapping clear could strand the discarded snapshot (or half of
+  // it) on disk. Also used after Save/Save As: the same ordering guarantee
+  // applies to clearing the snapshot of a just-saved document.
+  const clearRecoverySnapshot = useCallback(async (): Promise<void> => {
+    dirtySinceAutosaveRef.current = false
+    const inFlight = autosaveWriteRef.current
+    await inFlight
+    // A newer write while we awaited means the document changed under us
+    // (e.g. a first edit to the replacement document re-armed the tick) —
+    // the slot no longer holds the discarded document, so leave it alone.
+    if (autosaveWriteRef.current !== inFlight) return
+    await recoveryStoreRef.current.clear().catch(() => { /* best effort */ })
+  }, [])
+
   // ---------------------------------------------------------------- document lifecycle
 
   const newDocument = useCallback(async () => {
@@ -832,16 +871,22 @@ export default function App() {
     // reused rather than spawning a second empty one.
     const blank = blankBytesRef.current
     if (blank === null) return
-    if (applyLoadedBytes(blank)) setDocSession(afterOpen(null, Date.now()))
-  }, [confirmDiscard, applyLoadedBytes])
+    const discardsUnsaved = docSessionRef.current.dirty
+    if (applyLoadedBytes(blank)) {
+      setDocSession(afterOpen(null, Date.now()))
+      if (discardsUnsaved) void clearRecoverySnapshot()
+    }
+  }, [confirmDiscard, applyLoadedBytes, clearRecoverySnapshot])
 
   const openDocument = useCallback(async () => {
     if (!(await confirmDiscard())) return
     fileHostRef.current.open().then((result) => {
       if (result === null) return // user cancelled
+      const discardsUnsaved = docSessionRef.current.dirty
       const ok = applyLoadedBytes(result.bytes)
       if (!ok) return
       setDocSession(afterOpen(result.ref, Date.now()))
+      if (discardsUnsaved) void clearRecoverySnapshot()
       if (isTauri && typeof result.ref.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: result.ref.handle as string })
@@ -850,7 +895,7 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(`Open failed: ${String(err)}`)
     })
-  }, [confirmDiscard, applyLoadedBytes, handleToast])
+  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot])
 
   const importDocument = useCallback(async () => {
     const scene = sceneRef.current
@@ -909,8 +954,12 @@ export default function App() {
       // We must bail if the blank load fails (should never happen in practice).
       const blank = blankBytesRef.current
       if (blank === null) return
+      const discardsUnsaved = docSessionRef.current.dirty
       const blankOk = applyLoadedBytes(blank)
       if (!blankOk) return
+      // The previous document is gone as of the blank load above (even if
+      // the import below fails) — drop its autosave snapshot with it.
+      if (discardsUnsaved) void clearRecoverySnapshot()
 
       // Step 5: import into the now-empty document, dispatched by format.
       report = (
@@ -963,7 +1012,7 @@ export default function App() {
     const fmt = result!.kind === 'gltf' ? 'glTF' : result!.kind === 'skp' ? 'SKP' : 'DAE'
     LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
-  }, [confirmDiscard, handleToast, applyLoadedBytes])
+  }, [confirmDiscard, handleToast, applyLoadedBytes, clearRecoverySnapshot])
 
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
@@ -975,8 +1024,7 @@ export default function App() {
       setDocSession(afterSave(newRef, Date.now()))
       LogStore.log.info('app', `Saved: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
-      recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
-      dirtySinceAutosaveRef.current = false
+      void clearRecoverySnapshot()
       if (isTauri && typeof newRef.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: newRef.handle as string })
@@ -985,7 +1033,7 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(`Save failed: ${String(err)}`)
     })
-  }, [docSession.currentRef, handleToast])
+  }, [docSession.currentRef, handleToast, clearRecoverySnapshot])
 
   const saveAsDocument = useCallback(() => {
     const scene = sceneRef.current
@@ -1001,8 +1049,7 @@ export default function App() {
       setDocSession(afterSave(newRef, Date.now()))
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
-      recoveryStoreRef.current.clear().catch(() => { /* ignore */ })
-      dirtySinceAutosaveRef.current = false
+      void clearRecoverySnapshot()
       if (isTauri && typeof newRef.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: newRef.handle as string })
@@ -1011,7 +1058,7 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(`Save As failed: ${String(err)}`)
     })
-  }, [docSession.currentRef, docSession.importedName, handleToast])
+  }, [docSession.currentRef, docSession.importedName, handleToast, clearRecoverySnapshot])
 
   // ---------------------------------------------------------------- open by path (Tauri only — used by drag-drop, recents, and file association)
   // Reads the file at `path` via Tauri invoke, applies it, and sets session state.
@@ -1020,11 +1067,13 @@ export default function App() {
     const { invoke } = await import('@tauri-apps/api/core')
     const buf = await invoke<ArrayBuffer>('read_file', { path })
     const bytes = new Uint8Array(buf)
+    const discardsUnsaved = docSessionRef.current.dirty
     if (applyLoadedBytes(bytes)) {
       setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
+      if (discardsUnsaved) void clearRecoverySnapshot()
       invoke('push_recent', { path }).catch(() => { /* ignore */ })
     }
-  }, [confirmDiscard, applyLoadedBytes])
+  }, [confirmDiscard, applyLoadedBytes, clearRecoverySnapshot])
 
   // ---------------------------------------------------------------- Open Recent (in-app menu; Linux web menu,  port)
   // The recents list is owned by the Rust shell (recents.json). The native
@@ -1571,13 +1620,18 @@ export default function App() {
             { title: 'Unsaved Changes', kind: 'warning' },
           )
           if (!ok) return // keep the window open
+          // The user chose to discard — the close makes it irreversible, so
+          // drop this window's autosave snapshot before the webview (and its
+          // ability to invoke the shell) is destroyed.
+          await clearRecoverySnapshot()
         }
         // Force-close, bypassing onCloseRequested (no loop).
         await win.destroy()
       })
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore */ })
     return () => { cancelled = true; unlisten?.() }
-  }, []) // reads docSessionRef (always current) — no dep needed
+    // docSessionRef is always current; clearRecoverySnapshot has [] deps (stable).
+  }, [clearRecoverySnapshot])
 
   // ---------------------------------------------------------------- native drag-drop (Tauri only)
   // The OS delivers file drops to Tauri's webview event bus rather than the
@@ -1878,14 +1932,16 @@ export default function App() {
     if (file == null || !file.name.endsWith('.hew')) return
     if (!(await confirmDiscard())) return
     file.arrayBuffer().then((buf) => {
+      const discardsUnsaved = docSessionRef.current.dirty
       const ok = applyLoadedBytes(new Uint8Array(buf))
       if (ok) {
         setDocSession(afterOpen({ name: file.name, handle: null }, Date.now()))
+        if (discardsUnsaved) void clearRecoverySnapshot()
       }
     }).catch((err: unknown) => {
       handleToast(`Drop open failed: ${String(err)}`)
     })
-  }, [confirmDiscard, applyLoadedBytes, handleToast])
+  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot])
 
   // ── Hide/Show + Tags (must be declared BEFORE the early returns below so the
   // hook count is stable across the loading and loaded renders — Rules of Hooks).
