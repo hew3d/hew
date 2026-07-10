@@ -2480,6 +2480,7 @@ export default function App() {
               currentMaterialId={currentMaterialId}
               onSelectMaterial={setCurrentMaterialId}
               onDocumentChanged={handleDocumentChanged}
+              onRefreshViewport={() => viewportApi.current?.refreshScene()}
               selectedIds={selectedIds}
             />
           </TraySection>

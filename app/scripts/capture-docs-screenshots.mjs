@@ -189,6 +189,20 @@ async function shot(page, name, opts = {}) {
   }, CAM)
   await page.getByRole('button', { name: /materials/i }).click()
   await shot(page, 'materials-panel')
+
+  // Select Slate and drag its opacity down through the real slider, so the
+  // opacity screenshot shows genuine UI interaction, not a scripted value.
+  await page.getByTitle('Slate', { exact: true }).click()
+  await settle(page, 150)
+  const slider = page.getByRole('slider')
+  const sliderBox = await slider.boundingBox()
+  await page.mouse.move(sliderBox.x + sliderBox.width - 2, sliderBox.y + sliderBox.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(sliderBox.x + sliderBox.width * 0.65, sliderBox.y + sliderBox.height / 2, {
+    steps: 10,
+  })
+  await page.mouse.up()
+  await shot(page, 'materials-opacity')
   await page.close()
 }
 

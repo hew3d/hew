@@ -6,16 +6,22 @@
  *   - "Add color" — opens a color picker + name input → add_material()
  *   - "Add texture" — file input + world-size input → add_texture_material()
  *   - Textured swatches show a small thumbnail of the uploaded image.
+ *   - Opacity slider — adjusts the selected swatch's alpha (color or
+ *     texture alike) → set_material_alpha(). Live while dragging, but only
+ *     commits to the kernel (one undo step) on release.
  *
  * Props:
  *   `scene`        — the WASM scene (for material queries / mutations)
  *   `docRev`       — bumped by the parent on any document change
  *   `currentMaterialId` — currently selected material handle
  *   `onSelectMaterial`  — called when the user picks a different swatch
- *   `onDocumentChanged` — called after a material is added
+ *   `onDocumentChanged` — called after a material is added or changed
+ *   `onRefreshViewport` — called after an opacity commit to re-tessellate the
+ *     viewport (alpha isn't tracked by the doc-change touched lists, since
+ *     it's resolved live at render time rather than baked into geometry)
  */
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { nodeKindToNumber, type NodeRef } from './treeModel'
@@ -26,6 +32,7 @@ interface Props {
   currentMaterialId: bigint
   onSelectMaterial: (id: bigint) => void
   onDocumentChanged: () => void
+  onRefreshViewport: () => void
   /** Currently selected document nodes — used by "Fill selected object". */
   selectedIds?: NodeRef[]
 }
@@ -74,12 +81,24 @@ const BTN_STYLE: React.CSSProperties = {
   width: '100%',
 }
 
+/**
+ * Alpha (0–255) as a display percentage, clamped so only the exact extremes
+ * read as "0%"/"100%" — plain rounding would show e.g. alpha=254 as "100%",
+ * misleadingly implying fully opaque.
+ */
+function alphaToDisplayPercent(alpha: number): number {
+  if (alpha <= 0) return 0
+  if (alpha >= 255) return 100
+  return Math.min(99, Math.max(1, Math.round((alpha / 255) * 100)))
+}
+
 export function MaterialPalette({
   scene,
   docRev,
   currentMaterialId,
   onSelectMaterial,
   onDocumentChanged,
+  onRefreshViewport,
   selectedIds = [],
 }: Props) {
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
@@ -87,6 +106,35 @@ export function MaterialPalette({
   void docRev
 
   const materialIds = Array.from(scene.material_ids())
+
+  // --- Opacity state ---
+  // Non-null only mid-drag/mid-keystroke, so the slider tracks the pointer
+  // without a kernel round trip on every tick; committed (and cleared) on
+  // release so a whole gesture is one undo step, not one per tick.
+  const [draggingAlpha, setDraggingAlpha] = useState<number | null>(null)
+  const selectedMaterialInfo =
+    currentMaterialId === MATERIAL_SENTINEL ? undefined : scene.material_info(currentMaterialId)
+  // A newly selected swatch starts from its own alpha, not a stale drag value
+  // left over from whatever was selected before.
+  useEffect(() => setDraggingAlpha(null), [currentMaterialId])
+
+  // commitAlpha is redefined every render (closes over current state/props),
+  // so a ref lets the unmount cleanup below always call the latest version —
+  // otherwise an in-progress drag silently loses its value if this panel
+  // unmounts (e.g. the Materials tray section collapses) before any of
+  // onPointerUp/onKeyUp/onBlur has fired.
+  function commitAlpha() {
+    if (draggingAlpha === null || selectedMaterialInfo === undefined) return
+    scene.set_material_alpha(currentMaterialId, draggingAlpha)
+    setDraggingAlpha(null)
+    // onRefreshViewport re-tessellates via Viewport's handleSceneRefresh,
+    // which itself calls onDocumentChanged — calling it here too would
+    // double-fire the doc-change bookkeeping (docRev, dirty-marking) per commit.
+    onRefreshViewport()
+  }
+  const commitAlphaRef = useRef(commitAlpha)
+  commitAlphaRef.current = commitAlpha
+  useEffect(() => () => commitAlphaRef.current(), [])
 
   // --- Add color state ---
   const [newColorHex, setNewColorHex] = useState('#4488cc')
@@ -257,6 +305,40 @@ export function MaterialPalette({
           </div>
         )
       })}
+
+      {/* Opacity */}
+      <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
+      <div style={{ fontWeight: 'bold', color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>
+        Opacity{selectedMaterialInfo !== undefined ? ` — ${selectedMaterialInfo.name()}` : ''}
+      </div>
+      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+        <input
+          type="range"
+          min="0"
+          max="255"
+          step="1"
+          disabled={selectedMaterialInfo === undefined}
+          value={draggingAlpha ?? selectedMaterialInfo?.a() ?? 255}
+          onChange={(e) => setDraggingAlpha(Number(e.target.value))}
+          onPointerUp={commitAlpha}
+          onKeyUp={commitAlpha}
+          onBlur={commitAlpha}
+          aria-label={
+            selectedMaterialInfo !== undefined
+              ? `Opacity for ${selectedMaterialInfo.name()}`
+              : 'Opacity (select a material swatch first)'
+          }
+          title={selectedMaterialInfo === undefined ? 'Select a material swatch to adjust its opacity' : undefined}
+          style={{
+            flex: 1,
+            opacity: selectedMaterialInfo === undefined ? 0.4 : 1,
+            cursor: selectedMaterialInfo === undefined ? 'not-allowed' : 'pointer',
+          }}
+        />
+        <span style={{ width: '32px', textAlign: 'right', color: 'var(--text-tertiary, #aaa)' }}>
+          {alphaToDisplayPercent(draggingAlpha ?? selectedMaterialInfo?.a() ?? 255)}%
+        </span>
+      </div>
 
       {/* Divider */}
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />

@@ -11,9 +11,10 @@
 //! stable across undo/redo.
 
 use kernel::{
-    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, KernelOp,
-    KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
-    SketchError, SketchId, SketchVertexId, Transform, TransformError, Vec3, WatertightState,
+    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, ImageFormat,
+    KernelOp, KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
+    SketchError, SketchId, SketchVertexId, Texture, Transform, TransformError, Vec3,
+    WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -1802,6 +1803,65 @@ fn set_object_material_rejects_unknown_material() {
         doc.set_object_material(o, Some(stray)),
         Err(DocumentError::UnknownMaterial)
     );
+}
+
+// --------------------------------------------------- material palette opacity
+
+#[test]
+fn set_material_alpha_sets_and_undo_redo() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    assert_eq!(doc.material(red).unwrap().color.a, 255);
+
+    doc.set_material_alpha(red, 128).expect("set alpha");
+    assert_eq!(doc.material(red).unwrap().color.a, 128);
+
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.material(red).unwrap().color.a,
+        255,
+        "undo restores prev alpha"
+    );
+    doc.redo().unwrap();
+    assert_eq!(doc.material(red).unwrap().color.a, 128, "redo re-applies");
+}
+
+#[test]
+fn set_material_alpha_rejects_unknown_material() {
+    let mut doc = Document::new();
+    let mut other = Document::new();
+    let stray = other.add_material(Material::solid("X", Rgba8::rgb(0, 0, 0)));
+    assert_eq!(
+        doc.set_material_alpha(stray, 100),
+        Err(DocumentError::UnknownMaterial)
+    );
+}
+
+#[test]
+fn set_material_alpha_noop_does_not_record_undo() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    doc.set_material_alpha(red, 255)
+        .expect("setting to the already-current value is a no-op, not an error");
+    assert_eq!(doc.material(red).unwrap().color.a, 255);
+    assert_eq!(doc.undo(), Err(DocumentError::NothingToUndo));
+}
+
+#[test]
+fn set_material_alpha_applies_uniformly_to_a_textured_material() {
+    // `color`'s alpha modulates a texture too, so opacity must not be
+    // restricted to flat-color materials.
+    let mut doc = Document::new();
+    let tex = Texture {
+        image: vec![0u8; 4],
+        format: ImageFormat::Png,
+        world_size: [1.0, 1.0],
+    };
+    let glass = doc.add_material(Material::textured("Glass", Rgba8::rgb(200, 220, 255), tex));
+
+    doc.set_material_alpha(glass, 96).expect("set alpha");
+    assert_eq!(doc.material(glass).unwrap().color.a, 96);
+    assert!(doc.material(glass).unwrap().has_texture());
 }
 
 #[test]

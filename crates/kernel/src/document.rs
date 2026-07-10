@@ -464,6 +464,15 @@ enum DocAction {
         prev: Option<MaterialId>,
         next: Option<MaterialId>,
     },
+    /// `set_material_alpha` changed a palette material's opacity. Unlike
+    /// [`DocAction::PaintFace`]/[`DocAction::SetObjectMaterial`], this mutates
+    /// the palette entry itself (shared by every face/object referencing it),
+    /// not an assignment; undo restores `prev`, redo re-applies `next`.
+    SetMaterialAlpha {
+        material: MaterialId,
+        prev: u8,
+        next: u8,
+    },
     /// `set_node_name` / `add_node_tag` / `remove_node_tag` changed a tree
     /// node's display name or tag list (or both). Undo restores `prev_name` /
     /// `prev_tags`; redo re-applies `next_name` / `next_tags`. All three ops
@@ -1620,6 +1629,46 @@ impl Document {
     /// [`paint_face`]: Document::paint_face
     pub fn add_material(&mut self, material: Material) -> MaterialId {
         self.materials.insert(material)
+    }
+
+    /// Set an existing palette material's opacity (alpha channel of its
+    /// color; 0–255, 255 = opaque) — applies uniformly whether the material
+    /// is a flat color or textured, since `color` also modulates a texture.
+    /// Undoable, recording [`DocAction::SetMaterialAlpha`]: unlike
+    /// [`add_material`], this mutates a palette entry that may already be in
+    /// use, so it's a visible change like any other.
+    ///
+    /// Returns an empty [`DocChange`]: alpha is resolved live from the
+    /// palette at render time (see `MaterialJs::a` / the wasm-api), not baked
+    /// into tessellated geometry the way a face's material *assignment* is,
+    /// so no object/instance needs its render or inference cache invalidated.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownMaterial`] — `id` is not in the palette.
+    ///
+    /// [`add_material`]: Document::add_material
+    pub fn set_material_alpha(
+        &mut self,
+        id: MaterialId,
+        alpha: u8,
+    ) -> Result<DocChange, DocumentError> {
+        let mat = self
+            .materials
+            .get_mut(id)
+            .ok_or(DocumentError::UnknownMaterial)?;
+        let prev = mat.color.a;
+        if prev == alpha {
+            return Ok(DocChange::default());
+        }
+        mat.color.a = alpha;
+        self.undo.push(DocAction::SetMaterialAlpha {
+            material: id,
+            prev,
+            next: alpha,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange::default())
     }
 
     /// A palette material by handle, or `None` if stale.
@@ -4341,6 +4390,12 @@ impl Document {
                 }
                 self.paint_change(object)
             }
+            &DocAction::SetMaterialAlpha { material, prev, .. } => {
+                if let Some(mat) = self.materials.get_mut(material) {
+                    mat.color.a = prev;
+                }
+                DocChange::default()
+            }
             DocAction::NodeMetaChanged {
                 node,
                 prev_name,
@@ -4831,6 +4886,12 @@ impl Document {
                     rec.object.default_material = next;
                 }
                 self.paint_change(object)
+            }
+            &DocAction::SetMaterialAlpha { material, next, .. } => {
+                if let Some(mat) = self.materials.get_mut(material) {
+                    mat.color.a = next;
+                }
+                DocChange::default()
             }
             DocAction::NodeMetaChanged {
                 node,

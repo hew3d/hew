@@ -47,6 +47,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     add_material: vi.fn().mockReturnValue(1n),
     add_texture_material: vi.fn(),
     set_object_material: vi.fn(),
+    set_material_alpha: vi.fn(),
     node_leaf_objects: (_kind: number, _id: bigint) => new BigUint64Array(),
     group_members: (_id: bigint) => [] as { kind: string; id: bigint }[],
     node_parent: (_kind: number, _id: bigint) => undefined as bigint | undefined,
@@ -426,6 +427,7 @@ describe('MaterialPalette', () => {
     currentMaterialId: MATERIAL_SENTINEL,
     onSelectMaterial: vi.fn(),
     onDocumentChanged: vi.fn(),
+    onRefreshViewport: vi.fn(),
     selectedIds: [] as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[],
   }
 
@@ -491,6 +493,7 @@ describe('MaterialPalette', () => {
       r: () => 255,
       g: () => 0,
       b: () => 0,
+      a: () => 255,
       name: () => 'Red Paint',
       has_texture: () => false,
     }
@@ -525,6 +528,129 @@ describe('MaterialPalette', () => {
     )
     fireEvent.click(screen.getByTitle('Sky Blue'))
     expect(onSelectMaterial).toHaveBeenCalledWith(3n)
+  })
+
+  it('opacity slider is disabled when the Default swatch is selected', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    expect(screen.getByRole('slider')).toBeDisabled()
+  })
+
+  it('opacity slider reflects the selected material\'s current alpha', () => {
+    const mockInfo = {
+      r: () => 255,
+      g: () => 0,
+      b: () => 0,
+      a: () => 128,
+      name: () => 'Glass',
+      has_texture: () => false,
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
+    const slider = screen.getByRole('slider') as HTMLInputElement
+    expect(slider).not.toBeDisabled()
+    expect(slider.value).toBe('128')
+  })
+
+  it('dragging the opacity slider previews without calling set_material_alpha', () => {
+    const mockInfo = {
+      r: () => 255,
+      g: () => 0,
+      b: () => 0,
+      a: () => 255,
+      name: () => 'Glass',
+      has_texture: () => false,
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
+    fireEvent.change(screen.getByRole('slider'), { target: { value: '64' } })
+    expect(screen.getByText('25%')).toBeInTheDocument()
+    expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
+  })
+
+  it('releasing the opacity slider commits set_material_alpha and onRefreshViewport once, and does not double-fire onDocumentChanged', () => {
+    const mockInfo = {
+      r: () => 255,
+      g: () => 0,
+      b: () => 0,
+      a: () => 255,
+      name: () => 'Glass',
+      has_texture: () => false,
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    const onDocumentChanged = vi.fn()
+    const onRefreshViewport = vi.fn()
+    render(
+      <MaterialPalette
+        {...baseProps}
+        scene={scene}
+        currentMaterialId={7n}
+        onDocumentChanged={onDocumentChanged}
+        onRefreshViewport={onRefreshViewport}
+      />,
+    )
+    const slider = screen.getByRole('slider')
+    fireEvent.change(slider, { target: { value: '64' } })
+    fireEvent.blur(slider)
+    expect((scene as any).set_material_alpha).toHaveBeenCalledTimes(1)
+    expect((scene as any).set_material_alpha).toHaveBeenCalledWith(7n, 64)
+    expect(onRefreshViewport).toHaveBeenCalledTimes(1)
+    // onRefreshViewport (Viewport.refreshScene) already cascades into
+    // onDocumentChanged in the real app; MaterialPalette must not also call
+    // it directly, or every commit double-bumps docRev.
+    expect(onDocumentChanged).not.toHaveBeenCalled()
+    // A second blur with no intervening change is not a new gesture.
+    fireEvent.blur(slider)
+    expect((scene as any).set_material_alpha).toHaveBeenCalledTimes(1)
+  })
+
+  it('displays 100%/0% only at the exact alpha extremes, not from rounding', () => {
+    const mockInfo = {
+      r: () => 255,
+      g: () => 0,
+      b: () => 0,
+      a: () => 254,
+      name: () => 'Glass',
+      has_texture: () => false,
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
+    // 254/255 rounds to 100% naively, but alpha=254 is not fully opaque.
+    expect(screen.queryByText('100%')).not.toBeInTheDocument()
+    expect(screen.getByText('99%')).toBeInTheDocument()
+  })
+
+  it('flushes an in-progress drag on unmount so the value is not silently lost', () => {
+    const mockInfo = {
+      r: () => 255,
+      g: () => 0,
+      b: () => 0,
+      a: () => 255,
+      name: () => 'Glass',
+      has_texture: () => false,
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    const { unmount } = render(
+      <MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />,
+    )
+    fireEvent.change(screen.getByRole('slider'), { target: { value: '64' } })
+    expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
+    unmount()
+    expect((scene as any).set_material_alpha).toHaveBeenCalledWith(7n, 64)
   })
 })
 

@@ -2466,6 +2466,23 @@ impl Scene {
         Ok(self.doc.add_material(mat).data().as_ffi())
     }
 
+    /// Set an existing palette material's opacity (alpha, 0–255, 255 =
+    /// opaque). Applies to flat-color and textured materials alike, since
+    /// `color`'s alpha modulates both. Undoable; does not invalidate any
+    /// object's mesh/inference cache — alpha is resolved live from the
+    /// palette at render time (`Scene::material_info`), unlike a face's
+    /// material *assignment*, whose grouping is baked into tessellated
+    /// geometry.
+    ///
+    /// # Errors
+    /// - `UnknownMaterial` — material handle is not in the palette.
+    pub fn set_material_alpha(&mut self, material: u64, alpha: u8) -> Result<(), ApiError> {
+        let mid = MaterialId::from(KeyData::from_ffi(material));
+        let change = self.doc.set_material_alpha(mid, alpha).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
     /// Handles of all palette materials, in unspecified but stable order.
     pub fn material_ids(&self) -> Vec<u64> {
         self.doc

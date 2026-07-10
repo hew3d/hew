@@ -64,6 +64,8 @@ export a file a slicer accepts as watertight, with no repair step.
 - An object-level default material so newly extruded or grown faces inherit
   a sensible color automatically
 - Materials survive splitting, imprinting, and boolean operations
+- Per-material opacity (glass, scrim, etc.), adjustable from the Materials
+  panel and applying uniformly to flat colors and textures alike
 
 ### File format & persistence
 
@@ -169,6 +171,20 @@ export a file a slicer accepts as watertight, with no repair step.
   calls — collapses that cost to one copy per definition. It requires a
   two-level spatial index (per-definition trees under a tree of placement
   bounds), which is why it is staged after the flat index has proven out.
+- **Targeted refresh for palette-wide and history mutations.** Undo/redo,
+  and any mutation that can't cheaply name which objects it touched (e.g.
+  the Materials panel's opacity slider), fall back to a full-scene
+  rebuild — re-tessellating and re-uploading every object's GPU buffers,
+  not just the ones actually affected. On a large model this pays the same
+  cost class the large-model rendering work already targeted, just through
+  a different door: undo/redo has always paid it, and the opacity slider
+  now pays it too, once per commit. A real fix needs either a reverse
+  index (which objects/instances reference a given material) or a
+  live-mutation path that twiddles the renderer's already-built THREE.js
+  material opacities in place — the same trick isolation-dimming already
+  uses — instead of re-tessellating. Scope note: this is a renderer-wide
+  gap, not opacity-specific; fixing it should cover undo/redo's fallback
+  too, since they share the same root cause.
 - **An out-of-process kernel option** for very large models
 - **Multi-user collaboration**
 - **A plugin/extension API**
