@@ -47,6 +47,7 @@ import { CommandPalette } from './palette/CommandPalette'
 import { toolHint, toolActionId, type PaletteEntry } from './palette/registry'
 import type { TagReveal } from './panels/TagsPanel'
 import { SettingsWindow } from './settings/SettingsWindow'
+import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import * as diagnosticLog from './log/diagnosticLog'
@@ -186,6 +187,8 @@ export default function App() {
   const [showGuides, setShowGuides] = useState(true)
   /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
   const [showSettingsModal, setShowSettingsModal] = useState(false)
+  // Windows desktop settings surface (Fluent in-app page; see openSettings).
+  const [showFluentSettings, setShowFluentSettings] = useState(false)
   /** Command palette visibility (⌘K / Ctrl-K). */
   const [paletteOpen, setPaletteOpen] = useState(false)
   /** True while the user is pointer-dragging the camera (orbit/pan/dolly) —
@@ -1308,10 +1311,19 @@ export default function App() {
   }, [exportGltf, exportStl])
 
   // ---------------------------------------------------------------- settings window
-  // Under Tauri: a separate, free-floating OS webview window (movable outside
-  // the main Hew window). On web: there's no concept of a second OS window,
-  // so we fall back to an in-app modal (showSettingsModal below).
+  // Per-platform settings surface:
+  //  - Windows desktop: a full-window in-app page in the Windows 11 app-
+  //    settings idiom (back arrow + settings cards, like Notepad/Paint) —
+  //    FluentSettingsPage below.
+  //  - macOS/Linux desktop: a separate, free-floating OS webview window
+  //    (macOS HIG expects a standalone settings window).
+  //  - Web: no concept of a second OS window — an in-app modal
+  //    (showSettingsModal below).
   const openSettings = useCallback(() => {
+    if (isTauri && isWindows) {
+      setShowFluentSettings(true)
+      return
+    }
     if (isTauri) {
       // Created by the shell (open_settings_window) rather than the JS
       // WebviewWindow API, so the capability set carries no window-creation
@@ -2194,11 +2206,11 @@ export default function App() {
         background: 'var(--surface-canvas-page, #1a1a1a)',
       }}
     >
-      {/* Linux and Windows desktop shells: borderless window → draw our own
-          title bar (Linux: KWin won't repaint the native one after setTitle;
-          Windows joined this treatment in for the Studio in-window
-          chrome). macOS keeps native decorations. */}
-      {isTauri && (isLinux || isWindows) && (
+      {/* Linux desktop shell only: borderless window → draw our own title bar
+          (KWin/WebKitGTK won't repaint the native one after setTitle). Windows
+          and macOS keep native decorations, so their OS caption (which reflects
+          setTitle) is the title bar — no custom one. */}
+      {isTauri && isLinux && (
         <TitleBar name={documentName(docSession)} saveState={saveStateLabel(docSession, nowTick)} />
       )}
 
@@ -2220,6 +2232,31 @@ export default function App() {
         onSaveAs={saveAsDocument}
         onImport={importDocument}
         onExport={() => setExportDialogOpen(true)}
+        onClose={
+          isTauri && !isMac
+            ? () => {
+                import('@tauri-apps/api/window')
+                  .then(({ getCurrentWindow }) => getCurrentWindow().close())
+                  .catch(() => { /* ignore */ })
+              }
+            : undefined
+        }
+        onExit={
+          isTauri && !isMac
+            ? () => {
+                import('@tauri-apps/api/window')
+                  .then(async ({ getAllWindows }) => {
+                    // Close every window (each document window's close-guard
+                    // still prompts for its own unsaved changes); the app exits
+                    // once the last one is gone.
+                    for (const w of await getAllWindows()) {
+                      await w.close().catch(() => { /* keep closing the rest */ })
+                    }
+                  })
+                  .catch(() => { /* ignore */ })
+              }
+            : undefined
+        }
         recentFiles={recentFiles}
         onOpenRecent={openRecent}
         onClearRecent={clearRecent}
@@ -2717,6 +2754,13 @@ export default function App() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Windows desktop settings surface — a full-window page in the
+          Windows 11 app-settings idiom (back arrow returns to the document;
+          see openSettings). Rendered last so it overlays every panel. */}
+      {showFluentSettings && (
+        <FluentSettingsPage onBack={() => setShowFluentSettings(false)} />
       )}
     </main>
   )

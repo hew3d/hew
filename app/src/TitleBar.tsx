@@ -14,11 +14,11 @@
  * grips that drive native window resizing (borderless Wayland windows lose
  * edge resize).
  *
- * Rendered only when `isTauri && (isLinux || isWindows)`; macOS keeps native
- * decorations + its own title bar (the OS owns that chrome — Hew has no way
- * to inject a custom save-state indicator into it, so macOS doesn't show one
- * outside the app itself; see the docked tray's Entity Info, for a
- * possible future home).
+ * Rendered only when `isTauri && isLinux`. Windows reverted to native
+ * decorations (WebView2 repaints the native caption correctly, unlike
+ * WebKitGTK), so it — like macOS — keeps the OS-drawn title bar and window
+ * controls; Hew has no way to inject a custom save-state indicator into that
+ * native chrome (see the docked tray's Entity Info, for a possible future home).
  */
 import { useEffect, useRef, useState } from 'react'
 
@@ -185,7 +185,7 @@ export function TitleBar({ name, saveState }: TitleBarProps) {
         <button style={btnStyle} title={maximized ? 'Restore' : 'Maximize'} onClick={toggleMax} aria-label="Maximize">
           {maximized ? (
             <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor">
-              <rect x="1.5" y="3.5" width="6" height="6" /><path d=" 3.5V1.5h6v6h-2" />
+              <rect x="1.5" y="3.5" width="6" height="6" /><path d="M3.5 3.5V1.5h6v6h-2" />
             </svg>
           ) : (
             <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor">
@@ -201,7 +201,7 @@ export function TitleBar({ name, saveState }: TitleBarProps) {
           onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--chrome-win-close-hover, #e53b41)'; e.currentTarget.style.color = '#fff' }}
           onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-tertiary, #9aa3b0)' }}
         >
-          <svg width="11" height="11" viewBox="0 0 11 11" stroke="currentColor"><path d=" 1.5l8 8M9.5 1.5l-8 8" /></svg>
+          <svg width="11" height="11" viewBox="0 0 11 11" stroke="currentColor"><path d="M1.5 1.5l8 8M9.5 1.5l-8 8" /></svg>
         </button>
       </div>
       {/* Resize grips — hidden while maximized (no edges to drag). */}

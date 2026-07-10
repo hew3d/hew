@@ -42,6 +42,12 @@ export interface MenuBarProps {
   onImport: () => void
   /** Open the unified Export dialog (format — glTF/GLB or STL — chosen there). */
   onExport: () => void
+  /** Close the current window (desktop shells only — omitted on web, where
+   *  the browser owns the window). */
+  onClose?: () => void
+  /** Quit the application (desktop shells only). macOS routes Quit through the
+   *  native app menu instead, so this is the Windows/Linux path. */
+  onExit?: () => void
   /** Recent file paths (most-recent first), shown under File ▸ Open Recent. */
   recentFiles?: string[]
   /** Open a recent file by its path. */
@@ -109,7 +115,11 @@ export interface MenuBarProps {
   onZoomExtents?: () => void
   /** Reposition the camera to a standard view (Camera → Standard Views). */
   onStandardView?: (view: StandardView) => void
-  /** Open the Settings window/modal (Window → Settings…, web only — native uses the OS app menu). */
+  /** Open the platform's Settings surface (the gear on the bar's trailing
+   *  edge + Window → Settings…): the Fluent in-app page on Windows, the
+   *  separate settings window on Linux, the modal on web. macOS reaches
+   *  Settings through its native app menu instead (this bar renders nothing
+   *  there). */
   onOpenSettings?: () => void
   /** Assemble and write a "Report Bug" bundle (Help → Report Bug…). */
   onReportBug?: () => void
@@ -142,14 +152,15 @@ const BAR_STYLE: React.CSSProperties = {
   position: 'relative',
 }
 
-const MENU_TRIGGER_STYLE = (open: boolean): React.CSSProperties => ({
+const MENU_TRIGGER_STYLE = (open: boolean, hovered: boolean): React.CSSProperties => ({
   padding: '0 12px',
   height: '100%',
   display: 'flex',
   alignItems: 'center',
   fontSize: 'var(--font-size-menu-item, 13px)',
   color: open ? 'var(--accent-text-on-tint, #fff)' : 'var(--text-tertiary, #ccc)',
-  background: open ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
+  // Native menu bars highlight a trigger on plain hover, before any click.
+  background: open || hovered ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
   cursor: 'pointer',
   border: 'none',
   fontFamily: 'var(--font-family-ui)',
@@ -199,6 +210,87 @@ const SHORTCUT_STYLE: React.CSSProperties = {
   fontSize: 'var(--font-size-kbd, 11px)',
   color: 'var(--text-faint, #888)',
   whiteSpace: 'nowrap',
+}
+
+/**
+ * One top-level menu trigger, with native menu-bar semantics: plain hover
+ * highlights the trigger; a click enters "menu mode" (drops the menu); while
+ * any menu is open, hovering a different trigger switches the open menu to it
+ * (no click needed); clicking the open trigger again — or anywhere outside
+ * the bar (see the outside-mousedown effect), or Escape — leaves menu mode.
+ */
+function MenuTrigger({
+  id,
+  label,
+  openMenu,
+  onToggle,
+  onActivate,
+}: {
+  id: MenuId
+  label: string
+  openMenu: MenuId
+  onToggle: (id: MenuId) => void
+  /** Hover-switch: make this the open menu, but only while one is open. */
+  onActivate: (id: MenuId) => void
+}) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      style={MENU_TRIGGER_STYLE(openMenu === id, hovered)}
+      onClick={() => onToggle(id)}
+      onMouseEnter={() => {
+        setHovered(true)
+        onActivate(id)
+      }}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {label}
+    </button>
+  )
+}
+
+/** Gear button at the far right of the bar — opens the Settings surface
+ *  (the Fluent settings page on Windows), per the modern convention of a
+ *  settings gear on the menu bar's trailing edge. */
+function GearButton({ onClick, shortcutHint }: { onClick: () => void; shortcutHint: string }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      aria-label="Settings"
+      title={`Settings (${shortcutHint})`}
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: '36px',
+        height: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        border: 'none',
+        background: hovered ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
+        color: 'var(--text-tertiary, #ccc)',
+        cursor: 'pointer',
+        padding: 0,
+        flexShrink: 0,
+      }}
+    >
+      <svg
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="3.2" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </svg>
+    </button>
+  )
 }
 
 interface MenuItemProps {
@@ -298,6 +390,8 @@ export function MenuBar({
   onSaveAs,
   onImport,
   onExport,
+  onClose,
+  onExit,
   recentFiles,
   onOpenRecent,
   onClearRecent,
@@ -343,16 +437,30 @@ export function MenuBar({
     setOpenMenu((cur) => (cur === id ? null : id))
   }, [])
 
-  // Close when clicking outside the menu bar
+  // Native "menu mode" hover-switch: while some menu is open, pointing at a
+  // different trigger opens that one — no click needed. With no menu open,
+  // hover only highlights (MenuTrigger's local hover state).
+  const activate = useCallback((id: MenuId) => {
+    setOpenMenu((cur) => (cur === null ? null : id))
+  }, [])
+
+  // Leave menu mode on any click outside the menu bar, or on Escape.
   useEffect(() => {
     if (openMenu === null) return
-    const handler = (e: MouseEvent) => {
+    const onMouseDown = (e: MouseEvent) => {
       if (barRef.current && !barRef.current.contains(e.target as Node)) {
         close()
       }
     }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close()
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
   }, [openMenu, close])
 
   const withClose = (fn: () => void) => () => { close(); fn() }
@@ -363,15 +471,21 @@ export function MenuBar({
   if (nativeMenuBar) return null
 
   return (
-    <div ref={barRef} style={BAR_STYLE} data-testid="menu-bar">
+    <div
+      ref={barRef}
+      style={BAR_STYLE}
+      data-testid="menu-bar"
+      // Clicking the EMPTY part of the bar leaves menu mode, like clicking
+      // outside it (native menu bars treat their own dead space as outside).
+      // Triggers/dropdowns/gear are children, so their clicks never have the
+      // bar itself as target; only dead-space clicks do.
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) close()
+      }}
+    >
       {/* File menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'file')}
-          onClick={() => toggle('file')}
-        >
-          File
-        </button>
+        <MenuTrigger id="file" label="File" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'file' && (
           <div style={DROPDOWN_STYLE}>
             <MenuItem label="New" shortcut={`${mod}N`} onClick={withClose(onNew)} />
@@ -401,18 +515,22 @@ export function MenuBar({
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
             <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
+            {(onClose !== undefined || onExit !== undefined) && (
+              <div style={SEPARATOR_STYLE} />
+            )}
+            {onClose !== undefined && (
+              <MenuItem label="Close" shortcut={`${mod}W`} onClick={withClose(onClose)} />
+            )}
+            {onExit !== undefined && (
+              <MenuItem label="Exit" onClick={withClose(onExit)} />
+            )}
           </div>
         )}
       </div>
 
       {/* Edit menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'edit')}
-          onClick={() => toggle('edit')}
-        >
-          Edit
-        </button>
+        <MenuTrigger id="edit" label="Edit" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'edit' && (
           <div style={DROPDOWN_STYLE}>
             <MenuItem
@@ -498,12 +616,7 @@ export function MenuBar({
 
       {/* View menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'view')}
-          onClick={() => toggle('view')}
-        >
-          View
-        </button>
+        <MenuTrigger id="view" label="View" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'view' && (
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
@@ -527,12 +640,7 @@ export function MenuBar({
 
       {/* Draw menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'draw')}
-          onClick={() => toggle('draw')}
-        >
-          Draw
-        </button>
+        <MenuTrigger id="draw" label="Draw" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'draw' && (
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
@@ -566,12 +674,7 @@ export function MenuBar({
 
       {/* Tools menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'tools')}
-          onClick={() => toggle('tools')}
-        >
-          Tools
-        </button>
+        <MenuTrigger id="tools" label="Tools" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'tools' && (
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
@@ -638,12 +741,7 @@ export function MenuBar({
 
       {/* Camera menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'camera')}
-          onClick={() => toggle('camera')}
-        >
-          Camera
-        </button>
+        <MenuTrigger id="camera" label="Camera" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'camera' && (
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
@@ -686,12 +784,7 @@ export function MenuBar({
 
       {/* Window menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'window')}
-          onClick={() => toggle('window')}
-        >
-          Window
-        </button>
+        <MenuTrigger id="window" label="Window" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'window' && (
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
@@ -723,24 +816,13 @@ export function MenuBar({
               checked={showDebugLog}
               onClick={withClose(() => onToggleDebugLog?.())}
             />
-            <div style={SEPARATOR_STYLE} />
-            <MenuItem
-              label="Settings…"
-              shortcut={`${mod},`}
-              onClick={withClose(() => onOpenSettings?.())}
-            />
           </div>
         )}
       </div>
 
       {/* Help menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <button
-          style={MENU_TRIGGER_STYLE(openMenu === 'help')}
-          onClick={() => toggle('help')}
-        >
-          Help
-        </button>
+        <MenuTrigger id="help" label="Help" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'help' && (
           <div style={DROPDOWN_STYLE}>
             <MenuItem
@@ -796,10 +878,18 @@ export function MenuBar({
         </div>
       )}
 
-      {/* Spacer. (The resting command-palette field lived here on
-          Windows/Linux/Web until moved it to the top of the tool rail on
-          every platform — see ToolRail.tsx.) */}
-      <div style={{ flex: 1 }} />
+      {/* Spacer — dead space, so clicking it also leaves menu mode (it has
+          zero height today, letting clicks fall through to the bar's own
+          handler, but a future height would swallow them). (The resting
+          command-palette field lived here on Windows/Linux/Web until moved
+          to the top of the tool rail on every platform — see ToolRail.tsx.) */}
+      <div style={{ flex: 1 }} onMouseDown={close} />
+
+      {/* Settings gear on the trailing edge — the modern menu-bar convention
+          for reaching Settings. Same target as Window ▸ Settings… */}
+      {onOpenSettings !== undefined && (
+        <GearButton onClick={onOpenSettings} shortcutHint={`${mod},`} />
+      )}
     </div>
   )
 }

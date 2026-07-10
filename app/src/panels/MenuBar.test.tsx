@@ -282,4 +282,68 @@ describe('MenuBar', () => {
     fireEvent.mouseDown(screen.getByText('Report Bug…'))
     expect(onReportBug).toHaveBeenCalledOnce()
   })
+
+  // --- Native menu-mode semantics ---
+
+  it('hovering another trigger while a menu is open switches to it (menu mode)', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.getByText('New')).toBeInTheDocument()
+    // Hover Edit — no click — and the Edit menu replaces the File menu.
+    fireEvent.mouseEnter(screen.getByRole('button', { name: /edit/i }))
+    expect(screen.queryByText('New')).not.toBeInTheDocument()
+    expect(screen.getByText('Undo')).toBeInTheDocument()
+  })
+
+  it('hovering a trigger with no menu open does NOT open one', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.mouseEnter(screen.getByRole('button', { name: /file/i }))
+    expect(screen.queryByText('New')).not.toBeInTheDocument()
+  })
+
+  it('clicking the empty part of the bar leaves menu mode', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.getByText('New')).toBeInTheDocument()
+    // Dead-space clicks have the bar itself as target.
+    fireEvent.mouseDown(screen.getByTestId('menu-bar'))
+    expect(screen.queryByText('New')).not.toBeInTheDocument()
+  })
+
+  it('clicking outside the bar leaves menu mode', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.getByText('New')).toBeInTheDocument()
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByText('New')).not.toBeInTheDocument()
+  })
+
+  it('Escape leaves menu mode', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.getByText('New')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByText('New')).not.toBeInTheDocument()
+  })
+
+  // --- Settings gear ---
+
+  it('shows the settings gear when onOpenSettings is provided, and it opens settings', () => {
+    const onOpenSettings = vi.fn()
+    render(<MenuBar {...defaultProps} onOpenSettings={onOpenSettings} />)
+    fireEvent.click(screen.getByRole('button', { name: /^settings$/i }))
+    expect(onOpenSettings).toHaveBeenCalledOnce()
+  })
+
+  it('omits the settings gear when onOpenSettings is not provided', () => {
+    render(<MenuBar {...defaultProps} />)
+    expect(screen.queryByRole('button', { name: /^settings$/i })).not.toBeInTheDocument()
+  })
+
+  it('no longer offers Settings… in the Window menu (the gear replaced it)', () => {
+    render(<MenuBar {...defaultProps} onOpenSettings={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    expect(screen.getByText('Model Info')).toBeInTheDocument()
+    expect(screen.queryByText('Settings…')).not.toBeInTheDocument()
+  })
 })

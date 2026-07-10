@@ -417,8 +417,15 @@ fn apply_initial_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWin
 /// than one snapshot exists. With `recover_slot`, the new window claims that
 /// recovery snapshot at mount (via `take_pending_recovery`) instead of
 /// starting blank.
+///
+/// `async` is load-bearing, not style: on Windows, creating a webview inside a
+/// synchronous command deadlocks WebView2 initialization (the sync command
+/// holds the main thread the webview needs to finish creating itself — see the
+/// "Known issues" note on `WebviewWindowBuilder::build`). The result is a
+/// zombie window: a frame with no content whose close button does nothing.
+/// An async command runs off the main thread, so the build can complete.
 #[tauri::command]
-fn new_window(
+async fn new_window(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     recover_slot: Option<String>,
@@ -450,7 +457,9 @@ fn new_window(
                 f64::from(pos.x) / scale + CASCADE,
                 f64::from(pos.y) / scale + CASCADE,
             );
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    // Linux/WebKitGTK draws its own chrome (see the setup() note); Windows and
+    // macOS keep native decorations.
+    #[cfg(target_os = "linux")]
     let builder = builder.decorations(false);
     builder.build().map_err(|e| e.to_string())?;
     Ok(())
@@ -1208,8 +1217,11 @@ fn deliver_open(app: &tauri::AppHandle, path: &str) {
 /// webview so the capability set needs no window-creation grants — a
 /// compromised webview must not be able to mint windows (new document
 /// windows are likewise created by the `new_window` command).
+///
+/// `async` is load-bearing: a synchronous command deadlocks WebView2 creation
+/// on Windows and yields a zombie window — see the note on [`new_window`].
 #[tauri::command]
-fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window("settings") {
         return existing.set_focus().map_err(|e| e.to_string());
     }
@@ -1883,22 +1895,23 @@ fn main() {
             // app, so the app-level menu is correct there.
             #[cfg(target_os = "macos")]
             app.set_menu(menu)?;
-            // Windows and Linux both go borderless with fully in-app chrome
-            // (custom TitleBar + HTML MenuBar — App renders both when
-            // isLinux || isWindows). Linux settled on this after the
-            //  experiments: native decorations can't return
-            // on Wayland ('s stale-title bug still reproduces; X11 works
-            // but is backend-regressive), and the native GTK menubar —
-            // trialed in  — was rejected because GTK can only stack it
-            // ABOVE the custom title bar and can't match Hew's theme beyond
-            // a dark/light flip. The menu below is still built on every
-            // platform: macOS attaches it (above), and it keeps parity ready
-            // if Windows ever goes native chrome ( leaves that open —
-            // Windows hasn't been examined yet); `accel()` keeps its
-            // per-platform accelerator labels correct for that day.
+            // Windows and Linux both drive the menus from the in-app HTML
+            // MenuBar (the native menu is built for parity but not attached):
+            // Linux settled on this after the experiments — the native GTK
+            // menubar can only stack ABOVE the custom title bar and can't match
+            // Hew's theme beyond a dark/light flip.
+            //
+            // Window chrome, however, splits by platform. Linux/WebKitGTK can't
+            // repaint the server-side titlebar after `setTitle` (Wayland's
+            // stale-title bug), so it goes borderless and draws its own
+            // TitleBar. Windows keeps NATIVE decorations: WebView2 repaints the
+            // native caption fine, the OS title bar reflects `setTitle`, and the
+            // native caption buttons behave exactly as users expect — no reason
+            // to reimplement min/maximize/close in-app there.
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 let _ = menu; // built for parity; not attached on Windows/Linux.
+                #[cfg(target_os = "linux")]
                 if let Some(main_window) = app.webview_windows().values().next() {
                     let _ = main_window.set_decorations(false);
                 }
