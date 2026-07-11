@@ -650,14 +650,19 @@ export default function App() {
     const booleanOperands = selectedIds.filter(
       (n) => n.kind === 'object' && objectIdSet.has(n.id),
     )
+    const isSketchKind = (n: NodeRef) =>
+      n.kind === 'sketch' ||
+      n.kind === 'sketch-island' ||
+      n.kind === 'sketch-curve' ||
+      n.kind === 'sketch-edge'
     const parentOf = (n: NodeRef) => {
-      if (n.kind === 'sketch') return undefined
+      if (isSketchKind(n)) return undefined
       const k = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
       return scene.node_parent(k, n.id)
     }
-    // A sketch has no kernel NodeId — any sketch in the selection
+    // Sketch-scoped selections have no kernel NodeId — any in the selection
     // disqualifies the node-level commands.
-    const hasSketch = selectedIds.some((n) => n.kind === 'sketch')
+    const hasSketch = selectedIds.some(isSketchKind)
     return {
       booleanOperands,
       canBoolean: activeContext.length === 0 && booleanOperands.length === 2,

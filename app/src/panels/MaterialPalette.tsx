@@ -200,10 +200,11 @@ export function MaterialPalette({
   function handleFillObject() {
     if (selectedIds.length === 0) return
     for (const node of selectedIds) {
-      if (node.kind === 'instance' || node.kind === 'sketch') {
-        // Instances hold geometry via a component definition; a sketch is a
-        // drawn line with no faces and no kernel NodeId. Skip both — only
-        // world objects / definition members support set_object_material.
+      if (node.kind !== 'object' && node.kind !== 'group') {
+        // Instances hold geometry via a component definition; a sketch (or a
+        // single sketch line) is drawn geometry with no faces and no kernel
+        // NodeId. Skip all three — only world objects / definition members
+        // support set_object_material.
         continue
       }
       const kind = nodeKindToNumber(node.kind)  // 0 = object, 1 = group

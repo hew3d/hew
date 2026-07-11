@@ -7,14 +7,15 @@
  * On a pick_face miss, falls back through two sketch pickers so a free-standing
  * (not-yet-extruded) sketch is selectable both by its edges and by clicking
  * inside a closed region it forms:
- *   1. pick_sketch() — nearest live sketch edge within the pick aperture.
+ *   1. pick_sketch_edge() — nearest live sketch edge within the pick
+ *      aperture. Selects THAT edge (SketchUp-style): Delete then removes
+ *      just the line, merging the regions it separated.
  *   2. pick_sketch_region() — the extrudable region under the ray (across ALL
  *      live sketches); clicking INSIDE a drawn rectangle/circle selects its
- *      owning sketch, not just a click on the boundary line.
- * Both resolve to the same third `sketchId` arg since a sketch has no
- * object/instance id of its own.
- * Fires onSelect(objectId) on a face hit, onSelect(null, undefined, sketchId)
- * on a sketch hit (edge or interior), onSelect(null) on a total miss.
+ *      owning sketch as a whole.
+ * Fires onSelect(objectId) on a face hit; onSelect(null, undefined, sketchId,
+ * edgeId) on an edge hit; onSelect(null, undefined, sketchId) on an interior
+ * hit; onSelect(null) on a total miss.
  */
 
 import type { Tool, Snap } from './types'
@@ -25,6 +26,8 @@ export type OnSelect = (
   objectId: bigint | null,
   instanceId?: bigint,
   sketchId?: bigint,
+  sketchEdgeId?: bigint,
+  sketchRegionId?: bigint,
 ) => void
 
 export class SelectTool implements Tool {
@@ -66,13 +69,19 @@ export class SelectTool implements Tool {
     }
 
     // No face hit — try a free-standing sketch edge before giving up.
-    const sketchId = this.wasmScene.pick_sketch(
+    const edgePick = this.wasmScene.pick_sketch_edge(
       ray.origin[0], ray.origin[1], ray.origin[2],
       ray.direction[0], ray.direction[1], ray.direction[2],
     )
-    if (sketchId !== undefined) {
-      console.log('[SelectTool] selected sketch:', sketchId)
-      this.onSelect(null, undefined, sketchId)
+    if (edgePick !== undefined) {
+      try {
+        const sketchId = edgePick.sketch()
+        const edgeId = edgePick.edge()
+        console.log('[SelectTool] selected sketch edge:', sketchId, edgeId)
+        this.onSelect(null, undefined, sketchId, edgeId)
+      } finally {
+        edgePick.free()
+      }
       return
     }
 
@@ -85,8 +94,9 @@ export class SelectTool implements Tool {
     if (regionPick !== undefined) {
       try {
         const regionSketchId = regionPick.sketch()
-        console.log('[SelectTool] selected sketch (interior pick):', regionSketchId)
-        this.onSelect(null, undefined, regionSketchId)
+        const regionId = regionPick.region()
+        console.log('[SelectTool] selected sketch (interior pick):', regionSketchId, regionId)
+        this.onSelect(null, undefined, regionSketchId, undefined, regionId)
       } finally {
         regionPick.free()
       }

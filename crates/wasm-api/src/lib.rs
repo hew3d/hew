@@ -708,6 +708,27 @@ impl SketchRegionPickJs {
     }
 }
 
+/// A picked sketch edge: the owning sketch plus the edge itself (see
+/// `Scene::pick_sketch_edge`).
+#[wasm_bindgen]
+pub struct SketchEdgePickJs {
+    sketch: u64,
+    edge: u64,
+}
+
+#[wasm_bindgen]
+impl SketchEdgePickJs {
+    /// Handle of the sketch owning the picked edge.
+    pub fn sketch(&self) -> u64 {
+        self.sketch
+    }
+
+    /// Handle of the picked edge within that sketch.
+    pub fn edge(&self) -> u64 {
+        self.edge
+    }
+}
+
 /// A resolved snap (mirrors `inference::Snap`).
 #[wasm_bindgen]
 pub struct SnapJs {
@@ -1142,17 +1163,239 @@ impl Scene {
         edge: u64,
     ) -> Result<EdgeRemovedJs, ApiError> {
         let sid = sketch_id(sketch);
+        let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
+        // Removing an edge on a consumed region's boundary would recompute
+        // regions and resurrect the extruded footprint as fresh extrudable
+        // regions overlapping the solid — refused, not repaired.
+        if self.doc.sketch_edge_borders_consumed(sid, eid) {
+            return Err(stale(
+                "EdgeBordersSolid",
+                "sketch edge on an extruded region's boundary",
+            ));
+        }
         let s = self
             .doc
             .sketch_mut(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
-        let report = s
-            .remove_edge(SketchEdgeId::from(KeyData::from_ffi(edge)))
-            .map_err(|e| api_err(&e, &e))?;
+        let report = s.remove_edge(eid).map_err(|e| api_err(&e, &e))?;
         // Same rationale as `sketch_add_segment`: no `DocChange` here, so
         // register at the call site.
         self.register_sketch(sid);
         Ok(EdgeRemovedJs { inner: report })
+    }
+
+    /// Opens a curve bracket on `sketch`: segments added until
+    /// `sketch_end_curve` are ONE curve chain (an arc's or circle's facets),
+    /// selected and deleted as a unit. Returns the curve handle.
+    pub fn sketch_begin_curve(&mut self, sketch: u64) -> Result<u64, ApiError> {
+        let sid = sketch_id(sketch);
+        let s = self
+            .doc
+            .sketch_mut(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let id = s.begin_curve();
+        recording::record(recording::RecordedCall::SketchBeginCurve { sketch });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Closes the open curve bracket on `sketch` (no-op when none is open).
+    pub fn sketch_end_curve(&mut self, sketch: u64) -> Result<(), ApiError> {
+        let sid = sketch_id(sketch);
+        let s = self
+            .doc
+            .sketch_mut(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        s.end_curve();
+        recording::record(recording::RecordedCall::SketchEndCurve { sketch });
+        Ok(())
+    }
+
+    /// The curve chain `edge` belongs to, or `undefined` for a plain line
+    /// (or a stale handle).
+    pub fn sketch_edge_curve(&self, sketch: u64, edge: u64) -> Option<u64> {
+        let s = self.doc.sketch(sketch_id(sketch))?;
+        s.edge_curve(SketchEdgeId::from(KeyData::from_ffi(edge)))
+            .map(|c| c.data().as_ffi())
+    }
+
+    /// Every live (non-consumed) edge of `curve` in `sketch`.
+    pub fn sketch_curve_edges(&self, sketch: u64, curve: u64) -> Vec<u64> {
+        let sid = sketch_id(sketch);
+        let Some(s) = self.doc.sketch(sid) else {
+            return Vec::new();
+        };
+        let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
+        s.curve_edges(cid)
+            .into_iter()
+            .filter(|&e| !self.doc.is_sketch_edge_consumed(sid, e))
+            .map(|e| e.data().as_ffi())
+            .collect()
+    }
+
+    /// Handles of `sketch`'s islands that still have at least one live
+    /// (non-consumed) edge — the outliner/selection units for free-standing
+    /// geometry, in deterministic slotmap order.
+    pub fn sketch_island_ids(&self, sketch: u64) -> Vec<u64> {
+        let sid = sketch_id(sketch);
+        let Some(s) = self.doc.sketch(sid) else {
+            return Vec::new();
+        };
+        s.islands()
+            .iter()
+            .filter(|(_, isl)| {
+                isl.edges
+                    .iter()
+                    .any(|&e| !self.doc.is_sketch_edge_consumed(sid, e))
+            })
+            .map(|(id, _)| id.data().as_ffi())
+            .collect()
+    }
+
+    /// The island `edge` belongs to, or `undefined` for a stale handle.
+    pub fn sketch_edge_island(&self, sketch: u64, edge: u64) -> Option<u64> {
+        let s = self.doc.sketch(sketch_id(sketch))?;
+        s.island_of_edge(SketchEdgeId::from(KeyData::from_ffi(edge)))
+            .map(|i| i.data().as_ffi())
+    }
+
+    /// The island owning `region` (via any edge of its outer boundary), or
+    /// `undefined` for stale handles.
+    pub fn sketch_region_island(&self, sketch: u64, region: u64) -> Option<u64> {
+        let sid = sketch_id(sketch);
+        let s = self.doc.sketch(sid)?;
+        let rid = kernel::SketchRegionId::from(KeyData::from_ffi(region));
+        let r = s.regions().get(rid)?;
+        let (a, b) = (r.outer.first().copied()?, r.outer.get(1).copied()?);
+        let eid = s
+            .edges()
+            .iter()
+            .find(|(_, e)| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+            .map(|(id, _)| id)?;
+        s.island_of_edge(eid).map(|i| i.data().as_ffi())
+    }
+
+    /// The live (non-consumed) edges of `island` in `sketch` — what a
+    /// per-shape Delete removes.
+    pub fn sketch_island_edges(&self, sketch: u64, island: u64) -> Vec<u64> {
+        let sid = sketch_id(sketch);
+        let Some(s) = self.doc.sketch(sid) else {
+            return Vec::new();
+        };
+        let iid = kernel::SketchIslandId::from(KeyData::from_ffi(island));
+        let Some(isl) = s.islands().get(iid) else {
+            return Vec::new();
+        };
+        isl.edges
+            .iter()
+            .copied()
+            .filter(|&e| !self.doc.is_sketch_edge_consumed(sid, e))
+            .map(|e| e.data().as_ffi())
+            .collect()
+    }
+
+    /// The live edges of `island` as xyz segment-endpoint pairs, for the
+    /// selection highlight and move ghost (the island analogue of
+    /// `sketch_lines`).
+    pub fn sketch_island_lines(&self, sketch: u64, island: u64) -> Result<Vec<f32>, ApiError> {
+        let sid = sketch_id(sketch);
+        let s = self
+            .doc
+            .sketch(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let iid = kernel::SketchIslandId::from(KeyData::from_ffi(island));
+        let isl = s
+            .islands()
+            .get(iid)
+            .ok_or_else(|| stale("UnknownIsland", "island"))?;
+        let mut out = Vec::new();
+        for &eid in &isl.edges {
+            if self.doc.is_sketch_edge_consumed(sid, eid) {
+                continue;
+            }
+            let e = s.edges()[eid];
+            let a = s.vertices()[e.from].position;
+            let b = s.vertices()[e.to].position;
+            out.extend([a.x as f32, a.y as f32, a.z as f32]);
+            out.extend([b.x as f32, b.y as f32, b.z as f32]);
+        }
+        Ok(out)
+    }
+
+    /// Whether an island contains any edge tombstoned by an extrusion — its
+    /// footprint backs a solid, so per-shape Move refuses it.
+    fn island_borders_solid(&self, sid: SketchId, iid: kernel::SketchIslandId) -> bool {
+        let Some(s) = self.doc.sketch(sid) else {
+            return false;
+        };
+        let Some(isl) = s.islands().get(iid) else {
+            return false;
+        };
+        isl.edges
+            .iter()
+            .any(|&e| self.doc.is_sketch_edge_consumed(sid, e))
+    }
+
+    /// True if this live sketch edge lies on an extruded region's boundary
+    /// (deleting it is refused — see `sketch_remove_edge`). The app's batch
+    /// deletes pre-validate with this so a refusal aborts the WHOLE batch
+    /// instead of committing a partial removal.
+    pub fn sketch_edge_borders_solid(&self, sketch: u64, edge: u64) -> bool {
+        self.doc.sketch_edge_borders_consumed(
+            sketch_id(sketch),
+            SketchEdgeId::from(KeyData::from_ffi(edge)),
+        )
+    }
+
+    /// `transform_sketch_island`'s validation without the commit: `true` iff
+    /// the move would be accepted. Batch movers validate every island first
+    /// so one refusal aborts the whole gesture atomically.
+    pub fn can_transform_sketch_island(&self, sketch: u64, island: u64, affine: &[f64]) -> bool {
+        let Ok(rows) = <&[f64; 12]>::try_from(affine) else {
+            return false;
+        };
+        let t = Transform::from_affine(rows);
+        let sid = sketch_id(sketch);
+        let iid = kernel::SketchIslandId::from(KeyData::from_ffi(island));
+        if self.island_borders_solid(sid, iid) {
+            return false;
+        }
+        if t.inverse().is_err() || t.determinant() < 0.0 {
+            return false;
+        }
+        let Some(s) = self.doc.sketch(sid) else {
+            return false;
+        };
+        s.validate_transform_island(iid, &t).is_ok()
+    }
+
+    /// Rigidly move ONE island of a free-standing sketch (per-shape Move;
+    /// undoable). In-plane only; a landing that would cross or merge other
+    /// islands' geometry is refused with a typed error, never welded, and an
+    /// island whose footprint backs an extruded solid refuses outright.
+    pub fn transform_sketch_island(
+        &mut self,
+        sketch: u64,
+        island: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let sid = sketch_id(sketch);
+        let iid = kernel::SketchIslandId::from(KeyData::from_ffi(island));
+        if self.island_borders_solid(sid, iid) {
+            return Err(stale(
+                "IslandBordersSolid",
+                "island contains an extruded region's footprint",
+            ));
+        }
+        let change = self
+            .doc
+            .transform_sketch_island(sid, iid, &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
     }
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
@@ -2326,6 +2569,30 @@ impl Scene {
             .map(|id| id.data().as_ffi())
     }
 
+    /// Picks the nearest live sketch edge under the ray (same aperture and
+    /// ranking as `pick_sketch`), returning both the owning sketch and the
+    /// edge — the Select tool's per-edge pick. `undefined` on a miss.
+    pub fn pick_sketch_edge(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<SketchEdgePickJs> {
+        let ray = PickRay {
+            origin: Point3::new(ox, oy, oz),
+            direction: kernel::Vec3::new(dx, dy, dz),
+        };
+        self.inference
+            .pick_sketch_edge(&ray, SKETCH_PICK_APERTURE)
+            .map(|(sid, eid)| SketchEdgePickJs {
+                sketch: sid.data().as_ffi(),
+                edge: eid.data().as_ffi(),
+            })
+    }
+
     /// Picks the extrudable sketch region under the ray across ALL live
     /// sketches: intersects the ray with each sketch's plane and returns the
     /// smallest-area region whose material contains the hit point (nested
@@ -2932,6 +3199,12 @@ impl Scene {
                     }
                     SketchBeginGesture { sketch } => {
                         self.sketch_begin_gesture(sketch)?;
+                    }
+                    SketchBeginCurve { sketch } => {
+                        self.sketch_begin_curve(sketch)?;
+                    }
+                    SketchEndCurve { sketch } => {
+                        self.sketch_end_curve(sketch)?;
                     }
                     SketchEndGesture { sketch } => {
                         self.sketch_end_gesture(sketch)?;
@@ -3715,6 +3988,94 @@ mod tests {
         ];
         let err = scene.transform_object(o, &reflect).unwrap_err();
         assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+    }
+
+    #[test]
+    fn island_move_refuses_when_its_footprint_backs_a_solid() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        // A second square sharing the first's right wall: one island, two
+        // regions. Extrude the original region — the island now mixes live
+        // and tombstoned edges.
+        for (a, b) in [
+            ([1.0, 0.0], [2.0, 0.0]),
+            ([2.0, 0.0], [2.0, 1.0]),
+            ([2.0, 1.0], [1.0, 1.0]),
+        ] {
+            scene
+                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+        scene.extrude_region(s, r, 1.0).unwrap();
+
+        let islands = scene.sketch_island_ids(s);
+        assert_eq!(islands.len(), 1);
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        assert!(
+            !scene.can_transform_sketch_island(s, islands[0], &affine),
+            "validation refuses a footprint-backed island"
+        );
+        let err = scene
+            .transform_sketch_island(s, islands[0], &affine)
+            .unwrap_err();
+        assert!(
+            err.0.starts_with("IslandBordersSolid"),
+            "typed refusal, got {}",
+            err.0
+        );
+
+        // A fresh, unconsumed island elsewhere still moves (and validates).
+        for (a, b) in [
+            ([5.0, 0.0], [6.0, 0.0]),
+            ([6.0, 0.0], [6.0, 1.0]),
+            ([6.0, 1.0], [5.0, 1.0]),
+            ([5.0, 1.0], [5.0, 0.0]),
+        ] {
+            scene
+                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+        let islands2 = scene.sketch_island_ids(s);
+        let fresh = *islands2
+            .iter()
+            .find(|&&i| i != islands[0])
+            .expect("a second island exists");
+        assert!(scene.can_transform_sketch_island(s, fresh, &affine));
+        scene.transform_sketch_island(s, fresh, &affine).unwrap();
+    }
+
+    /// The batch-delete pre-validation hook: a live edge on an extruded
+    /// region's boundary reports true; a plain edge false.
+    #[test]
+    fn sketch_edge_borders_solid_reports_footprint_edges() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        for (a, b) in [
+            ([1.0, 0.0], [2.0, 0.0]),
+            ([2.0, 0.0], [2.0, 1.0]),
+            ([2.0, 1.0], [1.0, 1.0]),
+        ] {
+            scene
+                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+        scene.extrude_region(s, r, 1.0).unwrap();
+
+        let islands = scene.sketch_island_ids(s);
+        let live = scene.sketch_island_edges(s, islands[0]);
+        assert!(!live.is_empty());
+        // The shared wall (bordering the consumed region) flags true; the
+        // second square's own three edges flag false.
+        let flagged: Vec<bool> = live
+            .iter()
+            .map(|&e| scene.sketch_edge_borders_solid(s, e))
+            .collect();
+        assert_eq!(flagged.iter().filter(|&&f| f).count(), 1);
+        assert_eq!(flagged.iter().filter(|&&f| !f).count(), 3);
     }
 
     #[test]

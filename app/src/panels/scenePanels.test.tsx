@@ -29,6 +29,9 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     group_ids: () => new BigUint64Array(),
     instance_ids: () => new BigUint64Array(),
     sketch_ids: () => new BigUint64Array(),
+    sketch_island_ids: (sid: bigint) => new BigUint64Array([sid + 100n]),
+    sketch_edge_island: () => undefined,
+    sketch_curve_edges: () => new BigUint64Array(),
     top_level_nodes: () => [],
     object_name: (_id: bigint) => undefined as string | undefined,
     group_name: (_id: bigint) => undefined as string | undefined,
@@ -402,12 +405,13 @@ describe('ObjectInfoPanel', () => {
       <ObjectInfoPanel
         scene={scene}
         docRev={0}
-        selectedIds={[{ kind: 'sketch', id: 20n }]}
+        selectedIds={[{ kind: 'sketch-island', id: 120n, sketch: 20n }]}
         onDocumentChanged={vi.fn()}
       />,
     )
     expect(screen.getByText('Sketch')).toBeInTheDocument()
-    // 20n is index 1 in sketch_ids() → "Sketch 2" (1-based, matching the tree's label).
+    // Island 120n of sketch 20n is row index 1 in the outliner's flattened
+    // island list → "Sketch 2" (1-based, matching the tree's label).
     expect(screen.getByText('Sketch 2')).toBeInTheDocument()
     // The old explanatory boilerplate is gone — just the real fields.
     expect(screen.queryByText(/naming and tags are not yet supported/i)).not.toBeInTheDocument()
@@ -808,7 +812,11 @@ describe('DocumentTree', () => {
     expect(objectRow).toBe(sketchRow)
     expect(container.querySelector('[data-node-icon="sketch"]')).not.toBeNull()
     fireEvent.click(screen.getByText('Sketch 1'))
-    expect(onSelect).toHaveBeenCalledWith({ kind: 'sketch', id: 5n }, false)
+    // Rows are ISLANDS — the connected-shape unit — carrying their sketch.
+    expect(onSelect).toHaveBeenCalledWith(
+      { kind: 'sketch-island', id: 105n, sketch: 5n },
+      false,
+    )
   })
 
   it('highlights the sketch row selected from the canvas (canvas → tree)', () => {
@@ -819,7 +827,7 @@ describe('DocumentTree', () => {
       <DocumentTree
         {...docTreeBase}
         scene={scene}
-        selectedIds={[{ kind: 'sketch', id: 5n }]}
+        selectedIds={[{ kind: 'sketch-island', id: 105n, sketch: 5n }]}
       />,
     )
     const row = screen.getByText('Sketch 1').closest('div')

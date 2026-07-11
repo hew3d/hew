@@ -54,6 +54,8 @@ function makeWasmScene(opts: {
       }
     }),
     sketch_end_gesture: vi.fn(),
+    sketch_begin_curve: vi.fn(() => 91n),
+    sketch_end_curve: vi.fn(),
     sketch_add_segment: vi.fn(() => {
       if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
       return {

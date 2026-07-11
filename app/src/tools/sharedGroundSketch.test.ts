@@ -32,6 +32,8 @@ function makeWasmScene() {
     }),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),
+    sketch_begin_curve: vi.fn(() => 91n),
+    sketch_end_curve: vi.fn(),
     sketch_add_segment: vi.fn((sketch: bigint) => {
       segmentSketches.push(sketch)
       return {

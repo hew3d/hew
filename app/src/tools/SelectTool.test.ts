@@ -1,7 +1,8 @@
 /**
- * SelectTool unit tests — the pick_face → pick_sketch → pick_sketch_region
- * fallback chain ("sketches are first-class interactable"). Mirrors the
- * fake-WasmScene pattern used by CircleTool.test.ts/ArcTool.test.ts.
+ * SelectTool unit tests — the pick_face → pick_sketch_edge →
+ * pick_sketch_region fallback chain ("sketches are first-class
+ * interactable"; an edge hit selects THAT line, an interior hit the whole
+ * sketch). Mirrors the fake-WasmScene pattern of CircleTool.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest'
 import { SelectTool } from './SelectTool'
@@ -31,14 +32,23 @@ function makeRegionPick(sketch: bigint, region: bigint) {
   }
 }
 
+/** A fake `SketchEdgePickJs` returning the seeded handles. */
+function makeEdgePick(sketch: bigint, edge: bigint) {
+  return {
+    sketch: () => sketch,
+    edge: () => edge,
+    free: vi.fn(),
+  }
+}
+
 function makeWasmScene(opts: {
   facePick?: ReturnType<typeof makeFacePick>
-  sketchPick?: bigint
+  edgePick?: ReturnType<typeof makeEdgePick>
   regionPick?: ReturnType<typeof makeRegionPick>
 } = {}): WasmScene {
   return {
     pick_face: vi.fn(() => opts.facePick),
-    pick_sketch: vi.fn(() => opts.sketchPick),
+    pick_sketch_edge: vi.fn(() => opts.edgePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
   } as unknown as WasmScene
 }
@@ -52,35 +62,37 @@ describe('SelectTool — pick fallback chain', () => {
     tool.onPointerDown(null, RAY)
 
     expect(onSelect).toHaveBeenCalledWith(7n, 9n)
-    expect(scene.pick_sketch).not.toHaveBeenCalled()
+    expect(scene.pick_sketch_edge).not.toHaveBeenCalled()
     expect(scene.pick_sketch_region).not.toHaveBeenCalled()
   })
 
-  it('a face miss falls back to a sketch EDGE hit (pick_sketch)', () => {
-    const scene = makeWasmScene({ facePick: undefined, sketchPick: 11n })
+  it('a face miss falls back to a sketch EDGE hit — selecting THAT edge', () => {
+    const edgePick = makeEdgePick(11n, 4n)
+    const scene = makeWasmScene({ facePick: undefined, edgePick })
     const onSelect = vi.fn()
     const tool = new SelectTool(scene, onSelect)
 
     tool.onPointerDown(null, RAY)
 
-    expect(onSelect).toHaveBeenCalledWith(null, undefined, 11n)
+    expect(onSelect).toHaveBeenCalledWith(null, undefined, 11n, 4n)
     expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+    expect(edgePick.free).toHaveBeenCalledTimes(1)
   })
 
   it('a face AND edge miss falls back to a sketch region INTERIOR hit (clicking inside a rectangle selects its sketch)', () => {
     const regionPick = makeRegionPick(21n, 5n)
-    const scene = makeWasmScene({ facePick: undefined, sketchPick: undefined, regionPick })
+    const scene = makeWasmScene({ facePick: undefined, edgePick: undefined, regionPick })
     const onSelect = vi.fn()
     const tool = new SelectTool(scene, onSelect)
 
     tool.onPointerDown(null, RAY)
 
-    expect(onSelect).toHaveBeenCalledWith(null, undefined, 21n)
+    expect(onSelect).toHaveBeenCalledWith(null, undefined, 21n, undefined, 5n)
     expect(regionPick.free).toHaveBeenCalledTimes(1)
   })
 
   it('a total miss (no face, no edge, no region) clears the selection', () => {
-    const scene = makeWasmScene({ facePick: undefined, sketchPick: undefined, regionPick: undefined })
+    const scene = makeWasmScene({ facePick: undefined, edgePick: undefined, regionPick: undefined })
     const onSelect = vi.fn()
     const tool = new SelectTool(scene, onSelect)
 

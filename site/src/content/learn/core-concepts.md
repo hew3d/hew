@@ -34,13 +34,13 @@ Free-standing sketches on the ground plane behave the same way: segments split w
 
 ## Inference snapping
 
-As you draw, Hew's inference engine constantly looks for meaningful relationships across everything visible (endpoints, midpoints, intersections, points on an edge or face, construction guides, axis alignment) and calls them out with a colored snap dot and label at the cursor:
+As you draw, Hew's inference engine constantly looks for meaningful relationships across everything visible (endpoints, midpoints, points on an edge or face, construction guides and their crossings, axis alignment) and calls them out with a colored snap dot and label at the cursor:
 
 | Cue | Color |
 |---|---|
 | Endpoint | Green |
 | Midpoint | Cyan |
-| Intersection | Amber |
+| Intersection (guide crossing) | Amber |
 | On Edge | Red |
 | On Face | Blue |
 | On Guide | Purple |

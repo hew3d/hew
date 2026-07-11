@@ -366,7 +366,10 @@ export class MoveTool implements Tool {
   private _commit(nodes: NodeRef[], tx: number, ty: number, tz: number): void {
     try {
       const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
-      if (this.copyMode && nodes.some((n) => n.kind !== 'sketch')) {
+      if (
+        this.copyMode &&
+        nodes.some((n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance')
+      ) {
         // Option/Alt: duplicate at the offset instead of moving. Each copy is
         // the same kind as its source; the copies become the selection so a
         // follow-up Alt-drag chains off them. Sketches have no
@@ -380,6 +383,16 @@ export class MoveTool implements Tool {
         const committed: NodeRef[] = []
         try {
           for (const node of nodes) {
+            if (node.kind === 'sketch-edge' || node.kind === 'sketch-curve') {
+              continue // lines/curves are not movable/copyable (v1)
+            }
+            if (node.kind === 'sketch-island' && node.sketch !== undefined) {
+              // Islands MOVE under copy-drag like whole sketches do — sketch
+              // geometry has no duplicate path yet.
+              this.wasmScene.transform_sketch_island(node.sketch, node.id, affineF64)
+              committed.push(node)
+              continue
+            }
             if (node.kind === 'sketch') {
               this.wasmScene.transform_sketch(node.id, affineF64)
               committed.push(node)

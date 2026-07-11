@@ -754,6 +754,8 @@ export default function Viewport({
       pickedObjectId: bigint | null,
       pickedInstanceId?: bigint,
       pickedSketchId?: bigint,
+      pickedSketchEdgeId?: bigint,
+      pickedSketchRegionId?: bigint,
     ): void {
       const additive = selectAdditiveRef.current && activeContextRef.current.length === 0
       const ctx = activeContextRef.current
@@ -763,7 +765,36 @@ export default function Viewport({
         // sketches have no group/instance nesting), so any active context
         // is simply out of scope for them, like a plain miss.
         if (pickedSketchId !== undefined && ctx.length === 0) {
-          onSelectRef.current?.({ kind: 'sketch', id: pickedSketchId }, additive)
+          // An edge pick selects the drawn CURVE it belongs to (an arc's or
+          // circle's facets act as one), else that single line. An interior
+          // pick selects the ISLAND — the connected shape under the cursor,
+          // never unrelated geometry meters away.
+          if (pickedSketchEdgeId !== undefined) {
+            const curve = wasmScene.sketch_edge_curve(pickedSketchId, pickedSketchEdgeId)
+            if (curve !== undefined) {
+              onSelectRef.current?.(
+                { kind: 'sketch-curve', id: curve, sketch: pickedSketchId },
+                additive,
+              )
+            } else {
+              onSelectRef.current?.(
+                { kind: 'sketch-edge', id: pickedSketchEdgeId, sketch: pickedSketchId },
+                additive,
+              )
+            }
+          } else if (pickedSketchRegionId !== undefined) {
+            const island = wasmScene.sketch_region_island(pickedSketchId, pickedSketchRegionId)
+            if (island !== undefined) {
+              onSelectRef.current?.(
+                { kind: 'sketch-island', id: island, sketch: pickedSketchId },
+                additive,
+              )
+            } else {
+              onSelectRef.current?.({ kind: 'sketch', id: pickedSketchId }, additive)
+            }
+          } else {
+            onSelectRef.current?.({ kind: 'sketch', id: pickedSketchId }, additive)
+          }
           scheduleRender()
           return
         }
@@ -849,7 +880,13 @@ export default function Viewport({
 
     /** Free-standing sketch refs (the kernel lists visible sketches only). */
     function visibleSketchRefs(): NodeRef[] {
-      return Array.from(wasmScene.sketch_ids()).map((id) => ({ kind: 'sketch' as const, id }))
+      return Array.from(wasmScene.sketch_ids()).flatMap((id) =>
+        Array.from(wasmScene.sketch_island_ids(id)).map((island) => ({
+          kind: 'sketch-island' as const,
+          id: island,
+          sketch: id,
+        })),
+      )
     }
 
     /**
@@ -935,7 +972,10 @@ export default function Viewport({
 
       const identity = new THREE.Matrix4()
       for (const s of visibleSketchRefs()) {
-        const lines = wasmScene.sketch_lines(s.id)
+        // Island refs: their lines come from the island query, not the
+        // whole-sketch one (s.id is an ISLAND handle).
+        if (s.sketch === undefined) continue
+        const lines = wasmScene.sketch_island_lines(s.sketch, s.id)
         if (lines.length === 0) continue
         const hit = mode === 'window'
           ? projector.allVerticesInRect(lines, identity, rect)
@@ -1116,9 +1156,76 @@ export default function Viewport({
       if (nodes.length === 0) return
       // kind: 0=object, 1=group, 2=instance; 'sketch' has no NodeId — its own
       // dedicated delete_sketch call, mirroring delete_guide's shape.
-      for (const n of nodes) {
+      //
+      // Sketch-edge deletes run FIRST, and an edge whose whole sketch is
+      // also selected is skipped — the sketch delete covers it, and deleting
+      // the sketch first would strand the edge's handle in a kernel error.
+      const deletedSketches = new Set(
+        nodes.filter((n) => n.kind === 'sketch').map((n) => n.id),
+      )
+      const isSub = (n: NodeRef) =>
+        n.kind === 'sketch-edge' || n.kind === 'sketch-curve' || n.kind === 'sketch-island'
+      const ordered = [...nodes.filter(isSub), ...nodes.filter((n) => !isSub(n))]
+      // Dissolve a batch of edges as ONE gesture (one undo step); an emptied
+      // sketch husk is removed afterward.
+      const removeEdgeBatch = (sketch: bigint, edges: bigint[]): void => {
+        if (edges.length === 0) return
+        // Pre-validate: if ANY edge lies on an extruded region's boundary
+        // the whole batch refuses up front — never a partial removal
+        // committed as one undo step.
+        for (const e of edges) {
+          if (wasmScene.sketch_edge_borders_solid(sketch, e)) {
+            handleToast(
+              "Can't delete: part of this shape is the footprint of a solid",
+              'EdgeBordersSolid',
+            )
+            return
+          }
+        }
+        wasmScene.sketch_begin_gesture(sketch)
         try {
-          if (n.kind === 'sketch') {
+          for (const e of edges) wasmScene.sketch_remove_edge(sketch, e)
+        } finally {
+          wasmScene.sketch_end_gesture(sketch)
+        }
+        const stillListed = Array.from(wasmScene.sketch_ids()).includes(sketch)
+        if (stillListed && wasmScene.sketch_lines(sketch).length === 0) {
+          wasmScene.delete_sketch(sketch)
+        }
+      }
+      for (const n of ordered) {
+        try {
+          if (n.kind === 'sketch-island' && n.sketch !== undefined) {
+            if (deletedSketches.has(n.sketch)) continue
+            removeEdgeBatch(n.sketch, Array.from(wasmScene.sketch_island_edges(n.sketch, n.id)))
+            continue
+          }
+          if (n.kind === 'sketch-curve' && n.sketch !== undefined) {
+            if (deletedSketches.has(n.sketch)) continue
+            removeEdgeBatch(n.sketch, Array.from(wasmScene.sketch_curve_edges(n.sketch, n.id)))
+            continue
+          }
+          if (n.kind === 'sketch-edge' && n.sketch !== undefined) {
+            if (deletedSketches.has(n.sketch)) continue
+            // Dissolve one line: regions it separated merge back together.
+            // Bracketed in a sketch gesture so it lands as ONE undo step
+            // (the same mechanism the draw tools commit through).
+            wasmScene.sketch_begin_gesture(n.sketch)
+            try {
+              wasmScene.sketch_remove_edge(n.sketch, n.id)
+            } finally {
+              wasmScene.sketch_end_gesture(n.sketch)
+            }
+            // Deleting the last line leaves an invisible, unusable empty
+            // sketch — remove the husk too (its own undo step). Guarded on
+            // sketch_ids: a sketch with zero LIVE lines whose remaining
+            // edges are consumed backs an extruded solid and has already
+            // dropped out of the listing — it must not be tombstoned.
+            const stillListed = Array.from(wasmScene.sketch_ids()).includes(n.sketch)
+            if (stillListed && wasmScene.sketch_lines(n.sketch).length === 0) {
+              wasmScene.delete_sketch(n.sketch)
+            }
+          } else if (n.kind === 'sketch') {
             wasmScene.delete_sketch(n.id)
           } else {
             const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
@@ -2596,11 +2703,28 @@ export default function Viewport({
     const leafIds: bigint[] = []
     const instanceIds: bigint[] = []
     const sketchIds: bigint[] = []
+    const sketchEdges: { sketch: bigint; edge: bigint }[] = []
+    const sketchIslands: { sketch: bigint; island: bigint }[] = []
     const getGroupMembers = (groupId: bigint): NodeRef[] =>
       wasmSceneRef.current.group_members(groupId).map((m) => ({ kind: m.kind as NodeRef['kind'], id: m.id }))
     for (const node of selectedIds) {
       if (node.kind === 'sketch') {
         sketchIds.push(node.id)
+        continue
+      }
+      if (node.kind === 'sketch-island' && node.sketch !== undefined) {
+        sketchIslands.push({ sketch: node.sketch, island: node.id })
+        continue
+      }
+      if (node.kind === 'sketch-curve' && node.sketch !== undefined) {
+        // A curve highlights as its member edges.
+        for (const edge of wasmSceneRef.current.sketch_curve_edges(node.sketch, node.id)) {
+          sketchEdges.push({ sketch: node.sketch, edge })
+        }
+        continue
+      }
+      if (node.kind === 'sketch-edge' && node.sketch !== undefined) {
+        sketchEdges.push({ sketch: node.sketch, edge: node.id })
         continue
       }
       const { objectIds, instanceIds: leafInstanceIds } = collectLeafIds(node, getGroupMembers)
@@ -2610,6 +2734,8 @@ export default function Viewport({
     sceneRendererRef.current?.setSelected(leafIds)
     sceneRendererRef.current?.setSelectedInstances(instanceIds)
     sceneRendererRef.current?.setSelectedSketches(sketchIds)
+    sceneRendererRef.current?.setSelectedSketchIslands(sketchIslands)
+    sceneRendererRef.current?.setSelectedSketchEdges(sketchEdges)
     scheduleRenderRef.current()
   }, [selectedIds])
 

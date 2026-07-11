@@ -8,6 +8,10 @@ Hew's four drawing tools create 2D profiles. On the empty ground plane, a closed
 
 The four tools share one working sketch on the ground, so shapes drawn with different tools combine: draw an arc, switch to Line, and close it with a chord — the face forms the moment the circuit closes, exactly as if one tool had drawn it all. An arch profile, for instance, is three Line segments topped with an Arc, extruded once.
 
+Layered shapes edit like a drawing, too. Where two closed shapes share a line, that line splits them into separate regions; select it with the Select tool and press `Delete`, and the regions merge into one larger face. Draw a rectangle, cap it with an arc, delete the line between them — one arch-shaped region, one pull.
+
+Selection matches what you drew. Clicking a straight line selects just that line. Clicking any facet of a drawn arc or circle selects the whole curve — one click, one `Delete`, no facet-by-facet tedium. Clicking inside a filled region selects the connected shape it belongs to, and shapes drawn apart from each other are independent: selecting, deleting, or moving one never touches the other, even though they share the working sketch.
+
 While any drawing tool is active, the status bar explains the next step, the top-right readout shows live dimensions, and everything you type goes into that readout (see "Typing exact values" below).
 
 ## Line (`L`)
@@ -54,9 +58,13 @@ A two-point arc, like SketchUp's:
 
 Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level you can draw on any object's face; once you've double-clicked into an object's editing context, drawing is scoped to that object.
 
-## Editing a sketch: Edit Vertex
+## Editing a sketch
 
-For a free-standing sketch that hasn't been extruded yet, the **Edit Vertex** tool (Tools ▸ Edit Vertex, or find it in the palette) adjusts a single point:
+**Deleting a line or curve.** With the Select tool, click any sketch line to select it — a facet of a drawn arc or circle selects the whole curve — and press `Delete`. If the line separated two regions, they merge; if it closed a region, the region opens back up. Deleting a shape's last line removes it entirely. One guardrail: a line on the boundary of a region you've already pulled into a solid can't be deleted — the solid's footprint depends on it.
+
+**Deleting or moving a whole shape.** Click inside a shape's filled region (or its row in the outliner) to select the connected shape, then `Delete` removes it or Move slides it — without disturbing anything else you've drawn. A move that would land one shape on top of another is refused rather than welded, and a shape whose outline has already been pulled into a solid stays put — its footprint belongs to the solid now. (Curve-as-a-unit selection applies to arcs and circles drawn on the ground; lines drawn on a solid's face become part of that solid's geometry.)
+
+**Moving a point.** For a free-standing sketch that hasn't been extruded yet, the **Edit Vertex** tool (Tools ▸ Edit Vertex, or find it in the palette) adjusts a single point:
 
 1. Click a sketch vertex to grab it.
 2. Click its new position — the connected edges stretch to follow.
@@ -65,7 +73,7 @@ If a move would break the sketch's topology (collapse a segment, fold a region),
 
 ## Inference while drawing
 
-Every click snaps. The colored dot and label at the cursor tell you what you're about to snap to — Endpoint (green), Midpoint (cyan), Intersection (amber), On Edge (red), On Face (blue), On Guide (purple), On Axis (the axis color), or Ground (gray). A dashed helper line appears through the snap point when the snap has a direction, such as an axis alignment. Construction guides let you add snap targets of your own; [Precision, measurement, and guides](/learn/measurement-and-guides/) covers them.
+Every click snaps. The colored dot and label at the cursor tell you what you're about to snap to — Endpoint (green), Midpoint (cyan), Intersection (amber — where a construction guide crosses an edge, a sketch line, or another guide), On Edge (red), On Face (blue), On Guide (purple), On Axis (the axis color), or Ground (gray). Lines you draw across each other need no cue of their own: crossings become real endpoints the moment they're drawn. A dashed helper line appears through the snap point when the snap has a direction, such as an axis alignment. Construction guides let you add snap targets of your own; [Precision, measurement, and guides](/learn/measurement-and-guides/) covers them.
 
 ## Typing exact values
 

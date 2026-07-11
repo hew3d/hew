@@ -143,6 +143,15 @@ Extruding a region consumes the sketch geometry that bounded it: the outline
 that became a solid's base disappears from the sketch, since it was
 scaffolding, not a first-class 2D object once it has served its purpose.
 
+Within a Sketch, the user-facing units are derived, identity-stable
+sub-entities, mirroring how regions already work: **islands** (connected
+components — each shape drawn apart from the others selects, deletes, and
+moves independently, recomputed on every edit with stable ids) and
+**curves** (the facet chain one arc or circle gesture committed, carried as
+edge metadata and persisted in the file format, so a drawn curve selects
+and deletes as a unit — and the metadata slot is the on-ramp for true
+analytic curves later).
+
 ### 2.7 Groups and Components are the two ways to compose
 
 Groups and Components answer different questions and stay separate concepts:

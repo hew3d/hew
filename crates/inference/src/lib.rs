@@ -42,8 +42,9 @@
 //! constant-count candidates (guides, world axes/origin) and gesture-scoped
 //! ones (sketch/transient segments) stay on a linear walk. The API
 //! deliberately hides the storage so the index strategy can change without
-//! touching callers. Intersection snaps (`SnapKind::Intersection`) are M2 —
-//! the variant exists but `resolve` does not emit it yet.
+//! touching callers. Intersection snaps (`SnapKind::Intersection`) are
+//! emitted where a guide line crosses a segment (sketch or object edge) or
+//! another guide line — the crossing is precisely why the guide was drawn.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::BTreeSet;
@@ -921,6 +922,52 @@ impl InferenceScene {
             }
         }
 
+        // --- Guide-intersection candidates ---
+        // The point where a guide line crosses a sketch segment, an object
+        // edge, or another guide line is precisely why the guide was drawn —
+        // snap it as SnapKind::Intersection (between Midpoint and OnEdge in
+        // strength, so a real vertex at the crossing still wins). Like plain
+        // guide snaps: no provenance, suppressed when guides are hidden.
+        if self.guides_enabled {
+            let guide_lines: Vec<(Point3, Vec3)> = self
+                .guides
+                .iter()
+                .filter_map(|g| match g.geom {
+                    SceneGuideGeom::Line { origin, direction } => Some((origin, direction)),
+                    SceneGuideGeom::Point { .. } => None,
+                })
+                .collect();
+
+            // Guide × segment (object edges near the ray, plus every live
+            // sketch segment — sketch candidates stay on the linear walk).
+            let emit = |p: Point3, candidates: &mut Vec<Candidate>| {
+                if let Some((ang, depth)) = cone_test(origin, dir, p, aperture) {
+                    candidates.push((SnapKind::Intersection, ang, depth, p, None, None));
+                }
+            };
+            for &(go, gd) in &guide_lines {
+                for &si in &segment_ids {
+                    let seg = &self.segments[si];
+                    if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b) {
+                        emit(p, &mut candidates);
+                    }
+                }
+                for (_, _, seg) in &self.sketch_segments {
+                    if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b) {
+                        emit(p, &mut candidates);
+                    }
+                }
+            }
+            // Guide × guide.
+            for (i, &(ao, ad)) in guide_lines.iter().enumerate() {
+                for &(bo, bd) in guide_lines.iter().skip(i + 1) {
+                    if let Some(p) = line_line_intersection(ao, ad, bo, bd) {
+                        emit(p, &mut candidates);
+                    }
+                }
+            }
+        }
+
         // --- Constrain to the active drawing plane, if any. ---
         // Drawing on a face must not snap to occluded, off-plane geometry: the
         // pick cone is a screen-space projection that "sees through" the solid,
@@ -1121,17 +1168,33 @@ impl InferenceScene {
     /// transient segments (no owning sketch) are not candidates here.
     /// Returns `None` if the ray hits no live sketch edge within `aperture`.
     pub fn pick_sketch(&self, ray: &PickRay, aperture: f64) -> Option<SketchId> {
+        self.pick_sketch_edge(ray, aperture).map(|(id, _)| id)
+    }
+
+    /// Like [`InferenceScene::pick_sketch`], but says WHICH edge was hit:
+    /// the `(SketchId, SketchEdgeId)` of the live sketch segment nearest the
+    /// ray within `aperture` (same ranking — smallest angular distance,
+    /// depth breaks ties). The Select tool's per-edge pick. `None` if the
+    /// ray hits no live sketch edge within `aperture`.
+    pub fn pick_sketch_edge(
+        &self,
+        ray: &PickRay,
+        aperture: f64,
+    ) -> Option<(SketchId, SketchEdgeId)> {
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
-        let mut best: Option<(f64, f64, SketchId)> = None; // (angular_dist, depth, id)
-        for &(id, _eid, ref seg) in &self.sketch_segments {
+        // (angular_dist, depth, sketch, edge)
+        let mut best: Option<(f64, f64, SketchId, SketchEdgeId)> = None;
+        for &(id, eid, ref seg) in &self.sketch_segments {
             if let Some((_pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
-                && best.as_ref().is_none_or(|&(a, d, _)| (ang, depth) < (a, d))
+                && best
+                    .as_ref()
+                    .is_none_or(|&(a, d, _, _)| (ang, depth) < (a, d))
             {
-                best = Some((ang, depth, id));
+                best = Some((ang, depth, id, eid));
             }
         }
-        best.map(|(_, _, id)| id)
+        best.map(|(_, _, id, eid)| (id, eid))
     }
 
     /// Picks the committed sketch *vertex* nearest the ray (Phase D per-vertex
@@ -1353,6 +1416,82 @@ fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
 
 /// Projects `point` onto the line `anchor + t * dir` (dir must be unit).
 /// Returns the projected point, which lies exactly on the line.
+/// The point where the infinite line `(o, d)` crosses the segment `[a, b]`,
+/// or `None` when they are parallel, skew beyond [`tol::POINT_MERGE`], or
+/// the crossing falls outside the segment (with [`tol::POINT_MERGE`] of
+/// world-distance slack at the endpoints). The returned point lies ON the
+/// segment (real geometry), not on the guide.
+fn line_segment_intersection(o: Point3, d: Vec3, a: Point3, b: Point3) -> Option<Point3> {
+    let e = b - a;
+    let seg_len2 = e.dot(e);
+    if seg_len2 < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
+        return None; // degenerate segment
+    }
+    let dd = d.dot(d);
+    if dd < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
+        return None; // degenerate guide direction
+    }
+    // Solve min |o + s·d − (a + t·e)| for (s, t) — standard line/line closest
+    // points. denom / (dd·seg_len2) = sin²θ between the directions; treat the
+    // pair as parallel below the same normalize floor segment_cone_hit uses.
+    let w = o - a;
+    let de = d.dot(e);
+    let denom = dd * seg_len2 - de * de;
+    if denom < dd * seg_len2 * tol::NORMALIZE_MIN_LENGTH {
+        return None;
+    }
+    let dw = d.dot(w);
+    let ew = e.dot(w);
+    let t = (dd * ew - de * dw) / denom;
+    // Endpoint slack in world distance, expressed in the parameter t.
+    let t_slack = tol::POINT_MERGE / seg_len2.sqrt();
+    if t < -t_slack || t > 1.0 + t_slack {
+        return None;
+    }
+    let t = t.clamp(0.0, 1.0);
+    let on_seg = Point3::new(a.x + e.x * t, a.y + e.y * t, a.z + e.z * t);
+    let s = (de * t - dw) / dd; // closest param on the guide for that t
+    let on_line = Point3::new(o.x + d.x * s, o.y + d.y * s, o.z + d.z * s);
+    if (on_seg - on_line).length() > tol::POINT_MERGE {
+        return None; // skew — the lines pass near, not through, each other
+    }
+    Some(on_seg)
+}
+
+/// The point where two infinite lines cross, or `None` when parallel or
+/// skew beyond [`tol::POINT_MERGE`]. Returns the midpoint of the closest
+/// pair (exact crossing → the crossing itself).
+fn line_line_intersection(ao: Point3, ad: Vec3, bo: Point3, bd: Vec3) -> Option<Point3> {
+    let w = ao - bo;
+    let aa = ad.dot(ad);
+    let bb = bd.dot(bd);
+    if aa < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH
+        || bb < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH
+    {
+        return None; // degenerate direction
+    }
+    let ab = ad.dot(bd);
+    // denom / (aa·bb) = sin²θ — same parallel floor as the segment case.
+    let denom = aa * bb - ab * ab;
+    if denom < aa * bb * tol::NORMALIZE_MIN_LENGTH {
+        return None;
+    }
+    let aw = ad.dot(w);
+    let bw = bd.dot(w);
+    let s = (ab * bw - bb * aw) / denom;
+    let t = (aa * bw - ab * aw) / denom;
+    let pa = Point3::new(ao.x + ad.x * s, ao.y + ad.y * s, ao.z + ad.z * s);
+    let pb = Point3::new(bo.x + bd.x * t, bo.y + bd.y * t, bo.z + bd.z * t);
+    if (pa - pb).length() > tol::POINT_MERGE {
+        return None;
+    }
+    Some(Point3::new(
+        (pa.x + pb.x) / 2.0,
+        (pa.y + pb.y) / 2.0,
+        (pa.z + pb.z) / 2.0,
+    ))
+}
+
 fn project_onto_line(anchor: Point3, dir: Vec3, point: Point3) -> Point3 {
     let t = (point - anchor).dot(dir);
     anchor + dir * t
@@ -2337,6 +2476,175 @@ mod tests {
         // Idempotent / unknown id is a no-op.
         scene.remove_sketch(id);
         scene.remove_sketch(SketchId::default());
+    }
+
+    /// A guide line crossing a sketch segment snaps as Intersection exactly
+    /// at the crossing — the reason the guide was drawn. A real vertex at
+    /// the same spot still outranks it, and hidden guides emit nothing.
+    #[test]
+    fn guide_crossing_a_sketch_segment_snaps_as_intersection() {
+        let mut scene = InferenceScene::new();
+        // Horizontal sketch segment y=1, x in 0..2.
+        scene.add_sketch(
+            SketchId::default(),
+            &[(
+                SketchEdgeId::default(),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(2.0, 1.0, 0.0),
+            )],
+        );
+        // Vertical guide line through x = 0.5.
+        scene.add_guide(
+            GuideId::default(),
+            &Guide::Line {
+                origin: Point3::new(0.5, 0.0, 0.0),
+                direction: Vec3::new(0.0, 1.0, 0.0),
+            },
+        );
+
+        let query_at = |x: f64, y: f64| SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(x, y, 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.02,
+            constraint_plane: None,
+        };
+
+        let snap = scene
+            .resolve(&query_at(0.5, 1.0))
+            .expect("the crossing snaps");
+        assert_eq!(snap.kind, SnapKind::Intersection);
+        assert!(
+            snap.position
+                .approx_eq(Point3::new(0.5, 1.0, 0.0), tol::POINT_MERGE)
+        );
+
+        // The segment's endpoint still outranks the intersection when the
+        // guide passes through it.
+        scene.add_guide(
+            GuideId::default(),
+            &Guide::Line {
+                origin: Point3::new(0.0, 0.0, 0.0),
+                direction: Vec3::new(0.0, 1.0, 0.0),
+            },
+        );
+        let at_vertex = scene
+            .resolve(&query_at(0.0, 1.0))
+            .expect("the vertex snaps");
+        assert_eq!(at_vertex.kind, SnapKind::Endpoint);
+
+        // Hidden guides emit neither OnGuide nor Intersection.
+        scene.set_guides_enabled(false);
+        let hidden = scene.resolve(&query_at(0.5, 1.0));
+        assert!(hidden.is_none_or(|s| s.kind != SnapKind::Intersection));
+    }
+
+    /// Two crossing guide lines snap as Intersection at their crossing.
+    #[test]
+    fn crossing_guides_snap_as_intersection() {
+        let mut scene = InferenceScene::new();
+        // add_guide has replace semantics per id — mint two DISTINCT GuideIds
+        // from a real Document so both guides coexist.
+        let mut doc = kernel::Document::new();
+        let g1 = doc
+            .add_guide_line(Point3::new(0.3, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0))
+            .expect("guide 1");
+        let g2 = doc
+            .add_guide_line(Point3::new(0.0, 0.7, 0.0), Vec3::new(1.0, 0.0, 0.0))
+            .expect("guide 2");
+        scene.add_guide(
+            g1,
+            &Guide::Line {
+                origin: Point3::new(0.3, 0.0, 0.0),
+                direction: Vec3::new(0.0, 1.0, 0.0),
+            },
+        );
+        scene.add_guide(
+            g2,
+            &Guide::Line {
+                origin: Point3::new(0.0, 0.7, 0.0),
+                direction: Vec3::new(1.0, 0.0, 0.0),
+            },
+        );
+
+        let snap = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(0.3, 0.7, 5.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.02,
+                constraint_plane: None,
+            })
+            .expect("the guide crossing snaps");
+        assert_eq!(snap.kind, SnapKind::Intersection);
+        assert!(
+            snap.position
+                .approx_eq(Point3::new(0.3, 0.7, 0.0), tol::POINT_MERGE)
+        );
+    }
+
+    /// `pick_sketch_edge` returns WHICH edge was hit, not just the sketch:
+    /// two edges registered with distinct real ids resolve to the right one
+    /// depending on where the ray points.
+    #[test]
+    fn pick_sketch_edge_distinguishes_edges_within_one_sketch() {
+        // Mint two genuinely distinct SketchEdgeIds from a real kernel
+        // sketch (slotmap keys — Default would alias them).
+        let mut sk = kernel::Sketch::on_plane(
+            kernel::Plane::from_polygon(&[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ])
+            .unwrap(),
+        );
+        sk.add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0))
+            .unwrap();
+        sk.add_segment(Point3::new(0.0, 5.0, 0.0), Point3::new(2.0, 5.0, 0.0))
+            .unwrap();
+        let ids: Vec<SketchEdgeId> = sk.edges().keys().collect();
+        let [e_low, e_high] = [ids[0], ids[1]];
+        let seg_of = |eid: SketchEdgeId| {
+            let e = &sk.edges()[eid];
+            (
+                eid,
+                sk.vertices()[e.from].position,
+                sk.vertices()[e.to].position,
+            )
+        };
+
+        let mut scene = InferenceScene::new();
+        let sid = SketchId::default();
+        scene.add_sketch(sid, &[seg_of(e_low), seg_of(e_high)]);
+
+        let ray_at = |x: f64, y: f64| PickRay {
+            origin: Point3::new(x, y, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+        // Which id is which depends on which segment sits at y=0 vs y=5.
+        let e = &sk.edges()[e_low];
+        let low_is_y0 = sk.vertices()[e.from].position.y.abs() < 1e-9;
+        let (y0_edge, y5_edge) = if low_is_y0 {
+            (e_low, e_high)
+        } else {
+            (e_high, e_low)
+        };
+
+        assert_eq!(
+            scene.pick_sketch_edge(&ray_at(1.0, 0.0), 0.05),
+            Some((sid, y0_edge)),
+        );
+        assert_eq!(
+            scene.pick_sketch_edge(&ray_at(1.0, 5.0), 0.05),
+            Some((sid, y5_edge)),
+        );
+        assert_eq!(scene.pick_sketch_edge(&ray_at(50.0, 50.0), 0.05), None);
     }
 
     /// `pick_sketch` returns the id of the sketch whose edge the ray passes

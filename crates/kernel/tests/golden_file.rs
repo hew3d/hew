@@ -150,6 +150,15 @@ fn build_representative_doc() -> Document {
         ] {
             sk.add_segment(a, b).unwrap();
         }
+        // A two-facet curve chain (v7: curve ids on edges) off to the side.
+        sk.begin_curve();
+        for (a, b) in [
+            (Point3::new(5.0, 0.0, 0.0), Point3::new(5.5, 0.3, 0.0)),
+            (Point3::new(5.5, 0.3, 0.0), Point3::new(6.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+        sk.end_curve();
         // Rectangle 2: remains extrudable
         for (a, b) in [
             (Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 0.0, 0.0)),

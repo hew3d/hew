@@ -26,27 +26,42 @@ export function stripTagSuffix(name: string): string {
 
 /**
  * Kind of a document node. `'sketch'` is a free-standing,
- * not-yet-extruded sketch — it has no kernel `NodeId`/FFI `node_id` ('s
- * NodeId enumerates only Object/Group/Instance), so it deliberately stays out
- * of `nodeKindToNumber`'s mapping; sketch delete/pick route through dedicated
- * `delete_sketch`/`pick_sketch` wasm methods instead of `delete_node`.
+ * not-yet-extruded sketch and `'sketch-edge'` one individual line of one —
+ * neither has a kernel `NodeId`/FFI `node_id` ('s NodeId enumerates only
+ * Object/Group/Instance), so both deliberately stay out of
+ * `nodeKindToNumber`'s mapping; their delete/pick route through dedicated
+ * wasm methods (`delete_sketch`/`sketch_remove_edge`/`pick_sketch`/
+ * `pick_sketch_edge`) instead of `delete_node`.
  */
-export type NodeKind = 'object' | 'group' | 'instance' | 'sketch'
+export type NodeKind =
+  | 'object'
+  | 'group'
+  | 'instance'
+  | 'sketch'
+  | 'sketch-island'
+  | 'sketch-curve'
+  | 'sketch-edge'
 
-/** A reference to a document node: kind + opaque handle. */
+/** A reference to a document node: kind + opaque handle. The sketch-scoped
+ * kinds (`'sketch-island'` — one connected shape, the user-facing unit;
+ * `'sketch-curve'` — a drawn arc/circle's facet chain; `'sketch-edge'` — one
+ * line) additionally carry their owning sketch, since their ids are only
+ * unique within one sketch. */
 export interface NodeRef {
   kind: NodeKind
   id: bigint
+  /** Owning sketch handle — set iff `kind` is a sketch-scoped sub-entity. */
+  sketch?: bigint
 }
 
 /** Return true when two NodeRefs refer to the same node. */
 export function nodeEq(a: NodeRef, b: NodeRef): boolean {
-  return a.kind === b.kind && a.id === b.id
+  return a.kind === b.kind && a.id === b.id && a.sketch === b.sketch
 }
 
 /** Stable string key for a NodeRef, usable in a Set or Map. */
 export function nodeKey(n: NodeRef): string {
-  return `${n.kind}:${n.id}`
+  return n.sketch !== undefined ? `${n.kind}:${n.sketch}:${n.id}` : `${n.kind}:${n.id}`
 }
 
 /** Convert a NodeJs FFI value (has .kind and .id) to a plain NodeRef. */
@@ -73,7 +88,14 @@ export function collectLeafIds(
 ): { objectIds: bigint[]; instanceIds: bigint[] } {
   if (node.kind === 'object') return { objectIds: [node.id], instanceIds: [] }
   if (node.kind === 'instance') return { objectIds: [], instanceIds: [node.id] }
-  if (node.kind === 'sketch') return { objectIds: [], instanceIds: [] }
+  if (
+    node.kind === 'sketch' ||
+    node.kind === 'sketch-island' ||
+    node.kind === 'sketch-curve' ||
+    node.kind === 'sketch-edge'
+  ) {
+    return { objectIds: [], instanceIds: [] }
+  }
   // Group: recurse into members (may themselves be nested groups).
   const objectIds: bigint[] = []
   const instanceIds: bigint[] = []

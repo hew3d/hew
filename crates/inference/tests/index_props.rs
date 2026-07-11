@@ -7,9 +7,7 @@
 //! only prune, never decide.
 
 use inference::{Axis, InferenceScene, PickRay, SnapLock, SnapQuery};
-use kernel::{
-    Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchId, Transform, Vec3,
-};
+use kernel::{Guide, InstanceId, Object, ObjectId, Plane, Point3, SketchId, Transform, Vec3};
 use proptest::prelude::*;
 
 /// Minimum |det| of the three edge vectors for a generated tetrahedron
@@ -163,10 +161,18 @@ fn build_scene(spec: &SceneSpec) -> InferenceScene {
             );
         }
     }
+    // Distinct ids per guide (add_guide has replace semantics — a shared
+    // id would keep only the last one, hiding every multi-guide code path,
+    // including guide × guide intersections). Mint real ids from a scratch
+    // Document, the same way the app does.
+    let mut id_mint = kernel::Document::new();
     for guide in &spec.guides {
-        // Same id: `add_guide` has replace semantics, so only the last one
-        // survives — enough to exercise the (linear) guide path.
-        scene.add_guide(GuideId::default(), guide);
+        let gid = match guide {
+            Guide::Point { position } => id_mint.add_guide_point(*position),
+            Guide::Line { origin, direction } => id_mint.add_guide_line(*origin, *direction),
+        }
+        .expect("generated guides are finite");
+        scene.add_guide(gid, guide);
     }
     let sketch_segs: Vec<(kernel::SketchEdgeId, Point3, Point3)> = spec
         .sketch
@@ -306,6 +312,105 @@ proptest! {
         prop_assert_eq!(
             scene.pick_face(&query.ray),
             scene.pick_face_linear(&query.ray)
+        );
+    }
+}
+
+/// Deterministic indexed/linear parity at REAL guide crossings. The random
+/// generators essentially never place a guide exactly through a segment
+/// (POINT_MERGE is 1e-9 against meter-scale draws), so the property test
+/// above cannot reach the Intersection candidate path — this spec pins it:
+/// guide × object edge, guide × sketch segment, and guide × guide must all
+/// snap as Intersection at the crossing, identically on both paths.
+#[test]
+fn intersection_snaps_agree_between_indexed_and_linear_paths() {
+    let mut scene = InferenceScene::new();
+
+    // Unit cube at the origin.
+    let vertices = vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(1.0, 1.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(1.0, 1.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ];
+    let faces: Vec<Vec<usize>> = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![2, 3, 7, 6],
+        vec![1, 2, 6, 5],
+        vec![0, 4, 7, 3],
+    ];
+    let cube = Object::from_polygons(&vertices, &faces).expect("cube");
+    scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
+
+    // A sketch segment on the ground, away from the cube.
+    scene.add_sketch(
+        SketchId::default(),
+        &[(
+            kernel::SketchEdgeId::default(),
+            Point3::new(0.0, 3.0, 0.0),
+            Point3::new(2.0, 3.0, 0.0),
+        )],
+    );
+
+    // Guides minted with distinct ids: one through the cube's top-front
+    // edge, one through the sketch segment, one crossing the second guide.
+    let mut id_mint = kernel::Document::new();
+    let mut add_line = |scene: &mut InferenceScene, origin: Point3, direction: Vec3| {
+        let gid = id_mint
+            .add_guide_line(origin, direction)
+            .expect("finite guide");
+        scene.add_guide(gid, &Guide::Line { origin, direction });
+    };
+    add_line(
+        &mut scene,
+        Point3::new(0.25, -5.0, 1.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    add_line(
+        &mut scene,
+        Point3::new(0.7, -5.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    add_line(
+        &mut scene,
+        Point3::new(-5.0, 3.5, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+    );
+
+    let crossings = [
+        (Point3::new(0.25, 0.0, 1.0), "guide x cube edge"),
+        (Point3::new(0.7, 3.0, 0.0), "guide x sketch segment"),
+        (Point3::new(0.7, 3.5, 0.0), "guide x guide"),
+    ];
+    for (p, what) in crossings {
+        let query = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(p.x, p.y, p.z + 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.01,
+            constraint_plane: None,
+        };
+        let indexed = scene.resolve(&query);
+        let linear = scene.resolve_linear(&query);
+        assert_eq!(indexed, linear, "indexed/linear parity at {what}");
+        let snap = indexed.unwrap_or_else(|| panic!("{what} snaps"));
+        assert_eq!(
+            snap.kind,
+            inference::SnapKind::Intersection,
+            "{what} snaps as Intersection"
+        );
+        assert!(
+            (snap.position - p).length() < 1e-9,
+            "{what} lands on the crossing"
         );
     }
 }

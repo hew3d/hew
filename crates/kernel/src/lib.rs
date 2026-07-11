@@ -57,8 +57,9 @@ pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,
 };
 pub use sketch::{
-    EdgeRemoved, Profile, ProfileError, SegmentAdded, Sketch, SketchEdge, SketchEdgeId,
-    SketchError, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
+    EdgeRemoved, Profile, ProfileError, SegmentAdded, Sketch, SketchCurveId, SketchEdge,
+    SketchEdgeId, SketchError, SketchIsland, SketchIslandId, SketchRegion, SketchRegionId,
+    SketchVertex, SketchVertexId,
 };
 pub use topo::{Object, WatertightState};
 pub use transform::{Transform, TransformError};

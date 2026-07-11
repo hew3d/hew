@@ -46,6 +46,21 @@ new_key_type! {
     pub struct SketchEdgeId;
     /// Handle to a [`SketchRegion`].
     pub struct SketchRegionId;
+    /// Handle to a curve chain: the edges committed as ONE drawn curve (an
+    /// arc or circle's facets), selected and deleted as a unit.
+    pub struct SketchCurveId;
+    /// Handle to an [`SketchIsland`].
+    pub struct SketchIslandId;
+}
+
+/// A connected component of a sketch's edges: what the user perceives as one
+/// independent drawn shape. Derived (never serialized) and recomputed on
+/// every edge-set mutation with identity reuse, exactly like regions — the
+/// selection/label/delete/move unit for free-standing sketch geometry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchIsland {
+    /// The island's edges, ascending by id.
+    pub edges: Vec<SketchEdgeId>,
 }
 
 /// A point in a sketch. Always on the sketch plane
@@ -67,6 +82,11 @@ pub struct SketchEdge {
     pub from: SketchVertexId,
     /// End vertex.
     pub to: SketchVertexId,
+    /// The curve chain this edge belongs to, when it was committed as part
+    /// of one drawn curve (an arc's or circle's facets). `None` for plain
+    /// lines and rectangle sides. Fragments of a split curve edge inherit
+    /// the id, so a curve stays one selectable unit across sticky splits.
+    pub curve: Option<SketchCurveId>,
 }
 
 /// A closed region bounded by sketch edges: what the user perceives as "a
@@ -133,6 +153,9 @@ pub enum SketchError {
     /// overlap another edge, or the moved vertex would land on another vertex
     /// (a merge). No silent repair (rule 4) — the caller decides.
     WouldRetopologize,
+    /// The island handle is stale (islands die whenever an edge-set mutation
+    /// reshapes them — always re-query after mutating).
+    UnknownIsland,
     /// The region's traced boundary does not form a valid [`Profile`] (a
     /// kernel bug in region tracing, surfaced as a typed error rather than a
     /// panic so it cannot brick the caller).
@@ -149,6 +172,9 @@ impl std::fmt::Display for SketchError {
             SketchError::UnknownEdge => write!(f, "no such edge in this sketch"),
             SketchError::UnknownVertex => write!(f, "no such vertex in this sketch"),
             SketchError::UnknownRegion => write!(f, "no such region in this sketch"),
+            SketchError::UnknownIsland => {
+                write!(f, "no such island in this sketch")
+            }
             SketchError::WouldRetopologize => {
                 write!(f, "the move would cross or merge sketch geometry")
             }
@@ -168,6 +194,15 @@ pub struct Sketch {
     vertices: SlotMap<SketchVertexId, SketchVertex>,
     edges: SlotMap<SketchEdgeId, SketchEdge>,
     regions: SlotMap<SketchRegionId, SketchRegion>,
+    /// Live curve-chain ids (values carry nothing; the id is the identity —
+    /// membership lives on each edge's `curve` field).
+    curves: SlotMap<SketchCurveId, ()>,
+    /// Current connected components (derived; see [`SketchIsland`]).
+    islands: SlotMap<SketchIslandId, SketchIsland>,
+    /// Curve id applied to edges inserted by `add_segment` while a
+    /// `begin_curve`/`end_curve` bracket is open. Transient tool state — a
+    /// gesture snapshot restores it with the rest of the sketch.
+    active_curve: Option<SketchCurveId>,
 }
 
 impl Sketch {
@@ -178,6 +213,9 @@ impl Sketch {
             vertices: SlotMap::with_key(),
             edges: SlotMap::with_key(),
             regions: SlotMap::with_key(),
+            curves: SlotMap::with_key(),
+            active_curve: None,
+            islands: SlotMap::with_key(),
         }
     }
 
@@ -194,6 +232,231 @@ impl Sketch {
     /// Edge storage (read-only).
     pub fn edges(&self) -> &SlotMap<SketchEdgeId, SketchEdge> {
         &self.edges
+    }
+
+    /// Opens a curve bracket: edges added by `add_segment` until
+    /// [`Sketch::end_curve`] are tagged as ONE curve chain (an arc's or
+    /// circle's facets), so the UI can select and delete them as a unit.
+    /// Returns the minted curve id. Nesting is not supported — a second
+    /// `begin_curve` simply replaces the active id.
+    pub fn begin_curve(&mut self) -> SketchCurveId {
+        let id = self.curves.insert(());
+        self.active_curve = Some(id);
+        id
+    }
+
+    /// Closes the open curve bracket (no-op when none is open).
+    pub fn end_curve(&mut self) {
+        self.active_curve = None;
+    }
+
+    /// The curve chain `edge` belongs to, or `None` for a plain line (or a
+    /// stale handle).
+    pub fn edge_curve(&self, edge: SketchEdgeId) -> Option<SketchCurveId> {
+        self.edges.get(edge).and_then(|e| e.curve)
+    }
+
+    /// Every edge of `curve`, in slotmap order. Empty for a stale id.
+    pub fn curve_edges(&self, curve: SketchCurveId) -> Vec<SketchEdgeId> {
+        self.edges
+            .iter()
+            .filter(|(_, e)| e.curve == Some(curve))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Registers a curve id during structural (file-load) reconstruction.
+    pub(crate) fn insert_curve_raw(&mut self) -> SketchCurveId {
+        self.curves.insert(())
+    }
+
+    /// Current islands — connected components of the edge graph (read-only).
+    /// Kept up to date by every edge-set mutation; ids are stable while an
+    /// island keeps its anchor edge (see [`Sketch::recompute_islands`]).
+    pub fn islands(&self) -> &SlotMap<SketchIslandId, SketchIsland> {
+        &self.islands
+    }
+
+    /// The island `edge` belongs to, or `None` for a stale handle.
+    pub fn island_of_edge(&self, edge: SketchEdgeId) -> Option<SketchIslandId> {
+        self.islands
+            .iter()
+            .find(|(_, isl)| isl.edges.binary_search(&edge).is_ok())
+            .map(|(id, _)| id)
+    }
+
+    /// Rebuild the island set from the current edge graph, preserving ids:
+    /// a new component reuses an old island's id when it contains that
+    /// island's smallest surviving edge (each old id claimed once, smallest
+    /// anchor first — deterministic for a deterministically built sketch).
+    /// Called at the end of every mutation that changes the edge set.
+    pub(crate) fn recompute_islands(&mut self) {
+        // Anchor edge (smallest surviving) per old island.
+        let old_anchors: Vec<(SketchIslandId, SketchEdgeId)> = self
+            .islands
+            .iter()
+            .filter_map(|(id, isl)| {
+                isl.edges
+                    .iter()
+                    .copied()
+                    .filter(|e| self.edges.contains_key(*e))
+                    .min()
+                    .map(|m| (id, m))
+            })
+            .collect();
+
+        // Connected components by shared vertices, discovered in edge-id
+        // order (each component's edge list ends up ascending).
+        let mut vertex_edges: std::collections::BTreeMap<SketchVertexId, Vec<SketchEdgeId>> =
+            std::collections::BTreeMap::new();
+        for (eid, e) in &self.edges {
+            vertex_edges.entry(e.from).or_default().push(eid);
+            vertex_edges.entry(e.to).or_default().push(eid);
+        }
+        let mut seen: std::collections::BTreeSet<SketchEdgeId> = std::collections::BTreeSet::new();
+        let mut components: Vec<Vec<SketchEdgeId>> = Vec::new();
+        for start in self.edges.keys() {
+            if seen.contains(&start) {
+                continue;
+            }
+            let mut comp = Vec::new();
+            let mut queue = vec![start];
+            seen.insert(start);
+            while let Some(eid) = queue.pop() {
+                comp.push(eid);
+                let e = self.edges[eid];
+                for v in [e.from, e.to] {
+                    for &n in &vertex_edges[&v] {
+                        if seen.insert(n) {
+                            queue.push(n);
+                        }
+                    }
+                }
+            }
+            comp.sort();
+            components.push(comp);
+        }
+
+        // Assign ids: reuse where the anchor edge landed; fresh otherwise.
+        let mut used: std::collections::BTreeSet<SketchIslandId> =
+            std::collections::BTreeSet::new();
+        let mut assignments: Vec<(Option<SketchIslandId>, Vec<SketchEdgeId>)> = Vec::new();
+        for comp in components {
+            let reuse = old_anchors
+                .iter()
+                .filter(|(id, anchor)| !used.contains(id) && comp.binary_search(anchor).is_ok())
+                .min_by_key(|(id, anchor)| (*anchor, *id))
+                .map(|(id, _)| *id);
+            if let Some(id) = reuse {
+                used.insert(id);
+            }
+            assignments.push((reuse, comp));
+        }
+
+        let dead: Vec<SketchIslandId> = self
+            .islands
+            .keys()
+            .filter(|id| !used.contains(id))
+            .collect();
+        for id in dead {
+            self.islands.remove(id);
+        }
+        for (reuse, edges) in assignments {
+            match reuse {
+                Some(id) => self.islands[id].edges = edges,
+                None => {
+                    self.islands.insert(SketchIsland { edges });
+                }
+            }
+        }
+    }
+
+    /// Rigidly move ONE island by an in-plane transform, refusing anything
+    /// that would interact with other islands' geometry (a landing that
+    /// merges vertices, crosses edges, or grazes within tolerance is
+    /// [`SketchError::WouldRetopologize`] — sticky welding across a whole
+    /// island move is not supported). The transform must keep every vertex
+    /// on the sketch plane ([`SketchError::PointOffPlane`] otherwise); the
+    /// caller (the document layer) has already vetted invertibility and
+    /// rejected reflections. Strong guarantee: untouched on `Err`.
+    /// [`Sketch::apply_transform_island`]'s checks without the commit:
+    /// `Ok(())` iff the move would be accepted. Callers batching several
+    /// island moves validate ALL of them first so a refusal aborts the whole
+    /// batch instead of leaving earlier islands moved.
+    pub fn validate_transform_island(
+        &self,
+        island: SketchIslandId,
+        t: &crate::Transform,
+    ) -> Result<(), SketchError> {
+        let mut probe = self.clone();
+        probe.apply_transform_island(island, t)
+    }
+
+    pub fn apply_transform_island(
+        &mut self,
+        island: SketchIslandId,
+        t: &crate::Transform,
+    ) -> Result<(), SketchError> {
+        let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
+        let island_edges: std::collections::BTreeSet<SketchEdgeId> =
+            isl.edges.iter().copied().collect();
+        let mut island_verts: std::collections::BTreeSet<SketchVertexId> =
+            std::collections::BTreeSet::new();
+        for &eid in &island_edges {
+            let e = self.edges[eid];
+            island_verts.insert(e.from);
+            island_verts.insert(e.to);
+        }
+
+        // Validate on a clone; swap in only once every check passes.
+        let mut s = self.clone();
+        for &v in &island_verts {
+            let p = t.apply_point(s.vertices[v].position);
+            if s.plane.signed_distance(p).abs() > tol::PLANE_DIST {
+                return Err(SketchError::PointOffPlane { which: 0 });
+            }
+            s.vertices[v].position = p;
+        }
+
+        // Interference with everything OUTSIDE the island: crossings, vertex
+        // merges, and within-tolerance grazes all refuse.
+        let near = |p: Point3, a: Point3, b: Point3| -> bool {
+            let ab = b - a;
+            let len2 = ab.dot(ab);
+            let t = if len2 <= tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
+                0.0
+            } else {
+                ((p - a).dot(ab) / len2).clamp(0.0, 1.0)
+            };
+            let c = Point3::new(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
+            (p - c).length() <= tol::POINT_MERGE
+        };
+        let moved_segs: Vec<(Point3, Point3)> = island_edges
+            .iter()
+            .map(|&eid| {
+                let e = s.edges[eid];
+                (s.vertices[e.from].position, s.vertices[e.to].position)
+            })
+            .collect();
+        for (oid, oe) in &s.edges {
+            if island_edges.contains(&oid) {
+                continue;
+            }
+            let (r, w) = (s.vertices[oe.from].position, s.vertices[oe.to].position);
+            for &(p, q) in &moved_segs {
+                if crate::geom2d::segments_intersect(p, q, r, w)
+                    || near(p, r, w)
+                    || near(q, r, w)
+                    || near(r, p, q)
+                    || near(w, p, q)
+                {
+                    return Err(SketchError::WouldRetopologize);
+                }
+            }
+        }
+
+        *self = s;
+        Ok(())
     }
 
     /// Current closed regions (read-only). Kept up to date by every mutation;
@@ -769,7 +1032,9 @@ impl Sketch {
             chain.extend_from_slice(&split_vids);
             chain.push(old_to_vid);
 
-            // Remove the old edge.
+            // Remove the old edge — its fragments inherit its curve chain,
+            // so a split arc facet stays part of its arc.
+            let split_curve = self.edges[esplit.edge_id].curve;
             self.edges.remove(esplit.edge_id);
 
             // Insert fragment edges.  Fragments of split *existing* edges go into
@@ -780,6 +1045,7 @@ impl Sketch {
                 let frag_id = self.edges.insert(SketchEdge {
                     from: w[0],
                     to: w[1],
+                    curve: split_curve,
                 });
                 fragments.push(frag_id);
             }
@@ -813,7 +1079,24 @@ impl Sketch {
             let a = w[0];
             let b = w[1];
             if self.edge_exists(a, b) {
-                // Collinear merge: this sub-segment already exists; skip.
+                // Collinear merge: this sub-segment already exists. If a
+                // curve bracket is open and the existing edge is a plain
+                // line, ADOPT it into the curve — otherwise the drawn curve
+                // would have an untagged hole where it overlapped existing
+                // geometry, splitting the selectable unit. An edge already
+                // in another curve keeps its allegiance.
+                if let Some(curve) = self.active_curve {
+                    let existing = self
+                        .edges
+                        .iter()
+                        .find(|(_, e)| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+                        .map(|(id, _)| id);
+                    if let Some(eid) = existing
+                        && self.edges[eid].curve.is_none()
+                    {
+                        self.edges[eid].curve = Some(curve);
+                    }
+                }
                 continue;
             }
             // Skip zero-length fragments.
@@ -823,14 +1106,19 @@ impl Sketch {
             {
                 continue;
             }
-            let eid = self.edges.insert(SketchEdge { from: a, to: b });
+            let eid = self.edges.insert(SketchEdge {
+                from: a,
+                to: b,
+                curve: self.active_curve,
+            });
             report.new_edges.push(eid);
         }
 
-        // ── Step 9: recompute regions and diff ────────────────────────────────
+        // ── Step 9: recompute regions, islands, and diff ──────────────────────
         let (regions_created, regions_removed) = self.recompute_regions_with_diff(&old_regions);
         report.regions_created = regions_created;
         report.regions_removed = regions_removed;
+        self.recompute_islands();
 
         Ok(report)
     }
@@ -854,6 +1142,7 @@ impl Sketch {
         }
 
         let (regions_created, regions_removed) = self.recompute_regions_with_diff(&old_regions);
+        self.recompute_islands();
 
         EdgeRemoved {
             removed_vertices,
@@ -1054,6 +1343,38 @@ impl Sketch {
                 current = (arrive_at, next_to);
             }
 
+            // Prune spurs: a dangling chain attached to the cycle is walked
+            // out-and-back by planar face tracing, leaving a pinched
+            // `… a, tip, a …` pattern with repeated vertices. Such a cycle
+            // renders a fill (the spur has zero area) but is not a simple
+            // polygon, so profiles built from it are refused — the spur is
+            // decoration, not boundary. Collapse every backtrack until none
+            // remain; chains fold up tip-first over the iterations.
+            loop {
+                let n = cycle.len();
+                if n < 3 {
+                    break;
+                }
+                let mut pruned = false;
+                for i in 0..n {
+                    let prev = cycle[(i + n - 1) % n];
+                    let next = cycle[(i + 1) % n];
+                    if prev == next {
+                        // cycle[i] is a spur tip: drop it and one duplicate
+                        // of its base (the entry at i+1).
+                        let (a, b) = (i, (i + 1) % n);
+                        let (first, second) = if a > b { (a, b) } else { (b, a) };
+                        cycle.remove(first);
+                        cycle.remove(second);
+                        pruned = true;
+                        break;
+                    }
+                }
+                if !pruned {
+                    break;
+                }
+            }
+
             if cycle.len() >= 3 {
                 cycles.push(cycle);
             }
@@ -1216,6 +1537,9 @@ impl Sketch {
             vertices: SlotMap::with_key(),
             edges: SlotMap::with_key(),
             regions: SlotMap::with_key(),
+            curves: SlotMap::with_key(),
+            active_curve: None,
+            islands: SlotMap::with_key(),
         }
     }
 
@@ -1885,6 +2209,243 @@ mod tests {
         assert_eq!(report.regions_removed.len(), 1);
         assert_eq!(report.regions_created.len(), 2);
         assert_eq!(s.regions().len(), 2);
+    }
+
+    /// Drawing a curve over an existing plain collinear line adopts that
+    /// line into the curve — no untagged hole in the selectable chain. An
+    /// edge already claimed by another curve keeps its allegiance.
+    #[test]
+    fn curve_adopts_overlapped_plain_edges_but_not_other_curves() {
+        let mut s = Sketch::on_plane(xy_plane());
+        s.add_segment(pt(1.0, 0.0), pt(2.0, 0.0)).unwrap(); // plain line
+        let c1 = s.begin_curve();
+        // A longer collinear segment spanning the plain line.
+        s.add_segment(pt(0.0, 0.0), pt(3.0, 0.0)).unwrap();
+        s.end_curve();
+        assert_eq!(
+            s.curve_edges(c1).len(),
+            3,
+            "all three pieces (including the adopted one) are the curve"
+        );
+
+        // A second curve over c1's territory does NOT steal its edges.
+        let c2 = s.begin_curve();
+        s.add_segment(pt(0.0, 0.0), pt(2.0, 0.0)).unwrap();
+        s.end_curve();
+        assert_eq!(s.curve_edges(c1).len(), 3, "c1 keeps its edges");
+        assert_eq!(s.curve_edges(c2).len(), 0, "fully-overlapped c2 owns none");
+    }
+
+    // ── islands ───────────────────────────────────────────────────────────────
+
+    fn two_rect_sketch() -> Sketch {
+        let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        for (a, b) in [
+            (pt(3.0, 0.0), pt(4.0, 0.0)),
+            (pt(4.0, 0.0), pt(4.0, 1.0)),
+            (pt(4.0, 1.0), pt(3.0, 1.0)),
+            (pt(3.0, 1.0), pt(3.0, 0.0)),
+        ] {
+            s.add_segment(a, b).unwrap();
+        }
+        s
+    }
+
+    /// Two disjoint rectangles are two islands; ids survive an unrelated
+    /// third shape appearing, and the survivor keeps its id when the other
+    /// island loses an edge.
+    #[test]
+    fn disjoint_shapes_are_separate_islands_with_stable_ids() {
+        let mut s = two_rect_sketch();
+        assert_eq!(s.islands().len(), 2);
+        let before: Vec<SketchIslandId> = s.islands().keys().collect();
+
+        s.add_segment(pt(6.0, 0.0), pt(7.0, 0.0)).unwrap();
+        assert_eq!(s.islands().len(), 3);
+        for id in &before {
+            assert!(s.islands().contains_key(*id), "existing island ids survive");
+        }
+
+        // Remove one edge of the first rectangle: both islands keep ids.
+        let some_edge = s
+            .edges()
+            .iter()
+            .find(|(_, e)| s.vertices()[e.from].position.x < 2.0)
+            .map(|(id, _)| id)
+            .unwrap();
+        s.remove_edge(some_edge).unwrap();
+        for id in &before {
+            assert!(s.islands().contains_key(*id), "ids survive an edge removal");
+        }
+    }
+
+    /// A segment bridging two islands merges them into one (the id with the
+    /// smaller anchor edge survives); removing the bridge splits them again
+    /// and the anchor-holding component keeps the id.
+    #[test]
+    fn bridging_merges_islands_and_unbridging_splits_them() {
+        let mut s = two_rect_sketch();
+        let ids: Vec<SketchIslandId> = s.islands().keys().collect();
+        let survivor = *s
+            .islands()
+            .iter()
+            .min_by_key(|(_, isl)| isl.edges[0])
+            .map(|(id, _)| id)
+            .iter()
+            .next()
+            .unwrap();
+
+        let report = s.add_segment(pt(1.0, 0.5), pt(3.0, 0.5)).unwrap();
+        let _ = report;
+        assert_eq!(s.islands().len(), 1, "bridged into one island");
+        assert!(s.islands().contains_key(survivor));
+
+        // Remove the bridge (the edge whose midpoint sits between the rects).
+        let bridge = s
+            .edges()
+            .iter()
+            .find(|(_, e)| {
+                let m = (s.vertices()[e.from].position.x + s.vertices()[e.to].position.x) / 2.0;
+                (1.0..3.0).contains(&m) && m > 1.01 && m < 2.99
+            })
+            .map(|(id, _)| id)
+            .unwrap();
+        s.remove_edge(bridge).unwrap();
+        assert_eq!(s.islands().len(), 2, "split back into two");
+        assert!(s.islands().contains_key(survivor), "anchor holder keeps id");
+        // One of the two is the survivor; the other is fresh or the old
+        // second id — either way there are exactly two distinct live ids.
+        let _ = ids;
+    }
+
+    /// Moving one island rigidly succeeds when it lands clear, refuses when
+    /// it would cross the other island, and refuses off-plane transforms —
+    /// untouched on every refusal.
+    #[test]
+    fn island_transform_moves_one_shape_and_refuses_interference() {
+        let mut s = two_rect_sketch();
+        let left = s
+            .islands()
+            .iter()
+            .find(|(_, isl)| {
+                let e = s.edges()[isl.edges[0]];
+                s.vertices()[e.from].position.x < 2.0
+            })
+            .map(|(id, _)| id)
+            .unwrap();
+
+        // Clear landing: shift left rect up by 5.
+        let up = crate::Transform::translation(crate::math::Vec3::new(0.0, 5.0, 0.0));
+        s.apply_transform_island(left, &up).unwrap();
+        assert_eq!(s.islands().len(), 2, "still two islands");
+        let e = s.edges()[s.islands()[left].edges[0]];
+        assert!(s.vertices()[e.from].position.y >= 5.0 - 1e-9);
+
+        // Interfering landing: drop it onto the right rectangle.
+        let onto = crate::Transform::translation(crate::math::Vec3::new(3.0, -5.0, 0.0));
+        let before = s.clone();
+        assert_eq!(
+            s.apply_transform_island(left, &onto).unwrap_err(),
+            SketchError::WouldRetopologize
+        );
+        assert_eq!(
+            s.edges().len(),
+            before.edges().len(),
+            "untouched on refusal"
+        );
+
+        // Off-plane landing.
+        let lift = crate::Transform::translation(crate::math::Vec3::new(0.0, 0.0, 1.0));
+        assert!(matches!(
+            s.apply_transform_island(left, &lift).unwrap_err(),
+            SketchError::PointOffPlane { .. }
+        ));
+    }
+
+    // ── curve chains ──────────────────────────────────────────────────────────
+
+    /// Edges committed inside a begin_curve/end_curve bracket share one
+    /// curve id; edges outside carry none.
+    #[test]
+    fn curve_bracket_tags_only_its_edges() {
+        let mut s = Sketch::on_plane(xy_plane());
+        s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap(); // plain line
+        let curve = s.begin_curve();
+        s.add_segment(pt(0.0, 1.0), pt(0.5, 1.2)).unwrap();
+        s.add_segment(pt(0.5, 1.2), pt(1.0, 1.0)).unwrap();
+        s.end_curve();
+        s.add_segment(pt(0.0, 2.0), pt(1.0, 2.0)).unwrap(); // plain line
+
+        assert_eq!(s.curve_edges(curve).len(), 2);
+        let tagged: Vec<_> = s
+            .edges()
+            .iter()
+            .filter(|(_, e)| e.curve.is_some())
+            .collect();
+        assert_eq!(tagged.len(), 2);
+        for (eid, _) in tagged {
+            assert_eq!(s.edge_curve(eid), Some(curve));
+        }
+    }
+
+    /// Splitting a curve edge (a line drawn across an arc facet) leaves the
+    /// fragments in the curve — the arc stays one selectable unit.
+    #[test]
+    fn split_curve_edge_fragments_inherit_the_curve() {
+        let mut s = Sketch::on_plane(xy_plane());
+        let curve = s.begin_curve();
+        s.add_segment(pt(0.0, 1.0), pt(2.0, 1.0)).unwrap();
+        s.end_curve();
+        // Cross it with a plain line — the curve edge splits in two.
+        s.add_segment(pt(1.0, 0.0), pt(1.0, 2.0)).unwrap();
+
+        assert_eq!(
+            s.curve_edges(curve).len(),
+            2,
+            "both fragments stay in the curve"
+        );
+        let plain = s.edges().values().filter(|e| e.curve.is_none()).count();
+        assert_eq!(plain, 2, "the crossing line's fragments stay plain");
+    }
+
+    // ── spur pruning ──────────────────────────────────────────────────────────
+
+    /// A dangling chain hanging into a region's interior is decoration, not
+    /// boundary: the region's outer cycle is the clean silhouette (no
+    /// repeated vertices) and converts to a valid profile. This is the
+    /// leftover-arc-facet case: a stray interior line must not make the
+    /// region unextrudable.
+    #[test]
+    fn interior_spur_is_pruned_from_the_region_boundary() {
+        let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        // Whisker from the (1,1) corner into the interior.
+        s.add_segment(pt(1.0, 1.0), pt(0.5, 0.5)).unwrap();
+
+        assert_eq!(s.regions().len(), 1, "the square still reads as one region");
+        let (rid, r) = s.regions().iter().next().unwrap();
+        assert_eq!(r.outer.len(), 4, "the spur is not part of the boundary");
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(
+            r.outer.iter().all(|v| seen.insert(*v)),
+            "no repeated boundary vertices"
+        );
+        assert!(s.profile(rid).is_ok(), "the region converts to a profile");
+    }
+
+    /// Same, with the spur hanging off a mid-edge vertex and two segments
+    /// long — the chain folds up tip-first and the split boundary vertex
+    /// stays.
+    #[test]
+    fn two_segment_spur_off_a_split_edge_is_pruned() {
+        let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        s.add_segment(pt(0.5, 1.0), pt(0.5, 0.6)).unwrap();
+        s.add_segment(pt(0.5, 0.6), pt(0.4, 0.4)).unwrap();
+
+        assert_eq!(s.regions().len(), 1);
+        let (rid, r) = s.regions().iter().next().unwrap();
+        // 4 corners + the split vertex at (0.5, 1).
+        assert_eq!(r.outer.len(), 5);
+        assert!(s.profile(rid).is_ok());
     }
 
     // ── consumed_tombstones ───────────────────────────────────────────────────

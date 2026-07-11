@@ -433,12 +433,12 @@ export class ArcTool implements Tool {
       return
     }
     const { a, b } = this.groundStage
-    const verts = this._groundChain(a, b, sign * distance)
-    if (verts === null) {
+    const chain = this._groundChain(a, b, sign * distance)
+    if (chain === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
-    this._commitGroundChain(verts)
+    this._commitGroundChain(chain.chain, chain.curveSegments)
     this.groundStage = { kind: 'idle' }
     this.typed = ''
     this._lastGroundCursor = null
@@ -552,7 +552,7 @@ export class ArcTool implements Tool {
     this._lastGroundCursor = cursor
     const s = chordSagitta(a, b, cursor)
     if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(s) as -1 | 1
-    const verts = s === null ? null : this._groundChain(a, b, s)
+    const verts = s === null ? null : (this._groundChain(a, b, s)?.chain ?? null)
     if (verts === null) {
       // Flat bulge — fall back to showing the bare chord.
       this._clearPreview()
@@ -586,13 +586,13 @@ export class ArcTool implements Tool {
     // Third click: commit at the cursor's sagitta. Refuse a flat bulge.
     const { a, b } = this.groundStage
     const s = chordSagitta(a, b, [snap.x, snap.y])
-    const verts = s === null ? null : this._groundChain(a, b, s)
-    if (verts === null) {
+    const chain = s === null ? null : this._groundChain(a, b, s)
+    if (chain === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
 
-    this._commitGroundChain(verts)
+    this._commitGroundChain(chain.chain, chain.curveSegments)
     this.groundStage = { kind: 'idle' }
     this.typed = ''
     this._lastGroundCursor = null
@@ -661,32 +661,51 @@ export class ArcTool implements Tool {
   }
 
   /** The committed ground chain: the arc polyline plus the closing vertices
-   *  for the current completion mode. */
-  private _groundChain(a: Vec2, b: Vec2, s: number): V3[] | null {
+   *  for the current completion mode. `curveSegments` counts the ARC's own
+   *  segments — the part tagged as one curve chain; pie/segment closing
+   *  edges stay plain lines. */
+  private _groundChain(
+    a: Vec2,
+    b: Vec2,
+    s: number,
+  ): { chain: V3[]; curveSegments: number } | null {
     const verts = this._groundPolyline(a, b, s)
     if (verts === null) return null
-    return verts.concat(this._closingVerts(verts, this._groundCenter(a, b, s)))
+    return {
+      chain: verts.concat(this._closingVerts(verts, this._groundCenter(a, b, s))),
+      curveSegments: verts.length - 1,
+    }
   }
 
-  /** Commit the open polyline chain as N ground-sketch segments. */
-  private _commitGroundChain(verts: V3[]): void {
+  /** Commit the polyline chain as N ground-sketch segments; the first
+   *  `curveSegments` of them are bracketed as ONE curve chain (the arc), so
+   *  clicking any facet later selects the whole arc. */
+  private _commitGroundChain(verts: V3[], curveSegments: number): void {
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         let lastRegionsCreated: bigint[] = []
-        for (let i = 0; i < verts.length - 1; i++) {
-          const p = verts[i]
-          const q = verts[i + 1]
-          const report = this.wasmScene.sketch_add_segment(
-            sketch,
-            p[0], p[1], p[2],
-            q[0], q[1], q[2],
-          )
-          try {
-            const rc = report.regions_created()
-            lastRegionsCreated = Array.from(rc)
-          } finally {
-            report.free()
+        this.wasmScene.sketch_begin_curve(sketch)
+        try {
+          for (let i = 0; i < verts.length - 1; i++) {
+            if (i === curveSegments) this.wasmScene.sketch_end_curve(sketch)
+            const p = verts[i]
+            const q = verts[i + 1]
+            const report = this.wasmScene.sketch_add_segment(
+              sketch,
+              p[0], p[1], p[2],
+              q[0], q[1], q[2],
+            )
+            try {
+              const rc = report.regions_created()
+              lastRegionsCreated = Array.from(rc)
+            } finally {
+              report.free()
+            }
           }
+        } finally {
+          // The kernel also force-closes the bracket at gesture end; this
+          // just keeps the tool honest on a mid-chain error.
+          this.wasmScene.sketch_end_curve(sketch)
         }
 
         this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })

@@ -21,6 +21,33 @@ import {
   type NodeRef,
 } from './treeModel'
 
+describe('nodeEq / nodeKey — sketch-edge scoping', () => {
+  it('two edges with the same id in DIFFERENT sketches are distinct', () => {
+    const a: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
+    const b: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 2n }
+    expect(nodeEq(a, b)).toBe(false)
+    expect(nodeKey(a)).not.toBe(nodeKey(b))
+  })
+
+  it('the same edge equals itself and keys stably', () => {
+    const a: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
+    const b: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
+    expect(nodeEq(a, b)).toBe(true)
+    expect(nodeKey(a)).toBe(nodeKey(b))
+  })
+
+  it('an edge never equals its owning sketch or an object with the same id', () => {
+    const edge: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
+    expect(nodeEq(edge, { kind: 'sketch', id: 1n })).toBe(false)
+    expect(nodeEq(edge, { kind: 'object', id: 5n })).toBe(false)
+    expect(nodeKey(edge)).not.toBe(nodeKey({ kind: 'sketch', id: 1n }))
+  })
+
+  it('plain node keys are unchanged by the optional sketch field being absent', () => {
+    expect(nodeKey({ kind: 'object', id: 3n })).toBe('object:3')
+  })
+})
+
 describe('stripTagSuffix', () => {
   it('returns the name unchanged when there is no tag suffix', () => {
     expect(stripTagSuffix('Counter Base')).toBe('Counter Base')

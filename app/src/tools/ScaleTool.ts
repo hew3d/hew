@@ -212,6 +212,16 @@ export class ScaleTool implements Tool {
     const box = new THREE.Box3()
     const pt = new THREE.Vector3()
     for (const node of nodes) {
+      if (node.kind === 'sketch-edge' || node.kind === 'sketch-curve') {
+        continue // not transformable — contributes nothing to the center
+      }
+      if (node.kind === 'sketch-island' && node.sketch !== undefined) {
+        const lines = this.wasmScene.sketch_island_lines(node.sketch, node.id)
+        for (let i = 0; i + 2 < lines.length; i += 3) {
+          box.expandByPoint(pt.set(lines[i], lines[i + 1], lines[i + 2]))
+        }
+        continue
+      }
       if (node.kind === 'sketch') {
         const lines = this.wasmScene.sketch_lines(node.id)
         for (let i = 0; i + 2 < lines.length; i += 3) {

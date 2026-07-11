@@ -40,7 +40,16 @@ export function deriveDockContext(selectedIds: NodeRef[], selectedGuide: bigint 
   if (selectedIds.length === 0) return 'empty'
   if (selectedIds.length > 1) return 'multi'
   const kind = selectedIds[0].kind
-  if (kind === 'sketch') return 'sketch'
+  // Sketch-scoped selections (a whole island, a drawn curve, or a single
+  // line) all get the sketch verb set — same context, finer selection.
+  if (
+    kind === 'sketch' ||
+    kind === 'sketch-island' ||
+    kind === 'sketch-curve' ||
+    kind === 'sketch-edge'
+  ) {
+    return 'sketch'
+  }
   return kind
 }
 

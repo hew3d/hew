@@ -22,7 +22,7 @@ use crate::ids::{ComponentId, GroupId, GuideId, InstanceId, MaterialId, ObjectId
 use crate::material::{ImageFormat, Material, Texture, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::{
-    Sketch, SketchEdge, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
+    Sketch, SketchCurveId, SketchEdge, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
 };
 use crate::topo::Object;
 use crate::transform::Transform;
@@ -71,7 +71,14 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
 /// is `#[serde(default, skip_serializing_if ...)]`, so v1-v5 files still
 /// load (nothing user-hidden) — back-compatible. The geometry buffer is
 /// unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
-pub const MANIFEST_FORMAT_VERSION: u32 = 6;
+///
+/// v7: added optional `curve: u32` to sketch edge entries — the dense
+/// per-sketch id of the curve chain the edge belongs to (an arc's or
+/// circle's facets, selected/deleted as one unit). The field is
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so v1-v6
+/// files still load (every edge a plain line) — back-compatible. The
+/// geometry buffer is unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
+pub const MANIFEST_FORMAT_VERSION: u32 = 7;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -684,6 +691,9 @@ pub(crate) struct SketchEdgeDto {
     pub id: u32,
     pub from: u32,
     pub to: u32,
+    /// Dense per-sketch curve-chain id, or absent for a plain line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1100,12 +1110,20 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
     }
 
     let mut edge_dtos = Vec::new();
+    // Dense curve ids by first appearance in edge slotmap order —
+    // deterministic for a deterministically built sketch.
+    let mut curve_to_dense: BTreeMap<SketchCurveId, u32> = BTreeMap::new();
     for (_, e) in sk.edges() {
         let eid = edge_dtos.len() as u32;
+        let curve = e.curve.map(|c| {
+            let next = curve_to_dense.len() as u32;
+            *curve_to_dense.entry(c).or_insert(next)
+        });
         edge_dtos.push(SketchEdgeDto {
             id: eid,
             from: vert_to_dense[e.from],
             to: vert_to_dense[e.to],
+            curve,
         });
     }
 
@@ -1464,7 +1482,9 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
         vert_ids.push(id);
     }
 
-    // Insert edges in dense id order.
+    // Insert edges in dense id order, minting one SketchCurveId per dense
+    // curve index as they appear (indices need not arrive sorted).
+    let mut curve_ids: Vec<SketchCurveId> = Vec::new();
     for e in &dto.edges {
         let from_idx = e.from as usize;
         let to_idx = e.to as usize;
@@ -1476,9 +1496,17 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                 ),
             });
         }
+        let curve = e.curve.map(|ci| {
+            let ci = ci as usize;
+            while curve_ids.len() <= ci {
+                curve_ids.push(sk.insert_curve_raw());
+            }
+            curve_ids[ci]
+        });
         sk.insert_edge_raw(SketchEdge {
             from: vert_ids[from_idx],
             to: vert_ids[to_idx],
+            curve,
         });
     }
 
@@ -1524,6 +1552,10 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
             .collect::<Result<_, _>>()?;
         sk.insert_region_raw(SketchRegion { outer, holes });
     }
+
+    // Islands are derived, never serialized — compute them from the
+    // reconstructed edge graph.
+    sk.recompute_islands();
 
     Ok(sk)
 }

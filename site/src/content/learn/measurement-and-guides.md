@@ -57,6 +57,7 @@ The result is a guide line through the apex at that angle.
 Guides are construction geometry: dashed lines and point markers that are never part of your solids, never export, but always snap. Use them to pre-plan positions, then draw to them.
 
 - The purple "On Guide" snap cue appears whenever the cursor is on a guide.
+- Where a guide **crosses** an edge, a sketch line, or another guide, the amber Intersection cue appears — click there to land exactly on the crossing, which is usually the whole reason the guide exists.
 - **View ▸ Guides** hides or shows all guides at once; hidden guides don't snap.
 - To delete one guide, select it with the Select tool and press `Delete`. **Edit ▸ Delete Guide Lines** clears every guide in one undoable step.
 - Guides are saved in the `.hew` file, and guides in imported SketchUp files come across.

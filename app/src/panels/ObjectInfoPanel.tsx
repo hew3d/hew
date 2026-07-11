@@ -44,7 +44,9 @@ interface Props {
 function kindLabel(kind: NodeRef['kind']): string {
   if (kind === 'object') return 'Object'
   if (kind === 'group') return 'Group'
-  if (kind === 'sketch') return 'Sketch'
+  if (kind === 'sketch' || kind === 'sketch-island') return 'Sketch'
+  if (kind === 'sketch-curve') return 'Curve'
+  if (kind === 'sketch-edge') return 'Sketch Line'
   return 'Component'
 }
 
@@ -97,16 +99,42 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
     // which no node_id-keyed wasm call accepts). Its
     // "name" is the same positional label the tree/canvas show ("Sketch 2"),
     // derived from `sketch_ids()` order since sketches can't be renamed yet.
-    if (kind === 'sketch') {
-      const allSketches = Array.from(scene.sketch_ids())
-      const idx = allSketches.indexOf(id)
+    if (kind !== 'object' && kind !== 'group' && kind !== 'instance') {
+      const sketchId = node.sketch ?? id
+      // Number by the ISLAND's position in the outliner's flattened
+      // cross-sketch island list, so panel and tree agree ('Sketch 3' here
+      // is 'Sketch 3' there). Resolve the owning island for sub-entities.
+      let islandId: bigint | undefined
+      if (kind === 'sketch-island') {
+        islandId = id
+      } else if (kind === 'sketch') {
+        // Legacy whole-sketch ref: number by its first island's row.
+        const islands = Array.from(scene.sketch_island_ids(sketchId))
+        islandId = islands.length > 0 ? islands[0] : undefined
+      } else if (kind === 'sketch-edge') {
+        islandId = scene.sketch_edge_island(sketchId, id)
+      } else if (kind === 'sketch-curve') {
+        const edges = Array.from(scene.sketch_curve_edges(sketchId, id))
+        islandId = edges.length > 0 ? scene.sketch_edge_island(sketchId, edges[0]) : undefined
+      }
+      const flat = Array.from(scene.sketch_ids()).flatMap((sid) =>
+        Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sid, island })),
+      )
+      const idx = flat.findIndex((f) => f.sid === sketchId && f.island === islandId)
+      const sketchLabel = entityLabel('sketch', idx >= 0 ? idx : 0)
       return {
         node,
         kind,
         id,
         kindNum: null as number | null,
         nameFromScene: undefined as string | undefined,
-        defaultLabel: entityLabel('sketch', idx >= 0 ? idx : 0),
+        // Sub-entities have no identity of their own — label by the owner.
+        defaultLabel:
+          kind === 'sketch-edge'
+            ? `Line of ${sketchLabel}`
+            : kind === 'sketch-curve'
+              ? `Curve of ${sketchLabel}`
+              : sketchLabel,
         tags: [] as string[][],
         solid: null as boolean | null,
       }
@@ -241,7 +269,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
   return (
     <div style={PANEL_STYLE}>
       {/* Name — sketches can't be named yet; show the read-only default label instead. */}
-      {nodeInfo.kind === 'sketch' ? (
+      {nodeInfo.kind !== 'object' && nodeInfo.kind !== 'group' && nodeInfo.kind !== 'instance' ? (
         <div>
           <div style={LABEL_STYLE}>Name</div>
           <div style={VALUE_STYLE}>{nodeInfo.defaultLabel}</div>
@@ -289,7 +317,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
 
       {/* Tags — sketches can't be tagged yet. Empty state is just the "+"
        * button next to the label: no chips, no "No tags" text. */}
-      {nodeInfo.kind !== 'sketch' && (
+      {(nodeInfo.kind === 'object' || nodeInfo.kind === 'group' || nodeInfo.kind === 'instance') && (
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
           <div style={{ ...LABEL_STYLE, marginBottom: 0 }}>Tags</div>

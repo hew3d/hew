@@ -46,6 +46,10 @@ pub enum RecordedCall {
     },
     /// `sketch_begin_gesture(sketch)`.
     SketchBeginGesture { sketch: u64 },
+    /// `sketch_begin_curve(sketch)`.
+    SketchBeginCurve { sketch: u64 },
+    /// `sketch_end_curve(sketch)`.
+    SketchEndCurve { sketch: u64 },
     /// `sketch_end_gesture(sketch)`.
     SketchEndGesture { sketch: u64 },
     /// `sketch_cancel_gesture()` (recorded only when a gesture was open).

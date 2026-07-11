@@ -2047,6 +2047,170 @@ fn shared_edge_tombstoned_with_last_region_not_first() {
     );
 }
 
+/// A region with a leftover interior whisker extrudes: the spur is not
+/// boundary, so the profile is clean, and after the extrude the spur edge
+/// is neither tombstoned nor locked — it never bordered the consumed
+/// region, so the user can still delete the leftover line.
+#[test]
+fn region_with_interior_spur_extrudes_and_spur_stays_deletable() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    // Leftover interior line off the (1,1) corner — the stray-facet case.
+    {
+        let sk = doc.sketch_mut(s).expect("live");
+        sk.add_segment(Point3::new(1.0, 1.0, 0.0), Point3::new(0.5, 0.5, 0.0))
+            .expect("whisker");
+    }
+
+    let r = only_region(&doc, s);
+    doc.extrude_region(s, r, 1.0)
+        .expect("spur must not block the extrude");
+
+    // The spur edge survives visibly (not tombstoned) and is deletable —
+    // it does not border the consumed region.
+    let sk = doc.sketch(s).expect("live");
+    let live: Vec<_> = sk
+        .edges()
+        .keys()
+        .filter(|&e| !doc.is_sketch_edge_consumed(s, e))
+        .collect();
+    assert_eq!(live.len(), 1, "exactly the whisker remains live");
+    assert!(!doc.sketch_edge_borders_consumed(s, live[0]));
+}
+
+/// Edges on an extruded (consumed) region's boundary — including the wall
+/// shared with a still-live neighbor — are flagged by
+/// `sketch_edge_borders_consumed`: removing one would recompute regions and
+/// resurrect the extruded footprint as fresh extrudable regions overlapping
+/// the solid. Edges bounding only live regions are not flagged.
+#[test]
+fn edges_bordering_a_consumed_region_are_flagged() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    draw_rect(&mut doc, s, 1.0, 0.0, 2.0, 1.0); // shares the x=1 wall
+
+    let regions: Vec<SketchRegionId> = doc.sketch(s).expect("live").regions().keys().collect();
+    doc.extrude_region(s, regions[0], 1.0)
+        .expect("extrude one region");
+
+    // Expected flags derive from the consumed region's own boundary.
+    let sk = doc.sketch(s).expect("live");
+    let outer = sk.regions()[regions[0]].outer.clone();
+    let mut consumed_pairs = std::collections::BTreeSet::new();
+    for i in 0..outer.len() {
+        let a = outer[i];
+        let b = outer[(i + 1) % outer.len()];
+        consumed_pairs.insert((a.min(b), a.max(b)));
+    }
+
+    let mut flagged = 0;
+    let mut unflagged = 0;
+    let edge_info: Vec<_> = sk
+        .edges()
+        .iter()
+        .map(|(eid, e)| (eid, e.from, e.to))
+        .collect();
+    for (eid, from, to) in edge_info {
+        let expected = consumed_pairs.contains(&(from.min(to), from.max(to)));
+        assert_eq!(
+            doc.sketch_edge_borders_consumed(s, eid),
+            expected,
+            "flag must match consumed-boundary membership"
+        );
+        if expected {
+            flagged += 1;
+        } else {
+            unflagged += 1;
+        }
+    }
+    // 4 consumed-boundary edges (incl. the shared wall), 3 live-only edges.
+    assert_eq!(flagged, 4);
+    assert_eq!(unflagged, 3);
+
+    // Stale handles are simply not flagged.
+    assert!(!doc.sketch_edge_borders_consumed(s, kernel::SketchEdgeId::default()));
+}
+
+/// Moving one island of a two-shape sketch is undoable and leaves the other
+/// island untouched; landing on the neighbor refuses with a typed error and
+/// records nothing.
+#[test]
+fn island_transform_is_undoable_and_scoped() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    draw_rect(&mut doc, s, 3.0, 0.0, 4.0, 1.0);
+
+    let sk = doc.sketch(s).expect("live");
+    assert_eq!(sk.islands().len(), 2);
+    let left = sk
+        .islands()
+        .iter()
+        .find(|(_, isl)| {
+            let e = sk.edges()[isl.edges[0]];
+            sk.vertices()[e.from].position.x < 2.0
+        })
+        .map(|(id, _)| id)
+        .expect("left island");
+
+    let up = Transform::translation(Vec3::new(0.0, 5.0, 0.0));
+    doc.transform_sketch_island(s, left, &up).expect("move");
+    let max_y = |doc: &Document, island| {
+        let sk = doc.sketch(s).unwrap();
+        sk.islands()[island]
+            .edges
+            .iter()
+            .map(|&e| sk.vertices()[sk.edges()[e].from].position.y)
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    assert!(max_y(&doc, left) >= 5.0);
+
+    doc.undo().expect("undo");
+    assert!(max_y(&doc, left) <= 1.0 + 1e-9, "undo moved it back");
+    doc.redo().expect("redo");
+    assert!(max_y(&doc, left) >= 5.0, "redo re-applied");
+
+    // Refusal records nothing: undo after a refused move undoes the redo.
+    let onto = Transform::translation(Vec3::new(3.0, -5.0, 0.0));
+    assert!(doc.transform_sketch_island(s, left, &onto).is_err());
+    doc.undo().expect("undo the redo, not the refusal");
+    assert!(max_y(&doc, left) <= 1.0 + 1e-9);
+}
+
+/// A curve bracket never outlives its gesture: ending (or cancelling) the
+/// gesture force-closes it, so a tool that aborted mid-commit cannot leave
+/// the sketch silently tagging later, unrelated edges into a dead curve.
+#[test]
+fn gesture_end_force_closes_an_open_curve_bracket() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+
+    doc.begin_sketch_gesture(s).expect("gesture");
+    let curve = doc.sketch_mut(s).unwrap().begin_curve();
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    // Tool dies here — no end_curve. The gesture close must clean up.
+    doc.end_sketch_gesture(s).expect("end");
+
+    doc.begin_sketch_gesture(s).expect("gesture 2");
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(0.0, 2.0, 0.0), Point3::new(1.0, 2.0, 0.0))
+        .unwrap();
+    doc.end_sketch_gesture(s).expect("end 2");
+
+    let sk = doc.sketch(s).unwrap();
+    assert_eq!(
+        sk.curve_edges(curve).len(),
+        1,
+        "only the bracketed edge is in the curve; the later line is plain"
+    );
+}
+
 // ──────────────────────────────── boolean coplanar-seam cleanup ─────────────
 
 /// A document-level union of two flush boxes dissolves the coplanar seams:

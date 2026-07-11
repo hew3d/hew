@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `4`**, and **geometry buffer format version `3`**. Both are covered
+version `7`**, and **geometry buffer format version `3`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -53,7 +53,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 6,
+  "format_version": 7,
   "geometry_version": 3,
   "app": "hew",
   "app_version": "0.1.0",
@@ -89,7 +89,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     { "id": 0,
       "plane": [0.0, 0.0, 1.0, 0.0],
       "vertices": [ {"id":0, "p":[0.0, 0.0, 0.0]} ],
-      "edges":    [ {"id":0, "from":0, "to":1} ],
+      "edges":    [ {"id":0, "from":0, "to":1, "curve":0} ],
       "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ]
     }
   ],
@@ -106,7 +106,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `6`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `7`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `3`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -169,6 +169,7 @@ of the manifest:
 | `guides` (top-level array) | 4 | empty list (no guides) |
 | `tags` (top-level array) | 5 | empty registry (all node-carried tags visible) |
 | `objects[].hidden`, `groups[].hidden`, `instances[].hidden` | 6 | `false` (visible) |
+| `sketches[].edges[].curve` | 7 | absent (a plain line, not part of a curve chain) |
 
 Note `components[]` entries never carry a `tags` field at any version —
 tags are attached to *placements* (objects, groups, instances), not to
@@ -372,8 +373,15 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   point `p` lies on the plane iff `n·p = offset`.
 - `vertices[]` — `{id, p}`, a 3D point. A reader need not verify `p` lies on
   `plane`, though a well-formed writer only ever places it there.
-- `edges[]` — `{id, from, to}`: an undirected connection between two
-  sketch-local vertex ids.
+- `edges[]` — `{id, from, to, curve?}`: an undirected connection between
+  two sketch-local vertex ids. `curve` (v7+, optional) is a sketch-local
+  dense id naming the **curve chain** the edge belongs to: the facets a
+  single drawn arc or circle committed together, which editors treat as one
+  selectable unit. Edges sharing a `curve` value belong to the same chain;
+  an absent `curve` is a plain line. Curve ids are dense per sketch in
+  first-appearance order over the edge list and carry no geometry of their
+  own — a reader that ignores them loses only selection grouping, never
+  shape.
 - `regions[]` — `{id, outer, holes}`: a closed planar polygon-with-holes.
   `outer` is a vertex-id cycle, counter-clockwise from the plane normal's
   side; each `holes` entry is clockwise (same convention as). This

@@ -19,6 +19,10 @@ export a file a slicer accepts as watertight, with no repair step.
 - Rectangle, line, circle, and arc drawing on the ground plane or on any
   face, all sharing one ground sketch so mixed-tool profiles close into
   regions; arcs optionally close as a pie or a chord segment (Alt cycles)
+- Drawing-like sketch editing: lines are selectable and deletable
+  (merging the regions they separated), a drawn arc or circle selects
+  and deletes as one curve, and each connected shape is an independent
+  island — selected, deleted, and moved without touching anything else
 - Push/pull to extrude a closed profile into a solid, with a live preview
 - Push/pull through-cuts that punch holes or remove material, including
   splitting a solid into two when a cut fully severs it

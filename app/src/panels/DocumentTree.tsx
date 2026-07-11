@@ -84,9 +84,34 @@ export function DocumentTree({
     [scene, docRev],
   )
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const sketches = useMemo(() => Array.from(scene.sketch_ids()), [scene, docRev])
+  // One outliner row per ISLAND (connected shape), numbered across all
+  // sketches — the user-facing unit; two shapes drawn apart get two rows.
+  const sketches = useMemo(
+    () =>
+      Array.from(scene.sketch_ids()).flatMap((sid) =>
+        Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sketch: sid, island })),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scene, docRev],
+  )
 
   const selected = new Set(selectedIds.map((n) => nodeKey(n)))
+  // A selected line/curve/island has no dedicated row beyond the island's —
+  // light up the owning ISLAND's row so the outliner reflects the selection.
+  for (const n of selectedIds) {
+    if (n.sketch === undefined) continue
+    if (n.kind === 'sketch-island') continue // has its own row key already
+    let island: bigint | undefined
+    if (n.kind === 'sketch-edge') {
+      island = scene.sketch_edge_island(n.sketch, n.id)
+    } else if (n.kind === 'sketch-curve') {
+      const edges = Array.from(scene.sketch_curve_edges(n.sketch, n.id))
+      island = edges.length > 0 ? scene.sketch_edge_island(n.sketch, edges[0]) : undefined
+    }
+    if (island !== undefined) {
+      selected.add(nodeKey({ kind: 'sketch-island', id: island, sketch: n.sketch }))
+    }
+  }
   const isSelected = (n: NodeRef) => selected.has(nodeKey(n))
 
   // Primary selection for scroll-into-view: stable ref so the effect only
@@ -113,8 +138,16 @@ export function DocumentTree({
     const keys = new Set<string>()
     if (selectedIds.length === 0) return keys
     const primary = selectedIds[0]
-    // A sketch is always top-level and has no kernel NodeId — no ancestors.
-    if (primary.kind === 'sketch') return keys
+    // Sketch-scoped selections are always top-level with no kernel NodeId —
+    // no ancestors.
+    if (
+      primary.kind === 'sketch' ||
+      primary.kind === 'sketch-island' ||
+      primary.kind === 'sketch-curve' ||
+      primary.kind === 'sketch-edge'
+    ) {
+      return keys
+    }
     // Walk up the parent chain from the primary node.
     const kindNum = primary.kind === 'object' ? 0 : primary.kind === 'group' ? 1 : 2
     let parentId = scene.node_parent(kindNum, primary.id)
@@ -220,11 +253,11 @@ export function DocumentTree({
             onEnterContext={onEnterContext}
           />
         ))}
-        {sketches.map((id, index) => {
-          const node: NodeRef = { kind: 'sketch', id }
+        {sketches.map(({ sketch, island }, index) => {
+          const node: NodeRef = { kind: 'sketch-island', id: island, sketch }
           return (
             <Row
-              key={String(id)}
+              key={`${sketch}:${island}`}
               label={entityLabel('sketch', index)}
               icon={<NodeIcon kind="sketch" />}
               selected={isSelected(node)}

@@ -226,6 +226,13 @@ export class SceneRenderer {
   private guideHighlight: THREE.LineSegments | null = null
   /** Currently selected sketch ids, drawn as a bright overlay. */
   private selectedSketchIds: bigint[] = []
+
+  /** Individually selected sketch edges, highlighted alongside whole
+   *  sketches (kind 'sketch-edge' in the app selection). */
+  private selectedSketchEdges: { sketch: bigint; edge: bigint }[] = []
+
+  /** Selected islands — the connected-shape selection unit. */
+  private selectedSketchIslands: { sketch: bigint; island: bigint }[] = []
   /**
    * Highlight overlay (solid bright lines) for `selectedSketchIds`. A fat
    * `LineSegments2` (not a plain `THREE.LineSegments`) — normal sketch lines
@@ -1528,6 +1535,20 @@ export class SceneRenderer {
     this._rebuildSketchHighlight()
   }
 
+  /** Reflect the individually selected sketch edges into the highlight
+   *  overlay (per-edge counterpart of `setSelectedSketches`). */
+  setSelectedSketchEdges(edges: { sketch: bigint; edge: bigint }[]): void {
+    this.selectedSketchEdges = [...edges]
+    this._rebuildSketchHighlight()
+  }
+
+  /** Reflect the selected islands (per-shape counterpart of
+   *  `setSelectedSketches`). */
+  setSelectedSketchIslands(islands: { sketch: bigint; island: bigint }[]): void {
+    this.selectedSketchIslands = [...islands]
+    this._rebuildSketchHighlight()
+  }
+
   /** (Re)build the bright overlay for the selected sketches — solid lines in
    * the selection color, drawn on top so a selected sketch reads as picked
    * over the normal blue. Cleared if nothing is selected or all selected
@@ -1538,7 +1559,13 @@ export class SceneRenderer {
       this.sketchGroup.remove(this.sketchHighlight)
       this.sketchHighlight = null
     }
-    if (this.selectedSketchIds.length === 0) return
+    if (
+      this.selectedSketchIds.length === 0 &&
+      this.selectedSketchEdges.length === 0 &&
+      this.selectedSketchIslands.length === 0
+    ) {
+      return
+    }
 
     const positions: number[] = []
     for (const id of this.selectedSketchIds) {
@@ -1551,6 +1578,25 @@ export class SceneRenderer {
       for (let i = 0; i < linePositions.length; i++) {
         positions.push(linePositions[i])
       }
+    }
+    for (const { sketch, island } of this.selectedSketchIslands) {
+      if (this.selectedSketchIds.some((s) => s === sketch)) continue
+      let lines: Float32Array | number[]
+      try {
+        lines = this.wasmScene.sketch_island_lines(sketch, island)
+      } catch {
+        continue // stale handle — contributes nothing
+      }
+      for (let i = 0; i < lines.length; i++) positions.push(lines[i])
+    }
+    for (const { sketch, edge } of this.selectedSketchEdges) {
+      // The whole sketch already highlighted — skip its edge to avoid a
+      // doubled overdrawn segment.
+      if (this.selectedSketchIds.some((s) => s === sketch)) continue
+      // Stale/consumed edges return undefined and contribute nothing.
+      const seg = this.wasmScene.sketch_edge_endpoints(sketch, edge)
+      if (seg === undefined) continue
+      for (let i = 0; i < 6; i++) positions.push(seg[i])
     }
     if (positions.length === 0) return
 

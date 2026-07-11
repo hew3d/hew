@@ -37,6 +37,12 @@ describe('deriveDockContext', () => {
     expect(deriveDockContext([sketch(1n)], null)).toBe('sketch')
   })
 
+  it('is "sketch" for a single selected sketch LINE too (same verbs, finer selection)', () => {
+    expect(
+      deriveDockContext([{ kind: 'sketch-edge', id: 4n, sketch: 1n }], null),
+    ).toBe('sketch')
+  })
+
   it('is "multi" for more than one selected node, regardless of kind mix', () => {
     expect(deriveDockContext([obj(1n), obj(2n)], null)).toBe('multi')
     expect(deriveDockContext([obj(1n), group(2n), instance(3n)], null)).toBe('multi')

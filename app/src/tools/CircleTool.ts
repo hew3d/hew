@@ -422,6 +422,10 @@ export class CircleTool implements Tool {
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         let lastRegionsCreated: bigint[] = []
+        // The whole circle is ONE curve chain — clicking any facet later
+        // selects (and deletes) the circle as a unit.
+        this.wasmScene.sketch_begin_curve(sketch)
+        try {
         for (let i = 0; i < verts.length; i++) {
           const p = verts[i]
           const q = verts[(i + 1) % verts.length]
@@ -438,6 +442,9 @@ export class CircleTool implements Tool {
           }
         }
 
+        } finally {
+          this.wasmScene.sketch_end_curve(sketch)
+        }
         this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
       })
     } catch (err) {

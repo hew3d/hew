@@ -372,6 +372,61 @@ fn save_load_preserves_textured_material() {
     assert_eq!(t.world_size, [0.5, 1.5]);
 }
 
+// ------------------------------------------------------------ curve round-trip
+
+/// Curve-chain membership survives save → load: the arc's facets come back
+/// sharing one curve id, distinct from a second curve's, and plain lines
+/// stay plain (manifest v7).
+#[test]
+fn curve_chains_round_trip_through_save_load() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        sk.add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0))
+            .unwrap(); // plain
+        sk.begin_curve();
+        sk.add_segment(Point3::new(0.0, 1.0, 0.0), Point3::new(0.5, 1.2, 0.0))
+            .unwrap();
+        sk.add_segment(Point3::new(0.5, 1.2, 0.0), Point3::new(1.0, 1.0, 0.0))
+            .unwrap();
+        sk.end_curve();
+        sk.begin_curve();
+        sk.add_segment(Point3::new(0.0, 2.0, 0.0), Point3::new(0.5, 2.2, 0.0))
+            .unwrap();
+        sk.end_curve();
+    }
+
+    let bytes = doc.save();
+    let doc2 = Document::load(&bytes).expect("round-trip");
+    let s2 = doc2.sketch_ids()[0];
+    let sk2 = doc2.sketch(s2).expect("live");
+
+    let mut by_curve: std::collections::BTreeMap<Option<kernel::SketchCurveId>, usize> =
+        std::collections::BTreeMap::new();
+    for e in sk2.edges().values() {
+        *by_curve.entry(e.curve).or_insert(0) += 1;
+    }
+    assert_eq!(by_curve.get(&None), Some(&1), "one plain line");
+    let curve_sizes: Vec<usize> = by_curve
+        .iter()
+        .filter(|(k, _)| k.is_some())
+        .map(|(_, &n)| n)
+        .collect();
+    assert_eq!(
+        curve_sizes.iter().sum::<usize>(),
+        3,
+        "three curve-tagged edges"
+    );
+    assert!(
+        curve_sizes.contains(&2) && curve_sizes.contains(&1),
+        "two DISTINCT curves of sizes 2 and 1, not merged"
+    );
+
+    // Byte-stable: saving the loaded doc reproduces the bytes.
+    assert_eq!(doc2.save(), bytes, "deterministic re-save");
+}
+
 // --------------------------------------------------------------- sketch round-trip
 
 #[test]

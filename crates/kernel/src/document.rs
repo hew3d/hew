@@ -44,7 +44,9 @@ use crate::material::Material;
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError, SliceError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
-use crate::sketch::{Sketch, SketchEdgeId, SketchError, SketchRegionId, SketchVertexId};
+use crate::sketch::{
+    Sketch, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId, SketchVertexId,
+};
 use crate::topo::{Object, WatertightState};
 use crate::transform::{Transform, TransformError};
 
@@ -271,6 +273,16 @@ enum DocAction {
     /// `inverse`, redo bakes `forward`; the `SketchId` is handle-stable.
     TransformSketch {
         sketch: SketchId,
+        forward: Transform,
+        inverse: Transform,
+    },
+    /// A move/rotate baked into ONE island of a sketch (per-island Move).
+    /// Undo bakes `inverse`, redo bakes `forward`; the island id is stable
+    /// across the transform (its edge set never changes) and therefore
+    /// across undo/redo too.
+    TransformSketchIsland {
+        sketch: SketchId,
+        island: SketchIslandId,
         forward: Transform,
         inverse: Transform,
     },
@@ -1489,6 +1501,13 @@ impl Document {
     ///   open one is for a different sketch.
     /// - [`DocumentError::UnknownSketch`] — the sketch vanished mid-gesture.
     pub fn end_sketch_gesture(&mut self, sketch: SketchId) -> Result<DocChange, DocumentError> {
+        // A curve bracket never outlives its gesture: a tool that aborted
+        // mid-commit (add_segment error, thrown callback) must not leave
+        // `active_curve` armed to silently tag later, unrelated edges.
+        if let Some(s) = self.sketches.get_mut(sketch) {
+            s.end_curve();
+        }
+
         match &self.pending_sketch_gesture {
             Some(p) if p.sketch == sketch => {}
             _ => return Err(DocumentError::SketchGestureNotOpen),
@@ -1526,6 +1545,13 @@ impl Document {
     /// made inside the abandoned bracket stay in the sketch but out of the
     /// undo log; cancel-before-mutate is the caller's contract.
     pub fn cancel_sketch_gesture(&mut self) -> bool {
+        if let Some(p) = &self.pending_sketch_gesture {
+            let sid = p.sketch;
+            if let Some(s) = self.sketches.get_mut(sid) {
+                s.end_curve();
+            }
+        }
+
         self.pending_sketch_gesture.take().is_some()
     }
 
@@ -1611,6 +1637,36 @@ impl Document {
     /// rendering — it became part of a solid's base).
     pub fn is_sketch_edge_consumed(&self, sketch: SketchId, edge: SketchEdgeId) -> bool {
         self.consumed_sketch_edges.contains(&(sketch, edge))
+    }
+
+    /// Whether `edge` lies on the boundary of an already-extruded (consumed)
+    /// region of `sketch`. Removing such an edge would trigger a region
+    /// recompute that resurrects the consumed region's area as fresh,
+    /// extrudable regions overlapping the solid built from it — callers must
+    /// refuse the removal instead. `false` for stale handles.
+    pub fn sketch_edge_borders_consumed(&self, sketch: SketchId, edge: SketchEdgeId) -> bool {
+        let Some(s) = self.sketch(sketch) else {
+            return false;
+        };
+        let Some(e) = s.edges().get(edge) else {
+            return false;
+        };
+        for (rid, r) in s.regions() {
+            if !self.consumed.contains(&(sketch, rid)) {
+                continue;
+            }
+            let loops = std::iter::once(&r.outer).chain(r.holes.iter());
+            for lp in loops {
+                for i in 0..lp.len() {
+                    let a = lp[i];
+                    let b = lp[(i + 1) % lp.len()];
+                    if (a == e.from && b == e.to) || (a == e.to && b == e.from) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// The still-extrudable regions of `sketch` (its closed regions minus any
@@ -2937,6 +2993,47 @@ impl Document {
         })
     }
 
+    /// Rigidly move ONE island of a free-standing sketch (the per-shape
+    /// Move). In-plane transforms only; landings that would cross or merge
+    /// with other islands' geometry are refused with a typed error (see
+    /// [`Sketch::apply_transform_island`]). Undoable via
+    /// [`DocAction::TransformSketchIsland`]; the island id is stable across
+    /// the move and its undo/redo.
+    pub fn transform_sketch_island(
+        &mut self,
+        sketch: SketchId,
+        island: SketchIslandId,
+        t: &Transform,
+    ) -> Result<DocChange, DocumentError> {
+        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+        if t.determinant() < 0.0 {
+            return Err(DocumentError::Transform(TransformError::Reflection));
+        }
+        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        self.sketches[sketch]
+            .apply_transform_island(island, t)
+            .map_err(DocumentError::Sketch)?;
+        self.undo.push(DocAction::TransformSketchIsland {
+            sketch,
+            island,
+            forward: *t,
+            inverse,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(DocChange {
+            objects_touched: Vec::new(),
+            sketches_touched: vec![sketch],
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        })
+    }
+
     /// Drags one vertex of a free-standing sketch to `new_pos` (Phase D
     /// per-vertex edit). Topology-preserving — see [`Sketch::move_vertex`]:
     /// the vertex moves and its incident edges stretch, but nothing splits,
@@ -4130,6 +4227,26 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            &DocAction::TransformSketchIsland {
+                sketch,
+                island,
+                inverse,
+                ..
+            } => {
+                // Undo an island transform by baking its exact inverse (moving
+                // BACK to a previously valid placement cannot interfere).
+                self.sketches[sketch]
+                    .apply_transform_island(island, &inverse)
+                    .expect("inverse of a validated island transform must re-apply");
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             &DocAction::TransformSketch {
                 sketch, inverse, ..
             } => {
@@ -4642,6 +4759,26 @@ impl Document {
                 DocChange {
                     objects_touched: objects.clone(),
                     sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            &DocAction::TransformSketchIsland {
+                sketch,
+                island,
+                forward,
+                ..
+            } => {
+                // Redo an island transform by re-baking the forward (the
+                // destination was validated when first applied).
+                self.sketches[sketch]
+                    .apply_transform_island(island, &forward)
+                    .expect("forward of a validated island transform must re-apply");
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
