@@ -801,6 +801,202 @@ fn v2_manifest_loads_with_empty_tags() {
     }
 }
 
+/// A v8 file carries extrusion provenance as a dense `[sketch, region]`
+/// `source` pair instead of v9's `footprints` polygons. Loading one freezes
+/// the referenced region's loops as the footprint, so the v8 contract —
+/// deleting the solid frees its scaffolding — still holds.
+#[test]
+fn v8_source_pairs_load_as_footprints() {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 1.0);
+    let bytes = doc.save();
+
+    // Rewrite the manifest to v8 shape: drop `footprints`, write the dense
+    // `source` pair (one sketch, one region → [0, 0]).
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    manifest["format_version"] = serde_json::json!(8);
+    let objs = manifest["objects"].as_array_mut().unwrap();
+    assert_eq!(objs.len(), 1);
+    let m = objs[0].as_object_mut().unwrap();
+    assert!(m.remove("footprints").is_some(), "v9 wrote footprints");
+    m.insert("source".to_string(), serde_json::json!([0, 0]));
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    let bytes2 = bytes.clone();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    let patched_bytes = new_zip.finish().unwrap().into_inner();
+
+    let mut loaded = Document::load(&patched_bytes).expect("v8 manifest loads");
+    assert!(
+        loaded.sketch_ids().is_empty(),
+        "the footprint region is consumed after a v8 load — the fully-consumed sketch is unlisted"
+    );
+    let obj = loaded.visible_object_ids()[0];
+    loaded.delete_node(NodeId::Object(obj)).expect("delete");
+    let s2 = loaded.sketch_ids()[0];
+    assert_eq!(
+        loaded.extrudable_regions(s2).unwrap().len(),
+        1,
+        "deleting the solid frees the v8-sourced footprint"
+    );
+}
+
+/// A v8 boolean/slice/push-through RESULT carries no `source` pair at all
+/// (pre-v9 code never attributed those), so nothing derives its consumed
+/// regions from object footprints after load. The loader freezes such
+/// orphaned consumed claims as document-lifetime legacy footprints: the
+/// regions stay consumed through later edits — honoring the file verbatim,
+/// exactly as the version that wrote it behaved — instead of silently
+/// freeing on the first recompute and letting a new solid extrude through
+/// the standing one.
+#[test]
+fn v8_unattributed_consumed_regions_stay_consumed_after_edits() {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    // Two adjacent squares on ONE sketch, extruded and unioned, plus a
+    // third live square that keeps the sketch listed. The union result
+    // inherits both footprints in v9; a v8 file has no such attribution.
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).expect("live");
+        let mut rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            let pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+            for i in 0..4 {
+                let (px, py) = pts[i];
+                let (qx, qy) = pts[(i + 1) % 4];
+                sk.add_segment(Point3::new(px, py, 0.0), Point3::new(qx, qy, 0.0))
+                    .expect("segment");
+            }
+        };
+        rect(0.0, 0.0, 2.0, 2.0);
+        rect(2.0, 0.0, 4.0, 2.0);
+        rect(10.0, 0.0, 12.0, 2.0); // stays live
+    }
+    let regions: Vec<_> = doc
+        .extrudable_regions(s)
+        .expect("live")
+        .into_iter()
+        .filter(|&r| {
+            // Extrude only the two adjacent squares (x <= 4).
+            doc.sketch(s)
+                .unwrap()
+                .region_contains_point(r, Point3::new(11.0, 1.0, 0.0))
+                != Ok(true)
+        })
+        .collect();
+    assert_eq!(regions.len(), 2);
+    let (a, _) = doc.extrude_region(s, regions[0], 1.0).expect("extrude a");
+    let (b, _) = doc.extrude_region(s, regions[1], 1.0).expect("extrude b");
+    doc.boolean(kernel::ops::BooleanOp::Union, a, b)
+        .expect("union");
+    let bytes = doc.save();
+
+    // Rewrite the manifest to v8 shape: strip every `footprints` field and
+    // write no `source` (a v8 boolean result never had one).
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    manifest["format_version"] = serde_json::json!(8);
+    for obj in manifest["objects"].as_array_mut().unwrap() {
+        obj.as_object_mut().unwrap().remove("footprints");
+    }
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    let bytes2 = bytes.clone();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    let patched_bytes = new_zip.finish().unwrap().into_inner();
+
+    let mut loaded = Document::load(&patched_bytes).expect("v8 manifest loads");
+
+    // The sketch is listed (the third square is live); draw an unrelated
+    // rectangle on it (any recompute-triggering edit) — the legacy-frozen
+    // regions must NOT free out from under the standing union solid.
+    let sketches = loaded.sketch_ids();
+    assert_eq!(sketches.len(), 1, "the footprint sketch is listed");
+    let s = sketches[0];
+    assert_eq!(
+        loaded.extrudable_regions(s).expect("live").len(),
+        1,
+        "right after load only the live third square is extrudable"
+    );
+    loaded.begin_sketch_gesture(s).expect("gesture");
+    {
+        let sk = loaded.sketch_mut(s).expect("live");
+        for (p, q) in [
+            ((10.0, 10.0), (11.0, 10.0)),
+            ((11.0, 10.0), (11.0, 11.0)),
+            ((11.0, 11.0), (10.0, 11.0)),
+            ((10.0, 11.0), (10.0, 10.0)),
+        ] {
+            sk.add_segment(Point3::new(p.0, p.1, 0.0), Point3::new(q.0, q.1, 0.0))
+                .expect("segment");
+        }
+    }
+    loaded.end_sketch_gesture(s).expect("end");
+
+    let extrudable = loaded.extrudable_regions(s).expect("live");
+    assert_eq!(
+        extrudable.len(),
+        2,
+        "the third square and the new rectangle — the legacy footprint regions stay consumed"
+    );
+}
+
 // ─────────────────────────────────────────── guides round-trip (v4) ─────
 
 /// A document with one construction line and one construction point survives

@@ -770,10 +770,15 @@ export default function Viewport({
           // pick selects the ISLAND — the connected shape under the cursor,
           // never unrelated geometry meters away.
           if (pickedSketchEdgeId !== undefined) {
-            const curve = wasmScene.sketch_edge_curve(pickedSketchId, pickedSketchEdgeId)
-            if (curve !== undefined) {
+            // A drawn curve selects as the RUN between junctions with other
+            // geometry (SketchUp splits an arc where a line crosses it). The
+            // NodeRef's id is the chain's smallest edge — a stable canonical
+            // representative, so re-clicking any facet of the same run
+            // produces an identical ref.
+            const chain = wasmScene.sketch_curve_chain(pickedSketchId, pickedSketchEdgeId)
+            if (chain.length > 1) {
               onSelectRef.current?.(
-                { kind: 'sketch-curve', id: curve, sketch: pickedSketchId },
+                { kind: 'sketch-curve', id: chain[0], sketch: pickedSketchId },
                 additive,
               )
             } else {
@@ -1170,18 +1175,10 @@ export default function Viewport({
       // sketch husk is removed afterward.
       const removeEdgeBatch = (sketch: bigint, edges: bigint[]): void => {
         if (edges.length === 0) return
-        // Pre-validate: if ANY edge lies on an extruded region's boundary
-        // the whole batch refuses up front — never a partial removal
-        // committed as one undo step.
-        for (const e of edges) {
-          if (wasmScene.sketch_edge_borders_solid(sketch, e)) {
-            handleToast(
-              "Can't delete: part of this shape is the footprint of a solid",
-              'EdgeBordersSolid',
-            )
-            return
-          }
-        }
+        // Edges bordering an extruded footprint are deletable — the kernel
+        // re-derives the consumed set from the solids' frozen footprint
+        // polygons at gesture close, so however the regions re-form,
+        // nothing under a standing solid becomes extrudable.
         wasmScene.sketch_begin_gesture(sketch)
         try {
           for (const e of edges) wasmScene.sketch_remove_edge(sketch, e)
@@ -1202,7 +1199,7 @@ export default function Viewport({
           }
           if (n.kind === 'sketch-curve' && n.sketch !== undefined) {
             if (deletedSketches.has(n.sketch)) continue
-            removeEdgeBatch(n.sketch, Array.from(wasmScene.sketch_curve_edges(n.sketch, n.id)))
+            removeEdgeBatch(n.sketch, Array.from(wasmScene.sketch_curve_chain(n.sketch, n.id)))
             continue
           }
           if (n.kind === 'sketch-edge' && n.sketch !== undefined) {
@@ -2717,8 +2714,9 @@ export default function Viewport({
         continue
       }
       if (node.kind === 'sketch-curve' && node.sketch !== undefined) {
-        // A curve highlights as its member edges.
-        for (const edge of wasmSceneRef.current.sketch_curve_edges(node.sketch, node.id)) {
+        // A curve run highlights as its member edges (resolved from the
+        // canonical representative edge).
+        for (const edge of wasmSceneRef.current.sketch_curve_chain(node.sketch, node.id)) {
           sketchEdges.push({ sketch: node.sketch, edge })
         }
         continue

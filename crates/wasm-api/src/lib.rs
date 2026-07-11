@@ -1146,7 +1146,13 @@ impl Scene {
             .map_err(|e| api_err(&e, &e))?;
         // `Sketch::add_segment` is called directly (not through
         // `Document::apply_*`), so no `DocChange`/`sketches_touched` exists
-        // here — register the sketch with inference at this call site instead.
+        // here. The consumed set derives from geometry this call just
+        // changed — refresh it BEFORE re-registering with inference, which
+        // filters on it. Tools normally bracket this in a gesture (whose
+        // close also recomputes), but the refresh here keeps an unbracketed
+        // call — a script, a test harness, a future tool path — from ever
+        // leaving a region under a solid marked live.
+        self.doc.refresh_consumed(sid);
         self.register_sketch(sid);
         recording::record(recording::RecordedCall::SketchAddSegment {
             sketch,
@@ -1164,22 +1170,18 @@ impl Scene {
     ) -> Result<EdgeRemovedJs, ApiError> {
         let sid = sketch_id(sketch);
         let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
-        // Removing an edge on a consumed region's boundary would recompute
-        // regions and resurrect the extruded footprint as fresh extrudable
-        // regions overlapping the solid — refused, not repaired.
-        if self.doc.sketch_edge_borders_consumed(sid, eid) {
-            return Err(stale(
-                "EdgeBordersSolid",
-                "sketch edge on an extruded region's boundary",
-            ));
-        }
+        // Edges bordering a consumed footprint ARE deletable: the consumed
+        // set re-derives from the objects' frozen footprint polygons (see
+        // kernel::document::Footprint), so however the regions re-form,
+        // nothing under a standing solid ever becomes extrudable.
         let s = self
             .doc
             .sketch_mut(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let report = s.remove_edge(eid).map_err(|e| api_err(&e, &e))?;
         // Same rationale as `sketch_add_segment`: no `DocChange` here, so
-        // register at the call site.
+        // refresh the derived consumed set and re-register at the call site.
+        self.doc.refresh_consumed(sid);
         self.register_sketch(sid);
         Ok(EdgeRemovedJs { inner: report })
     }
@@ -1216,6 +1218,23 @@ impl Scene {
         let s = self.doc.sketch(sketch_id(sketch))?;
         s.edge_curve(SketchEdgeId::from(KeyData::from_ffi(edge)))
             .map(|c| c.data().as_ffi())
+    }
+
+    /// The maximal same-curve run containing `edge`, stopped at junctions
+    /// with other geometry — the selection unit for a drawn arc/circle (see
+    /// `Sketch::curve_chain_at`). Live edges only, ascending by id, so the
+    /// first element is a stable canonical representative for the chain.
+    pub fn sketch_curve_chain(&self, sketch: u64, edge: u64) -> Vec<u64> {
+        let sid = sketch_id(sketch);
+        let Some(s) = self.doc.sketch(sid) else {
+            return Vec::new();
+        };
+        let hidden = self.doc.consumed_edges_of(sid);
+        s.curve_chain_at(SketchEdgeId::from(KeyData::from_ffi(edge)), &hidden)
+            .into_iter()
+            .filter(|&e| !hidden.contains(&e))
+            .map(|e| e.data().as_ffi())
+            .collect()
     }
 
     /// Every live (non-consumed) edge of `curve` in `sketch`.
@@ -1333,17 +1352,6 @@ impl Scene {
         isl.edges
             .iter()
             .any(|&e| self.doc.is_sketch_edge_consumed(sid, e))
-    }
-
-    /// True if this live sketch edge lies on an extruded region's boundary
-    /// (deleting it is refused — see `sketch_remove_edge`). The app's batch
-    /// deletes pre-validate with this so a refusal aborts the WHOLE batch
-    /// instead of committing a partial removal.
-    pub fn sketch_edge_borders_solid(&self, sketch: u64, edge: u64) -> bool {
-        self.doc.sketch_edge_borders_consumed(
-            sketch_id(sketch),
-            SketchEdgeId::from(KeyData::from_ffi(edge)),
-        )
     }
 
     /// `transform_sketch_island`'s validation without the commit: `true` iff
@@ -4048,10 +4056,13 @@ mod tests {
         scene.transform_sketch_island(s, fresh, &affine).unwrap();
     }
 
-    /// The batch-delete pre-validation hook: a live edge on an extruded
-    /// region's boundary reports true; a plain edge false.
+    /// Deleting the wall an extruded footprint shares with a live square
+    /// merges the two regions — and the merged region derives as consumed
+    /// (it overlaps the solid's frozen footprint), so nothing under or
+    /// beside the solid turns extrudable while it stands. Deleting the
+    /// solid then frees the whole merged area.
     #[test]
-    fn sketch_edge_borders_solid_reports_footprint_edges() {
+    fn merging_a_live_square_into_a_footprint_stays_consumed() {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         for (a, b) in [
@@ -4063,19 +4074,30 @@ mod tests {
                 .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
                 .unwrap();
         }
-        scene.extrude_region(s, r, 1.0).unwrap();
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
 
-        let islands = scene.sketch_island_ids(s);
-        let live = scene.sketch_island_edges(s, islands[0]);
-        assert!(!live.is_empty());
-        // The shared wall (bordering the consumed region) flags true; the
-        // second square's own three edges flag false.
-        let flagged: Vec<bool> = live
-            .iter()
-            .map(|&e| scene.sketch_edge_borders_solid(s, e))
-            .collect();
-        assert_eq!(flagged.iter().filter(|&&f| f).count(), 1);
-        assert_eq!(flagged.iter().filter(|&&f| !f).count(), 3);
+        // The shared wall is the one live edge whose deletion merges the
+        // consumed square with the live one.
+        let wall = scene
+            .pick_sketch_edge(1.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("shared wall is pickable");
+        scene.sketch_begin_gesture(s).unwrap();
+        scene
+            .sketch_remove_edge(wall.sketch(), wall.edge())
+            .unwrap();
+        scene.sketch_end_gesture(s).unwrap();
+
+        assert_eq!(
+            scene.sketch_regions(s).unwrap().len(),
+            0,
+            "the merged region overlaps the standing solid — not extrudable"
+        );
+        scene.delete_node(0, obj).unwrap();
+        assert_eq!(
+            scene.sketch_regions(s).unwrap().len(),
+            1,
+            "deleting the solid frees the merged area"
+        );
     }
 
     #[test]

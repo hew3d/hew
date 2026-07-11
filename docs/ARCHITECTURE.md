@@ -81,7 +81,8 @@ further action required. This is the concrete expression of "solids by
 default": a user never has to remember to group their geometry to keep it
 from fusing with the rest of the scene, because the geometry that would fuse
 doesn't exist yet — only its 2D sketch outline does, and that outline is
-consumed once the extrusion happens.
+consumed once the extrusion happens (and released again if the solid is
+later deleted — see 2.6).
 
 ### 2.3 Combination is always explicit
 
@@ -142,6 +143,30 @@ degenerate ("zero-thickness") solid Object, for two reasons:
 Extruding a region consumes the sketch geometry that bounded it: the outline
 that became a solid's base disappears from the sketch, since it was
 scaffolding, not a first-class 2D object once it has served its purpose.
+Consumption lasts exactly as long as a solid stands on the area — each
+extruded Object freezes its footprint (the profile's loops in world
+coordinates, persisted in the file format; boolean/slice/push-through
+results inherit their operands'), and the consumed region set is *derived*
+from those polygons: a region is consumed iff its material overlaps a live
+Object's footprint. Because the rule is geometric rather than
+handle-based, it survives any sketch re-topology — splitting a footprint
+region marks every fragment consumed, merging one into open area
+conservatively consumes the merged region (redrawing the boundary frees
+the open part again), and deleting an outline edge and redrawing it never
+launders the area into extrudability. Deleting the last Object over an
+area releases it: the outline returns to the sketch, fully editable
+again. Re-extruding a consumed region is refused.
+
+Footprints are positional bookkeeping, deliberately not kinematic: moving
+a solid (or the instances of a component built from one) does not relocate
+its frozen footprint, and moving a sketch out from under a solid frees the
+carried-away regions while the solid keeps standing where it was. Boolean
+results inherit the footprints of the operands whose material they keep —
+both for union and intersect, only the kept operand's for subtract (the
+cutter's scaffolding frees the moment it is consumed into the result).
+Files older than manifest v9 attributed footprints partially or not at
+all; their consumed claims load verbatim and are frozen for the document's
+lifetime rather than silently freed (HEW_FILE_FORMAT.md).
 
 Within a Sketch, the user-facing units are derived, identity-stable
 sub-entities, mirroring how regions already work: **islands** (connected

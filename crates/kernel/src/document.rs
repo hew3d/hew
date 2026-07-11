@@ -50,6 +50,28 @@ use crate::sketch::{
 use crate::topo::{Object, WatertightState};
 use crate::transform::{Transform, TransformError};
 
+/// The sketch-plane area a solid stands on: the extruded profile's loops,
+/// frozen in world coordinates at extrusion time.
+///
+/// The document *derives* the consumed (non-extrudable) region set from
+/// these — a sketch region is consumed iff its material overlaps a live
+/// object's footprint ([`crate::geom2d::loops_overlap`]) — so sketch edits
+/// can never expose extrudable area under a standing solid, no matter how
+/// regions split, merge, die, or reappear. Frozen geometry rather than a
+/// region handle: handles churn with sketch topology, area does not.
+/// Boolean/slice/push-through results inherit their operands' footprints;
+/// when the last solid standing on an area goes, the area frees itself on
+/// the next recompute.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Footprint {
+    /// The sketch the footprint shadows.
+    pub sketch: SketchId,
+    /// Outer boundary loop (world coordinates on the sketch plane).
+    pub outer: Vec<Point3>,
+    /// Hole loops.
+    pub holes: Vec<Vec<Point3>>,
+}
+
 /// A node in the document tree (ARCHITECTURE.md): either a solid Object or a
 /// merge [`Group`](GroupRecord). This is the unit of selection, picking, and
 /// transform — *not* of rendering, which stays flat over leaf objects.
@@ -90,6 +112,13 @@ struct ObjectRecord {
     history: History,
     hidden: bool,
     owner: ObjectOwner,
+    /// The sketch-plane areas this solid stands on (see [`Footprint`]).
+    /// One entry from `extrude_region`; boolean/slice/push-through results
+    /// inherit their operands' entries so the combined solid keeps shadowing
+    /// every area it covers. Empty for imports. Deleting the object lifts
+    /// its footprints — the scaffolding returns to the sketch on the next
+    /// consumed-set recompute.
+    footprints: Vec<Footprint>,
     /// Optional display name (e.g. carried in from an import). `None` falls back
     /// to a positional label in the UI.
     name: Option<String>,
@@ -221,16 +250,11 @@ enum DocAction {
     /// Object and restores the region's extrudability; redo reverses both.
     CreatedObject {
         id: ObjectId,
+        /// The sketch whose consumed set the extrusion changed. Undo/redo
+        /// hide/unhide the object and recompute that sketch's consumed set
+        /// from the remaining live footprints (a pure derivation — no
+        /// increments to replay).
         sketch: SketchId,
-        region: SketchRegionId,
-        /// Sketch edges exclusively bounding this region (not shared by any
-        /// surviving region); hidden from rendering after extrusion, restored
-        /// on undo. Derived index — not serialized.
-        consumed_edges: Vec<SketchEdgeId>,
-        /// Sketch vertices left isolated once `consumed_edges` are hidden;
-        /// treated as hidden from rendering after extrusion, restored on undo.
-        /// Derived index — not serialized.
-        consumed_verts: Vec<SketchVertexId>,
     },
     /// A per-Object op (push/pull, split, merge) ran; undo/redo delegate to that
     /// Object's [`History`].
@@ -369,6 +393,10 @@ enum DocAction {
         /// descendant (groups, objects, instances) beneath it — captured so
         /// undo unhides exactly this set and nothing else.
         hidden_subtree: Vec<NodeId>,
+        /// Sketches shadowed by footprints of the deleted objects. The
+        /// delete (and its undo/redo) recomputes each one's consumed set —
+        /// hiding a solid lifts its footprints, unhiding restores them.
+        footprint_sketches: Vec<SketchId>,
     },
     /// `make_component` folded a selection into a new definition plus
     /// one identity-posed instance. Undo dissolves it: each def member returns
@@ -552,6 +580,10 @@ pub struct DocChange {
 pub enum DocumentError {
     /// The sketch handle is stale or from another Document.
     UnknownSketch,
+    /// `extrude_region` on a consumed region — one whose material overlaps
+    /// a live object's footprint. Extruding it would stack a second solid
+    /// through the standing one, so it is refused, never built.
+    RegionConsumed,
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
     /// The face handle is not present in the target object ( paint).
@@ -630,6 +662,9 @@ impl std::fmt::Display for DocumentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DocumentError::UnknownSketch => write!(f, "no such sketch in this document"),
+            DocumentError::RegionConsumed => {
+                write!(f, "region was already extruded into a solid")
+            }
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
             DocumentError::UnknownFace => write!(f, "no such face in the target object"),
             DocumentError::UnknownMaterial => write!(f, "no such material in this document"),
@@ -713,6 +748,15 @@ pub struct Document {
     /// the bottom of its box and is no longer offered for extrusion. Keyed by
     /// sketch too because a different sketch's slotmap reuses region keys.
     consumed: BTreeSet<(SketchId, SketchRegionId)>,
+    /// Footprints frozen at load for consumed regions no live object's
+    /// footprint covers — pre-v9 files never attributed boolean/slice/
+    /// push-through results (and pre-v8 files attributed nothing), so their
+    /// consumed claims have no owning object to derive from. Honoring the
+    /// file verbatim (never silently repairing it) means these areas stay
+    /// consumed for the document's lifetime, exactly as they did in the
+    /// version that wrote them. Session-only: the regions they keep
+    /// consumed are saved in `consumed`, so a reload re-freezes them.
+    legacy_footprints: Vec<Footprint>,
     /// Sketch edges hidden because their region was extruded and they are not
     /// shared by any surviving region. Derived index — rebuilt on load.
     consumed_sketch_edges: BTreeSet<(SketchId, SketchEdgeId)>,
@@ -827,6 +871,14 @@ impl Document {
             .map(|(id, rec)| (id, rec.name.clone()))
             .collect();
 
+        // ── Per-object extrusion footprints, keyed by id (manifest v9) ─────
+        let obj_footprints: std::collections::BTreeMap<ObjectId, Vec<Footprint>> = self
+            .objects
+            .iter()
+            .filter(|(_, rec)| !rec.hidden && !rec.footprints.is_empty())
+            .map(|(id, rec)| (id, rec.footprints.clone()))
+            .collect();
+
         // ── Per-object tags (world + def members), keyed by id ─────────────
         let obj_tags: std::collections::BTreeMap<ObjectId, Vec<Vec<String>>> = self
             .objects
@@ -937,6 +989,7 @@ impl Document {
             roots,
             consumed,
             obj_names,
+            obj_footprints,
             obj_tags,
             tag_meta,
             obj_hidden: self.user_hidden_objects.clone(),
@@ -1035,6 +1088,7 @@ impl Document {
                 owner,
                 name: raw.obj_names.get(i).cloned().flatten(),
                 tags: raw.obj_tags.get(i).cloned().unwrap_or_default(),
+                footprints: Vec::new(),
             });
             dense_obj_ids.push(oid);
         }
@@ -1196,6 +1250,97 @@ impl Document {
                     ),
                 })?;
             doc.consumed.insert((sid, rid));
+        }
+
+        // Restore extrusion footprints (manifest v9+): dense sketch ids
+        // resolve to handles; the loop geometry is stored verbatim.
+        // Dangling/absent entries degrade to an empty footprint list —
+        // bookkeeping, never load-fatal.
+        for (i, fps) in raw.obj_footprints.iter().enumerate() {
+            let Some(&oid) = dense_obj_ids.get(i) else {
+                continue;
+            };
+            for fp in fps {
+                let Some(&sid) = sketch_ids.get(fp.sketch as usize) else {
+                    continue;
+                };
+                let point = |c: &[f64; 3]| Point3::new(c[0], c[1], c[2]);
+                doc.objects[oid].footprints.push(Footprint {
+                    sketch: sid,
+                    outer: fp.outer.iter().map(point).collect(),
+                    holes: fp
+                        .holes
+                        .iter()
+                        .map(|h| h.iter().map(point).collect())
+                        .collect(),
+                });
+            }
+        }
+
+        // v8 files carried a dense `[sketch, region]` provenance pair
+        // instead: resolve the region and freeze its CURRENT loops as the
+        // footprint — the file was saved with region and solid consistent,
+        // so the loops at load time are the loops at extrusion time.
+        for (i, src_pair) in raw.obj_sources.iter().enumerate() {
+            let Some([dense_sid, dense_rid]) = src_pair else {
+                continue;
+            };
+            let Some(&sid) = sketch_ids.get(*dense_sid as usize) else {
+                continue;
+            };
+            let Some(rid) = doc.sketches[sid].regions().keys().nth(*dense_rid as usize) else {
+                continue;
+            };
+            let Ok(profile) = doc.sketches[sid].profile(rid) else {
+                continue;
+            };
+            if let Some(&oid) = dense_obj_ids.get(i) {
+                doc.objects[oid].footprints.push(Footprint {
+                    sketch: sid,
+                    outer: profile.outer().to_vec(),
+                    holes: profile.holes().to_vec(),
+                });
+            }
+        }
+
+        // Freeze LEGACY footprints: any consumed pair the file claims that
+        // no loaded object footprint covers (pre-v9 files never attributed
+        // boolean/slice/push-through results; pre-v8 files attributed
+        // nothing). The file's consumed set is authoritative — never
+        // silently repaired — so freeze each such region's loops as a
+        // document-lifetime footprint: the area stays consumed through
+        // every later recompute, exactly as it did in the version that
+        // wrote it. Regions kept consumed this way are saved back into
+        // `consumed`, so a reload re-freezes them.
+        for &(sid, rid) in &doc.consumed {
+            let sk = &doc.sketches[sid];
+            let Some(r) = sk.regions().get(rid) else {
+                continue;
+            };
+            let outer: Vec<Point3> = r
+                .outer
+                .iter()
+                .map(|&vid| sk.vertices()[vid].position)
+                .collect();
+            let holes: Vec<Vec<Point3>> = r
+                .holes
+                .iter()
+                .map(|h| h.iter().map(|&vid| sk.vertices()[vid].position).collect())
+                .collect();
+            let normal = sk.plane().normal();
+            let covered = doc
+                .objects
+                .values()
+                .flat_map(|rec| rec.footprints.iter())
+                .filter(|f| f.sketch == sid)
+                .any(|f| crate::geom2d::loops_overlap(&outer, &holes, &f.outer, &f.holes, normal));
+            if !covered {
+                doc.legacy_footprints.push(Footprint {
+                    sketch: sid,
+                    outer,
+                    holes,
+                });
+            }
         }
 
         // Rebuild the derived tombstone index for consumed sketch edges/verts
@@ -1490,11 +1635,90 @@ impl Document {
         Ok(())
     }
 
+    /// Recompute `sketch`'s consumed set from first principles: a region is
+    /// consumed iff its material overlaps any live object's [`Footprint`]
+    /// (shared boundary alone is not overlap — an adjacent or hole-filling
+    /// region stays extrudable). Tombstoned edges/vertices then re-derive
+    /// from the consumed regions ([`Sketch::consumed_tombstones`]).
+    ///
+    /// This is the ONLY writer of the consumed index. Because the answer is
+    /// a pure function of (sketch geometry, live footprints), every mutation
+    /// path — gestures, extrudes, deletes, undo/redo, load — converges on
+    /// the same state by calling this; there is no incremental bookkeeping
+    /// to drift. Splitting a footprint region marks every fragment consumed;
+    /// merging one into open area conservatively consumes the merged region
+    /// (redrawing the boundary splits it again and frees the open part);
+    /// deleting the last solid over an area frees it.
+    fn recompute_consumed(&mut self, sketch: SketchId) {
+        self.consumed.retain(|&(s, _)| s != sketch);
+        self.consumed_sketch_edges.retain(|&(s, _)| s != sketch);
+        self.consumed_sketch_verts.retain(|&(s, _)| s != sketch);
+        let Some(sk) = self.sketches.get(sketch) else {
+            return;
+        };
+        let footprints: Vec<&Footprint> = self
+            .objects
+            .values()
+            .filter(|rec| !rec.hidden)
+            .flat_map(|rec| rec.footprints.iter())
+            .chain(self.legacy_footprints.iter())
+            .filter(|f| f.sketch == sketch)
+            .collect();
+        if footprints.is_empty() {
+            return;
+        }
+        let normal = sk.plane().normal();
+        let mut regions = std::collections::BTreeSet::new();
+        for (rid, r) in sk.regions() {
+            let outer: Vec<Point3> = r
+                .outer
+                .iter()
+                .map(|&vid| sk.vertices()[vid].position)
+                .collect();
+            let holes: Vec<Vec<Point3>> = r
+                .holes
+                .iter()
+                .map(|h| h.iter().map(|&vid| sk.vertices()[vid].position).collect())
+                .collect();
+            if footprints
+                .iter()
+                .any(|f| crate::geom2d::loops_overlap(&outer, &holes, &f.outer, &f.holes, normal))
+            {
+                regions.insert(rid);
+            }
+        }
+        let (edges, verts) = sk.consumed_tombstones(&regions);
+        for r in regions {
+            self.consumed.insert((sketch, r));
+        }
+        for e in edges {
+            self.consumed_sketch_edges.insert((sketch, e));
+        }
+        for v in verts {
+            self.consumed_sketch_verts.insert((sketch, v));
+        }
+    }
+
+    /// Public entry to [`Document::recompute_consumed`], for callers that
+    /// mutate a sketch directly through [`Document::sketch_mut`] outside a
+    /// gesture bracket (the wasm boundary's `sketch_add_segment` /
+    /// `sketch_remove_edge`). Gesture close, extrude, delete, undo/redo, and
+    /// load all recompute on their own; an unbracketed edit has no such
+    /// hook, so it refreshes here — the derived consumed set must never
+    /// trail the geometry it is derived from.
+    pub fn refresh_consumed(&mut self, sketch: SketchId) {
+        self.recompute_consumed(sketch);
+    }
+
     /// Closes the open gesture on `sketch`. If the sketch changed since
     /// [`Document::begin_sketch_gesture`], pushes one
     /// [`DocAction::SketchGesture`] and clears redo; an unchanged gesture
     /// records nothing (and stays undo-invisible). Either way the gesture is
-    /// closed on return — including the `Err` paths.
+    /// closed on return — including the `Err` paths. The sketch's consumed
+    /// set re-derives from the live footprints before recording (see
+    /// [`Document::recompute_consumed`]) — however the gesture split,
+    /// merged, or killed regions, area under a standing solid stays
+    /// consumed and everything else frees.
     ///
     /// # Errors
     /// - [`DocumentError::SketchGestureNotOpen`] — no gesture is open, or the
@@ -1525,10 +1749,12 @@ impl Document {
         if *s == *pending.before {
             return Ok(DocChange::default());
         }
+        self.recompute_consumed(sketch);
+        let after = Box::new(self.sketches[sketch].clone());
         self.undo.push(DocAction::SketchGesture {
             sketch,
             before: pending.before,
-            after: Box::new(s.clone()),
+            after,
             created: pending.created,
         });
         self.redo.clear();
@@ -1550,9 +1776,13 @@ impl Document {
             if let Some(s) = self.sketches.get_mut(sid) {
                 s.end_curve();
             }
+            self.pending_sketch_gesture = None;
+            // Any mutations the abandoned bracket did leave lie stay in the
+            // sketch; keep the derived consumed set honest about them.
+            self.recompute_consumed(sid);
+            return true;
         }
-
-        self.pending_sketch_gesture.take().is_some()
+        false
     }
 
     /// A sketch by handle, or `None` if stale or hidden (deleted).
@@ -1639,11 +1869,21 @@ impl Document {
         self.consumed_sketch_edges.contains(&(sketch, edge))
     }
 
-    /// Whether `edge` lies on the boundary of an already-extruded (consumed)
-    /// region of `sketch`. Removing such an edge would trigger a region
-    /// recompute that resurrects the consumed region's area as fresh,
-    /// extrudable regions overlapping the solid built from it — callers must
-    /// refuse the removal instead. `false` for stale handles.
+    /// The set of `sketch`'s consumed (tombstoned) edges — what queries that
+    /// walk the raw edge graph must treat as invisible.
+    pub fn consumed_edges_of(&self, sketch: SketchId) -> std::collections::BTreeSet<SketchEdgeId> {
+        self.consumed_sketch_edges
+            .iter()
+            .filter(|&&(s, _)| s == sketch)
+            .map(|&(_, e)| e)
+            .collect()
+    }
+
+    /// Whether `edge` lies on the boundary (outer or hole) of a consumed
+    /// region of `sketch`. Pure observation — removing such an edge is
+    /// allowed; the consumed set re-derives from the live footprints at the
+    /// gesture close, so the area under the solid stays consumed however
+    /// the regions re-form. `false` for stale handles.
     pub fn sketch_edge_borders_consumed(&self, sketch: SketchId, edge: SketchEdgeId) -> bool {
         let Some(s) = self.sketch(sketch) else {
             return false;
@@ -2613,6 +2853,14 @@ impl Document {
         distance: f64,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "extrude_region", distance);
+        // Authoritative refusal gate: re-derive the consumed set first, so a
+        // sketch edited outside a gesture bracket (which has no recompute
+        // hook of its own) can never slip an under-a-solid region past the
+        // check on a stale index.
+        self.recompute_consumed(sketch);
+        if self.consumed.contains(&(sketch, region)) {
+            return Err(DocumentError::RegionConsumed);
+        }
         let s = self
             .sketches
             .get(sketch)
@@ -2620,6 +2868,14 @@ impl Document {
         let profile = s.profile(region).map_err(DocumentError::Sketch)?;
         let object = Object::from_extrusion(&profile, distance).map_err(DocumentError::Extrude)?;
 
+        // Freeze the footprint: the region's loops as extruded. Consumption
+        // derives from this geometry from here on, not from the region
+        // handle — handles churn with sketch topology, area does not.
+        let footprint = Footprint {
+            sketch,
+            outer: profile.outer().to_vec(),
+            holes: profile.holes().to_vec(),
+        };
         let id = self.objects.insert(ObjectRecord {
             object,
             history: History::new(),
@@ -2627,41 +2883,13 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            footprints: vec![footprint],
         });
-        // The region is now the bottom of a solid: consume it so it neither
-        // re-extrudes nor leaves a stray fill.
-        self.consumed.insert((sketch, region));
+        // The region is now the bottom of a solid: re-deriving the consumed
+        // set picks it up (plus tombstones for edges no live region needs).
+        self.recompute_consumed(sketch);
 
-        // Tombstone the sketch edges/vertices that no longer bound any LIVE
-        // region: evaluate the full derived rule for this sketch's consumed
-        // set, then keep only what is newly tombstoned so the undo record
-        // carries exactly this extrude's increment. An edge shared with a
-        // previously consumed region dies here, with the last region that
-        // needed it. (Re-borrow the sketch — the earlier `let s = ...` borrow
-        // ended after `profile(region)`.)
-        let consumed_regions: std::collections::BTreeSet<SketchRegionId> = self
-            .consumed
-            .iter()
-            .filter(|&&(sid, _)| sid == sketch)
-            .map(|&(_, rid)| rid)
-            .collect();
-        let (tomb_edges, tomb_verts) = self.sketches[sketch].consumed_tombstones(&consumed_regions);
-        let cons_edges: Vec<SketchEdgeId> = tomb_edges
-            .into_iter()
-            .filter(|&e| self.consumed_sketch_edges.insert((sketch, e)))
-            .collect();
-        let cons_verts: Vec<SketchVertexId> = tomb_verts
-            .into_iter()
-            .filter(|&v| self.consumed_sketch_verts.insert((sketch, v)))
-            .collect();
-
-        self.undo.push(DocAction::CreatedObject {
-            id,
-            sketch,
-            region,
-            consumed_edges: cons_edges,
-            consumed_verts: cons_verts,
-        });
+        self.undo.push(DocAction::CreatedObject { id, sketch });
         self.redo.clear();
         self.debug_validate();
 
@@ -2760,6 +2988,22 @@ impl Document {
             .collect();
         result.merge_coplanar_faces(&preserve);
 
+        // The result inherits the footprints of the operands whose material
+        // it keeps: both for Union (it stands on everything they stood on)
+        // and Intersect (its material lies inside both, conservatively), but
+        // only `a`'s for Subtract — `b`'s material is removed, so the result
+        // does not stand on `b`'s area and must not keep it consumed.
+        // Inherited areas stay consumed while the result lives and free
+        // together when it is deleted.
+        let footprints: Vec<Footprint> = match op {
+            BooleanOp::Union | BooleanOp::Intersect => self.objects[a]
+                .footprints
+                .iter()
+                .chain(self.objects[b].footprints.iter())
+                .cloned()
+                .collect(),
+            BooleanOp::Subtract => self.objects[a].footprints.clone(),
+        };
         let id = self.objects.insert(ObjectRecord {
             object: result,
             history: History::new(),
@@ -2767,16 +3011,26 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            footprints,
         });
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
+        // A Subtract drops `b`'s footprints from the live set (see above):
+        // re-derive the shadowed sketches so the cutter's scaffolding frees
+        // the moment it is consumed into the result. No-op for Union and
+        // Intersect (the live footprint multiset is unchanged).
+        let footprint_sketches =
+            self.footprint_sketches_of(&[NodeId::Object(a), NodeId::Object(b), NodeId::Object(id)]);
+        for &s in &footprint_sketches {
+            self.recompute_consumed(s);
+        }
         self.undo.push(DocAction::Boolean { result: id, a, b });
         self.redo.clear();
         self.debug_validate();
 
         let change = DocChange {
             objects_touched: vec![a, b, id],
-            sketches_touched: Vec::new(),
+            sketches_touched: footprint_sketches,
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
@@ -2812,6 +3066,10 @@ impl Document {
         }
         let (positive, negative) = rec.object.slice(plane).map_err(DocumentError::Slice)?;
 
+        // Each piece inherits the whole source footprint set (conservative —
+        // a piece may stand on only part of it, but the area frees exactly
+        // when the last piece over it goes).
+        let inherited = rec.footprints.clone();
         let a = self.objects.insert(ObjectRecord {
             object: positive,
             history: History::new(),
@@ -2819,6 +3077,7 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            footprints: inherited.clone(),
         });
         let b = self.objects.insert(ObjectRecord {
             object: negative,
@@ -2827,6 +3086,7 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            footprints: inherited,
         });
         self.objects[object].hidden = true;
         self.undo.push(DocAction::Sliced {
@@ -2881,6 +3141,9 @@ impl Document {
             .map_err(|e| DocumentError::Op(KernelOpError::PushPull(e)))?;
         let pieces = result.split_connected_components();
 
+        // Every result piece inherits the source's footprints (conservative,
+        // as in `slice_node`): the cut solid still stands where it stood.
+        let inherited = self.objects[object].footprints.clone();
         let mut results: Vec<ObjectId> = Vec::with_capacity(pieces.len());
         for piece in pieces {
             let id = self.objects.insert(ObjectRecord {
@@ -2890,6 +3153,7 @@ impl Document {
                 owner: ObjectOwner::World { parent: None },
                 name: None,
                 tags: Vec::new(),
+                footprints: inherited.clone(),
             });
             results.push(id);
         }
@@ -2975,6 +3239,10 @@ impl Document {
         self.sketches[sketch]
             .apply_transform(t)
             .map_err(DocumentError::Transform)?;
+        // Footprints are frozen in world coordinates; the sketch just moved
+        // relative to them. Re-derive: regions carried out from under a
+        // solid free, regions carried onto a footprint consume.
+        self.recompute_consumed(sketch);
         self.undo.push(DocAction::TransformSketch {
             sketch,
             forward: *t,
@@ -3015,6 +3283,9 @@ impl Document {
         self.sketches[sketch]
             .apply_transform_island(island, t)
             .map_err(DocumentError::Sketch)?;
+        // Same rule as `transform_sketch`: geometry moved against the
+        // frozen footprints, so the consumed set re-derives.
+        self.recompute_consumed(sketch);
         self.undo.push(DocAction::TransformSketchIsland {
             sketch,
             island,
@@ -3056,6 +3327,9 @@ impl Document {
         let old_pos = self.sketches[sketch]
             .move_vertex(vertex, new_pos)
             .map_err(DocumentError::Sketch)?;
+        // A vertex drag reshapes regions against the frozen footprints
+        // (topology-preserving, geometry-changing): re-derive.
+        self.recompute_consumed(sketch);
         self.undo.push(DocAction::MovedSketchVertex {
             sketch,
             vertex,
@@ -3190,6 +3464,20 @@ impl Document {
     ///   [`DocumentError::UnknownInstance`] — `node` is stale or already hidden.
     ///
     /// On `Err` the document is untouched (the strong guarantee).
+    /// The sketches shadowed by footprints of the Objects among `nodes` —
+    /// the set whose consumed regions a hide/unhide of those objects can
+    /// change. A delete (and its undo/redo) recomputes exactly these.
+    fn footprint_sketches_of(&self, nodes: &[NodeId]) -> Vec<SketchId> {
+        let mut sketches = std::collections::BTreeSet::new();
+        for &n in nodes {
+            let NodeId::Object(oid) = n else { continue };
+            if let Some(rec) = self.objects.get(oid) {
+                sketches.extend(rec.footprints.iter().map(|f| f.sketch));
+            }
+        }
+        sketches.into_iter().collect()
+    }
+
     pub fn delete_node(&mut self, node: NodeId) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "delete_node", node = ?node);
         if !self.node_is_live(node) {
@@ -3215,16 +3503,27 @@ impl Document {
             self.splice_out_parent(pg, node, &[]);
         }
 
+        // Deleting an extruded object lifts its footprints: re-deriving the
+        // consumed set of each shadowed sketch frees whatever no remaining
+        // live solid stands on — the scaffolding returns, editable again.
+        let footprint_sketches = self.footprint_sketches_of(&hidden_subtree);
+        for &s in &footprint_sketches {
+            self.recompute_consumed(s);
+        }
+
         self.undo.push(DocAction::Deleted {
             node,
             parent,
             prev_parent_members,
             hidden_subtree: hidden_subtree.clone(),
+            footprint_sketches: footprint_sketches.clone(),
         });
         self.redo.clear();
         self.debug_validate();
 
-        Ok(delete_change(node, parent, &hidden_subtree))
+        let mut change = delete_change(node, parent, &hidden_subtree);
+        change.sketches_touched.extend(footprint_sketches);
+        Ok(change)
     }
 
     /// Move / rotate / scale a group: **bake** `t` into every world leaf object
@@ -3412,6 +3711,12 @@ impl Document {
             let prev = rec.pose;
             rec.pose = prev.then(t);
             instance_prevs.push((inst, prev));
+        }
+
+        // Baked sketches moved against the frozen footprints: re-derive
+        // their consumed sets (same rule as `transform_sketch`).
+        for &s in &baked_sketches {
+            self.recompute_consumed(s);
         }
 
         let groups_touched: Vec<GroupId> = nodes
@@ -3779,6 +4084,7 @@ impl Document {
                 owner: ObjectOwner::World { parent },
                 name: None,
                 tags: Vec::new(),
+                footprints: Vec::new(),
             });
             created.push(id);
         }
@@ -3846,6 +4152,7 @@ impl Document {
                 owner: ObjectOwner::Definition(new_def),
                 name: None,
                 tags: Vec::new(),
+                footprints: Vec::new(),
             });
             new_members.push(id);
         }
@@ -3990,6 +4297,7 @@ impl Document {
                     owner: ObjectOwner::World { parent: new_parent },
                     name,
                     tags,
+                    footprints: Vec::new(),
                 });
                 created.objects.push(new_id);
                 Ok(NodeId::Object(new_id))
@@ -4108,24 +4416,13 @@ impl Document {
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.undo.pop().ok_or(DocumentError::NothingToUndo)?;
         let change = match &action {
-            DocAction::CreatedObject {
-                id,
-                sketch,
-                region,
-                consumed_edges,
-                consumed_verts,
-            } => {
-                let (id, sketch, region) = (*id, *sketch, *region);
+            &DocAction::CreatedObject { id, sketch } => {
+                // Hiding the object lifts its footprint; the sketch's
+                // consumed set re-derives from what remains live.
                 if let Some(rec) = self.objects.get_mut(id) {
                     rec.hidden = true;
                 }
-                self.consumed.remove(&(sketch, region));
-                for &e in consumed_edges {
-                    self.consumed_sketch_edges.remove(&(sketch, e));
-                }
-                for &v in consumed_verts {
-                    self.consumed_sketch_verts.remove(&(sketch, v));
-                }
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: vec![id],
                     sketches_touched: vec![sketch],
@@ -4155,14 +4452,24 @@ impl Document {
             }
             &DocAction::Boolean { result, a, b } => {
                 // Undo a combine: hide the result, bring the operands back.
+                // Re-derive the shadowed sketches — a Subtract's cutter
+                // footprint re-consumes with the cutter live again.
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = true;
                 }
                 self.objects[a].hidden = false;
                 self.objects[b].hidden = false;
+                let footprint_sketches = self.footprint_sketches_of(&[
+                    NodeId::Object(a),
+                    NodeId::Object(b),
+                    NodeId::Object(result),
+                ]);
+                for &s in &footprint_sketches {
+                    self.recompute_consumed(s);
+                }
                 DocChange {
                     objects_touched: vec![result, a, b],
-                    sketches_touched: Vec::new(),
+                    sketches_touched: footprint_sketches,
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
@@ -4238,6 +4545,7 @@ impl Document {
                 self.sketches[sketch]
                     .apply_transform_island(island, &inverse)
                     .expect("inverse of a validated island transform must re-apply");
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -4254,6 +4562,7 @@ impl Document {
                 self.sketches[sketch]
                     .apply_transform(&inverse)
                     .expect("inverse of a validated transform must re-apply");
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -4286,6 +4595,9 @@ impl Document {
                 for &(inst, prev) in instances {
                     self.instances[inst].pose = prev;
                 }
+                for &s in sketches.iter() {
+                    self.recompute_consumed(s);
+                }
                 DocChange {
                     objects_touched: objects.clone(),
                     sketches_touched: sketches.clone(),
@@ -4306,6 +4618,7 @@ impl Document {
                 self.sketches[sketch]
                     .move_vertex(vertex, old_pos)
                     .expect("reverse of a validated vertex move must re-apply");
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -4322,13 +4635,15 @@ impl Document {
                 ..
             } => {
                 // Undo a drawing gesture: restore the exact pre-gesture
-                // snapshot (keys preserved — every prior handle stays valid).
-                // A gesture that created the sketch also hides it, so no
-                // empty ghost lingers in the sketch list.
+                // snapshot (keys preserved — every prior handle stays valid),
+                // then re-derive the consumed set against the restored
+                // regions. A gesture that created the sketch also hides it,
+                // so no empty ghost lingers.
                 let (sketch, created) = (*sketch, *created);
                 if let Some(s) = self.sketches.get_mut(sketch) {
                     *s = (**before).clone();
                 }
+                self.recompute_consumed(sketch);
                 if created {
                     self.hidden_sketches.insert(sketch);
                 }
@@ -4378,9 +4693,12 @@ impl Document {
                 parent,
                 prev_parent_members,
                 hidden_subtree,
+                footprint_sketches,
             } => {
                 // Undo delete = unhide exactly the hidden subtree and re-splice
-                // `node` back into its parent at the original position.
+                // `node` back into its parent at the original position. The
+                // solids are back, so their footprints re-consume on the
+                // recompute.
                 let (node, parent) = (*node, *parent);
                 for &n in hidden_subtree {
                     match n {
@@ -4389,10 +4707,16 @@ impl Document {
                         NodeId::Instance(id) => self.instances[id].hidden = false,
                     }
                 }
+                let footprint_sketches = footprint_sketches.clone();
+                for &s in &footprint_sketches {
+                    self.recompute_consumed(s);
+                }
                 if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
                     self.groups[pg].members = prev.clone();
                 }
-                delete_change(node, parent, hidden_subtree)
+                let mut change = delete_change(node, parent, hidden_subtree);
+                change.sketches_touched.extend(footprint_sketches);
+                change
             }
             DocAction::MadeComponent {
                 component,
@@ -4648,24 +4972,13 @@ impl Document {
     pub fn redo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.redo.pop().ok_or(DocumentError::NothingToRedo)?;
         let change = match &action {
-            DocAction::CreatedObject {
-                id,
-                sketch,
-                region,
-                consumed_edges,
-                consumed_verts,
-            } => {
-                let (id, sketch, region) = (*id, *sketch, *region);
+            &DocAction::CreatedObject { id, sketch } => {
+                // Unhiding the object restores its footprint; the sketch's
+                // consumed set re-derives with it live again.
                 if let Some(rec) = self.objects.get_mut(id) {
                     rec.hidden = false;
                 }
-                self.consumed.insert((sketch, region));
-                for &e in consumed_edges {
-                    self.consumed_sketch_edges.insert((sketch, e));
-                }
-                for &v in consumed_verts {
-                    self.consumed_sketch_verts.insert((sketch, v));
-                }
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: vec![id],
                     sketches_touched: vec![sketch],
@@ -4693,14 +5006,24 @@ impl Document {
             }
             &DocAction::Boolean { result, a, b } => {
                 // Redo a combine: hide the operands again, show the result.
+                // Re-derive the shadowed sketches — a Subtract's cutter
+                // footprint frees again with the cutter re-consumed.
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = false;
                 }
                 self.objects[a].hidden = true;
                 self.objects[b].hidden = true;
+                let footprint_sketches = self.footprint_sketches_of(&[
+                    NodeId::Object(a),
+                    NodeId::Object(b),
+                    NodeId::Object(result),
+                ]);
+                for &s in &footprint_sketches {
+                    self.recompute_consumed(s);
+                }
                 DocChange {
                     objects_touched: vec![result, a, b],
-                    sketches_touched: Vec::new(),
+                    sketches_touched: footprint_sketches,
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
@@ -4776,6 +5099,7 @@ impl Document {
                 self.sketches[sketch]
                     .apply_transform_island(island, &forward)
                     .expect("forward of a validated island transform must re-apply");
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -4792,6 +5116,7 @@ impl Document {
                 self.sketches[sketch]
                     .apply_transform(&forward)
                     .expect("forward of a validated transform must re-apply");
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -4825,6 +5150,9 @@ impl Document {
                 for &(inst, prev) in instances.iter() {
                     self.instances[inst].pose = prev.then(forward);
                 }
+                for &s in sketches.iter() {
+                    self.recompute_consumed(s);
+                }
                 DocChange {
                     objects_touched: objects.clone(),
                     sketches_touched: sketches.clone(),
@@ -4844,6 +5172,7 @@ impl Document {
                 self.sketches[sketch]
                     .move_vertex(vertex, new_pos)
                     .expect("forward of a validated vertex move must re-apply");
+                self.recompute_consumed(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
@@ -4860,7 +5189,8 @@ impl Document {
                 ..
             } => {
                 // Redo a drawing gesture: unhide first (when the gesture
-                // created the sketch), then restore the post-gesture snapshot.
+                // created the sketch), restore the post-gesture snapshot,
+                // then re-derive the consumed set against it.
                 let (sketch, created) = (*sketch, *created);
                 if created {
                     self.hidden_sketches.remove(&sketch);
@@ -4868,6 +5198,7 @@ impl Document {
                 if let Some(s) = self.sketches.get_mut(sketch) {
                     *s = (**after).clone();
                 }
+                self.recompute_consumed(sketch);
                 DocChange {
                     sketches_touched: vec![sketch],
                     ..Default::default()
@@ -4901,9 +5232,12 @@ impl Document {
                 node,
                 parent,
                 hidden_subtree,
+                footprint_sketches,
                 ..
             } => {
-                // Redo delete: re-hide the subtree and splice `node` out again.
+                // Redo delete: re-hide the subtree, splice `node` out again,
+                // and re-derive the shadowed sketches' consumed sets with
+                // the solids gone.
                 let (node, parent) = (*node, *parent);
                 for &n in hidden_subtree {
                     match n {
@@ -4912,10 +5246,16 @@ impl Document {
                         NodeId::Instance(id) => self.instances[id].hidden = true,
                     }
                 }
+                let footprint_sketches = footprint_sketches.clone();
+                for &s in &footprint_sketches {
+                    self.recompute_consumed(s);
+                }
                 if let Some(pg) = parent {
                     self.splice_out_parent(pg, node, &[]);
                 }
-                delete_change(node, parent, hidden_subtree)
+                let mut change = delete_change(node, parent, hidden_subtree);
+                change.sketches_touched.extend(footprint_sketches);
+                change
             }
             DocAction::MadeComponent {
                 component,
@@ -5341,6 +5681,7 @@ fn ingest_build_mesh(
                 owner,
                 name: Some(recipe.name),
                 tags: recipe.tags,
+                footprints: Vec::new(),
             });
             all_objects.push(oid);
             Some(oid)

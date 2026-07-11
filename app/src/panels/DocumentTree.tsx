@@ -105,8 +105,8 @@ export function DocumentTree({
     if (n.kind === 'sketch-edge') {
       island = scene.sketch_edge_island(n.sketch, n.id)
     } else if (n.kind === 'sketch-curve') {
-      const edges = Array.from(scene.sketch_curve_edges(n.sketch, n.id))
-      island = edges.length > 0 ? scene.sketch_edge_island(n.sketch, edges[0]) : undefined
+      // The ref's id is the chain's representative edge.
+      island = scene.sketch_edge_island(n.sketch, n.id)
     }
     if (island !== undefined) {
       selected.add(nodeKey({ kind: 'sketch-island', id: island, sketch: n.sketch }))

@@ -78,7 +78,27 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
 /// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so v1-v6
 /// files still load (every edge a plain line) — back-compatible. The
 /// geometry buffer is unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
-pub const MANIFEST_FORMAT_VERSION: u32 = 7;
+///
+/// v8: added optional `source: [u32; 2]` to object entries — the dense
+/// (sketch, region) footprint the object was extruded from, resolved like
+/// `consumed` pairs; deleting the object frees the footprint. Absent for
+/// boolean results, slice pieces, imports, and all pre-v8 files —
+/// back-compatible (provenance degrades to `None`). Geometry buffer
+/// unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
+///
+/// v9: replaced v8's `source` region handle with optional `footprints` on
+/// object entries — the sketch-plane loops (outer + holes, world
+/// coordinates) the solid stands on, frozen at extrusion; boolean/slice/
+/// push-through results inherit their operands' entries. The consumed set
+/// is DERIVED from these polygons (a region is consumed iff its material
+/// overlaps a live footprint), so it survives any sketch re-topology —
+/// region handles churn, area does not. v9 writers no longer emit
+/// `source`; v8 files still load (each `source` pair resolves to its
+/// region, whose loops at load time equal the loops at extrusion time).
+/// Both fields are `#[serde(default, skip_serializing_if = ...)]` —
+/// back-compatible. Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION`
+/// stays 3).
+pub const MANIFEST_FORMAT_VERSION: u32 = 9;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -622,6 +642,31 @@ pub(crate) struct ObjectDto {
     /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Extrusion footprint provenance (manifest v8 only): the dense
+    /// `[sketch, region]` pair this object was extruded from, resolved like
+    /// `consumed` entries. v9+ writers emit `footprints` instead; kept for
+    /// decoding v8 files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<[u32; 2]>,
+    /// Extrusion footprints (manifest v9+): the sketch-plane loops this
+    /// solid stands on, frozen at extrusion (boolean/slice/push-through
+    /// results inherit their operands'). The consumed set derives from
+    /// these polygons. Absent for imports and all pre-v9 files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub footprints: Vec<FootprintDto>,
+}
+
+/// One extrusion footprint (manifest v9+): the loops of the profile a solid
+/// was extruded from, in world coordinates on the sketch plane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct FootprintDto {
+    /// Dense id of the sketch the footprint shadows.
+    pub sketch: u32,
+    /// Outer boundary loop.
+    pub outer: Vec<[f64; 3]>,
+    /// Hole loops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Vec<[f64; 3]>>,
 }
 
 /// A merge group entry.
@@ -800,6 +845,8 @@ pub(crate) struct DocSaveData {
     pub guides: Vec<(GuideId, Guide)>,
     /// Per-object display name, keyed by id (covers world + def members).
     pub obj_names: std::collections::BTreeMap<ObjectId, Option<String>>,
+    /// Per-object extrusion footprints (manifest v9), keyed by id.
+    pub obj_footprints: std::collections::BTreeMap<ObjectId, Vec<crate::document::Footprint>>,
     /// Per-object tag list, keyed by id (covers world + def members).
     pub obj_tags: std::collections::BTreeMap<ObjectId, Vec<Vec<String>>>,
     /// All live world roots (objects/groups/instances with no parent).
@@ -936,6 +983,31 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 name: data.obj_names.get(oid).cloned().flatten(),
                 tags: data.obj_tags.get(oid).cloned().unwrap_or_default(),
                 hidden: data.obj_hidden.contains(oid),
+                source: None, // v8 field; v9 writers emit `footprints`
+                footprints: data
+                    .obj_footprints
+                    .get(oid)
+                    .map(|fps| {
+                        fps.iter()
+                            .filter_map(|fp| {
+                                // A footprint on a hidden/gone sketch is
+                                // dropped, matching `consumed` filtering.
+                                let dense_sid = sketch_to_dense.get(&fp.sketch).copied()?;
+                                let coords =
+                                    |p: &crate::math::Point3| -> [f64; 3] { [p.x, p.y, p.z] };
+                                Some(FootprintDto {
+                                    sketch: dense_sid,
+                                    outer: fp.outer.iter().map(coords).collect(),
+                                    holes: fp
+                                        .holes
+                                        .iter()
+                                        .map(|h| h.iter().map(coords).collect())
+                                        .collect(),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -1176,6 +1248,10 @@ pub(crate) struct DocLoadRaw {
     /// Optional display name per object/group/component/instance, in dense order
     /// (manifest v2+; all `None` for v1 files).
     pub obj_names: Vec<Option<String>>,
+    /// Extrusion provenance per object, in dense order (manifest v8 files).
+    pub obj_sources: Vec<Option<[u32; 2]>>,
+    /// Extrusion footprints per object, in dense order (manifest v9+).
+    pub obj_footprints: Vec<Vec<FootprintDto>>,
     pub group_names: Vec<Option<String>>,
     pub component_names: Vec<Option<String>>,
     pub instance_names: Vec<Option<String>>,
@@ -1249,11 +1325,15 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let mut geom_buffers: Vec<Vec<u8>> = Vec::with_capacity(obj_count);
     let mut obj_base_materials: Vec<Option<u32>> = Vec::with_capacity(obj_count);
     let mut obj_names: Vec<Option<String>> = Vec::with_capacity(obj_count);
+    let mut obj_sources: Vec<Option<[u32; 2]>> = Vec::with_capacity(obj_count);
+    let mut obj_footprints: Vec<Vec<FootprintDto>> = Vec::with_capacity(obj_count);
     for obj_dto in &manifest.objects {
         let buf = zip_read_entry(&mut zip, &obj_dto.geometry)?;
         geom_buffers.push(buf);
         obj_base_materials.push(obj_dto.base_material);
         obj_names.push(obj_dto.name.clone());
+        obj_sources.push(obj_dto.source);
+        obj_footprints.push(obj_dto.footprints.clone());
     }
 
     // Decode sketches.
@@ -1311,6 +1391,8 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         consumed: manifest.consumed.clone(),
         def_membership,
         obj_names,
+        obj_sources,
+        obj_footprints,
         group_names,
         component_names,
         instance_names,

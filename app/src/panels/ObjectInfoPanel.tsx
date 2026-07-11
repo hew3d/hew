@@ -114,8 +114,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
       } else if (kind === 'sketch-edge') {
         islandId = scene.sketch_edge_island(sketchId, id)
       } else if (kind === 'sketch-curve') {
-        const edges = Array.from(scene.sketch_curve_edges(sketchId, id))
-        islandId = edges.length > 0 ? scene.sketch_edge_island(sketchId, edges[0]) : undefined
+        // The ref's id is the chain's representative EDGE.
+        islandId = scene.sketch_edge_island(sketchId, id)
       }
       const flat = Array.from(scene.sketch_ids()).flatMap((sid) =>
         Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sid, island })),

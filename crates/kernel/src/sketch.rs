@@ -256,6 +256,65 @@ impl Sketch {
         self.edges.get(edge).and_then(|e| e.curve)
     }
 
+    /// The maximal run of `edge`'s curve reachable through vertices used by
+    /// NOTHING but that curve — the selection unit for a drawn arc/circle
+    /// once other geometry touches it. A junction vertex (crossing or touch:
+    /// three or more incident edges, or two from different owners) stops the
+    /// walk, so the piece of a circle inside an outline selects separately
+    /// from the piece that became the outline's rounded corner. For an
+    /// untouched curve this is the whole curve; for a plain line it is just
+    /// the edge itself. Ascending by id; empty for a stale handle.
+    pub fn curve_chain_at(
+        &self,
+        edge: SketchEdgeId,
+        hidden: &std::collections::BTreeSet<SketchEdgeId>,
+    ) -> Vec<SketchEdgeId> {
+        let Some(e) = self.edges.get(edge) else {
+            return Vec::new();
+        };
+        let Some(curve) = e.curve else {
+            return vec![edge];
+        };
+
+        // The walk sees only VISIBLE topology: `hidden` carries the caller's
+        // consumed (tombstoned) edges, so an extruded footprint that happens
+        // to share a vertex with a live curve neither fractures the run nor
+        // counts as a junction — invisible scaffolding must not shape what a
+        // click selects.
+        let mut vertex_edges: std::collections::BTreeMap<SketchVertexId, Vec<SketchEdgeId>> =
+            std::collections::BTreeMap::new();
+        for (eid, ed) in &self.edges {
+            if hidden.contains(&eid) {
+                continue;
+            }
+            vertex_edges.entry(ed.from).or_default().push(eid);
+            vertex_edges.entry(ed.to).or_default().push(eid);
+        }
+
+        let mut chain: std::collections::BTreeSet<SketchEdgeId> = std::collections::BTreeSet::new();
+        chain.insert(edge);
+        let mut frontier = vec![edge];
+        while let Some(cur) = frontier.pop() {
+            let ed = self.edges[cur];
+            for v in [ed.from, ed.to] {
+                let incident = &vertex_edges[&v];
+                // Interior curve vertex: exactly two edges, both this curve.
+                if incident.len() != 2 {
+                    continue;
+                }
+                if !incident.iter().all(|&i| self.edges[i].curve == Some(curve)) {
+                    continue;
+                }
+                for &n in incident {
+                    if chain.insert(n) {
+                        frontier.push(n);
+                    }
+                }
+            }
+        }
+        chain.into_iter().collect()
+    }
+
     /// Every edge of `curve`, in slotmap order. Empty for a stale id.
     pub fn curve_edges(&self, curve: SketchCurveId) -> Vec<SketchEdgeId> {
         self.edges
@@ -2234,6 +2293,66 @@ mod tests {
         s.end_curve();
         assert_eq!(s.curve_edges(c1).len(), 3, "c1 keeps its edges");
         assert_eq!(s.curve_edges(c2).len(), 0, "fully-overlapped c2 owns none");
+    }
+
+    /// A closed curve touching other geometry at two vertices splits into
+    /// two selectable runs at those junctions; an untouched curve is one
+    /// run; a plain line is just itself.
+    #[test]
+    fn curve_chain_stops_at_junctions() {
+        let mut s = Sketch::on_plane(xy_plane());
+        // A diamond "circle" of four facets…
+        let c = s.begin_curve();
+        for (a, b) in [
+            (pt(1.0, 0.0), pt(2.0, 1.0)),
+            (pt(2.0, 1.0), pt(1.0, 2.0)),
+            (pt(1.0, 2.0), pt(0.0, 1.0)),
+            (pt(0.0, 1.0), pt(1.0, 0.0)),
+        ] {
+            s.add_segment(a, b).unwrap();
+        }
+        s.end_curve();
+        let any_edge = s.curve_edges(c)[0];
+        assert_eq!(
+            s.curve_chain_at(any_edge, &Default::default()).len(),
+            4,
+            "untouched curve selects whole"
+        );
+
+        // …then a line through two opposite vertices makes them junctions.
+        s.add_segment(pt(1.0, 0.0), pt(1.0, 2.0)).unwrap();
+        for &e in &s.curve_edges(c) {
+            assert_eq!(
+                s.curve_chain_at(e, &Default::default()).len(),
+                2,
+                "each side of the crossing selects separately"
+            );
+        }
+
+        // Plain lines select alone.
+        let plain = s
+            .edges()
+            .iter()
+            .find(|(_, e)| e.curve.is_none())
+            .map(|(id, _)| id)
+            .unwrap();
+        assert_eq!(s.curve_chain_at(plain, &Default::default()), vec![plain]);
+
+        // Edges the caller marks HIDDEN (an extruded footprint's tombstones)
+        // neither fracture the run nor count as junctions: hiding the
+        // crossing line makes the diamond select whole again.
+        let hidden: std::collections::BTreeSet<SketchEdgeId> = s
+            .edges()
+            .iter()
+            .filter(|(_, e)| e.curve.is_none())
+            .map(|(id, _)| id)
+            .collect();
+        let any = s.curve_edges(c)[0];
+        assert_eq!(
+            s.curve_chain_at(any, &hidden).len(),
+            4,
+            "invisible geometry must not shape what a click selects"
+        );
     }
 
     // ── islands ───────────────────────────────────────────────────────────────

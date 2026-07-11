@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `7`**, and **geometry buffer format version `3`**. Both are covered
+version `8`**, and **geometry buffer format version `3`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -53,7 +53,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 7,
+  "format_version": 9,
   "geometry_version": 3,
   "app": "hew",
   "app_version": "0.1.0",
@@ -69,7 +69,11 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   "objects": [
     { "id": 0, "geometry": "geometry/obj_0.bin", "base_material": 0,
       "name": "Counter_Base",
-      "tags": [["Architecture", "Walls"], ["Level", "L1"]] }
+      "tags": [["Architecture", "Walls"], ["Level", "L1"]],
+      "footprints": [               // v9+; omitted when the object has none
+        { "sketch": 0,              // dense sketch id the footprint shadows
+          "outer": [[0,0,0], [4,0,0], [4,4,0], [0,4,0]],
+          "holes": [ [[1,1,0], [1,2,0], [2,2,0], [2,1,0]] ] } ] }
   ],
   "groups": [
     { "id": 0, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
@@ -106,7 +110,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `7`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `9`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `3`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -170,6 +174,8 @@ of the manifest:
 | `tags` (top-level array) | 5 | empty registry (all node-carried tags visible) |
 | `objects[].hidden`, `groups[].hidden`, `instances[].hidden` | 6 | `false` (visible) |
 | `sketches[].edges[].curve` | 7 | absent (a plain line, not part of a curve chain) |
+| `objects[].source` | 8 (v8 only — v9+ writers emit `footprints` instead) | absent (no extrusion provenance) |
+| `objects[].footprints` | 9 | empty list (the object shadows no sketch area; nothing derives as consumed for it) |
 
 Note `components[]` entries never carry a `tags` field at any version —
 tags are attached to *placements* (objects, groups, instances), not to
@@ -320,7 +326,32 @@ watertight-tracked mesh described by exactly one `geometry/obj_<id>.bin`
 buffer. Its manifest entry (`objects[]`) carries `geometry` (the buffer's
 zip path), an optional `base_material` (used by any face whose own per-face
 material is absent — an object-level default paint, not an override), an
-optional `name`, and optional `tags` ().
+optional `name`, optional `tags` (), and optional `footprints` (v9+): the
+sketch-plane areas the solid stands on, each a dense `sketch` id plus the
+extruded profile's loops in world coordinates (`outer` counter-clockwise,
+`holes` clockwise, matching sketch-region winding). Footprints are frozen
+at extrusion time; boolean/slice/push-through results inherit their
+operands' entries. Editors DERIVE the `consumed` region set from these
+polygons — a region is consumed iff its material overlaps a live object's
+footprint — so consumption survives any sketch re-topology (splits,
+merges, delete-and-redraw) and lifts by itself when the last solid over
+an area is deleted. A reader that ignores `footprints` loses only that
+bookkeeping, never geometry; a footprint whose `sketch` is out of range
+degrades to absent — never load-fatal.
+
+v8 files carry an optional `source` instead: the dense `[sketch, region]`
+pair the object was extruded from, resolved like `consumed` entries. A v9
+reader converts it by freezing that region's loops as the footprint (the
+file was saved with region and solid consistent). v9+ writers do not emit
+`source`.
+
+A `consumed` pair that no loaded footprint covers (pre-v9 boolean/slice/
+push-through results carried no `source`; pre-v8 files attributed nothing)
+is honored verbatim, never silently freed: the reader freezes that
+region's loops as a document-lifetime footprint, so the area stays
+consumed through later edits exactly as it did in the version that wrote
+the file. Such regions remain in `consumed` on save, so the freeze
+survives round trips.
 
 Every object id appears in **exactly one** structural position: either a
 member of exactly one component definition (`components[].members`), or
@@ -390,7 +421,11 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
 `consumed` (top-level) is `[sketch_id, region_id]` dense-id pairs — regions
 already extruded into an Object, not to be offered again — sorted ascending.
 Every pair must resolve to a real sketch and region; dangling ones are
-rejected like any other dangling reference.
+rejected like any other dangling reference. From v9 the set is derivable
+from `objects[].footprints` (it is written redundantly so a reader need
+not implement polygon-overlap tests to know what is consumed); a writer
+must keep the two consistent — at save time the stored set equals the
+derived one.
 
 ### 4.7 Guides
 

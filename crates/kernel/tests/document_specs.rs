@@ -13,8 +13,8 @@
 use kernel::{
     BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, ImageFormat,
     KernelOp, KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
-    SketchError, SketchId, SketchRegionId, SketchVertexId, Texture, Transform, TransformError,
-    Vec3, WatertightState,
+    SketchEdgeId, SketchError, SketchId, SketchRegionId, SketchVertexId, Texture, Transform,
+    TransformError, Vec3, WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -2209,6 +2209,537 @@ fn gesture_end_force_closes_an_open_curve_bracket() {
         1,
         "only the bracketed edge is in the curve; the later line is plain"
     );
+}
+
+/// A footprint has exactly one live consumer: re-extruding an
+/// already-consumed region refuses with a typed error instead of stacking
+/// a second solid whose deletion would free scaffolding the first still
+/// depends on.
+#[test]
+fn re_extruding_a_consumed_region_is_refused() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    let r = only_region(&doc, s);
+    doc.extrude_region(s, r, 1.0).expect("first extrude");
+    assert!(matches!(
+        doc.extrude_region(s, r, 2.0).unwrap_err(),
+        DocumentError::RegionConsumed
+    ));
+    // Undoing the extrude un-consumes; the region extrudes again.
+    doc.undo().expect("undo");
+    doc.extrude_region(s, r, 2.0)
+        .expect("extrudable after undo");
+}
+
+/// THE playtest fix: the circle at the bottom of an extruded hole IS
+/// deletable while the solid stands. Deleting its edges (one gesture)
+/// merges the hole into the region, and the merged region derives as
+/// consumed (it overlaps the solid's frozen footprint) — nothing under the
+/// solid turns extrudable, and the fully-consumed sketch drops out of the
+/// listing entirely. Undo restores circle, footprint, and hole alike; and
+/// deleting the SOLID afterwards frees the (now hole-less) footprint.
+#[test]
+fn hole_scaffolding_is_deletable_while_the_solid_stands() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 4.0, 4.0);
+    draw_rect(&mut doc, s, 1.0, 1.0, 2.0, 2.0); // the "circle"
+
+    let outer = {
+        let sk = doc.sketch(s).expect("live");
+        sk.regions()
+            .iter()
+            .find(|(_, r)| !r.holes.is_empty())
+            .map(|(id, _)| id)
+            .expect("holed outer region")
+    };
+    let (obj, _) = doc.extrude_region(s, outer, 1.0).expect("extrude");
+
+    // Delete the inner shape's edges in one gesture — no refusal.
+    let inner: Vec<SketchEdgeId> = {
+        let sk = doc.sketch(s).expect("live");
+        sk.edges()
+            .iter()
+            .filter(|(_, e)| {
+                let p = sk.vertices()[e.from].position;
+                (1.0 - 1e-9..=2.0 + 1e-9).contains(&p.x)
+            })
+            .map(|(id, _)| id)
+            .collect()
+    };
+    doc.begin_sketch_gesture(s).expect("gesture");
+    for &e in &inner {
+        doc.sketch_mut(s)
+            .unwrap()
+            .remove_edge(e)
+            .expect("hole scaffolding deletes like any line");
+    }
+    doc.end_sketch_gesture(s).expect("end");
+
+    // Consumption carried forward: one region, consumed, nothing extrudable,
+    // sketch fully consumed → gone from the listing.
+    {
+        let sk = doc.sketch(s).expect("live");
+        assert_eq!(sk.regions().len(), 1, "hole merged into one region");
+        let r = sk.regions().keys().next().unwrap();
+        assert!(
+            doc.is_region_consumed(s, r),
+            "the footprint grew, stayed consumed"
+        );
+    }
+    assert!(doc.extrudable_regions(s).expect("live").is_empty());
+    assert!(
+        !doc.sketch_ids().contains(&s),
+        "fully-consumed sketch vanishes — no undeletable garbage"
+    );
+
+    // Undo restores the circle and the original holed footprint.
+    doc.undo().expect("undo");
+    assert_eq!(doc.sketch(s).expect("live").regions().len(), 2);
+    assert!(doc.sketch_edge_borders_consumed(s, inner[0]));
+
+    // Redo, then delete the SOLID: the grown footprint frees whole.
+    doc.redo().expect("redo");
+    doc.delete_node(NodeId::Object(obj)).expect("delete solid");
+    let sk = doc.sketch(s).expect("live");
+    let visible = sk
+        .edges()
+        .keys()
+        .filter(|&e| !doc.is_sketch_edge_consumed(s, e))
+        .count();
+    assert_eq!(visible, 4, "the outer outline returns, circle stays gone");
+    assert_eq!(
+        doc.extrudable_regions(s).expect("live").len(),
+        1,
+        "the freed full-rect region is extrudable again"
+    );
+}
+
+/// Deleting an extruded solid frees its footprint: the playtest case — a
+/// circle inside a rectangle, rectangle region (holed by the circle)
+/// extruded. While the solid lives, the circle's edges bound the consumed
+/// region's hole. Deleting the solid lifts the tombstones: the scaffolding
+/// returns, fully editable. Undo restores solid and footprint alike — and
+/// the footprint survives a save/load round trip.
+#[test]
+fn deleting_a_solid_frees_its_footprint() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 4.0, 4.0);
+    // A small square "circle stand-in" inside — same topology as the
+    // playtest circle: an inner island whose loop holes the outer region.
+    draw_rect(&mut doc, s, 1.0, 1.0, 2.0, 2.0);
+
+    // The outer region is the one WITH the hole.
+    let outer = {
+        let sk = doc.sketch(s).expect("live");
+        sk.regions()
+            .iter()
+            .find(|(_, r)| !r.holes.is_empty())
+            .map(|(id, _)| id)
+            .expect("holed outer region")
+    };
+    let (obj, _) = doc.extrude_region(s, outer, 1.0).expect("extrude");
+
+    // While the solid lives: every inner-island edge borders the consumed
+    // region (its hole boundary) and refuses deletion.
+    let inner_edges: Vec<SketchEdgeId> = {
+        let sk = doc.sketch(s).expect("live");
+        sk.edges()
+            .iter()
+            .filter(|(_, e)| {
+                sk.vertices()[e.from].position.x >= 1.0 - 1e-9
+                    && sk.vertices()[e.from].position.x <= 2.0 + 1e-9
+            })
+            .map(|(id, _)| id)
+            .collect()
+    };
+    assert!(!inner_edges.is_empty());
+    for &e in &inner_edges {
+        assert!(doc.sketch_edge_borders_consumed(s, e));
+    }
+
+    // Delete the solid: footprint freed — refusal lifts, and the OUTER
+    // outline's tombstoned edges come back too.
+    doc.delete_node(NodeId::Object(obj)).expect("delete");
+    for &e in &inner_edges {
+        assert!(
+            !doc.sketch_edge_borders_consumed(s, e),
+            "the circle is editable once the solid is gone"
+        );
+    }
+    let visible = |doc: &Document| {
+        let sk = doc.sketch(s).unwrap();
+        sk.edges()
+            .keys()
+            .filter(|&e| !doc.is_sketch_edge_consumed(s, e))
+            .count()
+    };
+    assert_eq!(
+        visible(&doc),
+        8,
+        "outer outline returned alongside the inner"
+    );
+
+    // Undo the delete: solid back, footprint re-consumed, refusal back.
+    doc.undo().expect("undo");
+    assert!(doc.sketch_edge_borders_consumed(s, inner_edges[0]));
+    assert_eq!(visible(&doc), 4, "outer outline tombstoned again");
+
+    // Provenance survives save/load: delete after a round trip still frees.
+    let bytes = doc.save();
+    let mut doc2 = Document::load(&bytes).expect("round-trip");
+    let obj2 = doc2.visible_object_ids()[0];
+    let s2 = doc2.sketch_ids()[0];
+    doc2.delete_node(NodeId::Object(obj2)).expect("delete");
+    let sk2 = doc2.sketch(s2).expect("live");
+    let visible2 = sk2
+        .edges()
+        .keys()
+        .filter(|&e| !doc2.is_sketch_edge_consumed(s2, e))
+        .count();
+    assert_eq!(visible2, 8, "footprint freed after a save/load round trip");
+}
+
+/// Drawing across a consumed footprint splits its region — and EVERY
+/// fragment derives as consumed (each overlaps the solid's frozen
+/// footprint), not just an arbitrary first match. No half of the area a
+/// solid stands on is ever offered as extrudable; deleting the solid frees
+/// all fragments at once, and undo re-consumes them.
+#[test]
+fn splitting_a_footprint_marks_every_fragment_consumed() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 4.0, 4.0);
+    let r = only_region(&doc, s);
+    let (obj, _) = doc.extrude_region(s, r, 1.0).expect("extrude");
+
+    // Draw a diagonal corner-to-corner: the footprint region splits in two.
+    doc.begin_sketch_gesture(s).expect("gesture");
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(4.0, 4.0, 0.0))
+        .expect("diagonal");
+    doc.end_sketch_gesture(s).expect("end");
+
+    let fragments: Vec<_> = doc.sketch(s).expect("live").regions().keys().collect();
+    assert_eq!(fragments.len(), 2, "the diagonal split the footprint");
+    for &f in &fragments {
+        assert!(
+            doc.is_region_consumed(s, f),
+            "every fragment under the solid is consumed"
+        );
+        assert!(matches!(
+            doc.extrude_region(s, f, 1.0).unwrap_err(),
+            DocumentError::RegionConsumed
+        ));
+    }
+    assert!(doc.extrudable_regions(s).expect("live").is_empty());
+
+    // Deleting the solid frees BOTH fragments; undo re-consumes both.
+    doc.delete_node(NodeId::Object(obj)).expect("delete");
+    assert_eq!(doc.extrudable_regions(s).expect("live").len(), 2);
+    doc.undo().expect("undo");
+    assert!(doc.extrudable_regions(s).expect("live").is_empty());
+}
+
+/// Deleting the wall between a consumed footprint and a LIVE square merges
+/// the two regions. The merged region overlaps the solid, so it derives as
+/// consumed (extruding it would collide with the standing solid) — but the
+/// live area is not lost: redrawing the wall splits the region again and
+/// the open half frees itself, and deleting the solid frees everything.
+#[test]
+fn merging_live_area_into_a_footprint_is_conservative_and_reversible() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    draw_rect(&mut doc, s, 2.0, 0.0, 4.0, 2.0);
+
+    // Extrude only the LEFT square.
+    let left = {
+        let sk = doc.sketch(s).expect("live");
+        sk.regions()
+            .iter()
+            .find(|(_, r)| {
+                r.outer
+                    .iter()
+                    .all(|&v| sk.vertices()[v].position.x <= 2.0 + 1e-9)
+            })
+            .map(|(id, _)| id)
+            .expect("left square region")
+    };
+    doc.extrude_region(s, left, 1.0).expect("extrude left");
+    assert_eq!(doc.extrudable_regions(s).expect("live").len(), 1);
+
+    // Delete the shared wall: the regions merge, and the merged region
+    // (overlapping the solid) is consumed — nothing extrudable through the
+    // standing solid.
+    let wall = {
+        let sk = doc.sketch(s).expect("live");
+        sk.edges()
+            .iter()
+            .find(|(_, e)| {
+                let a = sk.vertices()[e.from].position;
+                let b = sk.vertices()[e.to].position;
+                (a.x - 2.0).abs() < 1e-9 && (b.x - 2.0).abs() < 1e-9
+            })
+            .map(|(id, _)| id)
+            .expect("shared wall")
+    };
+    doc.begin_sketch_gesture(s).expect("gesture");
+    doc.sketch_mut(s).unwrap().remove_edge(wall).expect("wall");
+    doc.end_sketch_gesture(s).expect("end");
+
+    assert_eq!(doc.sketch(s).expect("live").regions().len(), 1);
+    assert!(
+        doc.extrudable_regions(s).expect("live").is_empty(),
+        "the merged region overlaps the solid — conservatively consumed"
+    );
+
+    // Self-healing: redraw the wall and the open half frees itself.
+    doc.begin_sketch_gesture(s).expect("gesture 2");
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(2.0, 0.0, 0.0), Point3::new(2.0, 2.0, 0.0))
+        .expect("redraw wall");
+    doc.end_sketch_gesture(s).expect("end 2");
+    assert_eq!(
+        doc.extrudable_regions(s).expect("live").len(),
+        1,
+        "the re-split open half is extrudable again; the footprint half is not"
+    );
+}
+
+/// Deleting the wall between TWO extruded footprints merges them into one
+/// region standing under BOTH solids. Deleting one solid must NOT free the
+/// merged area — the other solid still stands on it; only deleting the
+/// last solid frees it. (Each object keeps its own frozen footprint
+/// polygon; there is no shared region handle to orphan or double-free.)
+#[test]
+fn merged_footprints_free_only_when_the_last_solid_goes() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    draw_rect(&mut doc, s, 2.0, 0.0, 4.0, 2.0);
+    let regions: Vec<_> = doc.sketch(s).expect("live").regions().keys().collect();
+    assert_eq!(regions.len(), 2);
+    let (obj_a, _) = doc.extrude_region(s, regions[0], 1.0).expect("extrude a");
+    let (obj_b, _) = doc.extrude_region(s, regions[1], 1.0).expect("extrude b");
+
+    // Delete the (tombstoned) shared wall at the kernel level — the two
+    // footprint regions merge into one.
+    let wall = {
+        let sk = doc.sketch(s).expect("live");
+        sk.edges()
+            .iter()
+            .find(|(_, e)| {
+                let a = sk.vertices()[e.from].position;
+                let b = sk.vertices()[e.to].position;
+                (a.x - 2.0).abs() < 1e-9 && (b.x - 2.0).abs() < 1e-9
+            })
+            .map(|(id, _)| id)
+            .expect("shared wall")
+    };
+    doc.begin_sketch_gesture(s).expect("gesture");
+    doc.sketch_mut(s).unwrap().remove_edge(wall).expect("wall");
+    doc.end_sketch_gesture(s).expect("end");
+    assert_eq!(doc.sketch(s).expect("live").regions().len(), 1);
+    assert!(doc.extrudable_regions(s).expect("live").is_empty());
+
+    // One solid down: the OTHER still stands on the merged area.
+    doc.delete_node(NodeId::Object(obj_a)).expect("delete a");
+    assert!(
+        doc.extrudable_regions(s).expect("live").is_empty(),
+        "solid B still stands on the merged region — it must stay consumed"
+    );
+
+    // Last solid down: the whole area frees.
+    doc.delete_node(NodeId::Object(obj_b)).expect("delete b");
+    assert_eq!(doc.extrudable_regions(s).expect("live").len(), 1);
+}
+
+/// Dismantling a footprint's outline (the region stops closing) and then
+/// redrawing it does not launder the area into extrudability: the re-formed
+/// region — a brand-new handle — still overlaps the solid's frozen
+/// footprint and derives as consumed.
+#[test]
+fn redrawing_a_dismantled_footprint_outline_stays_consumed() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    let r = only_region(&doc, s);
+    let (obj, _) = doc.extrude_region(s, r, 1.0).expect("extrude");
+
+    // Remove one outline edge: the region no longer closes.
+    let edge = {
+        let sk = doc.sketch(s).expect("live");
+        sk.edges().keys().next().expect("an outline edge")
+    };
+    let (a, b) = {
+        let sk = doc.sketch(s).expect("live");
+        let e = &sk.edges()[edge];
+        (sk.vertices()[e.from].position, sk.vertices()[e.to].position)
+    };
+    doc.begin_sketch_gesture(s).expect("gesture");
+    doc.sketch_mut(s).unwrap().remove_edge(edge).expect("open");
+    doc.end_sketch_gesture(s).expect("end");
+    assert!(doc.sketch(s).expect("live").regions().is_empty());
+
+    // Redraw it: the region re-forms under the solid — and stays consumed.
+    doc.begin_sketch_gesture(s).expect("gesture 2");
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(a, b)
+        .expect("redraw");
+    doc.end_sketch_gesture(s).expect("end 2");
+    assert_eq!(doc.sketch(s).expect("live").regions().len(), 1);
+    assert!(
+        doc.extrudable_regions(s).expect("live").is_empty(),
+        "the re-formed region is under the solid — not extrudable"
+    );
+
+    doc.delete_node(NodeId::Object(obj)).expect("delete");
+    assert_eq!(doc.extrudable_regions(s).expect("live").len(), 1);
+}
+
+/// Sketch edits that bypass the gesture bracket entirely (direct
+/// `sketch_mut` mutation — a scripting path, a future tool bug) cannot
+/// extrude under a solid either: `extrude_region` re-derives the consumed
+/// set on entry, so the refusal gate never judges from a stale index.
+#[test]
+fn unbracketed_edits_cannot_expose_footprint_area_to_extrude() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    draw_rect(&mut doc, s, 2.0, 0.0, 4.0, 2.0);
+    let left = {
+        let sk = doc.sketch(s).expect("live");
+        sk.regions()
+            .iter()
+            .find(|(_, r)| {
+                r.outer
+                    .iter()
+                    .all(|&v| sk.vertices()[v].position.x <= 2.0 + 1e-9)
+            })
+            .map(|(id, _)| id)
+            .expect("left square region")
+    };
+    doc.extrude_region(s, left, 1.0).expect("extrude left");
+
+    // No gesture bracket: merge the footprint with the live square.
+    let wall = {
+        let sk = doc.sketch(s).expect("live");
+        sk.edges()
+            .iter()
+            .find(|(_, e)| {
+                let a = sk.vertices()[e.from].position;
+                let b = sk.vertices()[e.to].position;
+                (a.x - 2.0).abs() < 1e-9 && (b.x - 2.0).abs() < 1e-9
+            })
+            .map(|(id, _)| id)
+            .expect("shared wall")
+    };
+    doc.sketch_mut(s).unwrap().remove_edge(wall).expect("wall");
+
+    let merged = only_region(&doc, s);
+    assert!(matches!(
+        doc.extrude_region(s, merged, 1.0).unwrap_err(),
+        DocumentError::RegionConsumed
+    ));
+}
+
+/// A boolean result inherits its operands' footprints: the scaffolding
+/// under a union stays consumed while the combined solid lives, and
+/// deleting the RESULT frees every underlying footprint at once (undo
+/// re-consumes them).
+#[test]
+fn boolean_result_inherits_operand_footprints() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    draw_rect(&mut doc, s, 2.0, 0.0, 4.0, 2.0);
+    let regions: Vec<_> = doc.sketch(s).expect("live").regions().keys().collect();
+    let (a, _) = doc.extrude_region(s, regions[0], 1.0).expect("extrude a");
+    let (b, _) = doc.extrude_region(s, regions[1], 1.0).expect("extrude b");
+
+    let (result, _) = doc.boolean(BooleanOp::Union, a, b).expect("union");
+    assert!(
+        doc.extrudable_regions(s).expect("live").is_empty(),
+        "the union stands on both footprints — nothing frees"
+    );
+
+    doc.delete_node(NodeId::Object(result)).expect("delete");
+    assert_eq!(
+        doc.extrudable_regions(s).expect("live").len(),
+        2,
+        "deleting the union frees both inherited footprints"
+    );
+    doc.undo().expect("undo");
+    assert!(doc.extrudable_regions(s).expect("live").is_empty());
+}
+
+/// A Subtract removes the cutter's material, so the result must NOT keep
+/// the cutter's footprint: the cutter's scaffolding frees the moment the
+/// subtract lands, while the kept operand's footprint stays consumed. Undo
+/// restores the cutter and re-consumes its footprint.
+#[test]
+fn subtract_frees_the_cutters_footprint() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    // The kept solid and an overlapping cutter, each on its own footprint.
+    draw_rect(&mut doc, s, 0.0, 0.0, 4.0, 4.0);
+    draw_rect(&mut doc, s, 5.0, 0.0, 6.0, 1.0);
+    let regions: Vec<_> = doc.sketch(s).expect("live").regions().keys().collect();
+    let (a, _) = doc.extrude_region(s, regions[0], 2.0).expect("extrude a");
+    let (b, _) = doc.extrude_region(s, regions[1], 1.0).expect("extrude b");
+    // Overlap the cutter with the kept solid (its footprint stays behind —
+    // positional bookkeeping, documented).
+    doc.transform_object(b, &Transform::translation(Vec3::new(-4.5, 0.0, 0.0)))
+        .expect("move cutter");
+
+    doc.boolean(BooleanOp::Subtract, a, b).expect("subtract");
+    assert_eq!(
+        doc.extrudable_regions(s).expect("live").len(),
+        1,
+        "the cutter's footprint frees; the kept operand's stays consumed"
+    );
+
+    doc.undo().expect("undo subtract");
+    assert!(
+        doc.extrudable_regions(s).expect("live").is_empty(),
+        "undo restores the cutter and re-consumes its footprint"
+    );
+}
+
+/// Moving a whole sketch out from under its solid re-derives consumption:
+/// the footprint is frozen in world coordinates, so the carried-away region
+/// no longer overlaps it and frees at the new location. Undo moves the
+/// sketch back and re-consumes.
+#[test]
+fn transforming_a_sketch_re_derives_its_consumed_set() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
+    let r = only_region(&doc, s);
+    doc.extrude_region(s, r, 1.0).expect("extrude");
+    assert!(doc.extrudable_regions(s).expect("live").is_empty());
+
+    let away = Transform::translation(Vec3::new(100.0, 0.0, 0.0));
+    doc.transform_sketch(s, &away).expect("move sketch");
+    assert_eq!(
+        doc.extrudable_regions(s).expect("live").len(),
+        1,
+        "the carried-away region no longer overlaps the frozen footprint"
+    );
+
+    doc.undo().expect("undo");
+    assert!(
+        doc.extrudable_regions(s).expect("live").is_empty(),
+        "back under the solid, consumed again"
+    );
+    doc.redo().expect("redo");
+    assert_eq!(doc.extrudable_regions(s).expect("live").len(), 1);
 }
 
 // ──────────────────────────────── boolean coplanar-seam cleanup ─────────────
