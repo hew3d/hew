@@ -6,6 +6,8 @@ order: 5
 
 Hew's four drawing tools create 2D profiles. On the empty ground plane, a closed profile becomes a **sketch region** ready to extrude. Drawn directly on a solid's face, the same tools **split the face**, carving regions you can push in or pull out. The tool decides which mode to use from what's under your cursor; there is no explicit switch.
 
+The four tools share one working sketch on the ground, so shapes drawn with different tools combine: draw an arc, switch to Line, and close it with a chord — the face forms the moment the circuit closes, exactly as if one tool had drawn it all. An arch profile, for instance, is three Line segments topped with an Arc, extruded once.
+
 While any drawing tool is active, the status bar explains the next step, the top-right readout shows live dimensions, and everything you type goes into that readout (see "Typing exact values" below).
 
 ## Line (`L`)
@@ -45,6 +47,8 @@ A two-point arc, like SketchUp's:
 3. Move perpendicular to the chord to pull out the bulge, then click to commit.
 
 `Esc` steps back one stage at a time. The readout shows the arc's radius. Typed values work at both stages: in the chord stage a typed length places the second endpoint at that distance, and in the bulge stage it sets the bulge depth. A flat, zero-bulge arc is refused ("Pull out the bulge"). Arcs are faceted at 12 segments per quarter turn.
+
+**Closing the arc:** press `Option`/`Alt` mid-gesture to cycle what the commit produces — the open arc, a **pie** closed to the center with two straight edges, or a **segment** closed with the chord. The preview draws the closing edges and the readout names the mode. Both closed forms are complete profiles: on the ground they become a region immediately, and on a face they split it, ready to push/pull. The chosen mode sticks for further arcs until you switch tools.
 
 ## Drawing on a face
 

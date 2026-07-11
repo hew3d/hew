@@ -49,8 +49,8 @@ use std::cell::{Cell, Ref, RefCell};
 use std::collections::BTreeSet;
 
 use kernel::{
-    EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchId,
-    SketchVertexId, Transform, Vec3, VertexId, tol,
+    EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId,
+    SketchId, SketchVertexId, Transform, Vec3, VertexId, tol,
 };
 
 mod index;
@@ -130,9 +130,34 @@ pub struct Snap {
     /// Provenance for highlighting; `None` for pure-direction snaps like
     /// [`SnapKind::OnAxis`].
     pub source: Option<SnapSource>,
+    /// Committed-sketch provenance: which sketch edge a Midpoint/OnEdge snap
+    /// derives from, when it came from a sketch rather than an Object.
+    /// Mutually exclusive with `source`. Lets tools use a sketch edge as a
+    /// reference (Tape Measure parallel guides) without object plumbing.
+    pub sketch_source: Option<(SketchId, SketchEdgeId)>,
     /// The inference direction for directional snaps (axis / parallel /
     /// perpendicular), for drawing the dashed guide line.
     pub direction: Option<Vec3>,
+}
+
+/// Internal candidate provenance: an Object element or a committed sketch
+/// edge. Split back into [`Snap::source`] / [`Snap::sketch_source`] when the
+/// winning candidate becomes a snap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    Object(SnapSource),
+    SketchEdge(SketchId, SketchEdgeId),
+}
+
+impl Provenance {
+    /// Split into the two public [`Snap`] provenance fields.
+    fn split(this: Option<Provenance>) -> (Option<SnapSource>, Option<(SketchId, SketchEdgeId)>) {
+        match this {
+            Some(Provenance::Object(s)) => (Some(s), None),
+            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid))),
+            None => (None, None),
+        }
+    }
 }
 
 /// The three model axes.
@@ -271,7 +296,7 @@ pub struct InferenceScene {
     /// Objects): keyed by `SketchId` so a caller can replace one sketch's
     /// segments without touching another's. No `SnapSource` provenance —
     /// sketch elements aren't selectable in this phase.
-    sketch_segments: Vec<(SketchId, BareSegment)>,
+    sketch_segments: Vec<(SketchId, SketchEdgeId, BareSegment)>,
     /// Committed sketch *vertices*, keyed by `SketchId`, carrying their
     /// `SketchVertexId` so the per-vertex edit tool (Phase D) can pick an exact
     /// vertex to drag. Registered/cleared alongside `sketch_segments`.
@@ -633,10 +658,13 @@ impl InferenceScene {
     /// drops any prior candidates for `id` first, so callers can call this on
     /// every sketch mutation (add/remove segment, extrude) without tracking
     /// whether `id` was already registered.
-    pub fn add_sketch(&mut self, id: SketchId, segments: &[(Point3, Point3)]) {
+    pub fn add_sketch(&mut self, id: SketchId, segments: &[(SketchEdgeId, Point3, Point3)]) {
         self.remove_sketch(id);
-        self.sketch_segments
-            .extend(segments.iter().map(|&(a, b)| (id, BareSegment { a, b })));
+        self.sketch_segments.extend(
+            segments
+                .iter()
+                .map(|&(eid, a, b)| (id, eid, BareSegment { a, b })),
+        );
     }
 
     /// Registers (or re-registers) the committed *vertices* of sketch `id` as
@@ -655,7 +683,7 @@ impl InferenceScene {
     /// [`InferenceScene::remove_object`]) so callers can remove-then-add
     /// freely.
     pub fn remove_sketch(&mut self, id: SketchId) {
-        self.sketch_segments.retain(|(sid, _)| *sid != id);
+        self.sketch_segments.retain(|(sid, _, _)| *sid != id);
         self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
     }
 
@@ -754,7 +782,7 @@ impl InferenceScene {
                     ang,
                     depth,
                     sp.position,
-                    Some(sp.source),
+                    Some(Provenance::Object(sp.source)),
                     None,
                 ));
             }
@@ -767,7 +795,14 @@ impl InferenceScene {
 
             // Midpoint candidate: emitted when the midpoint itself is in the cone.
             if let Some((ang, depth)) = cone_test(origin, dir, mid, aperture) {
-                candidates.push((SnapKind::Midpoint, ang, depth, mid, Some(seg.source), None));
+                candidates.push((
+                    SnapKind::Midpoint,
+                    ang,
+                    depth,
+                    mid,
+                    Some(Provenance::Object(seg.source)),
+                    None,
+                ));
             }
 
             // OnEdge candidate: the closest point on the segment to the ray,
@@ -778,20 +813,29 @@ impl InferenceScene {
                 // a duplicate; the Midpoint candidate already covers it with
                 // the stronger kind).
                 if !pos.approx_eq(mid, tol::POINT_MERGE) {
-                    candidates.push((SnapKind::OnEdge, ang, depth, pos, Some(seg.source), None));
+                    candidates.push((
+                        SnapKind::OnEdge,
+                        ang,
+                        depth,
+                        pos,
+                        Some(Provenance::Object(seg.source)),
+                        None,
+                    ));
                 }
             }
         }
 
         // --- Sketch and transient segment candidates: Endpoint, Midpoint,
-        //     and OnEdge, all with source: None (no ElementRef provenance in
-        //     this phase — sketch/transient elements aren't selectable). ---
+        //     and OnEdge. A committed sketch segment's Midpoint/OnEdge carry
+        //     its (SketchId, SketchEdgeId) so tools can use the edge as a
+        //     reference (Tape Measure parallel guides); endpoints are vertex
+        //     snaps and carry none. Transient segments carry none at all. ---
         let bare_segments = self
             .sketch_segments
             .iter()
-            .map(|(_, seg)| seg)
-            .chain(self.transient_segments.iter());
-        for seg in bare_segments {
+            .map(|&(sid, eid, ref seg)| (Some(Provenance::SketchEdge(sid, eid)), seg))
+            .chain(self.transient_segments.iter().map(|seg| (None, seg)));
+        for (prov, seg) in bare_segments {
             for endpoint in [seg.a, seg.b] {
                 if let Some((ang, depth)) = cone_test(origin, dir, endpoint, aperture) {
                     candidates.push((SnapKind::Endpoint, ang, depth, endpoint, None, None));
@@ -800,13 +844,13 @@ impl InferenceScene {
 
             let mid = midpoint(seg.a, seg.b);
             if let Some((ang, depth)) = cone_test(origin, dir, mid, aperture) {
-                candidates.push((SnapKind::Midpoint, ang, depth, mid, None, None));
+                candidates.push((SnapKind::Midpoint, ang, depth, mid, prov, None));
             }
 
             if let Some((pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
                 && !pos.approx_eq(mid, tol::POINT_MERGE)
             {
-                candidates.push((SnapKind::OnEdge, ang, depth, pos, None, None));
+                candidates.push((SnapKind::OnEdge, ang, depth, pos, prov, None));
             }
         }
 
@@ -821,7 +865,14 @@ impl InferenceScene {
                 &face.holes,
                 aperture,
             ) {
-                candidates.push((SnapKind::OnFace, ang, depth, pos, Some(face.source), None));
+                candidates.push((
+                    SnapKind::OnFace,
+                    ang,
+                    depth,
+                    pos,
+                    Some(Provenance::Object(face.source)),
+                    None,
+                ));
             }
         }
 
@@ -924,13 +975,15 @@ impl InferenceScene {
                     Err(_) => return None,
                 };
 
-                if let Some((kind, _ang, _depth, pos, source, _cdir)) = winner.as_ref() {
+                if let Some((kind, _ang, _depth, pos, prov, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
+                    let (source, sketch_source) = Provenance::split(*prov);
                     Some(Snap {
                         position: projected,
                         kind: *kind,
-                        source: *source,
+                        source,
+                        sketch_source,
                         direction: Some(lock_dir),
                     })
                 } else {
@@ -941,6 +994,7 @@ impl InferenceScene {
                         position: locked_pos,
                         kind: SnapKind::OnAxis,
                         source: None,
+                        sketch_source: None,
                         direction: Some(lock_dir),
                     })
                 }
@@ -948,11 +1002,15 @@ impl InferenceScene {
             _ => {
                 // No lock (or lock with no anchor): return the top-ranked
                 // candidate that is actually visible (see the occlusion cull above).
-                winner.map(|(kind, _ang, _depth, pos, source, snap_dir)| Snap {
-                    position: pos,
-                    kind,
-                    source,
-                    direction: snap_dir,
+                winner.map(|(kind, _ang, _depth, pos, prov, snap_dir)| {
+                    let (source, sketch_source) = Provenance::split(prov);
+                    Snap {
+                        position: pos,
+                        kind,
+                        source,
+                        sketch_source,
+                        direction: snap_dir,
+                    }
                 })
             }
         }
@@ -1066,7 +1124,7 @@ impl InferenceScene {
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
         let mut best: Option<(f64, f64, SketchId)> = None; // (angular_dist, depth, id)
-        for &(id, seg) in &self.sketch_segments {
+        for &(id, _eid, ref seg) in &self.sketch_segments {
             if let Some((_pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
                 && best.as_ref().is_none_or(|&(a, d, _)| (ang, depth) < (a, d))
             {
@@ -1106,7 +1164,7 @@ impl InferenceScene {
 
 /// Internal candidate tuple used inside `resolve`:
 /// `(kind, angular_dist, depth, position, source, direction)`.
-type Candidate = (SnapKind, f64, f64, Point3, Option<SnapSource>, Option<Vec3>);
+type Candidate = (SnapKind, f64, f64, Point3, Option<Provenance>, Option<Vec3>);
 
 // ---------------------------------------------------------------------------
 // Geometry helpers (crate-private)
@@ -2145,14 +2203,16 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A registered sketch segment's endpoint and its midpoint each resolve
-    /// as a snap along a ray through them, with `source: None`.
+    /// as a snap along a ray through them, with `source: None` (sketch edges
+    /// have no Object provenance; the midpoint carries `sketch_source`
+    /// instead — see `sketch_segment_snaps_carry_sketch_provenance`).
     #[test]
     fn sketch_segment_endpoint_and_midpoint_snap() {
         let mut scene = InferenceScene::new();
         let id = SketchId::default();
         let a = Point3::new(0.0, 0.0, 0.0);
         let b = Point3::new(2.0, 0.0, 0.0);
-        scene.add_sketch(id, &[(a, b)]);
+        scene.add_sketch(id, &[(SketchEdgeId::default(), a, b)]);
 
         // Ray straight at endpoint `b`.
         let endpoint_snap = scene
@@ -2193,6 +2253,59 @@ mod tests {
         assert!(mid_snap.source.is_none());
     }
 
+    /// A committed sketch segment's Midpoint and OnEdge snaps carry the
+    /// owning `(SketchId, SketchEdgeId)` in `sketch_source`, so tools can
+    /// use the edge as a reference (Tape Measure parallel guides). Endpoint
+    /// snaps are vertex snaps and carry none; transient segments carry none.
+    #[test]
+    fn sketch_segment_snaps_carry_sketch_provenance() {
+        let mut scene = InferenceScene::new();
+        let sid = SketchId::default();
+        let eid = SketchEdgeId::default();
+        let a = Point3::new(0.0, 0.0, 0.0);
+        let b = Point3::new(2.0, 0.0, 0.0);
+        scene.add_sketch(sid, &[(eid, a, b)]);
+
+        let query_at = |target: Point3| SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(target.x, target.y, 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.05,
+            constraint_plane: None,
+        };
+
+        // Midpoint: carries the sketch provenance.
+        let mid = scene
+            .resolve(&query_at(Point3::new(1.0, 0.0, 0.0)))
+            .expect("midpoint on ray");
+        assert_eq!(mid.kind, SnapKind::Midpoint);
+        assert_eq!(mid.sketch_source, Some((sid, eid)));
+
+        // On-edge (off-midpoint interior point): carries it too.
+        let on_edge = scene
+            .resolve(&query_at(Point3::new(0.5, 0.0, 0.0)))
+            .expect("on-edge on ray");
+        assert_eq!(on_edge.kind, SnapKind::OnEdge);
+        assert_eq!(on_edge.sketch_source, Some((sid, eid)));
+
+        // Endpoint: a vertex snap — no edge provenance.
+        let endpoint = scene.resolve(&query_at(b)).expect("endpoint on ray");
+        assert_eq!(endpoint.kind, SnapKind::Endpoint);
+        assert_eq!(endpoint.sketch_source, None);
+
+        // A transient segment's snaps carry none.
+        let mut scene2 = InferenceScene::new();
+        scene2.add_transient_segment(a, b);
+        let t_mid = scene2
+            .resolve(&query_at(Point3::new(1.0, 0.0, 0.0)))
+            .expect("transient midpoint on ray");
+        assert_eq!(t_mid.kind, SnapKind::Midpoint);
+        assert_eq!(t_mid.sketch_source, None);
+    }
+
     /// `remove_sketch` unregisters a sketch's candidates; removing an unknown
     /// id is a no-op.
     #[test]
@@ -2201,7 +2314,7 @@ mod tests {
         let id = SketchId::default();
         let a = Point3::new(20.0, 20.0, 0.0);
         let b = Point3::new(22.0, 20.0, 0.0);
-        scene.add_sketch(id, &[(a, b)]);
+        scene.add_sketch(id, &[(SketchEdgeId::default(), a, b)]);
 
         let query = SnapQuery {
             ray: PickRay {
@@ -2234,7 +2347,11 @@ mod tests {
         let near = SketchId::default();
         scene.add_sketch(
             near,
-            &[(Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0))],
+            &[(
+                SketchEdgeId::default(),
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+            )],
         );
 
         let ray = PickRay {

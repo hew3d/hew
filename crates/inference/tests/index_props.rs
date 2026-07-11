@@ -168,7 +168,12 @@ fn build_scene(spec: &SceneSpec) -> InferenceScene {
         // survives — enough to exercise the (linear) guide path.
         scene.add_guide(GuideId::default(), guide);
     }
-    scene.add_sketch(SketchId::default(), &spec.sketch);
+    let sketch_segs: Vec<(kernel::SketchEdgeId, Point3, Point3)> = spec
+        .sketch
+        .iter()
+        .map(|&(a, b)| (kernel::SketchEdgeId::default(), a, b))
+        .collect();
+    scene.add_sketch(SketchId::default(), &sketch_segs);
     for &(a, b) in &spec.transient {
         scene.add_transient_segment(a, b);
     }

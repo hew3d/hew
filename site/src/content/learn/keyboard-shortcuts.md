@@ -61,6 +61,7 @@ These keys change what the *current tool operation* does; they're covered in eac
 | `Shift` (hold) | Lock to the dominant axis (Line, Move) · pin the plane (Protractor, Slice) · pan while orbiting (Orbit tool) |
 | `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice); `↓` clears |
 | `Option`/`Alt` (hold) | Move commits a copy instead of moving |
+| `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `Shift`-click | Add to / remove from the selection (Select tool) |
 | `⌘`/`Ctrl`-click | Paint the whole object instead of one face (Paint tool) |
 | Double-click | Enter a group/component/object's editing context; end a Line chain |

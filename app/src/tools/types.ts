@@ -15,6 +15,9 @@ export interface Snap {
   object?: bigint
   element?: bigint
   elementKind?: string
+  /** Owning sketch handle when the snap derives from a committed sketch
+   *  edge (`elementKind === 'sketch-edge'`; `element` is the edge). */
+  sketch?: bigint
 }
 
 /**

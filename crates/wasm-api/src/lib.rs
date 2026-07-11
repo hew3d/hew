@@ -763,25 +763,38 @@ impl SnapJs {
             .map(|i| i.data().as_ffi())
     }
 
-    /// Source element handle within the object (see `element_kind`).
+    /// Source element handle: within the object for Object provenance, or
+    /// the sketch-edge handle for sketch provenance (see `element_kind`).
     pub fn element(&self) -> Option<u64> {
-        self.snap.source.map(|s| match s.element {
-            ElementRef::Vertex(v) => v.data().as_ffi(),
-            ElementRef::Edge(e) => e.data().as_ffi(),
-            ElementRef::Face(f) => f.data().as_ffi(),
-        })
+        self.snap
+            .source
+            .map(|s| match s.element {
+                ElementRef::Vertex(v) => v.data().as_ffi(),
+                ElementRef::Edge(e) => e.data().as_ffi(),
+                ElementRef::Face(f) => f.data().as_ffi(),
+            })
+            .or_else(|| self.snap.sketch_source.map(|(_, e)| e.data().as_ffi()))
     }
 
-    /// "vertex" | "edge" | "face" for interpreting `element`.
+    /// "vertex" | "edge" | "face" | "sketch-edge" for interpreting `element`.
     pub fn element_kind(&self) -> Option<String> {
-        self.snap.source.map(|s| {
-            match s.element {
-                ElementRef::Vertex(_) => "vertex",
-                ElementRef::Edge(_) => "edge",
-                ElementRef::Face(_) => "face",
-            }
-            .to_string()
-        })
+        self.snap
+            .source
+            .map(|s| {
+                match s.element {
+                    ElementRef::Vertex(_) => "vertex",
+                    ElementRef::Edge(_) => "edge",
+                    ElementRef::Face(_) => "face",
+                }
+                .to_string()
+            })
+            .or_else(|| self.snap.sketch_source.map(|_| "sketch-edge".to_string()))
+    }
+
+    /// The owning sketch handle when this snap derives from a committed
+    /// sketch edge (`element_kind` == "sketch-edge"); `undefined` otherwise.
+    pub fn sketch(&self) -> Option<u64> {
+        self.snap.sketch_source.map(|(s, _)| s.data().as_ffi())
     }
 
     /// Inference direction (xyz) for directional snaps, for guide lines.
@@ -991,11 +1004,15 @@ impl Scene {
         Some(out)
     }
 
-    /// Enumerates sketch `id`'s live (non-consumed) edges as world-space
-    /// endpoint pairs, or `None` if the sketch is unknown/gone. Shared by
-    /// [`Scene::register_sketch`] and [`Scene::sketch_lines`] so both walk
-    /// the same "live edge" definition.
-    fn live_sketch_segments(doc: &Document, id: SketchId) -> Option<Vec<(Point3, Point3)>> {
+    /// Enumerates sketch `id`'s live (non-consumed) edges as
+    /// `(SketchEdgeId, world endpoints)` triples, or `None` if the sketch is
+    /// unknown/gone. Shared by [`Scene::register_sketch`] and
+    /// [`Scene::sketch_lines`] so both walk the same "live edge" definition;
+    /// the edge id becomes snap provenance (Tape Measure parallel guides).
+    fn live_sketch_segments(
+        doc: &Document,
+        id: SketchId,
+    ) -> Option<Vec<(SketchEdgeId, Point3, Point3)>> {
         let s = doc.sketch(id)?;
         let mut out = Vec::with_capacity(s.edges().len());
         for (eid, edge) in s.edges() {
@@ -1004,7 +1021,7 @@ impl Scene {
             }
             let a = s.vertices()[edge.from].position;
             let b = s.vertices()[edge.to].position;
-            out.push((a, b));
+            out.push((eid, a, b));
         }
         Some(out)
     }
@@ -1144,7 +1161,7 @@ impl Scene {
         let segments = Self::live_sketch_segments(&self.doc, sketch_id(sketch))
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let mut out = Vec::with_capacity(segments.len() * 6);
-        for (a, b) in segments {
+        for (_eid, a, b) in segments {
             out.extend([a.x as f32, a.y as f32, a.z as f32]);
             out.extend([b.x as f32, b.y as f32, b.z as f32]);
         }
@@ -2001,6 +2018,24 @@ impl Scene {
         let object = self.doc.object(oid)?;
         let eid = EdgeId::from(KeyData::from_ffi(edge));
         let (a, b) = object.edge_endpoints(eid)?;
+        Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
+    }
+
+    /// World endpoints `[ax, ay, az, bx, by, bz]` of a live, visible
+    /// (non-consumed) sketch edge, or `undefined` if the sketch or edge is
+    /// stale or the edge was consumed by an extrusion. The sketch-edge
+    /// counterpart of `edge_endpoints`, for tools that use a snapped sketch
+    /// edge as a reference (Tape Measure parallel guides).
+    pub fn sketch_edge_endpoints(&self, sketch: u64, edge: u64) -> Option<Vec<f64>> {
+        let sid = sketch_id(sketch);
+        let s = self.doc.sketch(sid)?;
+        let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
+        let e = s.edges().get(eid)?;
+        if self.doc.is_sketch_edge_consumed(sid, eid) {
+            return None;
+        }
+        let a = s.vertices()[e.from].position;
+        let b = s.vertices()[e.to].position;
         Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
     }
 

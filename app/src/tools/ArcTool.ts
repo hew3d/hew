@@ -52,6 +52,17 @@
  * VCB-driven) and the live measurement readout shows the typed text instead
  * of the pointer-derived one whenever the buffer is non-empty — identical
  * to LineTool's `_reportMeasurement` convention.
+ *
+ * Completion modes (SketchUp's Alt/Option arc↔pie toggle, plus a chord
+ * close): pressing Alt mid-gesture cycles open → pie → segment. `open`
+ * commits the bare arc as today. `pie` closes it to the arc center with two
+ * radii; `segment` closes it with the chord — both commit a closed profile,
+ * so a region (ground) or a face imprint (face mode, via `split_face_inner`
+ * like CircleTool) appears immediately and push/pull works. The live preview
+ * draws the closing edges and the radius readout names the mode. The mode
+ * persists across commits until the tool is switched (tools are recreated on
+ * every switch, so a fresh Arc tool always starts `open`) or the document is
+ * replaced (`onDocumentReset`).
  */
 
 import * as THREE from 'three'
@@ -64,7 +75,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween } from './lineInput'
 import { editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
-import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
+import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
 import {
   ARC_MIN_CHORD_M,
   ARC_MIN_SAGITTA_M,
@@ -87,6 +98,18 @@ export type OnMeasurement = (text: string) => void
 
 /** Measurement-line hint shown when a commit click lands with a flat bulge. */
 const FLAT_BULGE_HINT = 'Pull out the bulge'
+
+/** How the committed arc is closed (Alt cycles, in this order). */
+export type ArcCompletion = 'open' | 'pie' | 'segment'
+
+const COMPLETION_CYCLE: readonly ArcCompletion[] = ['open', 'pie', 'segment']
+
+/** Readout label per mode ('open' shows the bare radius). */
+const COMPLETION_LABEL: Record<ArcCompletion, string> = {
+  open: '',
+  pie: 'Pie',
+  segment: 'Segment',
+}
 
 /** Ground gesture: idle → endpoint A placed → chord (A,B) placed. */
 type GroundStage =
@@ -153,17 +176,16 @@ export class ArcTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Handle to the current active sketch — reused across commits if not null */
-  private sketchHandle: bigint | null = null
-
-  /** `sketchHandle` get/set, boxed for `runSketchGesture`. */
-  private readonly _sketchHandleCache: SketchHandleCache = {
-    get: () => this.sketchHandle,
-    set: (h) => { this.sketchHandle = h },
-  }
+  /** Cached ground-sketch handle — the Viewport passes one cache shared by
+   *  every draw tool, so mixed-tool profiles land in a single sketch. */
+  private readonly sketchCache: SketchHandleCache
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
+
+  /** Completion mode for committed arcs — Alt cycles it mid-gesture and it
+   *  persists across commits (see module doc). */
+  private completion: ArcCompletion = 'open'
 
   /** VCB buffer — raw string being typed by the user (length, in display units). */
   private typed: string = ''
@@ -187,6 +209,7 @@ export class ArcTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    sketchCache: SketchHandleCache = makeSketchHandleCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -194,6 +217,7 @@ export class ArcTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.sketchCache = sketchCache
   }
 
   /** Set the active editing context (entered object), or null for top level. */
@@ -286,6 +310,23 @@ export class ArcTool implements Tool {
 
     if (!this.capturingInput()) return
 
+    if (ev.key === 'Alt') {
+      // SketchUp's Alt/Option toggle, extended with the chord close. Guard
+      // key autorepeat so holding Alt doesn't spin through the cycle.
+      if (ev.repeat) return
+      const next = COMPLETION_CYCLE[(COMPLETION_CYCLE.indexOf(this.completion) + 1) % COMPLETION_CYCLE.length]
+      this.completion = next
+      // With a typed buffer live, keep it visible (the mode rides along as
+      // its suffix); otherwise flash the mode name until the Viewport's
+      // post-onKey pointer-move refresh replaces it with the full readout.
+      if (this.typed !== '') {
+        this.onMeasurementCb(this._measurementText(''))
+      } else {
+        this.onMeasurementCb(next === 'open' ? 'Arc' : COMPLETION_LABEL[next])
+      }
+      return
+    }
+
     if (ev.key === 'Enter') {
       if (this.typed === '') return
       const meters = parseLengthToMeters(this.typed)
@@ -305,9 +346,14 @@ export class ArcTool implements Tool {
   }
 
   /** Show the typed VCB buffer if one is being entered; otherwise the given
-   *  live (pointer-derived) measurement text. */
+   *  live (pointer-derived) measurement text. Mid-gesture, a non-open
+   *  completion mode suffixes its label so the mode stays visible whether
+   *  the readout is typed or pointer-derived. */
   private _measurementText(live: string): string {
-    return this.typed !== '' ? this._typedReadout() : live
+    const text = this.typed !== '' ? this._typedReadout() : live
+    const label = COMPLETION_LABEL[this.completion]
+    if (label !== '' && text !== '' && this.capturingInput()) return `${text} · ${label}`
+    return text
   }
 
   /** Esc steps back one stage: bulge → chord (A kept), chord → idle. */
@@ -387,7 +433,7 @@ export class ArcTool implements Tool {
       return
     }
     const { a, b } = this.groundStage
-    const verts = this._groundPolyline(a, b, sign * distance)
+    const verts = this._groundChain(a, b, sign * distance)
     if (verts === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
@@ -437,7 +483,7 @@ export class ArcTool implements Tool {
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
-    this._commitFaceChain(object, face, verts)
+    this._commitFace(object, face, normal, verts, sign * distance)
   }
 
   /**
@@ -474,7 +520,8 @@ export class ArcTool implements Tool {
    * Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
-    this.sketchHandle = null
+    this.sketchCache.set(null)
+    this.completion = 'open' // a fresh document starts with the default close
     this.cancel()
   }
 
@@ -498,13 +545,14 @@ export class ArcTool implements Tool {
       return
     }
 
-    // Stage 3: rubber-band the faceted arc through the cursor's bulge side.
+    // Stage 3: rubber-band the faceted arc (plus any completion-mode closing
+    // edges) through the cursor's bulge side.
     const { a, b } = this.groundStage
     const cursor: [number, number] = [snap.x, snap.y]
     this._lastGroundCursor = cursor
     const s = chordSagitta(a, b, cursor)
     if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(s) as -1 | 1
-    const verts = s === null ? null : this._groundPolyline(a, b, s)
+    const verts = s === null ? null : this._groundChain(a, b, s)
     if (verts === null) {
       // Flat bulge — fall back to showing the bare chord.
       this._clearPreview()
@@ -538,7 +586,7 @@ export class ArcTool implements Tool {
     // Third click: commit at the cursor's sagitta. Refuse a flat bulge.
     const { a, b } = this.groundStage
     const s = chordSagitta(a, b, [snap.x, snap.y])
-    const verts = s === null ? null : this._groundPolyline(a, b, s)
+    const verts = s === null ? null : this._groundChain(a, b, s)
     if (verts === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
@@ -573,10 +621,57 @@ export class ArcTool implements Tool {
     return arcPolylineOnPlane([a[0], a[1], 0], [b[0], b[1], 0], s, [1, 0, 0], [0, 1, 0])
   }
 
+  /** Closing vertices appended after the arc polyline for the current
+   *  completion mode: the chord back to A for 'segment', B→center→A for
+   *  'pie', nothing for 'open' (or a 'pie' with no resolvable center). The
+   *  appended A is `verts[0]` itself, so the chain closes with an exact
+   *  coordinate match and the sticky rules merge it. */
+  private _closingVerts(verts: V3[], center: V3 | null): V3[] {
+    if (this.completion === 'segment') return [verts[0]]
+    if (this.completion === 'pie' && center !== null) return [center, verts[0]]
+    return []
+  }
+
+  /** 3D arc center for the ground chord a→b with sagitta s (z=0), or null
+   *  on degenerate input. */
+  private _groundCenter(a: Vec2, b: Vec2, s: number): V3 | null {
+    const arc = arcFromChord(a, b, s)
+    return arc === null ? null : [arc.center[0], arc.center[1], 0]
+  }
+
+  /** 3D arc center for the face chord a→b with sagitta s, lifted through the
+   *  face's in-plane basis, or null on degenerate input. */
+  private _faceCenter(a: V3, b: V3, normal: V3, s: number): V3 | null {
+    const basis = facePlaneBasis(normal)
+    if (basis === null) return null
+    const { u, v } = basis
+    const dx = b[0] - a[0]
+    const dy = b[1] - a[1]
+    const dz = b[2] - a[2]
+    const bu = dx * u[0] + dy * u[1] + dz * u[2]
+    const bv = dx * v[0] + dy * v[1] + dz * v[2]
+    const arc = arcFromChord([0, 0], [bu, bv], s)
+    if (arc === null) return null
+    const [cu, cv] = arc.center
+    return [
+      a[0] + u[0] * cu + v[0] * cv,
+      a[1] + u[1] * cu + v[1] * cv,
+      a[2] + u[2] * cu + v[2] * cv,
+    ]
+  }
+
+  /** The committed ground chain: the arc polyline plus the closing vertices
+   *  for the current completion mode. */
+  private _groundChain(a: Vec2, b: Vec2, s: number): V3[] | null {
+    const verts = this._groundPolyline(a, b, s)
+    if (verts === null) return null
+    return verts.concat(this._closingVerts(verts, this._groundCenter(a, b, s)))
+  }
+
   /** Commit the open polyline chain as N ground-sketch segments. */
   private _commitGroundChain(verts: V3[]): void {
     try {
-      runSketchGesture(this.wasmScene, this._sketchHandleCache, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         let lastRegionsCreated: bigint[] = []
         for (let i = 0; i < verts.length - 1; i++) {
           const p = verts[i]
@@ -667,16 +762,18 @@ export class ArcTool implements Tool {
     if (this.faceStage.kind !== 'bulge') return // (narrowing is lost across the _faceCursor call)
     const { a, b, normal } = this.faceStage
     this._lastFaceCursor = cursor
-    const sSign = this._faceChordSagitta(a, b, normal, cursor)
-    if (sSign !== null && Math.abs(sSign) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(sSign) as -1 | 1
+    const s = this._faceChordSagitta(a, b, normal, cursor)
+    if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(s) as -1 | 1
     const verts = this._facePolyline(a, b, normal, cursor)
     this._clearPreview()
-    if (verts === null) {
+    if (verts === null || s === null) {
       this._drawSegments([a, b], /* liftZ */ false)
       this.onMeasurementCb(this._measurementText(''))
       return
     }
-    this._drawSegments(verts, /* liftZ */ false)
+    // Preview the arc plus any completion-mode closing edges; the radius
+    // readout still derives from the bare arc vertices.
+    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, normal, s))), /* liftZ */ false)
     this._reportRadiusFromChain(verts)
   }
 
@@ -728,8 +825,9 @@ export class ArcTool implements Tool {
     // Third click: commit the face cut. Refuse a flat bulge.
     if (this.faceStage.kind !== 'bulge') return // (narrowing is lost across the _faceCursor call)
     const { object, face, a, b, normal } = this.faceStage
-    const verts = this._facePolyline(a, b, normal, cursor)
-    if (verts === null) {
+    const s = this._faceChordSagitta(a, b, normal, cursor)
+    const verts = s === null ? null : this._facePolyline(a, b, normal, cursor)
+    if (verts === null || s === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
@@ -740,7 +838,7 @@ export class ArcTool implements Tool {
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
-    this._commitFaceChain(object, face, verts)
+    this._commitFace(object, face, normal, verts, s)
   }
 
   /** Place chord endpoint B (face) — shared by the pointer-click and typed
@@ -756,6 +854,50 @@ export class ArcTool implements Tool {
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
+  }
+
+  /** Commit the face cut for the current completion mode: an open arc cuts
+   * boundary-to-boundary (`split_face`); pie/segment close into a loop and
+   * imprint like CircleTool (`split_face_inner`). A pie whose center is
+   * unresolvable (degenerate basis — cannot happen when `verts` built) falls
+   * back to the open cut. */
+  private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number): void {
+    if (this.completion === 'open') {
+      this._commitFaceChain(object, face, verts)
+      return
+    }
+    let loop = verts
+    if (this.completion === 'pie') {
+      const center = this._faceCenter(verts[0], verts[verts.length - 1], normal, s)
+      if (center === null) {
+        this._commitFaceChain(object, face, verts)
+        return
+      }
+      loop = verts.concat([center])
+    }
+    this._commitFaceLoop(object, face, loop)
+  }
+
+  /** Imprint `verts` on `face` as a closed loop (the loop closes implicitly
+   * from the last vertex back to the first — same convention as CircleTool's
+   * `split_face_inner` commit). */
+  private _commitFaceLoop(object: bigint, face: bigint, verts: V3[]): void {
+    const loopPts = new Float64Array(verts.length * 3)
+    for (let i = 0; i < verts.length; i++) {
+      loopPts[i * 3 + 0] = verts[i][0]
+      loopPts[i * 3 + 1] = verts[i][1]
+      loopPts[i * 3 + 2] = verts[i][2]
+    }
+
+    try {
+      this.wasmScene.split_face_inner(object, face, loopPts)
+      this.onFaceImprint(object)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
+      this.onToast(message, code ?? undefined)
+    }
   }
 
   /** Cut `face` along the arc polyline (open, boundary-to-boundary — the
@@ -782,7 +924,8 @@ export class ArcTool implements Tool {
 
   // ------------------------------------------------------------------ measurement
 
-  /** Report the live arc radius for a valid ground bulge. */
+  /** Report the live arc radius for a valid ground bulge (`_measurementText`
+   *  suffixes the completion mode). */
   private _reportRadius(a: Vec2, b: Vec2, s: number): void {
     const arc = arcFromChord(a, b, s)
     if (arc === null) {

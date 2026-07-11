@@ -227,6 +227,11 @@ pub enum StickyError {
     /// `merge_faces` where both sides are the same face: dissolving the edge
     /// would leave a non-manifold or punctured result.
     SameFaceOnBothSides,
+    /// `merge_faces` on faces that share TWO OR MORE disconnected edge
+    /// chains (a bridge/dogbone adjacency): dissolving everything shared
+    /// would need the merged boundary rebuilt as outer + hole loops, which
+    /// the merge does not build yet. Refused, not guessed.
+    SharedChainDisconnected,
     /// `split_face_inner`: a loop vertex is not strictly inside the face (it lies
     /// on/outside the outer boundary or inside a hole). v1 imprints only loops
     /// strictly interior to the face.
@@ -352,6 +357,12 @@ impl std::fmt::Display for StickyError {
             StickyError::BoundaryEdge => write!(f, "cannot merge across a boundary edge"),
             StickyError::SameFaceOnBothSides => {
                 write!(f, "edge has the same face on both sides")
+            }
+            StickyError::SharedChainDisconnected => {
+                write!(
+                    f,
+                    "faces share more than one separate run of edges; merging them is not supported"
+                )
             }
             StickyError::LoopNotStrictlyInside { index } => {
                 write!(f, "loop vertex {index} is not strictly inside the face")
@@ -1902,6 +1913,159 @@ impl Object {
         Ok(report)
     }
 
+    /// The interior edges whose two adjacent faces are coplanar and
+    /// identically painted — the edges [`Object::merge_coplanar_faces`]
+    /// WOULD dissolve — as world-space endpoint segments.
+    ///
+    /// Callers about to run a boolean collect these from each operand and
+    /// pass them as the result's `preserve` set: such an edge is a deliberate
+    /// artifact (a face imprint drawn but not yet extruded), not a seam the
+    /// boolean introduced, and must survive the cleanup. Pure query.
+    pub fn coplanar_edge_segments(&self) -> Vec<(Point3, Point3)> {
+        let mut out = Vec::new();
+        for (_eid, edge) in &self.edges {
+            let Some((a, b)) = self.mergeable_edge_endpoints(edge) else {
+                continue;
+            };
+            out.push((a, b));
+        }
+        out
+    }
+
+    /// Dissolve every interior edge whose two adjacent faces are coplanar
+    /// and identically painted, repeating until none remain — the cleanup
+    /// run on boolean results (union / subtract / intersect and through-cut
+    /// push/pull) so the seam where two solids joined does not linger as a
+    /// stray edge across what is now one continuous face.
+    ///
+    /// `preserve` holds edge segments that must NOT be dissolved even though
+    /// they qualify: the operands' pre-existing coplanar edges (face imprints
+    /// awaiting push/pull — see [`Object::coplanar_edge_segments`]). A
+    /// candidate is kept when its midpoint lies on any preserve segment
+    /// (within [`tol::POINT_MERGE`]), which also protects imprint edges the
+    /// boolean trimmed into shorter pieces.
+    ///
+    /// Differing face materials or UV frames are a hard stop (a painted face
+    /// never bleeds into its neighbor), and edges [`Object::merge_faces`]
+    /// refuses (boundary, hole loop, same face on both sides, not coplanar
+    /// within tolerance) are skipped, never forced — every dissolve goes
+    /// through that validated primitive, so watertightness is preserved by
+    /// construction. Returns the number of edges dissolved.
+    pub fn merge_coplanar_faces(&mut self, preserve: &[(Point3, Point3)]) -> usize {
+        let mut dissolved = 0;
+        loop {
+            // Fresh scan each round: a merge deletes its edge and one face,
+            // and can expose new coplanar pairs. Slotmap key order is
+            // deterministic for a deterministically built object, so the
+            // merge order (and thus the result) is reproducible.
+            let candidates: Vec<EdgeId> = self.edges.keys().collect();
+            let mut progress = false;
+            for eid in candidates {
+                // An earlier merge this round may have deleted the edge.
+                let Some(edge) = self.edges.get(eid).copied() else {
+                    continue;
+                };
+                if self.mergeable_edge_endpoints(&edge).is_none() {
+                    continue;
+                }
+                // merge_faces dissolves EVERY edge the two faces share, not
+                // just this candidate — so the preserve check must cover the
+                // pair's whole shared set, or a preserved imprint that joined
+                // the chain through an earlier merge would die as collateral.
+                let chain = self.shared_face_pair_segments(&edge);
+                let preserved = chain.iter().any(|&(a, b)| {
+                    let mid = Point3::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0);
+                    preserve
+                        .iter()
+                        .any(|&(p, q)| point_on_segment(mid, p, q, tol::POINT_MERGE))
+                });
+                if preserved {
+                    continue;
+                }
+                if self.merge_faces(eid).is_ok() {
+                    dissolved += 1;
+                    progress = true;
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        dissolved
+    }
+
+    /// If `edge` separates two distinct, identically-painted, coplanar faces
+    /// (both bounded by outer loops — the same preconditions
+    /// [`Object::merge_faces`] enforces), its world endpoints; else `None`.
+    /// The shared geometry test behind [`Object::coplanar_edge_segments`] and
+    /// [`Object::merge_coplanar_faces`]'s candidate scan.
+    fn mergeable_edge_endpoints(&self, edge: &Edge) -> Option<(Point3, Point3)> {
+        let twin_he_id = edge.twin_half_edge?;
+        let he = self.half_edges[edge.half_edge];
+        let twin_he = self.half_edges[twin_he_id];
+
+        let loop_a = he.loop_id;
+        let loop_b = twin_he.loop_id;
+        if self.loops[loop_a].kind != LoopKind::Outer || self.loops[loop_b].kind != LoopKind::Outer
+        {
+            return None;
+        }
+
+        let face_a = self.loops[loop_a].face;
+        let face_b = self.loops[loop_b].face;
+        if face_a == face_b {
+            return None;
+        }
+
+        let fa = &self.faces[face_a];
+        let fb = &self.faces[face_b];
+        if fa.material != fb.material || fa.uv_frame != fb.uv_frame {
+            return None;
+        }
+
+        // Same coplanarity test merge_faces itself validates with.
+        let normal_diff = (fa.plane.normal() - fb.plane.normal()).length();
+        let normal_diff2 = (fa.plane.normal() + fb.plane.normal()).length();
+        if normal_diff >= tol::NORMAL_DIRECTION && normal_diff2 >= tol::NORMAL_DIRECTION {
+            return None;
+        }
+        let sample_b = {
+            let h = self.loops[fb.outer_loop].first_half_edge;
+            self.vertices[self.half_edges[h].origin].position
+        };
+        if fa.plane.signed_distance(sample_b).abs() > tol::PLANE_DIST {
+            return None;
+        }
+
+        let a = self.vertices[he.origin].position;
+        let b = self.vertices[twin_he.origin].position;
+        Some((a, b))
+    }
+
+    /// Every edge shared between the two faces adjacent to `edge` (a
+    /// half-edge on one face's outer loop twinned into the other's), as
+    /// world segments — the full set a `merge_faces` on that edge would
+    /// dissolve, connected or not. Empty for a boundary edge.
+    fn shared_face_pair_segments(&self, edge: &Edge) -> Vec<(Point3, Point3)> {
+        let Some(twin_he_id) = edge.twin_half_edge else {
+            return Vec::new();
+        };
+        let loop_a = self.half_edges[edge.half_edge].loop_id;
+        let loop_b = self.half_edges[twin_he_id].loop_id;
+        let mut out = Vec::new();
+        for h in self.loop_half_edges(loop_a) {
+            let hh = self.half_edges[h];
+            if let Some(t) = hh.twin
+                && self.half_edges[t].loop_id == loop_b
+            {
+                let a = self.vertices[hh.origin].position;
+                let b = self.vertices[self.half_edges[hh.next].origin].position;
+                out.push((a, b));
+            }
+        }
+        out
+    }
+
     /// Explicit combination of two solids — the only way Objects ever join
     /// (ARCHITECTURE.md: no implicit welding, ever).
     ///
@@ -2278,7 +2442,14 @@ impl Object {
         let tool = Object::from_extrusion(&profile, distance)
             .map_err(|_| PushPullError::NonManifoldResult)?;
         match Object::boolean(BooleanOp::Subtract, self, &tool, &Transform::IDENTITY) {
-            Ok(result) => {
+            Ok(mut result) => {
+                // Dissolve coplanar seams the cut introduced (a cut wall
+                // flush with an existing wall must read as ONE face), but
+                // preserve this object's pre-existing coplanar edges — face
+                // imprints awaiting their own push/pull. The tool is a fresh
+                // extrusion with no imprints, so it contributes none.
+                let preserve = self.coplanar_edge_segments();
+                result.merge_coplanar_faces(&preserve);
                 result.check_invariants();
                 // Always-on backstop.
                 result
@@ -2293,6 +2464,21 @@ impl Object {
 }
 
 // ============================================================== private helpers
+
+/// Whether `point` lies on the segment `a`→`b` within `tol` (distance to the
+/// CLAMPED closest point — a point beyond an endpoint measures to that
+/// endpoint, so collinear-but-outside points do not qualify).
+fn point_on_segment(point: Point3, a: Point3, b: Point3, tol: f64) -> bool {
+    let ab = b - a;
+    let len2 = ab.dot(ab);
+    let t = if len2 <= f64::EPSILON {
+        0.0
+    } else {
+        ((point - a).dot(ab) / len2).clamp(0.0, 1.0)
+    };
+    let closest = Point3::new(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
+    (point - closest).length() <= tol
+}
 
 /// Detects and undoes the exact inverse of [`push_pull_coplanar_aware`]'s
 /// unweld: a push whose sweep exactly closes a coplanar step it (or an
@@ -3761,6 +3947,16 @@ fn do_merge_faces(
         }
     }
 
+    // The walk above follows ONE connected run. If it did not cover every
+    // shared half-edge, the two faces meet along two or more disconnected
+    // chains (a bridge/dogbone adjacency) and the splice below would strand
+    // the other chains' half-edges on deleted Edge records. Refuse instead —
+    // supporting this needs the merged boundary rebuilt as outer + hole
+    // loops, which this op does not do yet.
+    if chain_a_seq.len() != shared_on_a.len() {
+        return Err(StickyError::SharedChainDisconnected);
+    }
+
     // The corresponding chain on outer_b (in reverse order of chain_a).
     // chain_a[0]'s twin is on outer_b; that twin goes B→A, which is the last
     // segment of the shared portion on B.  We need the chain on B in the
@@ -3869,6 +4065,13 @@ fn do_merge_faces(
         (before_chain_a, after_chain_b),
         (before_chain_b, after_chain_a),
     ] {
+        // When the neighbor face's non-shared portion is a SINGLE half-edge,
+        // it serves as both after_chain and before_chain — healing the first
+        // endpoint consumes it, and there is nothing left to heal at the
+        // second. Skip any pair whose half-edges an earlier heal removed.
+        if !obj.half_edges.contains_key(h_in) || !obj.half_edges.contains_key(h_out) {
+            continue;
+        }
         // h_in arrives at the candidate vertex V; h_out departs from V.
         let v_pos = obj.vertices[obj.half_edges[h_out].origin].position;
         let prev_v_pos = obj.vertices[obj.half_edges[h_in].origin].position;

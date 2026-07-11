@@ -15,7 +15,7 @@
 
 use kernel::{
     BooleanError, BooleanOp, FaceId, History, KernelOp, Object, Plane, Point3, Profile,
-    PushPullError, Transform, Vec3, WatertightState, tol,
+    PushPullError, StickyError, Transform, Vec3, WatertightState, tol,
 };
 use proptest::prelude::*;
 
@@ -844,6 +844,273 @@ fn push_past_an_interior_step_is_refused() {
         PushPullError::NonManifoldResult,
     );
     assert!(objects_equivalent(&obj, &original));
+}
+
+// ------------------------------------------------- coplanar seam cleanup
+
+/// Union of two flush boxes: `merge_coplanar_faces` dissolves every seam,
+/// leaving the canonical single box of the combined extent — the seam edges
+/// across the top/bottom/side faces must not linger.
+#[test]
+fn union_seams_dissolve_to_the_canonical_box() {
+    let a = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0));
+    let b = box_object(Point3::new(1.0, 0.0, 0.0), Point3::new(2.0, 1.0, 1.0));
+    let mut r = Object::boolean(BooleanOp::Union, &a, &b, &Transform::IDENTITY).unwrap();
+
+    let dissolved = r.merge_coplanar_faces(&[]);
+    assert!(dissolved > 0, "the flush union has seams to dissolve");
+    r.validate().unwrap();
+    assert_eq!(r.watertight(), WatertightState::Watertight);
+    assert_eq!(r.faces().len(), 6, "one face per side of the 2x1x1 box");
+    assert!(
+        r.coplanar_edge_segments().is_empty(),
+        "no mergeable pair survives the pass"
+    );
+    // The canonical box: the pass also healed the collinear boundary
+    // vertices the dissolved seams left behind (merge_faces is split_face's
+    // exact inverse), so this is equivalent to a directly built 2x1x1 box.
+    let canonical = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 1.0, 1.0));
+    assert!(objects_equivalent(&r, &canonical));
+}
+
+/// A preserve segment shields a face imprint from the pass: an edge drawn on
+/// a face (split_face, awaiting its own push/pull) survives the union's seam
+/// cleanup while the seams themselves dissolve.
+#[test]
+fn preserve_segments_shield_face_imprints_from_the_pass() {
+    let mut a = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0));
+    let top = face_with_normal(&a, Vec3::new(0.0, 0.0, 1.0));
+    // Imprint the top at x=0.5 — a deliberate, un-extruded region boundary.
+    a.split_face(
+        top,
+        &[Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)],
+    )
+    .unwrap();
+    let b = box_object(Point3::new(1.0, 0.0, 0.0), Point3::new(2.0, 1.0, 1.0));
+
+    let mut r = Object::boolean(BooleanOp::Union, &a, &b, &Transform::IDENTITY).unwrap();
+    let preserve: Vec<_> = a
+        .coplanar_edge_segments()
+        .into_iter()
+        .chain(b.coplanar_edge_segments())
+        .collect();
+    assert_eq!(
+        preserve.len(),
+        1,
+        "the imprint is the only pre-existing coplanar edge"
+    );
+
+    r.merge_coplanar_faces(&preserve);
+    r.validate().unwrap();
+    assert_eq!(r.watertight(), WatertightState::Watertight);
+    // Top: the imprint at x=0.5 survives (two faces); the union seam at x=1
+    // dissolved into the right-hand piece. Everything else merged to one
+    // face per side: 2 top + bottom + north + south + east + west = 7.
+    assert_eq!(r.faces().len(), 7);
+    // Without the preserve set the imprint would have been swallowed too —
+    // the contrast that proves the shield is what kept it.
+    let mut bare = Object::boolean(BooleanOp::Union, &a, &b, &Transform::IDENTITY).unwrap();
+    bare.merge_coplanar_faces(&[]);
+    assert_eq!(bare.faces().len(), 6);
+}
+
+/// `push_through` keeps an unrelated imprint on the same object: the cut
+/// consumes ITS region while a second drawn-but-unextruded imprint survives.
+/// (This cut produces no coplanar seams — the flush-wall merge case is
+/// `push_through_merges_a_cut_wall_flush_with_an_existing_wall`.)
+#[test]
+fn push_through_keeps_unrelated_imprints() {
+    let mut cube = unit_cube();
+    let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+    // Imprint 1 (the cut region): the x < 0.5 half of the top.
+    let cut = cube
+        .split_face(
+            top,
+            &[Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)],
+        )
+        .unwrap();
+    // new_faces come in no guaranteed order — identify by extent.
+    let left = *cut
+        .new_faces
+        .iter()
+        .find(|&&f| {
+            cube.loop_positions(cube.faces()[f].outer_loop)
+                .all(|p| p.x <= 0.5 + tol::POINT_MERGE)
+        })
+        .expect("one piece lies entirely at x <= 0.5");
+    let right = *cut.new_faces.iter().find(|&&f| f != left).unwrap();
+    // Imprint 2 (unrelated, must survive): a line at x = 0.75 on the
+    // remaining half.
+    cube.split_face(
+        right,
+        &[Point3::new(0.75, 0.0, 1.0), Point3::new(0.75, 1.0, 1.0)],
+    )
+    .unwrap();
+
+    // Push the left region through: the left half of the cube vanishes.
+    let result = cube.push_through(left, -1.0).unwrap();
+    result.validate().unwrap();
+    assert_eq!(result.watertight(), WatertightState::Watertight);
+    assert!(
+        (signed_volume(&result) - 0.5).abs() < VOLUME_TOL,
+        "half the cube remains, vol {}",
+        signed_volume(&result)
+    );
+    // The surviving half-cube: 6 sides plus the x=0.75 imprint splitting the
+    // top — the through-cut did not swallow the unrelated imprint.
+    assert_eq!(result.faces().len(), 7);
+    assert_eq!(
+        result.coplanar_edge_segments().len(),
+        1,
+        "exactly the surviving imprint remains mergeable"
+    );
+}
+
+/// A through-cut whose new wall lands flush with an existing wall of the
+/// same solid: the two coplanar wall pieces merge into one, leaving the
+/// canonical box — the seam-dissolving half of push_through's cleanup.
+#[test]
+fn push_through_merges_a_cut_wall_flush_with_an_existing_wall() {
+    // L-shaped solid: a tall column plus a low base extension, pre-merged.
+    let a = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 2.0));
+    let b = box_object(Point3::new(1.0, 0.0, 0.0), Point3::new(2.0, 1.0, 1.0));
+    let mut l = Object::boolean(BooleanOp::Union, &a, &b, &Transform::IDENTITY).unwrap();
+    l.merge_coplanar_faces(&[]);
+
+    // The exposed base top: normal +z, passing through z = 1 (not the
+    // column top at z = 2).
+    let base_top = l
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane.normal().z > 0.9
+                && f.plane.signed_distance(Point3::new(1.5, 0.5, 1.0)).abs() < tol::PLANE_DIST
+        })
+        .map(|(id, _)| id)
+        .expect("the base top face exists");
+
+    // Cut the base off: the new wall at x=1 (z in 0..1) lands flush with
+    // the column's existing east wall (z in 1..2) and must merge with it.
+    let result = l.push_through(base_top, -1.0).unwrap();
+    result.validate().unwrap();
+    assert_eq!(result.watertight(), WatertightState::Watertight);
+    assert_eq!(
+        result.faces().len(),
+        6,
+        "the flush cut wall merged with the existing wall"
+    );
+    assert!(objects_equivalent(
+        &result,
+        &box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 2.0)),
+    ));
+}
+
+/// The preserve check covers the WHOLE shared set between a face pair, not
+/// just the candidate edge: once a seam merge makes a preserved imprint and
+/// a remaining seam adjacent to the same pair, dissolving that seam would
+/// take the imprint with it (merge_faces dissolves every shared edge at
+/// once) — so the pass must skip the pair instead.
+#[test]
+fn preserve_shields_an_imprint_that_joins_a_seam_chain() {
+    let mut a = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 1.0, 1.0));
+    let top = face_with_normal(&a, Vec3::new(0.0, 0.0, 1.0));
+    // The imprint: splits a's top at x=1, spanning the full y extent — it
+    // ENDS on the y=1 wall, where the union seam with b will run.
+    a.split_face(
+        top,
+        &[Point3::new(1.0, 0.0, 1.0), Point3::new(1.0, 1.0, 1.0)],
+    )
+    .unwrap();
+    // b flush against a along y=1: b's single top is coplanar-adjacent to
+    // BOTH imprint pieces of a's top.
+    let b = box_object(Point3::new(0.0, 1.0, 0.0), Point3::new(2.0, 2.0, 1.0));
+
+    let mut r = Object::boolean(BooleanOp::Union, &a, &b, &Transform::IDENTITY).unwrap();
+    let preserve = a.coplanar_edge_segments();
+    assert_eq!(preserve.len(), 1, "the imprint is the only preserved edge");
+    r.merge_coplanar_faces(&preserve);
+    r.validate().unwrap();
+    assert_eq!(r.watertight(), WatertightState::Watertight);
+
+    // One seam merged b's top into one imprint piece; the other seam shares
+    // its pair with the imprint and was skipped. Two top faces remain and
+    // the imprint edge itself is still present.
+    let top_faces = r
+        .faces()
+        .values()
+        .filter(|f| f.plane.normal().z > 0.9)
+        .count();
+    assert_eq!(top_faces, 2, "the imprint still separates the top");
+    let imprint_survives = r.coplanar_edge_segments().iter().any(|&(p, q)| {
+        let mid = Point3::new((p.x + q.x) / 2.0, (p.y + q.y) / 2.0, (p.z + q.z) / 2.0);
+        (mid - Point3::new(1.0, 0.5, 1.0)).length() < tol::POINT_MERGE
+    });
+    assert!(imprint_survives, "the preserved imprint edge is intact");
+}
+
+/// Faces meeting along two DISCONNECTED edge chains (a bridge/dogbone
+/// adjacency) refuse to merge with a typed error, leaving the object
+/// untouched — dissolving everything shared would need the merged boundary
+/// rebuilt as outer + hole loops, which merge_faces does not do.
+#[test]
+fn merge_faces_refuses_faces_sharing_two_disconnected_chains() {
+    // A flat sheet in the z=0 plane, partitioned into a U-shaped face A, the
+    // notch filler M, and a right-hand bar B that touches A along TWO
+    // disjoint runs of x=2 (separated by M's own edge). Open (not
+    // watertight) but topologically valid — enough for the sticky ops.
+    let positions = [
+        Point3::new(0.0, 0.0, 0.0), // 0
+        Point3::new(2.0, 0.0, 0.0), // 1
+        Point3::new(2.0, 1.0, 0.0), // 2
+        Point3::new(1.0, 1.0, 0.0), // 3
+        Point3::new(1.0, 2.0, 0.0), // 4
+        Point3::new(2.0, 2.0, 0.0), // 5
+        Point3::new(2.0, 3.0, 0.0), // 6
+        Point3::new(0.0, 3.0, 0.0), // 7
+        Point3::new(3.0, 0.0, 0.0), // 8
+        Point3::new(3.0, 3.0, 0.0), // 9
+    ];
+    let faces: Vec<Vec<usize>> = vec![
+        vec![0, 1, 2, 3, 4, 5, 6, 7], // A: the U
+        vec![3, 2, 5, 4],             // M: the notch filler
+        vec![1, 8, 9, 6, 5, 2],       // B: the bar (touches A twice)
+    ];
+    let mut sheet = Object::from_polygons(&positions, &faces).unwrap();
+    sheet.validate().unwrap();
+    let face_count = sheet.faces().len();
+
+    // The A–B edge (2,0)–(2,1): one of the two disjoint shared runs.
+    let wanted = [Point3::new(2.0, 0.0, 0.0), Point3::new(2.0, 1.0, 0.0)];
+    let ab_edge = sheet
+        .edges()
+        .iter()
+        .find(|(_, e)| {
+            let he = sheet.half_edges()[e.half_edge];
+            let p = sheet.vertices()[he.origin].position;
+            let q = sheet.vertices()[sheet.half_edges()[he.next].origin].position;
+            (p.approx_eq(wanted[0], tol::POINT_MERGE) && q.approx_eq(wanted[1], tol::POINT_MERGE))
+                || (p.approx_eq(wanted[1], tol::POINT_MERGE)
+                    && q.approx_eq(wanted[0], tol::POINT_MERGE))
+        })
+        .map(|(id, _)| id)
+        .expect("the (2,0)-(2,1) edge exists");
+
+    assert_eq!(
+        sheet.merge_faces(ab_edge).unwrap_err(),
+        StickyError::SharedChainDisconnected,
+    );
+    // Strong guarantee: refused means untouched.
+    sheet.validate().unwrap();
+    assert_eq!(sheet.faces().len(), face_count);
+
+    // And the automated pass skips the pair rather than corrupting: it only
+    // merges what merge_faces accepts (A–M and M–B are single chains, so
+    // those DO merge; the sheet collapses to one face without ever passing
+    // through the refused A–B pair).
+    let mut swept = sheet.clone();
+    swept.merge_coplanar_faces(&[]);
+    swept.validate().unwrap();
+    assert_eq!(swept.faces().len(), 1);
 }
 
 // ------------------------------------------------- sticky split / merge

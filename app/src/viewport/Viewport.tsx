@@ -45,6 +45,7 @@ import { TapeMeasureTool } from '../tools/TapeMeasureTool'
 import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
+import { makeSketchHandleCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
 import type { Ray } from './math'
 import type { Snap } from '../tools/types'
@@ -807,6 +808,12 @@ export default function Viewport({
     const toolController = new ToolController(wasmScene, handleSelect)
     toolControllerRef.current = toolController
 
+    // ONE ground sketch shared by every draw tool (Line/Rectangle/Circle/
+    // Arc), surviving tool switches, so mixed-tool profiles — an arc closed
+    // by a Line chord, a rectangle meeting an arc — land in the same sketch
+    // and can close regions. Cleared when a new document replaces the Scene.
+    const groundSketchCache = makeSketchHandleCache()
+
     // ------------------------------------------------- select-all + marquee
     /**
      * Top-level selectable candidates with their visible leaf geometry ids.
@@ -1196,9 +1203,10 @@ export default function Viewport({
     }
 
     function notifyLoaded(): void {
-      // A new/loaded document replaced the Scene — any handles the active tool
-      // cached (e.g. a ground-sketch handle) are now stale. Re-selecting the
-      // same tool doesn't recreate it, so reset it explicitly here.
+      // A new/loaded document replaced the Scene — the shared ground-sketch
+      // handle and any handles the active tool cached are now stale.
+      // Re-selecting the same tool doesn't recreate it, so reset explicitly.
+      groundSketchCache.set(null)
       const at = toolController.activeTool
       if ('onDocumentReset' in at) {
         (at as { onDocumentReset(): void }).onDocumentReset()
@@ -1391,6 +1399,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        groundSketchCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -1415,6 +1424,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        groundSketchCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -1439,6 +1449,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        groundSketchCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -1463,6 +1474,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        groundSketchCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current

@@ -37,7 +37,7 @@ The Tape Measure does two jobs, chosen by where your *first* click lands:
 
 **Measure a distance.** Click any point, move, and read the live distance; click again to finish. If the second click lands on empty space, Hew drops a **guide point** there (a small marker that participates in snapping). If it lands on real geometry, you just get the measurement — nothing is created.
 
-**Drop a parallel guide.** Click on an **edge** of a solid, then move sideways: a guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it.
+**Drop a parallel guide.** Click on an **edge** — of a solid or of a sketch you've drawn — then move sideways: a guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it.
 
 ## Protractor
 

@@ -55,7 +55,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
 import { segmentLength, directionBetween } from './lineInput'
-import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
+import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
 export type OnFaceImprint = (objectId: bigint) => void
@@ -120,14 +120,9 @@ export class LineTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Handle to the current active sketch — reused across commits if not null */
-  private sketchHandle: bigint | null = null
-
-  /** `sketchHandle` get/set, boxed for `runSketchGesture`. */
-  private readonly _sketchHandleCache: SketchHandleCache = {
-    get: () => this.sketchHandle,
-    set: (h) => { this.sketchHandle = h },
-  }
+  /** Cached ground-sketch handle — the Viewport passes one cache shared by
+   *  every draw tool, so mixed-tool profiles land in a single sketch. */
+  private readonly sketchCache: SketchHandleCache
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -188,6 +183,7 @@ export class LineTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    sketchCache: SketchHandleCache = makeSketchHandleCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -195,6 +191,7 @@ export class LineTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.sketchCache = sketchCache
   }
 
   /** Set the active editing context (entered object), or null for top level. */
@@ -560,7 +557,7 @@ export class LineTool implements Tool {
    * this hook — not tool re-instantiation — is what clears the stale handle.
    */
   onDocumentReset(): void {
-    this.sketchHandle = null
+    this.sketchCache.set(null)
     this.cancel()
   }
 
@@ -632,7 +629,7 @@ export class LineTool implements Tool {
     try {
       // Each committed segment is its own gesture — one Cmd+Z undoes exactly
       // that segment, matching LineTool's chain-forward-per-click semantics.
-      runSketchGesture(this.wasmScene, this._sketchHandleCache, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         const report = this.wasmScene.sketch_add_segment(
           sketch,
           anchor[0], anchor[1], 0,

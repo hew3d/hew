@@ -5,9 +5,11 @@
  *
  * Gesture:
  *   1. First click:
- *      - On an edge (snap.elementKind === 'edge', a live world Object) →
- *        PARALLEL-GUIDE mode. Remembers the edge's two endpoints (via
- *        `wasmScene.edge_endpoints`) and the picked point on it.
+ *      - On an edge (snap.elementKind === 'edge' for a live world Object,
+ *        or 'sketch-edge' for a committed sketch line) → PARALLEL-GUIDE
+ *        mode. Remembers the edge's two endpoints (via
+ *        `wasmScene.edge_endpoints` / `sketch_edge_endpoints`) and the
+ *        picked point on it.
  *      - Anywhere else → MEASURE mode. Remembers the picked point as P0.
  *   2. Pointer move previews:
  *      - Parallel mode: a dashed guide line through (edgePoint + offset)
@@ -220,23 +222,32 @@ export class TapeMeasureTool implements Tool {
 
   /**
    * Resolve a snap to an edge's endpoints + the picked point on it, or null
-   * if the snap isn't on a live world-Object edge.
+   * if the snap isn't on a live world-Object edge or committed sketch edge.
    *
-   * Only `elementKind === 'edge'` snaps carry an edge handle directly
-   * (on-edge, midpoint); an `endpoint` snap is a vertex, not an edge, so it
-   * intentionally falls through to measure mode here (a simplification —
-   * SketchUp lets you start a parallel guide from a vertex-snapped point on
-   * an edge too, but distinguishing "vertex that happens to sit on an edge"
-   * needs more inference-engine plumbing than this slice adds).
+   * Only `elementKind === 'edge'` / `'sketch-edge'` snaps carry an edge
+   * handle directly (on-edge, midpoint); an `endpoint` snap is a vertex, not
+   * an edge, so it intentionally falls through to measure mode here (a
+   * simplification — SketchUp lets you start a parallel guide from a
+   * vertex-snapped point on an edge too, but distinguishing "vertex that
+   * happens to sit on an edge" needs more inference-engine plumbing than
+   * this slice adds).
    */
   private _tryResolveEdge(
     snap: Snap,
   ): { edgePoint: [number, number, number]; edgeDir: [number, number, number] } | null {
-    if (snap.elementKind !== 'edge' || snap.object === undefined || snap.element === undefined) {
-      return null
+    let endpoints: Float64Array | number[] | undefined
+    if (snap.elementKind === 'edge' && snap.object !== undefined && snap.element !== undefined) {
+      endpoints = this.wasmScene.edge_endpoints(snap.object, snap.element)
+    } else if (
+      snap.elementKind === 'sketch-edge' &&
+      snap.sketch !== undefined &&
+      snap.element !== undefined
+    ) {
+      // A committed sketch line works as a guide reference too — the most
+      // common case: a parallel guide off a just-drawn rectangle's edge.
+      endpoints = this.wasmScene.sketch_edge_endpoints(snap.sketch, snap.element)
     }
-    const endpoints = this.wasmScene.edge_endpoints(snap.object, snap.element)
-    if (endpoints === undefined) return null // not a live world object — fall back
+    if (endpoints === undefined) return null // stale/consumed — fall back
 
     const [ax, ay, az, bx, by, bz] = endpoints
     const dx = bx - ax, dy = by - ay, dz = bz - az

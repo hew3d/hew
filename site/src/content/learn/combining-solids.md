@@ -13,7 +13,7 @@ Combining solids is always a command you issue; [Core concepts](/learn/core-conc
 
 ![Two overlapping boxes, both selected, ready to combine](/docs/boolean-selection.png)
 
-**Union** produces one object containing all material from both. **Subtract** cuts the second selected object away from the first. **Intersect** keeps only the overlapping material.
+**Union** produces one object containing all material from both, and cleans up after itself: where two coplanar faces meet, the seam dissolves and they become a single face. **Subtract** cuts the second selected object away from the first. **Intersect** keeps only the overlapping material.
 
 ![The union result: a single watertight object](/docs/boolean-union.png)
 

@@ -7,9 +7,12 @@
  * creation into that step, so undoing it removes the sketch entirely.
  *
  * Handles the stale cached-handle case: RectangleTool/CircleTool/ArcTool/
- * LineTool each lazily create a ground sketch via `begin_ground_sketch()` and
- * cache the handle for the session. If the user undoes the gesture that
- * created it, the sketch is hidden and the cached handle is stale —
+ * LineTool lazily create a ground sketch via `begin_ground_sketch()` and
+ * cache the handle. The Viewport hands all four draw tools ONE shared cache
+ * (`makeSketchHandleCache`) so everything drawn at top level lands in the
+ * same sketch — a chord drawn with the Line tool closes an Arc-tool arc into
+ * a region, and mixed-tool profiles extrude. If the user undoes the gesture
+ * that created the sketch, it is hidden and the cached handle is stale —
  * `sketch_begin_gesture` throws (`UnknownSketch`). `runSketchGesture` detects
  * that failure at the bracket's first FFI call and recovers by minting a
  * fresh ground sketch and retrying once; a second failure is a genuine error
@@ -18,10 +21,21 @@
 
 import type { Scene as WasmScene } from '../wasm/loader'
 
-/** Get/set access to a tool's single cached sketch handle. */
+/** Get/set access to a cached ground-sketch handle. One instance is shared
+ * by every draw tool of a Viewport; `set(null)` drops a handle known to be
+ * stale (the document was replaced). */
 export interface SketchHandleCache {
   get(): bigint | null
-  set(handle: bigint): void
+  set(handle: bigint | null): void
+}
+
+/** A standalone `SketchHandleCache` boxing one nullable handle. */
+export function makeSketchHandleCache(): SketchHandleCache {
+  let handle: bigint | null = null
+  return {
+    get: () => handle,
+    set: (h) => { handle = h },
+  }
 }
 
 /**

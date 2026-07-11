@@ -1186,13 +1186,21 @@ impl Document {
             doc.consumed.insert((sid, rid));
         }
 
-        // Rebuild the derived tombstone index for consumed sketch edges/verts.
-        // Collect pairs first to avoid a simultaneous borrow of `doc.consumed`
-        // and `doc.sketches`.
-        let consumed_pairs: Vec<(SketchId, SketchRegionId)> =
-            doc.consumed.iter().copied().collect();
-        for (sid, rid) in consumed_pairs {
-            let (edges, verts) = doc.sketches[sid].region_exclusive_boundary(rid);
+        // Rebuild the derived tombstone index for consumed sketch edges/verts
+        // from each sketch's FULL consumed set (the rule is order-free — see
+        // `Sketch::consumed_tombstones` — so one evaluation per sketch lands
+        // on the same answer the original extrude sequence produced). Group
+        // first to avoid a simultaneous borrow of `doc.consumed` and
+        // `doc.sketches`.
+        let mut consumed_by_sketch: std::collections::BTreeMap<
+            SketchId,
+            std::collections::BTreeSet<SketchRegionId>,
+        > = std::collections::BTreeMap::new();
+        for &(sid, rid) in &doc.consumed {
+            consumed_by_sketch.entry(sid).or_default().insert(rid);
+        }
+        for (sid, regions) in consumed_by_sketch {
+            let (edges, verts) = doc.sketches[sid].consumed_tombstones(&regions);
             for e in edges {
                 doc.consumed_sketch_edges.insert((sid, e));
             }
@@ -2568,16 +2576,28 @@ impl Document {
         // re-extrudes nor leaves a stray fill.
         self.consumed.insert((sketch, region));
 
-        // Tombstone the sketch edges/vertices that exclusively bounded this
-        // region (not shared with any surviving region). Re-borrow the sketch
-        // here — the earlier `let s = ...` borrow ended after `profile(region)`.
-        let (cons_edges, cons_verts) = self.sketches[sketch].region_exclusive_boundary(region);
-        for &e in &cons_edges {
-            self.consumed_sketch_edges.insert((sketch, e));
-        }
-        for &v in &cons_verts {
-            self.consumed_sketch_verts.insert((sketch, v));
-        }
+        // Tombstone the sketch edges/vertices that no longer bound any LIVE
+        // region: evaluate the full derived rule for this sketch's consumed
+        // set, then keep only what is newly tombstoned so the undo record
+        // carries exactly this extrude's increment. An edge shared with a
+        // previously consumed region dies here, with the last region that
+        // needed it. (Re-borrow the sketch — the earlier `let s = ...` borrow
+        // ended after `profile(region)`.)
+        let consumed_regions: std::collections::BTreeSet<SketchRegionId> = self
+            .consumed
+            .iter()
+            .filter(|&&(sid, _)| sid == sketch)
+            .map(|&(_, rid)| rid)
+            .collect();
+        let (tomb_edges, tomb_verts) = self.sketches[sketch].consumed_tombstones(&consumed_regions);
+        let cons_edges: Vec<SketchEdgeId> = tomb_edges
+            .into_iter()
+            .filter(|&e| self.consumed_sketch_edges.insert((sketch, e)))
+            .collect();
+        let cons_verts: Vec<SketchVertexId> = tomb_verts
+            .into_iter()
+            .filter(|&v| self.consumed_sketch_verts.insert((sketch, v)))
+            .collect();
 
         self.undo.push(DocAction::CreatedObject {
             id,
@@ -2668,8 +2688,21 @@ impl Document {
             return Err(DocumentError::GroupedOperand);
         }
 
-        let result = Object::boolean(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
+        let mut result = Object::boolean(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
             .map_err(DocumentError::Boolean)?;
+
+        // Dissolve the coplanar seams the boolean introduced (two coplanar
+        // top faces joined by a union must read as ONE face), but preserve
+        // coplanar edges the operands already had — those are face imprints
+        // drawn but not yet extruded, not seams. Runs BEFORE the result is
+        // inserted, so undo/redo of the boolean is untouched.
+        let preserve: Vec<_> = rec_a
+            .object
+            .coplanar_edge_segments()
+            .into_iter()
+            .chain(rec_b.object.coplanar_edge_segments())
+            .collect();
+        result.merge_coplanar_faces(&preserve);
 
         let id = self.objects.insert(ObjectRecord {
             object: result,

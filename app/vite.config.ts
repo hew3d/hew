@@ -3,6 +3,16 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  server: {
+    // Under `tauri dev` the shell's webview loads the FIXED devUrl from
+    // tauri.conf.json (http://localhost:5173). If another dev server —
+    // typically a sibling worktree's — already owns the port, vite's default
+    // is to drift silently to 5174+, leaving the shell a blank white window
+    // pointed at a stranger. Fail loudly instead ("Port 5173 is already in
+    // use"). Plain web dev keeps vite's auto-port behavior: the Tauri CLI
+    // sets TAURI_ENV_* only when it spawns the beforeDevCommand.
+    strictPort: process.env.TAURI_ENV_PLATFORM !== undefined,
+  },
   plugins: [
     react(),
     VitePWA({

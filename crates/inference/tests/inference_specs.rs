@@ -8,7 +8,8 @@
 
 use inference::{ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery};
 use kernel::{
-    Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchId, Transform, Vec3, tol,
+    Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId, Transform,
+    Vec3, tol,
 };
 
 const WIDE: f64 = 0.3; // generous pick-cone half-angle (radians)
@@ -443,8 +444,16 @@ fn mixed_scene() -> InferenceScene {
     scene.add_sketch(
         SketchId::default(),
         &[
-            (Point3::new(3.0, 3.0, 0.0), Point3::new(4.0, 3.0, 0.0)),
-            (Point3::new(4.0, 3.0, 0.0), Point3::new(4.0, 4.0, 0.0)),
+            (
+                SketchEdgeId::default(),
+                Point3::new(3.0, 3.0, 0.0),
+                Point3::new(4.0, 3.0, 0.0),
+            ),
+            (
+                SketchEdgeId::default(),
+                Point3::new(4.0, 3.0, 0.0),
+                Point3::new(4.0, 4.0, 0.0),
+            ),
         ],
     );
     scene.add_transient_segment(Point3::new(2.0, 6.0, 0.0), Point3::new(2.0, 6.0, 2.0));
@@ -580,7 +589,11 @@ fn index_invalidation_tracks_every_mutation() {
     // but their mutators must coexist with the index without staleness.
     scene.add_sketch(
         SketchId::default(),
-        &[(Point3::new(60.0, 60.0, 0.0), Point3::new(62.0, 60.0, 0.0))],
+        &[(
+            SketchEdgeId::default(),
+            Point3::new(60.0, 60.0, 0.0),
+            Point3::new(62.0, 60.0, 0.0),
+        )],
     );
     assert_eq!(
         probe(&scene, Point3::new(60.0, 60.0, 0.0)).map(|s| s.kind),
@@ -873,7 +886,11 @@ fn clear_solids_drops_solids_and_keeps_guides_and_sketches() {
     );
     scene.add_sketch(
         SketchId::default(),
-        &[(Point3::new(3.0, 3.0, 0.0), Point3::new(4.0, 3.0, 0.0))],
+        &[(
+            SketchEdgeId::default(),
+            Point3::new(3.0, 3.0, 0.0),
+            Point3::new(4.0, 3.0, 0.0),
+        )],
     );
 
     // Warm the index, then clear: no candidate scan, solids gone, index fresh.

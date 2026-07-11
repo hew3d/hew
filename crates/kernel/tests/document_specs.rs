@@ -13,8 +13,8 @@
 use kernel::{
     BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, ImageFormat,
     KernelOp, KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
-    SketchError, SketchId, SketchVertexId, Texture, Transform, TransformError, Vec3,
-    WatertightState,
+    SketchError, SketchId, SketchRegionId, SketchVertexId, Texture, Transform, TransformError,
+    Vec3, WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -1980,6 +1980,137 @@ fn extruded_sketch_edges_are_tombstoned_and_survive_round_trip() {
         1,
         "the extruded solid survives the round-trip"
     );
+}
+
+/// Two regions sharing an edge (a rectangle with an arc segment on top,
+/// reduced to two rectangles sharing a wall): the shared edge survives the
+/// FIRST extrude — it still bounds the live neighbor region — and dies with
+/// the SECOND, so no orphan sketch line outlives the regions it bounded.
+/// Undo walks the tombstones back one step, and a save → load round-trip of
+/// the fully-consumed sketch stays gone.
+#[test]
+fn shared_edge_tombstoned_with_last_region_not_first() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    draw_rect(&mut doc, s, 1.0, 0.0, 2.0, 1.0); // shares the x=1 wall
+
+    let regions: Vec<SketchRegionId> = doc.sketch(s).expect("live").regions().keys().collect();
+    assert_eq!(regions.len(), 2);
+    assert_eq!(visible_edge_count(&doc, s), 7);
+
+    // First extrude: only the left region's exclusive 3 edges go; the shared
+    // wall stays visible because the right region is still live.
+    doc.extrude_region(s, regions[0], 1.0)
+        .expect("extrude left");
+    assert_eq!(
+        visible_edge_count(&doc, s),
+        4,
+        "the shared wall and the live neighbor's edges must survive"
+    );
+
+    // Second extrude: the shared wall no longer bounds anything live — the
+    // whole sketch is consumed and drops out of the actionable set.
+    doc.extrude_region(s, regions[1], 1.0)
+        .expect("extrude right");
+    assert_eq!(
+        visible_edge_count(&doc, s),
+        0,
+        "the shared wall dies with the last region that needed it"
+    );
+    assert!(
+        !doc.sketch_ids().contains(&s),
+        "a fully-consumed sketch must vanish from sketch_ids"
+    );
+
+    // Undo the second extrude: exactly its increment comes back.
+    doc.undo().expect("undo");
+    assert_eq!(
+        visible_edge_count(&doc, s),
+        4,
+        "undoing the second extrude restores the shared wall and neighbors"
+    );
+
+    // Redo, then round-trip: the load-time tombstone rebuild (one order-free
+    // evaluation per sketch) must land on the same fully-consumed answer.
+    doc.redo().expect("redo");
+    let bytes = doc.save();
+    let doc2 = Document::load(&bytes).expect("round-trip");
+    assert!(
+        doc2.sketch_ids().is_empty(),
+        "the fully-consumed sketch must not reappear after save/load"
+    );
+    assert_eq!(
+        doc2.visible_object_ids().len(),
+        2,
+        "both extruded solids survive the round-trip"
+    );
+}
+
+// ──────────────────────────────── boolean coplanar-seam cleanup ─────────────
+
+/// A document-level union of two flush boxes dissolves the coplanar seams:
+/// the result reads as one canonical box (6 faces), and undo still restores
+/// both operands untouched (the cleanup runs before the result is inserted,
+/// so the undo record is the ordinary boolean one).
+#[test]
+fn boolean_union_dissolves_seams_and_undoes_cleanly() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0);
+
+    let (result, _) = doc.boolean(BooleanOp::Union, a, b).expect("union");
+    assert_eq!(
+        doc.object(result).expect("result live").faces().len(),
+        6,
+        "flush-union seams must dissolve to the canonical box"
+    );
+
+    doc.undo().expect("undo");
+    assert_eq!(doc.visible_object_ids().len(), 2, "operands restored");
+    assert_eq!(doc.object(a).expect("a live").faces().len(), 6);
+    assert_eq!(doc.object(b).expect("b live").faces().len(), 6);
+}
+
+/// Differing face materials are a hard stop for the seam cleanup: painting
+/// one operand's top face keeps the top seam (a painted face never bleeds
+/// into its neighbor), while the unpainted faces still merge.
+#[test]
+fn boolean_union_keeps_seams_between_differently_painted_faces() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0);
+
+    // Paint a's top face red.
+    let red = doc.add_material(Material {
+        name: "red".to_string(),
+        color: Rgba8::rgb(200, 30, 30),
+        texture: None,
+    });
+    let a_top = {
+        let obj = doc.object(a).expect("a live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("a has a top face")
+    };
+    doc.paint_face(a, a_top, Some(red)).expect("paint");
+
+    let (result, _) = doc.boolean(BooleanOp::Union, a, b).expect("union");
+    let obj = doc.object(result).expect("result live");
+    // Top stays split (painted vs unpainted); the other four seam pairs
+    // merged: 2 top + 1 bottom + 1 north + 1 south + 1 east + 1 west = 7.
+    assert_eq!(obj.faces().len(), 7);
+    let top_materials: Vec<_> = obj
+        .faces()
+        .values()
+        .filter(|f| f.plane.normal().z > 0.9)
+        .map(|f| f.material)
+        .collect();
+    assert_eq!(top_materials.len(), 2);
+    assert!(top_materials.contains(&Some(red)));
+    assert!(top_materials.contains(&None));
 }
 
 // ──────────────────────────────────── node metadata ops (WS3) ───────────────

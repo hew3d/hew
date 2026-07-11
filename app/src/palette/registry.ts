@@ -59,7 +59,7 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Line': 'Draw a straight edge between two points.',
   'Rectangle': 'Draw a rectangular face on the ground or a face.',
   'Circle': 'Draw a faceted circular face.',
-  'Arc': 'Click two endpoints, then pull out the bulge.',
+  'Arc': 'Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment.',
   'Push/Pull': 'Extrude a face into a solid, or reshape one.',
   'Paint': 'Apply the current material to a face or object.',
   'Move': 'Translate the selection, with inference snapping.',

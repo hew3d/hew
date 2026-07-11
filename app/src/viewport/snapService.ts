@@ -45,7 +45,8 @@ function sameTarget(a: Snap, b: Snap): boolean {
     a.kind === b.kind &&
     a.object === b.object &&
     a.element === b.element &&
-    a.elementKind === b.elementKind
+    a.elementKind === b.elementKind &&
+    a.sketch === b.sketch
   )
 }
 
@@ -67,6 +68,7 @@ function snapJsToSnap(s: SnapJs): Snap {
       object: s.object(),
       element: elem,
       elementKind: elemKind,
+      sketch: s.sketch(),
     }
   } finally {
     s.free()

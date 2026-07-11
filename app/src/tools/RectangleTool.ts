@@ -30,7 +30,7 @@ import { rectangleCorners, faceRectangleCorners, facePlaneBasis, parseKernelErro
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
 import { editDimsBuffer } from './moveInput'
-import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
+import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
 
 export type RectangleCommitResult = {
   sketchHandle: bigint
@@ -98,14 +98,9 @@ export class RectangleTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Handle to the current active sketch — reused across commits if not null */
-  private sketchHandle: bigint | null = null
-
-  /** `sketchHandle` get/set, boxed for `runSketchGesture`. */
-  private readonly _sketchHandleCache: SketchHandleCache = {
-    get: () => this.sketchHandle,
-    set: (h) => { this.sketchHandle = h },
-  }
+  /** Cached ground-sketch handle — the Viewport passes one cache shared by
+   *  every draw tool, so mixed-tool profiles land in a single sketch. */
+  private readonly sketchCache: SketchHandleCache
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -124,6 +119,7 @@ export class RectangleTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    sketchCache: SketchHandleCache = makeSketchHandleCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -131,6 +127,7 @@ export class RectangleTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.sketchCache = sketchCache
   }
 
   /** Set the active editing context (entered object), or null for top level. */
@@ -305,7 +302,7 @@ export class RectangleTool implements Tool {
    * Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
-    this.sketchHandle = null
+    this.sketchCache.set(null)
     this.cancel()
   }
 
@@ -408,7 +405,7 @@ export class RectangleTool implements Tool {
 
   private _commitGroundRectangle(a: [number, number], b: [number, number]): void {
     try {
-      runSketchGesture(this.wasmScene, this._sketchHandleCache, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         const corners = rectangleCorners(a, b)
         // Four edges: 0→1, 1→2, 2→3, 3→0
         const edges = [

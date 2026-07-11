@@ -386,7 +386,11 @@ common in practice, not edge cases, so the boolean engine classifies
 coplanar sub-faces by an exact, tolerance-free coverage test instead of
 falling back to a numerically fragile epsilon comparison. A genuinely
 ambiguous case (an edge lying exactly on a face with no area overlap) is
-refused outright rather than resolved arbitrarily.
+refused outright rather than resolved arbitrarily. Results are also cleaned
+up: coplanar seams a boolean (or a through-cut push/pull) introduces are
+dissolved, so two joined tops read as one face — while coplanar edges the
+operands already carried (face imprints drawn but not yet extruded) are
+preserved, and differing face materials are a hard stop.
 
 **A baked transform for plain geometry; a real pose only for Component
 instances.** Move, rotate, and scale write directly into an Object's or

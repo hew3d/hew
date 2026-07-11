@@ -399,80 +399,70 @@ impl Sketch {
         Ok(old_pos)
     }
 
-    /// The boundary edges of `region` that are NOT shared by any other region's
-    /// boundary, plus the vertices that would be left with no incident edge once
-    /// those edges are gone. Pure query — no mutation. Empty vecs if `region` is
-    /// unknown.
-    pub fn region_exclusive_boundary(
+    /// The sketch edges and vertices to hide ("tombstone") given that every
+    /// region in `consumed` has been extruded into a solid: an edge is
+    /// tombstoned iff it lies on a consumed region's boundary and on NO live
+    /// region's boundary; a vertex is tombstoned iff it lies on a consumed
+    /// region's boundary and every edge incident to it is tombstoned.
+    ///
+    /// The rule is a pure function of the FULL consumed set — order-free —
+    /// so an edge shared by two regions dies exactly when the last region
+    /// needing it is consumed, never before. Callers diff successive results
+    /// to attribute an increment to one extrude (undo needs per-step deltas);
+    /// the load path evaluates it once with the file's whole consumed set and
+    /// lands on the same answer. Unknown/stale ids in `consumed` are skipped.
+    /// Pure query — no mutation.
+    pub fn consumed_tombstones(
         &self,
-        region: SketchRegionId,
-    ) -> (Vec<SketchEdgeId>, Vec<SketchVertexId>) {
-        let r = match self.regions.get(region) {
-            Some(r) => r,
-            None => return (Vec::new(), Vec::new()),
-        };
-
-        // Collect this region's boundary edge ids (outer + all holes).
-        let mut this_edges: std::collections::BTreeSet<SketchEdgeId> =
+        consumed: &std::collections::BTreeSet<SketchRegionId>,
+    ) -> (
+        std::collections::BTreeSet<SketchEdgeId>,
+        std::collections::BTreeSet<SketchVertexId>,
+    ) {
+        let mut consumed_edges: std::collections::BTreeSet<SketchEdgeId> =
             std::collections::BTreeSet::new();
-        // Collect this region's boundary vertex ids.
-        let mut this_verts: std::collections::BTreeSet<SketchVertexId> =
+        let mut consumed_verts: std::collections::BTreeSet<SketchVertexId> =
+            std::collections::BTreeSet::new();
+        let mut live_edges: std::collections::BTreeSet<SketchEdgeId> =
             std::collections::BTreeSet::new();
 
-        let loops_this: Vec<&Vec<SketchVertexId>> =
-            std::iter::once(&r.outer).chain(r.holes.iter()).collect();
-        for lp in &loops_this {
-            for i in 0..lp.len() {
-                let a = lp[i];
-                let b = lp[(i + 1) % lp.len()];
-                if let Some(eid) = self.edge_between(a, b) {
-                    this_edges.insert(eid);
-                }
-                this_verts.insert(a);
-            }
-        }
-
-        // Collect the union of all OTHER regions' boundary edges.
-        let mut other_edges: std::collections::BTreeSet<SketchEdgeId> =
-            std::collections::BTreeSet::new();
-        for (rid, other_r) in &self.regions {
-            if rid == region {
-                continue;
-            }
-            let loops_other: Vec<&Vec<SketchVertexId>> = std::iter::once(&other_r.outer)
-                .chain(other_r.holes.iter())
-                .collect();
-            for lp in &loops_other {
+        for (rid, r) in &self.regions {
+            let is_consumed = consumed.contains(&rid);
+            let loops: Vec<&Vec<SketchVertexId>> =
+                std::iter::once(&r.outer).chain(r.holes.iter()).collect();
+            for lp in &loops {
                 for i in 0..lp.len() {
                     let a = lp[i];
                     let b = lp[(i + 1) % lp.len()];
                     if let Some(eid) = self.edge_between(a, b) {
-                        other_edges.insert(eid);
+                        if is_consumed {
+                            consumed_edges.insert(eid);
+                        } else {
+                            live_edges.insert(eid);
+                        }
+                    }
+                    if is_consumed {
+                        consumed_verts.insert(a);
                     }
                 }
             }
         }
 
-        // Exclusive edges: in this region but not in any other region.
-        let exclusive_edges: Vec<SketchEdgeId> = this_edges
+        // Edges on a consumed boundary that no live region still needs.
+        let tomb_edges: std::collections::BTreeSet<SketchEdgeId> = consumed_edges
             .into_iter()
-            .filter(|e| !other_edges.contains(e))
+            .filter(|e| !live_edges.contains(e))
             .collect();
 
-        // Isolated vertices: boundary vertices of this region whose every
-        // incident edge is in the exclusive-removal set (no surviving edge).
-        let removal_set: std::collections::BTreeSet<SketchEdgeId> =
-            exclusive_edges.iter().copied().collect();
-
-        let exclusive_verts: Vec<SketchVertexId> = this_verts
+        // Vertices left with no visible incident edge once tomb_edges hide.
+        // Edges outside any region (open chains) count as visible, so their
+        // endpoints are never tombstoned out from under them.
+        let tomb_verts: std::collections::BTreeSet<SketchVertexId> = consumed_verts
             .into_iter()
             .filter(|&vid| {
-                // A vertex is isolated iff ALL its incident edges are being removed.
                 self.edges.iter().all(|(eid, e)| {
-                    // If this edge is incident to vid...
                     if e.from == vid || e.to == vid {
-                        // ...it must be in the removal set.
-                        removal_set.contains(&eid)
+                        tomb_edges.contains(&eid)
                     } else {
                         true // not incident — irrelevant
                     }
@@ -480,7 +470,7 @@ impl Sketch {
             })
             .collect();
 
-        (exclusive_edges, exclusive_verts)
+        (tomb_edges, tomb_verts)
     }
 
     /// Extracts a region as a validated [`Profile`] ready for extrusion.
@@ -1897,16 +1887,17 @@ mod tests {
         assert_eq!(s.regions().len(), 2);
     }
 
-    // ── region_exclusive_boundary ─────────────────────────────────────────────
+    // ── consumed_tombstones ───────────────────────────────────────────────────
 
-    /// A single rectangle: all 4 edges and all 4 vertices are exclusive.
+    /// Consuming a lone rectangle's region tombstones all 4 edges and verts.
     #[test]
-    fn exclusive_boundary_single_rect_returns_all_edges_and_verts() {
+    fn tombstones_single_rect_consumes_all_edges_and_verts() {
         let s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
         let region = s.regions().keys().next().expect("one region");
-        let (edges, verts) = s.region_exclusive_boundary(region);
-        assert_eq!(edges.len(), 4, "all 4 edges are exclusive");
-        assert_eq!(verts.len(), 4, "all 4 vertices are exclusive");
+        let consumed = std::collections::BTreeSet::from([region]);
+        let (edges, verts) = s.consumed_tombstones(&consumed);
+        assert_eq!(edges.len(), 4, "all 4 edges tombstoned");
+        assert_eq!(verts.len(), 4, "all 4 vertices tombstoned");
     }
 
     /// Two rectangles sharing the x=1 wall: the first region's exclusive
@@ -1950,32 +1941,92 @@ mod tests {
             .map(|(id, _)| id)
             .expect("left region");
 
-        let (edges, verts) = s.region_exclusive_boundary(left_region);
-        // 3 exclusive edges (bottom, top, left — not the shared x=1 wall).
-        assert_eq!(edges.len(), 3, "3 exclusive edges (not the shared wall)");
-        // 2 exclusive vertices: (0,0) and (0,1) — not the shared x=1 corners.
+        let consumed = std::collections::BTreeSet::from([left_region]);
+        let (edges, verts) = s.consumed_tombstones(&consumed);
+        // 3 tombstoned edges (bottom, top, left — the shared x=1 wall still
+        // bounds the live right region and must survive).
+        assert_eq!(edges.len(), 3, "3 tombstoned edges (not the shared wall)");
+        // 2 tombstoned vertices: (0,0) and (0,1) — not the shared x=1 corners.
         assert_eq!(
             verts.len(),
             2,
-            "2 exclusive vertices (not on the shared wall)"
+            "2 tombstoned vertices (not on the shared wall)"
         );
-        // Verify the 2 exclusive vertices are at x=0.
+        // Verify the 2 tombstoned vertices are at x=0.
         for vid in &verts {
             let x = s.vertices()[*vid].position.x;
             assert!(
                 (x - 0.0).abs() < crate::tol::POINT_MERGE,
-                "exclusive vertex should be at x=0, got x={x}"
+                "tombstoned vertex should be at x=0, got x={x}"
             );
         }
     }
 
-    /// Unknown region returns empty vecs.
+    /// Consuming BOTH regions of the shared-wall pair tombstones everything,
+    /// including the shared wall and its corners — the orphan-edge case: an
+    /// edge shared only with already-consumed regions must not survive.
     #[test]
-    fn exclusive_boundary_unknown_region_returns_empty() {
+    fn tombstones_shared_wall_dies_when_both_regions_consumed() {
+        let mut s = Sketch::on_plane(xy_plane());
+        for (a, b) in &[
+            (pt(0.0, 0.0), pt(1.0, 0.0)),
+            (pt(1.0, 0.0), pt(1.0, 1.0)),
+            (pt(1.0, 1.0), pt(0.0, 1.0)),
+            (pt(0.0, 1.0), pt(0.0, 0.0)),
+            (pt(1.0, 0.0), pt(2.0, 0.0)),
+            (pt(2.0, 0.0), pt(2.0, 1.0)),
+            (pt(2.0, 1.0), pt(1.0, 1.0)),
+        ] {
+            s.add_segment(*a, *b).unwrap();
+        }
+        assert_eq!(s.regions().len(), 2);
+
+        let consumed: std::collections::BTreeSet<SketchRegionId> = s.regions().keys().collect();
+        let (edges, verts) = s.consumed_tombstones(&consumed);
+        assert_eq!(
+            edges.len(),
+            s.edges().len(),
+            "every edge tombstoned once no live region needs it"
+        );
+        assert_eq!(
+            verts.len(),
+            s.vertices().len(),
+            "every vertex tombstoned with its edges"
+        );
+    }
+
+    /// A vertex shared between a consumed region and an edge OUTSIDE any
+    /// region (an open chain) survives: hiding it would strand the chain.
+    #[test]
+    fn tombstones_keep_vertices_used_by_open_chains() {
+        let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        // Open whisker off the (1,1) corner — bounds no region.
+        s.add_segment(pt(1.0, 1.0), pt(2.0, 2.0)).unwrap();
+        assert_eq!(s.regions().len(), 1);
+
+        let consumed: std::collections::BTreeSet<SketchRegionId> = s.regions().keys().collect();
+        let (edges, verts) = s.consumed_tombstones(&consumed);
+        assert_eq!(edges.len(), 4, "the whisker edge is not tombstoned");
+        assert_eq!(
+            verts.len(),
+            3,
+            "the whisker's corner vertex survives with it"
+        );
+    }
+
+    /// Unknown region ids in the consumed set are skipped; an empty consumed
+    /// set tombstones nothing.
+    #[test]
+    fn tombstones_unknown_region_and_empty_set_return_empty() {
         let s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        let empty = std::collections::BTreeSet::new();
+        let (edges, verts) = s.consumed_tombstones(&empty);
+        assert!(edges.is_empty());
+        assert!(verts.is_empty());
+
         // The null key (default) is never inserted by slotmap and is always stale.
-        let bogus = SketchRegionId::default();
-        let (edges, verts) = s.region_exclusive_boundary(bogus);
+        let bogus = std::collections::BTreeSet::from([SketchRegionId::default()]);
+        let (edges, verts) = s.consumed_tombstones(&bogus);
         assert!(edges.is_empty());
         assert!(verts.is_empty());
     }

@@ -47,7 +47,7 @@ import { circlePolygonGround, circlePolygonFace, facePlaneBasis, parseKernelErro
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
-import { runSketchGesture, type SketchHandleCache } from './sketchGesture'
+import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
 
 /** Number of straight segments approximating the circle ("circle" = faceted
  * regular N-gon; true arcs are out of scope for). */
@@ -119,14 +119,9 @@ export class CircleTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Handle to the current active sketch — reused across commits if not null */
-  private sketchHandle: bigint | null = null
-
-  /** `sketchHandle` get/set, boxed for `runSketchGesture`. */
-  private readonly _sketchHandleCache: SketchHandleCache = {
-    get: () => this.sketchHandle,
-    set: (h) => { this.sketchHandle = h },
-  }
+  /** Cached ground-sketch handle — the Viewport passes one cache shared by
+   *  every draw tool, so mixed-tool profiles land in a single sketch. */
+  private readonly sketchCache: SketchHandleCache
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -145,6 +140,7 @@ export class CircleTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    sketchCache: SketchHandleCache = makeSketchHandleCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -152,6 +148,7 @@ export class CircleTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.sketchCache = sketchCache
   }
 
   /** Set the active editing context (entered object), or null for top level. */
@@ -316,7 +313,7 @@ export class CircleTool implements Tool {
    * Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
-    this.sketchHandle = null
+    this.sketchCache.set(null)
     this.cancel()
   }
 
@@ -423,7 +420,7 @@ export class CircleTool implements Tool {
     if (verts.length === 0) return // degenerate — ignore
 
     try {
-      runSketchGesture(this.wasmScene, this._sketchHandleCache, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         let lastRegionsCreated: bigint[] = []
         for (let i = 0; i < verts.length; i++) {
           const p = verts[i]

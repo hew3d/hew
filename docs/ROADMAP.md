@@ -16,11 +16,14 @@ export a file a slicer accepts as watertight, with no repair step.
 
 ### Modeling
 
-- Rectangle, line, circle, and arc drawing on the ground plane or on any face
+- Rectangle, line, circle, and arc drawing on the ground plane or on any
+  face, all sharing one ground sketch so mixed-tool profiles close into
+  regions; arcs optionally close as a pie or a chord segment (Alt cycles)
 - Push/pull to extrude a closed profile into a solid, with a live preview
 - Push/pull through-cuts that punch holes or remove material, including
   splitting a solid into two when a cut fully severs it
-- Explicit boolean union, subtract, and intersect
+- Explicit boolean union, subtract, and intersect, with coplanar seams
+  dissolved on the result (a union of two flush boxes reads as one box)
 - Non-destructive, nestable grouping (Group/Ungroup)
 - Components: shared geometry with independent per-instance position,
   rotation, scale, and mirroring; edit the definition once, every instance
