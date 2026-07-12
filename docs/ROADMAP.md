@@ -35,6 +35,18 @@ export a file a slicer accepts as watertight, with no repair step.
 - Make Unique (detach an instance into its own copy) and Explode (bake an
   instance back into ordinary geometry)
 - Slice: cut a solid along a plane into two independent watertight solids
+- Push/pull on any planar face of a solid, not just faces with
+  perpendicular neighbors: it follows classic SketchUp translate-and-build —
+  the flat face moves rigidly and each oblique or coplanar neighbor grows a
+  fresh side wall, so pulling a sliced wedge's cut face erects a prism of
+  material along its slope and a faceted circle's side facet grows a pad.
+  Pulling outward succeeds however oblique the neighbors (unbounded by
+  neighbor angle — it just erects more material); pushing inward succeeds only
+  as far as the result stays valid and otherwise refuses with a typed error,
+  object unchanged — a wedge's slant face cannot be pushed in at all. (A pull
+  whose walls would ram a distant part of a non-convex solid still refuses,
+  since that is a real self-intersection.) Undo of a wall-building push is
+  exact, recorded as data (see docs/design/flat-face-pushpull.md)
 - Move and rotate with axis-locked inference snapping; Option/Alt-drag to
   copy while moving
 - Delete for objects, groups, instances, and guides
@@ -164,10 +176,20 @@ export a file a slicer accepts as watertight, with no repair step.
 - **3MF export** — a modern print format alongside STL: explicit units,
   one mesh per object with its name and color, better suited to multi-part
   prints
-- **Push/pull on any planar face of a solid**, not just faces with
-  perpendicular neighbors — currently the sharpest modeling dead-end a new
-  user can hit (it affects, among other things, faceted circles and sliced
-  solids)
+- **Whole-wall push/pull for analytic curved surfaces.** Flat-face
+  push/pull is done (see Shipped: translate-and-build for any planar face,
+  including oblique-neighbor and mixed coplanar+oblique boundaries). The
+  remaining case is a face that carries an analytic surface — a real
+  cylinder or arc wall — where pulling should expand the **entire** curved
+  part rather than bump one facet. That lives on the true-curves work: the
+  merge-time dispatch is `if face carries a SurfaceRef → whole-wall expand,
+  else → this branch's translate-and-build`, disjoint by face (see
+  docs/design/flat-face-pushpull.md). Still out of scope on the flat path:
+  a full-face through-cut on an oblique face (the swept tool grazes its
+  neighbors edge-on, which the boolean refuses as tangent contact —
+  imprinted sub-faces punch through obliquely just fine), and pushing an
+  outer face edge into or past one of its own holes (the deferred P4
+  hole-edge case, revisited with true circles)
 - **Plain-language error messages** for every operation Hew refuses, each
   with a suggested next step, instead of a raw technical error
 - **A welcome screen** on launch, with recent files, bundled sample models,
@@ -231,6 +253,20 @@ export a file a slicer accepts as watertight, with no repair step.
   is not yet
 - **Signed, notarized installers, auto-update, and a hosted web build**
   with no install step
+
+### Deferred until after initial public release
+
+- **Generalized step-wall recognition for the recorded push/pull inverse.**
+  `find_unbuild_plans`, behind the recorded `UnbuildPushPull` inverse of a
+  slanted-neighbor translate-and-build push, matches only pristine quad
+  walls. When an intervening op subdivides or consumes one of those walls —
+  or a redo rebuilds them with fresh handles — the exact un-build is
+  impossible, so undo/redo refuses typed with the object untouched rather
+  than closing the step. Both fuzz harnesses tolerate exactly this
+  `UnbuildPushPull` signature via `is_known_inverse_guard_gap`
+  (docs/design/flat-face-pushpull.md). The fix extends wall matching (and
+  the shared collapse surgery) to subdivided and L-shaped prismatic walls,
+  which also lets a plain `push_pull(-d)` re-close the built step directly.
 
 ## Non-goals
 

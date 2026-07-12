@@ -83,6 +83,14 @@ pub struct PushPullReport {
     /// Now-dead handles of faces consumed by merging or subtraction. Safe to
     /// hold (generational), useless to dereference.
     pub removed_faces: Vec<FaceId>,
+    /// True iff the push erected a wall along a SLANTED (non-coplanar)
+    /// neighbor, whose removal a plain `push_pull(-d)` cannot re-detect
+    /// (`find_collapse_plans` matches only coplanar-far-face walls). The
+    /// [`History`](crate::History) layer reads this to record the exact
+    /// [`Object::unbuild_push_pull`] inverse instead. A pure translate (box)
+    /// or a pure coplanar step (whose `-d` inverse still works) leaves it
+    /// false. Not exposed across the WASM boundary.
+    pub requires_unbuild_inverse: bool,
 }
 
 /// What `split_face` changed.
@@ -200,13 +208,18 @@ pub enum PushPullError {
     /// material. The kernel refuses; deleting the Object is the document's
     /// decision, not a geometric side effect.
     WouldVanish,
-    /// The swept side walls would intersect other geometry of this Object in
-    /// a way that has no manifold result (e.g., sweeping past a concave
-    /// neighbor). Fail loudly; never produce near-correct geometry.
+    /// The built side walls would intersect other geometry of this Object in
+    /// a way that has no manifold result. Fail loudly; never produce
+    /// near-correct geometry.
     ///
-    /// Also returned in M1 for sweeps the current implementation cannot
-    /// regenerate (side faces not perpendicular to the moved face); wall
-    /// generation for the general case lands with the boolean machinery.
+    /// This is what bounds an inward flat-face push: the moment the rigidly
+    /// translated moved face (or a wall built along one of its edges) would
+    /// cross the fixed structure it is pushed into, [`validate_sweep_result`]
+    /// refuses here, byte-identical — a wedge's slant face cannot be pushed in
+    /// at all. An outward pull erects a prism of material and, on a
+    /// convex-enough solid, does not reach this — but a pull whose new walls
+    /// would ram a distant part of the SAME solid (a non-convex reach) still
+    /// refuses here too.
     NonManifoldResult,
     /// `extrude_sub_face`/`collapse_sub_face` on a face that is not the expected
     /// kind (a flat imprinted sub-face, or a raised one with generated walls).
@@ -244,8 +257,15 @@ pub(crate) enum GuardMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BoundaryEdgeKind {
     /// Neighbor's normal is ~perpendicular to the sweep — an ordinary
-    /// side wall that stretches as the moved face translates.
+    /// side wall that extends seamlessly as the moved face translates
+    /// (no wall is built along this edge).
     Transverse,
+    /// Neighbor's normal is neither ~perpendicular nor ~parallel to the
+    /// sweep (a wedge/chamfer face, an adjacent facet of an N-gon prism, any
+    /// face produced by Slice). Like a coplanar sibling, the shared edge
+    /// unwelds and a fresh quad wall is built between the old edge and the
+    /// raised one; the neighbor keeps its shape.
+    Slanted,
     /// Neighbor's normal is ~parallel to the sweep — a coplanar sibling
     /// (a `split_face` cut edge); a wall is built along the shared edge
     /// instead of translating it.
@@ -792,63 +812,86 @@ impl Object {
         Ok(obj)
     }
 
-    /// SketchUp's signature move: translates `face` by `distance` along its
-    /// outward normal (positive = outward, adding material; negative =
-    /// inward, removing it), regenerating the side walls.
+    /// SketchUp's signature move on any FLAT face: translates `face` rigidly
+    /// by `distance` along its outward normal (positive = outward, adding
+    /// material; negative = inward, removing it) and rebuilds the side walls.
+    /// This is classic translate-and-build — the moved face is a rigid loop, a
+    /// wall is erected along each boundary edge whose neighbor does not extend
+    /// to follow it, whatever the neighbor's angle.
+    ///
+    /// (A face carrying an analytic surface — a cylinder/arc wall — is a
+    /// different operation: the whole curved wall expands. That lives on the
+    /// curves branch. This branch has no surface references, so every facet is
+    /// flat and takes the translate-and-build path below. At merge the two are
+    /// disjoint by `face.surface` presence — see docs/design/flat-face-pushpull.md.)
     ///
     /// Behavioral contract:
-    /// - Side walls appear along boundary edges whose neighbors don't move;
-    ///   where a new wall lands coplanar with an existing neighbor face
-    ///   (within [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)/[`tol::NORMAL_DIRECTION`](crate::tol::NORMAL_DIRECTION)), they merge —
-    ///   pulling a box's top up yields a taller box with 6 faces, not 10.
-    /// - If the moved face shares an edge with a **coplanar neighbor** — a
-    ///   sibling sub-face produced by [`Object::split_face`] — a wall is built
-    ///   along that shared edge and the shared vertices are **unwelded** (the
-    ///   sibling stays put), so pushing one half of a bisected face steps it up
-    ///   or down. Side walls that straddle the cut reshape into stepped
-    ///   (still planar) polygons.
-    /// - **Slanted neighbors ( contract — implementation pending):** a
-    ///   neighbor that is neither transverse nor coplanar (adjacent facets of
-    ///   an N-gon prism; any face produced by Slice) gets the same
-    ///   wall-and-unweld treatment as the coplanar case — the neighbor stays
-    ///   put, a planar wall is built along the shared edge (always
-    ///   non-degenerate: a boundary edge lies in the moved face's plane, so
-    ///   it is never parallel to the sweep), and transverse neighbors
-    ///   elsewhere on the boundary still stretch. SketchUp-style autofold is
-    ///   out of contract; overshoot/push-through semantics are unchanged.
-    ///   **Until that lands, such a neighbor is still refused as
-    ///   [`PushPullError::NonManifoldResult`]** — the `#[ignore]`d
-    ///   "slanted-neighbor" specs in `op_specs.rs` are the acceptance
-    ///   criteria.
-    /// - Pushing inward until the moved face lands on the opposite face's
-    ///   plane dissolves both ("push through"): material is subtracted, and
-    ///   the object may split into multiple shells (still one Object).
-    /// - The inverse property: `push_pull(f, d)` then `push_pull(f', -d)` on
-    ///   the returned face restores the original topology and geometry.
-    /// - **Whole-wall semantics for attributed cylinder walls**
-    ///   (docs/design/true-curves.md §4.6): a face carrying a
-    ///   [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef) does not translate.
-    ///   Pushing any facet of a stamped wall acts on the **logical wall**: every
-    ///   face of this object claiming the same cylinder offsets radially so the
-    ///   wall's radius changes by exactly `distance` along the picked facet's
-    ///   outward normal (pulling an outer wall outward grows the radius; pulling
-    ///   a hole wall toward its axis shrinks the hole). The radial map is affine
-    ///   in the cross-section plane, so every fully-moved face (wall facets,
-    ///   full-seam chord walls, caps whose rim is the wall) stays planar by
-    ///   construction; the surface references map to the new radius (never
-    ///   dropped — the wall is still exactly that cylinder). Neighbors sharing
-    ///   vertices with the wall **follow**: they translate (a D-profile's chord
-    ///   wall), stretch in-plane (caps perpendicular to the axis, radial
-    ///   pie-slice walls), or pivot (a prism wall tangent to a rounded corner
-    ///   — two parallel vertical edges always span a plane). A neighbor that
-    ///   would be bent off any single plane (stepped/bossed walls pinned
-    ///   elsewhere) refuses with [`PushPullError::WallNeighborNonPlanar`];
-    ///   every reshaped face must stay simple with holes strictly inside and
-    ///   mutually disjoint ([`PushPullError::NonManifoldResult`]); an offset
-    ///   to radius ≤ [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) is
-    ///   [`PushPullError::RadiusVanishes`]. Inverse property: offsetting by
-    ///   `distance` then `-distance` on the same facet restores topology and
-    ///   geometry (within floating-point round-trip tolerance).
+    /// The picked face takes one of two regimes, dispatched on whether it
+    /// carries an analytic [`SurfaceRef`](crate::topo::SurfaceRef): a flat
+    /// face translates and rebuilds walls; an attributed cylinder wall offsets
+    /// its whole logical wall radially.
+    ///
+    /// **Flat face — translate-and-build:**
+    /// - **Transverse neighbor** (perpendicular to the sweep, e.g. a box's
+    ///   side wall): the moved edge stays in the neighbor's plane, so the
+    ///   neighbor simply extends — the shared ring translates in place, no wall
+    ///   is minted. A purely transverse boundary (a box face) keeps the
+    ///   bit-identical fast path: pulling a box's top up yields a taller box
+    ///   with 6 faces.
+    /// - **Coplanar neighbor** (a `split_face` sibling sub-face) and **slanted
+    ///   neighbor** (a wedge/chamfer face, adjacent facets of an N-gon prism,
+    ///   any face produced by Slice) are handled identically: the shared edge
+    ///   **unwelds** and a fresh quad wall is erected between the old edge and
+    ///   the raised one, so the neighbor keeps its shape and the solid gains a
+    ///   facet. Junctions where such an edge meets a transverse one reshape the
+    ///   transverse neighbor into a (still planar) stepped polygon.
+    /// - **PULL (outward) is unbounded by neighbor angle:** erecting a prism of
+    ///   material on a flat face is always valid however oblique the neighbors,
+    ///   so pulls do not refuse on account of the neighbor angles this rework
+    ///   is about. (A pull whose new walls would interpenetrate a DISTANT part
+    ///   of the same non-convex solid is still refused by the result check
+    ///   below — that is a genuine self-intersection, not a neighbor angle.)
+    /// - **PUSH (inward) is bounded by validity:** the built result is checked
+    ///   for self-intersection ([`validate_sweep_result`]) and refuses typed
+    ///   ([`PushPullError::NonManifoldResult`], object byte-identical) the
+    ///   moment the moved face would cross the fixed structure it is pushed
+    ///   into — for a wedge's slant face that limit is zero (it cannot be
+    ///   pushed in at all); pushing far enough to consume the solid refuses as
+    ///   [`PushPullError::WouldVanish`].
+    /// - Pushing inward through the opposite face is a separate "push through"
+    ///   (a boolean subtraction, handled above the kernel op).
+    /// - **Inverse:** a pure translate (box) inverts by `push_pull(f', -d)`; a
+    ///   wall-building push does NOT — the walls it erects are perpendicular to
+    ///   the moved face, so a plain `-d` push cannot re-collapse a slanted
+    ///   neighbor's non-coplanar wall. Its exact inverse is the recorded
+    ///   [`Object::unbuild_push_pull`], derived and dispatched by
+    ///   [`History`](crate::History). (The direct-`push_pull` step-close of a
+    ///   *coplanar* sibling still works via `find_collapse_plans`.)
+    ///
+    /// **Attributed cylinder wall — whole-wall radial**
+    /// (docs/design/true-curves.md §4.6): a face carrying a
+    /// [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef) does not translate.
+    /// Pushing any facet of a stamped wall acts on the **logical wall**: every
+    /// face of this object claiming the same cylinder offsets radially so the
+    /// wall's radius changes by exactly `distance` along the picked facet's
+    /// outward normal (pulling an outer wall outward grows the radius; pulling
+    /// a hole wall toward its axis shrinks the hole). The radial map is affine
+    /// in the cross-section plane, so every fully-moved face (wall facets,
+    /// full-seam chord walls, caps whose rim is the wall) stays planar by
+    /// construction; the surface references map to the new radius (never
+    /// dropped — the wall is still exactly that cylinder). Neighbors sharing
+    /// vertices with the wall **follow**: they translate (a D-profile's chord
+    /// wall), stretch in-plane (caps perpendicular to the axis, radial
+    /// pie-slice walls), or pivot (a prism wall tangent to a rounded corner
+    /// — two parallel vertical edges always span a plane). A neighbor that
+    /// would be bent off any single plane (stepped/bossed walls pinned
+    /// elsewhere) refuses with [`PushPullError::WallNeighborNonPlanar`];
+    /// every reshaped face must stay simple with holes strictly inside and
+    /// mutually disjoint ([`PushPullError::NonManifoldResult`]); an offset
+    /// to radius ≤ [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) is
+    /// [`PushPullError::RadiusVanishes`]. Inverse property: offsetting by
+    /// `distance` then `-distance` on the same facet restores topology and
+    /// geometry (within floating-point round-trip tolerance).
     ///
     /// # Errors
     /// See [`PushPullError`]; all leave the object untouched.
@@ -942,10 +985,11 @@ impl Object {
         // Classify each boundary half-edge of the moved face by how its
         // neighbor's plane relates to the sweep direction:
         // - dot ~ 0: transverse neighbor (a perpendicular side wall) — translate
-        //   the shared vertices in place, exactly as before.
-        // - dot ~ 1: coplanar sibling (a `split_face` cut edge) — build a wall
-        //   along the shared edge instead of refusing.
-        // - otherwise: a genuinely slanted neighbor — still refused.
+        //   the shared vertices in place; the neighbor extends seamlessly.
+        // - dot ~ 1: coplanar sibling (a `split_face` cut edge) — unweld and
+        //   build a wall along the shared edge.
+        // - otherwise: a slanted neighbor — treated identically to a coplanar
+        //   one (unweld and build a wall; see the contract above).
         let mut edge_kinds: std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind> =
             std::collections::BTreeMap::new();
         for &loop_id in &boundary_loops {
@@ -964,11 +1008,24 @@ impl Object {
                 } else if dot >= 1.0 - tol::NORMAL_DIRECTION {
                     BoundaryEdgeKind::Coplanar
                 } else {
-                    return Err(PushPullError::NonManifoldResult);
+                    BoundaryEdgeKind::Slanted
                 };
                 edge_kinds.insert(h, kind);
             }
         }
+        let has_coplanar = edge_kinds
+            .values()
+            .any(|k| matches!(k, BoundaryEdgeKind::Coplanar));
+        let has_slanted = edge_kinds
+            .values()
+            .any(|k| matches!(k, BoundaryEdgeKind::Slanted));
+        // Coplanar siblings (a `split_face` cut edge) and slanted neighbors (a
+        // wedge/chamfer/facet wall) are handled by the SAME translate-and-build
+        // surgery: unweld the moved face's boundary and erect a fresh quad wall
+        // along each such edge (`push_pull_build_walls`). A boundary mixing both
+        // is therefore no longer a special case — every non-transverse edge
+        // builds a wall, every transverse one extends its neighbor seamlessly.
+        let has_wall = has_coplanar || has_slanted;
 
         // Endpoints of a Coplanar boundary edge (a `split_face` cut shared
         // with a sibling sub-face): the coplanar-aware mutation unwelds along
@@ -994,8 +1051,14 @@ impl Object {
         // must not see them as blocking — and indeed must not run for THIS
         // sweep at all: collapsing is the structural inverse of a previously
         // accepted push, so it cannot newly self-intersect.
-        let is_collapse =
-            !find_collapse_plans(self, face, &boundary_loops, &edge_kinds, sweep).is_empty();
+        // The direct-`push_pull` step-close is reserved for a boundary with no
+        // slanted edge: a step weld translates the remaining boundary rigidly,
+        // which is wrong for a face that must ALSO build a wall along a slanted
+        // edge. Such a push instead routes through translate-and-build and is
+        // bounded by result-validation (History still undoes a wall-building
+        // push exactly, via the recorded `unbuild_push_pull`).
+        let is_collapse = !has_slanted
+            && !find_collapse_plans(self, face, &boundary_loops, &edge_kinds, sweep).is_empty();
 
         // --- Step 3: WouldVanish check (inward push only) ---
         // Heuristic guard: skipped on history replay (rule 9) — a replayed
@@ -1028,21 +1091,28 @@ impl Object {
             }
         }
 
-        // Interior-obstruction guard, both sweep directions: translate mode
-        // moves the shared ring, so a neighbor face whose FIXED vertices sit
-        // closer along the sweep than the push depth would fold past them
+        // Interior-obstruction guard, PURE-TRANSLATE (fast path) only: moving
+        // the shared ring in place would fold a neighbor face whose FIXED
+        // vertices sit closer along the sweep than the push depth past them
         // into a self-intersecting shell — every face stays planar and
-        // manifold, so the validator cannot see it. Outward sweeps hit this
-        // exactly like inward ones (pushing a cavity wall out through the
-        // opposite wall folds the stretched side walls the same way — and
-        // records an inverse the inward guard would then refuse, breaking
-        // undo). Refuse at the nearest fixed neighbor vertex strictly in
-        // front of the sweep. Best-effort heuristic — skipped on history
-        // replay (rule 9), where the recorded-state proof supersedes it:
-        // this guard reads geometry AROUND the sweep, so it can refuse an
-        // exact-closure inverse whose pocket walls were subdivided by
-        // adjacent geometry even though the state it restores was accepted.
-        if !is_collapse && guards == GuardMode::Enforced {
+        // manifold, so the validator cannot see it. Refuse at the nearest
+        // fixed neighbor vertex strictly in front of the sweep. Skipped in
+        // three cases:
+        //   (1) a collapse;
+        //   (2) history replay (GuardMode not Enforced, rule 9) — the
+        //       recorded-state proof supersedes this best-effort heuristic,
+        //       which reads geometry AROUND the sweep and could otherwise
+        //       refuse an exact-closure inverse whose pocket walls were
+        //       subdivided by adjacent geometry even though the state it
+        //       restores was already accepted;
+        //   (3) the wall-building path (`has_wall`), which unwelds the
+        //       boundary and erects fresh walls rather than translating the
+        //       ring in place, so a fixed neighbor vertex ahead is extended
+        //       past, never folded — an outward pull is unbounded by neighbor
+        //       angle, and both directions are instead bounded by validating
+        //       the built result for self-intersection below (which still
+        //       catches a distant-geometry collision on a non-convex solid).
+        if !is_collapse && guards == GuardMode::Enforced && !has_wall {
             let moved_face_plane = self.faces[face].plane;
             // +1 along the outward normal for an outward push, -1 inward.
             let along = distance.signum();
@@ -1072,9 +1142,16 @@ impl Object {
             }
         }
 
-        let has_coplanar = edge_kinds
-            .values()
-            .any(|k| matches!(k, BoundaryEdgeKind::Coplanar));
+        // The moved face's pre-move plane and footprint, for the engulfment
+        // guard the wall-build result-validation reuses (captured before the
+        // clone is mutated).
+        let orig_plane = self.faces[face].plane;
+        let old_outer: Vec<Point3> = self.loop_positions(self.faces[face].outer_loop).collect();
+        let old_holes: Vec<Vec<Point3>> = self.faces[face]
+            .inner_loops
+            .iter()
+            .map(|&il| self.loop_positions(il).collect())
+            .collect();
 
         // --- Steps 4-6: Clone, mutate, validate, swap ---
         let mut obj = self.clone();
@@ -1087,7 +1164,7 @@ impl Object {
             // back onto the sibling it was raised from, removing the wall and
             // un-stepping the straddling transverse walls, instead of raising
             // a new copy that would immediately coincide with one already
-            // there (which `push_pull_coplanar_aware` cannot represent: it
+            // there (which `push_pull_build_walls` cannot represent: it
             // always mints a fresh vertex). Checked BEFORE `has_coplanar`:
             // once a step exists, its cut edge classifies as Transverse (the
             // wall built to bridge it is perpendicular to the moved face), so
@@ -1095,18 +1172,15 @@ impl Object {
             removed_faces =
                 try_collapse_coplanar_step(&mut obj, face, &boundary_loops, &edge_kinds, sweep)?
                     .expect("is_collapse implies find_collapse_plans is non-empty");
-        } else if !has_coplanar {
-            // Fast path: pure translate mode (no coplanar siblings on this
-            // boundary) — exactly the pre- behavior.
-            for &vid in &moved_vertices {
-                obj.vertices[vid].position = obj.vertices[vid].position + sweep;
-            }
-            refit_face_plane(&mut obj, face)?;
-            for &nf in &neighbor_faces {
-                refit_face_plane(&mut obj, nf)?;
-            }
-        } else {
-            created_faces = push_pull_coplanar_aware(
+        } else if has_wall {
+            // Translate-and-build (classic SketchUp push/pull): the moved face
+            // translates rigidly by `sweep`, every non-transverse boundary edge
+            // (a coplanar `split_face` sibling OR a slanted wedge/facet
+            // neighbor) unwelds and grows a fresh quad wall, and every
+            // transverse neighbor extends seamlessly via spliced junction
+            // steps. Topology changes; the walls are recorded for an exact
+            // inverse (see `History` / `unbuild_push_pull`).
+            created_faces = push_pull_build_walls(
                 &mut obj,
                 face,
                 &boundary_loops,
@@ -1114,6 +1188,31 @@ impl Object {
                 &neighbor_faces,
                 sweep,
             )?;
+            // Bound the sweep by the built RESULT's validity, reusing the
+            // interpenetration / boundary / engulfment checks: an outward pull
+            // erects a prism of material and validates for any neighbor angle
+            // (bounded only if its walls would ram a distant part of a
+            // non-convex solid); an inward push refuses typed the moment the
+            // moved face conflicts with the fixed structure it is pushed into.
+            validate_sweep_result(
+                &obj,
+                face,
+                orig_plane,
+                &old_outer,
+                &old_holes,
+                &created_faces,
+                distance,
+            )?;
+        } else {
+            // Fast path: pure translate mode (all-transverse boundary) —
+            // bit-identical to the original box behavior.
+            for &vid in &moved_vertices {
+                obj.vertices[vid].position = obj.vertices[vid].position + sweep;
+            }
+            refit_face_plane(&mut obj, face)?;
+            for &nf in &neighbor_faces {
+                refit_face_plane(&mut obj, nf)?;
+            }
         }
 
         if std::env::var("HEW_DEBUG_DUMP").is_ok() {
@@ -1162,11 +1261,94 @@ impl Object {
             .map_err(|_| PushPullError::NonManifoldResult)?;
         *self = obj;
 
-        // Step 7: Report.
+        // Step 7: Report. A slanted neighbor's wall is the only case whose
+        // removal a plain `push_pull(-d)` cannot re-detect, so only then does
+        // the inverse need the recorded un-build. A pure coplanar step still
+        // reverses through `find_collapse_plans` and keeps its `-d` inverse.
+        let requires_unbuild_inverse = has_slanted && !created_faces.is_empty();
         Ok(PushPullReport {
             face,
             created_faces,
             removed_faces,
+            requires_unbuild_inverse,
+        })
+    }
+
+    /// The exact, recorded inverse of a translate-and-build [`Object::push_pull`]
+    /// (the case that erects side walls — a coplanar `split_face` sibling or a
+    /// slanted wedge/facet neighbor). Removes the recorded `walls`, welds each
+    /// moved-face wall edge back onto the neighbor edge the wall bridged,
+    /// un-steps the reshaped transverse neighbors, and returns `face` to where
+    /// it began — restoring the pre-push topology exactly.
+    ///
+    /// This is dispatched only by the [`History`](crate::History) layer as the
+    /// derived inverse of a wall-building push; it is not a user gesture. In
+    /// the common LIFO case the `walls` a push recorded are still the pristine
+    /// quads it built when that push is undone, so their removal is
+    /// unambiguous — no re-detection of collapsibility, and no interaction with
+    /// [`find_collapse_plans`]' step-close path (which the direct
+    /// `push_pull(-d)` inverse of a *coplanar* push still uses). If an
+    /// intervening op altered a recorded wall (subdivided it, or appended a
+    /// hole via `split_face_inner`), it is no longer a removable pristine quad;
+    /// [`find_unbuild_plans`] rejects it and this refuses typed with the object
+    /// untouched, in both debug and release — never a validator panic.
+    ///
+    /// `forward_distance` is the signed distance of the push being inverted;
+    /// the inverse sweep is `-forward_distance` along the (unchanged) face
+    /// normal. Restores `face`'s original vertex positions to within
+    /// floating-point noise.
+    ///
+    /// # Errors
+    /// [`PushPullError::UnknownFace`] for a stale `face`;
+    /// [`PushPullError::NonManifoldResult`] if the recorded walls are not all
+    /// present as pristine quads this sweep closes, or the result fails
+    /// validation (never mutates on `Err` — strong guarantee).
+    pub fn unbuild_push_pull(
+        &mut self,
+        face: FaceId,
+        walls: &[FaceId],
+        forward_distance: f64,
+    ) -> Result<PushPullReport, PushPullError> {
+        if !self.faces.contains_key(face) {
+            return Err(PushPullError::UnknownFace);
+        }
+        let normal = self.faces[face].plane.normal();
+        // The inverse push travels back along the normal by the forward amount.
+        let sweep = normal * (-forward_distance);
+        let boundary_loops: Vec<LoopId> = std::iter::once(self.faces[face].outer_loop)
+            .chain(self.faces[face].inner_loops.iter().copied())
+            .collect();
+        let wall_set: std::collections::BTreeSet<FaceId> = walls
+            .iter()
+            .copied()
+            .filter(|&w| self.faces.contains_key(w))
+            .collect();
+
+        let mut obj = self.clone();
+        let plans = find_unbuild_plans(&obj, &boundary_loops, &wall_set, sweep);
+        // Every recorded wall must resolve to exactly one plan; otherwise the
+        // recorded inverse cannot faithfully reverse the push, so refuse rather
+        // than commit a partial un-build (the object is untouched on Err).
+        if plans.len() != wall_set.len() || plans.len() != walls.len() {
+            // A recorded wall is no longer a pristine quad (subdivided or
+            // consumed by an intervening op that undo did not restore
+            // exactly). The exact un-build is impossible: refuse typed,
+            // object untouched — the documented "undo fails typed, never
+            // corrupts" posture (docs/ROADMAP.md), reached here instead of
+            // through `find_collapse_plans`.
+            return Err(PushPullError::NonManifoldResult);
+        }
+        let removed_faces = collapse_plans_surgery(&mut obj, face, &boundary_loops, &plans, sweep)?;
+
+        obj.check_invariants();
+        obj.validate()
+            .map_err(|_| PushPullError::NonManifoldResult)?;
+        *self = obj;
+        Ok(PushPullReport {
+            face,
+            created_faces: Vec::new(),
+            removed_faces,
+            requires_unbuild_inverse: false,
         })
     }
 
@@ -1457,6 +1639,9 @@ impl Object {
             face,
             created_faces: Vec::new(),
             removed_faces: Vec::new(),
+            // A radial offset inverts exactly by push_pull(-distance) on the
+            // same facet; it builds no walls, so no recorded UnbuildPushPull.
+            requires_unbuild_inverse: false,
         })
     }
 
@@ -2113,6 +2298,8 @@ impl Object {
             face: sub_face,
             created_faces: walls,
             removed_faces: vec![],
+            // extrude_sub_face has its own inverse (collapse_sub_face).
+            requires_unbuild_inverse: false,
         })
     }
 
@@ -3180,12 +3367,926 @@ fn point_on_segment(point: Point3, a: Point3, b: Point3, tol: f64) -> bool {
     (point - closest).length() <= tol
 }
 
-// ---- whole-wall offset guards (docs/design/true-curves.md §4.6, F2) ----
-//
-// These predicates mirror the stretch-mode guards on the generalized
-// push/pull branch (`push_pull_stretch`'s interpenetration + engulfment
-// checks) so the two guard families unify cleanly when the branches
-// integrate — same semantics, restated over this branch's code.
+/// One face of a closed shell, flattened for the parity cast: its plane,
+/// outer loop positions, and hole loop positions.
+type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
+
+/// A few non-axis-aligned ray directions for [`point_in_shell_faces`]; the
+/// first one whose cast grazes no face boundary decides the parity (same
+/// posture as the boolean classifier's `RAY_DIRS`).
+const WALL_GUARD_RAY_DIRS: [Vec3; 4] = [
+    Vec3::new(0.4651, 0.7345, 0.4949),
+    Vec3::new(0.8012, -0.3461, 0.4877),
+    Vec3::new(-0.3299, 0.5813, 0.7438),
+    Vec3::new(0.1234, -0.5678, 0.8137),
+];
+
+/// Point-in-solid by ray-cast parity against a closed face set — the boolean
+/// classifier's mechanism (`crates/kernel/src/boolean.rs::point_in_solid`),
+/// restated over plain loop positions for the whole-wall offset guards.
+/// Tries each candidate direction until one casts cleanly (no boundary
+/// graze, no in-plane run through `p`); falls back to the first direction's
+/// count if all graze. Deterministic either way.
+fn point_in_shell_faces(faces: &[ShellFace], p: Point3) -> bool {
+    for d in WALL_GUARD_RAY_DIRS {
+        let (count, ambiguous) = shell_face_ray_cast(faces, p, d);
+        if !ambiguous {
+            return count % 2 == 1;
+        }
+    }
+    shell_face_ray_cast(faces, p, WALL_GUARD_RAY_DIRS[0]).0 % 2 == 1
+}
+
+/// Counts forward crossings of the ray `p + t·d` (t > 0) through the face
+/// set, flagging the cast ambiguous if a hit grazes a face boundary or the
+/// ray lies in a face's plane through `p`.
+fn shell_face_ray_cast(faces: &[ShellFace], p: Point3, d: Vec3) -> (usize, bool) {
+    let mut count = 0;
+    let mut ambiguous = false;
+    for (plane, outer, holes) in faces {
+        let denom = d.dot(plane.normal());
+        let signed = plane.signed_distance(p);
+        if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
+            if signed.abs() <= tol::PLANE_DIST {
+                ambiguous = true;
+            }
+            continue;
+        }
+        let t = -signed / denom;
+        if t <= tol::POINT_MERGE {
+            continue;
+        }
+        let hit = p + d * t;
+        let near = |poly: &[Point3]| {
+            (0..poly.len()).any(|i| {
+                point_on_segment(hit, poly[i], poly[(i + 1) % poly.len()], tol::POINT_MERGE)
+            })
+        };
+        if near(outer) || holes.iter().any(|h| near(h)) {
+            ambiguous = true;
+            continue;
+        }
+        let n = plane.normal();
+        if point_inside_polygon(hit, outer, n)
+            && !holes.iter().any(|h| point_inside_polygon(hit, h, n))
+        {
+            count += 1;
+        }
+    }
+    (count, ambiguous)
+}
+
+/// Detects and undoes the exact inverse of [`push_pull_build_walls`]'s
+/// unweld: a push whose sweep exactly closes a coplanar step it (or an
+/// earlier coplanar-aware push) built. A previously built cut wall is itself
+/// perpendicular to the moved face, so it classifies as an ordinary
+/// `Transverse` boundary edge ('s dot-product test cannot tell "an
+/// original side wall" from "a wall straddling a cut" apart — both are
+/// perpendicular); this scan instead recognizes the wall by shape: a quad
+/// whose far edge (two hops around from the moved face's edge) is itself
+/// twinned with a face that IS coplanar with the moved face — the sibling the
+/// wall was built to bridge to.
+///
+/// Returns `Ok(Some(removed_faces))` if every such wall's far edge sits
+/// exactly `sweep` away (within [`tol::POINT_MERGE`]) — i.e. the wall is
+/// collapsing to zero height — after welding `face`'s boundary straight back
+/// onto the sibling the wall was bridging to and removing the wall and its
+/// spliced junction steps. Returns `Ok(None)` (object untouched, no Transverse
+/// edge qualifies) so the caller falls back to [`push_pull_build_walls`]'s
+/// raise path — including the ordinary case where every neighbor really is
+/// just an unrelated side wall.
+///
+/// Scope: this only ever welds a step shut. It never merges `face`
+/// into a flush single face with its sibling (the cut edge persists, exactly
+/// reversing the unweld) and never attempts push-through.
+struct CollapsePlan {
+    h: HalfEdgeId,
+    h_hole: HalfEdgeId,
+    hb: HalfEdgeId,
+    hc: HalfEdgeId,
+    hd: HalfEdgeId,
+    wall_face: FaceId,
+    far_a: VertexId,
+    far_b: VertexId,
+}
+
+/// Pure (non-mutating) detection half of `try_collapse_coplanar_step`: finds
+/// every Transverse boundary half-edge `h` (moved face, origin `va`, twin
+/// `h_hole` on a candidate wall `w`) where `w`'s loop is a quad
+/// `h_hole(vb) -> hb(va) -> hc(far_a) -> hd(far_b) -> h_hole`, `hc`'s far-side
+/// twin is coplanar with the moved face (the telltale sign `w` is a cut wall,
+/// not an ordinary side wall), and both `position(va) + sweep ==
+/// position(far_a)` and `position(vb) + sweep == position(far_b)` — i.e. this
+/// sweep exactly closes a step built by an earlier coplanar-aware push.
+///
+/// Read-only: callers use this both to decide whether to apply the collapse
+/// (`try_collapse_coplanar_step`) and to know — *before* Step 3's
+/// interior-obstruction guard runs — that vertices on these candidate walls
+/// are part of the step machinery, not a genuine fixed obstruction.
+fn find_collapse_plans(
+    obj: &Object,
+    face: FaceId,
+    boundary_loops: &[LoopId],
+    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
+    sweep: Vec3,
+) -> Vec<CollapsePlan> {
+    let face_normal = obj.faces[face].plane.normal();
+    let mut plans = Vec::new();
+    for &loop_id in boundary_loops {
+        for h in obj.loop_half_edges(loop_id) {
+            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Transverse) {
+                continue;
+            }
+            let va = obj.half_edges[h].origin;
+            let h_hole = obj.half_edges[h].twin.expect("watertight boundary edge");
+            let vb = obj.half_edges[h_hole].origin;
+            let hb = obj.half_edges[h_hole].next;
+            let hc = obj.half_edges[hb].next;
+            let hd = obj.half_edges[hc].next;
+            if obj.half_edges[hd].next != h_hole {
+                continue; // wall isn't a quad — not a cut wall built by us.
+            }
+            let Some(hc_twin) = obj.half_edges[hc].twin else {
+                continue;
+            };
+            let far_face = obj.loops[obj.half_edges[hc_twin].loop_id].face;
+            let far_normal = obj.faces[far_face].plane.normal();
+            // A step sibling shares the moved face's normal DIRECTION (dot ≈ +1):
+            // it came from the same `split_face`d face. The opposite side of the
+            // solid is antiparallel (dot ≈ -1); collapsing onto it is push-THROUGH,
+            // not a step re-merge, and must fall through to the WouldVanish path.
+            if face_normal.dot(far_normal) < 1.0 - tol::NORMAL_DIRECTION {
+                continue; // far side isn't a same-facing coplanar sibling.
+            }
+            let far_a = obj.half_edges[hc].origin;
+            let far_b = obj.half_edges[hd].origin;
+            let target_a = obj.vertices[va].position + sweep;
+            let target_b = obj.vertices[vb].position + sweep;
+            if !target_a.approx_eq(obj.vertices[far_a].position, tol::POINT_MERGE)
+                || !target_b.approx_eq(obj.vertices[far_b].position, tol::POINT_MERGE)
+            {
+                continue; // shape matches a cut wall, but this push doesn't close it exactly.
+            }
+            let wall_face = obj.loops[obj.half_edges[h_hole].loop_id].face;
+            plans.push(CollapsePlan {
+                h,
+                h_hole,
+                hb,
+                hc,
+                hd,
+                wall_face,
+                far_a,
+                far_b,
+            });
+        }
+    }
+    plans
+}
+
+/// The plan-finder for [`Object::unbuild_push_pull`], the exact inverse of a
+/// translate-and-build sweep. Like [`find_collapse_plans`] it matches each
+/// recorded quad wall on the moved face's boundary and reads off the collapse
+/// plan, but it is driven by the RECORDED set of `walls` the forward push
+/// created rather than by re-detecting collapsibility, and it therefore drops
+/// the coplanar-far-face restriction: a wall built along a *slanted* neighbor
+/// bridges a face that is NOT coplanar with the moved one, yet is removed
+/// identically.
+///
+/// A recorded wall must still be the **pristine quad** it was built as, or its
+/// plan is skipped so the caller refuses typed (leaving the object untouched)
+/// rather than corrupting it. Undo is LIFO, so in the common case the wall is
+/// pristine — but an intervening op can alter it (e.g. a `split_face_inner`
+/// appends a hole loop and a sub-face, leaving the outer 4-cycle untouched),
+/// and removing such a wall would orphan its hole (a debug validator panic, a
+/// release corruption). The completeness check is therefore: only walls in
+/// `walls`, whose outer loop is a clean 4-cycle, that carry **no inner loops**,
+/// and that this inverse `sweep` (`−distance·n`) closes exactly. Any deviation
+/// skips the wall; the caller requires every recorded wall to yield a plan, so
+/// one skip is a typed refusal, not a partial un-build.
+fn find_unbuild_plans(
+    obj: &Object,
+    boundary_loops: &[LoopId],
+    walls: &std::collections::BTreeSet<FaceId>,
+    sweep: Vec3,
+) -> Vec<CollapsePlan> {
+    let mut plans = Vec::new();
+    for &loop_id in boundary_loops {
+        for h in obj.loop_half_edges(loop_id) {
+            let Some(h_hole) = obj.half_edges[h].twin else {
+                continue;
+            };
+            let wall_face = obj.loops[obj.half_edges[h_hole].loop_id].face;
+            if !walls.contains(&wall_face) {
+                continue;
+            }
+            // A hole appended to the wall (by an intervening imprint) leaves the
+            // outer 4-cycle intact but would be orphaned on removal: refuse.
+            if !obj.faces[wall_face].inner_loops.is_empty() {
+                continue;
+            }
+            let vb = obj.half_edges[h_hole].origin;
+            let hb = obj.half_edges[h_hole].next;
+            let hc = obj.half_edges[hb].next;
+            let hd = obj.half_edges[hc].next;
+            if obj.half_edges[hd].next != h_hole {
+                continue; // recorded face's outer loop is no longer a quad.
+            }
+            let va = obj.half_edges[h].origin;
+            let far_a = obj.half_edges[hc].origin;
+            let far_b = obj.half_edges[hd].origin;
+            let target_a = obj.vertices[va].position + sweep;
+            let target_b = obj.vertices[vb].position + sweep;
+            if !target_a.approx_eq(obj.vertices[far_a].position, tol::POINT_MERGE)
+                || !target_b.approx_eq(obj.vertices[far_b].position, tol::POINT_MERGE)
+            {
+                continue; // this inverse sweep does not close the recorded wall.
+            }
+            plans.push(CollapsePlan {
+                h,
+                h_hole,
+                hb,
+                hc,
+                hd,
+                wall_face,
+                far_a,
+                far_b,
+            });
+        }
+    }
+    plans
+}
+
+fn try_collapse_coplanar_step(
+    obj: &mut Object,
+    face: FaceId,
+    boundary_loops: &[LoopId],
+    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
+    sweep: Vec3,
+) -> Result<Option<Vec<FaceId>>, PushPullError> {
+    let plans = find_collapse_plans(obj, face, boundary_loops, edge_kinds, sweep);
+    if plans.is_empty() {
+        return Ok(None);
+    }
+    collapse_plans_surgery(obj, face, boundary_loops, &plans, sweep).map(Some)
+}
+
+/// The topology surgery that reverses a translate-and-build sweep: given
+/// `plans` (one per pristine quad wall to remove), it welds each moved-face
+/// wall edge back onto the neighbor edge the wall bridged, retires the raised
+/// junction copies onto their originals, un-splices the junction steps that
+/// reshaped the straddling transverse walls, removes the wall faces, and
+/// translates every non-welded boundary vertex back by `sweep`. Shared by the
+/// coplanar step-close ([`try_collapse_coplanar_step`], plans from
+/// [`find_collapse_plans`]) and the exact push/pull inverse
+/// ([`Object::unbuild_push_pull`], plans from [`find_unbuild_plans`], which may
+/// bridge a non-coplanar neighbor). Returns the removed wall faces.
+fn collapse_plans_surgery(
+    obj: &mut Object,
+    face: FaceId,
+    boundary_loops: &[LoopId],
+    plans: &[CollapsePlan],
+    sweep: Vec3,
+) -> Result<Vec<FaceId>, PushPullError> {
+    // Every vertex on the moved face's boundary that ISN'T a junction welded
+    // back onto a sibling below (i.e. every corner Pass 1 of the original
+    // push translated in place rather than raising, because both its incident
+    // edges were Transverse) still needs to translate back by `sweep` now —
+    // exactly mirroring the fast (pure-translate) path. Collected up front,
+    // before any welding below changes the loops' membership.
+    let welded: std::collections::BTreeSet<VertexId> =
+        plans.iter().flat_map(|p| [p.far_a, p.far_b]).collect();
+    let mut to_translate: Vec<VertexId> = Vec::new();
+    for &loop_id in boundary_loops {
+        for h in obj.loop_half_edges(loop_id) {
+            let v = obj.half_edges[h].origin;
+            if !welded.contains(&v) && !to_translate.contains(&v) {
+                to_translate.push(v);
+            }
+        }
+    }
+    for v in to_translate {
+        obj.vertices[v].position = obj.vertices[v].position + sweep;
+    }
+
+    let mut removed_faces = Vec::new();
+    // The raised junction copies retired by the re-weld below. They are still
+    // referenced by the straddling transverse side walls (their step vertices),
+    // so after the per-plan surgery every remaining reference to a raised copy
+    // is welded onto its surviving sibling vertex — otherwise a side-wall edge
+    // keeps starting at a vertex the moved face no longer shares, breaking the
+    // twin-origin involution (validate.rs `twin.origin == next.origin`).
+    let mut welds: Vec<(VertexId, VertexId)> = Vec::new();
+    // Loops of every wall being collapsed: a vertical whose twin lives in one
+    // of these is shared with an ADJACENT collapsing wall (interior cut
+    // vertex), not spliced into a transverse wall — see the unsplice below.
+    let collapsing_wall_loops: std::collections::BTreeSet<LoopId> = plans
+        .iter()
+        .map(|p| obj.faces[p.wall_face].outer_loop)
+        .collect();
+    for plan in plans {
+        // Weld `h` directly onto whatever the wall's far edge (`hc`) was
+        // twinned with — exactly reversing `build_coplanar_wall`'s "wc
+        // reuses the old shared edge" move. `h`'s origin retires the raised
+        // copy in favor of `far_a` (mirrors Pass 2's repoint in reverse); its
+        // DESTINATION — `h.next`'s origin, currently the other raised copy —
+        // must likewise retire to `far_b`, or that raised vertex is left
+        // dangling once the wall (its only other referrer) is removed below.
+        let hc_twin = obj.half_edges[plan.hc].twin;
+        let h_next = obj.half_edges[plan.h].next;
+        let raised_a = obj.half_edges[plan.h].origin;
+        let raised_b = obj.half_edges[h_next].origin;
+        if raised_a != plan.far_a {
+            welds.push((raised_a, plan.far_a));
+        }
+        if raised_b != plan.far_b {
+            welds.push((raised_b, plan.far_b));
+        }
+        obj.half_edges[plan.h].origin = plan.far_a;
+        obj.vertices[plan.far_a].outgoing = plan.h;
+        obj.half_edges[h_next].origin = plan.far_b;
+        match hc_twin {
+            Some(t) => {
+                let edge = obj.half_edges[t].edge;
+                obj.half_edges[plan.h].twin = Some(t);
+                obj.half_edges[plan.h].edge = edge;
+                obj.half_edges[t].twin = Some(plan.h);
+                obj.half_edges[t].edge = edge;
+                obj.edges[edge].half_edge = t;
+                obj.edges[edge].twin_half_edge = Some(plan.h);
+            }
+            None => return Err(PushPullError::NonManifoldResult),
+        }
+        obj.vertices[plan.far_b].outgoing = obj.half_edges[plan.h].twin.expect("just set");
+
+        // Un-splice the two junction steps (`hb`/`hd`) from the straddling
+        // transverse walls, undoing whichever of `splice_after`/`splice_before`
+        // created each one. A vertical shared with an ADJACENT collapsing
+        // wall is not a junction step: its twin is that wall's own vertical,
+        // which dies with that wall's removal (and may already be gone if the
+        // adjacent plan ran first) — skip it instead of unsplicing.
+        for &step in &[plan.hb, plan.hd] {
+            let Some(step_he) = obj.half_edges.get(step) else {
+                continue; // removed with an already-collapsed adjacent wall
+            };
+            let step_twin = step_he.twin.expect("junction step is twinned");
+            let Some(twin_he) = obj.half_edges.get(step_twin) else {
+                continue; // twin removed with an already-collapsed adjacent wall
+            };
+            if collapsing_wall_loops.contains(&twin_he.loop_id) {
+                continue; // shared vertical of an adjacent collapsing wall
+            }
+            unsplice_step(obj, step_twin);
+        }
+
+        // Remove the wall face, its loop, its 4 half-edges, and the 2 edges
+        // that belonged solely to it (the verticals; the far edge's `Edge`
+        // was just reassigned above, and `h`'s old edge is removed with it).
+        let h_edge = obj.half_edges[plan.h_hole].edge;
+        let hb_edge = obj.half_edges[plan.hb].edge;
+        let hd_edge = obj.half_edges[plan.hd].edge;
+        obj.edges.remove(h_edge);
+        obj.edges.remove(hb_edge);
+        obj.edges.remove(hd_edge);
+        let wall_loop = obj.half_edges[plan.h_hole].loop_id;
+        obj.loops.remove(wall_loop);
+        for &he in &[plan.h_hole, plan.hb, plan.hc, plan.hd] {
+            obj.half_edges.remove(he);
+        }
+        let shell = obj
+            .shells
+            .iter()
+            .find(|(_, s)| s.faces.contains(&plan.wall_face))
+            .map(|(id, _)| id)
+            .expect("wall face belongs to a shell");
+        obj.shells[shell].faces.retain(|&f| f != plan.wall_face);
+        obj.faces.remove(plan.wall_face);
+        removed_faces.push(plan.wall_face);
+    }
+
+    // Weld every retired raised junction copy onto its surviving sibling: any
+    // half-edge still starting at a raised copy (the straddling side walls'
+    // step vertices) is repointed to the original, then the raised vertex is
+    // removed. This restores the twin-origin involution at the junctions.
+    for (raised, survivor) in welds {
+        if raised == survivor || !obj.vertices.contains_key(raised) {
+            continue;
+        }
+        let hes: Vec<HalfEdgeId> = obj
+            .half_edges
+            .iter()
+            .filter(|(_, he)| he.origin == raised)
+            .map(|(h, _)| h)
+            .collect();
+        for h in hes {
+            obj.half_edges[h].origin = survivor;
+        }
+        // `survivor` already has a valid outgoing from the re-weld; the raised
+        // copy is now unreferenced.
+        obj.vertices.remove(raised);
+    }
+
+    // Refit the moved face's plane (its Coplanar edges now sit on the
+    // sibling's old boundary again).
+    refit_face_plane(obj, face)?;
+
+    // Refit the straddling transverse walls' planes too (they un-stepped
+    // back to quads/pentagons and the planarity check must see the new
+    // boundary, never a hand-translated one). Refit every current neighbor
+    // of the moved face — cheap, and correct regardless of which walls were
+    // actually touched.
+    let mut refit_faces: Vec<FaceId> = Vec::new();
+    for &loop_id in boundary_loops {
+        for h in obj.loop_half_edges(loop_id) {
+            if let Some(t) = obj.half_edges[h].twin {
+                let nf = obj.loops[obj.half_edges[t].loop_id].face;
+                if !refit_faces.contains(&nf) {
+                    refit_faces.push(nf);
+                }
+            }
+        }
+    }
+    for nf in refit_faces {
+        refit_face_plane(obj, nf)?;
+    }
+    Ok(removed_faces)
+}
+
+/// Undoes whichever of `splice_after`/`splice_before` created the junction
+/// step half-edge twinned with `step_twin` (the moved face's now-removed
+/// vertical, i.e. `step_twin` is the half-edge actually embedded in the
+/// straddling transverse wall's loop). Two shapes, distinguished by whether
+/// `step_twin`'s origin is the raised vertex (a `splice_after` "down" step,
+/// origin never repointed — just unlink and remove) or the original vertex
+/// (impossible here, since `splice_after` never repoints; kept for the
+/// `splice_before` "up" step, where the step's `next` was repointed to the
+/// raised copy and must be repointed back).
+fn unsplice_step(obj: &mut Object, step_twin: HalfEdgeId) {
+    let prev = obj.half_edges[step_twin].prev;
+    let next = obj.half_edges[step_twin].next;
+    // `splice_after` shape: `step_twin` was inserted between `prev` and
+    // `next`, origin untouched elsewhere — just unlink it.
+    // `splice_before` shape: `step_twin` was inserted between `prev` and
+    // `next`, and `next`'s origin was repointed to the raised copy that is
+    // about to vanish — repoint it back to `step_twin`'s own origin (the
+    // original vertex, which both share).
+    if obj.half_edges[next].origin != obj.half_edges[step_twin].origin {
+        let v_orig = obj.half_edges[step_twin].origin;
+        obj.half_edges[next].origin = v_orig;
+        obj.vertices[v_orig].outgoing = next;
+    }
+    obj.half_edges[prev].next = next;
+    obj.half_edges[next].prev = prev;
+    // The loop's anchor may be the half-edge being removed.
+    let loop_id = obj.half_edges[step_twin].loop_id;
+    if obj.loops[loop_id].first_half_edge == step_twin {
+        obj.loops[loop_id].first_half_edge = next;
+    }
+    // `prev` (and `next`, in the splice_before shape) already have valid
+    // `outgoing` half-edges that survive this removal — `step_twin` was
+    // never anyone's recorded `outgoing` except possibly transiently, and
+    // a quad wall's other three half-edges always include one starting at
+    // each of `step_twin`'s endpoints.
+    obj.half_edges.remove(step_twin);
+}
+
+/// The hybrid surgery behind `push_pull`'s coplanar-aware mode: walks
+/// every boundary loop of the moved face, translating vertices in place where
+/// every incident edge is transverse (the pre- behavior), and unwelding +
+/// building a wall where an edge is coplanar (a `split_face` cut edge shared
+/// with a sibling sub-face).
+///
+/// At a **junction** — a vertex where a coplanar edge meets a transverse one,
+/// i.e. a cut endpoint `split_face` planted on the moved face's outer
+/// boundary — the vertex is shared by the moved face, the sibling, and one
+/// straddling transverse wall. It is unwelded: the moved face gets a raised
+/// copy, while the sibling and a new "step" edge spliced into the straddling
+/// wall's loop keep the original. The straddling wall thereby reshapes from a
+/// quad into an L-shaped (still planar) polygon; its plane is refit from its
+/// new boundary, never translated by hand (KERNEL_GUIDE "Traps").
+///
+/// Mirrors `extrude_sub_face`'s per-edge wall construction (`wa`/`wb`/`wc`/`wd`)
+/// one coplanar edge at a time instead of over a whole imprinted sub-face, so
+/// the wall's two "vertical" half-edges are shared either with the next
+/// coplanar wall around an interior cut vertex (exactly as `extrude_sub_face`
+/// shares them between consecutive walls), or with the spliced step inside a
+/// straddling transverse wall at a junction.
+///
+/// Returns the newly created wall faces, or refuses with a typed
+/// [`PushPullError`] (never partially mutates: the caller validates and swaps
+/// only on success).
+fn push_pull_build_walls(
+    obj: &mut Object,
+    face: FaceId,
+    boundary_loops: &[LoopId],
+    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
+    neighbor_faces: &[FaceId],
+    sweep: Vec3,
+) -> Result<Vec<FaceId>, PushPullError> {
+    // A "wall edge" is any non-transverse boundary edge: a coplanar
+    // `split_face` sibling (`dot ≈ 1`) or a slanted wedge/facet neighbor
+    // (`0 < dot < 1`). Both unweld and grow a fresh quad wall — the
+    // construction is identical; only the wall's resulting plane differs. A
+    // transverse edge (`dot ≈ 0`) instead keeps its neighbor and extends it in
+    // place. (Before the flat-face translate-and-build generalization this
+    // path saw only coplanar edges; slanted ones stretched. Now they share
+    // exactly one surgery.)
+    let is_wall_edge = |h: &HalfEdgeId| {
+        matches!(
+            edge_kinds[h],
+            BoundaryEdgeKind::Coplanar | BoundaryEdgeKind::Slanted
+        )
+    };
+    // Snapshot each boundary loop's half-edges AND original vertices up front
+    // — every later pass mutates origins/positions, so the un-raised vertex
+    // at each position must be read once, before any of that happens.
+    struct LoopWalk {
+        /// Boundary half-edges of the moved face, in cycle order.
+        hes: Vec<HalfEdgeId>,
+        /// `verts[k]` is the ORIGINAL vertex at `hes[k]`'s origin.
+        verts: Vec<VertexId>,
+    }
+    let walks: Vec<LoopWalk> = boundary_loops
+        .iter()
+        .map(|&loop_id| {
+            let hes: Vec<HalfEdgeId> = obj.loop_half_edges(loop_id).collect();
+            let verts: Vec<VertexId> = hes.iter().map(|&h| obj.half_edges[h].origin).collect();
+            LoopWalk { hes, verts }
+        })
+        .collect();
+
+    // --- Pass 1: classify each boundary vertex and create raised copies. ---
+    // A vertex is "raised" (gets a fresh copy at +sweep; the original stays
+    // put for whoever doesn't move) iff at least one of its two incident
+    // boundary half-edges in the moved face's loop is Coplanar. A vertex with
+    // both edges Transverse translates in place, exactly as pre-.
+    let mut raised: std::collections::BTreeMap<VertexId, VertexId> =
+        std::collections::BTreeMap::new();
+    for walk in &walks {
+        let n = walk.hes.len();
+        for k in 0..n {
+            let h = walk.hes[k];
+            let h_prev = walk.hes[(k + n - 1) % n];
+            let needs_raise = is_wall_edge(&h) || is_wall_edge(&h_prev);
+            let v = walk.verts[k];
+            if needs_raise {
+                raised.entry(v).or_insert_with(|| {
+                    let p = obj.vertices[v].position + sweep;
+                    obj.vertices.insert(Vertex {
+                        position: p,
+                        outgoing: HalfEdgeId::default(),
+                    })
+                });
+            } else {
+                // Pure transverse corner: translate in place (shared with the
+                // transverse neighbor wall, which extends to follow it).
+                obj.vertices[v].position = obj.vertices[v].position + sweep;
+            }
+        }
+    }
+
+    // --- Pass 2: repoint the moved face's own boundary onto raised copies. ---
+    // The original vertex keeps its identity (the sibling/wall still uses
+    // it), so if its `outgoing` happened to be this now-repointed half-edge,
+    // it must be repatched to something that still starts there — a sibling
+    // or wall half-edge sharing the same original vertex always exists,
+    // since a raised vertex is by definition shared with at least one other
+    // face that did not move.
+    for walk in &walks {
+        let n = walk.hes.len();
+        for (k, &h) in walk.hes.iter().enumerate() {
+            let v_orig = walk.verts[k];
+            if let Some(&v_raised) = raised.get(&v_orig) {
+                if obj.vertices[v_orig].outgoing == h {
+                    let h_prev = walk.hes[(k + n - 1) % n];
+                    let fallback = obj.half_edges[h_prev]
+                        .twin
+                        .expect("watertight boundary edge");
+                    obj.vertices[v_orig].outgoing = fallback;
+                }
+                obj.half_edges[h].origin = v_raised;
+                obj.vertices[v_raised].outgoing = h;
+            }
+        }
+    }
+
+    // --- Pass 3: per junction (a raised vertex where a Transverse edge meets
+    // a Coplanar one in the moved face's loop), splice a "step" half-edge
+    // into the straddling transverse wall's loop, connecting the raised copy
+    // to the original. Exactly one direction is created here — `down`
+    // (raised -> original) if the junction sits at a Transverse half-edge's
+    // ORIGIN, `up` (original -> raised) if it sits at its DESTINATION — the
+    // opposite direction is the new coplanar wall's vertical (Pass 4), twinned
+    // to this one.
+    //
+    // Reasoning (mirroring `extrude_sub_face`'s wb[k] <-> wd[k-1] sharing):
+    // the wall's existing half-edge already agrees with the moved face on the
+    // non-junction end (translated in place in Pass 1), so only the junction
+    // end needs a new vertex spliced into the wall's loop.
+    let mut steps: std::collections::BTreeMap<VertexId, StepEdges> =
+        std::collections::BTreeMap::new();
+    for walk in &walks {
+        let n = walk.hes.len();
+        for k in 0..n {
+            let h = walk.hes[k];
+            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Transverse) {
+                continue;
+            }
+            let twin_h = obj.half_edges[h].twin.expect("watertight boundary edge");
+            let wall_loop = obj.half_edges[twin_h].loop_id;
+
+            // Junction at `h`'s origin (walk.verts[k]): `twin_h`'s
+            // DESTINATION is this vertex (twin_h runs dest_of_h -> origin_of_h).
+            // Splice a `down` step (raised -> original) right after `twin_h`.
+            if let Some(&v_raised) = raised.get(&walk.verts[k]) {
+                let v = walk.verts[k];
+                steps
+                    .entry(v)
+                    .or_default()
+                    .down
+                    .get_or_insert_with(|| splice_after(obj, wall_loop, twin_h, v_raised, v));
+            }
+            // Junction at `h`'s destination (walk.verts[(k+1)%n]): `twin_h`'s
+            // ORIGIN is this vertex. Splice an `up` step (original -> raised)
+            // right before `twin_h`, then repoint `twin_h`'s origin to raised.
+            let v_dest = walk.verts[(k + 1) % n];
+            if let Some(&v_raised) = raised.get(&v_dest) {
+                steps
+                    .entry(v_dest)
+                    .or_default()
+                    .up
+                    .get_or_insert_with(|| splice_before(obj, wall_loop, twin_h, v_dest, v_raised));
+            }
+        }
+    }
+
+    // --- Pass 4: build a wall along each Coplanar boundary edge, mirroring
+    // `extrude_sub_face`'s per-edge construction. The two verticals at each
+    // end either reuse a Pass-3 step (junction) or are created fresh here and
+    // shared with the next coplanar wall around an interior cut vertex
+    // (exactly as `extrude_sub_face`'s `wb[k]`/`wd[k-1]` share one).
+    let shell = obj
+        .shells
+        .iter()
+        .find(|(_, s)| s.faces.contains(&face))
+        .map(|(id, _)| id)
+        .expect("moved face belongs to a shell");
+    let mut created_faces = Vec::new();
+    for walk in &walks {
+        let n = walk.hes.len();
+        for k in 0..n {
+            let h = walk.hes[k];
+            if !is_wall_edge(&h) {
+                continue;
+            }
+            let v_a = walk.verts[k]; // edge origin, original vertex
+            let v_b = walk.verts[(k + 1) % n]; // edge dest, original vertex
+            let va_raised = raised[&v_a];
+            let vb_raised = raised[&v_b];
+            let h_sub = h; // already repointed to va_raised by Pass 2
+            let h_hole = obj.half_edges[h].twin.expect("watertight boundary edge");
+
+            // `wb = down(v_a)` (va_raised -> v_a), this wall's own half-edge.
+            // Its twin is `up(v_a)`: either Pass 3's junction splice, an
+            // earlier Pass-4 wall's `wd` at this same interior-cut vertex, or
+            // freshly created now (registered under `.down` for a later wall
+            // to find as ITS `up(v_a)` partner).
+            let wb = obj.new_half_edge(va_raised);
+            match steps.entry(v_a).or_default().up.take() {
+                Some(partner) => twin_half_edges(obj, wb, partner),
+                None => steps.entry(v_a).or_default().down = Some(wb),
+            }
+            // `wd = up(v_b)` (v_b -> vb_raised), this wall's own half-edge.
+            // Its twin is `down(v_b)`: Pass 3's junction splice, an earlier
+            // Pass-4 wall's `wb` at this vertex, or created now.
+            let wd = obj.new_half_edge(v_b);
+            match steps.entry(v_b).or_default().down.take() {
+                Some(partner) => twin_half_edges(obj, wd, partner),
+                None => steps.entry(v_b).or_default().up = Some(wd),
+            }
+
+            let wface =
+                build_coplanar_wall(obj, h_sub, h_hole, wb, wd, va_raised, vb_raised, v_a, v_b)?;
+            obj.shells[shell].faces.push(wface);
+            created_faces.push(wface);
+        }
+    }
+
+    // --- Pass 5: refit planes. ---
+    // Moved face.
+    {
+        refit_face_plane(obj, face)?;
+    }
+    // Every original neighbor face — transverse walls (extended or step-
+    // reshaped) and the wall-edge siblings are all unaffected in count here;
+    // `neighbor_faces` already excludes the moved face itself.
+    for &nf in neighbor_faces {
+        refit_face_plane(obj, nf)?;
+    }
+
+    Ok(created_faces)
+}
+
+/// Per-original-vertex bookkeeping for `push_pull_build_walls`'s unweld:
+/// `down` is a half-edge `raised(v) -> v`; `up` is `v -> raised(v)`. Each is
+/// filled by whichever pass (junction splice, or an earlier coplanar wall at
+/// an interior cut vertex) creates that direction first; the next consumer
+/// twins against it instead of creating a duplicate.
+#[derive(Default)]
+struct StepEdges {
+    down: Option<HalfEdgeId>,
+    up: Option<HalfEdgeId>,
+}
+
+impl Object {
+    /// A bare half-edge with `origin` set and everything else left as a
+    /// placeholder, for callers that wire `next`/`prev`/`loop_id`/`edge`/`twin`
+    /// themselves afterward (mirrors the `mk` closure in `extrude_sub_face`).
+    fn new_half_edge(&mut self, origin: VertexId) -> HalfEdgeId {
+        self.half_edges.insert(HalfEdge {
+            origin,
+            twin: None,
+            next: HalfEdgeId::default(),
+            prev: HalfEdgeId::default(),
+            edge: EdgeId::default(),
+            loop_id: LoopId::default(),
+        })
+    }
+}
+
+/// Refits `face`'s plane from its current outer loop, refusing the two
+/// silent in-plane corruptions a vertex translation can produce: a boundary
+/// that self-intersects (the face folded over itself laterally), and a
+/// winding whose Newell normal flipped against the face's previous
+/// orientation (net signed area crossed zero). Both keep every vertex on the
+/// plane and every twin consistent, so the final validator backstop cannot
+/// see them — this refit is the only place they are observable.
+fn refit_face_plane(obj: &mut Object, face: FaceId) -> Result<(), PushPullError> {
+    let outer_loop = obj.faces[face].outer_loop;
+    let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
+    if !polygon_is_simple(&pts) {
+        return Err(PushPullError::NonManifoldResult);
+    }
+    let new_plane = Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    if new_plane.normal().dot(obj.faces[face].plane.normal()) <= 0.0 {
+        return Err(PushPullError::NonManifoldResult);
+    }
+    // Inner loops must stay strictly inside the (possibly reshaped) outer
+    // boundary: a translation that swings a boundary edge across an imprinted
+    // ring leaves the ring poking outside its face — planar, twin-consistent,
+    // invisible to the validator, and fatal to the ring's own inverses.
+    for &il in &obj.faces[face].inner_loops {
+        let hole: Vec<Point3> = obj.loop_positions(il).collect();
+        if boundaries_contact(&pts, &hole)
+            || hole
+                .iter()
+                .any(|&hp| !point_inside_polygon(hp, &pts, new_plane.normal()))
+        {
+            return Err(PushPullError::NonManifoldResult);
+        }
+    }
+    obj.faces[face].plane = new_plane;
+    Ok(())
+}
+
+/// Validates the RESULT of a translate-and-build sweep
+/// ([`push_pull_build_walls`]), reusing the sweep-validity checks the earlier
+/// stretch path introduced: no zero-length boundary edge, every reshaped or
+/// created face boundary well-formed ([`check_face_boundary`]), no face
+/// interpenetration ([`faces_improperly_contact`]), and no disjoint shell
+/// engulfed by the swept prism.
+///
+/// Together these BOUND the sweep by geometric validity, which is the whole
+/// asymmetry the flat-face push/pull ruling asks for:
+/// - An **outward pull** erects a prism of fresh material on the face; on a
+///   convex-enough solid the moved face travels away from the fixed structure
+///   and the new walls are non-degenerate, so every check passes and the pull
+///   is unbounded regardless of neighbor angle. (The interpenetration and
+///   engulfment checks still fire if a pull's walls would reach into a distant
+///   part of a non-convex solid — a real self-intersection, refused typed.)
+/// - An **inward push** refuses typed the instant the moved face conflicts
+///   with the fixed structure it is pushed into — for a wedge's slant face the
+///   very first infinitesimal push drives the moved face across a fixed
+///   neighbor's interior, so it cannot be pushed in at all; the exact limit is
+///   derived here, never hardcoded.
+///
+/// The object is inspected, never mutated (the caller commits only on `Ok`).
+fn validate_sweep_result(
+    obj: &Object,
+    face: FaceId,
+    orig_plane: Plane,
+    old_outer: &[Point3],
+    old_holes: &[Vec<Point3>],
+    created_faces: &[FaceId],
+    distance: f64,
+) -> Result<(), PushPullError> {
+    let normal = orig_plane.normal();
+
+    // Touched = the moved face, the walls just erected, and every face still
+    // adjacent to the moved face (the transverse neighbors reshaped by spliced
+    // junction steps). These hold all the geometry the sweep created or moved;
+    // the fixed neighbors beyond the new walls never moved.
+    let mut touched: std::collections::BTreeSet<FaceId> = created_faces.iter().copied().collect();
+    touched.insert(face);
+    for lid in std::iter::once(obj.faces[face].outer_loop)
+        .chain(obj.faces[face].inner_loops.iter().copied())
+    {
+        for h in obj.loop_half_edges(lid) {
+            if let Some(t) = obj.half_edges[h].twin {
+                touched.insert(obj.loops[obj.half_edges[t].loop_id].face);
+            }
+        }
+    }
+
+    // Zero-length boundary edges are the collapse signature (a wall or the
+    // moved face itself pushed flat): positions merge while the half-edge
+    // structure still holds distinct vertices, which the validator cannot see.
+    for &tf in &touched {
+        let loops: Vec<LoopId> = std::iter::once(obj.faces[tf].outer_loop)
+            .chain(obj.faces[tf].inner_loops.iter().copied())
+            .collect();
+        for lid in loops {
+            let pts: Vec<Point3> = obj.loop_positions(lid).collect();
+            for (i, &pt) in pts.iter().enumerate() {
+                if pt.approx_eq(pts[(i + 1) % pts.len()], tol::POINT_MERGE) {
+                    return Err(PushPullError::NonManifoldResult);
+                }
+            }
+        }
+    }
+
+    // The pushed-past-flat family (a self-intersecting boundary, a flipped
+    // Newell normal, an escaped or overlapping hole ring) on every touched
+    // face. A degenerate wall (from_polygon fails) is refused here too.
+    for &tf in &touched {
+        check_face_boundary(obj, tf)?;
+    }
+
+    // Interpenetration guard (DEVELOPMENT.md rule 4). Any touched face
+    // contacting another face of the object away from the elements they
+    // legitimately share (common vertices, twin edges) is a self-intersection
+    // that stays planar and twin-consistent — invisible to the structural
+    // validator, observable only here. This is what stops an inward push the
+    // moment the moved face crosses a fixed neighbor.
+    let all_faces: Vec<FaceId> = obj.faces.keys().collect();
+    for &t in &touched {
+        for &g in &all_faces {
+            if g == t || (touched.contains(&g) && g <= t) {
+                continue;
+            }
+            if faces_improperly_contact(obj, t, g) {
+                return Err(PushPullError::NonManifoldResult);
+            }
+        }
+    }
+
+    // Engulfment guard: interpenetration cannot see a small disjoint shell the
+    // moved face sweeps cleanly PAST — afterwards nothing intersects, but the
+    // shell sits inside newly claimed material. The moved face translated
+    // rigidly, so the swept region is the prism bounded by the original and
+    // translated planes and, laterally, by the face's old/new footprints. Any
+    // vertex of geometry uninvolved in the sweep that lands strictly inside
+    // that prism was swept over: refuse. (Touched faces' own vertices are
+    // exempt — they legitimately occupy the band.)
+    let touched_verts: std::collections::BTreeSet<VertexId> = touched
+        .iter()
+        .flat_map(|&tf| {
+            std::iter::once(obj.faces[tf].outer_loop)
+                .chain(obj.faces[tf].inner_loops.iter().copied())
+                .collect::<Vec<_>>()
+        })
+        .flat_map(|lid| obj.loop_half_edges(lid).collect::<Vec<_>>())
+        .map(|h| obj.half_edges[h].origin)
+        .collect();
+    let new_outer: Vec<Point3> = obj.loop_positions(obj.faces[face].outer_loop).collect();
+    let new_holes: Vec<Vec<Point3>> = obj.faces[face]
+        .inner_loops
+        .iter()
+        .map(|&il| obj.loop_positions(il).collect())
+        .collect();
+    let inside_footprint = |p: Point3, outer: &[Point3], holes: &[Vec<Point3>]| {
+        point_inside_polygon(p, outer, normal)
+            && !holes.iter().any(|h| point_inside_polygon(p, h, normal))
+    };
+    for (vid, vtx) in &obj.vertices {
+        if touched_verts.contains(&vid) {
+            continue;
+        }
+        let sd = orig_plane.signed_distance(vtx.position);
+        let in_band = if distance > 0.0 {
+            sd > tol::POINT_MERGE && sd < distance - tol::POINT_MERGE
+        } else {
+            sd < -tol::POINT_MERGE && sd > distance + tol::POINT_MERGE
+        };
+        if in_band
+            && (inside_footprint(vtx.position, old_outer, old_holes)
+                || inside_footprint(vtx.position, &new_outer, &new_holes))
+        {
+            return Err(PushPullError::NonManifoldResult);
+        }
+    }
+
+    Ok(())
+}
 
 /// Whether faces `a` and `b` of one Object make contact anywhere other than
 /// along the elements they legitimately share — their common vertices and
@@ -3392,680 +4493,63 @@ fn coplanar_segment_contacts(p: Point3, q: Point3, r: Point3, s: Point3, n: Vec3
     Vec::new()
 }
 
-/// One face of a closed shell, flattened for the parity cast: its plane,
-/// outer loop positions, and hole loop positions.
-type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
-
-/// A few non-axis-aligned ray directions for [`point_in_shell_faces`]; the
-/// first one whose cast grazes no face boundary decides the parity (same
-/// posture as the boolean classifier's `RAY_DIRS`).
-const WALL_GUARD_RAY_DIRS: [Vec3; 4] = [
-    Vec3::new(0.4651, 0.7345, 0.4949),
-    Vec3::new(0.8012, -0.3461, 0.4877),
-    Vec3::new(-0.3299, 0.5813, 0.7438),
-    Vec3::new(0.1234, -0.5678, 0.8137),
-];
-
-/// Point-in-solid by ray-cast parity against a closed face set — the boolean
-/// classifier's mechanism (`crates/kernel/src/boolean.rs::point_in_solid`),
-/// restated over plain loop positions for the whole-wall offset guards.
-/// Tries each candidate direction until one casts cleanly (no boundary
-/// graze, no in-plane run through `p`); falls back to the first direction's
-/// count if all graze. Deterministic either way.
-fn point_in_shell_faces(faces: &[ShellFace], p: Point3) -> bool {
-    for d in WALL_GUARD_RAY_DIRS {
-        let (count, ambiguous) = shell_face_ray_cast(faces, p, d);
-        if !ambiguous {
-            return count % 2 == 1;
-        }
-    }
-    shell_face_ray_cast(faces, p, WALL_GUARD_RAY_DIRS[0]).0 % 2 == 1
-}
-
-/// Counts forward crossings of the ray `p + t·d` (t > 0) through the face
-/// set, flagging the cast ambiguous if a hit grazes a face boundary or the
-/// ray lies in a face's plane through `p`.
-fn shell_face_ray_cast(faces: &[ShellFace], p: Point3, d: Vec3) -> (usize, bool) {
-    let mut count = 0;
-    let mut ambiguous = false;
-    for (plane, outer, holes) in faces {
-        let denom = d.dot(plane.normal());
-        let signed = plane.signed_distance(p);
-        if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
-            if signed.abs() <= tol::PLANE_DIST {
-                ambiguous = true;
-            }
-            continue;
-        }
-        let t = -signed / denom;
-        if t <= tol::POINT_MERGE {
-            continue;
-        }
-        let hit = p + d * t;
-        let near = |poly: &[Point3]| {
-            (0..poly.len()).any(|i| {
-                point_on_segment(hit, poly[i], poly[(i + 1) % poly.len()], tol::POINT_MERGE)
-            })
-        };
-        if near(outer) || holes.iter().any(|h| near(h)) {
-            ambiguous = true;
-            continue;
-        }
-        let n = plane.normal();
-        if point_inside_polygon(hit, outer, n)
-            && !holes.iter().any(|h| point_inside_polygon(hit, h, n))
-        {
-            count += 1;
-        }
-    }
-    (count, ambiguous)
-}
-
-/// Detects and undoes the exact inverse of [`push_pull_coplanar_aware`]'s
-/// unweld: a push whose sweep exactly closes a coplanar step it (or an
-/// earlier coplanar-aware push) built. A previously built cut wall is itself
-/// perpendicular to the moved face, so it classifies as an ordinary
-/// `Transverse` boundary edge ('s dot-product test cannot tell "an
-/// original side wall" from "a wall straddling a cut" apart — both are
-/// perpendicular); this scan instead recognizes the wall by shape: a quad
-/// whose far edge (two hops around from the moved face's edge) is itself
-/// twinned with a face that IS coplanar with the moved face — the sibling the
-/// wall was built to bridge to.
-///
-/// Returns `Ok(Some(removed_faces))` if every such wall's far edge sits
-/// exactly `sweep` away (within [`tol::POINT_MERGE`]) — i.e. the wall is
-/// collapsing to zero height — after welding `face`'s boundary straight back
-/// onto the sibling the wall was bridging to and removing the wall and its
-/// spliced junction steps. Returns `Ok(None)` (object untouched, no Transverse
-/// edge qualifies) so the caller falls back to [`push_pull_coplanar_aware`]'s
-/// raise path — including the ordinary case where every neighbor really is
-/// just an unrelated side wall.
-///
-/// Scope: this only ever welds a step shut. It never merges `face`
-/// into a flush single face with its sibling (the cut edge persists, exactly
-/// reversing the unweld) and never attempts push-through.
-struct CollapsePlan {
-    h: HalfEdgeId,
-    h_hole: HalfEdgeId,
-    hb: HalfEdgeId,
-    hc: HalfEdgeId,
-    hd: HalfEdgeId,
-    wall_face: FaceId,
-    far_a: VertexId,
-    far_b: VertexId,
-}
-
-/// Pure (non-mutating) detection half of `try_collapse_coplanar_step`: finds
-/// every Transverse boundary half-edge `h` (moved face, origin `va`, twin
-/// `h_hole` on a candidate wall `w`) where `w`'s loop is a quad
-/// `h_hole(vb) -> hb(va) -> hc(far_a) -> hd(far_b) -> h_hole`, `hc`'s far-side
-/// twin is coplanar with the moved face (the telltale sign `w` is a cut wall,
-/// not an ordinary side wall), and both `position(va) + sweep ==
-/// position(far_a)` and `position(vb) + sweep == position(far_b)` — i.e. this
-/// sweep exactly closes a step built by an earlier coplanar-aware push.
-///
-/// Read-only: callers use this both to decide whether to apply the collapse
-/// (`try_collapse_coplanar_step`) and to know — *before* Step 3's
-/// interior-obstruction guard runs — that vertices on these candidate walls
-/// are part of the step machinery, not a genuine fixed obstruction.
-fn find_collapse_plans(
-    obj: &Object,
-    face: FaceId,
-    boundary_loops: &[LoopId],
-    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
-    sweep: Vec3,
-) -> Vec<CollapsePlan> {
-    let face_normal = obj.faces[face].plane.normal();
-    let mut plans = Vec::new();
-    for &loop_id in boundary_loops {
-        for h in obj.loop_half_edges(loop_id) {
-            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Transverse) {
-                continue;
-            }
-            let va = obj.half_edges[h].origin;
-            let h_hole = obj.half_edges[h].twin.expect("watertight boundary edge");
-            let vb = obj.half_edges[h_hole].origin;
-            let hb = obj.half_edges[h_hole].next;
-            let hc = obj.half_edges[hb].next;
-            let hd = obj.half_edges[hc].next;
-            if obj.half_edges[hd].next != h_hole {
-                continue; // wall isn't a quad — not a cut wall built by us.
-            }
-            let Some(hc_twin) = obj.half_edges[hc].twin else {
-                continue;
-            };
-            let far_face = obj.loops[obj.half_edges[hc_twin].loop_id].face;
-            let far_normal = obj.faces[far_face].plane.normal();
-            // A step sibling shares the moved face's normal DIRECTION (dot ≈ +1):
-            // it came from the same `split_face`d face. The opposite side of the
-            // solid is antiparallel (dot ≈ -1); collapsing onto it is push-THROUGH,
-            // not a step re-merge, and must fall through to the WouldVanish path.
-            if face_normal.dot(far_normal) < 1.0 - tol::NORMAL_DIRECTION {
-                continue; // far side isn't a same-facing coplanar sibling.
-            }
-            let far_a = obj.half_edges[hc].origin;
-            let far_b = obj.half_edges[hd].origin;
-            let target_a = obj.vertices[va].position + sweep;
-            let target_b = obj.vertices[vb].position + sweep;
-            if !target_a.approx_eq(obj.vertices[far_a].position, tol::POINT_MERGE)
-                || !target_b.approx_eq(obj.vertices[far_b].position, tol::POINT_MERGE)
-            {
-                continue; // shape matches a cut wall, but this push doesn't close it exactly.
-            }
-            let wall_face = obj.loops[obj.half_edges[h_hole].loop_id].face;
-            plans.push(CollapsePlan {
-                h,
-                h_hole,
-                hb,
-                hc,
-                hd,
-                wall_face,
-                far_a,
-                far_b,
-            });
-        }
-    }
-    plans
-}
-
-fn try_collapse_coplanar_step(
-    obj: &mut Object,
-    face: FaceId,
-    boundary_loops: &[LoopId],
-    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
-    sweep: Vec3,
-) -> Result<Option<Vec<FaceId>>, PushPullError> {
-    let plans = find_collapse_plans(obj, face, boundary_loops, edge_kinds, sweep);
-    if plans.is_empty() {
-        return Ok(None);
-    }
-
-    // Every vertex on the moved face's boundary that ISN'T a junction welded
-    // back onto a sibling below (i.e. every corner Pass 1 of the original
-    // push translated in place rather than raising, because both its incident
-    // edges were Transverse) still needs to translate back by `sweep` now —
-    // exactly mirroring the fast (pure-translate) path. Collected up front,
-    // before any welding below changes the loops' membership.
-    let welded: std::collections::BTreeSet<VertexId> =
-        plans.iter().flat_map(|p| [p.far_a, p.far_b]).collect();
-    let mut to_translate: Vec<VertexId> = Vec::new();
-    for &loop_id in boundary_loops {
-        for h in obj.loop_half_edges(loop_id) {
-            let v = obj.half_edges[h].origin;
-            if !welded.contains(&v) && !to_translate.contains(&v) {
-                to_translate.push(v);
-            }
-        }
-    }
-    for v in to_translate {
-        obj.vertices[v].position = obj.vertices[v].position + sweep;
-    }
-
-    let mut removed_faces = Vec::new();
-    // The raised junction copies retired by the re-weld below. They are still
-    // referenced by the straddling transverse side walls (their step vertices),
-    // so after the per-plan surgery every remaining reference to a raised copy
-    // is welded onto its surviving sibling vertex — otherwise a side-wall edge
-    // keeps starting at a vertex the moved face no longer shares, breaking the
-    // twin-origin involution (validate.rs `twin.origin == next.origin`).
-    let mut welds: Vec<(VertexId, VertexId)> = Vec::new();
-    // Loops of every wall being collapsed: a vertical whose twin lives in one
-    // of these is shared with an ADJACENT collapsing wall (interior cut
-    // vertex), not spliced into a transverse wall — see the unsplice below.
-    let collapsing_wall_loops: std::collections::BTreeSet<LoopId> = plans
-        .iter()
-        .map(|p| obj.faces[p.wall_face].outer_loop)
-        .collect();
-    for plan in &plans {
-        // Weld `h` directly onto whatever the wall's far edge (`hc`) was
-        // twinned with — exactly reversing `build_coplanar_wall`'s "wc
-        // reuses the old shared edge" move. `h`'s origin retires the raised
-        // copy in favor of `far_a` (mirrors Pass 2's repoint in reverse); its
-        // DESTINATION — `h.next`'s origin, currently the other raised copy —
-        // must likewise retire to `far_b`, or that raised vertex is left
-        // dangling once the wall (its only other referrer) is removed below.
-        let hc_twin = obj.half_edges[plan.hc].twin;
-        let h_next = obj.half_edges[plan.h].next;
-        let raised_a = obj.half_edges[plan.h].origin;
-        let raised_b = obj.half_edges[h_next].origin;
-        if raised_a != plan.far_a {
-            welds.push((raised_a, plan.far_a));
-        }
-        if raised_b != plan.far_b {
-            welds.push((raised_b, plan.far_b));
-        }
-        obj.half_edges[plan.h].origin = plan.far_a;
-        obj.vertices[plan.far_a].outgoing = plan.h;
-        obj.half_edges[h_next].origin = plan.far_b;
-        match hc_twin {
-            Some(t) => {
-                let edge = obj.half_edges[t].edge;
-                obj.half_edges[plan.h].twin = Some(t);
-                obj.half_edges[plan.h].edge = edge;
-                obj.half_edges[t].twin = Some(plan.h);
-                obj.half_edges[t].edge = edge;
-                obj.edges[edge].half_edge = t;
-                obj.edges[edge].twin_half_edge = Some(plan.h);
-            }
-            None => return Err(PushPullError::NonManifoldResult),
-        }
-        obj.vertices[plan.far_b].outgoing = obj.half_edges[plan.h].twin.expect("just set");
-
-        // Un-splice the two junction steps (`hb`/`hd`) from the straddling
-        // transverse walls, undoing whichever of `splice_after`/`splice_before`
-        // created each one. A vertical shared with an ADJACENT collapsing
-        // wall is not a junction step: its twin is that wall's own vertical,
-        // which dies with that wall's removal (and may already be gone if the
-        // adjacent plan ran first) — skip it instead of unsplicing.
-        for &step in &[plan.hb, plan.hd] {
-            let Some(step_he) = obj.half_edges.get(step) else {
-                continue; // removed with an already-collapsed adjacent wall
-            };
-            let step_twin = step_he.twin.expect("junction step is twinned");
-            let Some(twin_he) = obj.half_edges.get(step_twin) else {
-                continue; // twin removed with an already-collapsed adjacent wall
-            };
-            if collapsing_wall_loops.contains(&twin_he.loop_id) {
-                continue; // shared vertical of an adjacent collapsing wall
-            }
-            unsplice_step(obj, step_twin);
-        }
-
-        // Remove the wall face, its loop, its 4 half-edges, and the 2 edges
-        // that belonged solely to it (the verticals; the far edge's `Edge`
-        // was just reassigned above, and `h`'s old edge is removed with it).
-        let h_edge = obj.half_edges[plan.h_hole].edge;
-        let hb_edge = obj.half_edges[plan.hb].edge;
-        let hd_edge = obj.half_edges[plan.hd].edge;
-        obj.edges.remove(h_edge);
-        obj.edges.remove(hb_edge);
-        obj.edges.remove(hd_edge);
-        let wall_loop = obj.half_edges[plan.h_hole].loop_id;
-        obj.loops.remove(wall_loop);
-        for &he in &[plan.h_hole, plan.hb, plan.hc, plan.hd] {
-            obj.half_edges.remove(he);
-        }
-        let shell = obj
-            .shells
-            .iter()
-            .find(|(_, s)| s.faces.contains(&plan.wall_face))
-            .map(|(id, _)| id)
-            .expect("wall face belongs to a shell");
-        obj.shells[shell].faces.retain(|&f| f != plan.wall_face);
-        obj.faces.remove(plan.wall_face);
-        removed_faces.push(plan.wall_face);
-    }
-
-    // Weld every retired raised junction copy onto its surviving sibling: any
-    // half-edge still starting at a raised copy (the straddling side walls'
-    // step vertices) is repointed to the original, then the raised vertex is
-    // removed. This restores the twin-origin involution at the junctions.
-    for (raised, survivor) in welds {
-        if raised == survivor || !obj.vertices.contains_key(raised) {
-            continue;
-        }
-        let hes: Vec<HalfEdgeId> = obj
-            .half_edges
-            .iter()
-            .filter(|(_, he)| he.origin == raised)
-            .map(|(h, _)| h)
-            .collect();
-        for h in hes {
-            obj.half_edges[h].origin = survivor;
-        }
-        // `survivor` already has a valid outgoing from the re-weld; the raised
-        // copy is now unreferenced.
-        obj.vertices.remove(raised);
-    }
-
-    // Refit the moved face's plane (its Coplanar edges now sit on the
-    // sibling's old boundary again).
-    refit_face_plane(obj, face)?;
-
-    // Refit the straddling transverse walls' planes too (they un-stepped
-    // back to quads/pentagons and the planarity check must see the new
-    // boundary, never a hand-translated one). Refit every current neighbor
-    // of the moved face — cheap, and correct regardless of which walls were
-    // actually touched.
-    let mut refit_faces: Vec<FaceId> = Vec::new();
-    for &loop_id in boundary_loops {
-        for h in obj.loop_half_edges(loop_id) {
-            if let Some(t) = obj.half_edges[h].twin {
-                let nf = obj.loops[obj.half_edges[t].loop_id].face;
-                if !refit_faces.contains(&nf) {
-                    refit_faces.push(nf);
-                }
-            }
-        }
-    }
-    for nf in refit_faces {
-        refit_face_plane(obj, nf)?;
-    }
-
-    Ok(Some(removed_faces))
-}
-
-/// Undoes whichever of `splice_after`/`splice_before` created the junction
-/// step half-edge twinned with `step_twin` (the moved face's now-removed
-/// vertical, i.e. `step_twin` is the half-edge actually embedded in the
-/// straddling transverse wall's loop). Two shapes, distinguished by whether
-/// `step_twin`'s origin is the raised vertex (a `splice_after` "down" step,
-/// origin never repointed — just unlink and remove) or the original vertex
-/// (impossible here, since `splice_after` never repoints; kept for the
-/// `splice_before` "up" step, where the step's `next` was repointed to the
-/// raised copy and must be repointed back).
-fn unsplice_step(obj: &mut Object, step_twin: HalfEdgeId) {
-    let prev = obj.half_edges[step_twin].prev;
-    let next = obj.half_edges[step_twin].next;
-    // `splice_after` shape: `step_twin` was inserted between `prev` and
-    // `next`, origin untouched elsewhere — just unlink it.
-    // `splice_before` shape: `step_twin` was inserted between `prev` and
-    // `next`, and `next`'s origin was repointed to the raised copy that is
-    // about to vanish — repoint it back to `step_twin`'s own origin (the
-    // original vertex, which both share).
-    if obj.half_edges[next].origin != obj.half_edges[step_twin].origin {
-        let v_orig = obj.half_edges[step_twin].origin;
-        obj.half_edges[next].origin = v_orig;
-        obj.vertices[v_orig].outgoing = next;
-    }
-    obj.half_edges[prev].next = next;
-    obj.half_edges[next].prev = prev;
-    // The loop's anchor may be the half-edge being removed.
-    let loop_id = obj.half_edges[step_twin].loop_id;
-    if obj.loops[loop_id].first_half_edge == step_twin {
-        obj.loops[loop_id].first_half_edge = next;
-    }
-    // `prev` (and `next`, in the splice_before shape) already have valid
-    // `outgoing` half-edges that survive this removal — `step_twin` was
-    // never anyone's recorded `outgoing` except possibly transiently, and
-    // a quad wall's other three half-edges always include one starting at
-    // each of `step_twin`'s endpoints.
-    obj.half_edges.remove(step_twin);
-}
-
-/// The hybrid surgery behind `push_pull`'s coplanar-aware mode: walks
-/// every boundary loop of the moved face, translating vertices in place where
-/// every incident edge is transverse (the pre- behavior), and unwelding +
-/// building a wall where an edge is coplanar (a `split_face` cut edge shared
-/// with a sibling sub-face).
-///
-/// At a **junction** — a vertex where a coplanar edge meets a transverse one,
-/// i.e. a cut endpoint `split_face` planted on the moved face's outer
-/// boundary — the vertex is shared by the moved face, the sibling, and one
-/// straddling transverse wall. It is unwelded: the moved face gets a raised
-/// copy, while the sibling and a new "step" edge spliced into the straddling
-/// wall's loop keep the original. The straddling wall thereby reshapes from a
-/// quad into an L-shaped (still planar) polygon; its plane is refit from its
-/// new boundary, never translated by hand (KERNEL_GUIDE "Traps").
-///
-/// Mirrors `extrude_sub_face`'s per-edge wall construction (`wa`/`wb`/`wc`/`wd`)
-/// one coplanar edge at a time instead of over a whole imprinted sub-face, so
-/// the wall's two "vertical" half-edges are shared either with the next
-/// coplanar wall around an interior cut vertex (exactly as `extrude_sub_face`
-/// shares them between consecutive walls), or with the spliced step inside a
-/// straddling transverse wall at a junction.
-///
-/// Returns the newly created wall faces, or refuses with a typed
-/// [`PushPullError`] (never partially mutates: the caller validates and swaps
-/// only on success).
-fn push_pull_coplanar_aware(
-    obj: &mut Object,
-    face: FaceId,
-    boundary_loops: &[LoopId],
-    edge_kinds: &std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>,
-    neighbor_faces: &[FaceId],
-    sweep: Vec3,
-) -> Result<Vec<FaceId>, PushPullError> {
-    // Snapshot each boundary loop's half-edges AND original vertices up front
-    // — every later pass mutates origins/positions, so the un-raised vertex
-    // at each position must be read once, before any of that happens.
-    struct LoopWalk {
-        /// Boundary half-edges of the moved face, in cycle order.
-        hes: Vec<HalfEdgeId>,
-        /// `verts[k]` is the ORIGINAL vertex at `hes[k]`'s origin.
-        verts: Vec<VertexId>,
-    }
-    let walks: Vec<LoopWalk> = boundary_loops
-        .iter()
-        .map(|&loop_id| {
-            let hes: Vec<HalfEdgeId> = obj.loop_half_edges(loop_id).collect();
-            let verts: Vec<VertexId> = hes.iter().map(|&h| obj.half_edges[h].origin).collect();
-            LoopWalk { hes, verts }
-        })
-        .collect();
-
-    // --- Pass 1: classify each boundary vertex and create raised copies. ---
-    // A vertex is "raised" (gets a fresh copy at +sweep; the original stays
-    // put for whoever doesn't move) iff at least one of its two incident
-    // boundary half-edges in the moved face's loop is Coplanar. A vertex with
-    // both edges Transverse translates in place, exactly as pre-.
-    let mut raised: std::collections::BTreeMap<VertexId, VertexId> =
-        std::collections::BTreeMap::new();
-    for walk in &walks {
-        let n = walk.hes.len();
-        for k in 0..n {
-            let h = walk.hes[k];
-            let h_prev = walk.hes[(k + n - 1) % n];
-            let needs_raise = matches!(edge_kinds[&h], BoundaryEdgeKind::Coplanar)
-                || matches!(edge_kinds[&h_prev], BoundaryEdgeKind::Coplanar);
-            let v = walk.verts[k];
-            if needs_raise {
-                raised.entry(v).or_insert_with(|| {
-                    let p = obj.vertices[v].position + sweep;
-                    obj.vertices.insert(Vertex {
-                        position: p,
-                        outgoing: HalfEdgeId::default(),
-                    })
-                });
-            } else {
-                // Pure transverse corner: translate in place (shared with the
-                // unmodified neighbor wall, which stretches).
-                obj.vertices[v].position = obj.vertices[v].position + sweep;
-            }
-        }
-    }
-
-    // --- Pass 2: repoint the moved face's own boundary onto raised copies. ---
-    // The original vertex keeps its identity (the sibling/wall still uses
-    // it), so if its `outgoing` happened to be this now-repointed half-edge,
-    // it must be repatched to something that still starts there — a sibling
-    // or wall half-edge sharing the same original vertex always exists,
-    // since a raised vertex is by definition shared with at least one other
-    // face that did not move.
-    for walk in &walks {
-        let n = walk.hes.len();
-        for (k, &h) in walk.hes.iter().enumerate() {
-            let v_orig = walk.verts[k];
-            if let Some(&v_raised) = raised.get(&v_orig) {
-                if obj.vertices[v_orig].outgoing == h {
-                    let h_prev = walk.hes[(k + n - 1) % n];
-                    let fallback = obj.half_edges[h_prev]
-                        .twin
-                        .expect("watertight boundary edge");
-                    obj.vertices[v_orig].outgoing = fallback;
-                }
-                obj.half_edges[h].origin = v_raised;
-                obj.vertices[v_raised].outgoing = h;
-            }
-        }
-    }
-
-    // --- Pass 3: per junction (a raised vertex where a Transverse edge meets
-    // a Coplanar one in the moved face's loop), splice a "step" half-edge
-    // into the straddling transverse wall's loop, connecting the raised copy
-    // to the original. Exactly one direction is created here — `down`
-    // (raised -> original) if the junction sits at a Transverse half-edge's
-    // ORIGIN, `up` (original -> raised) if it sits at its DESTINATION — the
-    // opposite direction is the new coplanar wall's vertical (Pass 4), twinned
-    // to this one.
-    //
-    // Reasoning (mirroring `extrude_sub_face`'s wb[k] <-> wd[k-1] sharing):
-    // the wall's existing half-edge already agrees with the moved face on the
-    // non-junction end (translated in place in Pass 1), so only the junction
-    // end needs a new vertex spliced into the wall's loop.
-    let mut steps: std::collections::BTreeMap<VertexId, StepEdges> =
-        std::collections::BTreeMap::new();
-    for walk in &walks {
-        let n = walk.hes.len();
-        for k in 0..n {
-            let h = walk.hes[k];
-            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Transverse) {
-                continue;
-            }
-            let twin_h = obj.half_edges[h].twin.expect("watertight boundary edge");
-            let wall_loop = obj.half_edges[twin_h].loop_id;
-
-            // Junction at `h`'s origin (walk.verts[k]): `twin_h`'s
-            // DESTINATION is this vertex (twin_h runs dest_of_h -> origin_of_h).
-            // Splice a `down` step (raised -> original) right after `twin_h`.
-            if let Some(&v_raised) = raised.get(&walk.verts[k]) {
-                let v = walk.verts[k];
-                steps
-                    .entry(v)
-                    .or_default()
-                    .down
-                    .get_or_insert_with(|| splice_after(obj, wall_loop, twin_h, v_raised, v));
-            }
-            // Junction at `h`'s destination (walk.verts[(k+1)%n]): `twin_h`'s
-            // ORIGIN is this vertex. Splice an `up` step (original -> raised)
-            // right before `twin_h`, then repoint `twin_h`'s origin to raised.
-            let v_dest = walk.verts[(k + 1) % n];
-            if let Some(&v_raised) = raised.get(&v_dest) {
-                steps
-                    .entry(v_dest)
-                    .or_default()
-                    .up
-                    .get_or_insert_with(|| splice_before(obj, wall_loop, twin_h, v_dest, v_raised));
-            }
-        }
-    }
-
-    // --- Pass 4: build a wall along each Coplanar boundary edge, mirroring
-    // `extrude_sub_face`'s per-edge construction. The two verticals at each
-    // end either reuse a Pass-3 step (junction) or are created fresh here and
-    // shared with the next coplanar wall around an interior cut vertex
-    // (exactly as `extrude_sub_face`'s `wb[k]`/`wd[k-1]` share one).
-    let shell = obj
-        .shells
-        .iter()
-        .find(|(_, s)| s.faces.contains(&face))
-        .map(|(id, _)| id)
-        .expect("moved face belongs to a shell");
-    let mut created_faces = Vec::new();
-    for walk in &walks {
-        let n = walk.hes.len();
-        for k in 0..n {
-            let h = walk.hes[k];
-            if !matches!(edge_kinds[&h], BoundaryEdgeKind::Coplanar) {
-                continue;
-            }
-            let v_a = walk.verts[k]; // edge origin, original vertex
-            let v_b = walk.verts[(k + 1) % n]; // edge dest, original vertex
-            let va_raised = raised[&v_a];
-            let vb_raised = raised[&v_b];
-            let h_sub = h; // already repointed to va_raised by Pass 2
-            let h_hole = obj.half_edges[h].twin.expect("watertight boundary edge");
-
-            // `wb = down(v_a)` (va_raised -> v_a), this wall's own half-edge.
-            // Its twin is `up(v_a)`: either Pass 3's junction splice, an
-            // earlier Pass-4 wall's `wd` at this same interior-cut vertex, or
-            // freshly created now (registered under `.down` for a later wall
-            // to find as ITS `up(v_a)` partner).
-            let wb = obj.new_half_edge(va_raised);
-            match steps.entry(v_a).or_default().up.take() {
-                Some(partner) => twin_half_edges(obj, wb, partner),
-                None => steps.entry(v_a).or_default().down = Some(wb),
-            }
-            // `wd = up(v_b)` (v_b -> vb_raised), this wall's own half-edge.
-            // Its twin is `down(v_b)`: Pass 3's junction splice, an earlier
-            // Pass-4 wall's `wb` at this vertex, or created now.
-            let wd = obj.new_half_edge(v_b);
-            match steps.entry(v_b).or_default().down.take() {
-                Some(partner) => twin_half_edges(obj, wd, partner),
-                None => steps.entry(v_b).or_default().up = Some(wd),
-            }
-
-            let wface =
-                build_coplanar_wall(obj, h_sub, h_hole, wb, wd, va_raised, vb_raised, v_a, v_b)?;
-            obj.shells[shell].faces.push(wface);
-            created_faces.push(wface);
-        }
-    }
-
-    // --- Pass 5: refit planes. ---
-    // Moved face.
-    {
-        refit_face_plane(obj, face)?;
-    }
-    // Every original neighbor face — transverse walls (stretched or
-    // reshaped) and the coplanar sibling(s) are all unaffected in count here;
-    // `neighbor_faces` already excludes the moved face itself.
-    for &nf in neighbor_faces {
-        refit_face_plane(obj, nf)?;
-    }
-
-    Ok(created_faces)
-}
-
-/// Per-original-vertex bookkeeping for `push_pull_coplanar_aware`'s unweld:
-/// `down` is a half-edge `raised(v) -> v`; `up` is `v -> raised(v)`. Each is
-/// filled by whichever pass (junction splice, or an earlier coplanar wall at
-/// an interior cut vertex) creates that direction first; the next consumer
-/// twins against it instead of creating a duplicate.
-#[derive(Default)]
-struct StepEdges {
-    down: Option<HalfEdgeId>,
-    up: Option<HalfEdgeId>,
-}
-
-impl Object {
-    /// A bare half-edge with `origin` set and everything else left as a
-    /// placeholder, for callers that wire `next`/`prev`/`loop_id`/`edge`/`twin`
-    /// themselves afterward (mirrors the `mk` closure in `extrude_sub_face`).
-    fn new_half_edge(&mut self, origin: VertexId) -> HalfEdgeId {
-        self.half_edges.insert(HalfEdge {
-            origin,
-            twin: None,
-            next: HalfEdgeId::default(),
-            prev: HalfEdgeId::default(),
-            edge: EdgeId::default(),
-            loop_id: LoopId::default(),
-        })
-    }
-}
-
-/// Refits `face`'s plane from its current outer loop, refusing the two
-/// silent in-plane corruptions a vertex translation can produce: a boundary
-/// that self-intersects (the face folded over itself laterally), and a
-/// winding whose Newell normal flipped against the face's previous
-/// orientation (net signed area crossed zero). Both keep every vertex on the
-/// plane and every twin consistent, so the final validator backstop cannot
-/// see them — this refit is the only place they are observable.
-fn refit_face_plane(obj: &mut Object, face: FaceId) -> Result<(), PushPullError> {
+/// The validation half of [`refit_face_plane`], without storing the fitted
+/// plane: refuses a self-intersecting outer boundary, a winding whose Newell
+/// normal flipped against the face's stored orientation, and any hole-ring
+/// corruption a reshaped face can carry — a hole that self-intersects, a hole
+/// whose winding inverted, a hole touching or escaping the outer boundary, and
+/// two holes overlapping each other. Used by [`validate_sweep_result`] to
+/// check each touched face of a translate-and-build push while keeping the
+/// stored (exact) planes; the pure translation moves rings rigidly and cannot
+/// distort them, so `refit_face_plane` doesn't need these.
+fn check_face_boundary(obj: &Object, face: FaceId) -> Result<(), PushPullError> {
     let outer_loop = obj.faces[face].outer_loop;
     let pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
     if !polygon_is_simple(&pts) {
         return Err(PushPullError::NonManifoldResult);
     }
-    let new_plane = Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
-    if new_plane.normal().dot(obj.faces[face].plane.normal()) <= 0.0 {
+    let fitted = Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    let normal = obj.faces[face].plane.normal();
+    if fitted.normal().dot(normal) <= 0.0 {
         return Err(PushPullError::NonManifoldResult);
     }
-    // Inner loops must stay strictly inside the (possibly reshaped) outer
-    // boundary: a translation that swings a boundary edge across an imprinted
-    // ring leaves the ring poking outside its face — planar, twin-consistent,
-    // invisible to the validator, and fatal to the ring's own inverses.
+    let mut holes: Vec<Vec<Point3>> = Vec::new();
     for &il in &obj.faces[face].inner_loops {
         let hole: Vec<Point3> = obj.loop_positions(il).collect();
+        // A slid ring must still be a simple polygon...
+        if !polygon_is_simple(&hole) {
+            return Err(PushPullError::NonManifoldResult);
+        }
+        // ...wound opposite the outer loop (a ring pushed through the apex
+        // of its tapered walls comes back inverted: still simple, still
+        // planar, but enclosing negated area — the validator cannot see it)...
+        if signed_area_on_plane(&hole, normal) >= 0.0 {
+            return Err(PushPullError::NonManifoldResult);
+        }
+        // ...strictly inside the outer boundary...
         if boundaries_contact(&pts, &hole)
             || hole
                 .iter()
-                .any(|&hp| !point_inside_polygon(hp, &pts, new_plane.normal()))
+                .any(|&hp| !point_inside_polygon(hp, &pts, normal))
         {
             return Err(PushPullError::NonManifoldResult);
         }
+        // ...and disjoint from every other hole (rings that slid into each
+        // other claim the same area twice).
+        for prev in &holes {
+            if boundaries_contact(prev, &hole)
+                || hole
+                    .iter()
+                    .any(|&hp| point_inside_polygon(hp, prev, normal))
+                || prev
+                    .iter()
+                    .any(|&pp| point_inside_polygon(pp, &hole, normal))
+            {
+                return Err(PushPullError::NonManifoldResult);
+            }
+        }
+        holes.push(hole);
     }
-    obj.faces[face].plane = new_plane;
     Ok(())
 }
 
@@ -5414,6 +5898,129 @@ mod tests {
             .find(|(_, f)| f.plane.normal().approx_eq(dir, tol::NORMAL_DIRECTION))
             .map(|(id, _)| id)
             .expect("face with that normal must exist")
+    }
+
+    // ------------------------------- interpenetration guard primitive
+
+    /// The plus-sign coplanar overlap: two coplanar strips crossing
+    /// off-center, sharing real area but NO vertex of either inside the
+    /// other and no boundary endpoint or midpoint landing inside either —
+    /// point sampling misses it entirely; only real segment/segment
+    /// intersection of the boundaries sees the contact. This is exactly the
+    /// footprint a built wall or a rigidly translated moved face can produce
+    /// when it lands coplanar with, and crossing, a stationary face.
+    #[test]
+    fn faces_improperly_contact_detects_plus_sign_coplanar_overlap() {
+        // Two disjoint coplanar quads at z = 0 (an Open two-face object is
+        // enough — the guard primitive reads geometry, not watertightness):
+        // a long thin strip along x and a tall thin strip along y, crossing
+        // over x ∈ [3,4] × y ∈ [-0.5, 0.5].
+        let obj = Object::from_polygons(
+            &[
+                Point3::new(-10.0, -0.5, 0.0),
+                Point3::new(10.0, -0.5, 0.0),
+                Point3::new(10.0, 0.5, 0.0),
+                Point3::new(-10.0, 0.5, 0.0),
+                Point3::new(3.0, -5.0, 0.0),
+                Point3::new(4.0, -5.0, 0.0),
+                Point3::new(4.0, 8.0, 0.0),
+                Point3::new(3.0, 8.0, 0.0),
+            ],
+            &[vec![0, 1, 2, 3], vec![4, 5, 6, 7]],
+        )
+        .expect("two coplanar strips");
+        let faces: Vec<FaceId> = obj.faces().keys().collect();
+        assert!(
+            faces_improperly_contact(&obj, faces[0], faces[1]),
+            "plus-sign coplanar overlap must register as improper contact"
+        );
+        assert!(
+            faces_improperly_contact(&obj, faces[1], faces[0]),
+            "the test must be symmetric in its arguments"
+        );
+    }
+
+    /// The diagonal-chord overlap: a wall standing on a floor's diagonal,
+    /// sharing both diagonal endpoints as true vertices. Every boundary
+    /// contact between the two faces is a whitelisted shared corner, and
+    /// the wall's other edges are strictly off the floor's plane — yet the
+    /// chord's interior slices straight across the floor. Crossing
+    /// detection alone cannot see it (every intersection point is
+    /// whitelisted); only probing between the cut points does. The dual of
+    /// the plus-sign case: together they show why the coplanar test needs
+    /// both parts.
+    #[test]
+    fn faces_improperly_contact_detects_diagonal_chord_between_shared_corners() {
+        let obj = Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(0.0, 0.0, 1.0),
+            ],
+            &[vec![0, 1, 2, 3], vec![0, 2, 4, 5]],
+        )
+        .expect("floor plus a wall on its diagonal");
+        let faces: Vec<FaceId> = obj.faces().keys().collect();
+        assert!(
+            faces_improperly_contact(&obj, faces[0], faces[1]),
+            "a chord between two shared corners slicing across the face \
+             must register as improper contact"
+        );
+        assert!(
+            faces_improperly_contact(&obj, faces[1], faces[0]),
+            "the test must be symmetric in its arguments"
+        );
+    }
+
+    /// Control for the diagonal-chord case: the same two-shared-corner
+    /// shape on an L-shaped floor, with the chord crossing the notch —
+    /// strictly OUTSIDE the floor's material. Shared corners plus an
+    /// exterior chord is legitimate, not contact.
+    #[test]
+    fn faces_improperly_contact_ignores_chord_outside_the_face() {
+        let obj = Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(2.0, 0.0, 0.0),
+                Point3::new(2.0, 1.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(1.0, 2.0, 0.0),
+                Point3::new(0.0, 2.0, 0.0),
+                Point3::new(2.0, 1.0, 1.0),
+                Point3::new(1.0, 2.0, 1.0),
+            ],
+            &[vec![0, 1, 2, 3, 4, 5], vec![2, 4, 7, 6]],
+        )
+        .expect("L-shaped floor plus a wall bridging its notch");
+        let faces: Vec<FaceId> = obj.faces().keys().collect();
+        assert!(!faces_improperly_contact(&obj, faces[0], faces[1]));
+        assert!(!faces_improperly_contact(&obj, faces[1], faces[0]));
+    }
+
+    /// Control for the plus-sign case: the same two strips, pulled apart so
+    /// they no longer overlap, are NOT in contact.
+    #[test]
+    fn faces_improperly_contact_ignores_disjoint_coplanar_strips() {
+        let obj = Object::from_polygons(
+            &[
+                Point3::new(-10.0, -0.5, 0.0),
+                Point3::new(10.0, -0.5, 0.0),
+                Point3::new(10.0, 0.5, 0.0),
+                Point3::new(-10.0, 0.5, 0.0),
+                Point3::new(3.0, 2.0, 0.0),
+                Point3::new(4.0, 2.0, 0.0),
+                Point3::new(4.0, 8.0, 0.0),
+                Point3::new(3.0, 8.0, 0.0),
+            ],
+            &[vec![0, 1, 2, 3], vec![4, 5, 6, 7]],
+        )
+        .expect("two coplanar strips");
+        let faces: Vec<FaceId> = obj.faces().keys().collect();
+        assert!(!faces_improperly_contact(&obj, faces[0], faces[1]));
+        assert!(!faces_improperly_contact(&obj, faces[1], faces[0]));
     }
 
     // ------------------------------------------------------ material

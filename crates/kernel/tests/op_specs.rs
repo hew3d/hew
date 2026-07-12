@@ -14,8 +14,8 @@
 //! elements — but topology and geometry are not.
 
 use kernel::{
-    BooleanError, BooleanOp, FaceId, History, KernelOp, Object, Plane, Point3, Profile,
-    PushPullError, StickyError, Transform, Vec3, WatertightState, tol,
+    BooleanError, BooleanOp, FaceId, History, HistoryError, KernelOp, KernelOpReport, Object,
+    Plane, Point3, Profile, PushPullError, StickyError, Transform, Vec3, WatertightState, tol,
 };
 use proptest::prelude::*;
 
@@ -314,126 +314,82 @@ fn inward_partial_push_keeps_six_faces_and_reduces_extent() {
     );
 }
 
-/// A right-triangle prism has a hypotenuse wall whose normal is not
-/// perpendicular to the front wall's normal.  Pushing the front wall must
-/// return NonManifoldResult because the eligibility dot-product check fires.
-///
-/// Construction: extrude a right-triangle profile in XY by 1.0 along +z.
-/// The triangle outer vertices are (0,0,0), (1,0,0), (0,1,0).
-/// The resulting prism has 5 faces:
-///   - bottom cap (normal ≈ -z)
-///   - top cap    (normal ≈ +z)
-///   - front wall (normal ≈ -y, edge (0,0)-(1,0))
-///   - right wall (normal ≈ +x, edge (1,0)-(0,1)) — this IS the hypotenuse wall
-///   - left wall  (normal ≈ -x, edge (0,1)-(0,0))
-///
-/// The front wall (normal -y) shares edges with the bottom cap, top cap,
-/// hypotenuse wall (normal ≈ (1/√2, 1/√2, 0)), and left wall.
-/// Dot product of -y with hypotenuse normal ≈ -1/√2, |dot| ≈ 0.707 >> tol::NORMAL_DIRECTION.
-/// Therefore eligibility check must fire and return NonManifoldResult.
-///
-/// **Superseded by the slanted-neighbor re-spec below** (Road to
-/// Refinement; approved): the same construction becomes the
-/// success case `push_pull_prism_front_wall_with_slanted_neighbor_builds_a_wall`.
-/// The PR that implements DELETES this test and un-ignores that section
-/// — that deletion carries human sign-off via ROADMAP  (rule 5); do not
-/// remove it before the implementation actually lands.
-#[test]
-fn push_pull_slanted_neighbor_returns_non_manifold_result() {
-    use kernel::Profile;
+// ------------------------- flat-face push/pull (translate-and-build)
+//
+// Push/pull on any planar face of a solid, whatever the angle of its
+// neighbors — a Slice-produced wedge's cut face, a prism side facet (the
+// Circle tool's own output), a face from a dissolved boolean seam. Every
+// such face is flat, so it follows classic SketchUp push/pull: the moved
+// face translates rigidly by `distance` along its normal, and every
+// NON-transverse boundary edge (a coplanar `split_face` sibling OR a slanted
+// wedge/facet neighbor) unwelds and grows a fresh quad side wall, while every
+// transverse neighbor extends seamlessly. Topology therefore CHANGES (walls
+// appear), unlike the earlier in-plane "stretch" that this replaces.
+//
+// The asymmetry the flat-face ruling asks for (see `Object::push_pull` and
+// `validate_sweep_result`):
+// - PULL (outward) always succeeds — it erects a prism of material on the
+//   face — so it is unbounded regardless of neighbor angle.
+// - PUSH (inward) succeeds only as far as the built result stays valid, and
+//   refuses typed byte-identical past that: a wedge's slant face cannot be
+//   pushed in at all (the moved face immediately crosses the fixed structure),
+//   a fatter prism's facet can be pushed in until it would.
+// - A purely transverse boundary (a box face) keeps the bit-identical
+//   translate fast path.
+//
+// The exact inverse of a wall-building push is the recorded
+// `UnbuildPushPull`, dispatched by `History` — a plain `push_pull(-d)` cannot
+// re-collapse a slanted neighbor's non-coplanar wall — so invertibility specs
+// go through `History`, not a direct `push_pull(report.face, -d)`.
 
-    let plane = xy_plane();
-    let right_triangle_profile = Profile::new(
-        plane,
-        vec![
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-        ],
-        vec![],
-    )
-    .unwrap();
-
-    let prism = Object::from_extrusion(&right_triangle_profile, 1.0).unwrap();
-    prism.validate().unwrap();
-    assert_eq!(prism.watertight(), WatertightState::Watertight);
-    assert_eq!(prism.faces().len(), 5, "right-triangle prism has 5 faces");
-
-    // Find the front wall: normal ≈ (0, -1, 0).
-    let front_wall = face_with_normal(&prism, Vec3::new(0.0, -1.0, 0.0));
-
-    // Verify the hypotenuse-wall neighbor exists (normal ≈ (1/√2, 1/√2, 0)).
-    let hyp_normal = Vec3::new(
-        1.0_f64 / std::f64::consts::SQRT_2,
-        1.0_f64 / std::f64::consts::SQRT_2,
-        0.0,
-    );
-    let _hyp_wall = face_with_normal(&prism, hyp_normal);
-
-    // Confirm the dot product between the front normal and hypotenuse normal
-    // actually violates the perpendicularity check.
-    let front_normal = Vec3::new(0.0, -1.0, 0.0);
-    let dot = front_normal.dot(hyp_normal).abs();
-    assert!(
-        dot >= tol::NORMAL_DIRECTION,
-        "hypotenuse wall must fail the perpendicularity check (dot={dot})"
-    );
-
-    // The push must be refused with NonManifoldResult.
-    let mut prism_mut = prism;
-    let err = prism_mut.push_pull(front_wall, 0.5).unwrap_err();
-    assert_eq!(
-        err,
-        PushPullError::NonManifoldResult,
-        "pushing front wall of a prism (slanted hypotenuse neighbor) must return NonManifoldResult"
-    );
-    // Strong guarantee: prism is unchanged.
-    prism_mut.validate().unwrap();
-    assert_eq!(prism_mut.faces().len(), 5);
+/// Exact (bit-for-bit) polygon snapshot, for asserting the strong guarantee
+/// after a refusal: a refused push must leave the object byte-identical, not
+/// merely equivalent within tolerance.
+fn exact_snapshot(obj: &Object) -> (Vec<Point3>, Vec<Vec<usize>>) {
+    obj.to_polygons()
 }
 
-// ------------------------------------- slanted-neighbor push/pull
-//
-// Road to Refinement  (the "an earlier kernel gap"): push/pull on a face with a
-// *slanted* neighbor — neither transverse (|dot| ≈ 0, stretched in place) nor
-// coplanar (|dot| ≈ 1,  wall + unweld) — is refused today, which blocks
-// push/pull on EVERY side facet of an N-gon prism (the Circle tool's own
-// output) and every face produced by Slice.
-//
-// Contract: a slanted neighbor gets the SAME wall-and-unweld treatment
-// gives coplanar siblings — the neighbor stays put, a planar wall is built
-// along the shared edge, and transverse neighbors elsewhere on the boundary
-// still stretch. The wall is always non-degenerate: a shared boundary edge
-// lies in the moved face's plane, so it is never parallel to the sweep, and a
-// straight edge swept by a translation is a planar quad. SketchUp-style
-// autofold is explicitly OUT of contract. Push-through/overshoot semantics
-// are unchanged — slanted neighbors only change side-wall
-// construction, never sweep semantics.
-//
-// These are the acceptance criteria (docs/DEVELOPMENT.md workflow): un-ignore
-// each in the PR that implements, delete the superseded refusal test
-// above in the same PR, and extend the push/pull proptests to N-gon-prism
-// profiles (rule 3: watertight after; inverse restores).
+/// Pull `face` of `original` by `d` through `History`, assert the built result
+/// validates and stays watertight, then undo and assert the recorded inverse
+/// restores `original` exactly (topology + geometry). Returns the post-pull
+/// object for further inspection. This is the canonical translate-and-build
+/// round-trip: the inverse is `UnbuildPushPull`, not a direct `push_pull(-d)`.
+fn assert_build_and_invert(original: &Object, face: FaceId, d: f64) -> Object {
+    let mut obj = original.clone();
+    let mut history = History::new();
+    history
+        .apply(&mut obj, KernelOp::PushPull { face, distance: d })
+        .expect("wall-building push/pull must succeed");
+    obj.validate().unwrap();
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    let after = obj.clone();
+    history.undo(&mut obj).expect("recorded inverse must undo");
+    obj.validate().unwrap();
+    assert!(
+        objects_equivalent(&obj, original),
+        "history undo of a wall-building push must restore the original exactly"
+    );
+    // A redo must return to the pulled state, so the pair is a true inverse.
+    history.redo(&mut obj).expect("redo must re-apply");
+    assert!(
+        objects_equivalent(&obj, &after),
+        "redo must restore the pulled state"
+    );
+    after
+}
 
-/// The refusal test's exact construction, re-specced as the success case: a
-/// right-triangle prism's front wall (normal -y) has a MIXED boundary — top
-/// cap, bottom cap, and left wall are transverse (stretch); the hypotenuse
-/// wall (|dot| ≈ 0.707) is slanted (wall + unweld).
+/// The base success case: a right-triangle prism's front wall (normal -y) has
+/// a MIXED boundary — top cap, bottom cap, and left wall are transverse; the
+/// hypotenuse wall (|dot| ≈ 0.707) is slanted.
 ///
-/// Pulling the front wall out by 0.5:
-/// - front wall translates to y = -0.5;
-/// - (0,0,0)/(0,0,1) — shared only with transverse neighbors — translate in
-///   place (left wall and caps stretch);
-/// - (1,0,0)/(1,0,1) — shared with the slanted hypotenuse — unweld: the
-///   hypotenuse keeps them, the front wall gets translated copies, and ONE
-///   new wall (the quad in the plane x = 1) joins old to new;
-/// - counts: V 6→8, F 5→6, E 9→12 (all faces are quads or stay quads;
-///   Euler V - E + F = 2 holds).
+/// Pulling the front wall out by 0.5 translates it rigidly to y = -0.5. The
+/// three transverse neighbors extend seamlessly; the slanted hypotenuse edge
+/// unwelds and grows ONE fresh vertical wall bridging the old edge to the
+/// raised one. So the wall's near corners rise straight out — (1,0,z) stays
+/// put, (1,-0.5,z) is a raised copy — the hypotenuse does NOT slide sideways
+/// the way the old stretch made it. The prism gains a facet.
 #[test]
-#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
-fn push_pull_prism_front_wall_with_slanted_neighbor_builds_a_wall() {
-    use kernel::Profile;
-
+fn push_pull_prism_front_wall_builds_a_wall() {
     let plane = xy_plane();
     let profile = Profile::new(
         plane,
@@ -445,148 +401,1095 @@ fn push_pull_prism_front_wall_with_slanted_neighbor_builds_a_wall() {
         vec![],
     )
     .unwrap();
-    let mut prism = Object::from_extrusion(&profile, 1.0).unwrap();
+    let prism = Object::from_extrusion(&profile, 1.0).unwrap();
     let front_wall = face_with_normal(&prism, Vec3::new(0.0, -1.0, 0.0));
 
-    let report = prism.push_pull(front_wall, 0.5).unwrap();
-    prism.validate().unwrap();
+    let after = assert_build_and_invert(&prism, front_wall, 0.5);
 
-    assert_eq!(prism.watertight(), WatertightState::Watertight);
-    assert_eq!(prism.vertices().len(), 8, "2 corners unweld into 2 more");
-    assert_eq!(prism.edges().len(), 12);
-    assert_eq!(prism.faces().len(), 6, "5 originals + 1 new wall");
+    // One new wall along the single slanted (hypotenuse) edge.
+    assert_eq!(after.faces().len(), 6, "the prism grew one side facet");
     assert_eq!(
-        report.created_faces.len(),
-        1,
-        "exactly one wall: only the hypotenuse edge is slanted"
+        after.vertices().len(),
+        8,
+        "the slanted edge raised two copies"
     );
+    assert_eq!(euler_poincare(&after), 2, "still one genus-0 shell");
 
-    // The moved face sits at y = -0.5; exactly 4 vertices reached it.
-    let at_front = prism
-        .vertices()
-        .values()
-        .filter(|v| (v.position.y + 0.5).abs() <= tol::POINT_MERGE)
-        .count();
-    assert_eq!(at_front, 4, "front wall's 4 corners at y = -0.5");
-
-    // The slanted hypotenuse did not move: its corners are still present.
+    // The moved face translated rigidly to y = -0.5, and the original
+    // hypotenuse corners stayed put (the wall bridges to them) — no sideways
+    // slide.
     for expect in [
+        Point3::new(0.0, -0.5, 0.0),
+        Point3::new(1.0, -0.5, 0.0),
+        Point3::new(1.0, -0.5, 1.0),
         Point3::new(1.0, 0.0, 0.0),
         Point3::new(1.0, 0.0, 1.0),
         Point3::new(0.0, 1.0, 0.0),
-        Point3::new(0.0, 1.0, 1.0),
     ] {
         assert!(
-            prism
+            after
                 .vertices()
                 .values()
                 .any(|v| (v.position - expect).length() <= tol::POINT_MERGE),
-            "hypotenuse corner {expect:?} must be unchanged"
+            "expected a vertex at {expect:?}"
         );
+    }
+    // Cross-section (0,-0.5),(1,-0.5),(1,0),(0,1): area 1.0, extruded by 1.
+    let volume = signed_volume(&after);
+    assert!(
+        (volume - 1.0).abs() <= VOLUME_TOL,
+        "signed volume {volume}, expected 1.0"
+    );
+}
+
+/// A pull is UNBOUNDED regardless of neighbor angle: pulling the same slanted
+/// front wall out by a large distance still validates (it just erects a longer
+/// prism of material), it does not refuse the way the old stretch did once its
+/// walls pinched off.
+#[test]
+fn push_pull_slanted_face_pull_is_unbounded() {
+    let profile = Profile::new(
+        xy_plane(),
+        vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let prism = Object::from_extrusion(&profile, 1.0).unwrap();
+    let front_wall = face_with_normal(&prism, Vec3::new(0.0, -1.0, 0.0));
+    for d in [5.0, 50.0, 500.0] {
+        let after = assert_build_and_invert(&prism, front_wall, d);
+        assert_eq!(after.faces().len(), 6, "distance {d}");
     }
 }
 
 /// Regular hexagonal prism (radius 1, height 1) — the Circle tool's own
-/// output shape. Pulling one side facet outward by 0.2 bumps out a pad:
-/// caps are transverse (stretch, hexagon → octagon boundary), BOTH adjacent
-/// facets are slanted at 60° (|dot| = 0.5 → wall + unweld, they stay put).
-/// Counts: V 12→16, E 18→24, F 8→10 (2 new walls); Euler holds.
+/// output shape. Pulling one side facet outward by 0.2 translates it rigidly
+/// and grows a pad: the two adjacent facets (|dot| = 0.5) are slanted, so each
+/// unwelds and gains a fresh wall bridging out to the raised facet; the caps
+/// extend seamlessly. This is a flat-facet bump (acceptable on this branch),
+/// not the whole-cylinder bulge the curves branch will deliver.
 #[test]
-#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
-fn push_pull_hex_prism_facet_bumps_out_a_pad() {
-    let (mut hex, facet, n) = hex_prism_and_facet();
+fn push_pull_hex_prism_facet_builds_a_pad() {
+    let (hex, facet, n) = hex_prism_and_facet();
     let apothem = 3.0_f64.sqrt() / 2.0;
 
-    let report = hex.push_pull(facet, 0.2).unwrap();
-    hex.validate().unwrap();
+    let after = assert_build_and_invert(&hex, facet, 0.2);
 
-    assert_eq!(hex.watertight(), WatertightState::Watertight);
-    assert_eq!(hex.vertices().len(), 16);
-    assert_eq!(hex.edges().len(), 24);
-    assert_eq!(hex.faces().len(), 10);
-    assert_eq!(report.created_faces.len(), 2, "one wall per slanted edge");
+    // Two new walls along the two slanted adjacent-facet edges.
+    assert_eq!(after.faces().len(), 10, "the prism grew a two-walled pad");
+    assert_eq!(
+        after.vertices().len(),
+        16,
+        "the facet edges raised four copies"
+    );
+    assert_eq!(euler_poincare(&after), 2);
 
-    // Exactly the pad's 4 corners advanced to apothem + 0.2 along the facet
-    // normal; everything else stayed at or below the apothem.
-    let advanced = hex
+    // Exactly the facet's 4 corners advanced to apothem + 0.2 along the facet
+    // normal; the adjacent facets' far corners stayed put (a wall bridges to
+    // them) rather than sliding.
+    let advanced = after
         .vertices()
         .values()
         .filter(|v| {
-            let d = Vec3::new(v.position.x, v.position.y, v.position.z).dot(n);
+            let d = v.position.to_vec().dot(n);
             (d - (apothem + 0.2)).abs() <= tol::POINT_MERGE
         })
         .count();
-    assert_eq!(advanced, 4, "pad corners at apothem + 0.2 along the normal");
-}
-
-/// Rule-3 inverse property on the slanted case: bump the hex facet out, then
-/// push the returned face back by the same distance — the walls collapse,
-/// the unwelded vertices re-weld, and the result is equivalent to the
-/// original (cyclic position matching, not bytewise — see module docs).
-#[test]
-#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
-fn push_pull_slanted_then_inverse_is_identity() {
-    let (mut hex, facet, _n) = hex_prism_and_facet();
-    let original = hex.clone();
-
-    let report = hex.push_pull(facet, 0.2).unwrap();
-    hex.validate().unwrap();
-    hex.push_pull(report.face, -0.2).unwrap();
-    hex.validate().unwrap();
-
-    assert!(
-        objects_equivalent(&hex, &original),
-        "pull 0.2 then push -0.2 on the slanted facet must restore the prism"
+    assert_eq!(
+        advanced, 4,
+        "facet corners at apothem + 0.2 along the normal"
     );
 }
 
-/// Negative distance with slanted neighbors carves a recess instead of
-/// bumping a pad: same topology counts (walls now face inward), adjacent
-/// facets keep their full extent, and only the moved facet retreats.
+/// A 24-gon prism — the Circle tool's actual output. Translate-and-build lifts
+/// the old stretch range limit on the OUTWARD side: pulling a facet out grows
+/// a two-walled pad and is unbounded (a small nudge and a large pull both
+/// validate and invert). Pushing a facet IN is bounded by validity — a shallow
+/// recess builds cleanly, a deep push where the moved facet would cross
+/// non-adjacent facets refuses typed, byte-identical.
 #[test]
-#[ignore = ": slanted-neighbor push/pull not yet implemented — un-ignore in the implementing PR"]
-fn push_pull_inward_with_slanted_neighbors_carves_a_recess() {
-    let (mut hex, facet, n) = hex_prism_and_facet();
+fn push_pull_cylinder_facet_pull_unbounded_push_bounded() {
+    let pts: Vec<Point3> = (0..24)
+        .map(|k| {
+            let a = std::f64::consts::TAU * k as f64 / 24.0;
+            Point3::new(a.cos(), a.sin(), 0.0)
+        })
+        .collect();
+    let profile = Profile::new(xy_plane(), pts, vec![]).unwrap();
+    let cyl = Object::from_extrusion(&profile, 1.0).unwrap();
+    let th = 7.5f64.to_radians();
+    let n = Vec3::new(th.cos(), th.sin(), 0.0);
+    let facet = face_with_normal(&cyl, n);
+
+    // 24 side facets + 2 caps = 26 faces; a two-walled pad makes 28.
+    // Outward pads at any depth — small and large both build and invert.
+    for d in [0.02, 0.5, 5.0] {
+        let after = assert_build_and_invert(&cyl, facet, d);
+        assert_eq!(after.faces().len(), 28, "distance {d}: a two-walled pad");
+    }
+
+    // Shallow inward recess builds cleanly and inverts.
+    let shallow = assert_build_and_invert(&cyl, facet, -0.05);
+    assert_eq!(shallow.faces().len(), 28);
+
+    // A push deep enough to consume the solid refuses as WouldVanish,
+    // byte-identical.
+    let mut refused = cyl.clone();
+    let before = exact_snapshot(&refused);
+    let err = refused.push_pull(facet, -3.0).unwrap_err();
+    assert_eq!(err, PushPullError::WouldVanish);
+    assert_eq!(exact_snapshot(&refused), before);
+}
+
+/// The undo contract for a wall-building push, stated directly: the recorded
+/// `UnbuildPushPull` inverse (via `History`) restores the prism exactly, while
+/// a plain `push_pull(report.face, -d)` CANNOT — the walls it built are
+/// perpendicular to the moved facet, so pushing back does not re-collapse a
+/// slanted neighbor's non-coplanar wall. This asymmetry is why invertibility
+/// specs route through `History`.
+#[test]
+fn push_pull_slanted_inverse_is_the_recorded_unbuild() {
+    let (hex, facet, _n) = hex_prism_and_facet();
+    let original = hex.clone();
+
+    // History inverse restores exactly.
+    let mut via_history = hex.clone();
+    let mut history = History::new();
+    history
+        .apply(
+            &mut via_history,
+            KernelOp::PushPull {
+                face: facet,
+                distance: 0.2,
+            },
+        )
+        .unwrap();
+    history.undo(&mut via_history).unwrap();
+    via_history.validate().unwrap();
+    assert!(objects_equivalent(&via_history, &original));
+
+    // A direct push-back cannot: the built walls are not re-collapsible this
+    // way. It refuses typed, leaving the pulled solid untouched.
+    let mut direct = hex.clone();
+    let report = direct.push_pull(facet, 0.2).unwrap();
+    let pulled = direct.clone();
+    let err = direct.push_pull(report.face, -0.2).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+    assert!(
+        objects_equivalent(&direct, &pulled),
+        "refusal is byte-identical"
+    );
+}
+
+/// A recorded wall that an intervening `split_face_inner` turned into a holed
+/// face is no longer the pristine quad the push recorded. Undoing that push
+/// (via the recorded `UnbuildPushPull` inverse) must refuse TYPED with the
+/// object byte-identical — it must NOT remove a wall that still owns a hole
+/// loop and a sub-face, which would orphan them (a debug `check_invariants`
+/// panic, and a corruption in release). This test runs under plain
+/// `cargo test` (a debug build), so a passing run proves there is no panic.
+#[test]
+fn unbuild_refuses_when_a_recorded_wall_gained_a_hole() {
+    let mut obj = sliced_wedge();
+    let cut = wedge_cut_face(&obj);
+    let mut history = History::new();
+    let report = match history
+        .apply(
+            &mut obj,
+            KernelOp::PushPull {
+                face: cut,
+                distance: 0.3,
+            },
+        )
+        .expect("wedge cut face pull builds walls")
+    {
+        KernelOpReport::PushPull(r) => r,
+        other => panic!("expected a PushPull report, got {other:?}"),
+    };
+    let wall = report.created_faces[0];
+
+    // An inset rectangle strictly inside the built wall, on its own plane —
+    // a purely additive imprint that appends a hole loop to `wall` and mints a
+    // sub-face, leaving `wall`'s outer 4-cycle untouched.
+    let corners: Vec<Point3> = obj.loop_positions(obj.faces()[wall].outer_loop).collect();
+    let n = corners.len() as f64;
+    let centroid = corners
+        .iter()
+        .fold(Point3::ORIGIN, |acc, &p| acc + p.to_vec() / n);
+    let rect: Vec<Point3> = corners
+        .iter()
+        .map(|&p| centroid + (p - centroid) * 0.4)
+        .collect();
+    obj.split_face_inner(wall, &rect)
+        .expect("imprint a hole on the built wall");
+    obj.validate().unwrap();
+    let holed = obj.to_polygons();
+
+    // Undo the PUSH while the wall carries a hole. Must fail typed (a kernel
+    // bug surfaced as InverseFailed), object byte-identical — never panic.
+    let err = history
+        .undo(&mut obj)
+        .expect_err("undo must refuse: the recorded wall is no longer a pristine quad");
+    assert!(
+        matches!(err, HistoryError::InverseFailed(_)),
+        "undo must fail typed, got {err:?}"
+    );
+    assert_eq!(
+        obj.to_polygons(),
+        holed,
+        "a refused undo must leave the object byte-identical"
+    );
+    obj.validate().unwrap();
+}
+
+/// Negative distance recesses the facet: pushing a hex facet inward by 0.5
+/// translates it in and builds walls back to the adjacent facets — a valid
+/// recess (the fatter hexagon leaves room), removing material. Invertible
+/// through the recorded inverse.
+#[test]
+fn push_pull_inward_facet_recesses() {
+    let (hex, facet, n) = hex_prism_and_facet();
     let apothem = 3.0_f64.sqrt() / 2.0;
+    let volume_before = signed_volume(&hex);
 
-    hex.push_pull(facet, -0.2).unwrap();
-    hex.validate().unwrap();
+    let after = assert_build_and_invert(&hex, facet, -0.5);
+    assert_eq!(after.faces().len(), 10, "the recess adds two walls");
 
-    assert_eq!(hex.watertight(), WatertightState::Watertight);
-    assert_eq!(hex.vertices().len(), 16);
-    assert_eq!(hex.edges().len(), 24);
-    assert_eq!(hex.faces().len(), 10);
-
-    // The recessed pad's 4 corners sit at apothem - 0.2 along the normal;
-    // the unwelded originals (kept by the slanted neighbors) still sit at
-    // the full apothem, so the hexagonal silhouette is unchanged.
-    let recessed = hex
+    let recessed = after
         .vertices()
         .values()
         .filter(|v| {
-            let d = Vec3::new(v.position.x, v.position.y, v.position.z).dot(n);
-            (d - (apothem - 0.2)).abs() <= tol::POINT_MERGE
+            let d = v.position.to_vec().dot(n);
+            (d - (apothem - 0.5)).abs() <= tol::POINT_MERGE
         })
         .count();
-    assert_eq!(recessed, 4, "pad corners at apothem - 0.2 along the normal");
-    let at_rim = hex
-        .vertices()
-        .values()
-        .filter(|v| {
-            let d = Vec3::new(v.position.x, v.position.y, v.position.z).dot(n);
-            (d - apothem).abs() <= tol::POINT_MERGE
+    assert_eq!(
+        recessed, 4,
+        "facet corners at apothem - 0.5 along the normal"
+    );
+    assert!(
+        signed_volume(&after) < volume_before,
+        "an inward push removes material"
+    );
+}
+
+/// A fatter prism leaves room to push a facet in well past its own plane (a
+/// deep notch stays valid), but a push deep enough to consume the whole solid
+/// (beyond the far side's extent, √3 ≈ 1.732) refuses as WouldVanish,
+/// byte-identical — the kernel never deletes the Object as a geometric side
+/// effect.
+#[test]
+fn push_pull_inward_facet_consuming_the_solid_is_refused() {
+    let (hex, facet, _n) = hex_prism_and_facet();
+
+    // A deep-but-valid inward notch (past the facet's own apothem, 0.866).
+    let notched = assert_build_and_invert(&hex, facet, -1.0);
+    assert_eq!(notched.faces().len(), 10, "a two-walled inward notch");
+
+    // Beyond the whole solid's extent: consuming all material is refused.
+    let mut past_extent = hex.clone();
+    let before = exact_snapshot(&past_extent);
+    let err = past_extent.push_pull(facet, -2.0).unwrap_err();
+    assert_eq!(err, PushPullError::WouldVanish);
+    assert_eq!(exact_snapshot(&past_extent), before);
+}
+
+/// The unit right tetrahedron: the slanted face's three neighbors are all
+/// slanted, so pulling it out grows three fresh walls (a bump on the oblique
+/// face), watertight and invertible through the recorded inverse.
+#[test]
+fn push_pull_tetrahedron_face_builds_three_walls() {
+    let tetra = Object::from_polygons(
+        &[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ],
+        &[
+            vec![0, 2, 1], // bottom, outward -z
+            vec![0, 3, 2], // outward -x
+            vec![0, 1, 3], // outward -y
+            vec![1, 2, 3], // slanted, outward (1,1,1)
+        ],
+    )
+    .unwrap();
+    let slanted = face_with_normal(&tetra, Vec3::new(1.0, 1.0, 1.0).normalized().unwrap());
+    let volume_before = signed_volume(&tetra);
+
+    let after = assert_build_and_invert(&tetra, slanted, 0.3);
+    assert_eq!(after.faces().len(), 7, "three slanted edges → three walls");
+    assert!(
+        signed_volume(&after) > volume_before,
+        "an outward pull adds material"
+    );
+}
+
+/// A face whose every neighbor is oblique with a fully-oblique corner
+/// configuration (the octahedron, all vertices valence 4) — a case the old
+/// in-plane stretch REFUSED as over-determined — now pulls cleanly: translate-
+/// and-build never solves a per-vertex slide, it just erects a wall on each
+/// oblique edge, so there is nothing to over-determine.
+#[test]
+fn push_pull_octahedron_face_builds_walls() {
+    let octa = Object::from_polygons(
+        &[
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(-1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, -1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(0.0, 0.0, -1.0),
+        ],
+        &[
+            vec![0, 2, 4], // (+,+,+)
+            vec![1, 4, 2], // (-,+,+)
+            vec![0, 4, 3], // (+,-,+)
+            vec![0, 5, 2], // (+,+,-)
+            vec![1, 3, 4], // (-,-,+)
+            vec![1, 2, 5], // (-,+,-)
+            vec![0, 3, 5], // (+,-,-)
+            vec![1, 5, 3], // (-,-,-)
+        ],
+    )
+    .unwrap();
+    octa.validate().unwrap();
+
+    let face = face_with_normal(&octa, Vec3::new(1.0, 1.0, 1.0).normalized().unwrap());
+    let after = assert_build_and_invert(&octa, face, 0.2);
+    assert_eq!(after.faces().len(), 11, "three oblique edges → three walls");
+}
+
+/// A boundary that MIXES a coplanar sibling (from `split_face`) with slanted
+/// neighbors is now a first-class case: coplanar and slanted edges both build
+/// walls, so the same surgery handles them together. Pulling a bisected half
+/// of a wedge's cut face out builds walls along the cut edge and the wedge's
+/// oblique legs alike — watertight, invertible.
+#[test]
+fn push_pull_mixed_coplanar_and_slanted_boundary_builds_walls() {
+    let mut wedge = sliced_wedge();
+    let cut = wedge_cut_face(&wedge);
+    let report = wedge
+        .split_face(
+            cut,
+            &[Point3::new(1.0, 0.5, 0.0), Point3::new(0.0, 0.5, 1.0)],
+        )
+        .expect("edge-to-edge bisect of the cut face");
+    let half = report.new_faces[0];
+    let base = wedge.clone();
+
+    let after = assert_build_and_invert(&base, half, 0.2);
+    assert!(
+        after.faces().len() > base.faces().len(),
+        "the mixed push erected walls"
+    );
+}
+
+// ------------------------------------- stretch push/pull on sliced solids
+
+/// Unit cube sliced by the plane x + z = 1; the piece kept is the wedge
+/// x + z <= 1 (a right-triangle prism along y with a slanted cut face).
+fn sliced_wedge() -> Object {
+    let cube = unit_cube();
+    let plane =
+        Plane::from_point_normal(Point3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 1.0)).unwrap();
+    let (_above, below) = cube.slice(&plane).expect("slice through the cube");
+    below.validate().unwrap();
+    assert_eq!(below.faces().len(), 5, "wedge: 2 caps + 2 legs + cut face");
+    below
+}
+
+/// The wedge's cut face (outward normal = the slice plane's normal).
+fn wedge_cut_face(wedge: &Object) -> FaceId {
+    face_with_normal(wedge, Vec3::new(1.0, 0.0, 1.0).normalized().unwrap())
+}
+
+/// Pushing the cut face of a Slice-produced wedge — the flagship user case,
+/// and the exact behavior the flat-face ruling asks for.
+///
+/// PULL (outward): the two oblique legs each unweld and grow a fresh wall, so
+/// the wedge gains material along its slope. Watertight, and exactly
+/// invertible through the recorded inverse. Unbounded — even a large pull
+/// validates.
+///
+/// PUSH (inward): a wedge's slant face cannot be pushed in AT ALL. The moved
+/// face immediately drives across the fixed bottom/back structure (the new
+/// walls would dip outside the solid), so the interpenetration guard refuses
+/// the very first infinitesimal push — typed, byte-identical.
+#[test]
+fn push_pull_wedge_cut_face_builds_walls_and_cannot_push_in() {
+    let wedge = sliced_wedge();
+    let cut = wedge_cut_face(&wedge);
+
+    // Outward: builds two walls (one per oblique leg), watertight, invertible.
+    let after = assert_build_and_invert(&wedge, cut, 0.3);
+    assert_eq!(after.faces().len(), 7, "two oblique legs → two walls");
+    assert_eq!(after.vertices().len(), 10);
+    assert!(
+        signed_volume(&after) > signed_volume(&wedge),
+        "an outward pull adds material along the slope"
+    );
+
+    // A large pull is still fine (unbounded).
+    let far = assert_build_and_invert(&wedge, cut, 4.0);
+    assert_eq!(far.faces().len(), 7);
+
+    // Inward: not possible at all — even a tiny push refuses, byte-identical.
+    for d in [-0.01, -0.3, -0.6] {
+        let mut pushed = sliced_wedge();
+        let before = exact_snapshot(&pushed);
+        let err = pushed.push_pull(wedge_cut_face(&pushed), d).unwrap_err();
+        assert_eq!(err, PushPullError::NonManifoldResult, "distance {d}");
+        assert_eq!(exact_snapshot(&pushed), before, "distance {d}");
+    }
+}
+
+/// A slanted face WITH A HOLE: punch a square tunnel through the wedge's cut
+/// face (`push_through`), then pull the now-holed cut face out. The outer
+/// boundary's oblique legs each grow a wall; the hole ring rides along rigidly
+/// (its tunnel walls are transverse), staying inside the face. The recorded
+/// inverse restores the pushed solid — a face-with-hole pull round-trips.
+#[test]
+fn push_pull_holed_cut_face_builds_walls_and_keeps_the_hole() {
+    let mut wedge = sliced_wedge();
+    let cut = wedge_cut_face(&wedge);
+    // Imprint a small square (points on the plane x + z = 1) and punch it
+    // through: the sub-face swept inward past the bottom leaves a tunnel.
+    let inner = wedge
+        .split_face_inner(
+            cut,
+            &[
+                Point3::new(0.55, 0.35, 0.45),
+                Point3::new(0.75, 0.35, 0.25),
+                Point3::new(0.75, 0.65, 0.25),
+                Point3::new(0.55, 0.65, 0.45),
+            ],
+        )
+        .expect("imprint a square on the cut face");
+    let wedge = wedge
+        .push_through(inner.sub_face, -0.8)
+        .expect("punch the square through the wedge");
+    wedge.validate().unwrap();
+    assert_eq!(wedge.watertight(), WatertightState::Watertight);
+
+    // The cut face now carries the tunnel mouth as a hole.
+    let holed = wedge_cut_face(&wedge);
+    assert_eq!(
+        wedge.faces()[holed].inner_loops.len(),
+        1,
+        "cut face carries the tunnel mouth as a hole ring"
+    );
+
+    let pushed = assert_build_and_invert(&wedge, holed, 0.1);
+    let holed_after = wedge_cut_face(&pushed);
+    assert_eq!(
+        pushed.faces()[holed_after].inner_loops.len(),
+        1,
+        "the hole ring survives the build"
+    );
+    // The whole holed face translated rigidly by the sweep (the hole's tunnel
+    // walls are transverse): the hole corner moved by exactly 0.1 along the
+    // cut normal.
+    let n = Vec3::new(1.0, 0.0, 1.0).normalized().unwrap();
+    let expect = Point3::new(0.55, 0.35, 0.45) + n * 0.1;
+    assert!(
+        pushed
+            .vertices()
+            .values()
+            .any(|v| (v.position - expect).length() <= tol::POINT_MERGE),
+        "hole corner must ride along the sweep to {expect:?}"
+    );
+}
+
+/// Through-cut interaction on a Slice-produced face. Overshoot detection
+/// reports the through case for a deep push, so the document layer routes it
+/// to `push_through` — whose boolean REFUSES a full-face sweep here, typed:
+/// the swept tool's side walls contain the cut face's boundary edges, which
+/// lie on the wedge's oblique legs — edge-on-face tangency, exactly the
+/// contact booleans refuse rather than guess at (ARCHITECTURE.md). The
+/// working through path on an oblique face is a sub-face imprint (see
+/// `push_pull_holed_cut_face_stretches_and_keeps_the_hole`, whose tunnel
+/// walls meet the solid transversally). Full-face oblique push-through is
+/// scoped in docs/ROADMAP.md.
+#[test]
+fn push_through_on_a_slice_cut_face_refuses_typed() {
+    let wedge = sliced_wedge();
+    let cut = wedge_cut_face(&wedge);
+
+    // Deep inward pushes report as through-cuts (the document layer routes
+    // them to `push_through`).
+    assert!(wedge.push_pull_overshoots(cut, -0.8));
+
+    // The full-face sweep grazes the legs along the boundary: refused typed,
+    // source untouched (push_through borrows, never mutates).
+    let err = wedge.push_through(cut, -0.2).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+
+    // Sweeping past the far edge would consume the whole wedge; the empty
+    // result is refused typed as well.
+    let err = wedge.push_through(cut, -0.8).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PushPullError::WouldVanish | PushPullError::NonManifoldResult
+        ),
+        "deep full-face through-cut must refuse typed, got {err:?}"
+    );
+}
+
+/// Pushing a face produced by a dissolved coplanar seam, where that face has
+/// a genuinely SLANTED neighbor so the push exercises the stretch path (a
+/// union of two axis-aligned boxes would classify every edge transverse and
+/// take the translate fast path instead): a box unioned with a
+/// chamfer-topped box of the same height. The top seam dissolves into one
+/// face whose east neighbor is the chamfer; pulling the merged top stretches
+/// the chamfer in its own plane.
+#[test]
+fn push_pull_face_from_dissolved_seam_builds_a_wall() {
+    let a = unit_cube();
+    // B: box [1,2]×[0,1]×[0,1] with its top-east edge chamfered by the plane
+    // x + 0.5z = 2 (through (2,·,0) and (1.5,·,1)).
+    let plane =
+        Plane::from_point_normal(Point3::new(2.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.5)).unwrap();
+    let b_box = box_object(Point3::new(1.0, 0.0, 0.0), Point3::new(2.0, 1.0, 1.0));
+    let (_outside, b) = b_box.slice(&plane).expect("chamfer the box");
+
+    let mut merged = Object::boolean(BooleanOp::Union, &a, &b, &Transform::IDENTITY).unwrap();
+    merged.merge_coplanar_faces(&[]);
+    merged.validate().unwrap();
+    assert_eq!(
+        merged.faces().len(),
+        6,
+        "bottom, west, front, back, chamfer, and ONE dissolved top"
+    );
+    let original = merged.clone();
+
+    // The merged top spans x ∈ [0, 1.5]; its east neighbor is the chamfer
+    // (normal dot ≈ 0.447 — slanted, not transverse).
+    let top = face_with_normal(&merged, Vec3::new(0.0, 0.0, 1.0));
+    let after = assert_build_and_invert(&original, top, 0.2);
+    // The chamfer edge grows one wall; the top rose rigidly to z = 1.2 and its
+    // east border stayed at x = 1.5 (the wall bridges to the chamfer) rather
+    // than sliding.
+    assert_eq!(after.faces().len(), 7, "the chamfer edge grew one wall");
+    assert!(
+        after
+            .vertices()
+            .values()
+            .any(|v| (v.position - Point3::new(1.5, 0.0, 1.2)).length() <= tol::POINT_MERGE),
+        "top east border rose straight to z = 1.2 at x = 1.5"
+    );
+    // Volume: 1.75 before, plus the rigid slab [0,1.5]×[0,1]×[1,1.2] = 0.3.
+    let volume = signed_volume(&after);
+    assert!(
+        (volume - 2.05).abs() <= VOLUME_TOL,
+        "signed volume {volume}, expected 2.05"
+    );
+}
+
+// -------------------------- interpenetration guards on the build result
+//
+// A near-flat chamfer makes the built walls (and the moved face itself) reach
+// into a shallow band above the top where a separate shell may sit. These
+// specs pin the result-validation guards (`validate_sweep_result`, reused from
+// the stretch era) that keep a wall-building push from silently committing
+// interpenetrating geometry — every face stays planar and twin-consistent, so
+// the structural validator cannot see it: touched faces may not contact any
+// other face of the object away from their shared elements, and nothing may
+// end up engulfed inside the swept prism.
+
+/// Prism with a near-flat chamfer next to its top (the chamfer plane is
+/// ~1.1° off the top plane), plus one extra disjoint closed shell placed at
+/// `extra` (an axis-aligned box), all in ONE Object. A tiny +0.01 push on the
+/// top rises into the shallow band just above it, where the built wall (and
+/// the moved face) can reach a hovering shell — the case the result-validation
+/// guards below refuse.
+fn chamfered_prism_with_shell(extra: Option<(Point3, Point3)>) -> Object {
+    let mut verts = vec![
+        // y = 0 cap ring
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.5, 0.0, 0.0),
+        Point3::new(1.5, 0.0, 0.99),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(0.0, 0.0, 1.0),
+        // y = 1 cap ring
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(1.5, 1.0, 0.0),
+        Point3::new(1.5, 1.0, 0.99),
+        Point3::new(1.0, 1.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ];
+    let mut faces = vec![
+        vec![0, 1, 2, 3, 4], // cap y=0 (outward -y)
+        vec![5, 9, 8, 7, 6], // cap y=1 (outward +y)
+        vec![0, 5, 6, 1],    // bottom (-z)
+        vec![1, 6, 7, 2],    // east (+x)
+        vec![2, 7, 8, 3],    // chamfer (~+z, tilted 1.1°)
+        vec![3, 8, 9, 4],    // top (+z)
+        vec![4, 9, 5, 0],    // west (-x)
+    ];
+    if let Some((lo, hi)) = extra {
+        let base = verts.len();
+        verts.extend([
+            Point3::new(lo.x, lo.y, lo.z),
+            Point3::new(hi.x, lo.y, lo.z),
+            Point3::new(hi.x, hi.y, lo.z),
+            Point3::new(lo.x, hi.y, lo.z),
+            Point3::new(lo.x, lo.y, hi.z),
+            Point3::new(hi.x, lo.y, hi.z),
+            Point3::new(hi.x, hi.y, hi.z),
+            Point3::new(lo.x, hi.y, hi.z),
+        ]);
+        for f in [
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ] {
+            faces.push(f.into_iter().map(|i| i + base).collect());
+        }
+    }
+    let obj = Object::from_polygons(&verts, &faces).expect("prism (+shell) soup is closed");
+    obj.validate().unwrap();
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    obj
+}
+
+/// The near-flat chamfer alone is fine: +0.01 on the top translates it
+/// rigidly and grows ONE wall along the near-flat chamfer edge. The shared
+/// border rises straight to z = 1.01 at its original x = 1 — no lateral slide
+/// (the old stretch amplified a 0.01 push into a 0.5 sideways slide here;
+/// translate-and-build does not). Watertight, invertible.
+#[test]
+fn push_pull_near_flat_chamfer_builds_a_wall_no_slide() {
+    let prism = chamfered_prism_with_shell(None);
+    let top = face_with_normal(&prism, Vec3::new(0.0, 0.0, 1.0));
+
+    let after = assert_build_and_invert(&prism, top, 0.01);
+    assert_eq!(after.faces().len(), 8, "the chamfer edge grew one wall");
+    assert!(
+        after
+            .vertices()
+            .values()
+            .any(|v| (v.position - Point3::new(1.0, 0.0, 1.01)).length() <= tol::POINT_MERGE),
+        "border rises straight to z = 1.01 at x = 1, no slide"
+    );
+}
+
+/// A second, disjoint shell hovering 0.001 above the top, right where the
+/// stretched chamfer surface will pass: the same +0.01 push would drive the
+/// chamfer face straight through it. The sweep-depth guard cannot see this
+/// (the cube is on no neighbor face, and the cube's own depth exceeds
+/// nothing the guard measures) — the face-to-face interpenetration guard
+/// must refuse, byte-identical.
+#[test]
+fn push_pull_stretch_refuses_lateral_interpenetration_across_shells() {
+    let mut obj = chamfered_prism_with_shell(Some((
+        Point3::new(0.7, 0.4, 1.001),
+        Point3::new(0.8, 0.6, 1.1),
+    )));
+    let top = face_with_normal(&obj, Vec3::new(0.0, 0.0, 1.0));
+    let before = exact_snapshot(&obj);
+    let err = obj.push_pull(top, 0.01).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+    assert_eq!(
+        exact_snapshot(&obj),
+        before,
+        "a refused push must leave the object byte-identical"
+    );
+}
+
+/// A TINY disjoint shell that fits entirely between the top's old and new
+/// planes (z ∈ [1.002, 1.006] against a +0.01 push): after the sweep nothing
+/// would intersect it — it would simply be engulfed inside newly claimed
+/// material. The engulfment guard must refuse, byte-identical.
+#[test]
+fn push_pull_stretch_refuses_engulfing_a_disjoint_shell() {
+    let mut obj = chamfered_prism_with_shell(Some((
+        Point3::new(0.2, 0.4, 1.002),
+        Point3::new(0.3, 0.6, 1.006),
+    )));
+    let top = face_with_normal(&obj, Vec3::new(0.0, 0.0, 1.0));
+    let before = exact_snapshot(&obj);
+    let err = obj.push_pull(top, 0.01).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+    assert_eq!(exact_snapshot(&obj), before);
+}
+
+/// The PLUS-SIGN coplanar overlap, end to end: a plate shell hovers with its
+/// underside exactly where the +0.01 push lands the top (z = 1.01), crossing
+/// the stretched top off-center — the plate spans x ∈ [0.3, 0.4] (inside the
+/// top's final x ∈ [0, 0.5]) but pokes out far beyond it in y. The two
+/// coplanar faces share real area, yet NO vertex of either lies inside the
+/// other, and no boundary endpoint or midpoint of either lands inside the
+/// other — point sampling cannot see the overlap; the guard's real
+/// segment/segment boundary intersection can, deterministically. (The
+/// plate's walls also graze the landing plane, whose transversal
+/// classification sits exactly on a strict-interior boundary — a
+/// floating-point coin toss; the coplanar crossing must refuse regardless.)
+/// The primitive itself is pinned against point sampling by
+/// `faces_improperly_contact_detects_plus_sign_coplanar_overlap` in
+/// `ops.rs`'s unit tests, on bare strips with no walls at all. Refused,
+/// byte-identical.
+#[test]
+fn push_pull_stretch_refuses_plus_sign_coplanar_overlap() {
+    let mut obj = chamfered_prism_with_shell(Some((
+        Point3::new(0.3, -3.0, 1.01),
+        Point3::new(0.4, 2.0, 1.05),
+    )));
+    let top = face_with_normal(&obj, Vec3::new(0.0, 0.0, 1.0));
+    let before = exact_snapshot(&obj);
+    let err = obj.push_pull(top, 0.01).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+    assert_eq!(exact_snapshot(&obj), before);
+}
+
+/// Same mechanism WITHIN one shell: union the chamfered prism with a
+/// cantilever — a column standing on the chamfer carrying an arm that hangs
+/// 0.002 above the top. A +0.004 push raises the top into the arm (their
+/// only legitimate contact is the union seam down at the chamfer, far from
+/// the crossing) — refused, byte-identical. A +0.001 push stays under the
+/// arm and must still succeed.
+#[test]
+fn push_pull_stretch_refuses_lateral_interpenetration_same_shell() {
+    let prism = chamfered_prism_with_shell(None);
+    // Cantilever profile in the y = 0.35 plane, extruded 0.3 along +y:
+    // column x ∈ [1.05, 1.15] from z = 0.95 (inside the prism, through the
+    // chamfer) up to 1.05; arm x ∈ [0.65, 1.15], z ∈ [1.002, 1.05].
+    let plane =
+        Plane::from_point_normal(Point3::new(0.0, 0.35, 0.0), Vec3::new(0.0, 1.0, 0.0)).unwrap();
+    let profile = Profile::new(
+        plane,
+        vec![
+            Point3::new(1.05, 0.35, 1.002),
+            Point3::new(0.65, 0.35, 1.002),
+            Point3::new(0.65, 0.35, 1.05),
+            Point3::new(1.15, 0.35, 1.05),
+            Point3::new(1.15, 0.35, 0.95),
+            Point3::new(1.05, 0.35, 0.95),
+        ],
+        vec![],
+    )
+    .expect("cantilever profile");
+    let arm = Object::from_extrusion(&profile, 0.3).expect("cantilever solid");
+    let mut obj = Object::boolean(BooleanOp::Union, &prism, &arm, &Transform::IDENTITY).unwrap();
+    obj.merge_coplanar_faces(&[]);
+    obj.validate().unwrap();
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+
+    // The prism's top face (z = 1, full [0,1]² footprint — the arm hovers,
+    // it does not touch the top).
+    let top = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+                && f.plane.signed_distance(Point3::new(0.5, 0.5, 1.0)).abs() <= tol::PLANE_DIST
         })
-        .count();
-    assert_eq!(at_rim, 4, "unwelded rim corners keep the full apothem");
+        .map(|(id, _)| id)
+        .expect("prism top face");
+
+    // Deep enough to reach the arm: refused, byte-identical.
+    let before = exact_snapshot(&obj);
+    let err = obj.push_pull(top, 0.004).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+    assert_eq!(exact_snapshot(&obj), before);
+
+    // Shallow enough to stay clear: still works.
+    obj.push_pull(top, 0.001).unwrap();
+    obj.validate().unwrap();
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+}
+
+// ------------------------------------------ hole rings under the stretch
+
+/// Rectangular frustum solid (a tapered box) between `z0` and `z1`, centered
+/// on (0.5, 0.5), with half-width `0.3 − 0.1·z` at height z — its walls all
+/// lean toward a common apex at z = 3.
+fn tapered_tool(z0: f64, z1: f64) -> Object {
+    let half = |z: f64| 0.3 - 0.1 * z;
+    let (h0, h1) = (half(z0), half(z1));
+    let v = |h: f64, z: f64| {
+        vec![
+            Point3::new(0.5 - h, 0.5 - h, z),
+            Point3::new(0.5 + h, 0.5 - h, z),
+            Point3::new(0.5 + h, 0.5 + h, z),
+            Point3::new(0.5 - h, 0.5 + h, z),
+        ]
+    };
+    let mut verts = v(h0, z0);
+    verts.extend(v(h1, z1));
+    Object::from_polygons(
+        &verts,
+        &[
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+    )
+    .expect("frustum tool")
+}
+
+/// A face with a hole whose ring rides on TAPERED tunnel walls: pulling the
+/// top out builds a fresh wall along each slanted hole-ring edge (four here),
+/// and the ring rides up RIGIDLY at its original half-width rather than
+/// shrinking toward the walls' apex the way the old stretch did. So the
+/// apex-inversion refusal is gone — the ring never approaches the apex — and
+/// even a pull past the old apex height validates. The recorded inverse
+/// restores it. (This is the tapered-hole PULL; the deferred P4 case is a
+/// different gesture — pushing an outer edge INTO/PAST a hole — see
+/// docs/ROADMAP.md.)
+#[test]
+fn push_pull_tapered_hole_ring_builds_walls_and_rides_rigidly() {
+    let cube = unit_cube();
+    let tool = tapered_tool(-0.1, 1.1);
+    let mut holed =
+        Object::boolean(BooleanOp::Subtract, &cube, &tool, &Transform::IDENTITY).unwrap();
+    holed.merge_coplanar_faces(&[]);
+    holed.validate().unwrap();
+    assert_eq!(holed.watertight(), WatertightState::Watertight);
+    let top = face_with_normal(&holed, Vec3::new(0.0, 0.0, 1.0));
+    assert_eq!(
+        holed.faces()[top].inner_loops.len(),
+        1,
+        "through-hole mouth on the top face"
+    );
+
+    // Pull out by 0.5: four walls on the tapered hole ring; the ring rides up
+    // rigidly (half-width 0.2 at z = 0.5, unchanged — the tool's mouth on the
+    // top plane), invertible.
+    let after = assert_build_and_invert(&holed, top, 0.5);
+    assert_eq!(
+        after.faces().len(),
+        holed.faces().len() + 4,
+        "four hole-ring walls"
+    );
+    let top_after = face_with_normal(&after, Vec3::new(0.0, 0.0, 1.0));
+    assert_eq!(
+        after.faces()[top_after].inner_loops.len(),
+        1,
+        "hole survives"
+    );
+    let ring_half = 0.3 - 0.1 * 1.0; // the tool's half-width at the old top plane z=1
+    assert!(
+        after.vertices().values().any(|v| (v.position
+            - Point3::new(0.5 - ring_half, 0.5 - ring_half, 1.5))
+        .length()
+            <= tol::POINT_MERGE),
+        "ring corner rides up rigidly to z = 1.5 at its original half-width"
+    );
+
+    // Past the old walls' apex (z = 3): still fine — a rigid ring never
+    // inverts, so an outward pull is unbounded here too.
+    let far = assert_build_and_invert(&holed, top, 2.2);
+    assert_eq!(far.faces().len(), holed.faces().len() + 4);
+
+    // Pushing the holed top IN is bounded: the ring's walls immediately drive
+    // into the tapered tunnel — refused typed, byte-identical.
+    let mut pushed = holed.clone();
+    let before = exact_snapshot(&pushed);
+    let err = pushed.push_pull(top, -0.3).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+    assert_eq!(exact_snapshot(&pushed), before);
+}
+
+// ------------------------------------ collapse detection never sees slanted
+
+/// A push that would EXACTLY close a coplanar step (the direct-`push_pull`
+/// collapse) is gated away from the collapse path when the moved face also has
+/// a slanted neighbor, because the step weld translates the rest of the
+/// boundary rigidly — wrong for a face that must also build a wall along its
+/// slanted edge. Construction: bisect a cube top, raise one half (a step + a
+/// pristine quad wall, exactly what `find_collapse_plans` matches), then
+/// chamfer the raised block with an oblique slice. Pushing the raised top back
+/// by the exact step height now routes through translate-and-build (the
+/// boundary is not all-transverse), whose result-validation refuses at the
+/// chamfer's fixed far edge — typed, byte-identical — rather than welding the
+/// step. A shallower push builds walls and undoes cleanly through History.
+#[test]
+fn push_pull_step_close_with_slanted_neighbor_is_refused() {
+    let (mut cube, halves) = bisected_top_cube();
+    cube.push_pull(halves[0], 0.5).expect("raise the left half");
+    cube.validate().unwrap();
+
+    // Chamfer the raised block's top-west edge: plane -x + z = 1.2, through
+    // (0,·,1.2) and (0.3,·,1.5) — it misses everything below z = 1.2.
+    let plane =
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 1.2), Vec3::new(-1.0, 0.0, 1.0)).unwrap();
+    let (_corner, mut stepped) = cube.slice(&plane).expect("chamfer the raised block");
+    stepped.validate().unwrap();
+    let original = stepped.clone();
+
+    // The raised top now spans x ∈ [0.3, 0.5] with the chamfer to its west
+    // and the pristine step wall to its east.
+    let raised = stepped
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+                && f.plane.signed_distance(Point3::new(0.4, 0.5, 1.5)).abs() <= tol::PLANE_DIST
+        })
+        .map(|(id, _)| id)
+        .expect("raised top face");
+
+    // Exactly closing the step (-0.5) must NOT weld it shut: the boundary has a
+    // slanted edge, so the sweep builds walls, and the built result crosses the
+    // chamfer's fixed far edge — refused typed, byte-identical.
+    let before = exact_snapshot(&stepped);
+    let err = stepped.push_pull(raised, -0.5).unwrap_err();
+    assert_eq!(err, PushPullError::NonManifoldResult);
+    assert_eq!(exact_snapshot(&stepped), before);
+
+    // A shallower push builds walls, and History undoes it exactly.
+    let mut history = History::new();
+    history
+        .apply(
+            &mut stepped,
+            KernelOp::PushPull {
+                face: raised,
+                distance: -0.2,
+            },
+        )
+        .expect("shallow wall-building push of the raised top");
+    stepped.validate().unwrap();
+    assert_eq!(stepped.watertight(), WatertightState::Watertight);
+    history.undo(&mut stepped).expect("undo the push");
+    stepped.validate().unwrap();
+    assert!(objects_equivalent(&stepped, &original));
+}
+
+// Rule-3 property tests over flat-face translate-and-build push/pull, on
+// prisms extruded from IRREGULAR star polygons (per-vertex radii and jittered
+// angles — frequently concave), optionally carrying a centered square hole,
+// and optionally carrying a near-collinear "spike" vertex that makes two
+// adjacent facets meet at a very shallow angle (stressing the wall built on a
+// near-collinear neighbor). The invariant: any accepted push yields a
+// validating, watertight solid of the profile's genus and is exactly
+// invertible through the recorded inverse; any refusal (a self-intersecting
+// build) leaves the object byte-identical.
+proptest! {
+    #[test]
+    fn generalized_push_pull_is_watertight_and_invertible_or_untouched(
+        n in 5usize..10,
+        r in 1.0..4.0f64,
+        radii in proptest::collection::vec(0.4..1.0f64, 10),
+        jitter in proptest::collection::vec(-0.35..0.35f64, 10),
+        with_hole in proptest::bool::ANY,
+        // Angle between the spiked facet pair, log-uniform across the
+        // alignment floor (sin θ from ~6e-5 to ~0.1; the floor is 1e-2).
+        spike in proptest::option::of(-4.2..-1.0f64),
+        h in 0.5..4.0f64,
+        d in -3.0..3.0f64,
+    ) {
+        prop_assume!(d.abs() >= 0.05);
+        // Star polygon: strictly increasing jittered angles around the
+        // centroid with independent radii — always simple, often concave.
+        let step = std::f64::consts::TAU / n as f64;
+        let mut pts: Vec<Point3> = (0..n)
+            .map(|k| {
+                let a = step * (k as f64 + jitter[k]);
+                let rk = r * radii[k];
+                Point3::new(rk * a.cos(), rk * a.sin(), 0.0)
+            })
+            .collect();
+        // Optional near-collinear spike on edge 0→1: insert the edge
+        // midpoint displaced outward so the two half-facets meet at angle
+        // θ = 10^spike radians.
+        let spike_theta = spike.map(|exp| 10.0f64.powf(exp));
+        if let Some(theta) = spike_theta {
+            let (p0, p1) = (pts[0], pts[1]);
+            let edge = p1 - p0;
+            let len = edge.length();
+            let out = Vec3::new(edge.y, -edge.x, 0.0).normalized().unwrap();
+            let mid = p0 + edge * 0.5 + out * (len * 0.25 * (theta * 0.5).tan());
+            pts.insert(1, mid);
+        }
+        let holes: Vec<Vec<Point3>> = if with_hole {
+            // Small centered square, wound opposite the outer boundary; the
+            // minimum star radius (0.4·r) keeps it strictly interior.
+            let q = 0.12 * r;
+            vec![vec![
+                Point3::new(-q, -q, 0.0),
+                Point3::new(-q, q, 0.0),
+                Point3::new(q, q, 0.0),
+                Point3::new(q, -q, 0.0),
+            ]]
+        } else {
+            vec![]
+        };
+        let profile = Profile::new(xy_plane(), pts.clone(), holes).unwrap();
+        let mut prism = Object::from_extrusion(&profile, h).unwrap();
+        let original = prism.clone();
+        let before = exact_snapshot(&prism);
+        // The facet to push: with a spike, the one between pts[0] and the
+        // spike vertex pts[1] (its neighbor across the spike is the
+        // near-collinear half-facet); otherwise any side facet. `faces()`
+        // iteration is deterministic.
+        let facet = prism
+            .faces()
+            .iter()
+            .find(|(_, f)| {
+                if f.plane.normal().z.abs() > tol::NORMAL_DIRECTION {
+                    return false;
+                }
+                if spike_theta.is_none() {
+                    return true;
+                }
+                let mut has0 = false;
+                let mut has1 = false;
+                for lp in prism.loop_positions(f.outer_loop) {
+                    has0 |= lp.approx_eq(pts[0], tol::POINT_MERGE);
+                    has1 |= lp.approx_eq(pts[1], tol::POINT_MERGE);
+                }
+                has0 && has1
+            })
+            .map(|(id, _)| id)
+            .expect("prism has the requested side facet");
+        let mut history = History::new();
+        match history.apply(&mut prism, KernelOp::PushPull { face: facet, distance: d }) {
+            Ok(_report) => {
+                // Any accepted flat-facet push builds walls and yields a
+                // validating, watertight solid of the profile's genus (adding
+                // side walls never changes the genus).
+                prism.validate().unwrap();
+                prop_assert_eq!(prism.watertight(), WatertightState::Watertight);
+                prop_assert_eq!(
+                    euler_poincare(&prism),
+                    if with_hole { 0 } else { 2 },
+                    "genus must match the profile"
+                );
+                // Exactly invertible through the recorded inverse (a plain
+                // push(-d) cannot re-collapse a slanted neighbor's wall).
+                history.undo(&mut prism).unwrap();
+                prism.validate().unwrap();
+                prop_assert!(objects_equivalent(&prism, &original));
+            }
+            Err(_) => {
+                // Strong guarantee, byte-for-byte (a self-intersecting build
+                // is refused, not committed).
+                prop_assert_eq!(exact_snapshot(&prism), before);
+            }
+        }
+    }
 }
 
 /// Regular hexagonal prism (radius 1, height 1, extruded +z from the XY
 /// plane) plus the side facet between the 0° and 60° hex vertices and that
-/// facet's outward normal (at 30°). Shared by the slanted-neighbor
-/// specs.
+/// facet's outward normal (at 30°). Shared by the slanted-neighbor specs.
 fn hex_prism_and_facet() -> (Object, FaceId, Vec3) {
-    use kernel::Profile;
-
     let pts: Vec<Point3> = (0..6)
         .map(|k| {
             let a = std::f64::consts::FRAC_PI_3 * k as f64;

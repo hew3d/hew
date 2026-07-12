@@ -26,7 +26,9 @@ Push/pulling a closed sketch region creates a brand-new **Object** — a waterti
 
 Push/pulling an existing face of a solid moves that face in or out, keeping the object watertight the whole time. Pull the top of a box up to make it taller; push a side inward to make it thinner.
 
-Hew currently extrudes faces whose neighboring faces are perpendicular to them (the common case for box-like geometry). If a push/pull isn't possible on a particular face, Hew refuses with an error rather than producing questionable geometry. Support for arbitrary planar faces is on the roadmap.
+This works on angled faces too, not just box-like geometry. The face moves straight along its own normal, and where a neighbor meets it at an angle a new side wall grows to connect them — pull the cut face of a sliced wedge outward and the wedge gains a prism of material along its slope; pull a facet of a circle-based solid and it grows a small pad.
+
+Pulling outward always works: you are adding a block of material, so there is no limit. Pushing inward works only as far as the shape physically allows — Hew refuses the moment the moving face would run into the rest of the solid, leaving the object unchanged. A wedge's sloped face, for instance, can't be pushed in at all: there is nowhere for it to go. Expanding a whole curved surface as one (rather than one facet at a time) is on the roadmap.
 
 ## Curved walls: push/pull changes the radius
 

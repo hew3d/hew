@@ -59,6 +59,24 @@ pub enum KernelOp {
         /// Signed distance along the face normal (meters).
         distance: f64,
     },
+    /// `Object::unbuild_push_pull(face, walls, distance)` — the exact inverse
+    /// of a translate-and-build push/pull (one that erected side walls). Not a
+    /// user gesture: derived by [`History`] as the inverse of a wall-building
+    /// `PushPull` whose walls a plain `PushPull { -distance }` cannot re-detect
+    /// (a slanted neighbor's non-coplanar wall). Removes the recorded `walls`
+    /// and restores the moved face.
+    UnbuildPushPull {
+        /// The moved face to return to its pre-push position.
+        face: FaceId,
+        /// The walls the forward push erected (removed here). Usually still
+        /// pristine quads at undo time (undo is LIFO); if an intervening op
+        /// altered one, `unbuild_push_pull` refuses typed rather than
+        /// corrupting.
+        walls: Vec<FaceId>,
+        /// The forward push's signed distance (the inverse sweep is its
+        /// negation); carried so redo can reconstruct the forward `PushPull`.
+        distance: f64,
+    },
     /// `Object::split_face(face, path)` — or, with `restore` set,
     /// `Object::split_face_with_attrs`: the undo of a `MergeFaces`, giving
     /// each result face back the attribute state the merge report
@@ -698,6 +716,7 @@ enum Anchor {
 fn anchor_of(object: &Object, op: &KernelOp) -> Anchor {
     match op {
         KernelOp::PushPull { face, .. }
+        | KernelOp::UnbuildPushPull { face, .. }
         | KernelOp::SplitFace { face, .. }
         | KernelOp::SplitFaceInner { face, .. }
         | KernelOp::MergeInnerFace { sub_face: face }
@@ -779,6 +798,16 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
             face: face(unknown_face_pp)?,
             distance: *distance,
         }),
+        KernelOp::UnbuildPushPull {
+            walls, distance, ..
+        } => Ok(KernelOp::UnbuildPushPull {
+            face: face(unknown_face_pp)?,
+            // Walls are not re-anchored geometrically: they are the moved
+            // face's own boundary walls, still live and pristine under LIFO
+            // undo. A stale one fails the op's own typed check, never corrupts.
+            walls: walls.clone(),
+            distance: *distance,
+        }),
         KernelOp::SplitFace { path, restore, .. } => Ok(KernelOp::SplitFace {
             face: face(unknown_face_sticky)?,
             path: path.clone(),
@@ -840,6 +869,14 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             .push_pull(*face, *distance)
             .map(KernelOpReport::PushPull)
             .map_err(KernelOpError::PushPull),
+        KernelOp::UnbuildPushPull {
+            face,
+            walls,
+            distance,
+        } => object
+            .unbuild_push_pull(*face, walls, *distance)
+            .map(KernelOpReport::PushPull)
+            .map_err(KernelOpError::PushPull),
         KernelOp::SplitFace {
             face,
             path,
@@ -886,13 +923,34 @@ fn derive_inverse(
     pre_merge_path: Option<Vec<Point3>>,
 ) -> KernelOp {
     match (op, report) {
-        (KernelOp::PushPull { .. }, KernelOpReport::PushPull(r)) => KernelOp::PushPull {
-            face: r.face,
-            distance: -match op {
-                KernelOp::PushPull { distance, .. } => *distance,
-                _ => unreachable!(),
-            },
-        },
+        (KernelOp::PushPull { distance, .. }, KernelOpReport::PushPull(r)) => {
+            // Only a push that erected a wall along a SLANTED neighbor needs
+            // the recorded un-build: that wall is perpendicular to the moved
+            // face and bridges a non-coplanar neighbor, so a plain
+            // `push_pull(-d)` cannot re-detect it. A pure translate (box) and a
+            // pure coplanar step both still reverse the classic way — the
+            // latter through `find_collapse_plans` — so they keep the `-d`
+            // inverse, exactly as before this branch.
+            if r.requires_unbuild_inverse {
+                KernelOp::UnbuildPushPull {
+                    face: r.face,
+                    walls: r.created_faces.clone(),
+                    distance: *distance,
+                }
+            } else {
+                KernelOp::PushPull {
+                    face: r.face,
+                    distance: -*distance,
+                }
+            }
+        }
+        (KernelOp::UnbuildPushPull { distance, .. }, KernelOpReport::PushPull(r)) => {
+            // Redo of an un-build re-applies the forward push.
+            KernelOp::PushPull {
+                face: r.face,
+                distance: *distance,
+            }
+        }
         (KernelOp::SplitFace { .. }, KernelOpReport::FaceSplit(r)) => KernelOp::MergeFaces {
             edge: r.new_edges[0],
         },
