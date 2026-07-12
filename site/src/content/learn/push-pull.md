@@ -28,6 +28,12 @@ Push/pulling an existing face of a solid moves that face in or out, keeping the 
 
 Hew currently extrudes faces whose neighboring faces are perpendicular to them (the common case for box-like geometry). If a push/pull isn't possible on a particular face, Hew refuses with an error rather than producing questionable geometry. Support for arbitrary planar faces is on the roadmap.
 
+## Curved walls: push/pull changes the radius
+
+The wall of an extruded circle or arc is a special case. Pushing or pulling any facet of it acts on the **whole wall**: the radius changes by exactly the distance you drag, using the exact circle the wall remembers. Pull a cylinder's side outward and the whole cylinder gets fatter; push a hole's wall toward its center and the hole shrinks. Caps and attached flat walls follow along.
+
+The same refusal rule applies here: if changing the radius would bend a neighboring face or collapse the wall into its own axis, Hew refuses with an error and leaves the model untouched. A wall that a boolean has cut into (say, a cylinder with a flat slice taken off) still resizes — the cut face slides along with the new radius.
+
 ## Recesses, bosses, and through-cuts
 
 Draw directly on a solid's face to split it into regions (see [Drawing](/learn/drawing/)), then push/pull the new region:

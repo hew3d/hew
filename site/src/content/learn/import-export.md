@@ -34,11 +34,13 @@ Both `.gltf` and `.glb` import, with embedded textures and the full node hierarc
 
 **File ▸ Export…** opens one dialog with a format choice:
 
-![The Export dialog showing the format selector](/docs/export-dialog.png)
+![The Export dialog with STL selected, showing the format and curve-resolution selectors](/docs/export-dialog.png)
 
 ### STL — for 3D printing
 
 Binary STL, in **millimeters**, Z-up, ready for any slicer. Hew models are watertight solids, so the exported STL is manifold: no repair step, no "fix errors?" prompt in your slicer.
+
+The export dialog has a **Curve resolution** choice for STL. Because drawn circles and arcs remember their exact geometry, Hew can rebuild curved walls at export time at any smoothness — the facets you modeled with are the floor, not the ceiling. "As modeled" writes the stored facets verbatim; Draft through Ultra re-facet every eligible curved wall at 24 to 192 segments per turn, and the mesh stays manifold at every setting. A curved wall that later operations have made irregular (a boss on the wall, a boolean seam through it) keeps its stored facets rather than being approximated.
 
 The export is **gated on solidity**. If any object is leaky, Hew shows *Export STL Anyway?* with the offending objects listed by name; you can export regardless, but you've been told exactly what's wrong and where. STL contains geometry only (no names, colors, or units metadata) and merges everything into one mesh.
 

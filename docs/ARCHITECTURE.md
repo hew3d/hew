@@ -174,8 +174,16 @@ components — each shape drawn apart from the others selects, deletes, and
 moves independently, recomputed on every edit with stable ids) and
 **curves** (the facet chain one arc or circle gesture committed, carried as
 edge metadata and persisted in the file format, so a drawn curve selects
-and deletes as a unit — and the metadata slot is the on-ramp for true
-analytic curves later).
+and deletes as a unit). A curve chain also carries the analytic circle it
+was drawn from (center + radius), and extrusion stamps each side wall with
+the cylinder it is a chord facet of — durable metadata over the faceted
+carrier, propagated under a strict map-or-drop contract and held honest by
+the validator. Push/pull on a stamped wall facet acts on the *logical
+wall*: an exact radial offset of every facet claiming that cylinder,
+derived from the stored axis and radius rather than from any facet's
+plane, refusing typed where a neighbor would bend. This is the foundation
+of the true-curves plan; the architectural decision and staging live in
+`docs/design/true-curves.md`.
 
 ### 2.7 Groups and Components are the two ways to compose
 
@@ -293,7 +301,12 @@ without being rewritten.
 ### 3.3 Rendering
 
 `tessellate` converts kernel topology into flat vertex/index/normal buffers;
-the UI hands those to three.js, rendered on a WebGL2 baseline. WebGL2 is the
+the UI hands those to three.js, rendered on a WebGL2 baseline. Faces
+carrying an analytic surface reference shade with true per-vertex surface
+normals, and the facet seams interior to one curved wall are emitted as a
+separate soft-edge buffer the viewport suppresses — a drawn cylinder reads
+as one smooth wall while its cap rims stay crisp
+(`docs/design/true-curves.md`). WebGL2 is the
 lowest common denominator reliably available across the three
 platform webviews Hew targets (WebView2 on Windows, WKWebView on macOS,
 WebKitGTK on Linux), and a SketchUp-class viewport — flat-shaded faces plus
@@ -327,10 +340,15 @@ teaching the kernel about any external format:
   as a standalone converter wrapping OpenCASCADE, invoked as an external
   process rather than linked into the kernel — keeping a large C++
   dependency and its licensing entirely out of the Rust workspace.
-- Export to interchange formats (glTF/GLB, STL) is a one-way read of already
-  tessellated, already-rendered scene data; it does not need the healing
-  machinery import does, because it never has to reconstruct editable
-  kernel topology from someone else's mesh.
+- Export to interchange formats is one-way and needs no healing machinery
+  (it never reconstructs editable kernel topology from someone else's
+  mesh). glTF/GLB reads the already-tessellated, already-rendered scene
+  data. STL is sourced from the kernel's **export tessellation** instead:
+  each object re-facets its stamped cylinder walls from their analytic
+  surface references at a user-chosen resolution — true curves for STL,
+  manifold at any setting — falling back to stored facets for any wall
+  whose boundary is no longer fully analytic
+  (`docs/design/true-curves.md`).
 
 Every importer depends on the kernel and never the reverse, so the kernel's
 public surface has no knowledge of COLLADA, glTF, or `.skp` at all — it only

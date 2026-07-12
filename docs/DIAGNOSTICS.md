@@ -157,18 +157,31 @@ literal internal handles from the recording session.
 | `method` | Arguments | Effect |
 |---|---|---|
 | `begin_ground_sketch` | — | begin a ground-plane sketch |
+| `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one multi-segment commit as a single undo step |
+| `sketch_cancel_gesture` | — | abandon an open gesture bracket |
+| `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket the segments of one drawn arc/circle as a curve chain |
+| `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
 | `sketch_add_segment` | `sketch`, `a[3]`, `b[3]` | add a segment to a sketch |
 | `extrude_region` | `sketch`, `region`, `distance` | extrude a closed profile into an Object |
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
+| `split_face_inner` | `object`, `face`, `loop_pts[]` (xyz triples), optional `curve[4]` (`[cx,cy,cz,radius]`) | imprint a closed loop on a solid face (draw-on-face); `curve` present ⇒ the loop is a circle carrying its analytic identity, so a later push-through stamps the tunnel walls (docs/design/true-curves.md, C3) |
+| `push_pull` | `object`, `face`, `distance` | push/pull a solid face; the kernel re-derives the routing (translate, whole-wall radial offset, boss/recess, or through-cut) on replay |
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
 
-Coverage grows over time; adding a new `method` variant is a non-breaking
-change. `u64` values (`golden_hash` and handle fields) can exceed a JSON
-number's safe integer range in some languages — see the note under Replay
-below.
+Coverage grows over time under a deliberately **additive posture**
+(ratified with the true-curves work): adding a new `method` variant is a
+non-breaking change and does NOT bump `version` — an old recording replays
+on a new build unchanged, and a recording that uses a new method fails to
+parse on an older build loudly (a typed error), never silently divergent.
+`version` bumps (to 3 and beyond) are reserved for changes an old reader
+would MISinterpret: renaming or re-typing an existing method's fields, or
+changing a field's meaning. No such change is planned; existing recorded
+fixtures stay valid as-is. `u64` values (`golden_hash` and handle fields)
+can exceed a JSON number's safe integer range in some languages — see the
+note under Replay below.
 
 **Optional `input` array** — raw UI input that precedes kernel
 interpretation, present only when captured (omitted entirely when empty):

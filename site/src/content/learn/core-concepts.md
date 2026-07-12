@@ -34,18 +34,23 @@ Free-standing sketches on the ground plane behave the same way: segments split w
 
 ## Inference snapping
 
-As you draw, Hew's inference engine constantly looks for meaningful relationships across everything visible (endpoints, midpoints, points on an edge or face, construction guides and their crossings, axis alignment) and calls them out with a colored snap dot and label at the cursor:
+As you draw, Hew's inference engine constantly looks for meaningful relationships across everything visible (endpoints, midpoints, points on an edge or face, the centers, quadrants, and tangents of drawn circles and arcs, construction guides and their crossings, axis alignment) and calls them out with a colored snap dot and label at the cursor:
 
 | Cue | Color |
 |---|---|
 | Endpoint | Green |
+| Center (the exact center of a drawn circle or arc) | Teal |
+| Quadrant (a cardinal point on a drawn circle's rim) | Teal |
 | Midpoint | Cyan |
 | Intersection (guide crossing) | Amber |
+| Tangent (where your line just grazes a drawn circle) | Violet |
 | On Edge | Red |
 | On Face | Blue |
 | On Guide | Purple |
 | On Axis | The axis color (X red, Y green, Z blue) |
 | Ground | Gray |
+
+Center, Quadrant, and Tangent come from the circle or arc you actually drew — the exact geometry, not the faceted outline — and an arc offers them only over the range it covers. Tangent appears while a line is in progress: once the first point is placed, the rim point where your line would just graze the circle lights up.
 
 Point snaps are deliberately "magnetic": the cursor acquires a snap within a small radius and holds it a little longer than that, so precise clicks feel steady rather than jittery.
 

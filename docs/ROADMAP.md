@@ -40,6 +40,19 @@ export a file a slicer accepts as watertight, with no repair step.
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
+- True curves over the faceted carrier: a drawn circle or arc keeps its
+  exact center and radius, extruded curved walls know the cylinder they
+  approximate, render smoothly with the facet seams suppressed, and
+  facet counts adapt to the curve's size at draw time
+- Whole-wall push/pull on curved walls: pushing any facet of a drawn
+  cylinder offsets the whole wall's radius exactly, with typed refusals
+  where the result would be invalid — including growing a wall into, or
+  cleanly past, geometry it shares nothing with (interpenetration and
+  engulfment guards). Known gap, tracked separately: plain
+  translate-mode push/pull has always lacked the equivalent guards (a
+  face translated far enough can pass through a disjoint shell of the
+  same Object); the generalized-push/pull effort builds them for its
+  stretch path, and translate mode follows at that integration
 - Standard camera views (Top, Front, Iso, etc.) plus orbit/pan/zoom navigation
 - Full undo/redo across the whole document
 
@@ -47,6 +60,9 @@ export a file a slicer accepts as watertight, with no repair step.
 
 - Snapping to endpoints, midpoints, edges, faces, and locked axes, with
   on-screen cues for every snap
+- Analytic curve snaps: the exact center, quadrant points, and
+  tangent-from-anchor points of drawn circles and arcs, honoring each
+  arc's actual angular range
 - Construction guides — guide lines and points that participate in
   snapping and are saved with the model
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
@@ -92,6 +108,9 @@ export a file a slicer accepts as watertight, with no repair step.
   tags, and guides all come across natively
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
+- STL curve resolution: cylinder walls re-facet from their analytic
+  definitions at a chosen smoothness (the stored facets are the floor,
+  not the ceiling), staying manifold at any setting
 
 | Format | Import | Export |
 |---|---|---|
@@ -166,8 +185,10 @@ export a file a slicer accepts as watertight, with no repair step.
 
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
-- **True curved geometry** — real arcs and circles instead of today's
-  faceted approximations — plus Follow Me and Offset tools
+- **Follow Me and Offset tools** — now unblocked: the true-curves
+  analytic overlay they depend on (durable curve metadata, whole-wall
+  semantics, export re-faceting) has shipped; the architecture and its
+  history are in `docs/design/true-curves.md`
 - **Non-uniform scale**, and moving/rotating/scaling multiple selected
   objects together
 - **Nested component definitions** (a component containing other

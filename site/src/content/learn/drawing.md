@@ -40,7 +40,7 @@ To finish a chain *without* closing it: double-click, press `Enter` with nothing
 1. Click to set the center.
 2. Move outward (the readout shows the radius) and click to set a point on the rim, or type an exact radius and press `Enter`.
 
-Hew's circles are faceted: a circle is a regular 24-sided polygon. This matters at export time (a "cylinder" has 24 flat sides) and is currently fixed. True curved geometry, with real circles replacing the faceted approximation, is planned.
+Hew's circles are stored as regular polygons, but they remember the exact circle you drew — center and radius ride along with the shape, power the Center/Quadrant/Tangent snaps, keep extruded walls smooth on screen, and let STL export re-facet the wall at whatever resolution you pick. The stored facet count adapts to the size of the circle: small circles get 24 sides, larger ones up to 96, keeping the worst chord deviation at about half a millimeter.
 
 ## Arc (`A`)
 
@@ -50,7 +50,7 @@ A two-point arc, like SketchUp's:
 2. Click the other endpoint to set the chord.
 3. Move perpendicular to the chord to pull out the bulge, then click to commit.
 
-`Esc` steps back one stage at a time. The readout shows the arc's radius. Typed values work at both stages: in the chord stage a typed length places the second endpoint at that distance, and in the bulge stage it sets the bulge depth. A flat, zero-bulge arc is refused ("Pull out the bulge"). Arcs are faceted at 12 segments per quarter turn.
+`Esc` steps back one stage at a time. The readout shows the arc's radius. Typed values work at both stages: in the chord stage a typed length places the second endpoint at that distance, and in the bulge stage it sets the bulge depth. A flat, zero-bulge arc is refused ("Pull out the bulge"). Arcs facet at the same density as circles of the same radius, and like circles they carry their exact center and radius for snapping, smooth display, and export.
 
 **Closing the arc:** press `Option`/`Alt` mid-gesture to cycle what the commit produces — the open arc, a **pie** closed to the center with two straight edges, or a **segment** closed with the chord. The preview draws the closing edges and the readout names the mode. Both closed forms are complete profiles: on the ground they become a region immediately, and on a face they split it, ready to push/pull. The chosen mode sticks for further arcs until you switch tools.
 
@@ -73,7 +73,7 @@ If a move would break the sketch's topology (collapse a segment, fold a region),
 
 ## Inference while drawing
 
-Every click snaps. The colored dot and label at the cursor tell you what you're about to snap to — Endpoint (green), Midpoint (cyan), Intersection (amber — where a construction guide crosses an edge, a sketch line, or another guide), On Edge (red), On Face (blue), On Guide (purple), On Axis (the axis color), or Ground (gray). Lines you draw across each other need no cue of their own: crossings become real endpoints the moment they're drawn. A dashed helper line appears through the snap point when the snap has a direction, such as an axis alignment. Construction guides let you add snap targets of your own; [Precision, measurement, and guides](/learn/measurement-and-guides/) covers them.
+Every click snaps. The colored dot and label at the cursor tell you what you're about to snap to — Endpoint (green), Center and Quadrant of a drawn circle or arc (teal), Midpoint (cyan), Intersection (amber — where a construction guide crosses an edge, a sketch line, or another guide), Tangent (violet — where an in-progress line just grazes a drawn circle), On Edge (red), On Face (blue), On Guide (purple), On Axis (the axis color), or Ground (gray). Lines you draw across each other need no cue of their own: crossings become real endpoints the moment they're drawn. A dashed helper line appears through the snap point when the snap has a direction, such as an axis alignment. Construction guides let you add snap targets of your own; [Precision, measurement, and guides](/learn/measurement-and-guides/) covers them.
 
 ## Typing exact values
 
