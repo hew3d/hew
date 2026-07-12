@@ -183,6 +183,20 @@ pub enum PushPullError {
     NotASubFace,
 }
 
+/// How an operation treats its best-effort obstruction heuristics
+/// (DEVELOPMENT.md rule 9 / ARCHITECTURE.md §5.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardMode {
+    /// A forward user op: every heuristic guard is enforced.
+    Enforced,
+    /// A history replay (recorded inverse or redo): the obstruction
+    /// heuristics are skipped, because the replay re-enters a previously
+    /// accepted state and the [`History`](crate::history::History) verifies
+    /// the result against that state's recorded fingerprint instead.
+    /// Structural checks and validation are NOT affected by this mode.
+    Replay,
+}
+
 /// How a moved face's boundary half-edge relates to its neighbor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BoundaryEdgeKind {
@@ -232,6 +246,11 @@ pub enum StickyError {
     /// would need the merged boundary rebuilt as outer + hole loops, which
     /// the merge does not build yet. Refused, not guessed.
     SharedChainDisconnected,
+    /// `merge_faces` where the shared chain covers one face's ENTIRE outer
+    /// boundary (a disk filling part of its neighbor's ring): dissolving it
+    /// is `merge_inner_face`'s sub-face surgery, not an edge-chain merge.
+    /// Refused, not guessed.
+    SharedChainCoversBoundary,
     /// `split_face_inner`: a loop vertex is not strictly inside the face (it lies
     /// on/outside the outer boundary or inside a hole). v1 imprints only loops
     /// strictly interior to the face.
@@ -357,6 +376,12 @@ impl std::fmt::Display for StickyError {
             StickyError::BoundaryEdge => write!(f, "cannot merge across a boundary edge"),
             StickyError::SameFaceOnBothSides => {
                 write!(f, "edge has the same face on both sides")
+            }
+            StickyError::SharedChainCoversBoundary => {
+                write!(
+                    f,
+                    "faces share an entire outer boundary; dissolve the sub-face instead"
+                )
             }
             StickyError::SharedChainDisconnected => {
                 write!(
@@ -681,6 +706,30 @@ impl Object {
         face: FaceId,
         distance: f64,
     ) -> Result<PushPullReport, PushPullError> {
+        self.push_pull_impl(face, distance, GuardMode::Enforced)
+    }
+
+    /// [`push_pull`](Object::push_pull) in history-replay mode
+    /// (DEVELOPMENT.md rule 9): the `WouldVanish` extent check and the
+    /// interior-obstruction guard are skipped — the caller is the
+    /// [`History`](crate::history::History), which dispatches only recorded
+    /// inverses/redos and verifies the result against the recorded state's
+    /// fingerprint before committing. Every structural refusal and the
+    /// validator backstop still run.
+    pub(crate) fn push_pull_replay(
+        &mut self,
+        face: FaceId,
+        distance: f64,
+    ) -> Result<PushPullReport, PushPullError> {
+        self.push_pull_impl(face, distance, GuardMode::Replay)
+    }
+
+    fn push_pull_impl(
+        &mut self,
+        face: FaceId,
+        distance: f64,
+        guards: GuardMode,
+    ) -> Result<PushPullReport, PushPullError> {
         // --- Step 1: Validate inputs ---
         if self.watertight != crate::topo::WatertightState::Watertight {
             return Err(PushPullError::ObjectNotSolid);
@@ -790,7 +839,10 @@ impl Object {
             !find_collapse_plans(self, face, &boundary_loops, &edge_kinds, sweep).is_empty();
 
         // --- Step 3: WouldVanish check (inward push only) ---
-        if distance < 0.0 && !is_collapse {
+        // Heuristic guard: skipped on history replay (rule 9) — a replayed
+        // inverse/redo re-enters an accepted state and is verified against
+        // its recorded fingerprint by the History instead.
+        if distance < 0.0 && !is_collapse && guards == GuardMode::Enforced {
             // Inward push: compute extent = maximum inward signed distance from
             // the moved face's plane over all vertices NOT on the moved face.
             // "Inward" means in the -face_normal direction, so the signed distance
@@ -826,8 +878,12 @@ impl Object {
         // opposite wall folds the stretched side walls the same way — and
         // records an inverse the inward guard would then refuse, breaking
         // undo). Refuse at the nearest fixed neighbor vertex strictly in
-        // front of the sweep.
-        if !is_collapse {
+        // front of the sweep. Best-effort heuristic — skipped on history
+        // replay (rule 9), where the recorded-state proof supersedes it:
+        // this guard reads geometry AROUND the sweep, so it can refuse an
+        // exact-closure inverse whose pocket walls were subdivided by
+        // adjacent geometry even though the state it restores was accepted.
+        if !is_collapse && guards == GuardMode::Enforced {
             let moved_face_plane = self.faces[face].plane;
             // +1 along the outward normal for an outward push, -1 inward.
             let along = distance.signum();
@@ -1270,6 +1326,29 @@ impl Object {
         sub_face: FaceId,
         distance: f64,
     ) -> Result<PushPullReport, PushPullError> {
+        self.extrude_sub_face_impl(sub_face, distance, GuardMode::Enforced)
+    }
+
+    /// [`extrude_sub_face`](Object::extrude_sub_face) in history-replay mode
+    /// (DEVELOPMENT.md rule 9): the centroid-ray obstruction guard is
+    /// skipped — the caller is the [`History`](crate::history::History),
+    /// which dispatches only recorded inverses/redos and verifies the result
+    /// against the recorded state's fingerprint before committing. Every
+    /// structural refusal and the validator backstop still run.
+    pub(crate) fn extrude_sub_face_replay(
+        &mut self,
+        sub_face: FaceId,
+        distance: f64,
+    ) -> Result<PushPullReport, PushPullError> {
+        self.extrude_sub_face_impl(sub_face, distance, GuardMode::Replay)
+    }
+
+    fn extrude_sub_face_impl(
+        &mut self,
+        sub_face: FaceId,
+        distance: f64,
+        guards: GuardMode,
+    ) -> Result<PushPullReport, PushPullError> {
         if self.watertight != WatertightState::Watertight {
             return Err(PushPullError::ObjectNotSolid);
         }
@@ -1293,8 +1372,12 @@ impl Object {
         // vertex average can fall outside the sub-face, where the probe would
         // test a line the sweep never occupies and refuse legal extrusions
         // (including recorded inverses, which must never fail) — the guard is
-        // skipped there rather than guessed.
-        {
+        // skipped there rather than guessed. Skipped entirely on history
+        // replay (rule 9): the collapse this extrusion reverses recorded the
+        // raised state's fingerprint, and a centroid ray probed at replay
+        // time can see the opposite face closer than the recess depth and
+        // refuse a state that was already accepted.
+        if guards == GuardMode::Enforced {
             let ring: Vec<Point3> = self
                 .loop_positions(self.faces[sub_face].outer_loop)
                 .collect();
@@ -3258,21 +3341,21 @@ enum EndpointHit {
     /// Snapped exactly to an existing vertex.
     Vertex(VertexId),
     /// Lies in the interior of a boundary edge.
-    /// `he` is the half-edge (origin → dest) that gets split; `t` is the
-    /// parameter along that half-edge (0 = origin, 1 = dest).
-    Edge { he: HalfEdgeId, t: f64 },
+    /// `he` is the half-edge (origin → dest) that gets split; `pos` is the
+    /// path endpoint itself — already validated to lie on the edge within
+    /// [`tol::POINT_MERGE`] — and is where the split vertex is placed.
+    /// Placing the CALLER's point rather than its re-interpolated projection
+    /// keeps replayed splits bit-exact (determinism lane): an undo captures
+    /// the split vertex's live position into the reconstructed path, and the
+    /// redo must land the new vertex on exactly those bits, not one ulp off.
+    Edge { he: HalfEdgeId, pos: Point3 },
 }
 
 /// The resolved 3-D position of an endpoint hit.
 fn endpoint_position(obj: &Object, hit: &EndpointHit) -> Point3 {
     match hit {
         EndpointHit::Vertex(v) => obj.vertices[*v].position,
-        EndpointHit::Edge { he, t } => {
-            let h = obj.half_edges[*he];
-            let p = obj.vertices[h.origin].position;
-            let q = obj.vertices[obj.half_edges[h.next].origin].position;
-            p + (q - p) * *t
-        }
+        EndpointHit::Edge { pos, .. } => *pos,
     }
 }
 
@@ -3308,7 +3391,7 @@ fn classify_endpoint(
         if t > tol::POINT_MERGE && t < 1.0 - tol::POINT_MERGE {
             let closest = origin + edge_vec * t;
             if (pt - closest).length_squared() <= tol::POINT_MERGE * tol::POINT_MERGE {
-                return Ok(Some(EndpointHit::Edge { he: h, t }));
+                return Ok(Some(EndpointHit::Edge { he: h, pos: pt }));
             }
         }
     }
@@ -3348,14 +3431,8 @@ fn do_split_face(
 
     let v0 = match ep0 {
         EndpointHit::Vertex(v) => *v,
-        EndpointHit::Edge { he, t } => {
-            let pos = {
-                let h = obj.half_edges[*he];
-                let p = obj.vertices[h.origin].position;
-                let q = obj.vertices[obj.half_edges[h.next].origin].position;
-                p + (q - p) * *t
-            };
-            let (v, dead_edge, new_edges) = split_boundary_edge(obj, *he, pos);
+        EndpointHit::Edge { he, pos } => {
+            let (v, dead_edge, new_edges) = split_boundary_edge(obj, *he, *pos);
             split_boundary_edges.push((dead_edge, new_edges));
             v
         }
@@ -3366,24 +3443,20 @@ fn do_split_face(
 
     let v1 = match ep1 {
         EndpointHit::Vertex(v) => *v,
-        EndpointHit::Edge { he, t } => {
-            let (live_he, pos) = if obj.half_edges.contains_key(*he) {
+        EndpointHit::Edge { he, pos } => {
+            let live_he = if obj.half_edges.contains_key(*he) {
                 // Distinct edge (or ep0 was a vertex hit): the stored key is
-                // still the same segment — slotmap key stability — so the
-                // original interpolation stands.
-                let h = obj.half_edges[*he];
-                let p = obj.vertices[h.origin].position;
-                let q = obj.vertices[obj.half_edges[h.next].origin].position;
-                (*he, p + (q - p) * *t)
+                // still the same segment — slotmap key stability.
+                *he
             } else {
                 // Lens cut: ep0's split consumed this half-edge. Re-resolve
-                // the last path point against the CURRENT outer loop — the
+                // the endpoint against the CURRENT outer loop — the
                 // containing sub-edge lies on the same carrier line as the
                 // original edge, so projection reproduces the classification
-                // snap. Typed error if nothing contains it (rule 4: never
-                // panic on a user-reachable path).
-                let target = *path.last().expect("validated: path.len() >= 2");
-                let mut found: Option<(HalfEdgeId, Point3)> = None;
+                // snap (the split vertex is still placed at `pos` itself).
+                // Typed error if nothing contains it (rule 4: never panic on
+                // a user-reachable path).
+                let mut found: Option<HalfEdgeId> = None;
                 for h2 in obj.loop_half_edges(obj.faces[face].outer_loop) {
                     let p = obj.vertices[obj.half_edges[h2].origin].position;
                     let next = obj.half_edges[h2].next;
@@ -3393,12 +3466,22 @@ fn do_split_face(
                     if len_sq <= tol::POINT_MERGE * tol::POINT_MERGE {
                         continue;
                     }
-                    let s = (target - p).dot(seg) / len_sq;
+                    // The parameter must lie strictly INSIDE (0, 1), exactly
+                    // as `classify_endpoint` requires: an unclamped
+                    // projection extrapolates onto the carrier line, where a
+                    // point on a COLLINEAR SIBLING sub-edge (ep0's split just
+                    // divided the original edge in two) sits at zero distance
+                    // from its extrapolation while lying outside this
+                    // segment — endpoint-distance checks alone cannot tell
+                    // those apart, and splitting the wrong sub-edge wires a
+                    // self-overlapping (validator-invisible) ring.
+                    let s = (*pos - p).dot(seg) / len_sq;
+                    if s <= tol::POINT_MERGE || s >= 1.0 - tol::POINT_MERGE {
+                        continue;
+                    }
                     let proj = p + seg * s;
-                    let interior = (proj - p).length() > tol::POINT_MERGE
-                        && (proj - q).length() > tol::POINT_MERGE;
-                    if interior && (target - proj).length() <= tol::POINT_MERGE {
-                        found = Some((h2, proj));
+                    if (*pos - proj).length() <= tol::POINT_MERGE {
+                        found = Some(h2);
                         break;
                     }
                 }
@@ -3407,7 +3490,7 @@ fn do_split_face(
                     None => return Err(StickyError::EndpointNotOnBoundary { which: 1 }),
                 }
             };
-            let (v, dead_edge, new_edges) = split_boundary_edge(obj, live_he, pos);
+            let (v, dead_edge, new_edges) = split_boundary_edge(obj, live_he, *pos);
             split_boundary_edges.push((dead_edge, new_edges));
             v
         }
@@ -3626,18 +3709,35 @@ fn do_split_face(
 
     for il in &inner_loops {
         let hole_pts: Vec<Point3> = obj.loop_positions(*il).collect();
-        // Use the centroid of the hole to determine which face contains it.
-        let centroid = hole_centroid(&hole_pts);
-
         let outer_a_pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
-        if point_inside_polygon(centroid, &outer_a_pts, normal) {
+
+        // Decide by testing the hole RING itself: the cut path is validated
+        // to stay clear of every hole, so all of a hole's vertices lie
+        // strictly on one side of the cut and inside exactly one result
+        // face. A vertex-average "centroid" is NOT a usable proxy — for a
+        // concave hole it can fall outside the hole entirely (and inside the
+        // other result face), silently assigning the hole to a face whose
+        // outer boundary does not contain it; loop-ownership checks alone
+        // cannot catch that downstream (rule 4: decide correctly here, never
+        // repair later).
+        let inside_a = hole_pts
+            .iter()
+            .filter(|&&hp| point_inside_polygon(hp, &outer_a_pts, normal))
+            .count();
+        if inside_a == hole_pts.len() {
             // Assign to face A.
             obj.faces[face].inner_loops.push(*il);
             obj.loops[*il].face = face;
-        } else {
+        } else if inside_a == 0 {
             // Assign to face B.
             obj.faces[face_b_id].inner_loops.push(*il);
             obj.loops[*il].face = face_b_id;
+        } else {
+            // A hole straddling both result faces means the cut path crosses
+            // hole territory in a way the up-front point/midpoint validation
+            // did not see. No valid assignment exists — refuse rather than
+            // guess (rule 4).
+            return Err(StickyError::PathNotSimple);
         }
     }
 
@@ -3695,15 +3795,6 @@ fn wire_loop_sequence(obj: &mut Object, seq: &[HalfEdgeId], loop_id: LoopId, fac
     }
     obj.loops[loop_id].first_half_edge = seq[0];
     obj.loops[loop_id].face = face_id;
-}
-
-/// Compute the centroid of a polygon's vertices.
-fn hole_centroid(pts: &[Point3]) -> Point3 {
-    let n = pts.len() as f64;
-    let sum = pts
-        .iter()
-        .fold(crate::math::Vec3::ZERO, |acc, p| acc + p.to_vec());
-    Point3::new(sum.x / n, sum.y / n, sum.z / n)
 }
 
 /// Split a boundary (or interior) half-edge at a given position, inserting a
@@ -3922,14 +4013,18 @@ fn do_merge_faces(
     let shared_set_a: std::collections::BTreeSet<HalfEdgeId> =
         shared_on_a.iter().copied().collect();
 
-    let chain_start_a = shared_on_a
-        .iter()
-        .copied()
-        .find(|&h| {
-            let prev = obj.half_edges[h].prev;
-            !shared_set_a.contains(&prev)
-        })
-        .expect("at least one half-edge has a non-shared predecessor");
+    // No chain start means EVERY half-edge of face_a's outer loop is shared
+    // with face_b: face_a is a disk filling (part of) face_b's boundary —
+    // the sub-face/hole shape, whose dissolution is `merge_inner_face`'s
+    // surgery, not this one. Reachable through the boolean seam-dissolution
+    // path when a coverage piece shares its whole ring; refuse typed rather
+    // than walk a chain that has no endpoints (rule 4).
+    let Some(chain_start_a) = shared_on_a.iter().copied().find(|&h| {
+        let prev = obj.half_edges[h].prev;
+        !shared_set_a.contains(&prev)
+    }) else {
+        return Err(StickyError::SharedChainCoversBoundary);
+    };
 
     // Walk the shared chain on outer_a (chain_a_seq starts at chain_start_a
     // and continues while the next half-edge is also shared).
@@ -3983,9 +4078,7 @@ fn do_merge_faces(
     let chain_b_first = chain_b_seq[0];
 
     let after_chain_a = obj.half_edges[chain_a_last].next; // first non-shared on A (departs chain_a_start_v)
-    let before_chain_a = obj.half_edges[chain_a_first].prev; // last non-shared on A (arrives at chain_a_start_v)
     let after_chain_b = obj.half_edges[chain_b_last].next; // first non-shared on B (departs chain_b_start_v)
-    let before_chain_b = obj.half_edges[chain_b_first].prev; // last non-shared on B (arrives at chain_b_start_v)
 
     // The endpoints of the shared chain: two vertices that were inserted by
     // split_boundary_edge if endpoints landed on edge interiors.  They survive
@@ -4004,11 +4097,24 @@ fn do_merge_faces(
     //    The merged boundary goes:
     //      non_a[0] → ... → non_a.last() → non_b[0] → ... → non_b.last() → non_a[0]
     //
-    //    Joining: non_a.last() (before_chain_a, arriving at chain_a_start_v) now
-    //             points to non_b[0] (after_chain_b, departing from chain_b_start_v).
-    //             non_b.last() (before_chain_b) now points to non_a[0] (after_chain_a).
+    //    Joining: non_a.last() (arriving at chain_a_start_v) now points to
+    //             non_b[0] (after_chain_b, departing from chain_b_start_v).
+    //             non_b.last() now points to non_a[0] (after_chain_a).
 
     let merged_seq: Vec<HalfEdgeId> = non_a.iter().copied().chain(non_b.iter().copied()).collect();
+
+    // Completion check, BEFORE any mutation: the chain walks and non-shared
+    // collects are disjoint next-pointer walks, so count equality means they
+    // jointly account for every half-edge of both outer loops. Anything
+    // unaccounted for would survive the splice still pointing at the removed
+    // outer_b loop (seen through the boolean seam-dissolution path on
+    // annular operands whose boundary wiring the walks above do not cover).
+    // Refuse typed rather than strand a half-edge (rule 4).
+    let accounted = chain_a_seq.len() + chain_b_seq.len() + merged_seq.len();
+    let outer_total = obj.loop_half_edges(outer_a).count() + obj.loop_half_edges(outer_b).count();
+    if accounted != outer_total {
+        return Err(StickyError::WouldCorrupt);
+    }
 
     // 5. Wire the merged loop on outer_a.
     wire_loop_sequence(obj, &merged_seq, outer_a, face_a);
@@ -4052,30 +4158,64 @@ fn do_merge_faces(
     //    length below tol::NORMAL_DIRECTION), the vertex is a scar from a
     //    split_boundary_edge call and must be dissolved.
     //
-    //    In the merged loop the two vertices appear as:
-    //      chain_a_start_v: h_in = before_chain_a (incoming), h_out = after_chain_b (outgoing)
-    //      chain_b_start_v: h_in = before_chain_b (incoming), h_out = after_chain_a (outgoing)
-    //
-    //    Note: after_chain_a and after_chain_b are still valid half-edge ids but
-    //    their loop pointers have been updated to outer_a by wire_loop_sequence.
-    //    before_chain_a and before_chain_b were already in non_a / non_b and are
-    //    now in the merged loop too.
+    // The endpoint VERTICES are captured up front and each one's live
+    // incoming/outgoing half-edges are re-derived at heal time, never taken
+    // from pre-heal ids: healing the first endpoint can consume the
+    // half-edges the second endpoint's stale pair referenced (a triangular
+    // neighbor's single non-shared half-edge, for example), and skipping the
+    // second endpoint in that case made the heal outcome depend on which
+    // side happened to be `face_a` — the merge edge's primary-half-edge
+    // orientation, i.e. internal representation state. Identical geometric
+    // input must heal identically (the determinism invariant; History replay
+    // verifies redo results against the recorded state and fails typed on
+    // any asymmetry).
+    let endpoint_vertices = [chain_a_start_v, chain_b_start_v];
     let mut healing_removed_edges: Vec<EdgeId> = Vec::new();
-    for (h_in, h_out) in [
-        (before_chain_a, after_chain_b),
-        (before_chain_b, after_chain_a),
-    ] {
-        // When the neighbor face's non-shared portion is a SINGLE half-edge,
-        // it serves as both after_chain and before_chain — healing the first
-        // endpoint consumes it, and there is nothing left to heal at the
-        // second. Skip any pair whose half-edges an earlier heal removed.
-        if !obj.half_edges.contains_key(h_in) || !obj.half_edges.contains_key(h_out) {
+    for vertex_to_heal in endpoint_vertices {
+        if !obj.vertices.contains_key(vertex_to_heal) {
+            continue; // healed away together with the other endpoint
+        }
+
+        // Heal only true scars: V must have exactly two departing
+        // half-edges (one in the merged loop, one in the neighbor loop).
+        // Any extra incidence means V is a real model vertex shared with
+        // other geometry — removing it would strand those half-edges.
+        let departing: Vec<HalfEdgeId> = obj
+            .half_edges
+            .iter()
+            .filter(|(_, he)| he.origin == vertex_to_heal)
+            .map(|(h, _)| h)
+            .collect();
+        if departing.len() != 2 {
             continue;
         }
-        // h_in arrives at the candidate vertex V; h_out departs from V.
-        let v_pos = obj.vertices[obj.half_edges[h_out].origin].position;
-        let prev_v_pos = obj.vertices[obj.half_edges[h_in].origin].position;
-        let next_v_pos = obj.vertices[obj.half_edges[obj.half_edges[h_out].next].origin].position;
+
+        // h_out departs V along the merged outer loop; h_in arrives at V.
+        // Every reference below is re-derived from live wiring and the heal
+        // is SKIPPED if any of it is missing: an earlier heal (or, in the
+        // boolean seam-dissolution path, an earlier merge over a face this
+        // loop wiring still references) can leave V's neighborhood without
+        // the clean two-edge scar pattern this surgery reverses. Skipping
+        // leaves a legal (merely unhealed) scar vertex; the committed merge
+        // still passes the full validator either way (rule 4: skip, never
+        // guess).
+        let Some(&h_out) = departing
+            .iter()
+            .find(|&&h| obj.half_edges[h].loop_id == outer_a)
+        else {
+            continue; // endpoint no longer on the merged boundary
+        };
+        let h_in = obj.half_edges[h_out].prev;
+        let (Some(h_in_he), Some(h_out_next)) = (
+            obj.half_edges.get(h_in),
+            obj.half_edges.get(obj.half_edges[h_out].next),
+        ) else {
+            continue; // wiring at V no longer forms the scar pattern
+        };
+
+        let v_pos = obj.vertices[vertex_to_heal].position;
+        let prev_v_pos = obj.vertices[h_in_he.origin].position;
+        let next_v_pos = obj.vertices[h_out_next.origin].position;
 
         let dir_in = (v_pos - prev_v_pos).normalized();
         let dir_out = (next_v_pos - v_pos).normalized();
@@ -4088,29 +4228,24 @@ fn do_merge_faces(
             continue;
         }
 
-        let vertex_to_heal = obj.half_edges[h_out].origin;
-
-        // Heal only true scars: V must have exactly two departing
-        // half-edges (h_out here and h_in's twin in the neighbor loop).
-        // Any extra incidence means V is a real model vertex shared with
-        // other geometry — removing it would strand those half-edges.
-        let departing = obj
-            .half_edges
-            .values()
-            .filter(|he| he.origin == vertex_to_heal)
-            .count();
-        if departing != 2 {
-            continue;
-        }
-
         // Twin of h_in: this half-edge departs V in the neighbor face (t_out_of_v).
         // Twin of h_out: this half-edge arrives at V in the neighbor face (t_into_v).
-        let t_out_of_v = obj.half_edges[h_in]
-            .twin
-            .expect("manifold: twin must exist");
-        let t_into_v = obj.half_edges[h_out]
-            .twin
-            .expect("manifold: twin must exist");
+        let (Some(t_out_of_v), Some(t_into_v)) = (h_in_he.twin, obj.half_edges[h_out].twin) else {
+            continue; // boundary edge at V — not a closed scar pattern
+        };
+        if !obj.half_edges.contains_key(t_out_of_v) || !obj.half_edges.contains_key(t_into_v) {
+            continue; // neighbor side already consumed
+        }
+        // The neighbor side must be ONE loop passing V exactly once —
+        // t_into_v arrives at V and t_out_of_v departs it, consecutively.
+        // Anything else (the two twins living in different loops, e.g. when
+        // V is also touched by a hole ring or a third coplanar face in the
+        // boolean seam-dissolution path) is not the two-edge scar pattern
+        // this surgery reverses; splicing across two distinct loops would
+        // corrupt both. Skip — an unhealed scar vertex is legal geometry.
+        if obj.half_edges[t_into_v].next != t_out_of_v {
+            continue;
+        }
         let t_next = obj.half_edges[t_out_of_v].next; // half-edge after t_out_of_v in neighbor loop
         let neighbor_loop = obj.half_edges[t_out_of_v].loop_id;
 
@@ -4195,8 +4330,41 @@ fn do_merge_faces(
         shell.faces.retain(|&f| f != face_b);
     }
 
-    // 13. Refit plane for the merged face over the merged boundary.
-    let boundary_pts: Vec<Point3> = obj.loop_positions(outer_a).collect();
+    // 13. Refit plane for the merged face over the merged boundary. The
+    //     walk is CHECKED, not assumed: a shared-chain configuration whose
+    //     surgery left the merged loop wired through removed half-edges
+    //     (seen in the boolean seam-dissolution path when a chain endpoint
+    //     also touches a hole ring or a third coplanar face) must surface
+    //     as the typed WouldCorrupt refusal — the caller discards the
+    //     clone — rather than a panic on a dead key before validation can
+    //     run (rule 4: refuse loudly, never crash).
+    let boundary_pts: Vec<Point3> = {
+        let Some(lp) = obj.loops.get(outer_a) else {
+            return Err(StickyError::WouldCorrupt);
+        };
+        let first = lp.first_half_edge;
+        let mut pts = Vec::new();
+        let mut cur = first;
+        let mut closed = false;
+        for _ in 0..=obj.half_edges.len() {
+            let Some(he) = obj.half_edges.get(cur) else {
+                return Err(StickyError::WouldCorrupt);
+            };
+            let Some(v) = obj.vertices.get(he.origin) else {
+                return Err(StickyError::WouldCorrupt);
+            };
+            pts.push(v.position);
+            cur = he.next;
+            if cur == first {
+                closed = true;
+                break;
+            }
+        }
+        if !closed {
+            return Err(StickyError::WouldCorrupt);
+        }
+        pts
+    };
     if let Ok(new_plane) = Plane::from_polygon(&boundary_pts) {
         obj.faces[face_a].plane = new_plane;
     }

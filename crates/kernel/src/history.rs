@@ -23,6 +23,19 @@
 //! object to *topological and geometric* equality — same polygon soup up to
 //! index renaming — not necessarily the same handles. Tools must re-query
 //! after undo, never hoard handles across it.
+//!
+//! # Replay is guard-exempt, with proof (DEVELOPMENT.md rule 9)
+//!
+//! Undo and redo dispatch in the ops' replay mode: the best-effort
+//! obstruction heuristics (`push_pull`'s neighbor-vertex/extent guards,
+//! `extrude_sub_face`'s centroid ray) are skipped, because a LIFO replay
+//! re-enters a state the kernel already accepted and a heuristic reading
+//! the surrounding geometry could otherwise refuse it. In exchange, every
+//! entry carries a [`StateProof`] — a geometric fingerprint of the state
+//! the replay must reproduce — and the replayed op runs on a clone that is
+//! committed only if it matches the proof. A mismatch is a kernel bug,
+//! surfaced as [`HistoryError::InverseDiverged`] with the object untouched.
+//! See ARCHITECTURE.md §5.7 for the full rationale.
 
 use crate::ids::{EdgeId, FaceId, HalfEdgeId};
 use crate::math::{Point3, Vec3};
@@ -134,6 +147,11 @@ pub enum HistoryError {
     /// inverse recorded by `apply` must always succeed — surfaced as a typed
     /// error so release builds fail loudly instead of corrupting the model.
     InverseFailed(KernelOpError),
+    /// A replayed inverse/redo ran, but its result did not reproduce the
+    /// recorded state its [`StateProof`] fingerprints (rule 9). A kernel bug
+    /// by definition; the object is left untouched (the replay ran on a
+    /// clone that is discarded).
+    InverseDiverged,
 }
 
 impl std::fmt::Display for HistoryError {
@@ -143,6 +161,12 @@ impl std::fmt::Display for HistoryError {
             HistoryError::NothingToRedo => write!(f, "nothing to redo"),
             HistoryError::InverseFailed(e) => {
                 write!(f, "inverse op failed (kernel bug): {e}")
+            }
+            HistoryError::InverseDiverged => {
+                write!(
+                    f,
+                    "replayed op diverged from the recorded state (kernel bug)"
+                )
             }
         }
     }
@@ -182,9 +206,31 @@ pub struct HistoryEntry {
 /// after undo, and so does the history itself.
 #[derive(Debug, Clone, Default)]
 pub struct History {
-    applied: Vec<(HistoryEntry, Anchor)>,
+    applied: Vec<AppliedEntry>,
     /// Ops to re-apply on redo. Inverses are re-derived at redo-time.
-    undone: Vec<(KernelOp, Anchor)>,
+    undone: Vec<RedoEntry>,
+}
+
+/// An undo-stack record: the committed step, its target's [`Anchor`], and
+/// the rule-9 proof its inverse must discharge.
+#[derive(Debug, Clone)]
+struct AppliedEntry {
+    entry: HistoryEntry,
+    anchor: Anchor,
+    /// Fingerprint of the state *before* `entry.op` ran — the state
+    /// `entry.inverse` must reproduce for its replay to commit.
+    prior: StateProof,
+}
+
+/// A redo-stack record: the re-anchored forward op, its target's [`Anchor`],
+/// and the rule-9 proof its replay must discharge.
+#[derive(Debug, Clone)]
+struct RedoEntry {
+    op: KernelOp,
+    anchor: Anchor,
+    /// Fingerprint of the state `op` originally produced — the state its
+    /// replay must reproduce for the redo to commit.
+    target: StateProof,
 }
 
 impl History {
@@ -208,13 +254,13 @@ impl History {
     /// op KIND and parameters are what callers may rely on (undo menu
     /// labels, tooling).
     pub fn peek_undo(&self) -> Option<&KernelOp> {
-        self.applied.last().map(|(entry, _)| &entry.inverse)
+        self.applied.last().map(|rec| &rec.entry.inverse)
     }
 
     /// The op the next [`History::redo`] would dispatch, if any. Same handle
     /// caveat as [`History::peek_undo`].
     pub fn peek_redo(&self) -> Option<&KernelOp> {
-        self.undone.last().map(|(op, _)| op)
+        self.undone.last().map(|rec| &rec.op)
     }
 
     /// Runs `op` on `object`, records its inverse, and clears the redo stack
@@ -235,6 +281,10 @@ impl History {
             None
         };
 
+        // Capture the rule-9 proof for the eventual undo: the state the
+        // recorded inverse must restore is the one this op is about to leave.
+        let prior = StateProof::of(object);
+
         // Dispatch the op. On error the object is untouched (strong guarantee).
         let report = dispatch(object, &op)?;
 
@@ -244,7 +294,11 @@ impl History {
         let anchor = anchor_of(object, &inverse);
 
         // Push the entry and clear the redo stack (branch-discard).
-        self.applied.push((HistoryEntry { op, inverse }, anchor));
+        self.applied.push(AppliedEntry {
+            entry: HistoryEntry { op, inverse },
+            anchor,
+            prior,
+        });
         self.undone.clear();
 
         Ok(report)
@@ -252,16 +306,20 @@ impl History {
 
     /// Reverses the most recent applied op and moves it to the redo stack.
     ///
+    /// Dispatches in replay mode (rule 9): heuristic guards are exempt, and
+    /// the inverse runs on a clone that commits only if it reproduces the
+    /// entry's recorded pre-op state ([`StateProof`]).
+    ///
     /// The redo entry pushed to `undone` is the op derived from the inverse's
     /// report — i.e., the freshly re-anchored forward op. Its inverse is
     /// re-derived at redo-time, never stale.
     pub fn undo(&mut self, object: &mut Object) -> Result<KernelOpReport, HistoryError> {
-        let (entry, anchor) = self.applied.last().ok_or(HistoryError::NothingToUndo)?;
+        let rec = self.applied.last().ok_or(HistoryError::NothingToUndo)?;
 
         // Re-resolve the inverse's target from its geometric anchor: redo
         // cycles since `apply` may have reallocated the recorded handle.
-        let inverse =
-            re_anchor(object, &entry.inverse, anchor).map_err(HistoryError::InverseFailed)?;
+        let inverse = re_anchor(object, &rec.entry.inverse, &rec.anchor)
+            .map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces in the inverse, capture path before dispatch.
         let pre_merge_path: Option<Vec<Point3>> = if let KernelOp::MergeFaces { edge } = &inverse {
@@ -270,10 +328,22 @@ impl History {
             None
         };
 
-        // Run the inverse. On kernel bug this surfaces as InverseFailed; the
-        // object is untouched (ops' strong guarantee), so the entry stays on
-        // the stack — pop only after success.
-        let report = dispatch(object, &inverse).map_err(HistoryError::InverseFailed)?;
+        // Run the inverse on a clone, guard-exempt. A dispatch error is a
+        // kernel bug surfaced as InverseFailed; a result that fails the
+        // recorded-state proof is InverseDiverged. Either way the object is
+        // untouched and the entry stays on the stack — commit only after
+        // both succeed.
+        let mut candidate = object.clone();
+        let report =
+            dispatch_replay(&mut candidate, &inverse).map_err(HistoryError::InverseFailed)?;
+        if !rec.prior.verify_and_align(&mut candidate) {
+            return Err(HistoryError::InverseDiverged);
+        }
+
+        // Capture the rule-9 proof for the eventual redo — the state this
+        // undo is about to leave (the op's own result) — then commit.
+        let target = StateProof::of(object);
+        *object = candidate;
         self.applied.pop();
 
         // The op to push onto the redo stack is the RE-ANCHORED forward op:
@@ -282,23 +352,32 @@ impl History {
         // redo-time from the redo's report.
         let redo_op = derive_inverse(&inverse, &report, pre_merge_path);
         let redo_anchor = anchor_of(object, &redo_op);
-        self.undone.push((redo_op, redo_anchor));
+        self.undone.push(RedoEntry {
+            op: redo_op,
+            anchor: redo_anchor,
+            target,
+        });
 
         Ok(report)
     }
 
     /// Re-applies the most recently undone op.
     ///
+    /// Dispatches in replay mode (rule 9): heuristic guards are exempt, and
+    /// the op runs on a clone that commits only if it reproduces the state
+    /// it originally produced ([`StateProof`]).
+    ///
     /// Pops the redo op, runs it, derives a fresh inverse from the report,
     /// and pushes a complete [`HistoryEntry`] onto the undo stack.
     pub fn redo(&mut self, object: &mut Object) -> Result<KernelOpReport, HistoryError> {
-        let (op, anchor) = self.undone.last().ok_or(HistoryError::NothingToRedo)?;
+        let rec = self.undone.last().ok_or(HistoryError::NothingToRedo)?;
 
         // Re-resolve the redo op's target from its geometric anchor: undos
         // that ran after this entry was pushed (unwinding earlier ops) may
         // have destroyed the recorded handle, and the redos that rebuilt the
         // geometry minted fresh ids.
-        let redo_op = re_anchor(object, op, anchor).map_err(HistoryError::InverseFailed)?;
+        let redo_op =
+            re_anchor(object, &rec.op, &rec.anchor).map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces, capture path before dispatch.
         let pre_merge_path: Option<Vec<Point3>> = if let KernelOp::MergeFaces { edge } = &redo_op {
@@ -307,27 +386,270 @@ impl History {
             None
         };
 
-        // Run the redo op. Failure here is a kernel bug; pop only after
-        // success so a failed redo doesn't discard the entry.
-        let report = dispatch(object, &redo_op).map_err(HistoryError::InverseFailed)?;
+        // Run the redo on a clone, guard-exempt, and hold it to the recorded
+        // proof exactly as `undo` does; pop only after both succeed so a
+        // failed redo doesn't discard the entry.
+        let mut candidate = object.clone();
+        let report =
+            dispatch_replay(&mut candidate, &redo_op).map_err(HistoryError::InverseFailed)?;
+        if !rec.target.verify_and_align(&mut candidate) {
+            return Err(HistoryError::InverseDiverged);
+        }
+
+        // The state this redo leaves is what its recorded inverse must
+        // restore — capture it, then commit.
+        let prior = StateProof::of(object);
+        *object = candidate;
         self.undone.pop();
 
         // Derive a fresh inverse from this redo's report and push onto applied.
         let new_inverse = derive_inverse(&redo_op, &report, pre_merge_path);
         let inverse_anchor = anchor_of(object, &new_inverse);
-        self.applied.push((
-            HistoryEntry {
+        self.applied.push(AppliedEntry {
+            entry: HistoryEntry {
                 op: redo_op,
                 inverse: new_inverse,
             },
-            inverse_anchor,
-        ));
+            anchor: inverse_anchor,
+            prior,
+        });
 
         Ok(report)
     }
 }
 
 // ================================================================= private helpers
+
+/// Geometric fingerprint of an accepted state (DEVELOPMENT.md rule 9 /
+/// ARCHITECTURE.md §5.7): every face as its outer ring plus its hole rings,
+/// each a position cycle. Captured when a history entry is recorded; the
+/// entry's replay must reproduce it before its result is committed.
+///
+/// Hole rings are fingerprinted PER OWNING FACE, not as free-floating
+/// geometry: hole OWNERSHIP is exactly the kind of bookkeeping a buggy
+/// replay can scramble while leaving every outer ring — and the structural
+/// validator — happy (a hole handed to the wrong coplanar face keeps all
+/// loop pointers self-consistent). Covering ownership here is what makes
+/// that class InverseDiverged-visible.
+///
+/// Comparison is the tolerance-aware equivalence the round-trip property
+/// tests use — a multiset of faces, rings matched as cyclic rotations within
+/// [`tol::POINT_MERGE`] — because floating-point round-trips are not bitwise
+/// (`(p + d) − d ≠ p`; intervening baked transforms round-trip with noise
+/// too). Matching is greedy pairwise for the same reason [`same_position_set`]
+/// is: sort order flips under that noise.
+///
+/// Memory: every history entry retains one proof — O(total boundary
+/// vertices, outer and hole rings alike) per recorded op. Undo correctness
+/// buys that; revisit only with a benchmark in hand (DEVELOPMENT.md's
+/// strong-guarantee costing rule).
+#[derive(Debug, Clone)]
+struct StateProof {
+    faces: Vec<FaceProof>,
+}
+
+/// One face's fingerprint: outer ring and hole rings as position cycles,
+/// plus the face's stored plane.
+#[derive(Debug, Clone)]
+struct FaceProof {
+    outer: Vec<Point3>,
+    holes: Vec<Vec<Point3>>,
+    plane: crate::math::Plane,
+}
+
+/// The cyclic shift under which `a[i]` matches `b[(i + shift) % n]` within
+/// [`tol::POINT_MERGE`], if any (winding preserved).
+fn ring_match_shift(a: &[Point3], b: &[Point3]) -> Option<usize> {
+    if a.len() != b.len() {
+        return None;
+    }
+    (0..a.len()).find(|&shift| {
+        a.iter()
+            .enumerate()
+            .all(|(i, p)| p.approx_eq(b[(i + shift) % b.len()], tol::POINT_MERGE))
+    })
+}
+
+impl StateProof {
+    /// Fingerprints `object`'s current geometry.
+    fn of(object: &Object) -> StateProof {
+        StateProof {
+            faces: object
+                .faces()
+                .values()
+                .map(|face| FaceProof {
+                    outer: object.loop_positions(face.outer_loop).collect(),
+                    holes: face
+                        .inner_loops
+                        .iter()
+                        .map(|&il| object.loop_positions(il).collect())
+                        .collect(),
+                    plane: face.plane,
+                })
+                .collect(),
+        }
+    }
+
+    /// Verifies that `candidate`'s faces equal this fingerprint up to face
+    /// order, ring rotation, hole order, and floating-point round-trip
+    /// noise — and, on success, ALIGNS the candidate to the recorded
+    /// coordinates: every matched vertex takes the recorded position and
+    /// every matched face takes the recorded plane.
+    ///
+    /// The alignment is what keeps replay exact rather than merely close:
+    /// a replayed op recomputes geometry (`fl(fl(x + d) - d) != x`), and
+    /// committing the recomputed coordinates would let noise ACCUMULATE
+    /// across undo/redo cycles — refit normals amplify coordinate noise by
+    /// sweep-distance/face-extent per cycle, eventually flipping a marginal
+    /// tolerance decision inside a later replay and refusing an op that the
+    /// forward pass accepted. Restoring the recorded bits is not geometry
+    /// repair (rule 4 is about masking INVALID results); it is the
+    /// definition of undo/redo: the committed state IS the accepted state
+    /// the entry recorded, so every subsequent replay re-derives exactly
+    /// the computation its forward op ran.
+    ///
+    /// Returns false — candidate possibly partially aligned, caller must
+    /// discard it — if the fingerprint does not match or the match implies
+    /// conflicting vertex positions.
+    fn verify_and_align(&self, candidate: &mut Object) -> bool {
+        struct LiveFace {
+            id: crate::ids::FaceId,
+            outer_verts: Vec<crate::ids::VertexId>,
+            outer: Vec<Point3>,
+            holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)>,
+        }
+        let live: Vec<LiveFace> = candidate
+            .faces()
+            .iter()
+            .map(|(id, face)| {
+                let outer_verts: Vec<crate::ids::VertexId> = candidate
+                    .loop_half_edges(face.outer_loop)
+                    .map(|h| candidate.half_edges()[h].origin)
+                    .collect();
+                let outer = outer_verts
+                    .iter()
+                    .map(|&v| candidate.vertices()[v].position)
+                    .collect();
+                let holes = face
+                    .inner_loops
+                    .iter()
+                    .map(|&il| {
+                        let vs: Vec<crate::ids::VertexId> = candidate
+                            .loop_half_edges(il)
+                            .map(|h| candidate.half_edges()[h].origin)
+                            .collect();
+                        let ps = vs
+                            .iter()
+                            .map(|&v| candidate.vertices()[v].position)
+                            .collect();
+                        (vs, ps)
+                    })
+                    .collect();
+                LiveFace {
+                    id,
+                    outer_verts,
+                    outer,
+                    holes,
+                }
+            })
+            .collect();
+        if live.len() != self.faces.len() {
+            return false;
+        }
+
+        // Greedy face matching, extracting the ring alignments as we go.
+        let mut taken = vec![false; self.faces.len()];
+        let mut vertex_target: slotmap::SecondaryMap<crate::ids::VertexId, Point3> =
+            slotmap::SecondaryMap::new();
+        let assign = |verts: &[crate::ids::VertexId],
+                      rec: &[Point3],
+                      shift: usize,
+                      vertex_target: &mut slotmap::SecondaryMap<crate::ids::VertexId, Point3>|
+         -> bool {
+            for (i, &v) in verts.iter().enumerate() {
+                let target = rec[(i + shift) % rec.len()];
+                match vertex_target.get(v) {
+                    Some(prev) if !prev.approx_eq(target, tol::POINT_MERGE) => {
+                        return false; // conflicting assignments — bail
+                    }
+                    Some(_) => {}
+                    None => {
+                        vertex_target.insert(v, target);
+                    }
+                }
+            }
+            true
+        };
+        let mut face_plane: Vec<(crate::ids::FaceId, crate::math::Plane)> =
+            Vec::with_capacity(live.len());
+        for lf in &live {
+            let mut matched = false;
+            for (k, rec) in self.faces.iter().enumerate() {
+                if taken[k] || lf.holes.len() != rec.holes.len() {
+                    continue;
+                }
+                let Some(outer_shift) = ring_match_shift(&lf.outer, &rec.outer) else {
+                    continue;
+                };
+                // Match holes as a multiset, remembering each shift.
+                let mut hole_taken = vec![false; rec.holes.len()];
+                let mut hole_assign: Vec<(usize, usize, usize)> = Vec::new();
+                let mut holes_ok = true;
+                for (hi, (_, hp)) in lf.holes.iter().enumerate() {
+                    let mut found = None;
+                    for (hk, rh) in rec.holes.iter().enumerate() {
+                        if hole_taken[hk] {
+                            continue;
+                        }
+                        if let Some(shift) = ring_match_shift(hp, rh) {
+                            found = Some((hk, shift));
+                            break;
+                        }
+                    }
+                    match found {
+                        Some((hk, shift)) => {
+                            hole_taken[hk] = true;
+                            hole_assign.push((hi, hk, shift));
+                        }
+                        None => {
+                            holes_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !holes_ok {
+                    continue;
+                }
+                if !assign(&lf.outer_verts, &rec.outer, outer_shift, &mut vertex_target) {
+                    return false;
+                }
+                for (hi, hk, shift) in hole_assign {
+                    if !assign(&lf.holes[hi].0, &rec.holes[hk], shift, &mut vertex_target) {
+                        return false;
+                    }
+                }
+                face_plane.push((lf.id, rec.plane));
+                taken[k] = true;
+                matched = true;
+                break;
+            }
+            if !matched {
+                return false;
+            }
+        }
+
+        // Apply the alignment.
+        for (v, target) in &vertex_target {
+            candidate.vertices[v].position = *target;
+        }
+        for (f, plane) in face_plane {
+            candidate.faces[f].plane = plane;
+        }
+        // The aligned state is the recorded accepted state; hold it to the
+        // full validator anyway (typed refusal beats trusting the alignment).
+        candidate.validate().is_ok()
+    }
+}
 
 /// Geometric fingerprint of a stack entry's target. Captured when the entry's
 /// op is derived (its handle is fresh then) and resolved against the live
@@ -458,6 +780,25 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
                 .ok_or(KernelOpError::Sticky(StickyError::UnknownEdge)),
             Anchor::Face { .. } => Err(KernelOpError::Sticky(StickyError::UnknownEdge)),
         },
+    }
+}
+
+/// Dispatch a replayed [`KernelOp`] (a recorded inverse or redo) to the
+/// appropriate `Object` method in replay mode (rule 9): the ops that carry
+/// obstruction heuristics run guard-exempt, because the caller verifies the
+/// result against the entry's [`StateProof`]. The remaining ops have no
+/// heuristic guards and dispatch identically to [`dispatch`].
+fn dispatch_replay(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, KernelOpError> {
+    match op {
+        KernelOp::PushPull { face, distance } => object
+            .push_pull_replay(*face, *distance)
+            .map(KernelOpReport::PushPull)
+            .map_err(KernelOpError::PushPull),
+        KernelOp::ExtrudeSubFace { sub_face, distance } => object
+            .extrude_sub_face_replay(*sub_face, *distance)
+            .map(KernelOpReport::ExtrudeSubFace)
+            .map_err(KernelOpError::PushPull),
+        _ => dispatch(object, op),
     }
 }
 

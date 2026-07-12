@@ -1,12 +1,16 @@
-//! Acceptance spec distilled from `document_fuzz.rs` for a known gap:
-//! replaying the same document log twice (unwind-all / replay-all, twice)
-//! produces two semantically identical documents whose `save()` bytes differ.
-//! `save()` emits vertices and faces in slotmap order, and the slot free-list
-//! state after a full undo/redo cycle differs from the state before it, so
-//! identical replayed ops land in different slots. Byte-stable replay cycles
-//! need a canonical writer (emit geometry in a topology-derived order instead
-//! of slot order — format-compatible, but regenerates every saved golden).
-//! Set DUMP_DIR to write both containers for diffing.
+//! Acceptance spec distilled from `document_fuzz.rs` for a since-resolved
+//! gap: replaying the same document log twice (unwind-all / replay-all,
+//! twice) produced two semantically identical documents whose `save()` bytes
+//! differed. `save()` emitted vertices and faces in slotmap order, and the
+//! slot free-list state after a full undo/redo cycle differs from the state
+//! before it, so identical replayed ops landed in different slots.
+//!
+//! Resolved by the canonical geometry writer (`Object::encode`,
+//! HEW_FILE_FORMAT.md §3.1): loops are rotated to their lexicographically
+//! smallest position, faces are sorted by their canonicalized rings, and
+//! vertices are indexed by first appearance in that walk — a
+//! format-compatible, topology-derived order that no longer depends on slot
+//! allocation. Set DUMP_DIR to write both containers for diffing on failure.
 
 use kernel::{Document, KernelOp, NodeId, ObjectId, Plane, Point3, Vec3};
 
@@ -68,7 +72,6 @@ fn split_op(
 }
 
 #[test]
-#[ignore = ": save() is slot-order-sensitive, so undo/redo cycles drift bytes — un-ignore with the canonical-writer change"]
 fn document_replay_is_deterministic() {
     let mut doc = Document::new();
     doc.set_torture_mode(true);

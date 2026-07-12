@@ -1,13 +1,21 @@
-//! Acceptance spec distilled from `op_fuzz.rs` for a known contract gap:
-//! `find_collapse_plans` only recognizes clean QUAD step walls, so when a
-//! pocket's walls have been subdivided by adjacent geometry (here: a raised
-//! step bordering the pocket), the exact-closure inverse of a push/pull is
-//! not detected as a collapse and the interior-obstruction guard refuses it —
-//! undo fails typed with `NonManifoldResult` instead of restoring the object.
-//! The object is never corrupted (strong guarantee holds); the inverse
-//! property from `push_pull`'s contract is what's violated.
+//! Acceptance spec distilled from `op_fuzz.rs` for a since-resolved contract
+//! gap: undoing a recess whose stretched side walls carry subdivision
+//! vertices (here: from a raised step bordering the pocket, spliced in by an
+//! earlier coplanar-aware push) was refused by `push_pull`'s
+//! interior-obstruction guard, which misread those wall vertices as fixed
+//! obstructions strictly in front of the translate-back sweep. Undo failed
+//! typed with `NonManifoldResult` instead of restoring the object (never
+//! corrupting it; the inverse property was what broke).
 //!
-//! `op_fuzz.rs` tolerates exactly this failure signature and points here.
+//! Resolved by DEVELOPMENT.md rule 9 (ARCHITECTURE.md §5.7): history replay
+//! is guard-exempt and proof-carrying, so the heuristic cannot refuse the
+//! recorded inverse. The translate-back surgery itself restores the
+//! subdivided walls exactly (they un-stretch to the shapes they were built
+//! with — no wall degenerates and no collapse detection is involved), and
+//! the replay's result is verified against the recorded pre-op state's
+//! fingerprint before committing. Generalizing `find_collapse_plans` beyond
+//! quad walls was NOT needed for this class: the failing inverse was never a
+//! collapse, only a guarded translate.
 
 use kernel::{History, KernelOp, Object, Point3};
 
@@ -59,7 +67,6 @@ fn imprint_op(object: &Object, face_sel: usize, shrink: f64) -> KernelOp {
 }
 
 #[test]
-#[ignore = ": non-quad step walls not yet recognized by collapse detection — un-ignore in the implementing PR"]
 fn undo_closes_pocket_whose_walls_were_subdivided() {
     let (dx, dy, dz) = (3.4732755870644763, 0.5, 0.5);
     let v = vec![
@@ -115,8 +122,8 @@ fn undo_closes_pocket_whose_walls_were_subdivided() {
     let _ = history.apply(&mut object, op);
     object.validate().expect("valid after forward ops");
 
-    // Contract: every recorded inverse succeeds. Currently the first undo
-    // fails with InverseFailed(PushPull(NonManifoldResult)).
+    // Contract: every recorded inverse succeeds. Before rule 9 the first
+    // undo failed with InverseFailed(PushPull(NonManifoldResult)).
     let mut n = 0;
     while history.can_undo() {
         history

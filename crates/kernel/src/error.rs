@@ -84,6 +84,15 @@ pub enum TopologyError {
         /// The offending face.
         face: FaceId,
     },
+    /// A face's inner (hole) loop lies entirely outside the face's outer
+    /// boundary: the hole belongs to some other region of the plane, so the
+    /// face's ring structure does not describe its geometry.
+    HoleOutsideFace {
+        /// The offending face.
+        face: FaceId,
+        /// The displaced hole loop.
+        loop_id: LoopId,
+    },
     /// A vertex's `outgoing` half-edge does not originate at it.
     VertexOutgoingMismatch {
         /// The offending vertex.
@@ -145,6 +154,12 @@ impl std::fmt::Display for TopologyError {
             }
             FaceGeometryNotPlanar { face } => {
                 write!(f, "face {face:?} has vertices off its stored plane")
+            }
+            HoleOutsideFace { face, loop_id } => {
+                write!(
+                    f,
+                    "face {face:?} owns hole loop {loop_id:?} that lies outside its outer boundary"
+                )
             }
             VertexOutgoingMismatch { vertex } => {
                 write!(

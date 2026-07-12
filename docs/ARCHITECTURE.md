@@ -556,3 +556,59 @@ Loading the native file format itself runs the same validator a live
 mutation does, so a corrupted or hand-tampered file is rejected outright
 rather than loaded into a document that looks fine until something touches
 the wrong triangle.
+
+### 5.7 History replay is guard-exempt, and carries proof
+
+Some operations run best-effort **obstruction guards**: heuristics that
+refuse a sweep whose result would stay manifold — and therefore pass the
+topology validator — while self-intersecting in space (a recess pushed
+deeper than the material beneath it, a boss driven through geometry in
+front of it). Guards read the geometry *surrounding* an operation, and they
+are deliberately conservative: refusing a legal forward operation costs the
+user a retry, while accepting an illegal one silently corrupts the model.
+
+That conservatism must never break undo. Undo and redo are LIFO — a
+recorded inverse dispatches against exactly the state its operation
+produced, and a redo dispatches against exactly the state its operation was
+originally accepted in — so the state a replayed operation re-enters is one
+the kernel has *already accepted*. There is nothing left for a heuristic to
+protect against, and a heuristic must not be able to refuse the replay. The
+History therefore dispatches recorded inverses (undo) and recorded forward
+ops (redo) in a distinct **replay mode**:
+
+- **Guard-exempt.** The obstruction heuristics are skipped. Everything
+  structural still runs: input checking, the surgery's own typed refusals,
+  the debug invariant checker, and the always-on release validator. Replay
+  mode never disables validation — only the heuristics whose job the proof
+  below does better.
+- **Proof-carrying.** The exemption is not taken on faith. When an entry is
+  recorded, the History captures a geometric fingerprint of the state the
+  replay must reproduce (for an inverse, the state before the op; for a
+  redo, the state after it): every face's outer and hole rings plus its
+  plane. The replayed op runs on a clone and commits only if its result
+  matches that fingerprint, up to the same tolerance-aware equivalence the
+  round-trip property tests use. A mismatch is a kernel bug by definition,
+  surfaced as a typed error with the object untouched — undo can fail typed
+  on a kernel bug, but it never corrupts, and it is never refused by a
+  heuristic.
+- **Exact, not merely close.** On a successful match the committed clone is
+  aligned to the recorded coordinates (vertex positions and face planes).
+  A replayed op recomputes geometry, and floating-point round-trips are not
+  bitwise (`(p + d) − d ≠ p`); committing recomputed coordinates would let
+  that noise accumulate across undo/redo cycles — refit normals amplify it
+  by sweep-distance over face-extent — until a marginal tolerance decision
+  inside a later replay flips and refuses an op its forward pass accepted.
+  Alignment makes every replay re-enter the exact bits of the recorded
+  accepted state, so replay is idempotent and noise cannot accumulate. This
+  is not geometry repair (§5.3 is about masking invalid results); it is the
+  definition of undo/redo, and the aligned state still passes the full
+  validator before committing.
+
+This is DEVELOPMENT.md rule 9. The alternative — holding every guard to one
+shared fidelity and trusting that a replayed op re-derives the same
+accept/refuse decision at replay time — was rejected because it cannot be
+made exact: guards compare tolerances against recomputed positions,
+floating-point round-trips are not bitwise (`(p + d) − d ≠ p`), and every
+future guard would re-open the gap. Verifying the replayed *result* against
+the recorded state discharges the guards' entire purpose without depending
+on how any guard is implemented.

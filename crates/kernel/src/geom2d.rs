@@ -84,13 +84,25 @@ pub(crate) fn segments_intersect(p: Point3, q: Point3, r: Point3, s: Point3) -> 
     let d3 = cross_z(p, q, r);
     let d4 = cross_z(p, q, s);
 
-    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
-        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    // A proper crossing needs orientation values that are SIGNS, not noise:
+    // an orientation within the collinearity tolerance below must not count
+    // as a side (rule 6 — never give geometric meaning to a raw float
+    // comparison the epsilon regime says is zero). Two nearly collinear
+    // segments (e.g. two pieces of one face edge whose vertices round-tripped
+    // through an op and differ by an ulp) otherwise produce d-values of
+    // ~1e-16 with opposite signs and are declared crossing even though the
+    // collinear branch — whose bounding boxes are disjoint — would correctly
+    // clear them. Genuinely crossing near-collinear segments have overlapping
+    // boxes and are still caught by the collinear branch.
+    let eps = tol::POINT_MERGE;
+    let pos = |d: f64| d > eps;
+    let neg = |d: f64| d < -eps;
+    if ((pos(d1) && neg(d2)) || (neg(d1) && pos(d2)))
+        && ((pos(d3) && neg(d4)) || (neg(d3) && pos(d4)))
     {
         return true;
     }
     // Collinear / endpoint cases.
-    let eps = tol::POINT_MERGE;
     if d1.abs() <= eps && on_segment(r, s, p) {
         return true;
     }

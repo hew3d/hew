@@ -118,6 +118,17 @@ export a file a slicer accepts as watertight, with no repair step.
 - A deterministic kernel: the same sequence of operations always produces
   bit-identical results, which makes bugs reproducible instead of "worked
   twice, failed the third time"
+- Sound undo/redo by contract: a replayed inverse is never refused by a
+  best-effort heuristic and is verified against — then aligned to — the
+  recorded state before committing, so undo either restores exactly what
+  was there or fails with a typed error; it never corrupts
+  (ARCHITECTURE.md §5.7)
+- Canonical geometry serialization: saved bytes no longer depend on
+  internal storage order, so undo/redo slot reallocation cannot drift a
+  saved file. Scope note: this removes ORDER drift; value-level
+  floating-point drift from baked move/rotate/scale round-trips (the
+  documented `(p + d) − d ≠ p` trap, outside the history-replay proof
+  mechanism) remains a known, tolerance-absorbed limitation
 - Structured diagnostic logging, with an optional Debug Mode for deeper
   logging and extra internal validation
 - Session recording and replay, so a captured session becomes both a bug
@@ -199,41 +210,6 @@ export a file a slicer accepts as watertight, with no repair step.
   is not yet
 - **Signed, notarized installers, auto-update, and a hosted web build**
   with no install step
-
-### Deferred until after initial public release
-
-Four kernel architecture decisions surfaced by the op-sequence and
-document-level fuzz harnesses. Each is a contained, typed failure or a
-byte-level wart — never silent corruption — and each has an `#[ignore]`d
-acceptance spec in `crates/kernel/tests/` that the implementing change
-un-ignores.
-
-- **Generalized step-wall recognition for collapse.** `find_collapse_plans`
-  only matches pristine quad walls, so undoing a push whose pocket walls
-  were subdivided by adjacent geometry fails typed instead of closing the
-  step. Needs wall matching (and the collapse surgery) extended to
-  subdivided and L-shaped prismatic walls. Spec:
-  `op_fuzz_repro_nonquad_wall_undo.rs`.
-- **One obstruction-guard fidelity across inverse op pairs.** `push_pull`
-  guards sweeps with a neighbor-vertex heuristic while `extrude_sub_face`
-  uses a centroid ray, so a recess the first accepts can record a collapse
-  whose inverse the second refuses. Either unify on one guard or let
-  recorded inverses carry proof they revert to a previously accepted state
-  and bypass the guards — the latter also retires the class behind the
-  previous item. Spec: `op_fuzz_repro_guard_regime_undo.rs`.
-- **Canonical geometry serialization.** `save()` emits vertices and faces
-  in slotmap order, so undo/redo cycles (which reallocate slots) drift the
-  saved bytes of semantically identical documents. A canonical writer —
-  topology-derived order — is format-compatible but regenerates every
-  stored golden, so it lands as its own change. Spec:
-  `doc_replay_diverge_repro.rs`.
-- **An explicit contract for guards versus inverses.** The general form of
-  the second item: any forward-op guard that reads surrounding geometry
-  can refuse a recorded inverse after intermediate ops changed that
-  geometry. Decide once whether inverses are guard-exempt with proof, or
-  the History contract is officially "undo fails typed, never corrupts" —
-  the fuzz harnesses currently tolerate exactly the two known signatures
-  and nothing else.
 
 ## Non-goals
 

@@ -19,7 +19,9 @@ impl Object {
     /// every loop closes; edges and half-edges agree about each other; loops
     /// and faces agree about each other; face boundaries lie on their stored
     /// plane (within the object's `planarity_tol` — strict `PLANE_DIST` for
-    /// native geometry, wider `IMPORT_PLANE_DIST` for imports);
+    /// native geometry, wider `IMPORT_PLANE_DIST` for imports); every hole
+    /// loop lies geometrically inside its face's outer boundary (checked
+    /// conservatively: a hole with NO vertex inside the ring is invalid);
     /// vertices and their `outgoing`
     /// half-edges agree; every face is in exactly one shell; and the
     /// watertightness flag matches the actual topology.
@@ -172,6 +174,30 @@ impl Object {
                     }
                 }
             }
+            // Hole containment: a hole loop must lie inside its face's outer
+            // boundary. Checked conservatively — the hole is invalid only if
+            // NONE of its vertices are inside the outer ring — because a
+            // fully displaced hole is what a wrong ownership assignment
+            // produces, while a vertex grazing the outer boundary within
+            // tolerance must not fail legitimate geometry. (A partially
+            // displaced hole cannot arise from valid operations at all: cut
+            // paths are refused if they cross hole territory.)
+            if !face.inner_loops.is_empty() {
+                let outer_pts: Vec<crate::math::Point3> =
+                    self.loop_positions(face.outer_loop).collect();
+                let normal = face.plane.normal();
+                for &inner_id in &face.inner_loops {
+                    let any_inside = self
+                        .loop_positions(inner_id)
+                        .any(|p| crate::geom2d::point_inside_polygon(p, &outer_pts, normal));
+                    if !any_inside {
+                        return Err(TopologyError::HoleOutsideFace {
+                            face: f,
+                            loop_id: inner_id,
+                        });
+                    }
+                }
+            }
         }
         for (l, lp) in &self.loops {
             let face = self
@@ -295,6 +321,76 @@ mod tests {
         assert!(matches!(
             tet.validate(),
             Err(TopologyError::VertexOutgoingMismatch { .. } | TopologyError::OrphanVertex { .. })
+        ));
+    }
+
+    #[test]
+    fn validator_catches_displaced_hole() {
+        // A slab whose top face carries a small imprinted hole on its left
+        // half; splitting the top and handing the hole to the coplanar RIGHT
+        // half leaves every ownership pointer self-consistent while the hole
+        // lies entirely outside its owner's outer ring.
+        let mut obj = Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(10.0, 0.0, 0.0),
+                Point3::new(10.0, 10.0, 0.0),
+                Point3::new(0.0, 10.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+                Point3::new(10.0, 0.0, 1.0),
+                Point3::new(10.0, 10.0, 1.0),
+                Point3::new(0.0, 10.0, 1.0),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+        .unwrap();
+        let top = obj
+            .faces
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .unwrap();
+        obj.split_face_inner(
+            top,
+            &[
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(2.0, 1.0, 1.0),
+                Point3::new(2.0, 2.0, 1.0),
+                Point3::new(1.0, 2.0, 1.0),
+            ],
+        )
+        .unwrap();
+        obj.split_face(
+            top,
+            &[Point3::new(5.0, 0.0, 1.0), Point3::new(5.0, 10.0, 1.0)],
+        )
+        .unwrap();
+        assert!(obj.validate().is_ok(), "well-formed before displacement");
+
+        let (owner, hole) = obj
+            .faces
+            .iter()
+            .find_map(|(id, f)| f.inner_loops.first().map(|&il| (id, il)))
+            .expect("the hole survived the split");
+        let other = obj
+            .faces
+            .iter()
+            .find(|(id, f)| *id != owner && f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("the coplanar sibling exists");
+        obj.faces[owner].inner_loops.retain(|&il| il != hole);
+        obj.faces[other].inner_loops.push(hole);
+        obj.loops[hole].face = other;
+        assert!(matches!(
+            obj.validate(),
+            Err(TopologyError::HoleOutsideFace { .. })
         ));
     }
 

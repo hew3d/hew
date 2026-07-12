@@ -9,14 +9,13 @@
 //! - a failed op leaves the object bit-for-bit untouched (strong guarantee).
 //!
 //! And for the sequence as a whole:
+//! - every undo/redo dispatch succeeds (DEVELOPMENT.md rule 9 — history
+//!   replay is guard-exempt with proof; no failure signature is tolerated);
 //! - unwinding the entire history restores the starting geometry;
 //! - replaying the entire redo stack restores the post-sequence geometry
 //!   (exercises inverse re-anchoring in `history.rs`).
 
-use kernel::{
-    History, HistoryError, KernelOp, KernelOpError, Object, Plane, Point3, Profile, PushPullError,
-    Vec3, WatertightState,
-};
+use kernel::{History, KernelOp, Object, Plane, Point3, Profile, Vec3, WatertightState};
 use proptest::prelude::*;
 
 /// Geometric slack for round-trip comparison: inverse ops recompute positions
@@ -50,11 +49,15 @@ enum FuzzOp {
     MergeFaces {
         edge_sel: usize,
     },
-    /// Imprint a shrunk copy of the `face_sel`-th face's boundary strictly
-    /// inside it (valid on convex faces; rejected typed otherwise).
+    /// Imprint a loop strictly inside the `face_sel`-th face: a shrunk copy
+    /// of its boundary (valid on convex faces; rejected typed otherwise),
+    /// or — `staple: true`, quad faces only — a concave U-shaped loop whose
+    /// vertex average lies OUTSIDE it, feeding the hole-reassignment and
+    /// hole-fingerprint paths their hardest shape.
     SplitFaceInner {
         face_sel: usize,
         shrink: f64,
+        staple: bool,
     },
     /// Boss/recess the `face_sel`-th face if it is an imprinted sub-face
     /// (usually rejected typed — exercises the strong guarantee).
@@ -89,9 +92,13 @@ fn arb_fuzz_op() -> impl Strategy<Value = FuzzOp> {
                 tb,
             }),
         2 => any::<usize>().prop_map(|edge_sel| FuzzOp::MergeFaces { edge_sel }),
-        2 => (any::<usize>(), 0.3..0.7f64).prop_map(|(face_sel, shrink)| {
-            FuzzOp::SplitFaceInner { face_sel, shrink }
-        }),
+        2 => (any::<usize>(), 0.3..0.7f64, proptest::bool::ANY).prop_map(
+            |(face_sel, shrink, staple)| FuzzOp::SplitFaceInner {
+                face_sel,
+                shrink,
+                staple,
+            }
+        ),
         2 => (any::<usize>(), distance()).prop_map(|(face_sel, distance)| {
             FuzzOp::ExtrudeSubFace { face_sel, distance }
         }),
@@ -201,15 +208,82 @@ fn arb_ngon_prism() -> impl Strategy<Value = Object> {
     })
 }
 
+/// Boxes whose top face already carries a concave "staple" (U-shaped)
+/// imprint — a hole loop plus its flat sub-face. Splitting the top then
+/// exercises hole reassignment across the cut (the staple's vertex average
+/// lies outside the staple, the exact trap of the centroid-probe bug), and
+/// the sub-face ops start with a real target instead of hunting for one.
+fn arb_stapled_box() -> impl Strategy<Value = Object> {
+    (
+        (-10.0..10.0f64, -10.0..10.0f64),
+        (4.0..10.0f64, 4.0..10.0f64, 1.0..5.0f64),
+    )
+        .prop_map(|((x, y), (dx, dy, dz))| {
+            let v = vec![
+                Point3::new(x, y, 0.0),
+                Point3::new(x + dx, y, 0.0),
+                Point3::new(x + dx, y + dy, 0.0),
+                Point3::new(x, y + dy, 0.0),
+                Point3::new(x, y, dz),
+                Point3::new(x + dx, y, dz),
+                Point3::new(x + dx, y + dy, dz),
+                Point3::new(x, y + dy, dz),
+            ];
+            let f = vec![
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ];
+            let mut obj = Object::from_polygons(&v, &f).expect("generated box is a valid solid");
+            let top = obj
+                .faces()
+                .iter()
+                .find(|(_, face)| face.plane.normal().z > 0.9)
+                .map(|(id, _)| id)
+                .expect("box has a top face");
+            let staple = staple_loop(
+                Point3::new(x, y, dz),
+                Point3::new(x + dx, y, dz),
+                Point3::new(x, y + dy, dz),
+            );
+            obj.split_face_inner(top, &staple)
+                .expect("staple fits strictly inside the top face");
+            obj
+        })
+}
+
+/// The concave U-shaped loop used by the stapled seeds and the staple
+/// imprint op, in the bilinear frame of a quad face: `origin` is one corner,
+/// `ua`/`vb` the adjacent corners along the two edges. Fractions keep the
+/// loop strictly interior; its vertex average falls in the notch, outside
+/// the loop.
+fn staple_loop(origin: Point3, ua: Point3, vb: Point3) -> Vec<Point3> {
+    let at = |a: f64, b: f64| origin + (ua - origin) * a + (vb - origin) * b;
+    vec![
+        at(0.2, 0.6),
+        at(0.4, 0.6),
+        at(0.4, 0.8),
+        at(0.6, 0.8),
+        at(0.6, 0.6),
+        at(0.8, 0.6),
+        at(0.8, 0.9),
+        at(0.2, 0.9),
+    ]
+}
+
 /// Seed solids for a fuzz case, weighted toward the shapes with the richest
 /// op surface (quads everywhere) but always covering triangles, concave caps,
-/// and slanted side walls.
+/// slanted side walls, and faces that already carry a concave hole.
 fn arb_seed() -> impl Strategy<Value = Object> {
     prop_oneof![
         4 => arb_box(),
         1 => arb_tetra(),
         3 => arb_l_prism(),
         2 => arb_ngon_prism(),
+        3 => arb_stapled_box(),
     ]
 }
 
@@ -261,7 +335,11 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             let edge = object.edges().keys().nth(edge_sel % n)?;
             Some(KernelOp::MergeFaces { edge })
         }
-        FuzzOp::SplitFaceInner { face_sel, shrink } => {
+        FuzzOp::SplitFaceInner {
+            face_sel,
+            shrink,
+            staple,
+        } => {
             let n = object.faces().len();
             let face = object.faces().keys().nth(face_sel % n)?;
             let boundary: Vec<Point3> = object
@@ -269,6 +347,15 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                 .collect();
             if boundary.len() < 3 {
                 return None;
+            }
+            if *staple {
+                // Concave staple in the quad's bilinear frame (quad faces
+                // only; skewed quads may still reject typed — fine).
+                if boundary.len() != 4 {
+                    return None;
+                }
+                let loop_path = staple_loop(boundary[0], boundary[1], boundary[3]);
+                return Some(KernelOp::SplitFaceInner { face, loop_path });
             }
             // Shrink the boundary toward its vertex centroid; strictly inside
             // for convex faces, typed rejection otherwise.
@@ -349,45 +436,6 @@ fn same_geometry(a: &Snapshot, b: &Snapshot) -> Result<(), String> {
         unmatched.swap_remove(i);
     }
     Ok(())
-}
-
-/// KNOWN CONTRACT GAPS, tolerated by this harness — both are inverse ops
-/// failing typed with `InverseFailed(PushPull(NonManifoldResult))` while the
-/// object stays valid and untouched:
-///
-/// 1. `find_collapse_plans` only recognizes clean QUAD step walls, so
-///    undoing/redoing a push whose pocket walls were subdivided fails.
-///    Acceptance spec: `op_fuzz_repro_nonquad_wall_undo.rs` (pending op is a
-///    `PushPull`).
-/// 2. Obstruction-guard fidelity differs across inverse op pairs — a recess
-///    accepted by `push_pull`'s vertex-heuristic guard leaves a collapse
-///    whose inverse (`extrude_sub_face`, centroid-RAY guard) is refused.
-///    Acceptance spec: `op_fuzz_repro_guard_regime_undo.rs` (pending op is an
-///    `ExtrudeSubFace`).
-///
-/// When a spec is implemented and un-ignored, delete its arm here so the
-/// round-trip asserts bite again. The signature alone is deliberately not
-/// enough: it is shared by validator-backstop refusals (real regressions), so
-/// the pending op kind — peeked from the history, which is unchanged after a
-/// failed dispatch — must match a documented gap. Residual risk: a
-/// backstop-refused PushPull/ExtrudeSubFace inverse would be tolerated here
-/// in release, but debug runs still panic inside `check_invariants` before
-/// the backstop and are never tolerated.
-fn is_known_inverse_guard_gap(history: &History, e: &HistoryError, redo: bool) -> bool {
-    let signature = matches!(
-        e,
-        HistoryError::InverseFailed(KernelOpError::PushPull(PushPullError::NonManifoldResult))
-    );
-    let pending = if redo {
-        history.peek_redo()
-    } else {
-        history.peek_undo()
-    };
-    signature
-        && matches!(
-            pending,
-            Some(KernelOp::PushPull { .. }) | Some(KernelOp::ExtrudeSubFace { .. })
-        )
 }
 
 /// Serialization round-trip (HEW_FILE_FORMAT.md; serialize.rs's documented
@@ -480,9 +528,6 @@ proptest! {
                     if history.can_undo() {
                         match history.undo(&mut object) {
                             Ok(_) => check_state(&object, step, "undo")?,
-                            Err(e) if is_known_inverse_guard_gap(&history, &e, false) => {
-                                return Ok(());
-                            }
                             Err(e) => return Err(TestCaseError::fail(
                                 format!("step {step}: undo failed (kernel bug): {e}"),
                             )),
@@ -493,9 +538,6 @@ proptest! {
                     if history.can_redo() {
                         match history.redo(&mut object) {
                             Ok(_) => check_state(&object, step, "redo")?,
-                            Err(e) if is_known_inverse_guard_gap(&history, &e, true) => {
-                                return Ok(());
-                            }
                             Err(e) => return Err(TestCaseError::fail(
                                 format!("step {step}: redo failed (kernel bug): {e}"),
                             )),
@@ -533,77 +575,56 @@ proptest! {
         // can exceed the post-sequence state when the sequence ended with
         // unmatched Undos, so it is captured, not predicted); a second
         // unwind/replay cycle must reproduce both — this is what exercises
-        // inverse/redo re-anchoring across handle reallocation.
-        // `Ok(false)` = the known non-quad-collapse gap fired; abandon the
-        // round-trip for this case (the object is valid and untouched, but
-        // the history can no longer unwind past the refused inverse).
+        // inverse/redo re-anchoring across handle reallocation. Every
+        // undo/redo must succeed (DEVELOPMENT.md rule 9): no failure
+        // signature is tolerated.
         let unwind = |object: &mut Object,
                       history: &mut History,
                       label: &str|
-         -> Result<bool, TestCaseError> {
+         -> Result<(), TestCaseError> {
             let mut n = 0usize;
             while history.can_undo() {
-                match history.undo(object) {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(history, &e, false) => {
-                        return Ok(false);
-                    }
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!("{label}, undo #{n}: {e}")));
-                    }
+                if let Err(e) = history.undo(object) {
+                    return Err(TestCaseError::fail(format!("{label}, undo #{n}: {e}")));
                 }
                 check_state(object, n, label)?;
                 n += 1;
             }
-            Ok(true)
+            Ok(())
         };
         let replay = |object: &mut Object,
                       history: &mut History,
                       label: &str|
-         -> Result<bool, TestCaseError> {
+         -> Result<(), TestCaseError> {
             let mut n = 0usize;
             while history.can_redo() {
-                match history.redo(object) {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(history, &e, true) => {
-                        return Ok(false);
-                    }
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!("{label}, redo #{n}: {e}")));
-                    }
+                if let Err(e) = history.redo(object) {
+                    return Err(TestCaseError::fail(format!("{label}, redo #{n}: {e}")));
                 }
                 check_state(object, n, label)?;
                 n += 1;
             }
-            Ok(true)
+            Ok(())
         };
 
-        if !unwind(&mut object, &mut history, "first unwind")? {
-            return Ok(());
-        }
+        unwind(&mut object, &mut history, "first unwind")?;
         if let Err(why) = same_geometry(&original, &object.to_polygons()) {
             return Err(TestCaseError::fail(format!(
                 "full undo did not restore the original object: {why}"
             )));
         }
 
-        if !replay(&mut object, &mut history, "first replay")? {
-            return Ok(());
-        }
+        replay(&mut object, &mut history, "first replay")?;
         let maximal = object.to_polygons();
 
-        if !unwind(&mut object, &mut history, "second unwind")? {
-            return Ok(());
-        }
+        unwind(&mut object, &mut history, "second unwind")?;
         if let Err(why) = same_geometry(&original, &object.to_polygons()) {
             return Err(TestCaseError::fail(format!(
                 "second full undo did not restore the original object: {why}"
             )));
         }
 
-        if !replay(&mut object, &mut history, "second replay")? {
-            return Ok(());
-        }
+        replay(&mut object, &mut history, "second replay")?;
         if let Err(why) = same_geometry(&maximal, &object.to_polygons()) {
             return Err(TestCaseError::fail(format!(
                 "second full redo did not reproduce the maximal state: {why}"

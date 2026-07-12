@@ -42,6 +42,12 @@ This requires:
   meaning; only their invariance across saves matters.
 - **Deterministic dense ids and array ordering** (): every array in the
   manifest is emitted in dense-id order, never re-sorted or hash-ordered.
+- **Canonical geometry order**: vertices and faces inside a geometry buffer
+  are emitted in the topology-derived canonical order of §3.1, never in the
+  writer's internal storage order. Internal storage (slot) order is a
+  function of an object's mutation history, not its geometry — an undo/redo
+  cycle can reallocate storage — and two semantically identical documents
+  must serialize to identical bytes.
 
 A reader, by contrast, MUST NOT depend on any of the above: it must accept
 entries in any physical order and tolerate any timestamp/permission values.
@@ -204,9 +210,9 @@ offset  type                field
 9       u32                 base_material id (0xFFFFFFFF = none)
 13      u8                  imported flag: 0 = strict native tolerance, 1 = imported tolerance
 14      u32                 vertex_count (N)
-18      f64[3] * N          vertex positions, one (x, y, z) triple per vertex, in vertex-slot order
+18      f64[3] * N          vertex positions, one (x, y, z) triple per vertex, in canonical order (below)
 ...     u32                 face_count (F)
-        --- repeated F times, in face-slot order: ---
+        --- repeated F times, in canonical face order (below): ---
         u32                 face material id (0xFFFFFFFF = none)
         u8                  uv_frame flag: 0 = no UV frame, 1 = UV frame follows
         f64[8]              uv_frame, present only when the flag above is 1:
@@ -222,6 +228,31 @@ offset  type                field
 Each face's outer loop and each of its hole loops is a closed polygon: the
 last index does not repeat the first (the loop is implicitly closed by
 wrapping back to index 0 of that loop).
+
+**Canonical order.** A conforming writer derives the emission order from the
+geometry itself (see "Determinism"), as follows. Positions are compared
+lexicographically by coordinate — `x`, then `y`, then `z` — using a total
+order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
+`f64::total_cmp`), never a quantized or epsilon comparison. Then:
+
+- every loop (outer and hole) is rotated to start at the vertex that makes
+  its position sequence lexicographically smallest; winding is preserved —
+  only the starting vertex changes;
+- a face's hole loops are sorted among themselves by their (rotated)
+  position sequences;
+- faces are sorted by their rotated outer-ring position sequence, then hole
+  count, then hole sequences, then material id, then UV frame (frameless
+  faces first; frames compared elementwise `s.x s.y s.z t.x t.y t.z u0 v0`
+  under the same f64 total order) — coincident faces on disjoint shells can
+  tie on geometry alone, so every emitted payload participates in the key;
+- vertices are numbered by first appearance while walking the faces in that
+  order (each face's outer loop, then its holes); a vertex referenced by no
+  loop — which valid topology does not produce — is appended at the end in
+  position order.
+
+A reader MUST NOT depend on this order (any vertex/face order decodes to
+the same object); it exists so that semantically identical documents
+serialize to identical bytes regardless of the writer's mutation history.
 
 `uv_frame`, when present, is an oriented planar UV mapping: for a world
 point `p` on the face's plane, `uv = (s·p + u0, t·p + v0)`, where `s`/`t`

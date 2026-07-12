@@ -138,6 +138,20 @@ this list.
    refactor that crosses crate boundaries is proposed and discussed (an
    issue or a PR description laying out the change) before it lands — never
    landed silently inside an unrelated change.
+9. **History replay is guard-exempt, with proof.** A recorded inverse
+   (undo) or recorded forward op (redo) re-enters a state the kernel
+   already accepted, so the best-effort obstruction heuristics that forward
+   operations run are skipped on replay; instead, the replayed result is
+   verified against a geometric fingerprint of the recorded state (face
+   rings, hole rings, planes) and committed only on a match — after which
+   the committed result is ALIGNED to the recorded coordinates, so replay
+   restores the accepted state exactly and floating-point noise cannot
+   accumulate across undo/redo cycles (see ARCHITECTURE.md §5.7). A
+   mismatch fails typed with the object untouched — undo may fail typed on
+   a kernel bug, but it is never refused by a heuristic and it never
+   corrupts. Structural validation is never skipped on replay. A heuristic
+   that can refuse a replay, or a test harness arm that tolerates a failing
+   undo, is a bug — not something to whitelist.
 
 ## 4. Kernel development
 

@@ -1,19 +1,18 @@
-//! Acceptance spec distilled from `op_fuzz.rs` for a known contract gap:
-//! the interior-obstruction guards differ in fidelity across ops that are
-//! inverses of each other. Here a sub-face of a tetrahedron is recessed via
-//! `push_pull` (vertex-heuristic guard: permissive — no tetra vertex sits in
-//! front of the sweep, so a recess deeper than the material at the centroid
-//! is accepted), then flattened via `collapse_sub_face`. The collapse's
-//! recorded inverse dispatches as `extrude_sub_face`, whose centroid-RAY
-//! guard sees the opposite face closer than the recess depth and refuses —
-//! undo fails typed with `NonManifoldResult` although the object is valid
-//! and untouched.
+//! Acceptance spec distilled from `op_fuzz.rs` for a since-resolved contract
+//! gap: the interior-obstruction guards differ in fidelity across ops that
+//! are inverses of each other. Here a sub-face of a tetrahedron is recessed
+//! via `push_pull` (vertex-heuristic guard: permissive — no tetra vertex sits
+//! in front of the sweep, so a recess deeper than the material at the
+//! centroid is accepted), then flattened via `collapse_sub_face`. The
+//! collapse's recorded inverse dispatches as `extrude_sub_face`, whose
+//! centroid-RAY guard saw the opposite face closer than the recess depth and
+//! refused — undo failed typed with `NonManifoldResult` although the object
+//! was valid and untouched.
 //!
-//! Two acceptable resolutions, either of which un-ignores this spec: give
-//! the guards one shared fidelity (the ray probe in `push_pull` too, refusing
-//! the FORWARD recess here), or let recorded inverses carry proof they revert
-//! to a previously accepted state and bypass the guards. `op_fuzz.rs`
-//! tolerates exactly this failure signature and points here.
+//! Resolved by DEVELOPMENT.md rule 9 (ARCHITECTURE.md §5.7): history replay
+//! is guard-exempt and proof-carrying — the recorded inverse dispatches with
+//! the heuristic guards skipped and its result is verified against the
+//! recorded pre-op state's fingerprint before committing.
 
 use kernel::{History, KernelOp, Object, Point3};
 
@@ -40,7 +39,6 @@ fn imprint_op(object: &Object, face_sel: usize, shrink: f64) -> KernelOp {
 }
 
 #[test]
-#[ignore = ": obstruction-guard fidelity differs across inverse op pairs — un-ignore in the change that unifies them"]
 fn undo_of_collapse_survives_guard_regime_change() {
     let v = vec![
         Point3::new(0.0, 0.0, 0.0),
@@ -72,8 +70,8 @@ fn undo_of_collapse_survives_guard_regime_change() {
     let _ = history.apply(&mut object, op);
     object.validate().expect("valid after forward ops");
 
-    // Contract: every recorded inverse succeeds. Currently the collapse's
-    // inverse (extrude_sub_face) is refused by the centroid-ray guard.
+    // Contract: every recorded inverse succeeds. Before rule 9 the collapse's
+    // inverse (extrude_sub_face) was refused by the centroid-ray guard.
     let mut n = 0;
     while history.can_undo() {
         history

@@ -233,6 +233,69 @@ impl From<DecodeError> for LoadError {
 // Geometry buffer codec (HEW_FILE_FORMAT.md)
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Total order on positions by coordinate bits (`total_cmp`), for the
+/// canonical geometry writer. Bit-exact comparison is deliberate: the kernel
+/// is bit-for-bit deterministic (DEVELOPMENT.md §7), so identical replayed
+/// geometry carries identical bits and canonical order must not quantize.
+fn pos_cmp(a: Point3, b: Point3) -> std::cmp::Ordering {
+    a.x.total_cmp(&b.x)
+        .then_with(|| a.y.total_cmp(&b.y))
+        .then_with(|| a.z.total_cmp(&b.z))
+}
+
+/// Lexicographic order on position sequences (element-wise, then by length).
+fn ring_cmp(a: &[Point3], b: &[Point3]) -> std::cmp::Ordering {
+    for (p, q) in a.iter().zip(b) {
+        let c = pos_cmp(*p, *q);
+        if c != std::cmp::Ordering::Equal {
+            return c;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Total order on optional UV frames for the canonical face sort: frameless
+/// faces first, then frames compared elementwise (`s`, `t`, `u0`, `v0`) by
+/// `total_cmp` — the same bit-exact order positions use, so `-0.0`/`0.0` and
+/// NaN payloads cannot make the sort non-total.
+fn uv_frame_cmp(a: &Option<UvFrame>, b: &Option<UvFrame>) -> std::cmp::Ordering {
+    fn key(f: &UvFrame) -> [f64; 8] {
+        [f.s.x, f.s.y, f.s.z, f.t.x, f.t.y, f.t.z, f.u0, f.v0]
+    }
+    match (a, b) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(fa), Some(fb)) => key(fa)
+            .iter()
+            .zip(key(fb))
+            .map(|(x, y)| x.total_cmp(&y))
+            .find(|o| *o != std::cmp::Ordering::Equal)
+            .unwrap_or(std::cmp::Ordering::Equal),
+    }
+}
+
+/// The rotation start that makes `ring` lexicographically smallest under
+/// [`ring_cmp`]. Winding is preserved — only the starting vertex of the
+/// (implicitly closed) loop is canonicalized.
+fn canonical_rotation(ring: &[Point3]) -> usize {
+    let n = ring.len();
+    let mut best = 0usize;
+    for cand in 1..n {
+        let mut ord = std::cmp::Ordering::Equal;
+        for k in 0..n {
+            ord = pos_cmp(ring[(cand + k) % n], ring[(best + k) % n]);
+            if ord != std::cmp::Ordering::Equal {
+                break;
+            }
+        }
+        if ord == std::cmp::Ordering::Less {
+            best = cand;
+        }
+    }
+    best
+}
+
 impl Object {
     /// Encodes this Object's geometry as a versioned, deterministic binary
     /// buffer (HEW_FILE_FORMAT.md; see module docs for the obligations).
@@ -267,36 +330,252 @@ impl Object {
         let imported: u8 = u8::from(self.planarity_tol > crate::tol::PLANE_DIST);
         buf.push(imported);
 
-        // --- vertices (in slot order) ---
+        // --- canonical emission order ---
+        // Slotmap iteration is deterministic for one live object, but slot
+        // ASSIGNMENT is a function of the object's mutation history, not its
+        // geometry: undo/redo cycles route reallocation through the slot
+        // free-list, so two semantically identical objects (the same ops
+        // replayed after a full unwind) can hold the same geometry in
+        // different slots — and a slot-ordered writer would emit different
+        // bytes for them (`tests/doc_replay_diverge_repro.rs`). Vertices and
+        // faces are therefore emitted in a topology-derived canonical order:
+        // every loop is rotated to start at its lexicographically smallest
+        // position, a face's hole loops are sorted among themselves, faces
+        // are sorted by their canonicalized rings, and vertices are indexed
+        // by first appearance in that face walk. Positions are compared by
+        // `total_cmp` (bit-exact), which is sound because the kernel itself
+        // is bit-for-bit deterministic (DEVELOPMENT.md §7).
+        let ring_positions = |hes: &[crate::ids::HalfEdgeId]| -> Vec<Point3> {
+            hes.iter()
+                .map(|&h| self.vertices[self.half_edges[h].origin].position)
+                .collect()
+        };
+        let canonical_loop =
+            |loop_id: crate::ids::LoopId| -> (Vec<crate::ids::VertexId>, Vec<Point3>) {
+                let hes: Vec<crate::ids::HalfEdgeId> = self.loop_half_edges(loop_id).collect();
+                let ring = ring_positions(&hes);
+                let start = canonical_rotation(&ring);
+                let n = hes.len();
+                let verts = (0..n)
+                    .map(|k| self.half_edges[hes[(start + k) % n]].origin)
+                    .collect();
+                let ring = (0..n).map(|k| ring[(start + k) % n]).collect();
+                (verts, ring)
+            };
+
+        struct CanonicalFace {
+            outer_verts: Vec<crate::ids::VertexId>,
+            outer_ring: Vec<Point3>,
+            holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)>,
+            mat_id: u32,
+            uv_frame: Option<UvFrame>,
+            /// Ordinal of the owning connected component (derived from twin
+            /// adjacency, NOT the stored shell list, which may lump
+            /// disconnected components together); replaced by the
+            /// component's canonical RANK before the face sort below.
+            shell: usize,
+        }
+
+        // The full per-face key: every payload the record emits participates
+        // (ring, holes, material, UV frame), so two faces compare Equal only
+        // when their emitted bytes would be identical.
+        fn face_key_cmp(a: &CanonicalFace, b: &CanonicalFace) -> std::cmp::Ordering {
+            ring_cmp(&a.outer_ring, &b.outer_ring)
+                .then_with(|| a.holes.len().cmp(&b.holes.len()))
+                .then_with(|| {
+                    for (ha, hb) in a.holes.iter().zip(&b.holes) {
+                        let c = ring_cmp(&ha.1, &hb.1);
+                        if c != std::cmp::Ordering::Equal {
+                            return c;
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                })
+                .then_with(|| a.mat_id.cmp(&b.mat_id))
+                // Coincident faces (disjoint shells sharing positions) can
+                // tie on geometry and material alone; the UV frame is the
+                // last distinguishing payload, and leaving it out of the key
+                // would let such faces fall back to slot order — the drift
+                // class this canonical order exists to remove.
+                .then_with(|| uv_frame_cmp(&a.uv_frame, &b.uv_frame))
+        }
+
+        // Connected components over faces, via twin adjacency (union-find).
+        // Content-derived on purpose: the stored shell list is bookkeeping
+        // that can hold several disconnected components in one shell (a
+        // freshly decoded object does), and the tie-break below needs the
+        // actual geometric grouping.
+        let component_ordinal: SecondaryMap<crate::ids::FaceId, usize> = {
+            let face_ids: Vec<crate::ids::FaceId> = self.faces.keys().collect();
+            let index_of: SecondaryMap<crate::ids::FaceId, usize> =
+                face_ids.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+            let mut parent: Vec<usize> = (0..face_ids.len()).collect();
+            fn find(parent: &mut [usize], x: usize) -> usize {
+                let mut root = x;
+                while parent[root] != root {
+                    root = parent[root];
+                }
+                let mut cur = x;
+                while parent[cur] != root {
+                    let next = parent[cur];
+                    parent[cur] = root;
+                    cur = next;
+                }
+                root
+            }
+            for he in self.half_edges.values() {
+                if let Some(t) = he.twin {
+                    let fa = index_of[self.loops[he.loop_id].face];
+                    let fb = index_of[self.loops[self.half_edges[t].loop_id].face];
+                    let (ra, rb) = (find(&mut parent, fa), find(&mut parent, fb));
+                    if ra != rb {
+                        parent[ra] = rb;
+                    }
+                }
+            }
+            // Compress roots to dense ordinals in face-iteration order.
+            let mut ordinal_of_root: std::collections::BTreeMap<usize, usize> =
+                std::collections::BTreeMap::new();
+            face_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| {
+                    let root = find(&mut parent, i);
+                    let next = ordinal_of_root.len();
+                    (f, *ordinal_of_root.entry(root).or_insert(next))
+                })
+                .collect()
+        };
+        let component_count = component_ordinal
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |m| m + 1);
+
+        let mut canonical_faces: Vec<CanonicalFace> = self
+            .faces
+            .iter()
+            .map(|(fid, face)| {
+                let (outer_verts, outer_ring) = canonical_loop(face.outer_loop);
+                let mut holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)> = face
+                    .inner_loops
+                    .iter()
+                    .map(|&il| canonical_loop(il))
+                    .collect();
+                holes.sort_by(|a, b| ring_cmp(&a.1, &b.1));
+                CanonicalFace {
+                    outer_verts,
+                    outer_ring,
+                    holes,
+                    mat_id: match face.material {
+                        Some(m) => material_dense(m),
+                        None => NO_MATERIAL,
+                    },
+                    uv_frame: face.uv_frame,
+                    shell: component_ordinal[fid],
+                }
+            })
+            .collect();
+
+        // Faces on DIFFERENT components can tie on the full face key
+        // (coincident components), and resolving such ties per-face would
+        // leak storage order through the shared-vertex index assignment of
+        // every OTHER face of the same components. Resolve them per-
+        // COMPONENT instead: rank components by their sorted lists of face
+        // keys and give a tied face its component's rank, so the whole
+        // component moves in one consistent direction. Components whose
+        // entire key lists tie are byte-for-byte interchangeable, so
+        // whichever relative order they keep yields identical output.
+        let component_rank: Vec<usize> = {
+            let mut per_component: Vec<Vec<&CanonicalFace>> = vec![Vec::new(); component_count];
+            for cf in &canonical_faces {
+                per_component[cf.shell].push(cf);
+            }
+            for faces in &mut per_component {
+                faces.sort_by(|a, b| face_key_cmp(a, b));
+            }
+            let mut order: Vec<usize> = (0..per_component.len()).collect();
+            order.sort_by(|&x, &y| {
+                let (sx, sy) = (&per_component[x], &per_component[y]);
+                for (fa, fb) in sx.iter().zip(sy.iter()) {
+                    let c = face_key_cmp(fa, fb);
+                    if c != std::cmp::Ordering::Equal {
+                        return c;
+                    }
+                }
+                sx.len().cmp(&sy.len())
+            });
+            let mut rank = vec![0usize; per_component.len()];
+            for (r, &ordinal) in order.iter().enumerate() {
+                rank[ordinal] = r;
+            }
+            rank
+        };
+        for cf in &mut canonical_faces {
+            cf.shell = component_rank[cf.shell];
+        }
+
+        canonical_faces.sort_by(|a, b| face_key_cmp(a, b).then_with(|| a.shell.cmp(&b.shell)));
+
+        // Vertex order: first appearance in the canonical face walk. Valid
+        // topology references every vertex from some loop; any vertex that
+        // is somehow unreferenced still gets a (position-sorted) slot at the
+        // end rather than being dropped (rule 4: never repair, and never
+        // lose data either).
+        let mut vertex_index: SecondaryMap<crate::ids::VertexId, u32> = SecondaryMap::new();
+        let mut ordered_vertices: Vec<crate::ids::VertexId> =
+            Vec::with_capacity(self.vertices.len());
+        {
+            let assign = |vid: crate::ids::VertexId,
+                          vertex_index: &mut SecondaryMap<crate::ids::VertexId, u32>,
+                          ordered: &mut Vec<crate::ids::VertexId>| {
+                if !vertex_index.contains_key(vid) {
+                    vertex_index.insert(vid, ordered.len() as u32);
+                    ordered.push(vid);
+                }
+            };
+            for cf in &canonical_faces {
+                for &vid in &cf.outer_verts {
+                    assign(vid, &mut vertex_index, &mut ordered_vertices);
+                }
+                for (hole_verts, _) in &cf.holes {
+                    for &vid in hole_verts {
+                        assign(vid, &mut vertex_index, &mut ordered_vertices);
+                    }
+                }
+            }
+            let mut leftovers: Vec<crate::ids::VertexId> = self
+                .vertices
+                .keys()
+                .filter(|&vid| !vertex_index.contains_key(vid))
+                .collect();
+            leftovers
+                .sort_by(|&a, &b| pos_cmp(self.vertices[a].position, self.vertices[b].position));
+            for vid in leftovers {
+                assign(vid, &mut vertex_index, &mut ordered_vertices);
+            }
+        }
+
+        // --- vertices (canonical order) ---
         let vertex_count = self.vertices.len() as u32;
         buf.extend_from_slice(&vertex_count.to_le_bytes());
-
-        // Build a stable vertex index map (slot order).
-        // We iterate self.vertices (SlotMap) — the iteration order is
-        // deterministic (ascending slot index).
-        let mut vertex_index: SecondaryMap<crate::ids::VertexId, u32> = SecondaryMap::new();
-        for (vid, v) in &self.vertices {
-            let idx = vertex_index.len() as u32;
-            vertex_index.insert(vid, idx);
+        for &vid in &ordered_vertices {
+            let v = &self.vertices[vid];
             buf.extend_from_slice(&v.position.x.to_le_bytes());
             buf.extend_from_slice(&v.position.y.to_le_bytes());
             buf.extend_from_slice(&v.position.z.to_le_bytes());
         }
 
-        // --- faces (in slot order) ---
+        // --- faces (canonical order) ---
         let face_count = self.faces.len() as u32;
         buf.extend_from_slice(&face_count.to_le_bytes());
 
-        for (_, face) in &self.faces {
+        for cf in &canonical_faces {
             // per-face material
-            let mat_id: u32 = match face.material {
-                Some(m) => material_dense(m),
-                None => NO_MATERIAL,
-            };
-            buf.extend_from_slice(&mat_id.to_le_bytes());
+            buf.extend_from_slice(&cf.mat_id.to_le_bytes());
 
             // per-face UV frame (v2): u8 flag (0=none, 1=present) + 8×f64 LE
-            match face.uv_frame {
+            match cf.uv_frame {
                 None => buf.push(0u8),
                 Some(f) => {
                     buf.push(1u8);
@@ -312,28 +591,20 @@ impl Object {
             }
 
             // outer loop
-            let outer_verts: Vec<u32> = self
-                .loop_half_edges(face.outer_loop)
-                .map(|h| vertex_index[self.half_edges[h].origin])
-                .collect();
-            let outer_count = outer_verts.len() as u32;
+            let outer_count = cf.outer_verts.len() as u32;
             buf.extend_from_slice(&outer_count.to_le_bytes());
-            for &vi in &outer_verts {
-                buf.extend_from_slice(&vi.to_le_bytes());
+            for &vid in &cf.outer_verts {
+                buf.extend_from_slice(&vertex_index[vid].to_le_bytes());
             }
 
             // hole loops
-            let hole_count = face.inner_loops.len() as u32;
+            let hole_count = cf.holes.len() as u32;
             buf.extend_from_slice(&hole_count.to_le_bytes());
-            for &inner_loop in &face.inner_loops {
-                let hole_verts: Vec<u32> = self
-                    .loop_half_edges(inner_loop)
-                    .map(|h| vertex_index[self.half_edges[h].origin])
-                    .collect();
+            for (hole_verts, _) in &cf.holes {
                 let hole_vertex_count = hole_verts.len() as u32;
                 buf.extend_from_slice(&hole_vertex_count.to_le_bytes());
-                for &vi in &hole_verts {
-                    buf.extend_from_slice(&vi.to_le_bytes());
+                for &vid in hole_verts {
+                    buf.extend_from_slice(&vertex_index[vid].to_le_bytes());
                 }
             }
         }

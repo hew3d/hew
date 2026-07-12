@@ -7,23 +7,19 @@
 //! Invariants:
 //! - after every op (applied or refused typed) every visible object validates
 //!   and stays watertight;
+//! - every undo/redo dispatch succeeds (DEVELOPMENT.md rule 9 — history
+//!   replay is guard-exempt with proof; no failure signature is tolerated);
 //! - `save()` is deterministic, `load(save())` reproduces the same
 //!   `state_hash`, at the post-sequence and maximal states;
 //! - fully unwinding the document log and replaying it twice reproduces the
-//!   same states SEMANTICALLY (the document-level re-anchoring analogue of
-//!   `op_fuzz.rs`). Byte-level `state_hash` stability across cycles is a
-//!   known gap — `save()` is slot-order-sensitive; see the ignored spec in
-//!   `doc_replay_diverge_repro.rs` — so cycles compare canonical
-//!   fingerprints, not bytes.
-//!
-//! The op-level known guard gaps (see `op_fuzz.rs`) surface here through
-//! `Document::undo`/`redo` as `DocumentError::InverseFailed(PushPull(
-//! NonManifoldResult))`; those abandon the case exactly as in `op_fuzz.rs`.
+//!   same states up to tolerance-aware equivalence (canonical fingerprints).
+//!   The canonical geometry writer makes save bytes independent of slot
+//!   allocation (see `doc_replay_diverge_repro.rs`), but cycles are compared
+//!   by fingerprint, not bytes, because baked translations round-trip with
+//!   ulp noise (`fl(fl(x + d) - d) != x` — the DEVELOPMENT.md fp trap), and
+//!   that noise is exactly what tolerance-aware equivalence exists for.
 
-use kernel::{
-    BooleanOp, Document, DocumentError, KernelOp, KernelOpError, NodeId, ObjectId, Plane, Point3,
-    PushPullError, Transform, Vec3,
-};
+use kernel::{BooleanOp, Document, KernelOp, NodeId, ObjectId, Plane, Point3, Transform, Vec3};
 use proptest::prelude::*;
 
 /// Abstract document op; selectors resolve against live ids at apply time.
@@ -44,11 +40,14 @@ enum DocOp {
         ta: f64,
         tb: f64,
     },
-    /// Imprint a shrunk boundary copy into a face of a visible object.
+    /// Imprint a loop into a face of a visible object: a shrunk boundary
+    /// copy, or (`staple: true`, quad faces) a concave U-shaped loop whose
+    /// vertex average lies outside it — the hole-reassignment trap shape.
     SplitFaceInner {
         obj_sel: usize,
         face_sel: usize,
         shrink: f64,
+        staple: bool,
     },
     /// Boolean between two distinct visible objects.
     Boolean {
@@ -109,9 +108,11 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
             .prop_map(|(obj_sel, face_sel, edge_a, edge_b, ta, tb)| DocOp::SplitFace {
                 obj_sel, face_sel, edge_a, edge_b, ta, tb,
             }),
-        2 => (any::<usize>(), any::<usize>(), 0.3..0.7f64).prop_map(|(obj_sel, face_sel, shrink)| {
-            DocOp::SplitFaceInner { obj_sel, face_sel, shrink }
-        }),
+        2 => (any::<usize>(), any::<usize>(), 0.3..0.7f64, proptest::bool::ANY).prop_map(
+            |(obj_sel, face_sel, shrink, staple)| {
+                DocOp::SplitFaceInner { obj_sel, face_sel, shrink, staple }
+            }
+        ),
         3 => (0u8..3, any::<usize>(), any::<usize>()).prop_map(|(kind, a_sel, b_sel)| {
             DocOp::Boolean { kind, a_sel, b_sel }
         }),
@@ -162,26 +163,6 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
         .expect("rectangle closes one region");
     let (oid, _) = doc.extrude_region(s, region, h).expect("box extrudes");
     oid
-}
-
-/// The op-level known guard gaps surfacing through the document layer (see
-/// `op_fuzz.rs::is_known_inverse_guard_gap` for the full rationale and the
-/// ignored acceptance specs).
-fn is_known_inverse_guard_gap(doc: &Document, e: &DocumentError, redo: bool) -> bool {
-    let signature = matches!(
-        e,
-        DocumentError::InverseFailed(KernelOpError::PushPull(PushPullError::NonManifoldResult))
-    );
-    let pending = if redo {
-        doc.peek_redo_object_op()
-    } else {
-        doc.peek_undo_object_op()
-    };
-    signature
-        && matches!(
-            pending,
-            Some(KernelOp::PushPull { .. }) | Some(KernelOp::ExtrudeSubFace { .. })
-        )
 }
 
 /// Every visible object validates and is watertight.
@@ -292,9 +273,8 @@ fn nth<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     }
 }
 
-/// Applies one abstract op. `Ok(true)` = continue; `Ok(false)` = abandon the
-/// case (known guard gap fired through undo/redo).
-fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, TestCaseError> {
+/// Applies one abstract op.
+fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestCaseError> {
     match op {
         DocOp::PushPull {
             obj_sel,
@@ -302,11 +282,11 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
             distance,
         } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let obj = doc.object(oid).expect("visible id resolves");
             let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(true);
+                return Ok(());
             };
             let _ = doc.apply_object_op(
                 oid,
@@ -325,20 +305,20 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
             tb,
         } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let obj = doc.object(oid).expect("visible id resolves");
             let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(true);
+                return Ok(());
             };
             let boundary: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
             let sides = boundary.len();
             if sides < 3 {
-                return Ok(true);
+                return Ok(());
             }
             let (a, b) = (edge_a % sides, edge_b % sides);
             if a == b {
-                return Ok(true);
+                return Ok(());
             }
             let point_on = |i: usize, t: f64| {
                 let p = boundary[i];
@@ -352,29 +332,50 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
             obj_sel,
             face_sel,
             shrink,
+            staple,
         } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let obj = doc.object(oid).expect("visible id resolves");
             let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(true);
+                return Ok(());
             };
             let boundary: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
             if boundary.len() < 3 {
-                return Ok(true);
+                return Ok(());
             }
-            let inv = 1.0 / boundary.len() as f64;
-            let c = boundary.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
-                Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
-            });
-            let loop_path: Vec<Point3> = boundary.iter().map(|&p| c + (p - c) * *shrink).collect();
+            let loop_path: Vec<Point3> = if *staple {
+                // Concave staple in the quad's bilinear frame (quad faces
+                // only; skewed quads may still reject typed — fine).
+                if boundary.len() != 4 {
+                    return Ok(());
+                }
+                let (o, ua, vb) = (boundary[0], boundary[1], boundary[3]);
+                let at = |a: f64, b: f64| o + (ua - o) * a + (vb - o) * b;
+                vec![
+                    at(0.2, 0.6),
+                    at(0.4, 0.6),
+                    at(0.4, 0.8),
+                    at(0.6, 0.8),
+                    at(0.6, 0.6),
+                    at(0.8, 0.6),
+                    at(0.8, 0.9),
+                    at(0.2, 0.9),
+                ]
+            } else {
+                let inv = 1.0 / boundary.len() as f64;
+                let c = boundary.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
+                    Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
+                });
+                boundary.iter().map(|&p| c + (p - c) * *shrink).collect()
+            };
             let _ = doc.apply_object_op(oid, KernelOp::SplitFaceInner { face, loop_path });
         }
         DocOp::Boolean { kind, a_sel, b_sel } => {
             let ids = doc.visible_object_ids();
             let (Some(a), Some(b)) = (nth(&ids, *a_sel), nth(&ids, *b_sel)) else {
-                return Ok(true);
+                return Ok(());
             };
             let op = match kind {
                 0 => BooleanOp::Union,
@@ -385,85 +386,77 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
         }
         DocOp::Translate { obj_sel, offset } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.transform_object(oid, &t);
         }
         DocOp::Duplicate { obj_sel, offset } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.duplicate_node(NodeId::Object(oid), &t);
         }
         DocOp::Delete { node_sel } => {
             let Some(node) = nth(&doc.top_level_nodes(), *node_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let _ = doc.delete_node(node);
         }
         DocOp::Group { count } => {
             let nodes = doc.top_level_nodes();
             if nodes.len() < 2 {
-                return Ok(true);
+                return Ok(());
             }
             let members: Vec<NodeId> = nodes.into_iter().take(*count).collect();
             let _ = doc.group_nodes(&members);
         }
         DocOp::Ungroup { group_sel } => {
             let Some(gid) = nth(&doc.group_ids(), *group_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let _ = doc.ungroup(gid);
         }
         DocOp::MakeComponent { node_sel } => {
             let Some(node) = nth(&doc.top_level_nodes(), *node_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let _ = doc.make_component(&[node]);
         }
         DocOp::PlaceInstance { comp_sel, offset } => {
             let Some(cid) = nth(&doc.component_ids(), *comp_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.place_instance(cid, t);
         }
         DocOp::ExplodeInstance { inst_sel } => {
             let Some(iid) = nth(&doc.instance_ids(), *inst_sel) else {
-                return Ok(true);
+                return Ok(());
             };
             let _ = doc.explode_instance(iid);
         }
         DocOp::Undo => {
-            if doc.can_undo() {
-                match doc.undo() {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(doc, &e, false) => return Ok(false),
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!(
-                            "step {step}: document undo failed: {e}"
-                        )));
-                    }
-                }
+            if doc.can_undo()
+                && let Err(e) = doc.undo()
+            {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: document undo failed: {e}"
+                )));
             }
         }
         DocOp::Redo => {
-            if doc.can_redo() {
-                match doc.redo() {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(doc, &e, true) => return Ok(false),
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!(
-                            "step {step}: document redo failed: {e}"
-                        )));
-                    }
-                }
+            if doc.can_redo()
+                && let Err(e) = doc.redo()
+            {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: document redo failed: {e}"
+                )));
             }
         }
     }
-    Ok(true)
+    Ok(())
 }
 
 proptest! {
@@ -489,70 +482,56 @@ proptest! {
         }
 
         for (step, op) in ops.iter().enumerate() {
-            if !apply_doc_op(&mut doc, step, op)? {
-                return Ok(()); // known guard gap: abandon this case
-            }
+            apply_doc_op(&mut doc, step, op)?;
             check_doc(&doc, step, "apply")?;
         }
 
         check_persistence(&doc, "post-sequence")?;
 
-        // Unwind the whole document log, replay it, and do both again; the
-        // state hash must reproduce at both ends.
-        let unwind = |doc: &mut Document, label: &str| -> Result<bool, TestCaseError> {
+        // Unwind the whole document log, replay it, and do both again; both
+        // ends must reproduce the same canonical fingerprint, and every
+        // undo/redo must succeed (rule 9 — no failure signature is
+        // tolerated). Fingerprints, not save bytes: baked-transform and
+        // sweep round-trips carry ulp noise, which the fingerprint's
+        // quantization absorbs and byte comparison would not.
+        let unwind = |doc: &mut Document, label: &str| -> Result<(), TestCaseError> {
             let mut n = 0usize;
             while doc.can_undo() {
-                match doc.undo() {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(doc, &e, false) => return Ok(false),
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!("{label}, undo #{n}: {e}")));
-                    }
+                if let Err(e) = doc.undo() {
+                    return Err(TestCaseError::fail(format!("{label}, undo #{n}: {e}")));
                 }
                 check_doc(doc, n, label)?;
                 n += 1;
             }
-            Ok(true)
+            Ok(())
         };
-        let replay = |doc: &mut Document, label: &str| -> Result<bool, TestCaseError> {
+        let replay = |doc: &mut Document, label: &str| -> Result<(), TestCaseError> {
             let mut n = 0usize;
             while doc.can_redo() {
-                match doc.redo() {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(doc, &e, true) => return Ok(false),
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!("{label}, redo #{n}: {e}")));
-                    }
+                if let Err(e) = doc.redo() {
+                    return Err(TestCaseError::fail(format!("{label}, redo #{n}: {e}")));
                 }
                 check_doc(doc, n, label)?;
                 n += 1;
             }
-            Ok(true)
+            Ok(())
         };
 
-        if !unwind(&mut doc, "first unwind")? {
-            return Ok(());
-        }
+        unwind(&mut doc, "first unwind")?;
         let empty_print = doc_fingerprint(&doc);
 
-        if !replay(&mut doc, "first replay")? {
-            return Ok(());
-        }
+        replay(&mut doc, "first replay")?;
         let maximal_print = doc_fingerprint(&doc);
         check_persistence(&doc, "maximal")?;
 
-        if !unwind(&mut doc, "second unwind")? {
-            return Ok(());
-        }
+        unwind(&mut doc, "second unwind")?;
         prop_assert_eq!(
             doc_fingerprint(&doc),
             empty_print,
             "second full undo did not reproduce the fully-unwound state"
         );
 
-        if !replay(&mut doc, "second replay")? {
-            return Ok(());
-        }
+        replay(&mut doc, "second replay")?;
         prop_assert_eq!(
             doc_fingerprint(&doc),
             maximal_print,

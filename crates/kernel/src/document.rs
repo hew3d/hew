@@ -656,6 +656,10 @@ pub enum DocumentError {
     NothingToRedo,
     /// Replaying a per-Object inverse failed — a kernel bug, surfaced loudly.
     InverseFailed(KernelOpError),
+    /// A replayed per-Object inverse/redo ran but did not reproduce the
+    /// recorded state (rule 9 proof failure) — a kernel bug, surfaced loudly;
+    /// the object is untouched.
+    InverseDiverged,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -720,6 +724,12 @@ impl std::fmt::Display for DocumentError {
             DocumentError::NothingToUndo => write!(f, "nothing to undo"),
             DocumentError::NothingToRedo => write!(f, "nothing to redo"),
             DocumentError::InverseFailed(e) => write!(f, "inverse op failed (kernel bug): {e}"),
+            DocumentError::InverseDiverged => {
+                write!(
+                    f,
+                    "replayed op diverged from the recorded state (kernel bug)"
+                )
+            }
         }
     }
 }
@@ -4391,8 +4401,6 @@ impl Document {
         !self.redo.is_empty()
     }
 
-    /// Reverses the most recent document action (LIFO across creations and
-    /// per-Object ops alike) and returns what it touched.
     /// The kernel op the next [`Document::undo`] would reverse, when the
     /// pending document action is a per-object op (`None` otherwise or when
     /// there is nothing to undo). Mirrors [`History::peek_undo`].
@@ -4413,6 +4421,8 @@ impl Document {
         }
     }
 
+    /// Reverses the most recent document action (LIFO across creations and
+    /// per-Object ops alike) and returns what it touched.
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.undo.pop().ok_or(DocumentError::NothingToUndo)?;
         let change = match &action {
@@ -5888,6 +5898,7 @@ fn made_component_change(
 fn map_history_err(e: HistoryError) -> DocumentError {
     match e {
         HistoryError::InverseFailed(op) => DocumentError::InverseFailed(op),
+        HistoryError::InverseDiverged => DocumentError::InverseDiverged,
         // The document log only records ObjectOp steps that were applied, so the
         // delegated History always has the matching entry to undo/redo. Reaching
         // these is a kernel bug; surface it loudly rather than swallow it.
