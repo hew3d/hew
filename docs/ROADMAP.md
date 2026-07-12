@@ -23,7 +23,11 @@ export a file a slicer accepts as watertight, with no repair step.
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent
   island — selected, deleted, and moved without touching anything else
-- Push/pull to extrude a closed profile into a solid, with a live preview
+- Push/pull to extrude a closed profile into a solid, with a live preview;
+  the outline becomes the solid's base face and leaves the sketch, and a
+  standing-solid gate (derived live from visible solids' coplanar faces)
+  refuses extruding a region a solid already occupies
+  (docs/design/sketch-solid-model.md)
 - Push/pull through-cuts that punch holes or remove material, including
   splitting a solid into two when a cut fully severs it
 - Explicit boolean union, subtract, and intersect, with coplanar seams

@@ -12,7 +12,16 @@
 //! faithful, permanent reproducer. Un-ignore when the merge fix lands
 //! (docs/ROADMAP.md, deferred list).
 
-use kernel::{BooleanOp, Document, KernelOp, ObjectId, Plane, Point3, Vec3};
+use kernel::{BooleanOp, Document, KernelOp, ObjectId, Plane, Point3, Transform, Vec3};
+
+// The boxes in this repro overlap by design (that is the union under test),
+// which the Model D standing-solid gate refuses to extrude one atop another.
+// Extrude each box far out along +Y — clear of every already-placed box,
+// which have all been moved back before the next extrusion — then translate
+// it (an exact baked translation) into its real, overlapping position.
+// Moving a solid to overlap another is allowed; the gate only refuses
+// extruding a fresh region over a standing solid's base.
+const GATE_CLEARANCE_Y: f64 = 1000.0;
 
 fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> ObjectId {
     let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
@@ -21,11 +30,12 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
     doc.begin_sketch_gesture(s).expect("gesture opens");
     {
         let sk = doc.sketch_mut(s).expect("sketch exists");
+        let yo = y + GATE_CLEARANCE_Y;
         let p = [
-            Point3::new(x, y, 0.0),
-            Point3::new(x + dx, y, 0.0),
-            Point3::new(x + dx, y + dy, 0.0),
-            Point3::new(x, y + dy, 0.0),
+            Point3::new(x, yo, 0.0),
+            Point3::new(x + dx, yo, 0.0),
+            Point3::new(x + dx, yo + dy, 0.0),
+            Point3::new(x, yo + dy, 0.0),
         ];
         for k in 0..4 {
             sk.add_segment(p[k], p[(k + 1) % 4]).expect("segment adds");
@@ -40,6 +50,8 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
         .next()
         .expect("rectangle closes one region");
     let (oid, _) = doc.extrude_region(s, region, h).expect("box extrudes");
+    doc.transform_object(oid, &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)))
+        .expect("translate box into its real overlapping position");
     oid
 }
 

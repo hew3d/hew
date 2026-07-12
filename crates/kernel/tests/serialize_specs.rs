@@ -8,7 +8,7 @@
 //!
 //! Cross-save/load identity is judged by *structure*, never by handle value:
 //! slotmap handles and dense ids are free to differ; geometry, tree shape,
-//! poses, materials, and the consumed set are not.
+//! poses, materials, and sketch contents are not.
 
 use kernel::{
     CurveGeom, DecodeError, Document, Guide, ImageFormat, Material, NodeId, Object, Plane, Point3,
@@ -585,8 +585,7 @@ fn curve_chains_round_trip_through_save_load() {
 // --------------------------------------------------------------- sketch round-trip
 
 #[test]
-//#[ignore = "spec for Document::save/load: sketches and the consumed-region set round-trip"]
-fn save_load_preserves_sketch_and_consumed_region() {
+fn save_load_preserves_sketch_after_partial_consumption() {
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     // Two disjoint rectangles -> two regions; extrude (consume) one.
@@ -608,7 +607,7 @@ fn save_load_preserves_sketch_and_consumed_region() {
     let regions = doc.extrudable_regions(s).expect("regions");
     assert_eq!(regions.len(), 2);
     doc.extrude_region(s, regions[0], 1.0).expect("extrude one");
-    // One region is now consumed; exactly one remains extrudable.
+    // The extruded region's scaffolding is deleted; the sibling remains.
     assert_eq!(doc.extrudable_regions(s).unwrap().len(), 1);
 
     let loaded = Document::load(&doc.save()).expect("load");
@@ -616,9 +615,14 @@ fn save_load_preserves_sketch_and_consumed_region() {
     let ls = loaded.sketch_ids();
     assert_eq!(ls.len(), 1, "the sketch round-trips");
     assert_eq!(
+        loaded.sketch(ls[0]).expect("live").edges().len(),
+        4,
+        "only the surviving rectangle's edges persist"
+    );
+    assert_eq!(
         loaded.extrudable_regions(ls[0]).unwrap().len(),
         1,
-        "the consumed region is still consumed after load"
+        "the surviving region is extrudable after load"
     );
 }
 
@@ -956,33 +960,19 @@ fn v2_manifest_loads_with_empty_tags() {
     }
 }
 
-/// A v8 file carries extrusion provenance as a dense `[sketch, region]`
-/// `source` pair instead of v9's `footprints` polygons. Loading one freezes
-/// the referenced region's loops as the footprint, so the v8 contract —
-/// deleting the solid frees its scaffolding — still holds.
-#[test]
-fn v8_source_pairs_load_as_footprints() {
+/// Rewrites a saved container's manifest through `patch` and returns the
+/// re-zipped bytes — the shared scaffolding for old-manifest-shape specs.
+fn patch_manifest(bytes: &[u8], patch: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
     use std::io::{Cursor, Read as _, Write as _};
 
-    let mut doc = Document::new();
-    extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 1.0);
-    let bytes = doc.save();
-
-    // Rewrite the manifest to v8 shape: drop `footprints`, write the dense
-    // `source` pair (one sketch, one region → [0, 0]).
-    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     let mut manifest_bytes = Vec::new();
     zip.by_name("manifest.json")
         .unwrap()
         .read_to_end(&mut manifest_bytes)
         .unwrap();
     let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    manifest["format_version"] = serde_json::json!(8);
-    let objs = manifest["objects"].as_array_mut().unwrap();
-    assert_eq!(objs.len(), 1);
-    let m = objs[0].as_object_mut().unwrap();
-    assert!(m.remove("footprints").is_some(), "v9 wrote footprints");
-    m.insert("source".to_string(), serde_json::json!([0, 0]));
+    patch(&mut manifest);
     let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
 
     let out_cursor = Cursor::new(Vec::<u8>::new());
@@ -992,8 +982,7 @@ fn v8_source_pairs_load_as_footprints() {
         .last_modified_time(zip::DateTime::default());
     new_zip.start_file("manifest.json", opts).unwrap();
     new_zip.write_all(&patched_manifest).unwrap();
-    let bytes2 = bytes.clone();
-    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
         if entry.name() == "manifest.json" {
@@ -1008,147 +997,215 @@ fn v8_source_pairs_load_as_footprints() {
         new_zip.start_file(&name, opts2).unwrap();
         new_zip.write_all(&buf).unwrap();
     }
-    let patched_bytes = new_zip.finish().unwrap().into_inner();
-
-    let mut loaded = Document::load(&patched_bytes).expect("v8 manifest loads");
-    assert!(
-        loaded.sketch_ids().is_empty(),
-        "the footprint region is consumed after a v8 load — the fully-consumed sketch is unlisted"
-    );
-    let obj = loaded.visible_object_ids()[0];
-    loaded.delete_node(NodeId::Object(obj)).expect("delete");
-    let s2 = loaded.sketch_ids()[0];
-    assert_eq!(
-        loaded.extrudable_regions(s2).unwrap().len(),
-        1,
-        "deleting the solid frees the v8-sourced footprint"
-    );
+    new_zip.finish().unwrap().into_inner()
 }
 
-/// A v8 boolean/slice/push-through RESULT carries no `source` pair at all
-/// (pre-v9 code never attributed those), so nothing derives its consumed
-/// regions from object footprints after load. The loader freezes such
-/// orphaned consumed claims as document-lifetime legacy footprints: the
-/// regions stay consumed through later edits — honoring the file verbatim,
-/// exactly as the version that wrote it behaved — instead of silently
-/// freeing on the first recompute and letting a new solid extrude through
-/// the standing one.
+/// Older manifests (≤ v10) stored sketch–solid claim data: a top-level
+/// `consumed` list, per-object `footprints` polygons (v9/v10), and a v8
+/// `source` pair — and they persisted consumed outlines as ordinary sketch
+/// edges (tombstoned at runtime, not deleted). A v11 loader honors the
+/// `consumed` index ONE final time by applying "becoming" retroactively:
+/// each consumed region's exclusive scaffolding is deleted on load (shared
+/// edges with surviving regions survive, exactly as at extrusion), an
+/// emptied sketch ceases to exist, and the index itself is then discarded
+/// — the gate stays derived from the standing solids. `footprints` and
+/// `source` are ignored outright. Without this, every previously extruded
+/// outline would resurrect as live, drawable geometry at load — the exact
+/// zombie the model exists to kill.
 #[test]
-fn v8_unattributed_consumed_regions_stay_consumed_after_edits() {
-    use std::io::{Cursor, Read as _, Write as _};
+fn older_files_consumed_claims_become_deletion_on_load() {
+    // Build the OLD file shape: sketches still carrying their consumed
+    // outlines. Sketch 0 (dense 0): two rects sharing the x=2 wall — the
+    // LEFT one will be marked consumed, so its 3 exclusive edges must go
+    // while the shared wall survives with the live right region. Sketch 1
+    // (dense 1): one lone rect, marked consumed — the emptied sketch must
+    // cease to exist. A standing box (from a consumed-at-runtime sketch)
+    // provides the solid the claims pointed at.
+    let mut doc = Document::new();
+    let s0 = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s0).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0)),
+            (Point3::new(2.0, 0.0, 0.0), Point3::new(2.0, 2.0, 0.0)),
+            (Point3::new(2.0, 2.0, 0.0), Point3::new(0.0, 2.0, 0.0)),
+            (Point3::new(0.0, 2.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+            (Point3::new(2.0, 0.0, 0.0), Point3::new(4.0, 0.0, 0.0)),
+            (Point3::new(4.0, 0.0, 0.0), Point3::new(4.0, 2.0, 0.0)),
+            (Point3::new(4.0, 2.0, 0.0), Point3::new(2.0, 2.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).expect("segment");
+        }
+    }
+    let s1 = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s1).unwrap();
+        for (a, b) in [
+            (Point3::new(6.0, 0.0, 0.0), Point3::new(7.0, 0.0, 0.0)),
+            (Point3::new(7.0, 0.0, 0.0), Point3::new(7.0, 1.0, 0.0)),
+            (Point3::new(7.0, 1.0, 0.0), Point3::new(6.0, 1.0, 0.0)),
+            (Point3::new(6.0, 1.0, 0.0), Point3::new(6.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).expect("segment");
+        }
+    }
+    extrude_box(&mut doc, 10.0, 10.0, 12.0, 12.0, 0.0, 1.0);
+    let bytes = doc.save();
 
-    // Two adjacent squares on ONE sketch, extruded and unioned, plus a
-    // third live square that keeps the sketch listed. The union result
-    // inherits both footprints in v9; a v8 file has no such attribution.
+    // The dense region index of s0's LEFT rect (outer vertices at x <= 2).
+    let left_dense = {
+        let sk = doc.sketch(s0).unwrap();
+        sk.regions()
+            .values()
+            .enumerate()
+            .find(|(_, r)| {
+                r.outer
+                    .iter()
+                    .all(|&v| sk.vertices()[v].position.x <= 2.0 + 1e-9)
+            })
+            .map(|(i, _)| i)
+            .expect("left region")
+    };
+
+    let patched_bytes = patch_manifest(&bytes, |manifest| {
+        manifest["format_version"] = serde_json::json!(10);
+        manifest["consumed"] = serde_json::json!([[0, left_dense], [1, 0]]);
+        // Retired per-object fields ride along and must be ignored.
+        let objs = manifest["objects"].as_array_mut().unwrap();
+        let m = objs[0].as_object_mut().unwrap();
+        m.insert("source".to_string(), serde_json::json!([0, 0]));
+        m.insert(
+            "footprints".to_string(),
+            serde_json::json!([{
+                "sketch": 0,
+                "outer": [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [0.0, 2.0, 0.0]],
+            }]),
+        );
+    });
+
+    let loaded = Document::load(&patched_bytes).expect("old manifest loads");
+    assert_eq!(loaded.visible_object_ids().len(), 1, "the solid loads");
+
+    // Becoming, retroactively: the left rect's exclusive scaffolding is
+    // gone, the shared wall survives with the live right region, and the
+    // fully consumed second sketch ceased to exist.
+    let sketches = loaded.sketch_ids();
+    assert_eq!(sketches.len(), 1, "the emptied sketch is gone");
+    let sk = loaded.sketch(sketches[0]).expect("live");
+    assert_eq!(
+        sk.edges().len(),
+        4,
+        "left rect deleted; shared wall + right rect's own edges survive"
+    );
+    assert_eq!(sk.regions().len(), 1, "the right region still closes");
+    assert_eq!(
+        loaded.extrudable_regions(sketches[0]).unwrap().len(),
+        1,
+        "the surviving region is extrudable (no frozen claim)"
+    );
+
+    // Nothing resurrected: no region overlapping the old consumed areas
+    // exists, and no stored claim survived — resaving emits clean v11.
+    let resaved = loaded.save();
+    let resaved_manifest = {
+        use std::io::Read as _;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&resaved[..])).unwrap();
+        let mut s = String::new();
+        zip.by_name("manifest.json")
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        s
+    };
+    assert!(resaved_manifest.contains("\"format_version\": 11"));
+    assert!(!resaved_manifest.contains("\"consumed\""));
+    assert!(!resaved_manifest.contains("\"footprints\""));
+    assert!(!resaved_manifest.contains("\"source\""));
+
+    // And the resave is byte-stable: load(save) reproduces the bytes.
+    let reloaded = Document::load(&resaved).expect("clean v11 reloads");
+    assert_eq!(reloaded.save(), resaved, "deterministic clean-v11 resave");
+}
+
+/// The one-time retroactive consumption is VERSION-gated, not
+/// presence-gated: `consumed` is meaningful only in files declaring a
+/// format older than 11. A file that declares v11+ AND carries a
+/// `consumed` field is malformed for its own version — hand-edited or
+/// produced by a broken writer — and is rejected typed, never silently
+/// "repaired" by deleting sketch geometry no standing solid claims.
+#[test]
+fn consumed_field_smuggled_into_a_v11_file_is_rejected() {
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     {
-        let sk = doc.sketch_mut(s).expect("live");
-        let mut rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
-            let pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
-            for i in 0..4 {
-                let (px, py) = pts[i];
-                let (qx, qy) = pts[(i + 1) % 4];
-                sk.add_segment(Point3::new(px, py, 0.0), Point3::new(qx, qy, 0.0))
-                    .expect("segment");
-            }
-        };
-        rect(0.0, 0.0, 2.0, 2.0);
-        rect(2.0, 0.0, 4.0, 2.0);
-        rect(10.0, 0.0, 12.0, 2.0); // stays live
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).expect("segment");
+        }
     }
-    let regions: Vec<_> = doc
-        .extrudable_regions(s)
-        .expect("live")
-        .into_iter()
-        .filter(|&r| {
-            // Extrude only the two adjacent squares (x <= 4).
-            doc.sketch(s)
-                .unwrap()
-                .region_contains_point(r, Point3::new(11.0, 1.0, 0.0))
-                != Ok(true)
-        })
-        .collect();
-    assert_eq!(regions.len(), 2);
-    let (a, _) = doc.extrude_region(s, regions[0], 1.0).expect("extrude a");
-    let (b, _) = doc.extrude_region(s, regions[1], 1.0).expect("extrude b");
-    doc.boolean(kernel::ops::BooleanOp::Union, a, b)
-        .expect("union");
     let bytes = doc.save();
 
-    // Rewrite the manifest to v8 shape: strip every `footprints` field and
-    // write no `source` (a v8 boolean result never had one).
-    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
-    let mut manifest_bytes = Vec::new();
-    zip.by_name("manifest.json")
-        .unwrap()
-        .read_to_end(&mut manifest_bytes)
-        .unwrap();
-    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
-    manifest["format_version"] = serde_json::json!(8);
-    for obj in manifest["objects"].as_array_mut().unwrap() {
-        obj.as_object_mut().unwrap().remove("footprints");
-    }
-    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
-
-    let out_cursor = Cursor::new(Vec::<u8>::new());
-    let mut new_zip = zip::ZipWriter::new(out_cursor);
-    let opts = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .last_modified_time(zip::DateTime::default());
-    new_zip.start_file("manifest.json", opts).unwrap();
-    new_zip.write_all(&patched_manifest).unwrap();
-    let bytes2 = bytes.clone();
-    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
-    for i in 0..zip2.len() {
-        let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
-            continue;
-        }
-        let name = entry.name().to_string();
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf).unwrap();
-        let opts2 = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored)
-            .last_modified_time(zip::DateTime::default());
-        new_zip.start_file(&name, opts2).unwrap();
-        new_zip.write_all(&buf).unwrap();
-    }
-    let patched_bytes = new_zip.finish().unwrap().into_inner();
-
-    let mut loaded = Document::load(&patched_bytes).expect("v8 manifest loads");
-
-    // The sketch is listed (the third square is live); draw an unrelated
-    // rectangle on it (any recompute-triggering edit) — the legacy-frozen
-    // regions must NOT free out from under the standing union solid.
-    let sketches = loaded.sketch_ids();
-    assert_eq!(sketches.len(), 1, "the footprint sketch is listed");
-    let s = sketches[0];
-    assert_eq!(
-        loaded.extrudable_regions(s).expect("live").len(),
-        1,
-        "right after load only the live third square is extrudable"
+    // Add a resolvable consumed pair but LEAVE format_version at 11.
+    let smuggled = patch_manifest(&bytes, |m| {
+        m["consumed"] = serde_json::json!([[0, 0]]);
+    });
+    assert!(
+        matches!(
+            Document::load(&smuggled),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a v11 file carrying consumed data is malformed, not repaired"
     );
-    loaded.begin_sketch_gesture(s).expect("gesture");
+}
+
+/// A pre-v11 `consumed` pair that does not resolve — a dense sketch or
+/// region index out of range — is a dangling reference and fails typed,
+/// exactly like every other dangling id (never silently repaired, never a
+/// partial load).
+#[test]
+fn older_files_dangling_consumed_pairs_are_rejected() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
     {
-        let sk = loaded.sketch_mut(s).expect("live");
-        for (p, q) in [
-            ((10.0, 10.0), (11.0, 10.0)),
-            ((11.0, 10.0), (11.0, 11.0)),
-            ((11.0, 11.0), (10.0, 11.0)),
-            ((10.0, 11.0), (10.0, 10.0)),
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
         ] {
-            sk.add_segment(Point3::new(p.0, p.1, 0.0), Point3::new(q.0, q.1, 0.0))
-                .expect("segment");
+            sk.add_segment(a, b).expect("segment");
         }
     }
-    loaded.end_sketch_gesture(s).expect("end");
+    let bytes = doc.save();
 
-    let extrudable = loaded.extrudable_regions(s).expect("live");
-    assert_eq!(
-        extrudable.len(),
-        2,
-        "the third square and the new rectangle — the legacy footprint regions stay consumed"
+    let bad_region = patch_manifest(&bytes, |m| {
+        m["format_version"] = serde_json::json!(10);
+        m["consumed"] = serde_json::json!([[0, 5]]);
+    });
+    assert!(
+        matches!(
+            Document::load(&bad_region),
+            Err(kernel::LoadError::DanglingReference { .. })
+        ),
+        "out-of-range region index fails typed"
+    );
+
+    let bad_sketch = patch_manifest(&bytes, |m| {
+        m["format_version"] = serde_json::json!(10);
+        m["consumed"] = serde_json::json!([[7, 0]]);
+    });
+    assert!(
+        matches!(
+            Document::load(&bad_sketch),
+            Err(kernel::LoadError::DanglingReference { .. })
+        ),
+        "out-of-range sketch index fails typed"
     );
 }
 

@@ -162,6 +162,11 @@ literal internal handles from the recording session.
 | `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket the segments of one drawn arc/circle as a curve chain |
 | `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
 | `sketch_add_segment` | `sketch`, `a[3]`, `b[3]` | add a segment to a sketch |
+| `sketch_remove_edge` | `sketch`, `edge` | remove one sketch edge (the eraser's commit) |
+| `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one drawing gesture (one undo step) |
+| `sketch_cancel_gesture` | — | drop the open gesture without recording |
+| `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket segments into one curve chain |
+| `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
 | `extrude_region` | `sketch`, `region`, `distance` | extrude a closed profile into an Object |
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
@@ -170,6 +175,7 @@ literal internal handles from the recording session.
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
+| `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 
 Coverage grows over time under a deliberately **additive posture**
 (ratified with the true-curves work): adding a new `method` variant is a

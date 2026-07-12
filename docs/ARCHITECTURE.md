@@ -81,8 +81,8 @@ further action required. This is the concrete expression of "solids by
 default": a user never has to remember to group their geometry to keep it
 from fusing with the rest of the scene, because the geometry that would fuse
 doesn't exist yet — only its 2D sketch outline does, and that outline is
-consumed once the extrusion happens (and released again if the solid is
-later deleted — see 2.6).
+consumed once the extrusion happens: it becomes the solid's base face and
+leaves the sketch (see 2.6).
 
 ### 2.3 Combination is always explicit
 
@@ -140,33 +140,33 @@ degenerate ("zero-thickness") solid Object, for two reasons:
   shapes as solids would force every operation to handle a face-versus-solid
   case in addition to solid-versus-solid, for no benefit.
 
-Extruding a region consumes the sketch geometry that bounded it: the outline
-that became a solid's base disappears from the sketch, since it was
-scaffolding, not a first-class 2D object once it has served its purpose.
-Consumption lasts exactly as long as a solid stands on the area — each
-extruded Object freezes its footprint (the profile's loops in world
-coordinates, persisted in the file format; boolean/slice/push-through
-results inherit their operands'), and the consumed region set is *derived*
-from those polygons: a region is consumed iff its material overlaps a live
-Object's footprint. Because the rule is geometric rather than
-handle-based, it survives any sketch re-topology — splitting a footprint
-region marks every fragment consumed, merging one into open area
-conservatively consumes the merged region (redrawing the boundary frees
-the open part again), and deleting an outline edge and redrawing it never
-launders the area into extrudability. Deleting the last Object over an
-area releases it: the outline returns to the sketch, fully editable
-again. Re-extruding a consumed region is refused.
+A Sketch is the larval form of a solid: extruding a region makes the
+drawn profile BECOME the solid's base face, so the geometry that bounded
+it leaves the sketch — really deleted, not hidden
+(docs/design/sketch-solid-model.md). Exactly the edges no surviving
+region needs go: an edge shared with a neighboring region stays so the
+neighbor remains closed, open chains stay, and an extrusion that empties
+a sketch removes the sketch entity itself. Nothing invisible persists, so
+nothing can resurrect by side effect — deleting a solid deletes a solid,
+and the one road back to an outline is undo, which restores the sketch
+and removes the solid in the same atomic step. "What you see is what you
+have" is the invariant this buys: every entity in the document is either
+visible geometry or nothing.
 
-Footprints are positional bookkeeping, deliberately not kinematic: moving
-a solid (or the instances of a component built from one) does not relocate
-its frozen footprint, and moving a sketch out from under a solid frees the
-carried-away regions while the solid keeps standing where it was. Boolean
-results inherit the footprints of the operands whose material they keep —
-both for union and intersect, only the kept operand's for subtract (the
-cutter's scaffolding frees the moment it is consumed into the result).
-Files older than manifest v9 attributed footprints partially or not at
-all; their consumed claims load verbatim and are frozen for the document's
-lifetime rather than silently freed (HEW_FILE_FORMAT.md).
+Re-extruding occupied ground is refused by a gate *derived live* from the
+scene, never stored: a region refuses to extrude iff its material
+overlaps a coplanar face of a visible solid on the sketch's plane (shared
+boundary alone is not overlap, so adjacent construction stays free).
+Because the claim is the solid's own face, it is kinematic and global by
+construction — it moves when the solid moves, dies when the solid dies or
+hides, applies to copies and component instances (through their poses)
+exactly as to originals, and holds across every sketch on the plane, so
+no fresh sketch, split, merge, or redraw can launder a standing solid's
+base into extrudability. Boolean, slice, and push-through results claim
+precisely the area their actual geometry stands on, because there is no
+inherited bookkeeping to diverge from reality. Files store none of this:
+the `.hew` format carries no claim data at v11, and the stored claims of
+older versions are ignored on load (HEW_FILE_FORMAT.md).
 
 Within a Sketch, the user-facing units are derived, identity-stable
 sub-entities, mirroring how regions already work: **islands** (connected

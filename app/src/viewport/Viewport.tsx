@@ -1176,10 +1176,6 @@ export default function Viewport({
       // sketch husk is removed afterward.
       const removeEdgeBatch = (sketch: bigint, edges: bigint[]): void => {
         if (edges.length === 0) return
-        // Edges bordering an extruded footprint are deletable — the kernel
-        // re-derives the consumed set from the solids' frozen footprint
-        // polygons at gesture close, so however the regions re-form,
-        // nothing under a standing solid becomes extrudable.
         wasmScene.sketch_begin_gesture(sketch)
         try {
           for (const e of edges) wasmScene.sketch_remove_edge(sketch, e)
@@ -1216,9 +1212,8 @@ export default function Viewport({
             }
             // Deleting the last line leaves an invisible, unusable empty
             // sketch — remove the husk too (its own undo step). Guarded on
-            // sketch_ids: a sketch with zero LIVE lines whose remaining
-            // edges are consumed backs an extruded solid and has already
-            // dropped out of the listing — it must not be tombstoned.
+            // sketch_ids: a sketch already removed (e.g. wholly consumed by
+            // an extrusion) must not be tombstoned twice.
             const stillListed = Array.from(wasmScene.sketch_ids()).includes(n.sketch)
             if (stillListed && wasmScene.sketch_lines(n.sketch).length === 0) {
               wasmScene.delete_sketch(n.sketch)

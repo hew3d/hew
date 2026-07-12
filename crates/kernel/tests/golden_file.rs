@@ -141,12 +141,14 @@ fn build_representative_doc() -> Document {
     let sd = doc.add_sketch(ground);
     {
         let sk = doc.sketch_mut(sd).unwrap();
-        // Rectangle 1: to be consumed by extrusion
+        // Rectangle 1: to be consumed by extrusion. Placed on free ground —
+        // (0,0)-(1,1) is obj_a's base, and the standing-solid gate
+        // (docs/design/sketch-solid-model.md §4D) refuses redrawing it.
         for (a, b) in [
-            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
-            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
-            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
-            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+            (Point3::new(-2.0, 0.0, 0.0), Point3::new(-1.0, 0.0, 0.0)),
+            (Point3::new(-1.0, 0.0, 0.0), Point3::new(-1.0, 1.0, 0.0)),
+            (Point3::new(-1.0, 1.0, 0.0), Point3::new(-2.0, 1.0, 0.0)),
+            (Point3::new(-2.0, 1.0, 0.0), Point3::new(-2.0, 0.0, 0.0)),
         ] {
             sk.add_segment(a, b).unwrap();
         }

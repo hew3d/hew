@@ -178,6 +178,11 @@ pub enum SketchError {
     /// A [`CurveGeom`] is degenerate: its radius is not finite or not larger
     /// than [`tol::POINT_MERGE`](crate::tol::POINT_MERGE).
     DegenerateCurve,
+    /// Undoing an extrusion could not re-insert the scaffolding it had
+    /// deleted: geometry drawn since then crosses or overlaps where the
+    /// outline was ([`Sketch::restore_edges`]). The sketch is untouched —
+    /// erase the conflicting geometry and undo again.
+    RestoreConflicts,
 }
 
 impl std::fmt::Display for SketchError {
@@ -201,6 +206,12 @@ impl std::fmt::Display for SketchError {
             }
             SketchError::DegenerateCurve => {
                 write!(f, "curve radius is degenerate")
+            }
+            SketchError::RestoreConflicts => {
+                write!(
+                    f,
+                    "the restored outline would cross geometry drawn since the extrusion"
+                )
             }
         }
     }
@@ -319,11 +330,7 @@ impl Sketch {
     /// from the piece that became the outline's rounded corner. For an
     /// untouched curve this is the whole curve; for a plain line it is just
     /// the edge itself. Ascending by id; empty for a stale handle.
-    pub fn curve_chain_at(
-        &self,
-        edge: SketchEdgeId,
-        hidden: &std::collections::BTreeSet<SketchEdgeId>,
-    ) -> Vec<SketchEdgeId> {
+    pub fn curve_chain_at(&self, edge: SketchEdgeId) -> Vec<SketchEdgeId> {
         let Some(e) = self.edges.get(edge) else {
             return Vec::new();
         };
@@ -331,17 +338,9 @@ impl Sketch {
             return vec![edge];
         };
 
-        // The walk sees only VISIBLE topology: `hidden` carries the caller's
-        // consumed (tombstoned) edges, so an extruded footprint that happens
-        // to share a vertex with a live curve neither fractures the run nor
-        // counts as a junction — invisible scaffolding must not shape what a
-        // click selects.
         let mut vertex_edges: std::collections::BTreeMap<SketchVertexId, Vec<SketchEdgeId>> =
             std::collections::BTreeMap::new();
         for (eid, ed) in &self.edges {
-            if hidden.contains(&eid) {
-                continue;
-            }
             vertex_edges.entry(ed.from).or_default().push(eid);
             vertex_edges.entry(ed.to).or_default().push(eid);
         }
@@ -834,78 +833,165 @@ impl Sketch {
         Ok(old_pos)
     }
 
-    /// The sketch edges and vertices to hide ("tombstone") given that every
-    /// region in `consumed` has been extruded into a solid: an edge is
-    /// tombstoned iff it lies on a consumed region's boundary and on NO live
-    /// region's boundary; a vertex is tombstoned iff it lies on a consumed
-    /// region's boundary and every edge incident to it is tombstoned.
+    /// The scaffolding edges only `region` needs: the edges on its boundary
+    /// (outer or hole loops) that lie on NO other region's boundary.
+    /// Extrusion deletes exactly these (Model D,
+    /// docs/design/sketch-solid-model.md §4D): the region became the
+    /// solid's base face, so its exclusive boundary leaves the sketch with
+    /// it — while an edge shared with a surviving region stays (the
+    /// neighbor must remain closed) and open chains are untouched. Pure
+    /// query — no mutation.
     ///
-    /// The rule is a pure function of the FULL consumed set — order-free —
-    /// so an edge shared by two regions dies exactly when the last region
-    /// needing it is consumed, never before. Callers diff successive results
-    /// to attribute an increment to one extrude (undo needs per-step deltas);
-    /// the load path evaluates it once with the file's whole consumed set and
-    /// lands on the same answer. Unknown/stale ids in `consumed` are skipped.
-    /// Pure query — no mutation.
-    pub fn consumed_tombstones(
+    /// # Errors
+    /// [`SketchError::UnknownRegion`] if the handle is stale.
+    pub fn region_scaffolding(
         &self,
-        consumed: &std::collections::BTreeSet<SketchRegionId>,
-    ) -> (
-        std::collections::BTreeSet<SketchEdgeId>,
-        std::collections::BTreeSet<SketchVertexId>,
-    ) {
-        let mut consumed_edges: std::collections::BTreeSet<SketchEdgeId> =
+        region: SketchRegionId,
+    ) -> Result<std::collections::BTreeSet<SketchEdgeId>, SketchError> {
+        if !self.regions.contains_key(region) {
+            return Err(SketchError::UnknownRegion);
+        }
+        let mut own_edges: std::collections::BTreeSet<SketchEdgeId> =
             std::collections::BTreeSet::new();
-        let mut consumed_verts: std::collections::BTreeSet<SketchVertexId> =
+        let mut other_edges: std::collections::BTreeSet<SketchEdgeId> =
             std::collections::BTreeSet::new();
-        let mut live_edges: std::collections::BTreeSet<SketchEdgeId> =
-            std::collections::BTreeSet::new();
-
         for (rid, r) in &self.regions {
-            let is_consumed = consumed.contains(&rid);
-            let loops: Vec<&Vec<SketchVertexId>> =
-                std::iter::once(&r.outer).chain(r.holes.iter()).collect();
-            for lp in &loops {
+            let loops = std::iter::once(&r.outer).chain(r.holes.iter());
+            for lp in loops {
                 for i in 0..lp.len() {
                     let a = lp[i];
                     let b = lp[(i + 1) % lp.len()];
                     if let Some(eid) = self.edge_between(a, b) {
-                        if is_consumed {
+                        if rid == region {
+                            own_edges.insert(eid);
+                        } else {
+                            other_edges.insert(eid);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(own_edges.difference(&other_edges).copied().collect())
+    }
+
+    /// The scaffolding edges only the `consumed` regions need — the set
+    /// variant of [`Sketch::region_scaffolding`]: an edge dies iff it lies
+    /// on a consumed region's boundary and on NO surviving region's
+    /// boundary, so an edge shared by two consumed regions goes while an
+    /// edge shared with a survivor stays. The load path uses this to honor
+    /// a pre-v11 file's stored consumed index one final time
+    /// (docs/design/sketch-solid-model.md §6); ids not in this sketch are
+    /// skipped. Pure query — no mutation.
+    pub(crate) fn regions_scaffolding(
+        &self,
+        consumed: &std::collections::BTreeSet<SketchRegionId>,
+    ) -> std::collections::BTreeSet<SketchEdgeId> {
+        let mut consumed_edges: std::collections::BTreeSet<SketchEdgeId> =
+            std::collections::BTreeSet::new();
+        let mut live_edges: std::collections::BTreeSet<SketchEdgeId> =
+            std::collections::BTreeSet::new();
+        for (rid, r) in &self.regions {
+            let loops = std::iter::once(&r.outer).chain(r.holes.iter());
+            for lp in loops {
+                for i in 0..lp.len() {
+                    let a = lp[i];
+                    let b = lp[(i + 1) % lp.len()];
+                    if let Some(eid) = self.edge_between(a, b) {
+                        if consumed.contains(&rid) {
                             consumed_edges.insert(eid);
                         } else {
                             live_edges.insert(eid);
                         }
                     }
-                    if is_consumed {
-                        consumed_verts.insert(a);
-                    }
                 }
             }
         }
+        consumed_edges.difference(&live_edges).copied().collect()
+    }
 
-        // Edges on a consumed boundary that no live region still needs.
-        let tomb_edges: std::collections::BTreeSet<SketchEdgeId> = consumed_edges
-            .into_iter()
-            .filter(|e| !live_edges.contains(e))
-            .collect();
+    /// Re-inserts scaffolding an extrusion deleted — the undo half of
+    /// [`Sketch::remove_edges`]. Each row is an edge as endpoint positions
+    /// plus its curve-chain id; endpoints weld to existing vertices within
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) (the shared-wall case)
+    /// and re-form regions/islands through the ordinary sticky machinery,
+    /// merging with whatever the sketch holds NOW — never a whole-sketch
+    /// snapshot, so edits made after the extrusion survive its undo.
+    ///
+    /// A row that cannot re-insert faithfully — it would split, cross, or
+    /// collinearly overlap geometry drawn since (any sticky event beyond a
+    /// clean single-edge insert with endpoint welds) — is
+    /// [`SketchError::RestoreConflicts`]: the whole restore is refused and
+    /// the sketch left untouched (strong guarantee). Curve-chain ids are
+    /// re-applied when the chain still exists (chain entries outlive their
+    /// edges), reconnecting the surviving analytic [`CurveGeom`].
+    ///
+    pub(crate) fn restore_edges(
+        &mut self,
+        rows: &[(Point3, Point3, Option<SketchCurveId>)],
+    ) -> Result<(), SketchError> {
+        let mut s = self.clone();
+        for &(a, b, curve) in rows {
+            let report = s
+                .add_segment_inner(a, b)
+                .map_err(|_| SketchError::RestoreConflicts)?;
+            if !report.split_edges.is_empty() || report.new_edges.len() != 1 {
+                return Err(SketchError::RestoreConflicts);
+            }
+            let eid = report.new_edges[0];
+            if let Some(cid) = curve
+                && s.curves.contains_key(cid)
+            {
+                s.edges[eid].curve = Some(cid);
+            }
+        }
+        *self = s;
+        Ok(())
+    }
 
-        // Vertices left with no visible incident edge once tomb_edges hide.
-        // Edges outside any region (open chains) count as visible, so their
-        // endpoints are never tombstoned out from under them.
-        let tomb_verts: std::collections::BTreeSet<SketchVertexId> = consumed_verts
-            .into_iter()
-            .filter(|&vid| {
-                self.edges.iter().all(|(eid, e)| {
-                    if e.from == vid || e.to == vid {
-                        tomb_edges.contains(&eid)
-                    } else {
-                        true // not incident — irrelevant
-                    }
-                })
+    /// The edge whose endpoints coincide with `a` and `b` (either
+    /// orientation, within [`tol::POINT_MERGE`](crate::tol::POINT_MERGE)),
+    /// or `None`. Sticky rules forbid coincident duplicate edges, so a
+    /// match is unique. The extrusion REDO path uses this to re-delete
+    /// scaffolding by geometry: an interleaved gesture undo/redo restores
+    /// snapshots carrying the outline's ORIGINAL edge ids, so a stored id
+    /// set can go stale while the geometry itself is exact.
+    pub(crate) fn edge_at_positions(&self, a: Point3, b: Point3) -> Option<SketchEdgeId> {
+        self.edges
+            .iter()
+            .find(|(_, e)| {
+                let f = self.vertices[e.from].position;
+                let t = self.vertices[e.to].position;
+                (f.approx_eq(a, tol::POINT_MERGE) && t.approx_eq(b, tol::POINT_MERGE))
+                    || (f.approx_eq(b, tol::POINT_MERGE) && t.approx_eq(a, tol::POINT_MERGE))
             })
-            .collect();
+            .map(|(id, _)| id)
+    }
 
-        (tomb_edges, tomb_verts)
+    /// Removes a set of edges in one pass — the extrusion-consumption path
+    /// (Model D): the batch analogue of [`Sketch::remove_edge`]. Vertices
+    /// left without any incident edge are deleted; regions and islands
+    /// recompute once at the end. Stale ids are skipped. Curve-chain
+    /// identity survives on any remaining member edges, and a chain's
+    /// analytic [`CurveGeom`] stays valid — deletion removes facets, it
+    /// never deforms the ones that remain.
+    pub(crate) fn remove_edges(&mut self, edges: &std::collections::BTreeSet<SketchEdgeId>) {
+        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
+            self.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        let mut touched: std::collections::BTreeSet<SketchVertexId> =
+            std::collections::BTreeSet::new();
+        for &eid in edges {
+            if let Some(e) = self.edges.remove(eid) {
+                touched.insert(e.from);
+                touched.insert(e.to);
+            }
+        }
+        for vid in touched {
+            if !self.vertex_has_edges(vid) {
+                self.vertices.remove(vid);
+            }
+        }
+        self.recompute_regions_with_diff(&old_regions);
+        self.recompute_islands();
     }
 
     /// Extracts a region as a validated [`Profile`] ready for extrusion.
@@ -2515,7 +2601,7 @@ mod tests {
         s.end_curve();
         let any_edge = s.curve_edges(c)[0];
         assert_eq!(
-            s.curve_chain_at(any_edge, &Default::default()).len(),
+            s.curve_chain_at(any_edge).len(),
             4,
             "untouched curve selects whole"
         );
@@ -2524,7 +2610,7 @@ mod tests {
         s.add_segment(pt(1.0, 0.0), pt(1.0, 2.0)).unwrap();
         for &e in &s.curve_edges(c) {
             assert_eq!(
-                s.curve_chain_at(e, &Default::default()).len(),
+                s.curve_chain_at(e).len(),
                 2,
                 "each side of the crossing selects separately"
             );
@@ -2537,23 +2623,7 @@ mod tests {
             .find(|(_, e)| e.curve.is_none())
             .map(|(id, _)| id)
             .unwrap();
-        assert_eq!(s.curve_chain_at(plain, &Default::default()), vec![plain]);
-
-        // Edges the caller marks HIDDEN (an extruded footprint's tombstones)
-        // neither fracture the run nor count as junctions: hiding the
-        // crossing line makes the diamond select whole again.
-        let hidden: std::collections::BTreeSet<SketchEdgeId> = s
-            .edges()
-            .iter()
-            .filter(|(_, e)| e.curve.is_none())
-            .map(|(id, _)| id)
-            .collect();
-        let any = s.curve_edges(c)[0];
-        assert_eq!(
-            s.curve_chain_at(any, &hidden).len(),
-            4,
-            "invisible geometry must not shape what a click selects"
-        );
+        assert_eq!(s.curve_chain_at(plain), vec![plain]);
     }
 
     // ── islands ───────────────────────────────────────────────────────────────
@@ -2768,43 +2838,47 @@ mod tests {
         assert!(s.profile(rid).is_ok());
     }
 
-    // ── consumed_tombstones ───────────────────────────────────────────────────
+    // ── region_scaffolding / remove_edges ────────────────────────────────────
 
-    /// Consuming a lone rectangle's region tombstones all 4 edges and verts.
+    /// A lone rectangle's scaffolding is all 4 edges; deleting them leaves
+    /// an empty sketch (vertices die with their last edge; regions and
+    /// islands recompute to nothing).
     #[test]
-    fn tombstones_single_rect_consumes_all_edges_and_verts() {
-        let s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+    fn scaffolding_of_a_lone_rect_is_all_its_edges() {
+        let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
         let region = s.regions().keys().next().expect("one region");
-        let consumed = std::collections::BTreeSet::from([region]);
-        let (edges, verts) = s.consumed_tombstones(&consumed);
-        assert_eq!(edges.len(), 4, "all 4 edges tombstoned");
-        assert_eq!(verts.len(), 4, "all 4 vertices tombstoned");
+        let edges = s.region_scaffolding(region).expect("live region");
+        assert_eq!(edges.len(), 4, "all 4 edges are exclusive scaffolding");
+
+        s.remove_edges(&edges);
+        assert!(s.edges().is_empty(), "edges deleted");
+        assert!(s.vertices().is_empty(), "orphaned vertices deleted");
+        assert!(s.regions().is_empty(), "no region survives");
+        assert!(s.islands().is_empty(), "no island survives");
     }
 
-    /// Two rectangles sharing the x=1 wall: the first region's exclusive
-    /// boundary has 3 edges (not the shared wall) and the 2 corners NOT on
-    /// the shared wall.
+    /// Two rectangles sharing the x=1 wall: the left region's scaffolding
+    /// has 3 edges — the shared wall still bounds the right region and must
+    /// survive, keeping the neighbor closed.
     #[test]
-    fn exclusive_boundary_shared_wall_excluded() {
+    fn scaffolding_excludes_an_edge_shared_with_a_surviving_region() {
         let mut s = Sketch::on_plane(xy_plane());
         // Left rect [0,0]-[1,1].
-        let segs_left = [
+        for (a, b) in &[
             (pt(0.0, 0.0), pt(1.0, 0.0)),
             (pt(1.0, 0.0), pt(1.0, 1.0)),
             (pt(1.0, 1.0), pt(0.0, 1.0)),
             (pt(0.0, 1.0), pt(0.0, 0.0)),
-        ];
-        for (a, b) in &segs_left {
+        ] {
             s.add_segment(*a, *b).unwrap();
         }
         // Right rect [1,0]-[2,1] — shares the x=1 wall.
-        let segs_right = [
+        for (a, b) in &[
             (pt(1.0, 0.0), pt(2.0, 0.0)),
             (pt(2.0, 0.0), pt(2.0, 1.0)),
             (pt(2.0, 1.0), pt(1.0, 1.0)),
             (pt(1.0, 1.0), pt(1.0, 0.0)),
-        ];
-        for (a, b) in &segs_right {
+        ] {
             s.add_segment(*a, *b).unwrap();
         }
         assert_eq!(s.regions().len(), 2);
@@ -2814,40 +2888,38 @@ mod tests {
             .regions()
             .iter()
             .find(|(_, r)| {
-                r.outer.iter().all(|&vid| {
-                    let x = s.vertices()[vid].position.x;
-                    x < 1.5 // all vertices at x=0 or x=1
-                })
+                r.outer
+                    .iter()
+                    .all(|&vid| s.vertices()[vid].position.x < 1.5)
             })
             .map(|(id, _)| id)
             .expect("left region");
+        let right_region = s
+            .regions()
+            .keys()
+            .find(|&id| id != left_region)
+            .expect("right region");
 
-        let consumed = std::collections::BTreeSet::from([left_region]);
-        let (edges, verts) = s.consumed_tombstones(&consumed);
-        // 3 tombstoned edges (bottom, top, left — the shared x=1 wall still
-        // bounds the live right region and must survive).
-        assert_eq!(edges.len(), 3, "3 tombstoned edges (not the shared wall)");
-        // 2 tombstoned vertices: (0,0) and (0,1) — not the shared x=1 corners.
-        assert_eq!(
-            verts.len(),
-            2,
-            "2 tombstoned vertices (not on the shared wall)"
+        let edges = s.region_scaffolding(left_region).expect("live region");
+        assert_eq!(edges.len(), 3, "3 exclusive edges (not the shared wall)");
+
+        s.remove_edges(&edges);
+        // The right region survives WITH ITS ID (its outer cycle is
+        // untouched), the shared wall still bounds it, and only the two
+        // x=0 corners died.
+        assert!(s.regions().contains_key(right_region), "neighbor stays");
+        assert_eq!(s.regions().len(), 1);
+        assert_eq!(s.edges().len(), 4, "the right rect keeps all 4 walls");
+        assert!(
+            s.vertices().values().all(|v| v.position.x > 0.5),
+            "only the x=0 corners died"
         );
-        // Verify the 2 tombstoned vertices are at x=0.
-        for vid in &verts {
-            let x = s.vertices()[*vid].position.x;
-            assert!(
-                (x - 0.0).abs() < crate::tol::POINT_MERGE,
-                "tombstoned vertex should be at x=0, got x={x}"
-            );
-        }
     }
 
-    /// Consuming BOTH regions of the shared-wall pair tombstones everything,
-    /// including the shared wall and its corners — the orphan-edge case: an
-    /// edge shared only with already-consumed regions must not survive.
+    /// Consuming the left region then the right deletes everything: the
+    /// shared wall dies exactly when the LAST region needing it goes.
     #[test]
-    fn tombstones_shared_wall_dies_when_both_regions_consumed() {
+    fn shared_wall_dies_with_the_last_region_needing_it() {
         let mut s = Sketch::on_plane(xy_plane());
         for (a, b) in &[
             (pt(0.0, 0.0), pt(1.0, 0.0)),
@@ -2862,53 +2934,96 @@ mod tests {
         }
         assert_eq!(s.regions().len(), 2);
 
-        let consumed: std::collections::BTreeSet<SketchRegionId> = s.regions().keys().collect();
-        let (edges, verts) = s.consumed_tombstones(&consumed);
-        assert_eq!(
-            edges.len(),
-            s.edges().len(),
-            "every edge tombstoned once no live region needs it"
-        );
-        assert_eq!(
-            verts.len(),
-            s.vertices().len(),
-            "every vertex tombstoned with its edges"
-        );
+        let first = s.regions().keys().next().expect("first region");
+        let edges = s.region_scaffolding(first).expect("live");
+        s.remove_edges(&edges);
+        assert_eq!(s.regions().len(), 1, "one region left");
+
+        let second = s.regions().keys().next().expect("second region");
+        let edges = s.region_scaffolding(second).expect("live");
+        assert_eq!(edges.len(), s.edges().len(), "now ALL edges are exclusive");
+        s.remove_edges(&edges);
+        assert!(s.edges().is_empty());
+        assert!(s.vertices().is_empty());
     }
 
-    /// A vertex shared between a consumed region and an edge OUTSIDE any
-    /// region (an open chain) survives: hiding it would strand the chain.
+    /// An open chain hanging off a consumed region's corner survives the
+    /// deletion, and so does the corner vertex it needs.
     #[test]
-    fn tombstones_keep_vertices_used_by_open_chains() {
+    fn open_chains_survive_region_scaffolding_deletion() {
         let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
         // Open whisker off the (1,1) corner — bounds no region.
         s.add_segment(pt(1.0, 1.0), pt(2.0, 2.0)).unwrap();
         assert_eq!(s.regions().len(), 1);
 
-        let consumed: std::collections::BTreeSet<SketchRegionId> = s.regions().keys().collect();
-        let (edges, verts) = s.consumed_tombstones(&consumed);
-        assert_eq!(edges.len(), 4, "the whisker edge is not tombstoned");
-        assert_eq!(
-            verts.len(),
-            3,
-            "the whisker's corner vertex survives with it"
-        );
+        let region = s.regions().keys().next().expect("one region");
+        let edges = s.region_scaffolding(region).expect("live");
+        assert_eq!(edges.len(), 4, "the whisker edge is not scaffolding");
+
+        s.remove_edges(&edges);
+        assert_eq!(s.edges().len(), 1, "the whisker survives");
+        assert_eq!(s.vertices().len(), 2, "the whisker keeps its corner vertex");
+        assert_eq!(s.islands().len(), 1, "the whisker is one island");
     }
 
-    /// Unknown region ids in the consumed set are skipped; an empty consumed
-    /// set tombstones nothing.
+    /// A stale region handle is a typed error, and removing an empty edge
+    /// set is a no-op.
     #[test]
-    fn tombstones_unknown_region_and_empty_set_return_empty() {
-        let s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
-        let empty = std::collections::BTreeSet::new();
-        let (edges, verts) = s.consumed_tombstones(&empty);
-        assert!(edges.is_empty());
-        assert!(verts.is_empty());
+    fn scaffolding_of_a_stale_region_errors() {
+        let mut s = make_rect_sketch(0.0, 0.0, 1.0, 1.0);
+        // The null key (default) is never inserted by slotmap.
+        assert_eq!(
+            s.region_scaffolding(SketchRegionId::default()),
+            Err(SketchError::UnknownRegion)
+        );
+        let before_edges = s.edges().len();
+        s.remove_edges(&std::collections::BTreeSet::new());
+        assert_eq!(s.edges().len(), before_edges, "empty removal is a no-op");
+    }
 
-        // The null key (default) is never inserted by slotmap and is always stale.
-        let bogus = std::collections::BTreeSet::from([SketchRegionId::default()]);
-        let (edges, verts) = s.consumed_tombstones(&bogus);
-        assert!(edges.is_empty());
-        assert!(verts.is_empty());
+    /// A curve chain partially deleted by consumption keeps its analytic
+    /// geometry on the surviving edges: deletion removes facets but never
+    /// deforms the remaining ones, so the circle stays a true description.
+    #[test]
+    fn partial_curve_chain_keeps_valid_geometry_after_removal() {
+        let mut s = Sketch::on_plane(xy_plane());
+        let geom = CurveGeom {
+            center: pt(0.0, 0.0),
+            radius: 1.0,
+        };
+        let curve = s.begin_curve_with(geom).expect("curve opens");
+        // Three facets of the unit circle.
+        let a = pt(1.0, 0.0);
+        let b = pt(0.0, 1.0);
+        let c = pt(-1.0, 0.0);
+        let d = pt(0.0, -1.0);
+        s.add_segment(a, b).unwrap();
+        s.add_segment(b, c).unwrap();
+        s.add_segment(c, d).unwrap();
+        s.end_curve();
+
+        // Delete the middle facet.
+        let middle = s
+            .edges()
+            .iter()
+            .find(|(_, e)| {
+                let f = s.vertices()[e.from].position;
+                let t = s.vertices()[e.to].position;
+                // The b→c facet: midpoint at (-0.5, 0.5).
+                (f.x + t.x) * 0.5 < -0.4 && (f.y + t.y) * 0.5 > 0.4
+            })
+            .map(|(id, _)| id)
+            .expect("middle facet");
+        s.remove_edges(&std::collections::BTreeSet::from([middle]));
+
+        assert_eq!(s.edges().len(), 2, "two facets survive");
+        assert_eq!(
+            s.curve_geom(curve),
+            Some(geom),
+            "the surviving facets still lie on the drawn circle"
+        );
+        for e in s.edges().values() {
+            assert_eq!(e.curve, Some(curve), "chain identity survives");
+        }
     }
 }

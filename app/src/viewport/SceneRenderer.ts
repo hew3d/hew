@@ -1330,10 +1330,10 @@ export class SceneRenderer {
   }
 
   /**
-   * Build translucent fill meshes for one sketch's still-extrudable regions.
-   * For M1 rectangles each boundary is a convex polygon, so a triangle fan from
-   * vertex 0 is correct. Consumed regions are absent from `sketch_regions`, so
-   * they leave no stray fill.
+   * Build translucent fill meshes for one sketch's closed regions. For M1
+   * rectangles each boundary is a convex polygon, so a triangle fan from
+   * vertex 0 is correct. Regions the standing-solid gate blocks still fill
+   * and pick — attempting to extrude one surfaces the refusal message.
    */
   private _buildRegionFills(sketchHandle: bigint): void {
     const regionHandles = this.wasmScene.sketch_regions(sketchHandle)

@@ -24,7 +24,7 @@ use crate::ids::{
 use crate::material::{ImageFormat, Material, Texture, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::{
-    Sketch, SketchCurveId, SketchEdge, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
+    Sketch, SketchCurveId, SketchEdge, SketchRegion, SketchVertex, SketchVertexId,
 };
 use crate::topo::Object;
 use crate::transform::Transform;
@@ -94,19 +94,18 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 5;
 /// geometry buffer is unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
 ///
 /// v8: added optional `source: [u32; 2]` to object entries — the dense
-/// (sketch, region) footprint the object was extruded from, resolved like
-/// `consumed` pairs; deleting the object frees the footprint. Absent for
+/// (sketch, region) footprint the object was extruded from. Absent for
 /// boolean results, slice pieces, imports, and all pre-v8 files —
-/// back-compatible (provenance degrades to `None`). Geometry buffer
-/// unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
+/// back-compatible (provenance degrades to `None`). Retired at v11
+/// (ignored on load). Geometry buffer unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 3).
 ///
 /// v9: replaced v8's `source` region handle with optional `footprints` on
 /// object entries — the sketch-plane loops (outer + holes, world
 /// coordinates) the solid stands on, frozen at extrusion; boolean/slice/
-/// push-through results inherit their operands' entries. The consumed set
-/// is DERIVED from these polygons (a region is consumed iff its material
-/// overlaps a live footprint), so it survives any sketch re-topology —
-/// region handles churn, area does not. v9 writers no longer emit
+/// push-through results inherited their operands' entries, and the
+/// then-current consumed set was derived from these polygons. Retired at
+/// v11 (ignored on load). v9 writers no longer emit
 /// `source`; v8 files still load (each `source` pair resolves to its
 /// region, whose loops at load time equal the loops at extrusion time).
 /// Both fields are `#[serde(default, skip_serializing_if = ...)]` —
@@ -121,7 +120,25 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 5;
 /// files still load (every chain identity-only) — back-compatible. Geometry
 /// buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 3). See
 /// docs/design/true-curves.md.
-pub const MANIFEST_FORMAT_VERSION: u32 = 10;
+///
+/// v11: removed the stored sketch–solid claim data — the top-level
+/// `consumed` pairs and the per-object `footprints` (v9/v10) and `source`
+/// (v8) fields. The re-extrusion refusal is derived live from visible
+/// solids' coplanar face contact (Model D,
+/// docs/design/sketch-solid-model.md), so nothing needs storing: v11
+/// writers emit none of these fields, and readers of any older version
+/// ignore them entirely. Geometry the older versions kept hidden under a
+/// standing solid loads visible. Geometry buffer unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 4).
+pub const MANIFEST_FORMAT_VERSION: u32 = 11;
+
+/// The manifest version at which the stored sketch–solid claim fields
+/// (`consumed`, `objects[].footprints`, `objects[].source`) were retired.
+/// Files declaring an OLDER version get their `consumed` index honored one
+/// final time on load (retroactive consumption); a file declaring this
+/// version or newer that still carries `consumed` is malformed for its own
+/// declared version and is rejected (reject-not-repair).
+pub(crate) const MANIFEST_CLAIMS_RETIRED_VERSION: u32 = 11;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -1189,7 +1206,11 @@ pub(crate) struct Manifest {
     pub instances: Vec<InstanceDto>,
     pub sketches: Vec<SketchDto>,
     pub roots: Vec<NodeRefDto>,
-    /// Sorted ascending for determinism.
+    /// Pre-v11 stored consumed `(sketch, region)` dense-id pairs. Read so
+    /// the loader can honor them one final time by deleting the consumed
+    /// scaffolding (docs/design/sketch-solid-model.md §6); NEVER written —
+    /// a v11 document has nothing consumed to list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed: Vec<[u32; 2]>,
     /// Construction guides (manifest v4+). Absent/empty in v1-v3 files →
     /// no guides.
@@ -1264,31 +1285,6 @@ pub(crate) struct ObjectDto {
     /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
-    /// Extrusion footprint provenance (manifest v8 only): the dense
-    /// `[sketch, region]` pair this object was extruded from, resolved like
-    /// `consumed` entries. v9+ writers emit `footprints` instead; kept for
-    /// decoding v8 files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<[u32; 2]>,
-    /// Extrusion footprints (manifest v9+): the sketch-plane loops this
-    /// solid stands on, frozen at extrusion (boolean/slice/push-through
-    /// results inherit their operands'). The consumed set derives from
-    /// these polygons. Absent for imports and all pre-v9 files.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub footprints: Vec<FootprintDto>,
-}
-
-/// One extrusion footprint (manifest v9+): the loops of the profile a solid
-/// was extruded from, in world coordinates on the sketch plane.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct FootprintDto {
-    /// Dense id of the sketch the footprint shadows.
-    pub sketch: u32,
-    /// Outer boundary loop.
-    pub outer: Vec<[f64; 3]>,
-    /// Hole loops.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub holes: Vec<Vec<[f64; 3]>>,
 }
 
 /// A merge group entry.
@@ -1484,14 +1480,10 @@ pub(crate) struct DocSaveData {
     pub guides: Vec<(GuideId, Guide)>,
     /// Per-object display name, keyed by id (covers world + def members).
     pub obj_names: std::collections::BTreeMap<ObjectId, Option<String>>,
-    /// Per-object extrusion footprints (manifest v9), keyed by id.
-    pub obj_footprints: std::collections::BTreeMap<ObjectId, Vec<crate::document::Footprint>>,
     /// Per-object tag list, keyed by id (covers world + def members).
     pub obj_tags: std::collections::BTreeMap<ObjectId, Vec<Vec<String>>>,
     /// All live world roots (objects/groups/instances with no parent).
     pub roots: Vec<crate::document::NodeId>,
-    /// (sketch_id, region_id) pairs that are consumed.
-    pub consumed: Vec<(SketchId, SketchRegionId)>,
     /// Tag metadata registry (path → hidden), sorted by path (manifest v5).
     pub tag_meta: Vec<(Vec<String>, bool)>,
     /// USER-hidden flags keyed by id (manifest v6), same key spaces as the
@@ -1622,31 +1614,6 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 name: data.obj_names.get(oid).cloned().flatten(),
                 tags: data.obj_tags.get(oid).cloned().unwrap_or_default(),
                 hidden: data.obj_hidden.contains(oid),
-                source: None, // v8 field; v9 writers emit `footprints`
-                footprints: data
-                    .obj_footprints
-                    .get(oid)
-                    .map(|fps| {
-                        fps.iter()
-                            .filter_map(|fp| {
-                                // A footprint on a hidden/gone sketch is
-                                // dropped, matching `consumed` filtering.
-                                let dense_sid = sketch_to_dense.get(&fp.sketch).copied()?;
-                                let coords =
-                                    |p: &crate::math::Point3| -> [f64; 3] { [p.x, p.y, p.z] };
-                                Some(FootprintDto {
-                                    sketch: dense_sid,
-                                    outer: fp.outer.iter().map(coords).collect(),
-                                    holes: fp
-                                        .holes
-                                        .iter()
-                                        .map(|h| h.iter().map(coords).collect())
-                                        .collect(),
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -1728,32 +1695,9 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
 
     let root_dtos: Vec<NodeRefDto> = data.roots.iter().map(&node_to_dto).collect();
 
-    // consumed: sort ascending (first by sketch dense id, then region dense id).
-    // The region dense ids are per-sketch; we embed them in the SketchDtos.
-    // But wait — we need to map (SketchId, SketchRegionId) → (dense_sketch_id,
-    // dense_region_id). The region dense ids are those assigned inside
-    // encode_sketch. We need to re-derive them here.
-    let mut consumed_pairs: Vec<[u32; 2]> = data
-        .consumed
-        .iter()
-        .filter_map(|(sid, rid)| {
-            let dense_sid = sketch_to_dense.get(sid).copied()?;
-            let sk_idx = data.sketches.iter().position(|(s, _)| s == sid)?;
-            let (_, sk) = &data.sketches[sk_idx];
-            let dense_rid = sk
-                .regions()
-                .keys()
-                .enumerate()
-                .find(|(_, r)| r == rid)
-                .map(|(i, _)| i as u32)?;
-            Some([dense_sid, dense_rid])
-        })
-        .collect();
-    // Sort for determinism (encode in dense-id order, not raw set order).
-    consumed_pairs.sort_unstable();
-
     let manifest = Manifest {
         format_version: MANIFEST_FORMAT_VERSION,
+        consumed: Vec::new(),
         geometry_version: GEOMETRY_FORMAT_VERSION,
         app: "hew".to_string(),
         app_version: "0.1.0".to_string(),
@@ -1764,7 +1708,6 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         instances: instance_dtos,
         sketches: sketch_dtos,
         roots: root_dtos,
-        consumed: consumed_pairs,
         guides: guide_dtos,
         tags: data
             .tag_meta
@@ -1888,6 +1831,9 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
 /// materials first (to get live MaterialIds), then calls `Object::decode` for
 /// each geometry buffer with the reverse dense→MaterialId closure.
 pub(crate) struct DocLoadRaw {
+    /// The manifest's declared `format_version` — gates version-specific
+    /// load behavior (the pre-v11 retroactive consumption).
+    pub format_version: u32,
     pub materials: Vec<Material>,
     pub geom_buffers: Vec<Vec<u8>>,
     /// base_material dense id for each object (None = no base material).
@@ -1898,16 +1844,14 @@ pub(crate) struct DocLoadRaw {
     pub sketches: Vec<Sketch>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
+    /// Pre-v11 stored consumed pairs (dense sketch id, dense region id),
+    /// for the loader's one-time retroactive consumption. Empty for v11+.
     pub consumed: Vec<[u32; 2]>,
     /// For each object dense id: is it a definition member? (and which component dense id)
     pub def_membership: Vec<Option<u32>>,
     /// Optional display name per object/group/component/instance, in dense order
     /// (manifest v2+; all `None` for v1 files).
     pub obj_names: Vec<Option<String>>,
-    /// Extrusion provenance per object, in dense order (manifest v8 files).
-    pub obj_sources: Vec<Option<[u32; 2]>>,
-    /// Extrusion footprints per object, in dense order (manifest v9+).
-    pub obj_footprints: Vec<Vec<FootprintDto>>,
     pub group_names: Vec<Option<String>>,
     pub component_names: Vec<Option<String>>,
     pub instance_names: Vec<Option<String>>,
@@ -1981,15 +1925,11 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let mut geom_buffers: Vec<Vec<u8>> = Vec::with_capacity(obj_count);
     let mut obj_base_materials: Vec<Option<u32>> = Vec::with_capacity(obj_count);
     let mut obj_names: Vec<Option<String>> = Vec::with_capacity(obj_count);
-    let mut obj_sources: Vec<Option<[u32; 2]>> = Vec::with_capacity(obj_count);
-    let mut obj_footprints: Vec<Vec<FootprintDto>> = Vec::with_capacity(obj_count);
     for obj_dto in &manifest.objects {
         let buf = zip_read_entry(&mut zip, &obj_dto.geometry)?;
         geom_buffers.push(buf);
         obj_base_materials.push(obj_dto.base_material);
         obj_names.push(obj_dto.name.clone());
-        obj_sources.push(obj_dto.source);
-        obj_footprints.push(obj_dto.footprints.clone());
     }
 
     // Decode sketches.
@@ -2028,6 +1968,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         manifest.instances.iter().map(|i| i.tags.clone()).collect();
 
     Ok(DocLoadRaw {
+        format_version: manifest.format_version,
         materials,
         geom_buffers,
         obj_base_materials,
@@ -2047,8 +1988,6 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         consumed: manifest.consumed.clone(),
         def_membership,
         obj_names,
-        obj_sources,
-        obj_footprints,
         group_names,
         component_names,
         instance_names,
@@ -2170,6 +2109,23 @@ fn validate_manifest_references(
         }
     }
 
+    // The stored claim index is a pre-v11 concept: a file declaring the
+    // retired version or newer that still carries `consumed` is malformed
+    // for its own declared version (hand-edited or a broken writer) and is
+    // rejected — never silently "repaired" by deleting sketch geometry no
+    // standing solid claims.
+    if manifest.format_version >= MANIFEST_CLAIMS_RETIRED_VERSION && !manifest.consumed.is_empty() {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry a consumed list (retired at v{})",
+                manifest.format_version, MANIFEST_CLAIMS_RETIRED_VERSION
+            ),
+        });
+    }
+
+    // Pre-v11 stored consumed pairs must resolve like any other dense
+    // reference — the loader is about to act on them (one-time retroactive
+    // consumption), and acting on a dangling pair would be a guess.
     for [sid, rid] in &manifest.consumed {
         if *sid as usize >= manifest.sketches.len() {
             return Err(LoadError::DanglingReference {

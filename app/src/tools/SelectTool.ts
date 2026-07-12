@@ -10,9 +10,10 @@
  *   1. pick_sketch_edge() — nearest live sketch edge within the pick
  *      aperture. Selects THAT edge (SketchUp-style): Delete then removes
  *      just the line, merging the regions it separated.
- *   2. pick_sketch_region() — the extrudable region under the ray (across ALL
- *      live sketches); clicking INSIDE a drawn rectangle/circle selects its
- *      owning sketch as a whole.
+ *   2. pick_sketch_region() — the closed region under the ray (across ALL
+ *      live sketches, including regions the standing-solid gate would
+ *      refuse to extrude); clicking INSIDE a drawn rectangle/circle selects
+ *      its owning sketch as a whole.
  * Fires onSelect(objectId) on a face hit; onSelect(null, undefined, sketchId,
  * edgeId) on an edge hit; onSelect(null, undefined, sketchId) on an interior
  * hit; onSelect(null) on a total miss.

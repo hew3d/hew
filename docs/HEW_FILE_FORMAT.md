@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `10`**, and **geometry buffer format version `5`**. Both are covered
+version `11`**, and **geometry buffer format version `5`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 10,
+  "format_version": 11,
   "geometry_version": 5,
   "app": "hew",
   "app_version": "0.1.0",
@@ -75,11 +75,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   "objects": [
     { "id": 0, "geometry": "geometry/obj_0.bin", "base_material": 0,
       "name": "Counter_Base",
-      "tags": [["Architecture", "Walls"], ["Level", "L1"]],
-      "footprints": [               // v9+; omitted when the object has none
-        { "sketch": 0,              // dense sketch id the footprint shadows
-          "outer": [[0,0,0], [4,0,0], [4,4,0], [0,4,0]],
-          "holes": [ [[1,1,0], [1,2,0], [2,2,0], [2,1,0]] ] } ] }
+      "tags": [["Architecture", "Walls"], ["Level", "L1"]] }
   ],
   "groups": [
     { "id": 0, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
@@ -109,7 +105,6 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     { "id": 1, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
   "roots": [ {"kind":"object","id":0}, {"kind":"instance","id":0} ],
-  "consumed": [ [0, 0] ],
   "tags": [ {"path": ["Architecture", "Walls"]},
             {"path": ["Mock Walls"], "hidden": true} ]
 }
@@ -117,7 +112,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `10`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `11`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `4`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -133,7 +128,6 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 - **`sketches`** — first-class 2D sketches ().
 - **`guides`** — construction lines and points ().
 - **`roots`** — the document's top-level nodes, in display order ().
-- **`consumed`** — `(sketch, region)` id pairs already extruded ().
 - **`tags`** — the tag metadata registry: known tag paths with their
   hidden-by-default flags.
 
@@ -181,9 +175,39 @@ of the manifest:
 | `tags` (top-level array) | 5 | empty registry (all node-carried tags visible) |
 | `objects[].hidden`, `groups[].hidden`, `instances[].hidden` | 6 | `false` (visible) |
 | `sketches[].edges[].curve` | 7 | absent (a plain line, not part of a curve chain) |
-| `objects[].source` | 8 (v8 only — v9+ writers emit `footprints` instead) | absent (no extrusion provenance) |
-| `objects[].footprints` | 9 | empty list (the object shadows no sketch area; nothing derives as consumed for it) |
 | `sketches[].curves` | 10 | empty list (every curve chain is identity-only, no analytic definition) |
+
+Three fields existed only in older versions and are **retired at v11**: the
+top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
+`objects[].footprints` (v9/v10). They stored the sketch–solid claim data of
+the footprint consumption model; the current model derives the re-extrusion
+refusal live from the visible solids' own coplanar faces
+(docs/design/sketch-solid-model.md), so there is nothing to store, and a
+v11 writer emits none of them.
+
+A v11 reader treats them differently on an older file:
+
+- **`consumed`** is honored ONE final time, then discarded — and only in
+  files whose declared `format_version` is **older than 11** (the gating
+  is on the declared version, not on the field's presence). Older files
+  persisted extruded outlines as ordinary sketch edges (hidden at runtime,
+  not deleted); the reader applies the current consumption model to the
+  stored index retroactively — each consumed region's exclusive
+  scaffolding is deleted on load (an edge shared with a surviving region
+  survives, exactly as at extrusion time), and a sketch the deletion
+  empties is removed with it. Each pair must resolve to a real sketch and
+  region; a dangling pair is a fatal, typed dangling-reference error like
+  any other. The loaded document therefore looks exactly as it did in the
+  old build — nothing previously consumed resurrects — and a resave emits
+  clean v11 with no claim fields. A file that declares `format_version`
+  **11 or newer** and still carries a `consumed` field is malformed for
+  its own version and MUST be rejected with a typed error — never acted
+  on and never ignored (reject-not-repair; deleting sketch geometry on
+  the say-so of a retired field would be silent repair).
+- **`objects[].footprints`** and **`objects[].source`** are ignored
+  entirely: they carried the stored claims the derived gate replaces. They
+  are not validated, not resolved, and change nothing about the loaded
+  document.
 
 Note `components[]` entries never carry a `tags` field at any version —
 tags are attached to *placements* (objects, groups, instances), not to
@@ -399,32 +423,15 @@ watertight-tracked mesh described by exactly one `geometry/obj_<id>.bin`
 buffer. Its manifest entry (`objects[]`) carries `geometry` (the buffer's
 zip path), an optional `base_material` (used by any face whose own per-face
 material is absent — an object-level default paint, not an override), an
-optional `name`, optional `tags` (), and optional `footprints` (v9+): the
-sketch-plane areas the solid stands on, each a dense `sketch` id plus the
-extruded profile's loops in world coordinates (`outer` counter-clockwise,
-`holes` clockwise, matching sketch-region winding). Footprints are frozen
-at extrusion time; boolean/slice/push-through results inherit their
-operands' entries. Editors DERIVE the `consumed` region set from these
-polygons — a region is consumed iff its material overlaps a live object's
-footprint — so consumption survives any sketch re-topology (splits,
-merges, delete-and-redraw) and lifts by itself when the last solid over
-an area is deleted. A reader that ignores `footprints` loses only that
-bookkeeping, never geometry; a footprint whose `sketch` is out of range
-degrades to absent — never load-fatal.
+optional `name`, and optional `tags` ().
 
-v8 files carry an optional `source` instead: the dense `[sketch, region]`
-pair the object was extruded from, resolved like `consumed` entries. A v9
-reader converts it by freezing that region's loops as the footprint (the
-file was saved with region and solid consistent). v9+ writers do not emit
-`source`.
-
-A `consumed` pair that no loaded footprint covers (pre-v9 boolean/slice/
-push-through results carried no `source`; pre-v8 files attributed nothing)
-is honored verbatim, never silently freed: the reader freezes that
-region's loops as a document-lifetime footprint, so the area stays
-consumed through later edits exactly as it did in the version that wrote
-the file. Such regions remain in `consumed` on save, so the freeze
-survives round trips.
+An object needs no stored relationship to the sketch it was extruded from:
+extrusion deletes the profile's scaffolding from the sketch (the outline
+became the solid's base face), and the refusal to extrude a region that
+overlaps a standing solid is derived live from the solids' own coplanar
+faces, never from file data (docs/design/sketch-solid-model.md). Older
+files' `footprints` (v9/v10) and `source` (v8) fields are ignored on load
+(see the retired-fields note in the compatibility section).
 
 Every object id appears in **exactly one** structural position: either a
 member of exactly one component definition (`components[].members`), or
@@ -507,15 +514,6 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   to lie on `plane` (like vertex positions, not re-validated on load). A
   reader that ignores `curves` loses only the analytic metadata (exact
   center/radius), never shape.
-
-`consumed` (top-level) is `[sketch_id, region_id]` dense-id pairs — regions
-already extruded into an Object, not to be offered again — sorted ascending.
-Every pair must resolve to a real sketch and region; dangling ones are
-rejected like any other dangling reference. From v9 the set is derivable
-from `objects[].footprints` (it is written redundantly so a reader need
-not implement polygon-overlap tests to know what is consumed); a writer
-must keep the two consistent — at save time the stored set equals the
-derived one.
 
 ### 4.7 Guides
 

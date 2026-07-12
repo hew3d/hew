@@ -44,6 +44,11 @@ pub enum RecordedCall {
         a: [f64; 3],
         b: [f64; 3],
     },
+    /// `sketch_remove_edge(sketch, edge)` — the eraser tool's commit.
+    /// Additive variant (like [`RecordedCall::SketchBeginCurveWith`]): a
+    /// recording that never erases replays on older builds unchanged; one
+    /// that does fails to parse there — loudly, never silently divergent.
+    SketchRemoveEdge { sketch: u64, edge: u64 },
     /// `sketch_begin_gesture(sketch)`.
     SketchBeginGesture { sketch: u64 },
     /// `sketch_begin_curve(sketch)`.
@@ -110,6 +115,17 @@ pub enum RecordedCall {
         face: u64,
         distance: f64,
     },
+    /// `scene_undo()` — recorded only when it succeeded (a refused undo
+    /// commits nothing). Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
+    /// replay unchanged; a recording that uses it fails to parse on older
+    /// builds — loudly, never silently divergent. Undo/redo are where
+    /// Model D's subtle behavior lives (extrusion undo re-inserts
+    /// scaffolding, merging with later edits), so a bug reproducer must
+    /// carry them.
+    SceneUndo,
+    /// `scene_redo()` — recorded only when it succeeded.
+    SceneRedo,
 }
 
 /// A complete recorded session: the committed call stream plus the canonical

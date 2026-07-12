@@ -13,7 +13,13 @@
 //! pre-mutation coverage check and a checked boundary re-walk for the
 //! rest — so the boolean simply leaves those seams undissolved and returns
 //! a valid solid.
-use kernel::{BooleanOp, Document, KernelOp, ObjectId, Plane, Point3, Vec3};
+use kernel::{BooleanOp, Document, KernelOp, ObjectId, Plane, Point3, Transform, Vec3};
+
+// The seed boxes overlap (that is the union under test), which the Model D
+// standing-solid gate refuses to extrude one atop another. Extrude each box
+// clear along +Y (past the already-placed, already-moved-back boxes) then
+// translate it back into its real overlapping position.
+const GATE_CLEARANCE_Y: f64 = 1000.0;
 
 fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> ObjectId {
     let plane =
@@ -22,11 +28,12 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
     doc.begin_sketch_gesture(s).unwrap();
     {
         let sk = doc.sketch_mut(s).unwrap();
+        let yo = y + GATE_CLEARANCE_Y;
         let p = [
-            Point3::new(x, y, 0.0),
-            Point3::new(x + dx, y, 0.0),
-            Point3::new(x + dx, y + dy, 0.0),
-            Point3::new(x, y + dy, 0.0),
+            Point3::new(x, yo, 0.0),
+            Point3::new(x + dx, yo, 0.0),
+            Point3::new(x + dx, yo + dy, 0.0),
+            Point3::new(x, yo + dy, 0.0),
         ];
         for k in 0..4 {
             sk.add_segment(p[k], p[(k + 1) % 4]).unwrap();
@@ -35,6 +42,8 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
     doc.end_sketch_gesture(s).unwrap();
     let region = doc.sketch(s).unwrap().regions().keys().next().unwrap();
     let (oid, _) = doc.extrude_region(s, region, h).unwrap();
+    doc.transform_object(oid, &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)))
+        .unwrap();
     oid
 }
 

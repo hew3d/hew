@@ -995,7 +995,7 @@ impl Scene {
         }
     }
 
-    /// Re-registers sketch `id`'s current live (non-consumed) segments with
+    /// Re-registers sketch `id`'s current segments with
     /// inference (replace semantics — see [`inference::InferenceScene::add_sketch`]),
     /// or unregisters it if the sketch is unknown/gone. Shared by `reconcile`
     /// (each `sketches_touched` id) and the wasm-level call sites that mutate
@@ -1014,11 +1014,9 @@ impl Scene {
     }
 
     /// Enumerates sketch `id`'s vertices as `(SketchVertexId, world position)`
-    /// pairs for the per-vertex edit tool's picking, or `None` if the sketch is
-    /// unknown/gone. Restricted to vertices on at least one **live**
-    /// (non-consumed) edge, matching [`Scene::live_sketch_segments`]'s "live
-    /// edge" definition — so a vertex is pickable iff a visible sketch line
-    /// touches it (no orphan ghost vertices from already-extruded edges).
+    /// pairs for the per-vertex edit tool's picking, or `None` if the sketch
+    /// is unknown/gone. Every sketch edge is real, visible geometry (Model D
+    /// deleted the tombstone machinery), so every edge endpoint is pickable.
     fn live_sketch_vertices(
         doc: &Document,
         id: SketchId,
@@ -1026,10 +1024,7 @@ impl Scene {
         let s = doc.sketch(id)?;
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        for (eid, edge) in s.edges() {
-            if doc.is_sketch_edge_consumed(id, eid) {
-                continue;
-            }
+        for edge in s.edges().values() {
             for vid in [edge.from, edge.to] {
                 if seen.insert(vid) {
                     out.push((vid, s.vertices()[vid].position));
@@ -1039,10 +1034,9 @@ impl Scene {
         Some(out)
     }
 
-    /// Enumerates sketch `id`'s live (non-consumed) edges as
-    /// `(SketchEdgeId, world endpoints)` triples, or `None` if the sketch is
-    /// unknown/gone. Shared by [`Scene::register_sketch`] and
-    /// [`Scene::sketch_lines`] so both walk the same "live edge" definition;
+    /// Enumerates sketch `id`'s edges as `(SketchEdgeId, world endpoints)`
+    /// triples, or `None` if the sketch is unknown/gone. Shared by
+    /// [`Scene::register_sketch`] and [`Scene::sketch_lines`];
     /// the edge id becomes snap provenance (Tape Measure parallel guides).
     fn live_sketch_segments(
         doc: &Document,
@@ -1051,9 +1045,6 @@ impl Scene {
         let s = doc.sketch(id)?;
         let mut out = Vec::with_capacity(s.edges().len());
         for (eid, edge) in s.edges() {
-            if doc.is_sketch_edge_consumed(id, eid) {
-                continue;
-            }
             let a = s.vertices()[edge.from].position;
             let b = s.vertices()[edge.to].position;
             out.push((eid, a, b));
@@ -1160,13 +1151,7 @@ impl Scene {
             .map_err(|e| api_err(&e, &e))?;
         // `Sketch::add_segment` is called directly (not through
         // `Document::apply_*`), so no `DocChange`/`sketches_touched` exists
-        // here. The consumed set derives from geometry this call just
-        // changed — refresh it BEFORE re-registering with inference, which
-        // filters on it. Tools normally bracket this in a gesture (whose
-        // close also recomputes), but the refresh here keeps an unbracketed
-        // call — a script, a test harness, a future tool path — from ever
-        // leaving a region under a solid marked live.
-        self.doc.refresh_consumed(sid);
+        // here; re-register with inference at the call site.
         self.register_sketch(sid);
         recording::record(recording::RecordedCall::SketchAddSegment {
             sketch,
@@ -1184,19 +1169,15 @@ impl Scene {
     ) -> Result<EdgeRemovedJs, ApiError> {
         let sid = sketch_id(sketch);
         let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
-        // Edges bordering a consumed footprint ARE deletable: the consumed
-        // set re-derives from the objects' frozen footprint polygons (see
-        // kernel::document::Footprint), so however the regions re-form,
-        // nothing under a standing solid ever becomes extrudable.
         let s = self
             .doc
             .sketch_mut(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let report = s.remove_edge(eid).map_err(|e| api_err(&e, &e))?;
         // Same rationale as `sketch_add_segment`: no `DocChange` here, so
-        // refresh the derived consumed set and re-register at the call site.
-        self.doc.refresh_consumed(sid);
+        // re-register with inference at the call site.
         self.register_sketch(sid);
+        recording::record(recording::RecordedCall::SketchRemoveEdge { sketch, edge });
         Ok(EdgeRemovedJs { inner: report })
     }
 
@@ -1278,22 +1259,20 @@ impl Scene {
 
     /// The maximal same-curve run containing `edge`, stopped at junctions
     /// with other geometry — the selection unit for a drawn arc/circle (see
-    /// `Sketch::curve_chain_at`). Live edges only, ascending by id, so the
+    /// `Sketch::curve_chain_at`). Ascending by id, so the
     /// first element is a stable canonical representative for the chain.
     pub fn sketch_curve_chain(&self, sketch: u64, edge: u64) -> Vec<u64> {
         let sid = sketch_id(sketch);
         let Some(s) = self.doc.sketch(sid) else {
             return Vec::new();
         };
-        let hidden = self.doc.consumed_edges_of(sid);
-        s.curve_chain_at(SketchEdgeId::from(KeyData::from_ffi(edge)), &hidden)
+        s.curve_chain_at(SketchEdgeId::from(KeyData::from_ffi(edge)))
             .into_iter()
-            .filter(|&e| !hidden.contains(&e))
             .map(|e| e.data().as_ffi())
             .collect()
     }
 
-    /// Every live (non-consumed) edge of `curve` in `sketch`.
+    /// Every edge of `curve` in `sketch`.
     pub fn sketch_curve_edges(&self, sketch: u64, curve: u64) -> Vec<u64> {
         let sid = sketch_id(sketch);
         let Some(s) = self.doc.sketch(sid) else {
@@ -1302,14 +1281,12 @@ impl Scene {
         let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
         s.curve_edges(cid)
             .into_iter()
-            .filter(|&e| !self.doc.is_sketch_edge_consumed(sid, e))
             .map(|e| e.data().as_ffi())
             .collect()
     }
 
-    /// Handles of `sketch`'s islands that still have at least one live
-    /// (non-consumed) edge — the outliner/selection units for free-standing
-    /// geometry, in deterministic slotmap order.
+    /// Handles of `sketch`'s islands — the outliner/selection units for
+    /// free-standing geometry, in deterministic slotmap order.
     pub fn sketch_island_ids(&self, sketch: u64) -> Vec<u64> {
         let sid = sketch_id(sketch);
         let Some(s) = self.doc.sketch(sid) else {
@@ -1317,11 +1294,6 @@ impl Scene {
         };
         s.islands()
             .iter()
-            .filter(|(_, isl)| {
-                isl.edges
-                    .iter()
-                    .any(|&e| !self.doc.is_sketch_edge_consumed(sid, e))
-            })
             .map(|(id, _)| id.data().as_ffi())
             .collect()
     }
@@ -1349,8 +1321,7 @@ impl Scene {
         s.island_of_edge(eid).map(|i| i.data().as_ffi())
     }
 
-    /// The live (non-consumed) edges of `island` in `sketch` — what a
-    /// per-shape Delete removes.
+    /// The edges of `island` in `sketch` — what a per-shape Delete removes.
     pub fn sketch_island_edges(&self, sketch: u64, island: u64) -> Vec<u64> {
         let sid = sketch_id(sketch);
         let Some(s) = self.doc.sketch(sid) else {
@@ -1360,15 +1331,10 @@ impl Scene {
         let Some(isl) = s.islands().get(iid) else {
             return Vec::new();
         };
-        isl.edges
-            .iter()
-            .copied()
-            .filter(|&e| !self.doc.is_sketch_edge_consumed(sid, e))
-            .map(|e| e.data().as_ffi())
-            .collect()
+        isl.edges.iter().map(|e| e.data().as_ffi()).collect()
     }
 
-    /// The live edges of `island` as xyz segment-endpoint pairs, for the
+    /// The edges of `island` as xyz segment-endpoint pairs, for the
     /// selection highlight and move ghost (the island analogue of
     /// `sketch_lines`).
     pub fn sketch_island_lines(&self, sketch: u64, island: u64) -> Result<Vec<f32>, ApiError> {
@@ -1384,9 +1350,6 @@ impl Scene {
             .ok_or_else(|| stale("UnknownIsland", "island"))?;
         let mut out = Vec::new();
         for &eid in &isl.edges {
-            if self.doc.is_sketch_edge_consumed(sid, eid) {
-                continue;
-            }
             let e = s.edges()[eid];
             let a = s.vertices()[e.from].position;
             let b = s.vertices()[e.to].position;
@@ -1396,23 +1359,11 @@ impl Scene {
         Ok(out)
     }
 
-    /// Whether an island contains any edge tombstoned by an extrusion — its
-    /// footprint backs a solid, so per-shape Move refuses it.
-    fn island_borders_solid(&self, sid: SketchId, iid: kernel::SketchIslandId) -> bool {
-        let Some(s) = self.doc.sketch(sid) else {
-            return false;
-        };
-        let Some(isl) = s.islands().get(iid) else {
-            return false;
-        };
-        isl.edges
-            .iter()
-            .any(|&e| self.doc.is_sketch_edge_consumed(sid, e))
-    }
-
     /// `transform_sketch_island`'s validation without the commit: `true` iff
     /// the move would be accepted. Batch movers validate every island first
-    /// so one refusal aborts the whole gesture atomically.
+    /// so one refusal aborts the whole gesture atomically. (Every island is
+    /// movable in principle — extrusion deletes its scaffolding rather than
+    /// hiding it, so no island secretly "backs" a solid.)
     pub fn can_transform_sketch_island(&self, sketch: u64, island: u64, affine: &[f64]) -> bool {
         let Ok(rows) = <&[f64; 12]>::try_from(affine) else {
             return false;
@@ -1420,9 +1371,6 @@ impl Scene {
         let t = Transform::from_affine(rows);
         let sid = sketch_id(sketch);
         let iid = kernel::SketchIslandId::from(KeyData::from_ffi(island));
-        if self.island_borders_solid(sid, iid) {
-            return false;
-        }
         if t.inverse().is_err() || t.determinant() < 0.0 {
             return false;
         }
@@ -1434,8 +1382,7 @@ impl Scene {
 
     /// Rigidly move ONE island of a free-standing sketch (per-shape Move;
     /// undoable). In-plane only; a landing that would cross or merge other
-    /// islands' geometry is refused with a typed error, never welded, and an
-    /// island whose footprint backs an extruded solid refuses outright.
+    /// islands' geometry is refused with a typed error, never welded.
     pub fn transform_sketch_island(
         &mut self,
         sketch: u64,
@@ -1448,12 +1395,6 @@ impl Scene {
         let t = Transform::from_affine(rows);
         let sid = sketch_id(sketch);
         let iid = kernel::SketchIslandId::from(KeyData::from_ffi(island));
-        if self.island_borders_solid(sid, iid) {
-            return Err(stale(
-                "IslandBordersSolid",
-                "island contains an extruded region's footprint",
-            ));
-        }
         let change = self
             .doc
             .transform_sketch_island(sid, iid, &t)
@@ -1463,7 +1404,6 @@ impl Scene {
     }
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
-    /// Edges consumed by an extrusion (part of a solid's base) are excluded.
     pub fn sketch_lines(&self, sketch: u64) -> Result<Vec<f32>, ApiError> {
         let segments = Self::live_sketch_segments(&self.doc, sketch_id(sketch))
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
@@ -1475,14 +1415,18 @@ impl Scene {
         Ok(out)
     }
 
-    /// Handles of the sketch's current closed regions, excluding any already
-    /// extruded into a solid (those are consumed — see `extrude_region`).
+    /// Handles of the sketch's current closed regions — ALL of them,
+    /// including any the standing-solid gate would refuse to extrude
+    /// (`Document::region_blocker`): a blocked region still renders and
+    /// picks, so attempting to extrude it surfaces the refusal instead of
+    /// the region being silently unselectable.
     pub fn sketch_regions(&self, sketch: u64) -> Result<Vec<u64>, ApiError> {
-        let regions = self
+        let sid = sketch_id(sketch);
+        let s = self
             .doc
-            .extrudable_regions(sketch_id(sketch))
-            .map_err(doc_err)?;
-        Ok(regions.iter().map(|r| r.data().as_ffi()).collect())
+            .sketch(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        Ok(s.regions().keys().map(|r| r.data().as_ffi()).collect())
     }
 
     // --------------------------------------------------------------- solids
@@ -2352,9 +2296,8 @@ impl Scene {
         Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
     }
 
-    /// World endpoints `[ax, ay, az, bx, by, bz]` of a live, visible
-    /// (non-consumed) sketch edge, or `undefined` if the sketch or edge is
-    /// stale or the edge was consumed by an extrusion. The sketch-edge
+    /// World endpoints `[ax, ay, az, bx, by, bz]` of a sketch edge, or
+    /// `undefined` if the sketch or edge is stale. The sketch-edge
     /// counterpart of `edge_endpoints`, for tools that use a snapped sketch
     /// edge as a reference (Tape Measure parallel guides).
     pub fn sketch_edge_endpoints(&self, sketch: u64, edge: u64) -> Option<Vec<f64>> {
@@ -2362,9 +2305,6 @@ impl Scene {
         let s = self.doc.sketch(sid)?;
         let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
         let e = s.edges().get(eid)?;
-        if self.doc.is_sketch_edge_consumed(sid, eid) {
-            return None;
-        }
         let a = s.vertices()[e.from].position;
         let b = s.vertices()[e.to].position;
         Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
@@ -2578,6 +2518,7 @@ impl Scene {
     pub fn scene_undo(&mut self) -> Result<(), ApiError> {
         let change = self.doc.undo().map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::SceneUndo);
         Ok(())
     }
 
@@ -2587,6 +2528,7 @@ impl Scene {
     pub fn scene_redo(&mut self) -> Result<(), ApiError> {
         let change = self.doc.redo().map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::SceneRedo);
         Ok(())
     }
 
@@ -2696,7 +2638,7 @@ impl Scene {
         }
     }
 
-    /// Picks the live (non-consumed, non-hidden) free-standing sketch whose
+    /// Picks the live (non-hidden) free-standing sketch whose
     /// nearest edge the ray passes closest to (for whole-sketch selection,
     ///) — `undefined` when the ray hits no live sketch edge.
     ///
@@ -2739,12 +2681,15 @@ impl Scene {
             })
     }
 
-    /// Picks the extrudable sketch region under the ray across ALL live
-    /// sketches: intersects the ray with each sketch's plane and returns the
+    /// Picks the sketch region under the ray across ALL live sketches:
+    /// intersects the ray with each sketch's plane and returns the
     /// smallest-area region whose material contains the hit point (nested
     /// regions resolve to the innermost — the same rule the push/pull tool
-    /// always used, now kernel-side and multi-sketch). Consumed regions and
-    /// hidden sketches never match; `undefined` when nothing is hit.
+    /// always used, now kernel-side and multi-sketch). EVERY closed region
+    /// participates, including ones the standing-solid gate would refuse —
+    /// attempting to extrude a blocked pick is what surfaces the refusal.
+    /// Hidden sketches never match (and an extruded region cannot: its
+    /// scaffolding was deleted with it); `undefined` when nothing is hit.
     ///
     /// The "any sketch" targeting primitive: push/pull region targeting,
     /// select-by-interior, and dock hover all resolve through this, replacing
@@ -2775,7 +2720,10 @@ impl Scene {
                 continue; // plane is behind the ray origin
             }
             let hit = origin + dir * t;
-            for rid in self.doc.extrudable_regions(sid).unwrap_or_default() {
+            // ALL closed regions participate, blocked ones included — the
+            // standing-solid refusal belongs to the extrude attempt (with
+            // its message), not to a silent pick miss.
+            for rid in sketch.regions().keys() {
                 if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
                     continue;
                 }
@@ -3343,6 +3291,9 @@ impl Scene {
                     SketchAddSegment { sketch, a, b } => {
                         self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
                     }
+                    SketchRemoveEdge { sketch, edge } => {
+                        self.sketch_remove_edge(sketch, edge)?;
+                    }
                     SketchBeginGesture { sketch } => {
                         self.sketch_begin_gesture(sketch)?;
                     }
@@ -3419,6 +3370,12 @@ impl Scene {
                         distance,
                     } => {
                         self.push_pull(object, face, distance)?;
+                    }
+                    SceneUndo => {
+                        self.scene_undo()?;
+                    }
+                    SceneRedo => {
+                        self.scene_redo()?;
                     }
                 }
             }
@@ -3590,8 +3547,9 @@ mod tests {
     }
 
     /// `pick_sketch_region` targets ANY live sketch's regions — not just the
-    /// most recently drawn one — skips consumed regions, and resolves nested
-    /// regions to the innermost.
+    /// most recently drawn one — and resolves nested regions to the
+    /// innermost. (An extruded region cannot match: its scaffolding was
+    /// deleted with it.)
     #[test]
     fn pick_sketch_region_targets_any_sketch() {
         let mut scene = Scene::new();
@@ -3624,7 +3582,7 @@ mod tests {
                 .is_none()
         );
 
-        // A consumed region stops matching once extruded.
+        // An extruded region stops matching: its scaffolding was deleted.
         let r2 = scene.sketch_regions(s2).unwrap()[0];
         scene.extrude_region(s2, r2, 1.0).unwrap();
         assert!(
@@ -3782,13 +3740,14 @@ mod tests {
 
         let (s1, r1) = ground_unit_square(&mut scene);
         let a = scene.extrude_region(s1, r1, 2.0).unwrap();
-        let (s2, r2) = ground_unit_square(&mut scene);
+        // b extrudes on free ground (the standing-solid gate refuses a's
+        // base) and moves to (0.5, 0.5) so it overlaps a, then union.
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let b = scene.extrude_region(s2, r2, 1.0).unwrap();
-        // Move b so it overlaps a, then union.
         scene
             .transform_object(
                 b,
-                &[1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0],
+                &[1.0, 0.0, 0.0, -1.5, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0],
             )
             .unwrap();
         let _u = scene.boolean(0, a, b).unwrap();
@@ -3896,6 +3855,129 @@ mod tests {
         );
     }
 
+    /// The eraser's commit (`sketch_remove_edge`) is captured and replayed:
+    /// a session that deletes a line diverges without it (the merged
+    /// regions and the surviving edge set differ), so the golden state
+    /// hash is the proof it round-trips.
+    #[test]
+    fn record_then_replay_captures_the_eraser() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        // Two wall-sharing squares, then erase the shared wall (one
+        // gesture, like the app), then extrude the surviving merged
+        // region's neighbor… keep it simple: erase, then extrude the
+        // remaining closed region after redrawing the wall.
+        let (s, _r) = ground_unit_square(&mut scene);
+        for (a, b) in [
+            ([1.0, 0.0], [2.0, 0.0]),
+            ([2.0, 0.0], [2.0, 1.0]),
+            ([2.0, 1.0], [1.0, 1.0]),
+        ] {
+            scene
+                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+        let wall = scene
+            .pick_sketch_edge(1.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("shared wall is pickable");
+        scene.sketch_begin_gesture(s).unwrap();
+        scene
+            .sketch_remove_edge(wall.sketch(), wall.edge())
+            .unwrap();
+        scene.sketch_end_gesture(s).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(
+            json.contains("\"method\":\"sketch_remove_edge\""),
+            "the eraser commit is in the call stream"
+        );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying an eraser session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Undo/redo are committed mutations like any other: a session that
+    /// leans on them — where Model D's subtle behavior lives (extrusion
+    /// undo RE-INSERTS scaffolding, merging with later edits) — must
+    /// capture and replay them, or the recorder cannot reproduce exactly
+    /// the bugs it exists for. A FAILED redo attempt commits nothing and
+    /// is not recorded.
+    #[test]
+    fn record_then_replay_captures_undo_redo() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        // Draw → extrude → undo (outline re-inserted) → redo (re-deleted
+        // by geometry) → undo again.
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+        scene.scene_undo().unwrap();
+
+        // Draw more into the restored sketch, bracketed as one gesture the
+        // way tools commit (recording a SketchGesture step clears redo)…
+        scene.sketch_begin_gesture(s).unwrap();
+        for (a, b) in [
+            ([2.0, 0.0], [3.0, 0.0]),
+            ([3.0, 0.0], [3.0, 1.0]),
+            ([3.0, 1.0], [2.0, 1.0]),
+            ([2.0, 1.0], [2.0, 0.0]),
+        ] {
+            scene
+                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_gesture(s).unwrap();
+        // …so this redo attempt fails: nothing committed, nothing recorded.
+        assert!(scene.scene_redo().is_err());
+
+        // Eraser: open the first square, then extrude the second.
+        let edge = scene
+            .pick_sketch_edge(0.5, 0.0, 5.0, 0.0, 0.0, -1.0)
+            .expect("first square's bottom edge");
+        scene
+            .sketch_remove_edge(edge.sketch(), edge.edge())
+            .unwrap();
+        let regions = scene.sketch_regions(s).unwrap();
+        assert_eq!(regions.len(), 1, "only the second square still closes");
+        scene.extrude_region(s, regions[0], 1.0).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert_eq!(
+            json.matches("\"method\":\"scene_undo\"").count(),
+            2,
+            "both undos are in the call stream"
+        );
+        assert_eq!(
+            json.matches("\"method\":\"scene_redo\"").count(),
+            1,
+            "the successful redo is recorded; the failed attempt is not"
+        );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying an undo/redo session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
     /// A curve bracket carrying its analytic circle records and replays:
     /// the replayed document is byte-identical, so the curve geometry
     /// (persisted in manifest v10) survived the round trip.
@@ -3955,6 +4037,14 @@ mod tests {
     /// Draws a unit square on the ground sketch and returns
     /// (sketch_handle, region_handle).
     fn ground_unit_square(scene: &mut Scene) -> (u64, u64) {
+        ground_unit_square_at(scene, 0.0, 0.0)
+    }
+
+    /// [`ground_unit_square`] at an (x, y) offset. Tests that need a second
+    /// solid draw it on FREE ground and move it into place — the
+    /// standing-solid gate (docs/design/sketch-solid-model.md §4D) refuses
+    /// extruding a region over a visible solid's base.
+    fn ground_unit_square_at(scene: &mut Scene, x: f64, y: f64) -> (u64, u64) {
         let sketch = scene.begin_ground_sketch();
         let corners = [
             (0.0, 0.0, 1.0, 0.0),
@@ -3965,7 +4055,7 @@ mod tests {
         let mut region = None;
         for (ax, ay, bx, by) in corners {
             let report = scene
-                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .sketch_add_segment(sketch, x + ax, y + ay, 0.0, x + bx, y + by, 0.0)
                 .unwrap();
             if let Some(&r) = report.inner.regions_created.first() {
                 region = Some(r.data().as_ffi());
@@ -3990,13 +4080,10 @@ mod tests {
         assert_eq!(scene.object_ids(), vec![obj]);
         assert!(scene.object_watertight(obj).unwrap());
         assert!(scene.can_scene_undo());
-        // The region is consumed: gone from the list, so it can't re-extrude.
-        assert!(scene.sketch_regions(sketch).unwrap().is_empty());
-        // The outline edges are now hidden: sketch_lines is empty.
-        assert!(
-            scene.sketch_lines(sketch).unwrap().is_empty(),
-            "sketch lines must be empty after extruding the sole rectangle"
-        );
+        // The region is consumed: its scaffolding was deleted and the
+        // emptied sketch itself ceased to exist.
+        assert!(scene.sketch_regions(sketch).is_err(), "sketch is gone");
+        assert!(!scene.sketch_ids().contains(&sketch));
 
         // Undo the creation: the object is hidden (gone from the listing) but
         // its handle is preserved for redo.
@@ -4005,22 +4092,21 @@ mod tests {
         assert!(scene.object_watertight(obj).is_err()); // hidden = not live
         assert!(scene.can_scene_redo());
 
-        // Undo also restored the region's extrudability and the sketch lines.
-        assert_eq!(scene.sketch_regions(sketch).unwrap(), vec![region]);
+        // Undo also restored the outline (fresh region handle — the
+        // scaffolding is re-inserted, not snapshot-restored).
+        assert_eq!(scene.sketch_regions(sketch).unwrap().len(), 1);
         assert!(
             !scene.sketch_lines(sketch).unwrap().is_empty(),
             "sketch lines must reappear after undoing the extrusion"
         );
 
-        // Redo restores the SAME handle and re-consumes the region.
+        // Redo restores the SAME handle and re-consumes the sketch.
         scene.scene_redo().unwrap();
         assert_eq!(scene.object_ids(), vec![obj]);
         assert!(scene.object_watertight(obj).unwrap());
-        assert!(scene.sketch_regions(sketch).unwrap().is_empty());
-        // Lines hidden again after redo.
         assert!(
-            scene.sketch_lines(sketch).unwrap().is_empty(),
-            "sketch lines must be empty again after redo"
+            scene.sketch_regions(sketch).is_err(),
+            "the sketch is gone again after redo"
         );
     }
 
@@ -4231,8 +4317,16 @@ mod tests {
         let mut scene = Scene::new();
         let (s1, r1) = ground_unit_square(&mut scene);
         let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
-        let (s2, r2) = ground_unit_square(&mut scene);
+        // The second box extrudes on free ground and moves into coincidence
+        // (extruding over o1's base is refused by the standing-solid gate).
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        scene
+            .transform_object(
+                o2,
+                &[1.0, 0.0, 0.0, -2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
 
         // Two identical ground boxes share coplanar faces; the boolean now
         // resolves coplanar contact instead of refusing. Union of
@@ -4291,13 +4385,14 @@ mod tests {
         assert!(err.0.starts_with("Reflection"), "got {}", err.0);
     }
 
+    /// After extruding one of two wall-sharing squares, the surviving
+    /// island holds only the neighbor's real edges — no invisible
+    /// scaffolding backs a solid — so it validates and moves freely (Z5).
     #[test]
-    fn island_move_refuses_when_its_footprint_backs_a_solid() {
+    fn island_move_works_after_neighbor_extrusion() {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
-        // A second square sharing the first's right wall: one island, two
-        // regions. Extrude the original region — the island now mixes live
-        // and tombstoned edges.
+        // A second square sharing the first's right wall.
         for (a, b) in [
             ([1.0, 0.0], [2.0, 0.0]),
             ([2.0, 0.0], [2.0, 1.0]),
@@ -4309,53 +4404,37 @@ mod tests {
         }
         scene.extrude_region(s, r, 1.0).unwrap();
 
+        // The extruded square's exclusive edges are gone; what remains is
+        // ONE island: the neighbor square (closed by the shared wall).
         let islands = scene.sketch_island_ids(s);
         assert_eq!(islands.len(), 1);
+        assert_eq!(scene.sketch_island_edges(s, islands[0]).len(), 4);
         let affine = [
             1.0, 0.0, 0.0, 5.0, //
             0.0, 1.0, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.0,
         ];
         assert!(
-            !scene.can_transform_sketch_island(s, islands[0], &affine),
-            "validation refuses a footprint-backed island"
+            scene.can_transform_sketch_island(s, islands[0], &affine),
+            "nothing invisible backs the surviving island"
         );
-        let err = scene
+        scene
             .transform_sketch_island(s, islands[0], &affine)
-            .unwrap_err();
-        assert!(
-            err.0.starts_with("IslandBordersSolid"),
-            "typed refusal, got {}",
-            err.0
+            .unwrap();
+        assert_eq!(
+            scene.sketch_island_edges(s, islands[0]).len(),
+            4,
+            "exactly the visible shape moved"
         );
-
-        // A fresh, unconsumed island elsewhere still moves (and validates).
-        for (a, b) in [
-            ([5.0, 0.0], [6.0, 0.0]),
-            ([6.0, 0.0], [6.0, 1.0]),
-            ([6.0, 1.0], [5.0, 1.0]),
-            ([5.0, 1.0], [5.0, 0.0]),
-        ] {
-            scene
-                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
-                .unwrap();
-        }
-        let islands2 = scene.sketch_island_ids(s);
-        let fresh = *islands2
-            .iter()
-            .find(|&&i| i != islands[0])
-            .expect("a second island exists");
-        assert!(scene.can_transform_sketch_island(s, fresh, &affine));
-        scene.transform_sketch_island(s, fresh, &affine).unwrap();
     }
 
-    /// Deleting the wall an extruded footprint shares with a live square
-    /// merges the two regions — and the merged region derives as consumed
-    /// (it overlaps the solid's frozen footprint), so nothing under or
-    /// beside the solid turns extrudable while it stands. Deleting the
-    /// solid then frees the whole merged area.
+    /// Deleting the wall an extruded solid's base shared with a live square
+    /// simply OPENS the neighbor (the extruded side's edges were deleted at
+    /// extrusion — there is nothing left to merge with). Deleting the solid
+    /// resurrects nothing; redrawing the wall closes the neighbor again and
+    /// it extrudes freely (adjacent to the solid, not under it).
     #[test]
-    fn merging_a_live_square_into_a_footprint_stays_consumed() {
+    fn deleting_the_shared_wall_opens_the_neighbor_and_resurrects_nothing() {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         for (a, b) in [
@@ -4369,8 +4448,7 @@ mod tests {
         }
         let obj = scene.extrude_region(s, r, 1.0).unwrap();
 
-        // The shared wall is the one live edge whose deletion merges the
-        // consumed square with the live one.
+        // The shared wall survives the extrusion (the neighbor needs it).
         let wall = scene
             .pick_sketch_edge(1.0, 0.5, 5.0, 0.0, 0.0, -1.0)
             .expect("shared wall is pickable");
@@ -4383,14 +4461,24 @@ mod tests {
         assert_eq!(
             scene.sketch_regions(s).unwrap().len(),
             0,
-            "the merged region overlaps the standing solid — not extrudable"
+            "removing the wall opened the neighbor — no region closes"
         );
         scene.delete_node(0, obj).unwrap();
         assert_eq!(
             scene.sketch_regions(s).unwrap().len(),
-            1,
-            "deleting the solid frees the merged area"
+            0,
+            "deleting the solid resurrects nothing"
         );
+
+        // Redraw the wall: the neighbor closes and extrudes freely.
+        scene.sketch_begin_gesture(s).unwrap();
+        scene
+            .sketch_add_segment(s, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+            .unwrap();
+        scene.sketch_end_gesture(s).unwrap();
+        let regions = scene.sketch_regions(s).unwrap();
+        assert_eq!(regions.len(), 1);
+        scene.extrude_region(s, regions[0], 1.0).unwrap();
     }
 
     #[test]
@@ -4500,7 +4588,7 @@ mod tests {
         let mut scene = Scene::new();
         let (s1, r1) = ground_unit_square(&mut scene);
         let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
-        let (s2, r2) = ground_unit_square(&mut scene);
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
 
         // Group both objects (kind 0 = object).
@@ -4548,7 +4636,7 @@ mod tests {
         let mut scene = Scene::new();
         let (s1, r1) = ground_unit_square(&mut scene);
         let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
-        let (s2, r2) = ground_unit_square(&mut scene);
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
         let g = scene.group_nodes(&[0], &[o2]).unwrap();
         let free = scene.begin_ground_sketch();
