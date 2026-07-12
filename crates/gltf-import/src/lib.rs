@@ -79,6 +79,24 @@ pub struct GltfScene {
 /// resource URIs, and any conversion warnings (non-manifold splits). A totally
 /// unparseable file returns `Err(GltfError)`.
 pub fn import(bytes: &[u8]) -> Result<GltfScene, GltfError> {
+    // The `gltf-json` validator itself can panic on hostile input (e.g. a
+    // primitive whose POSITION accessor index is out of range of an empty
+    // accessors array indexes `root.accessors[i]` unchecked in 1.4.1), so
+    // a byte-mutated file could crash the app instead of failing typed.
+    // Contain the whole parse/convert pipeline: a panic becomes a Parse
+    // error at this boundary (DEVELOPMENT.md rule 3 — malformed input
+    // fails typed, never crashes). On wasm32 (panic = abort) the wrapper
+    // is a passthrough; the trap surfaces as a load failure there.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| import_inner(bytes))).unwrap_or_else(
+        |_| {
+            Err(GltfError::Parse(
+                "malformed glTF: parser rejected the file".to_string(),
+            ))
+        },
+    )
+}
+
+fn import_inner(bytes: &[u8]) -> Result<GltfScene, GltfError> {
     let gltf = gltf::Gltf::from_slice(bytes).map_err(|e| GltfError::Parse(e.to_string()))?;
     let (buffers, mut missing) = buffers::resolve(&gltf);
     let (scene, mat_missing, warnings) = convert::build_scene(&gltf, &buffers)?;
