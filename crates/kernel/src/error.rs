@@ -93,6 +93,25 @@ pub enum TopologyError {
         /// The displaced hole loop.
         loop_id: LoopId,
     },
+    /// A face's analytic [`crate::topo::SurfaceRef`] disagrees with its
+    /// geometry: non-unit axis, degenerate radius, a chord plane not
+    /// parallel to the axis or farther from it than the radius, or a
+    /// boundary vertex outside the cylinder. A stale claim is a validator
+    /// failure, never a silent lie (map-or-drop —
+    /// docs/design/true-curves.md).
+    FaceSurfaceMismatch {
+        /// The offending face.
+        face: FaceId,
+    },
+    /// An edge's analytic circle claim ([`crate::topo::Edge::curve`])
+    /// disagrees with its geometry: a degenerate radius, or an endpoint not
+    /// within tolerance of the claimed radius from the center (the edge is
+    /// not a chord facet of that circle). A stale claim is a validator
+    /// failure, never a silent lie (map-or-drop — docs/design/true-curves.md).
+    EdgeCurveMismatch {
+        /// The offending edge.
+        edge: EdgeId,
+    },
     /// A vertex's `outgoing` half-edge does not originate at it.
     VertexOutgoingMismatch {
         /// The offending vertex.
@@ -159,6 +178,18 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "face {face:?} owns hole loop {loop_id:?} that lies outside its outer boundary"
+                )
+            }
+            FaceSurfaceMismatch { face } => {
+                write!(
+                    f,
+                    "face {face:?} analytic surface disagrees with its geometry"
+                )
+            }
+            EdgeCurveMismatch { edge } => {
+                write!(
+                    f,
+                    "edge {edge:?} analytic circle disagrees with its geometry"
                 )
             }
             VertexOutgoingMismatch { vertex } => {

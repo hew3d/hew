@@ -1,17 +1,18 @@
 /**
  * Binary STL export.
  *
- * Follows `gltfExport.ts`'s architecture: runs entirely in TypeScript over
- * the live three.js scene via `SceneRenderer.buildExportScene()` (per-object
- * tessellated face meshes + instance nodes — never edges, sketches, guides,
- * or preview overlays). STL has no object structure, so the whole scene is
- * concatenated into one triangle soup.
+ * Sources geometry from the KERNEL, not the viewport: every object's export
+ * tessellation comes from `Scene.object_export_triangles`, which re-facets
+ * pristine stamped cylinder walls from their analytic definitions at the
+ * requested resolution (docs/design/true-curves.md stage 6 — "true curves
+ * for STL") and honestly falls back to stored facets where a wall is no
+ * longer fully analytic. The kernel guarantees the soup is manifold at any
+ * resolution. Instances are flattened by applying their poses here; STL has
+ * no object structure, so the whole scene concatenates into one soup.
  *
  * Two deliberate differences from the GLB path:
- *  - **No Y-up rotation.** glTF is Y-up, so `buildExportScene` bakes a −90°
- *    X rotation into the export root; STL consumers (slicers) expect Z-up,
- *    which is Hew's native world orientation. We reset the root transform to
- *    identity before collecting triangles.
+ *  - **No Y-up rotation.** STL consumers (slicers) expect Z-up, which is
+ *    Hew's native world orientation.
  *  - **Millimeter scale.** STL is unitless; the universal slicer convention
  *    is millimeters, so kernel meters are multiplied by 1000.
  *
@@ -22,14 +23,12 @@
  *   attribute-byte-count = 0
  *
  * Triangle normals are computed from vertex winding (right-hand rule). The
- * tessellator emits counter-clockwise front faces (three.js FrontSide), so
- * the winding is used as-is; a mesh whose world matrix has negative
- * determinant (reflected instance pose) gets its winding flipped so
- * normals still point outward. Zero-area triangles are skipped and counted —
- * never repaired (rule 4 in spirit).
+ * kernel emits counter-clockwise-from-outside triangles, so the winding is
+ * used as-is; an instance whose pose has negative determinant (mirrored
+ * placement) gets its winding flipped so normals still point outward.
+ * Zero-area triangles are skipped and counted — never repaired (rule 4 in
+ * spirit).
  */
-import * as THREE from 'three'
-import type { SceneRenderer } from '../../viewport/SceneRenderer'
 
 /** Size of the fixed binary STL header. */
 export const STL_HEADER_BYTES = 80
@@ -132,66 +131,80 @@ export function writeBinaryStl(
 }
 
 /**
- * Walk every face mesh under `root` (matrix world already up to date) and
- * concatenate all triangles, transformed to world space, into a flat soup in
- * meters (9 numbers per triangle). A mesh whose world matrix has negative
- * determinant (reflected pose) gets its winding flipped so the right-hand
+ * The slice of the wasm `Scene` surface the kernel-sourced STL collector
+ * needs — structural, so tests can pass a plain mock.
+ */
+export interface StlExportScene extends SolidQueryScene {
+  /** Row-major 3×4 affine pose, or undefined for a stale handle. */
+  instance_pose(instance: bigint): Float64Array | undefined
+  /**
+   * Kernel export tessellation for one object: flat triangle soup, 9 floats
+   * per triangle, object-local meters, CCW from outside.
+   * `segmentsPerTurn === 0` = stored facets.
+   */
+  object_export_triangles(object: bigint, segmentsPerTurn: number): Float32Array
+}
+
+/**
+ * Collect the whole scene (top-level objects + placed instances) as one
+ * world-space triangle soup in meters, sourced from the kernel's export
+ * tessellation at `segmentsPerTurn`. An instance pose with negative
+ * determinant (mirrored placement) flips triangle winding so the right-hand
  * rule still yields outward normals.
  */
-export function collectWorldTriangles(root: THREE.Object3D): number[] {
+export function collectKernelTriangles(scene: StlExportScene, segmentsPerTurn: number): number[] {
   const out: number[] = []
-  const a = new THREE.Vector3()
-  const b = new THREE.Vector3()
-  const c = new THREE.Vector3()
 
-  root.traverse((obj) => {
-    const mesh = obj as THREE.Mesh
-    if (mesh.isMesh !== true) return
-    const geo = mesh.geometry
-    const pos = geo.getAttribute('position')
-    if (pos === undefined) return
-    const index = geo.getIndex()
-    const triCount = (index !== null ? index.count : pos.count) / 3
-    const flip = mesh.matrixWorld.determinant() < 0
+  for (const id of scene.object_ids()) {
+    // Top-level objects have their transforms baked: local == world.
+    const soup = scene.object_export_triangles(id, segmentsPerTurn)
+    for (let i = 0; i < soup.length; i++) out.push(soup[i])
+  }
 
-    for (let t = 0; t < triCount; t++) {
-      const i0 = index !== null ? index.getX(t * 3) : t * 3
-      let i1 = index !== null ? index.getX(t * 3 + 1) : t * 3 + 1
-      let i2 = index !== null ? index.getX(t * 3 + 2) : t * 3 + 2
-      if (flip) {
-        const tmp = i1
-        i1 = i2
-        i2 = tmp
+  for (const instanceId of scene.instance_ids()) {
+    const def = scene.instance_def(instanceId)
+    const pose = scene.instance_pose(instanceId)
+    if (def === undefined || pose === undefined || pose.length !== 12) continue
+    const [m00, m01, m02, tx, m10, m11, m12, ty, m20, m21, m22, tz] = pose
+    const det =
+      m00 * (m11 * m22 - m12 * m21) -
+      m01 * (m10 * m22 - m12 * m20) +
+      m02 * (m10 * m21 - m11 * m20)
+    const flip = det < 0
+    for (const memberId of scene.component_member_objects(def)) {
+      const soup = scene.object_export_triangles(memberId, segmentsPerTurn)
+      for (let t = 0; t + 9 <= soup.length; t += 9) {
+        // Vertex order 0,1,2 — or 0,2,1 under a mirrored pose.
+        const order = flip ? [0, 2, 1] : [0, 1, 2]
+        for (const v of order) {
+          const x = soup[t + v * 3]
+          const y = soup[t + v * 3 + 1]
+          const z = soup[t + v * 3 + 2]
+          out.push(
+            m00 * x + m01 * y + m02 * z + tx,
+            m10 * x + m11 * y + m12 * z + ty,
+            m20 * x + m21 * y + m22 * z + tz,
+          )
+        }
       }
-      a.fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld)
-      b.fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld)
-      c.fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld)
-      out.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z)
     }
-  })
+  }
 
   return out
 }
 
 /**
  * Serialize the current solid geometry (objects + instances, faces only) to
- * a binary STL buffer at millimeter scale, Z-up. Returns `null` when
+ * a binary STL buffer at millimeter scale, Z-up, with cylinder walls
+ * re-faceted at `segmentsPerTurn` (0 = stored facets). Returns `null` when
  * there is nothing solid to export.
  */
-export function exportSceneToStl(renderer: SceneRenderer): StlBuildResult | null {
-  if (!renderer.hasExportableGeometry()) return null
-
-  const root = renderer.buildExportScene()
-  try {
-    // buildExportScene bakes glTF's −90°-about-X Y-up rotation into the root;
-    // STL is exported in Hew's native Z-up world frame, so undo it.
-    root.matrix.identity()
-    root.matrixWorldNeedsUpdate = true
-    root.updateMatrixWorld(true)
-    return writeBinaryStl(collectWorldTriangles(root))
-  } finally {
-    renderer.disposeExportScene(root)
-  }
+export function exportSceneToStl(
+  scene: StlExportScene,
+  segmentsPerTurn: number,
+): StlBuildResult | null {
+  if (scene.object_ids().length === 0 && scene.instance_ids().length === 0) return null
+  return writeBinaryStl(collectKernelTriangles(scene, segmentsPerTurn))
 }
 
 // ---------------------------------------------------------------------------

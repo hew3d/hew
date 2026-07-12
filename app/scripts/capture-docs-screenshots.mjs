@@ -269,6 +269,10 @@ async function shot(page, name, opts = {}) {
   await page.getByRole('button', { name: 'File' }).click()
   await settle(page, 200)
   await page.getByText('Export…').click()
+  // Show the STL branch: it carries the per-format Curve resolution select
+  // the guide describes.
+  await page.locator('#export-format-select').selectOption('stl')
+  await settle(page, 200)
   await shot(page, 'export-dialog')
   await page.close()
 }

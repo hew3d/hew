@@ -53,6 +53,21 @@ new_key_type! {
     pub struct SketchIslandId;
 }
 
+/// The analytic definition a curve chain was drawn from: the exact circle
+/// (or circular arc) whose facets the chain's edges are. The circle lies in
+/// the sketch plane; arc extent is derived from the chain's member edges,
+/// never stored. This is the durable form of what the drawing tool computed
+/// and, before this existed, immediately discarded — the foundation the
+/// true-curves plan builds on (docs/design/true-curves.md).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveGeom {
+    /// Circle center, on the sketch plane (within
+    /// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)).
+    pub center: Point3,
+    /// Circle radius in meters, > [`tol::POINT_MERGE`](crate::tol::POINT_MERGE).
+    pub radius: f64,
+}
+
 /// A connected component of a sketch's edges: what the user perceives as one
 /// independent drawn shape. Derived (never serialized) and recomputed on
 /// every edge-set mutation with identity reuse, exactly like regions — the
@@ -160,6 +175,9 @@ pub enum SketchError {
     /// kernel bug in region tracing, surfaced as a typed error rather than a
     /// panic so it cannot brick the caller).
     MalformedRegion,
+    /// A [`CurveGeom`] is degenerate: its radius is not finite or not larger
+    /// than [`tol::POINT_MERGE`](crate::tol::POINT_MERGE).
+    DegenerateCurve,
 }
 
 impl std::fmt::Display for SketchError {
@@ -181,6 +199,9 @@ impl std::fmt::Display for SketchError {
             SketchError::MalformedRegion => {
                 write!(f, "region boundary does not form a valid profile")
             }
+            SketchError::DegenerateCurve => {
+                write!(f, "curve radius is degenerate")
+            }
         }
     }
 }
@@ -194,9 +215,12 @@ pub struct Sketch {
     vertices: SlotMap<SketchVertexId, SketchVertex>,
     edges: SlotMap<SketchEdgeId, SketchEdge>,
     regions: SlotMap<SketchRegionId, SketchRegion>,
-    /// Live curve-chain ids (values carry nothing; the id is the identity —
-    /// membership lives on each edge's `curve` field).
-    curves: SlotMap<SketchCurveId, ()>,
+    /// Live curve chains: membership lives on each edge's `curve` field; the
+    /// value is the chain's analytic definition, when the drawing tool
+    /// supplied one ([`Sketch::begin_curve_with`]). `None` for chains
+    /// committed before geometry capture existed (pre-v10 files) or through
+    /// the plain [`Sketch::begin_curve`].
+    curves: SlotMap<SketchCurveId, Option<CurveGeom>>,
     /// Current connected components (derived; see [`SketchIsland`]).
     islands: SlotMap<SketchIslandId, SketchIsland>,
     /// Curve id applied to edges inserted by `add_segment` while a
@@ -240,9 +264,40 @@ impl Sketch {
     /// Returns the minted curve id. Nesting is not supported — a second
     /// `begin_curve` simply replaces the active id.
     pub fn begin_curve(&mut self) -> SketchCurveId {
-        let id = self.curves.insert(());
+        let id = self.curves.insert(None);
         self.active_curve = Some(id);
         id
+    }
+
+    /// [`Sketch::begin_curve`] with the chain's analytic definition: the
+    /// exact circle the facets approximate, as the drawing tool computed it.
+    /// The geometry is durable — it survives edge splits (fragments keep the
+    /// chain id), persists in the file format, and is what extrusion carries
+    /// onto the solid (docs/design/true-curves.md).
+    ///
+    /// # Errors
+    /// [`SketchError::PointOffPlane`] (`which: 0`) if `geom.center` is
+    /// farther than [`tol::PLANE_DIST`](crate::tol::PLANE_DIST) from the
+    /// sketch plane; [`SketchError::DegenerateCurve`] if `geom.radius` is
+    /// not finite or not larger than
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE). On error no curve is
+    /// minted and no bracket opens (strong guarantee).
+    pub fn begin_curve_with(&mut self, geom: CurveGeom) -> Result<SketchCurveId, SketchError> {
+        if self.plane.signed_distance(geom.center).abs() > tol::PLANE_DIST {
+            return Err(SketchError::PointOffPlane { which: 0 });
+        }
+        if !geom.radius.is_finite() || geom.radius <= tol::POINT_MERGE {
+            return Err(SketchError::DegenerateCurve);
+        }
+        let id = self.curves.insert(Some(geom));
+        self.active_curve = Some(id);
+        Ok(id)
+    }
+
+    /// The analytic definition of `curve`, or `None` when the chain carries
+    /// none (plain [`Sketch::begin_curve`], pre-v10 file, or a stale handle).
+    pub fn curve_geom(&self, curve: SketchCurveId) -> Option<CurveGeom> {
+        self.curves.get(curve).copied().flatten()
     }
 
     /// Closes the open curve bracket (no-op when none is open).
@@ -324,9 +379,10 @@ impl Sketch {
             .collect()
     }
 
-    /// Registers a curve id during structural (file-load) reconstruction.
-    pub(crate) fn insert_curve_raw(&mut self) -> SketchCurveId {
-        self.curves.insert(())
+    /// Registers a curve id (with its optional analytic definition) during
+    /// structural (file-load) reconstruction.
+    pub(crate) fn insert_curve_raw(&mut self, geom: Option<CurveGeom>) -> SketchCurveId {
+        self.curves.insert(geom)
     }
 
     /// Current islands — connected components of the edge graph (read-only).
@@ -514,6 +570,36 @@ impl Sketch {
             }
         }
 
+        // Curve geometry rides along iff the whole chain moved: a chain
+        // entirely inside the island maps (map-or-drop contract, see
+        // apply_transform); a chain straddling the island boundary — possible
+        // after partial deletion split its edges across components — can no
+        // longer be described by one circle, so its geometry drops.
+        let scale = in_plane_similarity_scale(t, s.plane.normal());
+        let curve_ids: Vec<SketchCurveId> = s.curves.keys().collect();
+        for cid in curve_ids {
+            if s.curves[cid].is_none() {
+                continue;
+            }
+            let members: Vec<SketchEdgeId> = s
+                .edges
+                .iter()
+                .filter(|(_, e)| e.curve == Some(cid))
+                .map(|(id, _)| id)
+                .collect();
+            let inside = members.iter().filter(|e| island_edges.contains(e)).count();
+            if inside == 0 {
+                continue; // untouched chain
+            }
+            s.curves[cid] = match (s.curves[cid], scale, inside == members.len()) {
+                (Some(g), Some(sc), true) => Some(CurveGeom {
+                    center: t.apply_point(g.center),
+                    radius: g.radius * sc,
+                }),
+                _ => None,
+            };
+        }
+
         *self = s;
         Ok(())
     }
@@ -548,7 +634,24 @@ impl Sketch {
         if transform.determinant() < 0.0 {
             return Err(crate::TransformError::Reflection);
         }
-        // Remap the plane first (cannot fail on a validated non-singular map),
+        // Curve geometry maps when the transform is an in-plane similarity
+        // (center through the point map, radius by the uniform factor) and is
+        // DROPPED otherwise — a non-uniform in-plane scale turns the circle
+        // into an ellipse the metadata cannot describe. Dropping metadata is
+        // not geometry repair: the facets are untouched; the chain merely
+        // stops claiming an analytic ancestry it no longer has
+        // (docs/design/true-curves.md). Chain identity always survives.
+        let scale = in_plane_similarity_scale(transform, self.plane.normal());
+        for geom in self.curves.values_mut() {
+            *geom = match (*geom, scale) {
+                (Some(g), Some(s)) => Some(CurveGeom {
+                    center: transform.apply_point(g.center),
+                    radius: g.radius * s,
+                }),
+                _ => None,
+            };
+        }
+        // Remap the plane (cannot fail on a validated non-singular map),
         // then move every vertex onto it.
         self.plane = transform
             .apply_plane(&self.plane)
@@ -717,6 +820,16 @@ impl Sketch {
             s.profile(region)?;
         }
 
+        // Dragging a vertex of a curve chain deforms the chain away from its
+        // drawn circle: the chains touching the moved vertex drop their
+        // analytic geometry (map-or-drop contract; identity survives so the
+        // chain still selects as a unit).
+        for &eid in &incident {
+            if let Some(cid) = s.edges[eid].curve {
+                s.curves[cid] = None;
+            }
+        }
+
         *self = s;
         Ok(old_pos)
     }
@@ -821,7 +934,27 @@ impl Sketch {
         // Profile; if it does not, that is a kernel bug — but surface it as a
         // typed error (rule 4) rather than panicking, since a panic at the
         // WASM boundary leaves the Scene unusable.
-        Profile::new(self.plane, outer, holes).map_err(|_| SketchError::MalformedRegion)
+        let mut profile =
+            Profile::new(self.plane, outer, holes).map_err(|_| SketchError::MalformedRegion)?;
+
+        // Analytic attribution: for each boundary edge, the circle its curve
+        // chain carries (when it carries one). This is what extrusion stamps
+        // onto side-wall faces (docs/design/true-curves.md).
+        let edge_geom = |a: SketchVertexId, b: SketchVertexId| -> Option<CurveGeom> {
+            self.edge_between(a, b)
+                .and_then(|eid| self.edges[eid].curve)
+                .and_then(|cid| self.curve_geom(cid))
+        };
+        let loop_geoms = |cycle: &[SketchVertexId]| -> Vec<Option<CurveGeom>> {
+            (0..cycle.len())
+                .map(|k| edge_geom(cycle[k], cycle[(k + 1) % cycle.len()]))
+                .collect()
+        };
+        let outer_curves = loop_geoms(&r.outer);
+        let hole_curves: Vec<Vec<Option<CurveGeom>>> =
+            r.holes.iter().map(|h| loop_geoms(h)).collect();
+        profile.set_curve_attribution(outer_curves, hole_curves);
+        Ok(profile)
     }
 
     /// The unsigned area of `region`'s outer boundary, in m². Hole areas are
@@ -891,7 +1024,31 @@ impl PartialEq for Sketch {
             && slotmaps_eq(&self.vertices, &other.vertices)
             && slotmaps_eq(&self.edges, &other.edges)
             && slotmaps_eq(&self.regions, &other.regions)
+            && slotmaps_eq(&self.curves, &other.curves)
     }
+}
+
+/// The uniform scale factor of `transform` restricted to the plane with unit
+/// `normal`, or `None` if the restriction is not a similarity (it maps the
+/// plane's circles to ellipses). Both in-plane basis directions must map to
+/// equal lengths and stay orthogonal, within [`tol::NORMAL_DIRECTION`]
+/// (dimensionless, applied relatively).
+fn in_plane_similarity_scale(transform: &crate::Transform, normal: Vec3) -> Option<f64> {
+    let (u, v) = plane_axes(normal);
+    let lu = transform.apply_vector(u);
+    let lv = transform.apply_vector(v);
+    let (a, b) = (lu.length(), lv.length());
+    let max = a.max(b);
+    if max < tol::NORMALIZE_MIN_LENGTH {
+        return None;
+    }
+    if (a - b).abs() > tol::NORMAL_DIRECTION * max {
+        return None;
+    }
+    if lu.dot(lv).abs() > tol::NORMAL_DIRECTION * a * b {
+        return None;
+    }
+    Some(a)
 }
 
 // ═══════════════════════════════════════════════════════════════════ internals
@@ -1855,6 +2012,13 @@ pub struct Profile {
     plane: Plane,
     outer: Vec<Point3>,
     holes: Vec<Vec<Point3>>,
+    /// Analytic attribution per outer boundary edge: `outer_curves[k]` is
+    /// the circle edge `outer[k] → outer[k+1]` is a facet of, when the edge
+    /// came from a curve chain with geometry. Parallel to `outer`; empty ⇒
+    /// no attribution anywhere (the [`Profile::new`] default).
+    outer_curves: Vec<Option<CurveGeom>>,
+    /// Same, per hole boundary edge. Parallel to `holes` when non-empty.
+    hole_curves: Vec<Vec<Option<CurveGeom>>>,
 }
 
 /// Typed reasons a would-be [`Profile`] is rejected. The kernel never fixes
@@ -1999,7 +2163,29 @@ impl Profile {
             plane,
             outer,
             holes,
+            outer_curves: Vec::new(),
+            hole_curves: Vec::new(),
         })
+    }
+
+    /// Attaches per-edge analytic curve attribution (see the field docs).
+    /// Crate-internal: only [`Sketch::profile`] produces attribution, from
+    /// the region's own edges. Lengths must be parallel to the boundaries.
+    pub(crate) fn set_curve_attribution(
+        &mut self,
+        outer_curves: Vec<Option<CurveGeom>>,
+        hole_curves: Vec<Vec<Option<CurveGeom>>>,
+    ) {
+        debug_assert_eq!(outer_curves.len(), self.outer.len());
+        debug_assert_eq!(hole_curves.len(), self.holes.len());
+        debug_assert!(
+            hole_curves
+                .iter()
+                .zip(&self.holes)
+                .all(|(c, h)| c.len() == h.len())
+        );
+        self.outer_curves = outer_curves;
+        self.hole_curves = hole_curves;
     }
 
     /// The supporting plane.
@@ -2015,6 +2201,21 @@ impl Profile {
     /// Hole boundaries, each CW seen from the plane normal side.
     pub fn holes(&self) -> &[Vec<Point3>] {
         &self.holes
+    }
+
+    /// The analytic circle outer edge `k` (`outer[k] → outer[k+1]`) is a
+    /// facet of, or `None` (plain line, or no attribution attached).
+    pub fn outer_curve(&self, k: usize) -> Option<CurveGeom> {
+        self.outer_curves.get(k).copied().flatten()
+    }
+
+    /// The analytic circle hole `i`'s edge `k` is a facet of, or `None`.
+    pub fn hole_curve(&self, i: usize, k: usize) -> Option<CurveGeom> {
+        self.hole_curves
+            .get(i)
+            .and_then(|h| h.get(k))
+            .copied()
+            .flatten()
     }
 }
 

@@ -15,7 +15,10 @@
 //! - replaying the entire redo stack restores the post-sequence geometry
 //!   (exercises inverse re-anchoring in `history.rs`).
 
-use kernel::{History, KernelOp, Object, Plane, Point3, Profile, Vec3, WatertightState};
+use kernel::{
+    CurveGeom, History, HistoryError, KernelOp, KernelOpError, Object, Plane, Point3, Profile,
+    PushPullError, Vec3, WatertightState, tol,
+};
 use proptest::prelude::*;
 
 /// Geometric slack for round-trip comparison: inverse ops recompute positions
@@ -59,6 +62,15 @@ enum FuzzOp {
         shrink: f64,
         staple: bool,
     },
+    /// Imprint a 24-gon CIRCLE carrying its analytic identity (`Edge::curve`)
+    /// strictly inside the `face_sel`-th face, radius a fraction of the face's
+    /// inradius. Exercises the map-or-drop paths: a later push_pull/extrude of
+    /// the imprinted face moves the claim off its circle (docs/design/true-
+    /// curves.md playtest fix C3 + the map-or-drop review follow-up).
+    ImprintCircle {
+        face_sel: usize,
+        radius_frac: f64,
+    },
     /// Boss/recess the `face_sel`-th face if it is an imprinted sub-face
     /// (usually rejected typed — exercises the strong guarantee).
     ExtrudeSubFace {
@@ -99,6 +111,9 @@ fn arb_fuzz_op() -> impl Strategy<Value = FuzzOp> {
                 staple,
             }
         ),
+        2 => (any::<usize>(), 0.2..0.7f64).prop_map(|(face_sel, radius_frac)| {
+            FuzzOp::ImprintCircle { face_sel, radius_frac }
+        }),
         2 => (any::<usize>(), distance()).prop_map(|(face_sel, distance)| {
             FuzzOp::ExtrudeSubFace { face_sel, distance }
         }),
@@ -328,6 +343,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             Some(KernelOp::SplitFace {
                 face,
                 path: vec![point_on(a, *ta), point_on(b, *tb)],
+                restore: None,
             })
         }
         FuzzOp::MergeFaces { edge_sel } => {
@@ -355,7 +371,12 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                     return None;
                 }
                 let loop_path = staple_loop(boundary[0], boundary[1], boundary[3]);
-                return Some(KernelOp::SplitFaceInner { face, loop_path });
+                return Some(KernelOp::SplitFaceInner {
+                    face,
+                    loop_path,
+                    restore: None,
+                    curve: None,
+                });
             }
             // Shrink the boundary toward its vertex centroid; strictly inside
             // for convex faces, typed rejection otherwise.
@@ -364,7 +385,74 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                 Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
             });
             let loop_path: Vec<Point3> = boundary.iter().map(|&p| c + (p - c) * *shrink).collect();
-            Some(KernelOp::SplitFaceInner { face, loop_path })
+            Some(KernelOp::SplitFaceInner {
+                face,
+                loop_path,
+                restore: None,
+                curve: None,
+            })
+        }
+        FuzzOp::ImprintCircle {
+            face_sel,
+            radius_frac,
+        } => {
+            let n = object.faces().len();
+            let face = object.faces().keys().nth(face_sel % n)?;
+            // A holed face could enclose its hole; keep the circle on simple faces.
+            if !object.faces()[face].inner_loops.is_empty() {
+                return None;
+            }
+            let boundary: Vec<Point3> = object
+                .loop_positions(object.faces()[face].outer_loop)
+                .collect();
+            if boundary.len() < 3 {
+                return None;
+            }
+            let inv = 1.0 / boundary.len() as f64;
+            let c = boundary.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
+                Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
+            });
+            // In-plane orthonormal basis from the face normal.
+            let normal = object.faces()[face].plane.normal();
+            let seed = if normal.x.abs() < 0.9 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            };
+            let u = (seed - normal * seed.dot(normal)).normalized().ok()?;
+            let v = normal.cross(u);
+            // Largest circle strictly inside: min centroid-to-boundary-edge distance.
+            let mut inradius = f64::INFINITY;
+            for i in 0..boundary.len() {
+                let a = boundary[i];
+                let b = boundary[(i + 1) % boundary.len()];
+                let ab = b - a;
+                let len2 = ab.dot(ab);
+                let t = if len2 > f64::EPSILON {
+                    ((c - a).dot(ab) / len2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let foot = a + ab * t;
+                inradius = inradius.min((c - foot).length());
+            }
+            let radius = radius_frac * inradius;
+            if radius <= tol::POINT_MERGE {
+                return None;
+            }
+            let sides = 24usize;
+            let loop_path: Vec<Point3> = (0..sides)
+                .map(|i| {
+                    let ang = 2.0 * std::f64::consts::PI * (i as f64) / (sides as f64);
+                    c + u * (radius * ang.cos()) + v * (radius * ang.sin())
+                })
+                .collect();
+            Some(KernelOp::SplitFaceInner {
+                face,
+                loop_path,
+                restore: None,
+                curve: Some(CurveGeom { center: c, radius }),
+            })
         }
         FuzzOp::ExtrudeSubFace { face_sel, distance } => {
             let n = object.faces().len();

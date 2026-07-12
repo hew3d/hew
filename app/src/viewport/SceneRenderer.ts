@@ -115,12 +115,34 @@ interface MemberGeometry {
 }
 
 /**
- * Side bucket for one instanced batch: 'F' = watertight, normal pose
- * (FrontSide); 'B' = watertight, reflected pose (det < 0 flips winding, so
- * BackSide); 'D' = non-watertight member (DoubleSide — culling off, so normal
- * and reflected placements share one bucket).
+ * Bucket for one instanced batch: 'F' = watertight, normal similarity pose
+ * (FrontSide, smooth-capable); 'G' = watertight, normal NON-similarity pose
+ * (FrontSide, flat-shaded — see below); 'B' = watertight, reflected pose
+ * (det < 0 flips winding, so BackSide); 'D' = non-watertight member
+ * (DoubleSide — culling off, so normal and reflected placements share one
+ * bucket).
+ *
+ * Shading rule (docs/design/true-curves.md, review follow-up): only the 'F'
+ * bucket renders the tessellator's per-vertex analytic normals. The
+ * InstancedMesh shader transforms normals by `mat3(instanceMatrix)` with a
+ * squared-column-norm compensation that is only the true inverse-transpose
+ * for matrices with orthogonal columns — three.js's own chunk says "shear
+ * transforms in the instance matrix are not supported" — so non-similarity
+ * poses ('G') would shade smooth-but-WRONG. And the 'B' bucket's BackSide
+ * material defines FLIP_SIDED, which negates the transformed normal in the
+ * vertex shader: a mirrored batch with attribute normals lights inside-out
+ * even though the mirror maps the normals themselves correctly. 'D' mixes
+ * reflected and non-reflected slots under DOUBLE_SIDED's camera-facing
+ * flip, which equally disagrees with attribute normals on mirrored slots.
+ * All three therefore use `flatShading` (screen-space derivative normals —
+ * geometrically exact for ANY pose): honest degradation, faceted-but-right
+ * rather than smooth-but-wrong, mirroring the kernel's map-or-drop posture
+ * (tangent snaps are likewise dropped under non-similarity poses).
+ * Materialized instances are unaffected: their pose rides the object
+ * matrix, whose CPU-side `normalMatrix` is a true inverse-transpose, so
+ * they shade smooth under every pose including mirrors and shears.
  */
-type BucketTag = 'F' | 'B' | 'D'
+type BucketTag = 'F' | 'G' | 'B' | 'D'
 
 /**
  * One GPU batch: every non-materialized placement of one definition member
@@ -157,6 +179,10 @@ interface InstanceRecord {
   matrix: THREE.Matrix4
   /** det(linear part) < 0 — reflected placements land in the 'B' bucket. */
   reflected: boolean
+  /** Linear part is a similarity (orthogonal columns of equal norm) — only
+   * these poses may render smooth per-vertex normals in a batch (see
+   * `BucketTag`). */
+  similar: boolean
 }
 
 /** Scratch matrix for slot writes (module-level to avoid per-write alloc). */
@@ -434,7 +460,7 @@ export class SceneRenderer {
         next.componentId === prev.componentId &&
         next.memberIds.length === prev.memberIds.length &&
         next.memberIds.every((m, i) => m === prev.memberIds[i])
-      if (!sameMembers || next.reflected !== prev.reflected) {
+      if (!sameMembers || next.reflected !== prev.reflected || next.similar !== prev.similar) {
         // Bucket membership changed — the slow (rebuild) path.
         for (const m of prev.memberIds) membersToRebuild.add(m)
         for (const m of next.memberIds) membersToRebuild.add(m)
@@ -534,6 +560,30 @@ export class SceneRenderer {
     return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
   }
 
+  /**
+   * Whether the linear part of a row-major 3×4 pose is a similarity
+   * (columns mutually orthogonal with equal norms, i.e. rotation × uniform
+   * scale, possibly mirrored). Only similarity poses keep smooth per-vertex
+   * normals in the instanced-batch path (see `BucketTag`); the tolerance is
+   * relative so large uniform scales don't misclassify.
+   */
+  private _poseIsSimilarity(pose: Float64Array): boolean {
+    const col = (j: number) => [pose[j], pose[4 + j], pose[8 + j]]
+    const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    const c = [col(0), col(1), col(2)]
+    const n = c.map((v) => Math.sqrt(dot(v, v)))
+    const eps = 1e-6
+    const scale = Math.max(n[0], n[1], n[2])
+    if (scale === 0) return false
+    for (let i = 0; i < 3; i++) {
+      if (Math.abs(n[i] - scale) > eps * scale) return false
+      for (let j = i + 1; j < 3; j++) {
+        if (Math.abs(dot(c[i], c[j])) > eps * scale * scale) return false
+      }
+    }
+    return true
+  }
+
   /** Pull one placement's def/pose/members into its InstanceRecord (creating
    * or overwriting it). Returns undefined (and leaves no record) when the
    * kernel no longer knows the instance. */
@@ -558,6 +608,7 @@ export class SceneRenderer {
       // Reflected pose: flips face winding (watertight members only — an open
       // shell renders double-sided regardless of reflection).
       reflected: this._poseDet(pose) < 0,
+      similar: this._poseIsSimilarity(pose),
     }
     this.instanceRecords.set(instanceId, rec)
     return rec
@@ -594,8 +645,10 @@ export class SceneRenderer {
   }
 
   /** Bucket tag for one (member, placement) pair — see `BucketTag`. */
-  private _bucketTag(watertight: boolean, reflected: boolean): BucketTag {
-    return watertight ? (reflected ? 'B' : 'F') : 'D'
+  private _bucketTag(watertight: boolean, reflected: boolean, similar: boolean): BucketTag {
+    if (!watertight) return 'D'
+    if (reflected) return 'B'
+    return similar ? 'F' : 'G'
   }
 
   /** Batch key for one member as rendered by one placement, or undefined when
@@ -603,7 +656,7 @@ export class SceneRenderer {
   private _batchKeyFor(memberId: bigint, rec: InstanceRecord): string | undefined {
     const cached = this.memberGeometryCache.get(memberId)
     if (cached === undefined) return undefined
-    return `${memberId}|${this._bucketTag(cached.watertight, rec.reflected)}`
+    return `${memberId}|${this._bucketTag(cached.watertight, rec.reflected, rec.similar)}`
   }
 
   /** Dispose and rebuild every batch of one definition member from the current
@@ -621,7 +674,7 @@ export class SceneRenderer {
     const cached = this._getMemberGeometry(memberId)
     const byTag = new Map<BucketTag, InstanceRecord[]>()
     for (const rec of placements) {
-      const tag = this._bucketTag(cached.watertight, rec.reflected)
+      const tag = this._bucketTag(cached.watertight, rec.reflected, rec.similar)
       const list = byTag.get(tag)
       if (list === undefined) byTag.set(tag, [rec])
       else list.push(rec)
@@ -634,7 +687,13 @@ export class SceneRenderer {
   /** Build one (member, bucket) batch: an InstancedMesh for faces and an
    * instanced-edge LineSegments, with one slot per placement. */
   private _buildBatch(memberId: bigint, tag: BucketTag, recs: InstanceRecord[], cached: MemberGeometry): void {
-    const side = tag === 'F' ? THREE.FrontSide : tag === 'B' ? THREE.BackSide : THREE.DoubleSide
+    const side =
+      tag === 'F' || tag === 'G' ? THREE.FrontSide : tag === 'B' ? THREE.BackSide : THREE.DoubleSide
+    // Only the 'F' bucket may consume the tessellator's per-vertex normals;
+    // every other bucket shades flat (see `BucketTag` for the shader-level
+    // reasons: non-inverse-transpose instance normal transforms and the
+    // FLIP_SIDED / DOUBLE_SIDED sign flips disagree with attribute normals).
+    const flatShading = tag !== 'F'
 
     // Fresh BufferAttribute wrappers over the shared TypedArrays — the batch
     // owns these GPU buffers, so disposing it cannot free another batch's.
@@ -651,6 +710,7 @@ export class SceneRenderer {
       cached.groupCounts,
       faceGeo,
       side,
+      flatShading,
     )
     const mesh = new THREE.InstancedMesh(faceGeo, materials, recs.length)
     mesh.name = `InstanceBatch_${memberId}_${tag}`
@@ -1025,6 +1085,23 @@ export class SceneRenderer {
    * (id == `u64::MAX`) the material uses `vertexColors: true` so the per-vertex
    * colors from the tessellator drive the shading; all other groups also use
    * `vertexColors: true` since the color is baked in already.
+   *
+   * Materials default to smooth shading (`flatShading` unset) — with the
+   * flag on, three.js ignores the `normal` attribute and derives flat
+   * normals in the shader, discarding the analytic smooth shading the
+   * tessellator emits (docs/design/true-curves.md stage 4). The kernel's
+   * tessellator duplicates vertices per face and, for planar (unattributed)
+   * faces, writes the exact face-plane normal at every corner, so planar
+   * faces still shade flat from the attribute alone; only attributed curved
+   * walls carry varying per-vertex normals and therefore shade smooth.
+   * Smooth shading is unconditionally correct for standalone objects and
+   * materialized instances (their normals go through the CPU-side
+   * `normalMatrix`, a true inverse-transpose for any pose). The
+   * instanced-batch path is NOT so lucky — its per-slot poses transform
+   * normals in the vertex shader without a per-instance inverse-transpose,
+   * and BackSide/DoubleSide sign flips disagree with attribute normals on
+   * mirrored slots — so batches pass `flatShading: true` for every bucket
+   * except 'F' (see `BucketTag` for the full derivation).
    */
   private _buildMaterialArray(
     groupMaterialIds: BigUint64Array,
@@ -1032,6 +1109,7 @@ export class SceneRenderer {
     groupCounts: Uint32Array,
     geometry: THREE.BufferGeometry,
     side: THREE.Side = THREE.FrontSide,
+    flatShading: boolean = false,
   ): THREE.MeshPhongMaterial[] {
     const materials: THREE.MeshPhongMaterial[] = []
     const SENTINEL = BigInt('18446744073709551615') // u64::MAX
@@ -1045,7 +1123,7 @@ export class SceneRenderer {
         materials.push(
           new THREE.MeshPhongMaterial({
             vertexColors: true,
-            flatShading: true,
+            flatShading,
             side,
           }),
         )
@@ -1091,7 +1169,7 @@ export class SceneRenderer {
           vertexColors: tex === undefined, // use vertex colors when no texture
           color: tex !== undefined ? color : undefined,
           map: tex,
-          flatShading: true,
+          flatShading,
           side,
           transparent: baseOpacity < 1,
           opacity: baseOpacity,
@@ -1109,7 +1187,7 @@ export class SceneRenderer {
       materials.push(
         new THREE.MeshPhongMaterial({
           color: FACE_COLOR_DEFAULT,
-          flatShading: true,
+          flatShading,
           side,
         }),
       )

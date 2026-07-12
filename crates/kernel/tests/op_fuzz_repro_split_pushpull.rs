@@ -49,6 +49,7 @@ fn split_then_push_pull_keeps_valid_topology() {
             KernelOp::SplitFace {
                 face,
                 path: vec![point_on(2, 0.25), point_on(3, 0.25)],
+                restore: None,
             },
         )
         .expect("split is valid");

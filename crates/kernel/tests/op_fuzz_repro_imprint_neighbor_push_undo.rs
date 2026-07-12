@@ -39,6 +39,7 @@ fn split_op(
     Some(KernelOp::SplitFace {
         face,
         path: vec![point_on(a, ta), point_on(b, tb)],
+        restore: None,
     })
 }
 
@@ -52,7 +53,12 @@ fn imprint_op(object: &Object, face_sel: usize, shrink: f64) -> KernelOp {
         Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
     });
     let loop_path: Vec<Point3> = boundary.iter().map(|&p| c + (p - c) * shrink).collect();
-    KernelOp::SplitFaceInner { face, loop_path }
+    KernelOp::SplitFaceInner {
+        face,
+        loop_path,
+        restore: None,
+        curve: None,
+    }
 }
 
 #[test]

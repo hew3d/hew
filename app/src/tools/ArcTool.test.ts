@@ -73,6 +73,7 @@ function makeWasmScene(opts: {
     }),
     sketch_end_gesture: vi.fn(),
     sketch_begin_curve: vi.fn(() => 91n),
+    sketch_begin_curve_with: vi.fn(() => 91n),
     sketch_end_curve: vi.fn(),
     sketch_add_segment: vi.fn((_sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
       if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
@@ -120,7 +121,7 @@ describe('ArcTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 1, y: 0.5 }), RAY) // commit
 
     const arc = arcFromChord([0, 0], [2, 0], 0.5)!
-    const expectSegs = arcSegmentCount(arc.sweep)
+    const expectSegs = arcSegmentCount(arc.sweep, arc.radius)
     expect(segments.length).toBe(expectSegs)
 
     // Exact endpoints — no float drift at the chain's ends.
@@ -289,7 +290,7 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
   // Shared geometry: A=(0,0), B=(2,0), bulge (1, 0.5) → s=0.5, r=1.25,
   // center=(1, −0.75) (on the side opposite the bulge).
   const ARC = arcFromChord([0, 0], [2, 0], 0.5)!
-  const ARC_SEGS = arcSegmentCount(ARC.sweep)
+  const ARC_SEGS = arcSegmentCount(ARC.sweep, ARC.radius)
 
   function drawToBulge(tool: ArcTool): void {
     tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)   // A

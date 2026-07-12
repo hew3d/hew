@@ -487,3 +487,154 @@ fn valid_washer_profile_constructs() {
     assert_eq!(profile.outer().len(), 4);
     assert_eq!(profile.holes().len(), 1);
 }
+
+// -------------------------------------------------------- curve geometry
+//
+// A curve chain opened with `begin_curve_with` carries the analytic circle
+// the drawing tool computed (docs/design/true-curves.md). The geometry is
+// durable across sticky splits, maps under similarity transforms, and DROPS
+// (identity kept) under anything that deforms the chain away from its circle
+// — the map-or-drop contract. Nothing here touches the facets themselves.
+
+/// Commits an `n`-gon circle chain around `center` and returns its curve id.
+fn circle_chain(s: &mut Sketch, center: Point3, radius: f64, n: usize) -> kernel::SketchCurveId {
+    let id = s
+        .begin_curve_with(kernel::CurveGeom { center, radius })
+        .unwrap();
+    let p = |i: usize| {
+        let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+        pt(center.x + radius * a.cos(), center.y + radius * a.sin())
+    };
+    for i in 0..n {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+    id
+}
+
+#[test]
+fn begin_curve_with_records_retrievable_geometry() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(1.0, 1.0), 0.5, 12);
+    let g = s.curve_geom(id).expect("geometry recorded");
+    assert!(g.center.approx_eq(pt(1.0, 1.0), tol::POINT_MERGE));
+    assert_eq!(g.radius, 0.5);
+    // A plain bracket mints an identity-only chain.
+    let plain = s.begin_curve();
+    s.end_curve();
+    assert_eq!(s.curve_geom(plain), None);
+}
+
+#[test]
+fn begin_curve_with_rejects_off_plane_center() {
+    let mut s = xy_sketch();
+    let err = s
+        .begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(0.0, 0.0, 1.0),
+            radius: 0.5,
+        })
+        .unwrap_err();
+    assert_eq!(err, SketchError::PointOffPlane { which: 0 });
+    // No bracket opened: the next segment stays a plain line.
+    s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
+    assert!(s.edges().values().all(|e| e.curve.is_none()));
+}
+
+#[test]
+fn begin_curve_with_rejects_degenerate_radius() {
+    let mut s = xy_sketch();
+    for bad in [0.0, tol::POINT_MERGE, -1.0, f64::NAN, f64::INFINITY] {
+        let err = s
+            .begin_curve_with(kernel::CurveGeom {
+                center: pt(0.0, 0.0),
+                radius: bad,
+            })
+            .unwrap_err();
+        assert_eq!(err, SketchError::DegenerateCurve, "radius {bad}");
+    }
+}
+
+#[test]
+fn sticky_split_keeps_curve_geometry() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 12);
+    // A chord across the circle splits facets; fragments inherit the chain
+    // and the chain keeps its analytic definition.
+    s.add_segment(pt(-2.0, 0.1), pt(2.0, 0.1)).unwrap();
+    let g = s.curve_geom(id).expect("split does not drop geometry");
+    assert!(g.center.approx_eq(pt(0.0, 0.0), tol::POINT_MERGE));
+    assert_eq!(g.radius, 1.0);
+}
+
+#[test]
+fn move_vertex_drops_touched_chain_geometry() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 12);
+    let v = vertex_at(&s, pt(1.0, 0.0));
+    // Nudge one facet corner inward: still topology-preserving, but the
+    // chain no longer lies on its drawn circle.
+    s.move_vertex(v, pt(0.9, 0.0)).unwrap();
+    assert_eq!(s.curve_geom(id), None, "deformed chain drops its circle");
+    // Identity survives: the chain still selects as one unit.
+    let tagged = s.edges().values().filter(|e| e.curve == Some(id)).count();
+    assert_eq!(tagged, 12);
+}
+
+#[test]
+fn sketch_translate_and_uniform_scale_map_curve_geometry() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(1.0, 0.0), 0.5, 12);
+
+    s.apply_transform(&kernel::Transform::translation(kernel::Vec3::new(
+        2.0, 3.0, 0.0,
+    )))
+    .unwrap();
+    let g = s.curve_geom(id).expect("translation maps geometry");
+    assert!(g.center.approx_eq(pt(3.0, 3.0), 1e-12));
+    assert_eq!(g.radius, 0.5);
+
+    s.apply_transform(&kernel::Transform::uniform_scale(2.0))
+        .unwrap();
+    let g = s.curve_geom(id).expect("uniform scale maps geometry");
+    assert!(g.center.approx_eq(pt(6.0, 6.0), 1e-12));
+    assert!((g.radius - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn nonuniform_in_plane_scale_drops_curve_geometry() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(1.0, 1.0), 0.5, 12);
+    // x-only stretch: the drawn circle becomes an ellipse the metadata
+    // cannot describe — geometry drops, identity stays.
+    s.apply_transform(&kernel::Transform::scale(kernel::Vec3::new(2.0, 1.0, 1.0)))
+        .unwrap();
+    assert_eq!(s.curve_geom(id), None);
+    assert!(s.edges().values().any(|e| e.curve == Some(id)));
+}
+
+#[test]
+fn island_move_maps_only_the_moved_chain() {
+    let mut s = xy_sketch();
+    let moved = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 12);
+    let bystander = circle_chain(&mut s, pt(10.0, 0.0), 1.0, 12);
+
+    let island = s
+        .island_of_edge(
+            s.edges()
+                .iter()
+                .find(|(_, e)| e.curve == Some(moved))
+                .map(|(id, _)| id)
+                .unwrap(),
+        )
+        .unwrap();
+    s.apply_transform_island(
+        island,
+        &kernel::Transform::translation(kernel::Vec3::new(3.0, 0.0, 0.0)),
+    )
+    .unwrap();
+
+    let g = s.curve_geom(moved).expect("moved chain maps");
+    assert!(g.center.approx_eq(pt(3.0, 0.0), 1e-12));
+    let b = s.curve_geom(bystander).expect("bystander untouched");
+    assert!(b.center.approx_eq(pt(10.0, 0.0), 1e-12));
+}

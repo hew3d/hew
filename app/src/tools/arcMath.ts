@@ -33,10 +33,39 @@ export type Vec2 = [number, number]
 /** 3-element number tuple (world coordinates, meters) — matches geoHelpers' V3. */
 export type Vec3 = [number, number, number]
 
-/** Facet density: segments per quarter turn of sweep. A full quarter circle
- * gets 12 segments (matching CIRCLE_SEGMENTS' visual density on a half turn).
- * VCB segment-count override is explicitly deferred. */
-export const ARC_SEGMENTS_PER_QUARTER_TURN = 12
+/**
+ * Draw-time facet density (docs/design/true-curves.md §6, ratified): the
+ * chord-sagitta budget — the largest deviation a stored chord may have from
+ * the true circle. Fixed at half a millimeter: about an FDM printer's
+ * practical tolerance, and below silhouette visibility. The analytic
+ * definition rides the curve chain regardless (center + radius), so export
+ * re-faceting restores exactness on demand; this budget only bounds the
+ * error of the boolean-frozen carrier.
+ */
+export const DRAW_SAGITTA_TOL_M = 5e-4
+
+/** Floor of the adaptive segments-per-turn rule — small curves stay 24-gon. */
+export const MIN_SEGMENTS_PER_TURN = 24
+
+/** Cap of the adaptive rule — beyond 96 per turn, file/boolean cost buys no
+ * visible silhouette and export re-faceting covers accuracy. */
+export const MAX_SEGMENTS_PER_TURN = 96
+
+/**
+ * Segments per full turn for a drawn curve of `radius` meters:
+ * `clamp(24, 96, ceil4(π / acos(1 − s/r)))` — the coarsest count whose
+ * sagitta stays within `DRAW_SAGITTA_TOL_M`, rounded UP to a multiple of 4
+ * so quadrant-angle vertices always exist on a drawn circle. Degenerate
+ * radii take the floor.
+ */
+export function segmentsPerTurn(radius: number): number {
+  if (!Number.isFinite(radius) || radius <= 0) return MIN_SEGMENTS_PER_TURN
+  const ratio = DRAW_SAGITTA_TOL_M / radius
+  if (ratio >= 1) return MIN_SEGMENTS_PER_TURN
+  const exact = Math.PI / Math.acos(1 - ratio)
+  const ceil4 = Math.ceil(exact / 4) * 4
+  return Math.min(MAX_SEGMENTS_PER_TURN, Math.max(MIN_SEGMENTS_PER_TURN, ceil4))
+}
 
 /** Chords shorter than this are degenerate — no arc (mirrors CircleTool's
  * zero-radius guard scale). */
@@ -114,13 +143,15 @@ export function arcFromChord(a: Vec2, b: Vec2, s: number): ArcGeometry | null {
 }
 
 /**
- * Number of straight segments approximating a sweep of |sweep| radians:
- * ceil(|sweep| / (π/2) · ARC_SEGMENTS_PER_QUARTER_TURN), floored at 2 so even
- * a sliver arc keeps a visible bulge vertex.
+ * Number of straight segments approximating a sweep of |sweep| radians at
+ * `radius` meters: the adaptive per-turn density scaled by the sweep
+ * fraction — `ceil(|sweep| / 2π · segmentsPerTurn(radius))` — floored at 2
+ * so even a sliver arc keeps a visible bulge vertex. An arc and a circle of
+ * equal radius facet at equal density (docs/design/true-curves.md §6).
  */
-export function arcSegmentCount(sweep: number): number {
-  const quarters = Math.abs(sweep) / (Math.PI / 2)
-  return Math.max(2, Math.ceil(quarters * ARC_SEGMENTS_PER_QUARTER_TURN))
+export function arcSegmentCount(sweep: number, radius: number): number {
+  const turns = Math.abs(sweep) / (2 * Math.PI)
+  return Math.max(2, Math.ceil(turns * segmentsPerTurn(radius)))
 }
 
 /**
@@ -136,7 +167,7 @@ export function arcPolyline(a: Vec2, b: Vec2, s: number): Vec2[] | null {
   if (arc === null) return null
   const { center, radius, startAngle, sweep } = arc
 
-  const n = arcSegmentCount(sweep)
+  const n = arcSegmentCount(sweep, radius)
   const pts: Vec2[] = [[a[0], a[1]]]
   for (let i = 1; i < n; i++) {
     const angle = startAngle + (sweep * i) / n

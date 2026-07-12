@@ -438,7 +438,7 @@ export class ArcTool implements Tool {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
-    this._commitGroundChain(chain.chain, chain.curveSegments)
+    this._commitGroundChain(chain.chain, chain.curveSegments, chain.geom)
     this.groundStage = { kind: 'idle' }
     this.typed = ''
     this._lastGroundCursor = null
@@ -592,7 +592,7 @@ export class ArcTool implements Tool {
       return
     }
 
-    this._commitGroundChain(chain.chain, chain.curveSegments)
+    this._commitGroundChain(chain.chain, chain.curveSegments, chain.geom)
     this.groundStage = { kind: 'idle' }
     this.typed = ''
     this._lastGroundCursor = null
@@ -663,28 +663,46 @@ export class ArcTool implements Tool {
   /** The committed ground chain: the arc polyline plus the closing vertices
    *  for the current completion mode. `curveSegments` counts the ARC's own
    *  segments — the part tagged as one curve chain; pie/segment closing
-   *  edges stay plain lines. */
+   *  edges stay plain lines. `geom` is the arc's analytic circle (center on
+   *  the ground plane + radius), recorded on the curve chain so the kernel
+   *  keeps the exact definition the facets approximate. */
   private _groundChain(
     a: Vec2,
     b: Vec2,
     s: number,
-  ): { chain: V3[]; curveSegments: number } | null {
+  ): { chain: V3[]; curveSegments: number; geom: { center: V3; radius: number } | null } | null {
     const verts = this._groundPolyline(a, b, s)
     if (verts === null) return null
+    const arc = arcFromChord(a, b, s)
     return {
       chain: verts.concat(this._closingVerts(verts, this._groundCenter(a, b, s))),
       curveSegments: verts.length - 1,
+      geom: arc === null ? null : { center: [arc.center[0], arc.center[1], 0], radius: arc.radius },
     }
   }
 
   /** Commit the polyline chain as N ground-sketch segments; the first
    *  `curveSegments` of them are bracketed as ONE curve chain (the arc), so
-   *  clicking any facet later selects the whole arc. */
-  private _commitGroundChain(verts: V3[], curveSegments: number): void {
+   *  clicking any facet later selects the whole arc. When the arc's analytic
+   *  circle is known it rides on the chain (durable center/radius —
+   *  docs/design/true-curves.md). */
+  private _commitGroundChain(
+    verts: V3[],
+    curveSegments: number,
+    geom: { center: V3; radius: number } | null = null,
+  ): void {
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         let lastRegionsCreated: bigint[] = []
-        this.wasmScene.sketch_begin_curve(sketch)
+        if (geom !== null) {
+          this.wasmScene.sketch_begin_curve_with(
+            sketch,
+            geom.center[0], geom.center[1], geom.center[2],
+            geom.radius,
+          )
+        } else {
+          this.wasmScene.sketch_begin_curve(sketch)
+        }
         try {
           for (let i = 0; i < verts.length - 1; i++) {
             if (i === curveSegments) this.wasmScene.sketch_end_curve(sketch)

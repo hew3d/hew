@@ -209,6 +209,37 @@ impl Transform {
         Plane::from_polygon(&triangle).map_err(|_| TransformError::Singular)
     }
 
+    /// The uniform scale factor of this map when its linear part is a
+    /// similarity (rotation × uniform scale), or `None` otherwise.
+    ///
+    /// A similarity is exactly the class of maps that keep a circle a circle
+    /// (of scaled radius), which is what lets analytic curve/surface
+    /// metadata map through a transform instead of being dropped
+    /// (docs/design/true-curves.md). Checked as `Lᵀ·L ≈ s²·I` on the column
+    /// vectors, within [`tol::NORMAL_DIRECTION`] relative (dimensionless).
+    pub fn similarity_scale(&self) -> Option<f64> {
+        let l = &self.linear;
+        let col = |j: usize| Vec3::new(l[0][j], l[1][j], l[2][j]);
+        let (c0, c1, c2) = (col(0), col(1), col(2));
+        let (n0, n1, n2) = (
+            c0.length_squared(),
+            c1.length_squared(),
+            c2.length_squared(),
+        );
+        let s2 = (n0 + n1 + n2) / 3.0;
+        if s2 < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
+            return None;
+        }
+        let tol_rel = tol::NORMAL_DIRECTION * s2;
+        if (n0 - s2).abs() > tol_rel || (n1 - s2).abs() > tol_rel || (n2 - s2).abs() > tol_rel {
+            return None;
+        }
+        if c0.dot(c1).abs() > tol_rel || c0.dot(c2).abs() > tol_rel || c1.dot(c2).abs() > tol_rel {
+            return None;
+        }
+        Some(s2.sqrt())
+    }
+
     /// Determinant of the linear part. Negative means the transform flips
     /// orientation (a reflection); zero means singular.
     pub fn determinant(&self) -> f64 {

@@ -48,6 +48,15 @@ pub enum RecordedCall {
     SketchBeginGesture { sketch: u64 },
     /// `sketch_begin_curve(sketch)`.
     SketchBeginCurve { sketch: u64 },
+    /// `sketch_begin_curve_with(sketch, center, radius)` — a curve bracket
+    /// carrying the chain's analytic circle. Additive variant: recordings
+    /// that never use it replay on older builds unchanged; one that does
+    /// fails to parse there (loudly, never silently divergent).
+    SketchBeginCurveWith {
+        sketch: u64,
+        center: [f64; 3],
+        radius: f64,
+    },
     /// `sketch_end_curve(sketch)`.
     SketchEndCurve { sketch: u64 },
     /// `sketch_end_gesture(sketch)`.
@@ -76,6 +85,31 @@ pub enum RecordedCall {
     },
     /// `delete_node(kind, id)`.
     DeleteNode { kind: u8, id: u64 },
+    /// `split_face_inner(object, face, loop_pts)` — imprint a closed loop on a
+    /// solid face (draw-on-face). `curve`, when present, is the drawn circle's
+    /// analytic identity `[center.x, center.y, center.z, radius]` and routes to
+    /// `split_face_inner_with_curve` so a later push-through stamps the tunnel
+    /// walls (docs/design/true-curves.md, playtest fix C3). Additive variant:
+    /// recordings that never imprint on a face replay on older builds
+    /// unchanged; one that does fails to parse there (loudly, never silently
+    /// divergent), the same posture as `SketchBeginCurveWith`.
+    SplitFaceInner {
+        object: u64,
+        face: u64,
+        loop_pts: Vec<f64>,
+        curve: Option<[f64; 4]>,
+    },
+    /// `push_pull(object, face, distance)` — the user-level push/pull of a
+    /// solid face. Replay re-issues it and the kernel re-derives the routing
+    /// (translate, coplanar-aware, whole-wall radial offset, boss/recess, or
+    /// through-cut), so recording the intent alone reproduces the result.
+    /// Additive variant (same posture as the others); enables a draw-on-face
+    /// imprint to be pushed through in replay (docs/design/true-curves.md, C3).
+    PushPull {
+        object: u64,
+        face: u64,
+        distance: f64,
+    },
 }
 
 /// A complete recorded session: the committed call stream plus the canonical

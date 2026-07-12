@@ -41,8 +41,8 @@
 //! it closes). This keeps every committed state a valid solid.
 
 use crate::geom2d::{
-    boundaries_contact, point_inside_polygon, point_near_segment, polygon_is_simple,
-    segments_intersect, signed_area_on_plane,
+    boundaries_contact, interior_point_of_loops, point_inside_polygon, point_near_segment,
+    polygon_is_simple, segments_intersect, signed_area_on_plane,
 };
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
@@ -111,13 +111,37 @@ pub struct FaceSplitInnerReport {
     pub new_edges: Vec<EdgeId>,
 }
 
-/// What `merge_faces` changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A face's restorable attribute state pinned to a point strictly inside
+/// that face's pre-merge material. The merge reports snapshot one per
+/// dissolved face; the split ops' restore path re-applies each to whichever
+/// result face contains the point — geometric matching, so the restoration
+/// is correct regardless of which fragment ends up on which handle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceAttrsAt {
+    /// A point strictly inside the face the attributes belonged to.
+    pub point: Point3,
+    /// The face's attribute state at snapshot time.
+    pub attrs: crate::topo::FaceAttrs,
+}
+
+/// What `merge_faces` changed. (`prior_attrs` carries f64 positions, so this
+/// is `PartialEq` but not `Eq`.)
+#[derive(Debug, Clone, PartialEq)]
 pub struct FaceMergeReport {
     /// The single face replacing the two inputs (both input handles die).
     pub merged_face: FaceId,
     /// Now-dead handles of the dissolved shared-boundary edges.
     pub removed_edges: Vec<EdgeId>,
+    /// Pre-merge attribute snapshots of the two input faces, each pinned to
+    /// an interior point, so undoing the merge restores exactly the
+    /// attributes each side had — never a copy of the survivor's. BEST
+    /// EFFORT per face: a face too degenerate to pin an interior point in
+    /// (a sub-[`tol::POINT_MERGE`]-width sliver, reachable only through
+    /// imported polygon soup) snapshots as `None`, the merge proceeds
+    /// unchanged, and undo falls back to inheriting the survivor's
+    /// attributes for that face only — attribute fidelity degrades before
+    /// forward behavior ever does.
+    pub prior_attrs: [Option<FaceAttrsAt>; 2],
 }
 
 /// What `merge_inner_face` changed: a sub-face dissolved back into its parent.
@@ -129,6 +153,12 @@ pub struct FaceMergeInnerReport {
     /// The dissolved loop's positions (parent-relative), in order — re-imprinting
     /// them on `parent` restores the sub-face.
     pub loop_path: Vec<Point3>,
+    /// The dissolved sub-face's attribute state at merge time, so undoing
+    /// the merge restores exactly what the sub-face carried — never a fresh
+    /// copy inherited from the current parent, which would resurrect an
+    /// analytic claim the sub-face had legitimately lost (or lose its own
+    /// paint).
+    pub sub_face_attrs: crate::topo::FaceAttrs,
 }
 
 /// What `collapse_sub_face` changed: a raised sub-face flattened back, its walls
@@ -181,6 +211,19 @@ pub enum PushPullError {
     /// `extrude_sub_face`/`collapse_sub_face` on a face that is not the expected
     /// kind (a flat imprinted sub-face, or a raised one with generated walls).
     NotASubFace,
+    /// Whole-wall push/pull on an attributed cylinder wall
+    /// (docs/design/true-curves.md §4.6): the offset would shrink the wall's
+    /// radius to or below [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) — the
+    /// cylinder would vanish into its own axis. Refused; the object is
+    /// untouched.
+    RadiusVanishes,
+    /// Whole-wall push/pull on an attributed cylinder wall: a neighboring
+    /// face would be bent off any single plane by the radial offset (e.g. a
+    /// stepped or bossed wall touching the cylinder's seam, where some of
+    /// its vertices follow the wall and others are pinned elsewhere).
+    /// Refused rather than folded — neighbors may translate, stretch, or
+    /// pivot with the wall, but never cease to be planar.
+    WallNeighborNonPlanar,
 }
 
 /// How an operation treats its best-effort obstruction heuristics
@@ -260,6 +303,12 @@ pub enum StickyError {
     },
     /// `split_face_inner`: the loop crosses itself.
     LoopSelfIntersects,
+    /// `split_face_inner_with_curve`: the supplied analytic circle claim does
+    /// not describe the loop — a degenerate radius, or a loop vertex not
+    /// within tolerance of `radius` from `center`. The kernel never fits a
+    /// circle to the points (no silent repair, DEVELOPMENT.md rule 4); the
+    /// caller must supply the circle the vertices actually lie on.
+    CurveClaimOffLoop,
     /// `merge_inner_face`: the face is not an imprinted sub-face (its boundary is
     /// not a single closed loop twinned entirely with one parent's hole loop).
     NotAnInnerFace,
@@ -345,6 +394,12 @@ impl std::fmt::Display for PushPullError {
             PushPullError::WouldVanish => "push/pull would remove all material",
             PushPullError::NonManifoldResult => "push/pull sweep has no manifold result",
             PushPullError::NotASubFace => "face is not the expected imprinted sub-face",
+            PushPullError::RadiusVanishes => {
+                "wall offset would shrink the cylinder radius to nothing"
+            }
+            PushPullError::WallNeighborNonPlanar => {
+                "wall offset would bend a neighboring face off its plane"
+            }
         };
         write!(f, "{msg}")
     }
@@ -393,6 +448,9 @@ impl std::fmt::Display for StickyError {
                 write!(f, "loop vertex {index} is not strictly inside the face")
             }
             StickyError::LoopSelfIntersects => write!(f, "loop crosses itself"),
+            StickyError::CurveClaimOffLoop => {
+                write!(f, "analytic circle claim does not match the loop vertices")
+            }
             StickyError::NotAnInnerFace => {
                 write!(f, "face is not an imprinted sub-face")
             }
@@ -449,11 +507,46 @@ impl Object {
         for v in self.vertices.values_mut() {
             v.position = transform.apply_point(v.position);
         }
+        // Analytic surface references map under similarities (rotation ×
+        // uniform scale — the maps that keep a cylinder a cylinder) and DROP
+        // under anything else (map-or-drop, docs/design/true-curves.md).
+        let scale = transform.similarity_scale();
         for f in self.faces.values_mut() {
             // Non-singular by the check above, so apply_plane cannot fail.
             f.plane = transform
                 .apply_plane(&f.plane)
                 .expect("apply_plane on a validated non-singular transform");
+            f.surface = match (f.surface, scale) {
+                (
+                    Some(crate::topo::SurfaceRef::Cylinder {
+                        axis_point,
+                        axis,
+                        radius,
+                    }),
+                    Some(s),
+                ) => transform.apply_vector(axis).normalized().ok().map(|axis| {
+                    crate::topo::SurfaceRef::Cylinder {
+                        axis_point: transform.apply_point(axis_point),
+                        axis,
+                        radius: radius * s,
+                    }
+                }),
+                _ => None,
+            };
+        }
+        // Per-edge analytic circle claims follow the same map-or-drop rule:
+        // a similarity maps the center as a point and scales the radius; any
+        // non-similarity drops the claim (an ellipse is not a circle).
+        for e in self.edges.values_mut() {
+            e.curve = match (e.curve, scale) {
+                (Some(crate::sketch::CurveGeom { center, radius }), Some(s)) => {
+                    Some(crate::sketch::CurveGeom {
+                        center: transform.apply_point(center),
+                        radius: radius * s,
+                    })
+                }
+                _ => None,
+            };
         }
         self.check_invariants();
         Ok(())
@@ -533,9 +626,24 @@ impl Object {
         };
         // Far layer starts total_near positions later.
 
-        // We'll collect (outer_loop_indices, inner_loop_index_lists, plane)
-        // tuples for from_faces_with_holes.
-        let mut face_specs: Vec<(Vec<usize>, Vec<Vec<usize>>, Plane)> = Vec::new();
+        // We'll collect (outer_loop_indices, inner_loop_index_lists, plane,
+        // surface) tuples for from_faces_with_holes. `surface` is the wall's
+        // analytic cylinder when its profile edge came from a curve chain
+        // with geometry (docs/design/true-curves.md); caps carry None.
+        #[allow(clippy::type_complexity)]
+        let mut face_specs: Vec<(
+            Vec<usize>,
+            Vec<Vec<usize>>,
+            Plane,
+            Option<crate::topo::SurfaceRef>,
+        )> = Vec::new();
+        // A wall facet's cylinder: axis = the sweep direction through the
+        // profile curve's center, radius = the curve's radius.
+        let wall_surface = |g: crate::sketch::CurveGeom| crate::topo::SurfaceRef::Cylinder {
+            axis_point: g.center,
+            axis: normal,
+            radius: g.radius,
+        };
 
         // ---- near cap -------------------------------------------------------
         // Faces -normal (away from sweep for positive distance).
@@ -561,7 +669,7 @@ impl Object {
             })
             .collect();
 
-        face_specs.push((near_outer_reversed, near_inner_loops, near_cap_plane));
+        face_specs.push((near_outer_reversed, near_inner_loops, near_cap_plane, None));
 
         // ---- far cap --------------------------------------------------------
         // Faces +normal (along sweep direction).
@@ -584,7 +692,7 @@ impl Object {
             Plane::from_polygon(&far_outer_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?
         };
 
-        face_specs.push((far_outer, far_inner_loops, far_cap_plane));
+        face_specs.push((far_outer, far_inner_loops, far_cap_plane, None));
 
         // ---- outer walls ----------------------------------------------------
         // For edge (a, b) in the outer loop (CCW from +normal), the wall quad
@@ -602,7 +710,12 @@ impl Object {
             ];
             let wall_plane =
                 Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
-            face_specs.push((vec![a_near, b_near, b_far, a_far], vec![], wall_plane));
+            face_specs.push((
+                vec![a_near, b_near, b_far, a_far],
+                vec![],
+                wall_plane,
+                profile.outer_curve(k).map(wall_surface),
+            ));
         }
 
         // ---- hole walls -----------------------------------------------------
@@ -625,7 +738,12 @@ impl Object {
                 ];
                 let wall_plane =
                     Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
-                face_specs.push((vec![a_near, b_near, b_far, a_far], vec![], wall_plane));
+                face_specs.push((
+                    vec![a_near, b_near, b_far, a_far],
+                    vec![],
+                    wall_plane,
+                    profile.hole_curve(i, k).map(wall_surface),
+                ));
             }
         }
 
@@ -637,7 +755,7 @@ impl Object {
         if distance < 0.0 {
             face_specs = face_specs
                 .into_iter()
-                .map(|(outer_idx, inner_lists, _plane)| {
+                .map(|(outer_idx, inner_lists, _plane, surface)| {
                     let rev_outer: Vec<usize> = outer_idx.into_iter().rev().collect();
                     let rev_inners: Vec<Vec<usize>> = inner_lists
                         .into_iter()
@@ -646,7 +764,7 @@ impl Object {
                     let pts: Vec<Point3> = rev_outer.iter().map(|&i| positions[i]).collect();
                     let plane =
                         Plane::from_polygon(&pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
-                    Ok((rev_outer, rev_inners, plane))
+                    Ok((rev_outer, rev_inners, plane, surface))
                 })
                 .collect::<Result<Vec<_>, ExtrudeError>>()?;
         }
@@ -654,9 +772,18 @@ impl Object {
         // Freshly extruded faces take the default material and no UV frame.
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(outer, inners, plane)| (outer, inners, plane, None, None))
+            .map(|(outer, inners, plane, surface)| (outer, inners, plane, None, None, surface))
             .collect();
         let obj = Object::from_faces_with_holes(&positions, &face_specs);
+        // Note: extrusion stamps side-wall FACES with `SurfaceRef` (above) but
+        // does NOT stamp cap EDGES with the profile's circle. A cap whose
+        // outer loop is a circle can only be pushed *through* into the
+        // opposing cap of the same prism, which vanishes it; any reachable
+        // "push a circular face through" is the imprinted disk sub-face, whose
+        // edges the imprint stamps directly. Cap-edge stamping is therefore
+        // omitted (it would serve no reachable case and carries a far-cap
+        // center trap) — docs/design/true-curves.md, playtest fix C3.
+
         // A valid Profile should always yield a valid solid; if the sweep
         // nonetheless produced invalid topology, return a typed error rather
         // than tripping the debug-only validator panic at the WASM boundary.
@@ -698,6 +825,30 @@ impl Object {
     ///   the object may split into multiple shells (still one Object).
     /// - The inverse property: `push_pull(f, d)` then `push_pull(f', -d)` on
     ///   the returned face restores the original topology and geometry.
+    /// - **Whole-wall semantics for attributed cylinder walls**
+    ///   (docs/design/true-curves.md §4.6): a face carrying a
+    ///   [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef) does not translate.
+    ///   Pushing any facet of a stamped wall acts on the **logical wall**: every
+    ///   face of this object claiming the same cylinder offsets radially so the
+    ///   wall's radius changes by exactly `distance` along the picked facet's
+    ///   outward normal (pulling an outer wall outward grows the radius; pulling
+    ///   a hole wall toward its axis shrinks the hole). The radial map is affine
+    ///   in the cross-section plane, so every fully-moved face (wall facets,
+    ///   full-seam chord walls, caps whose rim is the wall) stays planar by
+    ///   construction; the surface references map to the new radius (never
+    ///   dropped — the wall is still exactly that cylinder). Neighbors sharing
+    ///   vertices with the wall **follow**: they translate (a D-profile's chord
+    ///   wall), stretch in-plane (caps perpendicular to the axis, radial
+    ///   pie-slice walls), or pivot (a prism wall tangent to a rounded corner
+    ///   — two parallel vertical edges always span a plane). A neighbor that
+    ///   would be bent off any single plane (stepped/bossed walls pinned
+    ///   elsewhere) refuses with [`PushPullError::WallNeighborNonPlanar`];
+    ///   every reshaped face must stay simple with holes strictly inside and
+    ///   mutually disjoint ([`PushPullError::NonManifoldResult`]); an offset
+    ///   to radius ≤ [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) is
+    ///   [`PushPullError::RadiusVanishes`]. Inverse property: offsetting by
+    ///   `distance` then `-distance` on the same facet restores topology and
+    ///   geometry (within floating-point round-trip tolerance).
     ///
     /// # Errors
     /// See [`PushPullError`]; all leave the object untouched.
@@ -739,6 +890,14 @@ impl Object {
         }
         if distance.abs() < tol::POINT_MERGE {
             return Err(PushPullError::DistanceTooSmall);
+        }
+
+        // Attributed cylinder walls take the whole-wall path: the facet is a
+        // chord of a logical wall, and push/pull on it means "offset the
+        // wall's radius", never "translate this one facet"
+        // (docs/design/true-curves.md §4.6).
+        if self.faces[face].surface.is_some() {
+            return self.offset_cylinder_wall(face, distance);
         }
 
         let face_normal = self.faces[face].plane.normal();
@@ -982,6 +1141,19 @@ impl Object {
                 );
             }
         }
+        // The moved face left its plane: an analytic surface claim on it no
+        // longer holds (map-or-drop, docs/design/true-curves.md). Stretched
+        // transverse walls keep theirs — their planes are unchanged and they
+        // still lie on the same (infinite) cylinder.
+        if let Some(f) = obj.faces.get_mut(face) {
+            f.surface = None;
+        }
+        // A moved subset of vertices may carry an imprinted circle's endpoints
+        // off its stored center (a hole ring pushed to thicken the solid); drop
+        // any per-edge claim that no longer holds so a stale one never trips the
+        // validator (map-or-drop for Edge::curve).
+        obj.drop_stale_edge_curves();
+
         // Step 6: Validate (debug) and the always-on release-safe backstop
         //: a near-degenerate sweep that slips past the guards above yet
         // produces invalid topology must be refused, not committed.
@@ -995,6 +1167,296 @@ impl Object {
             face,
             created_faces,
             removed_faces,
+        })
+    }
+
+    /// The whole-wall half of [`Object::push_pull`]
+    /// (docs/design/true-curves.md §4.6): radially offsets the logical
+    /// cylinder wall `face` belongs to, changing its radius by `distance`
+    /// along `face`'s outward normal.
+    ///
+    /// Mechanism: every face of this object claiming the same cylinder
+    /// ([`SurfaceRef::same_surface`](crate::topo::SurfaceRef::same_surface))
+    /// is part of the wall; all their vertices move under the radial map
+    /// `p ↦ axis_proj(p) + (p − axis_proj(p)) · r'/r`, which is affine in
+    /// the cross-section plane (a uniform 2-D scale about the axis), so any
+    /// face **all** of whose vertices move stays planar by construction.
+    /// Faces with a mix of moved and fixed vertices stay planar when their
+    /// displacement lies in their own plane (caps perpendicular to the
+    /// axis, radial pie-slice walls) or when the face pivots as a whole (a
+    /// prism wall whose two vertical edges stay parallel); a face that
+    /// would genuinely bend refuses with
+    /// [`PushPullError::WallNeighborNonPlanar`]. Every reshaped face is
+    /// re-fit and re-checked (simple boundary, holes strictly inside,
+    /// orientation preserved) and the wall's surface references map to the
+    /// new radius — never dropped, the wall is still exactly that cylinder.
+    ///
+    /// Strong guarantee: on `Err` the object is untouched (clone, mutate,
+    /// validate, swap).
+    fn offset_cylinder_wall(
+        &mut self,
+        face: FaceId,
+        distance: f64,
+    ) -> Result<PushPullReport, PushPullError> {
+        let surface = self.faces[face]
+            .surface
+            .expect("offset_cylinder_wall is only routed to for attributed faces");
+        let crate::topo::SurfaceRef::Cylinder {
+            axis_point,
+            axis,
+            radius,
+        } = surface;
+
+        // Radial orientation of the picked facet: a chord plane sits at
+        // apothem distance from the axis, on the interior side of an outer
+        // wall (outward normal points away from the axis, signed distance of
+        // the axis point is negative) and on the exterior side of a hole
+        // wall. A plane *through* the axis is not a chord facet of anything;
+        // refuse rather than guess a direction.
+        let axis_side = self.faces[face].plane.signed_distance(axis_point);
+        if axis_side.abs() <= tol::POINT_MERGE {
+            return Err(PushPullError::NonManifoldResult);
+        }
+        let sign = if axis_side < 0.0 { 1.0 } else { -1.0 };
+        let new_radius = radius + sign * distance;
+        if new_radius <= tol::POINT_MERGE {
+            return Err(PushPullError::RadiusVanishes);
+        }
+
+        // The logical wall: every face claiming the same cylinder (slot
+        // order — deterministic). Disconnected claimants (stacked bands of
+        // one drilled cylinder, boolean fragments) move together: they all
+        // assert the same surface, and moving only some would leave the rest
+        // claiming a radius their neighbors no longer share.
+        let wall_faces: Vec<FaceId> = self
+            .faces
+            .iter()
+            .filter(|(_, f)| f.surface.as_ref().is_some_and(|s| s.same_surface(&surface)))
+            .map(|(fid, _)| fid)
+            .collect();
+
+        // Every vertex on any wall face moves.
+        let moved_vertices: std::collections::BTreeSet<VertexId> = wall_faces
+            .iter()
+            .flat_map(|&fid| {
+                let f = &self.faces[fid];
+                std::iter::once(f.outer_loop)
+                    .chain(f.inner_loops.iter().copied())
+                    .collect::<Vec<_>>()
+            })
+            .flat_map(|loop_id| self.loop_half_edges(loop_id))
+            .map(|h| self.half_edges[h].origin)
+            .collect();
+
+        // Clone-mutate-validate-swap (strong guarantee).
+        let mut obj = self.clone();
+        let scale = new_radius / radius;
+        for &vid in &moved_vertices {
+            let p = obj.vertices[vid].position;
+            let axial = axis * (p - axis_point).dot(axis);
+            let foot = axis_point + axial;
+            obj.vertices[vid].position = foot + (p - foot) * scale;
+        }
+
+        // Every face touching a moved vertex is reshaped: re-fit its plane
+        // and re-check its boundary. Fully-moved faces are affine images of
+        // planar polygons (planar by construction); partially-moved faces
+        // must additionally prove they stayed planar or the offset would
+        // fold them (WallNeighborNonPlanar, refused — never repaired).
+        let affected: Vec<FaceId> = obj
+            .faces
+            .iter()
+            .filter(|(_, f)| {
+                std::iter::once(f.outer_loop)
+                    .chain(f.inner_loops.iter().copied())
+                    .flat_map(|l| obj.loop_half_edges(l))
+                    .any(|h| moved_vertices.contains(&obj.half_edges[h].origin))
+            })
+            .map(|(fid, _)| fid)
+            .collect();
+        for &fid in &affected {
+            // Planarity first, so a genuinely bent neighbor reports as
+            // WallNeighborNonPlanar rather than whatever downstream check a
+            // bent loop happens to trip. The Newell fit over the outer loop
+            // is the reference plane; every loop vertex must still lie on
+            // one plane within the object's planarity tolerance.
+            let outer_pts: Vec<Point3> = obj.loop_positions(obj.faces[fid].outer_loop).collect();
+            let fit = Plane::from_polygon(&outer_pts)
+                .map_err(|_| PushPullError::WallNeighborNonPlanar)?;
+            let loops: Vec<LoopId> = std::iter::once(obj.faces[fid].outer_loop)
+                .chain(obj.faces[fid].inner_loops.iter().copied())
+                .collect();
+            for l in loops {
+                for p in obj.loop_positions(l) {
+                    if fit.signed_distance(p).abs() > obj.planarity_tol {
+                        return Err(PushPullError::WallNeighborNonPlanar);
+                    }
+                }
+            }
+            refit_face_plane(&mut obj, fid)?;
+        }
+
+        // Hole loops of a reshaped face must also stay clear of EACH OTHER —
+        // growing one tunnel until it swallows a neighboring tunnel keeps
+        // every loop simple and inside the outer boundary, which is all
+        // `refit_face_plane` checks.
+        for &fid in &affected {
+            let holes: Vec<Vec<Point3>> = obj.faces[fid]
+                .inner_loops
+                .iter()
+                .map(|&il| obj.loop_positions(il).collect())
+                .collect();
+            for i in 0..holes.len() {
+                for j in (i + 1)..holes.len() {
+                    if boundaries_contact(&holes[i], &holes[j])
+                        || holes[j].iter().any(|&p| {
+                            point_inside_polygon(p, &holes[i], obj.faces[fid].plane.normal())
+                        })
+                        || holes[i].iter().any(|&p| {
+                            point_inside_polygon(p, &holes[j], obj.faces[fid].plane.normal())
+                        })
+                    {
+                        return Err(PushPullError::NonManifoldResult);
+                    }
+                }
+            }
+        }
+
+        // Interpenetration guard (DEVELOPMENT.md rule 4;
+        // docs/design/true-curves.md §4.6, review follow-up F2). The radial
+        // map can move the wall a long way, and everything above only
+        // re-validates faces sharing a moved vertex — a grown wall passing
+        // straight through geometry it shares nothing with (another shell,
+        // or a distant feature of this one) would come out planar,
+        // twin-consistent, and invisible to the structural validator. Every
+        // reshaped face is therefore tested against every other face of the
+        // object — same shell or not — and any contact that is not along
+        // elements the two faces legitimately share (common vertices, twin
+        // edges) refuses the offset. Mirrors the stretch-mode guard of the
+        // generalized push/pull so the two unify at integration.
+        let affected_set: std::collections::BTreeSet<FaceId> = affected.iter().copied().collect();
+        let all_faces: Vec<FaceId> = obj.faces.keys().collect();
+        for &t in &affected {
+            for &g in &all_faces {
+                if g == t || (affected_set.contains(&g) && g <= t) {
+                    continue;
+                }
+                if faces_improperly_contact(&obj, t, g) {
+                    return Err(PushPullError::NonManifoldResult);
+                }
+            }
+        }
+
+        // Engulfment guard: contact detection cannot see a shell the wall
+        // sweeps cleanly PAST — afterwards nothing touches anything, and
+        // the entombed (or newly exposed) shell still validates. Refuse if
+        // any vertex of a non-moving shell changes its point-in-solid
+        // classification against the moving shells' faces between the pre-
+        // and post-offset positions (parity ray-cast, the boolean
+        // classifier's mechanism — exact for every neighbor motion class:
+        // radial, translating, and pivoting alike).
+        //
+        // Why testing VERTICES suffices (completeness): the volume the
+        // offset claims (grow) or vacates (shrink) is bounded by the moving
+        // shells' OLD boundary and their NEW boundary. A non-moving shell
+        // that intersects that volume either
+        //   (a) crosses the OLD boundary — impossible for valid input:
+        //       those were real faces of this object, and the improper
+        //       face contact that crossing implies cannot have been
+        //       present before the call;
+        //   (b) crosses the NEW boundary — a transversal intersection of
+        //       two planar faces is a line segment whose endpoints cross a
+        //       boundary edge of one face inside the other, exactly what
+        //       the all-pairs sweep above refuses (coplanar overlap is
+        //       probed per boundary-cut interval there too); or
+        //   (c) touches neither boundary — then it lies ENTIRELY inside
+        //       the swept volume, every one of its vertices changed
+        //       classification, and this test sees the change.
+        // A shell therefore cannot straddle the swept volume "between
+        // vertices": straddling means crossing its boundary, which is case
+        // (a) or (b). Same-shell geometry needs no vertex test: anything
+        // connected to the wall either moved with it or is held by the
+        // boundary/hole checks above (e.g. a cap imprint orphaned by a
+        // shrink refuses in `refit_face_plane`).
+        let moving_shells: Vec<crate::ids::ShellId> = obj
+            .shells
+            .iter()
+            .filter(|(_, sh)| sh.faces.iter().any(|f| affected_set.contains(f)))
+            .map(|(id, _)| id)
+            .collect();
+        let shell_faces = |o: &Object| -> Vec<ShellFace> {
+            moving_shells
+                .iter()
+                .flat_map(|&sid| o.shells[sid].faces.iter().copied())
+                .map(|fid| {
+                    let f = &o.faces[fid];
+                    (
+                        f.plane,
+                        o.loop_positions(f.outer_loop).collect(),
+                        f.inner_loops
+                            .iter()
+                            .map(|&il| o.loop_positions(il).collect())
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        // `obj` is a clone of `self`, so ids coincide; `self` still holds
+        // the pre-offset geometry (strong guarantee: nothing swapped yet).
+        let old_faces = shell_faces(self);
+        let new_faces = shell_faces(&obj);
+        for (sid, sh) in &obj.shells {
+            if moving_shells.contains(&sid) {
+                continue;
+            }
+            let verts: std::collections::BTreeSet<VertexId> = sh
+                .faces
+                .iter()
+                .flat_map(|&fid| {
+                    let f = &obj.faces[fid];
+                    std::iter::once(f.outer_loop)
+                        .chain(f.inner_loops.iter().copied())
+                        .collect::<Vec<_>>()
+                })
+                .flat_map(|lid| obj.loop_half_edges(lid).collect::<Vec<_>>())
+                .map(|h| obj.half_edges[h].origin)
+                .collect();
+            for &vid in &verts {
+                // Non-moving shells never move: the position is identical
+                // in `self` and `obj`.
+                let p = obj.vertices[vid].position;
+                if point_in_shell_faces(&old_faces, p) != point_in_shell_faces(&new_faces, p) {
+                    return Err(PushPullError::NonManifoldResult);
+                }
+            }
+        }
+
+        // The wall still is exactly that cylinder, one radius over: map the
+        // references (map-or-drop — this is the map half). Bitwise-shared
+        // value across the group, like extrusion stamps it.
+        let new_surface = crate::topo::SurfaceRef::Cylinder {
+            axis_point,
+            axis,
+            radius: new_radius,
+        };
+        for &fid in &wall_faces {
+            obj.faces[fid].surface = Some(new_surface);
+        }
+        // Neighbors that translate/stretch/pivot under the radial map can carry
+        // an imprinted circle's endpoints off its center; drop any per-edge
+        // claim that no longer holds (the wall FACES' surface refs mapped above
+        // are a separate, still-valid claim).
+        obj.drop_stale_edge_curves();
+
+        obj.check_invariants();
+        obj.validate()
+            .map_err(|_| PushPullError::NonManifoldResult)?;
+        *self = obj;
+
+        Ok(PushPullReport {
+            face,
+            created_faces: Vec::new(),
+            removed_faces: Vec::new(),
         })
     }
 
@@ -1019,6 +1481,60 @@ impl Object {
         &mut self,
         face: FaceId,
         loop_path: &[Point3],
+    ) -> Result<FaceSplitInnerReport, StickyError> {
+        self.split_face_inner_impl(face, loop_path, None, None)
+    }
+
+    /// [`Object::split_face_inner`] carrying the analytic circle the imprinted
+    /// loop's edges are chord facets of, so a later push-through re-attributes
+    /// the tunnel walls as [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef)
+    /// instead of losing the circle at the imprint (docs/design/true-curves.md,
+    /// playtest fix C3). `curve` is stamped onto every edge of the new loop —
+    /// correct because a drawn circle/arc imprint is a chain of chord facets
+    /// of ONE circle. `None` behaves exactly like [`Object::split_face_inner`].
+    ///
+    /// The caller owns the truth: `curve.center`/`radius` must be the circle
+    /// the `loop_path` vertices actually lie on (the drawing tool computed it).
+    /// The kernel never fits a circle to the points — a wrong claim is caught
+    /// by the validator, never silently repaired.
+    pub fn split_face_inner_with_curve(
+        &mut self,
+        face: FaceId,
+        loop_path: &[Point3],
+        curve: Option<crate::sketch::CurveGeom>,
+    ) -> Result<FaceSplitInnerReport, StickyError> {
+        self.split_face_inner_impl(face, loop_path, None, curve)
+    }
+
+    /// [`Object::split_face_inner`] with explicit attributes for the created
+    /// sub-face. This is undo's path for reversing a `merge_inner_face` —
+    /// the merge report snapshotted the dissolved sub-face's attributes
+    /// ([`FaceMergeInnerReport::sub_face_attrs`]) so the sub-face comes back
+    /// with exactly what it carried, never a fresh copy inherited from the
+    /// current parent (which would resurrect an analytic surface claim the
+    /// sub-face had legitimately lost, or lose its own paint). `None` = the
+    /// sub-face inherits the parent's attributes (the forward/tool
+    /// semantics).
+    pub fn split_face_inner_with_attrs(
+        &mut self,
+        face: FaceId,
+        loop_path: &[Point3],
+        restore: Option<crate::topo::FaceAttrs>,
+    ) -> Result<FaceSplitInnerReport, StickyError> {
+        self.split_face_inner_impl(face, loop_path, restore, None)
+    }
+
+    /// Shared body of the [`Object::split_face_inner`] family. `restore` is
+    /// the undo attribute snapshot (see [`Object::split_face_inner_with_attrs`]);
+    /// `curve` stamps the imprinted loop's edges (see
+    /// [`Object::split_face_inner_with_curve`]). Crate-internal so history's
+    /// dispatch can supply both at once.
+    pub(crate) fn split_face_inner_impl(
+        &mut self,
+        face: FaceId,
+        loop_path: &[Point3],
+        restore: Option<crate::topo::FaceAttrs>,
+        curve: Option<crate::sketch::CurveGeom>,
     ) -> Result<FaceSplitInnerReport, StickyError> {
         // ---- validation (no mutation) ----
         if !self.faces.contains_key(face) {
@@ -1084,6 +1600,24 @@ impl Object {
             pts.reverse();
         }
 
+        // The caller owns the analytic truth: a supplied circle claim must
+        // describe the loop it is stamped onto (every vertex a chord facet
+        // endpoint, i.e. on the circle). Reject a mismatch up front with a
+        // typed error — the kernel never fits a circle to the points and
+        // never commits stale metadata (map-or-drop; the same invariant the
+        // validator enforces, checked here before any surgery so a wrong
+        // claim is a clean refusal, not a corruption backstop).
+        if let Some(g) = curve {
+            if !g.radius.is_finite() || g.radius <= tol::POINT_MERGE {
+                return Err(StickyError::CurveClaimOffLoop);
+            }
+            for &p in &pts {
+                if ((p - g.center).length() - g.radius).abs() > self.planarity_tol {
+                    return Err(StickyError::CurveClaimOffLoop);
+                }
+            }
+        }
+
         // ---- additive surgery on a clone (strong guarantee) ----
         let mut obj = self.clone();
 
@@ -1107,14 +1641,18 @@ impl Object {
             first_half_edge: HalfEdgeId::default(),
             kind: LoopKind::Inner,
         });
+        // Imprinted sub-face inherits the parent face's material, UV frame
+        // ( +  extension), and analytic surface (a sub-face of a chord facet
+        // lies on the same chord plane of the same cylinder) — unless undo
+        // supplied the dissolved sub-face's own snapshot to restore.
+        let sub_attrs = restore.unwrap_or_else(|| obj.faces[face].attrs());
         let sub_face = obj.faces.insert(Face {
             outer_loop: sub_loop,
             inner_loops: Vec::new(),
             plane: face_plane,
-            // Imprinted sub-face inherits the parent face's material and UV
-            // frame ( +  extension).
-            material: obj.faces[face].material,
-            uv_frame: obj.faces[face].uv_frame,
+            material: sub_attrs.material,
+            uv_frame: sub_attrs.uv_frame,
+            surface: sub_attrs.surface,
         });
         obj.loops[sub_loop].face = sub_face;
 
@@ -1155,9 +1693,13 @@ impl Object {
 
             obj.half_edges[h_sub[k]].twin = Some(h_hole[k]);
             obj.half_edges[h_hole[k]].twin = Some(h_sub[k]);
+            // Every edge of a drawn circle/arc imprint is a chord facet of the
+            // same circle: stamp the caller's analytic claim so a later
+            // push-through re-attributes the tunnel walls (true-curves C3).
             let edge = obj.edges.insert(Edge {
                 half_edge: h_sub[k],
                 twin_half_edge: Some(h_hole[k]),
+                curve,
             });
             obj.half_edges[h_sub[k]].edge = edge;
             obj.half_edges[h_hole[k]].edge = edge;
@@ -1241,6 +1783,9 @@ impl Object {
             .iter()
             .map(|&h| self.vertices[self.half_edges[h].origin].position)
             .collect();
+        // Snapshot the sub-face's attribute state so undo restores exactly
+        // what it carried — see FaceMergeInnerReport::sub_face_attrs.
+        let sub_face_attrs = self.faces[sub_face].attrs();
 
         // ---- removal surgery on a clone ----
         let mut obj = self.clone();
@@ -1266,7 +1811,11 @@ impl Object {
         // Always-on backstop.
         obj.validate().map_err(|_| StickyError::WouldCorrupt)?;
         *self = obj;
-        Ok(FaceMergeInnerReport { parent, loop_path })
+        Ok(FaceMergeInnerReport {
+            parent,
+            loop_path,
+            sub_face_attrs,
+        })
     }
 
     /// Whether `face` is a flat imprinted sub-face (its boundary entirely twinned
@@ -1493,9 +2042,10 @@ impl Object {
                 inner_loops: Vec::new(),
                 plane,
                 // Freshly generated push/pull side walls take the default
-                // material and no UV frame.
+                // material, no UV frame, and no analytic surface.
                 material: None,
                 uv_frame: None,
+                surface: None,
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);
@@ -1509,6 +2059,7 @@ impl Object {
             let e_top = obj.edges.insert(Edge {
                 half_edge: h_sub[k],
                 twin_half_edge: Some(wa[k]),
+                curve: None,
             });
             obj.half_edges[h_sub[k]].edge = e_top;
             obj.half_edges[wa[k]].edge = e_top;
@@ -1526,6 +2077,7 @@ impl Object {
             let e_vert = obj.edges.insert(Edge {
                 half_edge: wb[k],
                 twin_half_edge: Some(wd[prev]),
+                curve: None,
             });
             obj.half_edges[wb[k]].edge = e_vert;
             obj.half_edges[wd[prev]].edge = e_vert;
@@ -1533,6 +2085,9 @@ impl Object {
 
         // Refit the moved sub-face plane (translated; same normal).
         refit_face_plane(&mut obj, sub_face)?;
+        // The raised sub-face left its chord plane: its inherited analytic
+        // surface claim drops (map-or-drop, docs/design/true-curves.md).
+        obj.faces[sub_face].surface = None;
 
         let shell = obj
             .shells
@@ -1543,6 +2098,11 @@ impl Object {
         for &w in &walls {
             obj.shells[shell].faces.push(w);
         }
+        // Defensive map-or-drop: the raised sub-face is fresh geometry (its new
+        // edges carry no claim and the base ring is unmoved), so this is a
+        // no-op today, but every subset-moving op examines Edge::curve rather
+        // than leaving a claim unchecked (docs/design/true-curves.md §4.2).
+        obj.drop_stale_edge_curves();
 
         obj.check_invariants();
         // Always-on backstop.
@@ -1692,6 +2252,9 @@ impl Object {
         }
         // The sub-face is flat again: same plane as the parent.
         obj.faces[sub_face].plane = obj.faces[parent].plane;
+        // Welding the raised sub-face back down moves its vertices; drop any
+        // per-edge claim that no longer holds (map-or-drop for Edge::curve).
+        obj.drop_stale_edge_curves();
 
         obj.check_invariants();
         // Always-on backstop.
@@ -1722,6 +2285,26 @@ impl Object {
         &mut self,
         face: FaceId,
         path: &[Point3],
+    ) -> Result<FaceSplitReport, StickyError> {
+        self.split_face_with_attrs(face, path, None)
+    }
+
+    /// [`Object::split_face`] with an explicit attribute restoration: after
+    /// the split, each present entry of `restore` is applied to whichever
+    /// result face contains its interior point. This is undo's path for
+    /// reversing a `merge_faces` — the merge report snapshotted each
+    /// pre-merge face's attributes ([`FaceMergeReport::prior_attrs`]) so the
+    /// two sides come back with exactly what they carried, never re-derived
+    /// copies of the merged survivor's. An absent per-face entry is the
+    /// snapshot's best-effort fallback (a face too thin to pin an interior
+    /// point in): that face inherits instead. `restore: None` = both result
+    /// faces inherit the split face's attributes (the forward/tool
+    /// semantics).
+    pub fn split_face_with_attrs(
+        &mut self,
+        face: FaceId,
+        path: &[Point3],
+        restore: Option<[Option<FaceAttrsAt>; 2]>,
     ) -> Result<FaceSplitReport, StickyError> {
         // --- validation (before any mutation) ---
         if !self.faces.contains_key(face) {
@@ -1906,6 +2489,9 @@ impl Object {
         // --- all checks passed — clone and mutate ---
         let mut obj = self.clone();
         let report = do_split_face(&mut obj, face, path, &ep0, &ep1)?;
+        if let Some(restore) = restore {
+            apply_split_restore(&mut obj, &report.new_faces, &restore);
+        }
         obj.check_invariants();
         // Release-safe backstop: `check_invariants` is compiled out of release
         // builds (the shipped wasm), so a path that slips past the up-front
@@ -2102,7 +2688,7 @@ impl Object {
 
         let fa = &self.faces[face_a];
         let fb = &self.faces[face_b];
-        if fa.material != fb.material || fa.uv_frame != fb.uv_frame {
+        if fa.material != fb.material || fa.uv_frame != fb.uv_frame || fa.surface != fb.surface {
             return None;
         }
 
@@ -2290,6 +2876,7 @@ impl Object {
             Plane,
             crate::material::FaceMaterial,
             Option<crate::material::UvFrame>,
+            Option<crate::topo::SurfaceRef>,
         )> = Vec::with_capacity(faces.len());
         for &fid in faces {
             let face = &self.faces[fid];
@@ -2299,7 +2886,14 @@ impl Object {
                 .iter()
                 .map(|&il| loop_indices(self, il, &mut positions, &mut local_index))
                 .collect();
-            specs.push((outer, inner, face.plane, face.material, face.uv_frame));
+            specs.push((
+                outer,
+                inner,
+                face.plane,
+                face.material,
+                face.uv_frame,
+                face.surface,
+            ));
         }
 
         let mut obj = Object::from_faces_with_holes(&positions, &specs);
@@ -2435,6 +3029,13 @@ impl Object {
     /// — the hole-punch case — is caught even though no wall vertex lies in the
     /// imprint's column.
     pub fn push_pull_overshoots(&self, face: FaceId, distance: f64) -> bool {
+        // Attributed cylinder walls never overshoot into a through-cut:
+        // push/pull on them is a radial offset of the whole logical wall
+        // (docs/design/true-curves.md §4.6), and deep pushes refuse there
+        // with a typed error instead of punching through.
+        if self.faces.get(face).is_some_and(|f| f.surface.is_some()) {
+            return false;
+        }
         match self.opposing_wall_depth(face) {
             Some(depth) if distance < 0.0 => (-distance) >= depth - tol::POINT_MERGE,
             _ => false,
@@ -2520,8 +3121,24 @@ impl Object {
             .iter()
             .map(|&il| self.loop_positions(il).collect())
             .collect();
-        let profile =
+        // Carry the analytic circle each boundary edge is a chord facet of
+        // (stamped at imprint / extrusion) into the tool profile, so
+        // `from_extrusion` re-stamps the cut's tunnel walls as
+        // `SurfaceRef::Cylinder` — otherwise a circular hole's walls are flat
+        // facets and refuse whole-wall push/pull (true-curves C3). The loop
+        // half-edges walk in the same order as `loop_positions`, so the
+        // attribution stays parallel to the profile boundaries.
+        let loop_curves = |lid: crate::ids::LoopId| -> Vec<Option<crate::sketch::CurveGeom>> {
+            self.loop_half_edges(lid)
+                .map(|h| self.edges[self.half_edges[h].edge].curve)
+                .collect()
+        };
+        let outer_curves = loop_curves(f.outer_loop);
+        let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
+            f.inner_loops.iter().map(|&il| loop_curves(il)).collect();
+        let mut profile =
             Profile::new(f.plane, outer, holes).map_err(|_| PushPullError::NonManifoldResult)?;
+        profile.set_curve_attribution(outer_curves, hole_curves);
         let tool = Object::from_extrusion(&profile, distance)
             .map_err(|_| PushPullError::NonManifoldResult)?;
         match Object::boolean(BooleanOp::Subtract, self, &tool, &Transform::IDENTITY) {
@@ -2561,6 +3178,287 @@ fn point_on_segment(point: Point3, a: Point3, b: Point3, tol: f64) -> bool {
     };
     let closest = Point3::new(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
     (point - closest).length() <= tol
+}
+
+// ---- whole-wall offset guards (docs/design/true-curves.md §4.6, F2) ----
+//
+// These predicates mirror the stretch-mode guards on the generalized
+// push/pull branch (`push_pull_stretch`'s interpenetration + engulfment
+// checks) so the two guard families unify cleanly when the branches
+// integrate — same semantics, restated over this branch's code.
+
+/// Whether faces `a` and `b` of one Object make contact anywhere other than
+/// along the elements they legitimately share — their common vertices and
+/// their twinned (shared) edges. A boundary segment of one face crossing the
+/// other's interior, poking a vertex into it, or overlapping it coplanarly
+/// is improper contact: interpenetrating geometry that stays planar and
+/// twin-consistent, which the structural validator cannot see.
+///
+/// Exactness posture: crossing points are classified against the other
+/// face's *strict* interior, and contact within [`tol::POINT_MERGE`] of a
+/// shared vertex or shared edge is legitimate (that is exactly how adjacent
+/// faces of a manifold touch). Grazing contact between unrelated faces
+/// (tangencies) refuses conservatively — the kernel cannot prove it safe.
+fn faces_improperly_contact(obj: &Object, a: FaceId, b: FaceId) -> bool {
+    let verts_of = |f: FaceId| -> std::collections::BTreeSet<VertexId> {
+        std::iter::once(obj.faces[f].outer_loop)
+            .chain(obj.faces[f].inner_loops.iter().copied())
+            .flat_map(|lid| obj.loop_half_edges(lid).collect::<Vec<_>>())
+            .map(|h| obj.half_edges[h].origin)
+            .collect()
+    };
+    let va = verts_of(a);
+    let vb = verts_of(b);
+    let shared_pts: Vec<Point3> = va
+        .intersection(&vb)
+        .map(|&v| obj.vertices[v].position)
+        .collect();
+    // Segments of `a` twinned into `b` (the legitimately shared edges).
+    let mut shared_segs: Vec<(Point3, Point3)> = Vec::new();
+    for lid in
+        std::iter::once(obj.faces[a].outer_loop).chain(obj.faces[a].inner_loops.iter().copied())
+    {
+        for h in obj.loop_half_edges(lid) {
+            if let Some(t) = obj.half_edges[h].twin
+                && obj.loops[obj.half_edges[t].loop_id].face == b
+            {
+                let p = obj.vertices[obj.half_edges[h].origin].position;
+                let q = obj.vertices[obj.half_edges[obj.half_edges[h].next].origin].position;
+                shared_segs.push((p, q));
+            }
+        }
+    }
+    boundary_pokes_face(obj, a, b, &shared_pts, &shared_segs)
+        || boundary_pokes_face(obj, b, a, &shared_pts, &shared_segs)
+}
+
+/// One direction of [`faces_improperly_contact`]: whether any boundary
+/// segment of `x` contacts the interior of face `y` away from their shared
+/// vertices/edges. Segments strictly on one side of `y`'s plane cannot;
+/// crossing segments are tested at the crossing point; segments lying in
+/// `y`'s plane are cut at every contact with `y`'s boundary and probed one
+/// interior point per piece (coplanar overlap).
+fn boundary_pokes_face(
+    obj: &Object,
+    x: FaceId,
+    y: FaceId,
+    shared_pts: &[Point3],
+    shared_segs: &[(Point3, Point3)],
+) -> bool {
+    let y_plane = obj.faces[y].plane;
+    let y_normal = y_plane.normal();
+    let y_outer: Vec<Point3> = obj.loop_positions(obj.faces[y].outer_loop).collect();
+    let y_holes: Vec<Vec<Point3>> = obj.faces[y]
+        .inner_loops
+        .iter()
+        .map(|&il| obj.loop_positions(il).collect())
+        .collect();
+    let in_y_interior = |p: Point3| -> bool {
+        point_inside_polygon(p, &y_outer, y_normal)
+            && !y_holes.iter().any(|h| point_inside_polygon(p, h, y_normal))
+    };
+    let is_shared_contact = |p: Point3| -> bool {
+        shared_pts.iter().any(|&s| s.approx_eq(p, tol::POINT_MERGE))
+            || shared_segs
+                .iter()
+                .any(|&(s0, s1)| point_on_segment(p, s0, s1, tol::POINT_MERGE))
+    };
+    for lid in
+        std::iter::once(obj.faces[x].outer_loop).chain(obj.faces[x].inner_loops.iter().copied())
+    {
+        for h in obj.loop_half_edges(lid) {
+            // A twinned (shared) edge is legitimate contact by definition.
+            if let Some(t) = obj.half_edges[h].twin
+                && obj.loops[obj.half_edges[t].loop_id].face == y
+            {
+                continue;
+            }
+            let p = obj.vertices[obj.half_edges[h].origin].position;
+            let q = obj.vertices[obj.half_edges[obj.half_edges[h].next].origin].position;
+            let sdp = y_plane.signed_distance(p);
+            let sdq = y_plane.signed_distance(q);
+            if (sdp > tol::PLANE_DIST && sdq > tol::PLANE_DIST)
+                || (sdp < -tol::PLANE_DIST && sdq < -tol::PLANE_DIST)
+            {
+                continue; // strictly one side of y's plane: no contact.
+            }
+            if sdp.abs() <= tol::PLANE_DIST && sdq.abs() <= tol::PLANE_DIST {
+                // Segment lies in y's plane. Its overlap with y's material
+                // is a union of sub-intervals whose endpoints are contacts
+                // with y's boundary (or the segment's own ends), which
+                // makes the complete test two-part:
+                // (1) any boundary contact away from the shared
+                //     vertices/edges is improper on its own — exact 2D
+                //     segment/segment intersections against every boundary
+                //     segment of y (point sampling misses the off-center
+                //     plus-sign crossing);
+                // (2) cut the segment at ALL boundary contacts, whitelisted
+                //     ones included, and probe each piece's midpoint for
+                //     non-shared strict interior containment. Every
+                //     material-overlap interval is bounded by boundary
+                //     contacts, so it contains a probed midpoint — this
+                //     catches a chord whose only boundary contacts are
+                //     whitelisted (a diagonal between two shared corners
+                //     slicing across y), which crossing detection alone
+                //     cannot see, and it subsumes endpoint testing for a
+                //     segment lying wholly inside y (no contact at all:
+                //     the single piece is the whole segment).
+                let len = (q - p).length();
+                if len <= tol::POINT_MERGE {
+                    continue; // degenerate segment: refused upstream anyway.
+                }
+                let dir = (q - p) / len;
+                let mut cuts: Vec<f64> = vec![0.0, len];
+                for ylid in std::iter::once(obj.faces[y].outer_loop)
+                    .chain(obj.faces[y].inner_loops.iter().copied())
+                {
+                    for yh in obj.loop_half_edges(ylid) {
+                        let r = obj.vertices[obj.half_edges[yh].origin].position;
+                        let s =
+                            obj.vertices[obj.half_edges[obj.half_edges[yh].next].origin].position;
+                        for c in coplanar_segment_contacts(p, q, r, s, y_normal) {
+                            if !is_shared_contact(c) {
+                                return true;
+                            }
+                            cuts.push((c - p).dot(dir).clamp(0.0, len));
+                        }
+                    }
+                }
+                cuts.sort_by(f64::total_cmp);
+                cuts.dedup_by(|a, b| (*a - *b).abs() <= tol::POINT_MERGE);
+                for pair in cuts.windows(2) {
+                    let mid = p + dir * ((pair[0] + pair[1]) * 0.5);
+                    if in_y_interior(mid) && !is_shared_contact(mid) {
+                        return true;
+                    }
+                }
+            } else {
+                // Transversal crossing: the single, exact plane-crossing
+                // point is the only place the segment can touch y.
+                let c = p + (q - p) * (sdp / (sdp - sdq));
+                if in_y_interior(c) && !is_shared_contact(c) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Contact points between two segments `p→q` and `r→s` lying in a common
+/// plane with unit normal `n`: a proper crossing or endpoint touch yields
+/// the single intersection point; collinear overlap yields both extremes of
+/// the shared interval. Empty when the segments miss each other.
+///
+/// Used by [`boundary_pokes_face`]'s coplanar branch, which must whitelist
+/// each contact against the faces' shared vertices/edges — so this returns
+/// the actual contact locations rather than a boolean.
+fn coplanar_segment_contacts(p: Point3, q: Point3, r: Point3, s: Point3, n: Vec3) -> Vec<Point3> {
+    let d1 = q - p;
+    let d2 = s - r;
+    let (Ok(u1), Ok(u2)) = (d1.normalized(), d2.normalized()) else {
+        return Vec::new(); // zero-length segment: refused upstream anyway.
+    };
+    let w = r - p;
+    // Signed sine of the angle between the segments, in the plane.
+    let denom = u1.cross(u2).dot(n);
+    if denom.abs() <= tol::NORMAL_DIRECTION {
+        // Parallel. Collinear only if `r` sits on p→q's carrier line.
+        let off = w - u1 * w.dot(u1);
+        if off.length() > tol::POINT_MERGE {
+            return Vec::new();
+        }
+        // Overlap interval of r→s on p→q, in p→q's arc length.
+        let len1 = d1.length();
+        let (tr, ts) = (w.dot(u1), (s - p).dot(u1));
+        let lo = tr.min(ts).max(0.0);
+        let hi = tr.max(ts).min(len1);
+        if lo > hi {
+            return Vec::new();
+        }
+        return vec![p + u1 * lo, p + u1 * hi];
+    }
+    // Proper (or endpoint-touching) intersection: solve p + t·u1 = r + v·u2
+    // by crossing both sides against each direction.
+    let t = w.cross(u2).dot(n) / denom;
+    let v = w.cross(u1).dot(n) / denom;
+    if t >= -tol::POINT_MERGE
+        && t <= d1.length() + tol::POINT_MERGE
+        && v >= -tol::POINT_MERGE
+        && v <= d2.length() + tol::POINT_MERGE
+    {
+        return vec![p + u1 * t];
+    }
+    Vec::new()
+}
+
+/// One face of a closed shell, flattened for the parity cast: its plane,
+/// outer loop positions, and hole loop positions.
+type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
+
+/// A few non-axis-aligned ray directions for [`point_in_shell_faces`]; the
+/// first one whose cast grazes no face boundary decides the parity (same
+/// posture as the boolean classifier's `RAY_DIRS`).
+const WALL_GUARD_RAY_DIRS: [Vec3; 4] = [
+    Vec3::new(0.4651, 0.7345, 0.4949),
+    Vec3::new(0.8012, -0.3461, 0.4877),
+    Vec3::new(-0.3299, 0.5813, 0.7438),
+    Vec3::new(0.1234, -0.5678, 0.8137),
+];
+
+/// Point-in-solid by ray-cast parity against a closed face set — the boolean
+/// classifier's mechanism (`crates/kernel/src/boolean.rs::point_in_solid`),
+/// restated over plain loop positions for the whole-wall offset guards.
+/// Tries each candidate direction until one casts cleanly (no boundary
+/// graze, no in-plane run through `p`); falls back to the first direction's
+/// count if all graze. Deterministic either way.
+fn point_in_shell_faces(faces: &[ShellFace], p: Point3) -> bool {
+    for d in WALL_GUARD_RAY_DIRS {
+        let (count, ambiguous) = shell_face_ray_cast(faces, p, d);
+        if !ambiguous {
+            return count % 2 == 1;
+        }
+    }
+    shell_face_ray_cast(faces, p, WALL_GUARD_RAY_DIRS[0]).0 % 2 == 1
+}
+
+/// Counts forward crossings of the ray `p + t·d` (t > 0) through the face
+/// set, flagging the cast ambiguous if a hit grazes a face boundary or the
+/// ray lies in a face's plane through `p`.
+fn shell_face_ray_cast(faces: &[ShellFace], p: Point3, d: Vec3) -> (usize, bool) {
+    let mut count = 0;
+    let mut ambiguous = false;
+    for (plane, outer, holes) in faces {
+        let denom = d.dot(plane.normal());
+        let signed = plane.signed_distance(p);
+        if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
+            if signed.abs() <= tol::PLANE_DIST {
+                ambiguous = true;
+            }
+            continue;
+        }
+        let t = -signed / denom;
+        if t <= tol::POINT_MERGE {
+            continue;
+        }
+        let hit = p + d * t;
+        let near = |poly: &[Point3]| {
+            (0..poly.len()).any(|i| {
+                point_on_segment(hit, poly[i], poly[(i + 1) % poly.len()], tol::POINT_MERGE)
+            })
+        };
+        if near(outer) || holes.iter().any(|h| near(h)) {
+            ambiguous = true;
+            continue;
+        }
+        let n = plane.normal();
+        if point_inside_polygon(hit, outer, n)
+            && !holes.iter().any(|h| point_inside_polygon(hit, h, n))
+        {
+            count += 1;
+        }
+    }
+    (count, ambiguous)
 }
 
 /// Detects and undoes the exact inverse of [`push_pull_coplanar_aware`]'s
@@ -3179,6 +4077,7 @@ fn twin_half_edges(obj: &mut Object, a: HalfEdgeId, b: HalfEdgeId) {
     let edge = obj.edges.insert(Edge {
         half_edge: a,
         twin_half_edge: Some(b),
+        curve: None,
     });
     obj.half_edges[a].twin = Some(b);
     obj.half_edges[a].edge = edge;
@@ -3298,6 +4197,7 @@ fn build_coplanar_wall(
     let e_top = obj.edges.insert(Edge {
         half_edge: h_sub,
         twin_half_edge: Some(wa),
+        curve: None,
     });
     obj.half_edges[h_sub].edge = e_top;
     obj.half_edges[wa].edge = e_top;
@@ -3330,6 +4230,7 @@ fn build_coplanar_wall(
         plane,
         material: None,
         uv_frame: None,
+        surface: None,
     });
     obj.loops[wloop].face = wface;
     Ok(wface)
@@ -3396,6 +4297,46 @@ fn classify_endpoint(
         }
     }
     Ok(None)
+}
+
+/// Applies a recorded attribute restoration after a split (undo of a
+/// merge): each present snapshot lands on whichever of the two result faces
+/// contains its interior point. An absent snapshot is the merge's
+/// best-effort fallback (the face was too thin to pin — see
+/// [`FaceMergeReport::prior_attrs`]): that face keeps the attributes it
+/// inherited from the split. A PRESENT snapshot matching neither face means
+/// the split landed differently than the recorded merge — impossible for a
+/// recorded inverse, so it is a debug-build assertion — and likewise leaves
+/// the inherited attributes rather than guessing.
+fn apply_split_restore(
+    obj: &mut Object,
+    new_faces: &[FaceId; 2],
+    restore: &[Option<FaceAttrsAt>; 2],
+) {
+    for r in restore.iter().flatten() {
+        let target = new_faces.iter().copied().find(|&f| {
+            let face = &obj.faces[f];
+            let n = face.plane.normal();
+            if face.plane.signed_distance(r.point).abs() > tol::PLANE_DIST {
+                return false;
+            }
+            let outer: Vec<Point3> = obj.loop_positions(face.outer_loop).collect();
+            if !point_inside_polygon(r.point, &outer, n) {
+                return false;
+            }
+            !face.inner_loops.iter().any(|&il| {
+                let hole: Vec<Point3> = obj.loop_positions(il).collect();
+                point_inside_polygon(r.point, &hole, n)
+            })
+        });
+        debug_assert!(
+            target.is_some(),
+            "a recorded restore anchor must land in one of the split's fragments"
+        );
+        if let Some(f) = target {
+            obj.faces[f].set_attrs(r.attrs);
+        }
+    }
 }
 
 /// Core split surgery on a cloned object.
@@ -3584,6 +4525,7 @@ fn do_split_face(
         let edge_id = obj.edges.insert(Edge {
             half_edge: h_fwd,
             twin_half_edge: Some(h_bwd),
+            curve: None,
         });
         obj.half_edges[h_fwd].edge = edge_id;
         obj.half_edges[h_bwd].edge = edge_id;
@@ -3655,10 +4597,12 @@ fn do_split_face(
         outer_loop: loop_b_id,
         inner_loops: Vec::new(), // holes assigned below
         plane: face_plane,       // same plane as original
-        // Both halves of a split inherit the original face's material and UV
-        // frame ( +  extension); face A keeps them by reusing its FaceId.
+        // Both halves of a split inherit the original face's material, UV
+        // frame ( +  extension), and analytic surface; face A keeps them by
+        // reusing its FaceId.
         material: obj.faces[face].material,
         uv_frame: obj.faces[face].uv_frame,
+        surface: obj.faces[face].surface,
     });
     obj.loops[loop_b_id].face = face_b_id;
 
@@ -3889,10 +4833,12 @@ fn split_boundary_edge(
         edge_a_id = obj.edges.insert(Edge {
             half_edge: h_a,
             twin_half_edge: Some(t_b),
+            curve: None,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
             twin_half_edge: Some(t_a),
+            curve: None,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[t_b].edge = edge_a_id;
@@ -3917,14 +4863,19 @@ fn split_boundary_edge(
         // Remove old twin half-edge.
         obj.half_edges.remove(twin_he_id);
     } else {
-        // Boundary edge (no twin).
+        // Boundary edge (no twin). A split at an interior point puts the new
+        // vertex INSIDE any circle the edge was a chord of (a chord midpoint
+        // is nearer the center than the radius), so the fragments are no
+        // longer valid chords — drop the claim (map-or-drop).
         edge_a_id = obj.edges.insert(Edge {
             half_edge: h_a,
             twin_half_edge: None,
+            curve: None,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
             twin_half_edge: None,
+            curve: None,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[h_b].edge = edge_b_id;
@@ -3969,6 +4920,35 @@ fn do_merge_faces(
 ) -> Result<FaceMergeReport, StickyError> {
     let outer_a = obj.faces[face_a].outer_loop;
     let outer_b = obj.faces[face_b].outer_loop;
+    let face_b_surface = obj.faces[face_b].surface;
+
+    // Snapshot each input face's attribute state, pinned to a point strictly
+    // inside it, BEFORE surgery: undoing this merge must give each side back
+    // exactly what it carried (paint, UV frame, analytic surface), never a
+    // copy of the survivor's. Geometric pinning makes the restoration
+    // independent of which fragment the undo-split puts on which handle.
+    //
+    // BEST EFFORT, never a refusal: a face too thin to pin an interior
+    // point in (every ordinate within `tol::POINT_MERGE` of another — a
+    // sub-nanometer sliver, constructible only from imported polygon soup)
+    // snapshots as `None` and the merge proceeds exactly as it always has;
+    // undo then inherits the survivor's attributes for that face only.
+    // Refusing here would reject merges the carrier itself accepts.
+    let snapshot = |f: FaceId| -> Option<FaceAttrsAt> {
+        let face = &obj.faces[f];
+        let outer: Vec<Point3> = obj.loop_positions(face.outer_loop).collect();
+        let holes: Vec<Vec<Point3>> = face
+            .inner_loops
+            .iter()
+            .map(|&il| obj.loop_positions(il).collect())
+            .collect();
+        let point = interior_point_of_loops(&outer, &holes, face.plane.normal())?;
+        Some(FaceAttrsAt {
+            point,
+            attrs: face.attrs(),
+        })
+    };
+    let prior_attrs = [snapshot(face_a), snapshot(face_b)];
 
     // 1. Find all half-edges on outer_a whose twin is on outer_b.
     //    These form the shared chain(s).  There must be at least one.
@@ -4368,6 +5348,13 @@ fn do_merge_faces(
     if let Ok(new_plane) = Plane::from_polygon(&boundary_pts) {
         obj.faces[face_a].plane = new_plane;
     }
+    // The survivor keeps its analytic surface only when BOTH faces claimed
+    // the same one (map-or-drop: absorbing area from a face on a different —
+    // or no — cylinder would make the claim a lie). `face_b_surface` was
+    // captured before face_b died.
+    if obj.faces[face_a].surface != face_b_surface {
+        obj.faces[face_a].surface = None;
+    }
     // (If refit fails, keep the original plane — shouldn't happen with valid geometry.)
 
     // 14. Recompute watertightness.
@@ -4381,6 +5368,7 @@ fn do_merge_faces(
     Ok(FaceMergeReport {
         merged_face: face_a,
         removed_edges,
+        prior_attrs,
     })
 }
 

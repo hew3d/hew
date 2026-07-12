@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `8`**, and **geometry buffer format version `3`**. Both are covered
+version `10`**, and **geometry buffer format version `5`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,8 +59,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 9,
-  "geometry_version": 3,
+  "format_version": 10,
+  "geometry_version": 5,
   "app": "hew",
   "app_version": "0.1.0",
 
@@ -100,7 +100,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "plane": [0.0, 0.0, 1.0, 0.0],
       "vertices": [ {"id":0, "p":[0.0, 0.0, 0.0]} ],
       "edges":    [ {"id":0, "from":0, "to":1, "curve":0} ],
-      "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ]
+      "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ],
+      "curves":   [ {"id":0, "center":[1.0, 2.0, 0.0], "radius":0.75} ]  // v10+
     }
   ],
   "guides": [
@@ -116,9 +117,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `9`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `10`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `3`.
+  used by every entry under `geometry/` in this file. Current: `4`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
@@ -182,6 +183,7 @@ of the manifest:
 | `sketches[].edges[].curve` | 7 | absent (a plain line, not part of a curve chain) |
 | `objects[].source` | 8 (v8 only — v9+ writers emit `footprints` instead) | absent (no extrusion provenance) |
 | `objects[].footprints` | 9 | empty list (the object shadows no sketch area; nothing derives as consumed for it) |
+| `sketches[].curves` | 10 | empty list (every curve chain is identity-only, no analytic definition) |
 
 Note `components[]` entries never carry a `tags` field at any version —
 tags are attached to *placements* (objects, groups, instances), not to
@@ -200,12 +202,12 @@ All multi-byte integers and all floats are **little-endian**. Material ids
 inside a buffer are the same dense ids used by `manifest.json`'s `materials`
 array — one shared id space, not a buffer-local one.
 
-### 3.1 Layout (current version, `3`)
+### 3.1 Layout (current version, `5`)
 
 ```
 offset  type                field
 0       u8[4]               magic = "HEWG" (0x48 0x45 0x57 0x47)
-4       u32                 version (currently 3)
+4       u32                 version (currently 5)
 8       u8                  watertight: 0 = Open (leaky), 1 = Watertight
 9       u32                 base_material id (0xFFFFFFFF = none)
 13      u8                  imported flag: 0 = strict native tolerance, 1 = imported tolerance
@@ -217,12 +219,21 @@ offset  type                field
         u8                  uv_frame flag: 0 = no UV frame, 1 = UV frame follows
         f64[8]              uv_frame, present only when the flag above is 1:
                              s.x s.y s.z  t.x t.y t.z  u0 v0
+        u8                  surface flag: 0 = plain planar face, 1 = cylinder reference follows
+        f64[7]              surface, present only when the flag above is 1:
+                             axis_point.x .y .z  axis.x .y .z  radius
         u32                 outer_count (K)
         u32[K]              outer-loop vertex indices (0-based into the vertex table, in loop order)
         u32                 hole_count (H)
         --- repeated H times: ---
         u32                 hole_vertex_count (J)
         u32[J]              hole-loop vertex indices
+        u8                  edge_curves flag (v5): 0 = no edge of this face carries an analytic circle, 1 = per-edge claims follow
+        --- present only when the edge_curves flag is 1: ---
+        --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
+        u8                  edge curve flag: 0 = plain edge, 1 = circle claim follows
+        f64[4]              edge curve, present only when the flag above is 1:
+                             center.x .y .z  radius
 ```
 
 Each face's outer loop and each of its hole loops is a closed polygon: the
@@ -261,6 +272,30 @@ are scalar offsets. A face with no `uv_frame` instead uses its material's
 `world_size` planar projection when textured () — mutually exclusive
 paths, selected by this flag.
 
+`surface` (v4+), when present, is the face's **analytic surface
+reference**: the face is a planar chord facet of the infinite right
+circular cylinder through `axis_point` along unit `axis` with the given
+`radius` — durable metadata over the faceted geometry (the extruded side
+walls of arc/circle profiles carry it), never a replacement for the
+polygonal face itself. The face's plane is parallel to `axis`, at most
+`radius` from it, and every face vertex lies within `radius` of the axis
+line; angular/axial extent is derived from the vertices, never stored. A
+reader that ignores the field loses only analytic metadata (exact
+center/axis/radius for snapping, smooth shading, re-export), never shape
+or watertightness.
+
+The per-face **edge-curve claims** (v5+) are the solid-edge mirror of the
+sketch-edge curve chains: an edge marked with a circle is a chord facet of
+the infinite circle through `center` with the given `radius` (each endpoint
+within tolerance of `radius` from `center`). They carry a circle imprinted
+on a solid face (drawn but not yet pushed) so a later push-through can
+re-attribute the tunnel walls as cylinder surfaces. The claims are stored
+per face parallel to that face's loop edges; a shared edge appears in both
+incident faces and carries the same claim in each. The leading `edge_curves`
+flag is `0` for the overwhelmingly common face that carries no such edge
+(one byte), so plain solids grow by exactly one byte per face. A reader that
+ignores the block loses only the imprint's analytic identity, never shape.
+
 ### 3.2 Field availability by version
 
 A conforming writer always writes one buffer version per file, matching the
@@ -273,8 +308,10 @@ present at every version:
 |---|---|---|---|
 | header `imported` flag (offset 13) | 3 | byte is not present at all — `vertex_count` begins one byte earlier | `0` (strict native tolerance) |
 | per-face `uv_frame` flag + payload | 2 | flag byte and payload are not present at all — `outer_count` follows the material id directly | no UV frame |
+| per-face `surface` flag + payload | 4 | flag byte and payload are not present at all — `outer_count` follows the `uv_frame` block directly | no analytic surface |
+| per-face `edge_curves` flag + payload | 5 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the last hole loop directly | no edge carries an analytic circle |
 
-Both gates shift subsequent byte offsets, so a reader must branch on the
+All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets
 past byte 9 (`base_material`). A reader MUST reject `version == 0` or
 `version` greater than the highest it implements, with a distinct
@@ -289,10 +326,15 @@ contents do not describe valid geometry.
 - **Truncation** (buffer ends before its own announced counts are
   satisfied) is a fatal error, distinct from corruption.
 - **Structural corruption** — an out-of-range vertex index, a loop under 3
-  vertices (`outer_count`/`hole_vertex_count < 3`), or a `watertight`/
-  `uv_frame`/`imported` byte outside its 0-1 range — is a fatal error
-  reported with the byte offset and what was wrong. Never a panic, never
-  best-effort recovery.
+  vertices (`outer_count`/`hole_vertex_count < 3`), a `watertight`/
+  `uv_frame`/`imported`/`surface`/`edge_curves` byte outside its 0-1 range,
+  a `surface` payload whose `axis` is not unit length or whose `radius` is
+  not finite and strictly positive, or an edge-curve payload whose `radius`
+  is not finite and strictly positive — is a fatal error reported with the
+  byte offset and what was wrong. Never a panic, never best-effort
+  recovery. (After rebuild, the validator additionally rejects an edge-curve
+  claim whose endpoints are not within tolerance of `radius` from `center`,
+  exactly as it rejects a lying `surface`.)
 - **Face plane recomputation.** Planes are *not* stored; a reader must
   recompute each face's best-fit plane from its outer-loop vertices and
   reject a loop that doesn't span a plane within tolerance (gated by
@@ -441,13 +483,30 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   single drawn arc or circle committed together, which editors treat as one
   selectable unit. Edges sharing a `curve` value belong to the same chain;
   an absent `curve` is a plain line. Curve ids are dense per sketch in
-  first-appearance order over the edge list and carry no geometry of their
-  own — a reader that ignores them loses only selection grouping, never
+  first-appearance order over the edge list — walking `edges[]` in order,
+  the first occurrence of each distinct `curve` value must be exactly one
+  greater than the previous maximum (starting at 0). This is a writer
+  guarantee AND a reader obligation: a reader MUST reject a first
+  appearance that skips ahead as malformed, never gap-fill phantom chains
+  (gap-filling would also defeat the dangling-`curves[]`-entry check).
+  Chain ids carry no geometry of their own (that lives in `curves[]`,
+  v10+) — a reader that ignores them loses only selection grouping, never
   shape.
 - `regions[]` — `{id, outer, holes}`: a closed planar polygon-with-holes.
   `outer` is a vertex-id cycle, counter-clockwise from the plane normal's
   side; each `holes` entry is clockwise (same convention as). This
   winding is a writer guarantee, not something the loader re-validates.
+- `curves[]` (v10+, optional) — `{id, center, radius}`: the **analytic
+  definition** of one curve chain — the exact circle, in the sketch plane,
+  whose facets the chain's edges approximate. `id` is the same dense
+  per-sketch curve id `edges[].curve` references. Sparse: a chain with no
+  entry is identity-only (selection grouping without geometry — every
+  pre-v10 chain). A reader MUST reject an entry whose `radius` is not
+  finite and strictly positive, an `id` no edge references, or a duplicated
+  `id` — like any other dangling reference. `center` is a writer guarantee
+  to lie on `plane` (like vertex positions, not re-validated on load). A
+  reader that ignores `curves` loses only the analytic metadata (exact
+  center/radius), never shape.
 
 `consumed` (top-level) is `[sketch_id, region_id]` dense-id pairs — regions
 already extruded into an Object, not to be offered again — sorted ascending.

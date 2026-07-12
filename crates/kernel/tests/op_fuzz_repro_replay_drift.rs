@@ -69,6 +69,7 @@ fn replay_cycles_do_not_accumulate_noise() {
             let op = KernelOp::SplitFace {
                 face,
                 path: vec![point_on(a, 0.25), point_on(b, 0.745254278052551)],
+                restore: None,
             };
             let _ = history.apply(&mut object, op);
         }
@@ -83,7 +84,15 @@ fn replay_cycles_do_not_accumulate_noise() {
             Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
         });
         let loop_path: Vec<Point3> = boundary.iter().map(|&p| c + (p - c) * 0.3).collect();
-        let _ = history.apply(&mut object, KernelOp::SplitFaceInner { face, loop_path });
+        let _ = history.apply(
+            &mut object,
+            KernelOp::SplitFaceInner {
+                face,
+                loop_path,
+                restore: None,
+                curve: None,
+            },
+        );
     }
     let op = KernelOp::PushPull {
         face: nth_face(&object, 7053327063461211258),

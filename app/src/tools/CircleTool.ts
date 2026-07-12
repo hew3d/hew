@@ -49,9 +49,25 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
 
-/** Number of straight segments approximating the circle ("circle" = faceted
- * regular N-gon; true arcs are out of scope for). */
+import { segmentsPerTurn } from './arcMath'
+
+/** Floor of the adaptive facet count (docs/design/true-curves.md §6): small
+ * circles are regular 24-gons; larger radii adapt up via `segmentsPerTurn`
+ * so the chord sagitta stays within the draw-time budget. The analytic
+ * center/radius rides the curve chain regardless. */
 export const CIRCLE_SEGMENTS = 24
+
+/** Adaptive facet count for a ground circle (center/rim in plane coords). */
+function groundSegments(center: [number, number], rim: [number, number]): number {
+  return segmentsPerTurn(Math.hypot(rim[0] - center[0], rim[1] - center[1]))
+}
+
+/** Adaptive facet count for an on-face circle (center/rim in world coords). */
+function faceSegments(center: V3, rim: V3): number {
+  return segmentsPerTurn(
+    Math.hypot(rim[0] - center[0], rim[1] - center[1], rim[2] - center[2]),
+  )
+}
 
 export type CircleCommitResult = {
   sketchHandle: bigint
@@ -226,7 +242,7 @@ export class CircleTool implements Tool {
         return
       }
       this._lastFaceCursor = cursorOnPlane
-      const verts = circlePolygonFace(center, cursorOnPlane, normal, CIRCLE_SEGMENTS)
+      const verts = circlePolygonFace(center, cursorOnPlane, normal, faceSegments(center, cursorOnPlane))
       if (verts !== null) {
         this._drawRubberBandFace(verts)
         this._reportMeasurement(center, cursorOnPlane)
@@ -244,7 +260,7 @@ export class CircleTool implements Tool {
       const { center } = this.groundStage
       const cursor: [number, number] = [snap.x, snap.y]
       this._lastGroundCursor = cursor
-      const verts = circlePolygonGround(center, cursor, CIRCLE_SEGMENTS)
+      const verts = circlePolygonGround(center, cursor, groundSegments(center, cursor))
       if (verts.length > 0) {
         this._drawRubberBandGround(verts)
         this._reportMeasurement([center[0], center[1], 0], [cursor[0], cursor[1], 0])
@@ -416,15 +432,18 @@ export class CircleTool implements Tool {
   }
 
   private _commitGroundCircle(center: [number, number], rim: [number, number]): void {
-    const verts = circlePolygonGround(center, rim, CIRCLE_SEGMENTS)
+    const verts = circlePolygonGround(center, rim, groundSegments(center, rim))
     if (verts.length === 0) return // degenerate — ignore
 
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
         let lastRegionsCreated: bigint[] = []
         // The whole circle is ONE curve chain — clicking any facet later
-        // selects (and deletes) the circle as a unit.
-        this.wasmScene.sketch_begin_curve(sketch)
+        // selects (and deletes) the circle as a unit — and it carries the
+        // exact analytic circle the facets approximate (durable
+        // center/radius — docs/design/true-curves.md).
+        const radius = Math.hypot(rim[0] - center[0], rim[1] - center[1])
+        this.wasmScene.sketch_begin_curve_with(sketch, center[0], center[1], 0, radius)
         try {
         for (let i = 0; i < verts.length; i++) {
           const p = verts[i]
@@ -497,7 +516,7 @@ export class CircleTool implements Tool {
       const cursorOnPlane = intersectPlane(ray.origin, ray.direction, planePoint, normal)
       if (cursorOnPlane === null) return
 
-      const verts = circlePolygonFace(center, cursorOnPlane, normal, CIRCLE_SEGMENTS)
+      const verts = circlePolygonFace(center, cursorOnPlane, normal, faceSegments(center, cursorOnPlane))
       if (verts === null) return // degenerate — ignore
 
       this.faceStage = { kind: 'idle' }
@@ -506,19 +525,27 @@ export class CircleTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
 
-      this._commitFaceVerts(object, face, verts)
+      this._commitFaceVerts(object, face, verts, center)
     }
   }
 
   /** Split the given face with a circle loop defined by center/rim/normal. */
   private _commitFaceCircle(object: bigint, face: bigint, center: V3, rim: V3, normal: V3): void {
-    const verts = circlePolygonFace(center, rim, normal, CIRCLE_SEGMENTS)
+    const verts = circlePolygonFace(center, rim, normal, faceSegments(center, rim))
     if (verts === null) return // degenerate — ignore
-    this._commitFaceVerts(object, face, verts)
+    this._commitFaceVerts(object, face, verts, center)
   }
 
-  /** Split the given face with a circle loop defined by N explicit world-space vertices. */
-  private _commitFaceVerts(object: bigint, face: bigint, verts: V3[]): void {
+  /**
+   * Split the given face with a circle loop defined by N explicit world-space
+   * vertices, carrying the drawn circle's analytic identity (center + radius)
+   * onto the solid so a later push-through of the imprinted disk shades smooth
+   * and offsets its radius, rather than leaving faceted tunnel walls
+   * (docs/design/true-curves.md, playtest fix C3). The radius is measured to
+   * the loop's own first vertex, so it matches the imprinted points exactly
+   * (the kernel refuses a claim that does not describe the loop).
+   */
+  private _commitFaceVerts(object: bigint, face: bigint, verts: V3[], center: V3): void {
     // Flatten the N vertices into a Float64Array of xyz triples
     const loopPts = new Float64Array(verts.length * 3)
     for (let i = 0; i < verts.length; i++) {
@@ -526,9 +553,20 @@ export class CircleTool implements Tool {
       loopPts[i * 3 + 1] = verts[i][1]
       loopPts[i * 3 + 2] = verts[i][2]
     }
+    const radius = Math.hypot(
+      verts[0][0] - center[0],
+      verts[0][1] - center[1],
+      verts[0][2] - center[2],
+    )
 
     try {
-      this.wasmScene.split_face_inner(object, face, loopPts)
+      this.wasmScene.split_face_inner_with_curve(
+        object,
+        face,
+        loopPts,
+        new Float64Array([center[0], center[1], center[2]]),
+        radius,
+      )
       this.onFaceImprint(object)
     } catch (err) {
       const code = parseKernelErrorCode(err)

@@ -206,9 +206,12 @@ export class LineTool implements Tool {
    * (so off-plane/occluded geometry is excluded), and/or an axis lock
    * (arrow keys / Shift, mirroring MoveTool) once a chain is anchored.
    *
-   * - Anchored (ground or face) with an axis locked: include
-   *   `anchor`/`lockAxis` (anchor = the last placed point) so the snap
-   *   collapses onto the locked line.
+   * - Anchored (ground or face): always include `anchor` (the last placed
+   *   point) — the inference engine derives anchor-dependent candidates
+   *   from it (a Tangent snap is "the rim point where the segment from the
+   *   anchor touches the circle", docs/design/true-curves.md). With an
+   *   axis locked, additionally include `lockAxis` so the snap collapses
+   *   onto the locked line.
    * - Face-anchored: ALSO return the known face plane's `constraintPlane`
    *   (unconditionally — independent of any axis lock) so subsequent snaps
    *   stay on that plane.
@@ -225,9 +228,11 @@ export class LineTool implements Tool {
   } | null {
     const lockPart: { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2 } = {}
     const anchorPoint = this._currentAnchor()
-    if (anchorPoint !== null && this.lockAxis !== null) {
+    if (anchorPoint !== null) {
       lockPart.anchor = anchorPoint
-      lockPart.lockAxis = this.lockAxis
+      if (this.lockAxis !== null) {
+        lockPart.lockAxis = this.lockAxis
+      }
     }
 
     if (this.faceStage.kind === 'anchored') {

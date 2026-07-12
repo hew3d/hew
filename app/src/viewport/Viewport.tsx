@@ -285,10 +285,11 @@ export interface ViewportApi {
   exportGlb: () => Promise<Uint8Array | null>
   /**
    * Serialize the current solid geometry (objects + instances) to a binary
-   * STL buffer — millimeter scale, Z-up. Resolves null when the
-   * model has no solids.
+   * STL buffer — millimeter scale, Z-up, cylinder walls re-faceted at
+   * `segmentsPerTurn` (0 = stored facets). Resolves null when the model has
+   * no solids.
    */
-  exportStl: () => Promise<StlBuildResult | null>
+  exportStl: (segmentsPerTurn: number) => Promise<StlBuildResult | null>
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -1475,8 +1476,10 @@ export default function Viewport({
       return exportSceneToGlb(sceneRenderer)
     }
 
-    async function exportStl(): Promise<StlBuildResult | null> {
-      return exportSceneToStl(sceneRenderer)
+    async function exportStl(segmentsPerTurn: number): Promise<StlBuildResult | null> {
+      // Kernel-sourced: the wasm scene serves export tessellation directly
+      // (re-faceted true curves); the three.js scene is not involved.
+      return exportSceneToStl(wasmScene, segmentsPerTurn)
     }
 
     if (apiRefRef.current !== undefined) {

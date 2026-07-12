@@ -40,10 +40,12 @@
 use crate::ids::{EdgeId, FaceId, HalfEdgeId};
 use crate::math::{Point3, Vec3};
 use crate::ops::{
-    CollapseSubFaceReport, FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport,
-    FaceSplitReport, PushPullError, PushPullReport, StickyError,
+    CollapseSubFaceReport, FaceAttrsAt, FaceMergeInnerReport, FaceMergeReport,
+    FaceSplitInnerReport, FaceSplitReport, PushPullError, PushPullReport, StickyError,
 };
+use crate::sketch::CurveGeom;
 use crate::tol;
+use crate::topo::FaceAttrs;
 use crate::topo::Object;
 
 /// A replayable, invertible mutation of one Object. Plain data — serializable
@@ -57,12 +59,20 @@ pub enum KernelOp {
         /// Signed distance along the face normal (meters).
         distance: f64,
     },
-    /// `Object::split_face(face, path)`.
+    /// `Object::split_face(face, path)` — or, with `restore` set,
+    /// `Object::split_face_with_attrs`: the undo of a `MergeFaces`, giving
+    /// each result face back the attribute state the merge report
+    /// snapshotted (matched by interior point; a per-face `None` is the
+    /// snapshot's best-effort fallback for a sliver too thin to pin — that
+    /// face inherits instead). `None` = both result faces inherit (the
+    /// forward/tool semantics).
     SplitFace {
         /// Face to cut.
         face: FaceId,
         /// The cut path, boundary to boundary.
         path: Vec<Point3>,
+        /// Attribute snapshots to restore onto the result faces (undo path).
+        restore: Option<[Option<FaceAttrsAt>; 2]>,
     },
     /// `Object::merge_faces(edge)`.
     MergeFaces {
@@ -70,11 +80,24 @@ pub enum KernelOp {
         edge: EdgeId,
     },
     /// `Object::split_face_inner(face, loop_path)` — imprint a closed loop.
+    /// With `restore` set this is the undo of a `MergeInnerFace`: the
+    /// re-created sub-face gets the attribute state the merge report
+    /// snapshotted, never a fresh copy inherited from the current parent
+    /// (which would resurrect an analytic claim the sub-face had
+    /// legitimately lost, or lose its paint). `None` = inherit.
     SplitFaceInner {
         /// Face to imprint into.
         face: FaceId,
         /// The closed loop, strictly inside the face.
         loop_path: Vec<Point3>,
+        /// Attribute snapshot to restore onto the sub-face (undo path).
+        restore: Option<FaceAttrs>,
+        /// The analytic circle the loop's edges are chord facets of, stamped
+        /// onto the imprinted edges so a later push-through re-attributes the
+        /// tunnel walls (docs/design/true-curves.md, playtest fix C3). `None`
+        /// for straight/unknown loops and for the undo-of-merge re-imprint
+        /// (the dissolved edge's claim is not snapshotted — map-or-drop).
+        curve: Option<CurveGeom>,
     },
     /// `Object::merge_inner_face(sub_face)` — dissolve an imprinted sub-face.
     MergeInnerFace {
@@ -756,13 +779,21 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
             face: face(unknown_face_pp)?,
             distance: *distance,
         }),
-        KernelOp::SplitFace { path, .. } => Ok(KernelOp::SplitFace {
+        KernelOp::SplitFace { path, restore, .. } => Ok(KernelOp::SplitFace {
             face: face(unknown_face_sticky)?,
             path: path.clone(),
+            restore: *restore,
         }),
-        KernelOp::SplitFaceInner { loop_path, .. } => Ok(KernelOp::SplitFaceInner {
+        KernelOp::SplitFaceInner {
+            loop_path,
+            restore,
+            curve,
+            ..
+        } => Ok(KernelOp::SplitFaceInner {
             face: face(unknown_face_sticky)?,
             loop_path: loop_path.clone(),
+            restore: *restore,
+            curve: *curve,
         }),
         KernelOp::MergeInnerFace { .. } => Ok(KernelOp::MergeInnerFace {
             sub_face: face(unknown_face_sticky)?,
@@ -809,16 +840,25 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             .push_pull(*face, *distance)
             .map(KernelOpReport::PushPull)
             .map_err(KernelOpError::PushPull),
-        KernelOp::SplitFace { face, path } => object
-            .split_face(*face, path)
+        KernelOp::SplitFace {
+            face,
+            path,
+            restore,
+        } => object
+            .split_face_with_attrs(*face, path, *restore)
             .map(KernelOpReport::FaceSplit)
             .map_err(KernelOpError::Sticky),
         KernelOp::MergeFaces { edge } => object
             .merge_faces(*edge)
             .map(KernelOpReport::FaceMerge)
             .map_err(KernelOpError::Sticky),
-        KernelOp::SplitFaceInner { face, loop_path } => object
-            .split_face_inner(*face, loop_path)
+        KernelOp::SplitFaceInner {
+            face,
+            loop_path,
+            restore,
+            curve,
+        } => object
+            .split_face_inner_impl(*face, loop_path, *restore, *curve)
             .map(KernelOpReport::FaceSplitInner)
             .map_err(KernelOpError::Sticky),
         KernelOp::MergeInnerFace { sub_face } => object
@@ -860,6 +900,9 @@ fn derive_inverse(
             face: r.merged_face,
             path: pre_merge_path
                 .expect("pre_merge_path must be provided for MergeFaces inverse derivation"),
+            // Give each side back exactly the attribute state the merge
+            // report snapshotted — never re-derived from the merged face.
+            restore: Some(r.prior_attrs),
         },
         (KernelOp::SplitFaceInner { .. }, KernelOpReport::FaceSplitInner(r)) => {
             KernelOp::MergeInnerFace {
@@ -868,10 +911,15 @@ fn derive_inverse(
         }
         (KernelOp::MergeInnerFace { .. }, KernelOpReport::FaceMergeInner(r)) => {
             // The merge captured the loop positions in its report (post-op state),
-            // so re-imprinting them on the restored parent redoes the split.
+            // so re-imprinting them on the restored parent redoes the split —
+            // and the snapshot gives the sub-face back its own attributes.
             KernelOp::SplitFaceInner {
                 face: r.parent,
                 loop_path: r.loop_path.clone(),
+                restore: Some(r.sub_face_attrs),
+                // The dissolved edges' circle claim was not snapshotted by the
+                // merge report; the re-imprint drops it (map-or-drop).
+                curve: None,
             }
         }
         (KernelOp::ExtrudeSubFace { .. }, KernelOpReport::ExtrudeSubFace(r)) => {
@@ -1259,7 +1307,14 @@ mod tests {
         let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
         let path = vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
         history
-            .apply(&mut cube, KernelOp::SplitFace { face: top, path })
+            .apply(
+                &mut cube,
+                KernelOp::SplitFace {
+                    face: top,
+                    path,
+                    restore: None,
+                },
+            )
             .unwrap();
         let after_split = cube.clone();
         assert_eq!(cube.faces().len(), 7, "split produces 7 faces");
@@ -1382,6 +1437,8 @@ mod tests {
                 KernelOp::SplitFaceInner {
                     face: top,
                     loop_path: rect,
+                    restore: None,
+                    curve: None,
                 },
             )
             .unwrap();
@@ -1421,6 +1478,8 @@ mod tests {
                 KernelOp::SplitFaceInner {
                     face: top,
                     loop_path: rect,
+                    restore: None,
+                    curve: None,
                 },
             )
             .unwrap();

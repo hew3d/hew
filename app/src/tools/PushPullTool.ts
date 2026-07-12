@@ -27,6 +27,9 @@ import { buildSweptPrismPreview, clearPreview } from './transformPreview'
  * fires continuously during a drag and would hijack the free-drag depth. */
 const HARD_SNAP_KINDS = new Set([
   'endpoint',
+  'center',
+  'quadrant',
+  'tangent',
   'midpoint',
   'intersection',
   'on-edge',

@@ -140,6 +140,23 @@ impl Object {
                     return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
                 }
             }
+            // A present analytic circle claim must agree with the geometry it
+            // describes (map-or-drop's enforcement half): both endpoints are
+            // chord facets of the circle, so each lies within tolerance of
+            // `radius` from `center`, and the radius is non-degenerate.
+            if let Some(crate::sketch::CurveGeom { center, radius }) = edge.curve {
+                let mismatch = TopologyError::EdgeCurveMismatch { edge: e };
+                if !radius.is_finite() || radius <= crate::tol::POINT_MERGE {
+                    return Err(mismatch);
+                }
+                let a = self.vertices[primary.origin].position;
+                let b = self.vertices[self.half_edges[primary.next].origin].position;
+                for p in [a, b] {
+                    if ((p - center).length() - radius).abs() > self.planarity_tol {
+                        return Err(mismatch);
+                    }
+                }
+            }
         }
 
         // Loops and faces agree; face boundaries are planar.
@@ -195,6 +212,43 @@ impl Object {
                             face: f,
                             loop_id: inner_id,
                         });
+                    }
+                }
+            }
+            // A present analytic surface must agree with the geometry it
+            // claims to describe (map-or-drop's enforcement half): a chord
+            // facet of a cylinder has its plane parallel to the axis, at
+            // most one radius away, with every vertex inside the cylinder.
+            if let Some(crate::topo::SurfaceRef::Cylinder {
+                axis_point,
+                axis,
+                radius,
+            }) = face.surface
+            {
+                let mismatch = TopologyError::FaceSurfaceMismatch { face: f };
+                if (axis.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION
+                    || !radius.is_finite()
+                    || radius <= crate::tol::POINT_MERGE
+                {
+                    return Err(mismatch);
+                }
+                if axis.dot(face.plane.normal()).abs() > crate::tol::NORMAL_DIRECTION {
+                    return Err(mismatch);
+                }
+                if face.plane.signed_distance(axis_point).abs() > radius + self.planarity_tol {
+                    return Err(mismatch);
+                }
+                let dist_to_axis = |p: crate::math::Point3| {
+                    let d = p - axis_point;
+                    (d - axis * d.dot(axis)).length()
+                };
+                let loop_ids =
+                    std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied());
+                for loop_id in loop_ids {
+                    for p in self.loop_positions(loop_id) {
+                        if dist_to_axis(p) > radius + self.planarity_tol {
+                            return Err(mismatch);
+                        }
                     }
                 }
             }
@@ -402,6 +456,63 @@ mod tests {
         assert!(matches!(
             tri.validate(),
             Err(TopologyError::DanglingHandle { .. })
+        ));
+    }
+
+    #[test]
+    fn validator_catches_lying_surface_reference() {
+        use crate::math::Vec3;
+        use crate::topo::SurfaceRef;
+        let mut tet = Object::tetrahedron();
+        let f = tet.faces.keys().next().unwrap();
+        // Claim a face is a chord facet of a cylinder it cannot be on (its
+        // vertices sit farther from the axis than the radius).
+        tet.faces[f].surface = Some(SurfaceRef::Cylinder {
+            axis_point: Point3::new(10.0, 10.0, 0.0),
+            axis: Vec3::new(0.0, 0.0, 1.0),
+            radius: 0.001,
+        });
+        assert!(matches!(
+            tet.validate(),
+            Err(TopologyError::FaceSurfaceMismatch { .. })
+        ));
+
+        // A non-unit axis is caught too.
+        tet.faces[f].surface = Some(SurfaceRef::Cylinder {
+            axis_point: Point3::ORIGIN,
+            axis: Vec3::new(0.0, 0.0, 2.0),
+            radius: 100.0,
+        });
+        assert!(matches!(
+            tet.validate(),
+            Err(TopologyError::FaceSurfaceMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validator_catches_lying_edge_curve() {
+        use crate::sketch::CurveGeom;
+        let mut tet = Object::tetrahedron();
+        let e = tet.edges.keys().next().unwrap();
+        // Claim an edge is a chord facet of a circle its endpoints are not on
+        // (its endpoints sit far from `radius` off the center).
+        tet.edges[e].curve = Some(CurveGeom {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 0.001,
+        });
+        assert!(matches!(
+            tet.validate(),
+            Err(TopologyError::EdgeCurveMismatch { .. })
+        ));
+
+        // A degenerate radius is caught too.
+        tet.edges[e].curve = Some(CurveGeom {
+            center: Point3::ORIGIN,
+            radius: 0.0,
+        });
+        assert!(matches!(
+            tet.validate(),
+            Err(TopologyError::EdgeCurveMismatch { .. })
         ));
     }
 }

@@ -939,3 +939,449 @@ fn clear_solids_drops_solids_and_keeps_guides_and_sketches() {
     assert_eq!(snap.kind, SnapKind::Endpoint);
     assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
 }
+
+// ---------------------------------------------------------- center snapping
+
+/// A faceted cylinder whose walls carry their analytic surface reference:
+/// built the way the app builds one — a circle chain with geometry, closed
+/// into a region, extruded.
+fn analytic_cylinder(center: Point3, radius: f64, n: usize, height: f64) -> Object {
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let mut s = kernel::Sketch::on_plane(plane);
+    s.begin_curve_with(kernel::CurveGeom { center, radius })
+        .unwrap();
+    let p = |i: usize| {
+        let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+        Point3::new(
+            center.x + radius * a.cos(),
+            center.y + radius * a.sin(),
+            0.0,
+        )
+    };
+    for i in 0..n {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+    let region = s.regions().keys().next().unwrap();
+    Object::from_extrusion(&s.profile(region).unwrap(), height).unwrap()
+}
+
+/// The true center of an extruded circle's cap snaps as `SnapKind::Center` —
+/// the exact drawn center, which is NOT any facet vertex or midpoint.
+#[test]
+fn cap_center_snaps_as_center() {
+    let mut scene = InferenceScene::new();
+    let cyl = analytic_cylinder(Point3::new(1.0, 2.0, 0.0), 0.5, 24, 1.0);
+    scene.add_object(ObjectId::default(), &cyl, &Transform::IDENTITY);
+
+    // Aim straight down at the TOP cap's center from above.
+    let snap = scene
+        .resolve(&query(
+            ray_at(Point3::new(1.0, 2.0, 5.0), Point3::new(1.0, 2.0, 1.0)),
+            NARROW,
+        ))
+        .expect("center candidate resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(
+        snap.position
+            .approx_eq(Point3::new(1.0, 2.0, 1.0), tol::POINT_MERGE)
+    );
+    // Provenance points at a claiming wall face of the owning object.
+    let source = snap.source.expect("centers carry object provenance");
+    assert!(matches!(source.element, ElementRef::Face(_)));
+}
+
+/// The bottom cap's center is occluded by the solid when viewed from above:
+/// only the visible center snaps (the same only-what-you-see rule as every
+/// other candidate).
+#[test]
+fn occluded_center_does_not_snap_through_the_solid() {
+    let mut scene = InferenceScene::new();
+    let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 1.0, 24, 1.0);
+    scene.add_object(ObjectId::default(), &cyl, &Transform::IDENTITY);
+
+    // From above, aiming at the BOTTOM center (z=0): the top cap hides it,
+    // so the resolved snap must not be the bottom center.
+    let snap = scene
+        .resolve(&query(
+            ray_at(Point3::new(0.0, 0.0, 5.0), Point3::new(0.0, 0.0, 0.0)),
+            NARROW,
+        ))
+        .expect("something under the cursor resolves");
+    if snap.kind == SnapKind::Center {
+        assert!(
+            snap.position
+                .approx_eq(Point3::new(0.0, 0.0, 1.0), tol::POINT_MERGE),
+            "only the visible (top) center may snap, got {:?}",
+            snap.position
+        );
+    }
+}
+
+/// A plain faceted prism (no analytic reference) produces no Center
+/// candidates — centers derive from metadata, never from facet geometry.
+#[test]
+fn unattributed_prism_has_no_center_candidates() {
+    let mut scene = InferenceScene::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let mut s = kernel::Sketch::on_plane(plane);
+    let p = |i: usize| {
+        let a = 2.0 * std::f64::consts::PI * (i as f64) / 24.0;
+        Point3::new(a.cos(), a.sin(), 0.0)
+    };
+    for i in 0..24 {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    let region = s.regions().keys().next().unwrap();
+    let prism = Object::from_extrusion(&s.profile(region).unwrap(), 1.0).unwrap();
+    scene.add_object(ObjectId::default(), &prism, &Transform::IDENTITY);
+
+    let snap = scene
+        .resolve(&query(
+            ray_at(Point3::new(0.0, 0.0, 5.0), Point3::new(0.0, 0.0, 1.0)),
+            NARROW,
+        ))
+        .expect("the cap face still resolves");
+    assert_ne!(snap.kind, SnapKind::Center, "no metadata, no center snap");
+}
+
+/// A rim with ZERO surviving arc offers no Center: slant-cut the entire top
+/// off a cylinder and the top "rim" is a circle of which nothing remains —
+/// its center is a fabricated point floating in the air above the slanted
+/// face. Only the intact bottom rim's center may snap
+/// (docs/design/true-curves.md, review follow-up: per-rim coverage gates
+/// Center exactly like Quadrant/Tangent).
+#[test]
+fn slant_cut_rim_offers_no_phantom_center() {
+    let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 1.0, 24, 1.0);
+    let cutter = {
+        // Quad on the plane z = 0.6 - 0.2x, extruded along its normal: the
+        // prism's slanted bottom face slices the whole top off.
+        let corners = [
+            Point3::new(-3.0, -3.0, 1.2),
+            Point3::new(3.0, -3.0, 0.0),
+            Point3::new(3.0, 3.0, 0.0),
+            Point3::new(-3.0, 3.0, 1.2),
+        ];
+        let plane = Plane::from_polygon(&corners).unwrap();
+        let mut cs = kernel::Sketch::on_plane(plane);
+        for i in 0..4 {
+            cs.add_segment(corners[i], corners[(i + 1) % 4]).unwrap();
+        }
+        let region = cs.regions().keys().next().unwrap();
+        Object::from_extrusion(&cs.profile(region).unwrap(), 2.0).unwrap()
+    };
+    let obj = Object::boolean(
+        kernel::BooleanOp::Subtract,
+        &cyl,
+        &cutter,
+        &Transform::IDENTITY,
+    )
+    .unwrap();
+
+    let mut scene = InferenceScene::new();
+    scene.set_axes_enabled(false); // the ambient Z axis is under these rays
+    scene.add_object(ObjectId::default(), &obj, &Transform::IDENTITY);
+
+    // The phantom top center would sit at (0,0,0.8) — the highest surviving
+    // vertex's station — 0.2 above the slant face, occluded by nothing.
+    // Aiming straight at it must NOT resolve a Center there.
+    if let Some(snap) = scene.resolve(&query(
+        ray_at(Point3::new(0.0, 0.0, 5.0), Point3::new(0.0, 0.0, 0.8)),
+        NARROW,
+    )) {
+        assert!(
+            !(snap.kind == SnapKind::Center
+                && snap
+                    .position
+                    .approx_eq(Point3::new(0.0, 0.0, 0.8), tol::POINT_MERGE)),
+            "a Center snapped at the fabricated point of a rim with zero \
+             surviving arc: {snap:?}"
+        );
+    }
+
+    // The intact bottom rim still offers its center (aimed from below,
+    // where nothing occludes it).
+    let snap = scene
+        .resolve(&query(
+            ray_at(Point3::new(0.0, 0.0, -5.0), Point3::new(0.0, 0.0, 0.0)),
+            NARROW,
+        ))
+        .expect("bottom center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(
+        snap.position
+            .approx_eq(Point3::new(0.0, 0.0, 0.0), tol::POINT_MERGE)
+    );
+}
+
+/// Removing the object removes its center candidates (replace semantics and
+/// idempotent removal, like every other candidate kind).
+#[test]
+fn center_candidates_are_removed_with_their_object() {
+    let mut scene = InferenceScene::new();
+    scene.set_axes_enabled(false); // the ambient Z axis is under this ray
+    let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 1.0, 12, 1.0);
+    scene.add_object(ObjectId::default(), &cyl, &Transform::IDENTITY);
+    scene.remove_object(ObjectId::default());
+    assert!(
+        scene
+            .resolve(&query(
+                ray_at(Point3::new(0.0, 0.0, 5.0), Point3::new(0.0, 0.0, 1.0)),
+                NARROW,
+            ))
+            .is_none(),
+        "no candidates survive removal"
+    );
+}
+
+/// A Center beats derived candidates (midpoints/edges) but loses to a real
+/// endpoint at the same screen position — the documented priority order.
+#[test]
+fn center_priority_sits_between_endpoint_and_midpoint() {
+    assert!(SnapKind::Endpoint < SnapKind::Center);
+    assert!(SnapKind::Center < SnapKind::Midpoint);
+}
+
+/// An instanced placement's centers follow the instance pose and are keyed
+/// to the instance for removal.
+#[test]
+fn instanced_centers_follow_the_pose_and_the_instance_key() {
+    let mut scene = InferenceScene::new();
+    scene.set_axes_enabled(false); // keep the post-removal probe unambiguous
+    let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 0.5, 12, 1.0);
+    let inst = InstanceId::default();
+    let pose = Transform::translation(Vec3::new(10.0, 0.0, 0.0));
+    scene.add_instance(inst, ObjectId::default(), &cyl, &pose);
+
+    let snap = scene
+        .resolve(&query(
+            ray_at(Point3::new(10.0, 0.0, 5.0), Point3::new(10.0, 0.0, 1.0)),
+            NARROW,
+        ))
+        .expect("instanced center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(
+        snap.position
+            .approx_eq(Point3::new(10.0, 0.0, 1.0), tol::POINT_MERGE)
+    );
+    assert_eq!(snap.source.unwrap().instance, Some(inst));
+
+    scene.remove_instance(inst);
+    assert!(
+        scene
+            .resolve(&query(
+                ray_at(Point3::new(10.0, 0.0, 5.0), Point3::new(10.0, 0.0, 1.0)),
+                NARROW,
+            ))
+            .is_none()
+    );
+}
+
+// ------------------------------------------------ quadrant + tangent snaps
+
+/// Tighter than [`NARROW`]: quadrant/tangent points on a fine polygon sit a
+/// few centimeters from real vertices, whose Endpoint candidates outrank
+/// them; the pin cone isolates the exact analytic point under test.
+const PIN: f64 = 0.003;
+
+/// The upper half-disc (semicircular analytic arc closed by a chord),
+/// extruded — a partial cylinder band whose rims cover only y >= 0.
+fn analytic_half_cylinder(radius: f64, n: usize, height: f64) -> Object {
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let mut s = kernel::Sketch::on_plane(plane);
+    s.begin_curve_with(kernel::CurveGeom {
+        center: Point3::new(0.0, 0.0, 0.0),
+        radius,
+    })
+    .unwrap();
+    let p = |i: usize| {
+        let a = std::f64::consts::PI * (i as f64) / (n as f64);
+        Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+    };
+    for i in 0..n {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+    s.add_segment(
+        Point3::new(-radius, 0.0, 0.0),
+        Point3::new(radius, 0.0, 0.0),
+    )
+    .unwrap();
+    let region = s.regions().keys().next().unwrap();
+    Object::from_extrusion(&s.profile(region).unwrap(), height).unwrap()
+}
+
+/// A rim quadrant point of a drawn circle snaps as `SnapKind::Quadrant` —
+/// the TRUE circle's cardinal point. With a facet vertex coinciding there
+/// (multiple-of-4 counts put vertices at the quadrants), Endpoint wins on
+/// priority; so probe a 26-gon, whose vertices straddle the cardinal.
+#[test]
+fn rim_quadrant_snaps_as_quadrant() {
+    let mut scene = InferenceScene::new();
+    let cyl = analytic_cylinder(Point3::new(1.0, 2.0, 0.0), 0.5, 26, 1.0);
+    scene.add_object(ObjectId::default(), &cyl, &Transform::IDENTITY);
+
+    // +Y cardinal of the top rim: (1, 2.5, 1). A 26-gon has no vertex at
+    // 90° (vertices sit at k·360/26 ≈ 13.85°·k, and the drawn polygon
+    // starts at +X), so the exact-cardinal point is between two vertices,
+    // slightly outside their chord, on the exact circle. The aperture is
+    // tight enough to exclude the neighboring vertices (~0.06 m away).
+    let target = Point3::new(1.0, 2.5, 1.0);
+    let snap = scene
+        .resolve(&query(ray_at(Point3::new(1.0, 5.0, 4.0), target), PIN))
+        .expect("quadrant candidate resolves");
+    assert_eq!(snap.kind, SnapKind::Quadrant);
+    assert!(snap.position.approx_eq(target, tol::POINT_MERGE));
+    let source = snap.source.expect("quadrants carry object provenance");
+    assert!(matches!(source.element, ElementRef::Face(_)));
+    // Indexed and reference paths agree (quadrants stay off the index).
+    let q = query(ray_at(Point3::new(1.0, 5.0, 4.0), target), PIN);
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// A partial arc offers quadrant points only over its covered range: the
+/// half cylinder's -Y cardinal does not exist anywhere in the scene.
+#[test]
+fn uncovered_quadrant_of_a_partial_arc_never_snaps() {
+    let mut scene = InferenceScene::new();
+    let half = analytic_half_cylinder(1.0, 13, 0.5);
+    scene.add_object(ObjectId::default(), &half, &Transform::IDENTITY);
+
+    // Covered apex quadrant (+Y) snaps…
+    let apex = Point3::new(0.0, 1.0, 0.5);
+    let snap = scene
+        .resolve(&query(ray_at(Point3::new(0.0, 4.0, 3.0), apex), NARROW))
+        .expect("apex quadrant resolves");
+    assert_eq!(snap.kind, SnapKind::Quadrant);
+    assert!(snap.position.approx_eq(apex, tol::POINT_MERGE));
+
+    // …but aiming at where the -Y quadrant WOULD be finds nothing at all
+    // (there is no geometry there — the solid's flat chord wall is at y=0).
+    let phantom = Point3::new(0.0, -1.0, 0.25);
+    let miss = scene.resolve(&query(
+        ray_at(Point3::new(0.0, -4.0, 0.25), phantom),
+        NARROW,
+    ));
+    assert!(
+        miss.is_none()
+            || !miss
+                .expect("checked")
+                .position
+                .approx_eq(phantom, tol::POINT_MERGE),
+        "the uncovered quadrant must not be offered"
+    );
+}
+
+/// With an anchor set, the rim point where the segment from the anchor
+/// touches the exact circle snaps as `SnapKind::Tangent`; the returned
+/// point satisfies tangency exactly (radius vector perpendicular to the
+/// anchor segment).
+#[test]
+fn tangent_from_anchor_snaps_on_the_true_circle() {
+    let mut scene = InferenceScene::new();
+    let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 1.0, 26, 1.0);
+    scene.add_object(ObjectId::default(), &cyl, &Transform::IDENTITY);
+
+    let anchor = Point3::new(3.0, 0.0, 1.0);
+    // Expected tangent point in the top rim plane: alpha = acos(r/d).
+    let alpha = (1.0f64 / 3.0).acos();
+    // The tangent point at +Y side: (cos a, sin a) relative to the +X
+    // direction of the anchor.
+    let expected = Point3::new(alpha.cos(), alpha.sin(), 1.0);
+
+    let mut q = query(ray_at(Point3::new(2.0, 3.0, 4.0), expected), PIN);
+    q.anchor = Some(anchor);
+    let snap = scene.resolve(&q).expect("tangent candidate resolves");
+    assert_eq!(snap.kind, SnapKind::Tangent);
+    assert!(snap.position.approx_eq(expected, 1e-9));
+    // Exact tangency: (p - c) ⟂ (p - anchor).
+    let radial = snap.position - Point3::new(0.0, 0.0, 1.0);
+    let along = snap.position - anchor;
+    assert!(radial.dot(along).abs() <= 1e-9);
+
+    // No anchor, no tangent: the same ray without an anchor resolves to
+    // something else (or nothing).
+    let bare = scene.resolve(&query(ray_at(Point3::new(2.0, 3.0, 4.0), expected), PIN));
+    assert!(bare.is_none_or(|s| s.kind != SnapKind::Tangent));
+}
+
+/// Tangent points obey coverage: the half cylinder never offers a tangent
+/// on its missing (y < 0) side.
+#[test]
+fn tangent_respects_the_covered_angular_range() {
+    let mut scene = InferenceScene::new();
+    let half = analytic_half_cylinder(1.0, 13, 0.5);
+    scene.add_object(ObjectId::default(), &half, &Transform::IDENTITY);
+
+    // Anchor on +X far side: tangent points sit at ±alpha off the +X
+    // direction — one on the covered +Y side, one on the uncovered -Y side.
+    let anchor = Point3::new(3.0, 0.0, 0.5);
+    let alpha = (1.0f64 / 3.0).acos();
+    let covered = Point3::new(alpha.cos(), alpha.sin(), 0.5);
+    let uncovered = Point3::new(alpha.cos(), -alpha.sin(), 0.5);
+
+    let mut q = query(ray_at(Point3::new(2.0, 3.0, 3.0), covered), PIN);
+    q.anchor = Some(anchor);
+    let snap = scene.resolve(&q).expect("covered tangent resolves");
+    assert_eq!(snap.kind, SnapKind::Tangent);
+    assert!(snap.position.approx_eq(covered, 1e-9));
+
+    let mut q2 = query(ray_at(Point3::new(2.0, -3.0, 3.0), uncovered), NARROW);
+    q2.anchor = Some(anchor);
+    let miss = scene.resolve(&q2);
+    assert!(
+        miss.is_none_or(|s| s.kind != SnapKind::Tangent),
+        "no tangent on the uncovered side"
+    );
+}
+
+/// An anchor inside the circle has no tangent lines; nothing is offered.
+#[test]
+fn anchor_inside_the_circle_offers_no_tangent() {
+    let mut scene = InferenceScene::new();
+    let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 1.0, 26, 1.0);
+    scene.add_object(ObjectId::default(), &cyl, &Transform::IDENTITY);
+
+    let mut q = query(
+        ray_at(Point3::new(2.0, 3.0, 4.0), Point3::new(0.9, 0.43, 1.0)),
+        WIDE,
+    );
+    q.anchor = Some(Point3::new(0.2, 0.1, 1.0));
+    let snap = scene.resolve(&q);
+    assert!(snap.is_none_or(|s| s.kind != SnapKind::Tangent));
+}
+
+/// Quadrant and tangent candidates are removed with their object, exactly
+/// like centers.
+#[test]
+fn quadrant_and_tangent_candidates_die_with_their_object() {
+    let mut scene = InferenceScene::new();
+    let id = ObjectId::default();
+    let cyl = analytic_cylinder(Point3::new(1.0, 2.0, 0.0), 0.5, 26, 1.0);
+    scene.add_object(id, &cyl, &Transform::IDENTITY);
+    scene.remove_object(id);
+
+    let target = Point3::new(1.5, 2.0, 1.0);
+    assert!(
+        scene
+            .resolve(&query(ray_at(Point3::new(4.0, 2.0, 4.0), target), NARROW))
+            .is_none(),
+        "no candidates survive removal"
+    );
+}

@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
-  ARC_SEGMENTS_PER_QUARTER_TURN,
+  MIN_SEGMENTS_PER_TURN,
+  MAX_SEGMENTS_PER_TURN,
+  DRAW_SAGITTA_TOL_M,
+  segmentsPerTurn,
   ARC_MIN_SAGITTA_M,
   arcFromChord,
   arcPolyline,
@@ -91,22 +94,52 @@ describe('arcFromChord — center and radius', () => {
   })
 })
 
+describe('segmentsPerTurn (docs/design/true-curves.md §6)', () => {
+  it('small radii take the floor: 24 segments per turn', () => {
+    expect(segmentsPerTurn(0.02)).toBe(MIN_SEGMENTS_PER_TURN)
+    expect(segmentsPerTurn(0.05)).toBe(MIN_SEGMENTS_PER_TURN)
+  })
+
+  it('large radii cap at 96 segments per turn', () => {
+    expect(segmentsPerTurn(1.0)).toBe(MAX_SEGMENTS_PER_TURN)
+    expect(segmentsPerTurn(100)).toBe(MAX_SEGMENTS_PER_TURN)
+  })
+
+  it('mid radii adapt, rounded up to a multiple of 4 (quadrant vertices)', () => {
+    const n = segmentsPerTurn(0.5)
+    expect(n % 4).toBe(0)
+    expect(n).toBeGreaterThan(MIN_SEGMENTS_PER_TURN)
+    expect(n).toBeLessThan(MAX_SEGMENTS_PER_TURN)
+    // The count honors the sagitta budget wherever it is not clamped.
+    const sagitta = 0.5 * (1 - Math.cos(Math.PI / n))
+    expect(sagitta).toBeLessThanOrEqual(DRAW_SAGITTA_TOL_M)
+  })
+
+  it('degenerate radii take the floor rather than exploding', () => {
+    expect(segmentsPerTurn(0)).toBe(MIN_SEGMENTS_PER_TURN)
+    expect(segmentsPerTurn(Number.NaN)).toBe(MIN_SEGMENTS_PER_TURN)
+    expect(segmentsPerTurn(-1)).toBe(MIN_SEGMENTS_PER_TURN)
+  })
+})
+
 describe('arcSegmentCount', () => {
-  it('a quarter turn gets exactly ARC_SEGMENTS_PER_QUARTER_TURN segments', () => {
-    expect(arcSegmentCount(Math.PI / 2)).toBe(ARC_SEGMENTS_PER_QUARTER_TURN)
+  it('is the per-turn density scaled by the sweep fraction', () => {
+    // Small radius: 24 per turn -> a quarter turn gets 6.
+    expect(arcSegmentCount(Math.PI / 2, 0.02)).toBe(6)
+    // Large radius: 96 per turn -> a quarter turn gets 24.
+    expect(arcSegmentCount(Math.PI / 2, 5)).toBe(24)
   })
 
-  it('scales with sweep: a half turn gets 24, and sign is ignored', () => {
-    expect(arcSegmentCount(Math.PI)).toBe(2 * ARC_SEGMENTS_PER_QUARTER_TURN)
-    expect(arcSegmentCount(-Math.PI)).toBe(2 * ARC_SEGMENTS_PER_QUARTER_TURN)
+  it('ignores the sweep sign', () => {
+    expect(arcSegmentCount(Math.PI, 0.02)).toBe(arcSegmentCount(-Math.PI, 0.02))
   })
 
-  it('rounds up for a partial quarter (sweep just over π/2 → 13)', () => {
-    expect(arcSegmentCount(Math.PI / 2 + 0.01)).toBe(ARC_SEGMENTS_PER_QUARTER_TURN + 1)
+  it('rounds partial fractions up', () => {
+    expect(arcSegmentCount(Math.PI / 2 + 0.05, 0.02)).toBe(7)
   })
 
   it('never drops below 2 segments, even for a sliver sweep', () => {
-    expect(arcSegmentCount(0.01)).toBe(2)
+    expect(arcSegmentCount(0.01, 0.02)).toBe(2)
   })
 })
 
@@ -115,7 +148,7 @@ describe('arcPolyline', () => {
     const s = 0.5
     const arc = arcFromChord(A, B, s)!
     const pts = arcPolyline(A, B, s)!
-    expect(pts.length).toBe(arcSegmentCount(arc.sweep) + 1)
+    expect(pts.length).toBe(arcSegmentCount(arc.sweep, arc.radius) + 1)
     for (const p of pts) {
       const d = Math.hypot(p[0] - arc.center[0], p[1] - arc.center[1])
       expect(d).toBeCloseTo(arc.radius, 10)

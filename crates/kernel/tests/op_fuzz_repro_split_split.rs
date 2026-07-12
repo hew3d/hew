@@ -37,6 +37,7 @@ fn split_op(
     KernelOp::SplitFace {
         face,
         path: vec![point_on(edge_a % sides, ta), point_on(edge_b % sides, tb)],
+        restore: None,
     }
 }
 

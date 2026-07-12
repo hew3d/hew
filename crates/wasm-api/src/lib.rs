@@ -423,9 +423,19 @@ impl MeshJs {
         self.mesh.groups.iter().map(|g| g.count).collect()
     }
 
-    /// Line-segment endpoints (xyz pairs), one segment per unique edge.
+    /// Line-segment endpoints (xyz pairs), one segment per unique **hard**
+    /// edge (everything except interior facet seams of one curved wall).
     pub fn edge_positions(&self) -> Vec<f32> {
         self.mesh.edge_positions.clone()
+    }
+
+    /// Line-segment endpoints (xyz pairs) of the **soft** edges: interior
+    /// seams between facets claiming the same analytic surface
+    /// (docs/design/true-curves.md stage 4). The viewport suppresses these
+    /// — a cylinder reads as one smooth wall; exposed so alternative
+    /// renderers or debug views can still draw them.
+    pub fn soft_edge_positions(&self) -> Vec<f32> {
+        self.mesh.soft_edge_positions.clone()
     }
 
     /// Whether the source Object encloses a volume.
@@ -752,13 +762,17 @@ impl SnapJs {
         self.snap.position.z
     }
 
-    /// Snap kind for cue styling: "endpoint", "midpoint", "intersection",
-    /// "on-edge", "on-face", "on-guide", "on-axis", "parallel", "perpendicular".
+    /// Snap kind for cue styling: "endpoint", "center", "quadrant",
+    /// "midpoint", "intersection", "tangent", "on-edge", "on-face",
+    /// "on-guide", "on-axis", "parallel", "perpendicular".
     pub fn kind(&self) -> String {
         match self.snap.kind {
             SnapKind::Endpoint => "endpoint",
+            SnapKind::Center => "center",
+            SnapKind::Quadrant => "quadrant",
             SnapKind::Midpoint => "midpoint",
             SnapKind::Intersection => "intersection",
+            SnapKind::Tangent => "tangent",
             SnapKind::OnEdge => "on-edge",
             SnapKind::OnFace => "on-face",
             SnapKind::OnGuide => "on-guide",
@@ -1198,6 +1212,48 @@ impl Scene {
         let id = s.begin_curve();
         recording::record(recording::RecordedCall::SketchBeginCurve { sketch });
         Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::sketch_begin_curve`] with the chain's analytic definition:
+    /// the exact circle (center `cx, cy, cz` on the sketch plane, `radius`
+    /// in meters) whose facets the bracketed segments approximate. The
+    /// geometry is durable — it persists in the file format and survives
+    /// sticky splits (docs/design/true-curves.md). Returns the curve handle.
+    pub fn sketch_begin_curve_with(
+        &mut self,
+        sketch: u64,
+        cx: f64,
+        cy: f64,
+        cz: f64,
+        radius: f64,
+    ) -> Result<u64, ApiError> {
+        let sid = sketch_id(sketch);
+        let s = self
+            .doc
+            .sketch_mut(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let id = s
+            .begin_curve_with(kernel::CurveGeom {
+                center: Point3::new(cx, cy, cz),
+                radius,
+            })
+            .map_err(|e| api_err(&e, &e))?;
+        recording::record(recording::RecordedCall::SketchBeginCurveWith {
+            sketch,
+            center: [cx, cy, cz],
+            radius,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// The analytic definition of curve chain `curve` in `sketch` as
+    /// `[cx, cy, cz, radius]`, or `undefined` when the chain carries none
+    /// (drawn before geometry capture, or a stale handle).
+    pub fn sketch_curve_geom(&self, sketch: u64, curve: u64) -> Option<Vec<f64>> {
+        let s = self.doc.sketch(sketch_id(sketch))?;
+        let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
+        s.curve_geom(cid)
+            .map(|g| vec![g.center.x, g.center.y, g.center.z, g.radius])
     }
 
     /// Closes the open curve bracket on `sketch` (no-op when none is open).
@@ -2161,6 +2217,30 @@ impl Scene {
         })
     }
 
+    /// Export tessellation of one Object as a flat triangle soup
+    /// (9 floats per triangle, CCW from outside, object-local meters) at a
+    /// chosen curve resolution — docs/design/true-curves.md stage 6.
+    ///
+    /// `segments_per_turn == 0` exports the stored facets verbatim; any
+    /// other value re-facets every pristine stamped cylinder wall at that
+    /// resolution (clamped to the tessellator's supported range), keeping
+    /// the mesh manifold at any setting; walls that are no longer fully
+    /// analytic (boolean seams, bosses) honestly keep their stored facets.
+    /// Uncached — export is a one-shot path, not a per-frame one.
+    pub fn object_export_triangles(
+        &self,
+        object: u64,
+        segments_per_turn: u32,
+    ) -> Result<Vec<f32>, ApiError> {
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let soup =
+            tessellate::export_triangles(object, segments_per_turn).map_err(|e| api_err(&e, &e))?;
+        Ok(soup.into_iter().map(|x| x as f32).collect())
+    }
+
     /// Whether an Object encloses a volume (drives the status UI).
     pub fn object_watertight(&self, object: u64) -> Result<bool, ApiError> {
         let object = self
@@ -2320,6 +2400,11 @@ impl Scene {
                 .push_pull_through(oid, face_id, distance)
                 .map_err(doc_err)?;
             self.reconcile(&change);
+            recording::record(recording::RecordedCall::PushPull {
+                object,
+                face,
+                distance,
+            });
             return Ok(PushPullJs {
                 inner: None,
                 through: results.iter().map(|id| id.data().as_ffi()).collect(),
@@ -2343,6 +2428,11 @@ impl Scene {
         };
         match self.apply_op(object, op)? {
             KernelOpReport::PushPull(inner) | KernelOpReport::ExtrudeSubFace(inner) => {
+                recording::record(recording::RecordedCall::PushPull {
+                    object,
+                    face,
+                    distance,
+                });
                 Ok(PushPullJs {
                     inner: Some(inner),
                     through: Vec::new(),
@@ -2362,6 +2452,43 @@ impl Scene {
         face: u64,
         loop_pts: &[f64],
     ) -> Result<u64, ApiError> {
+        self.split_face_inner_impl(object, face, loop_pts, None)
+    }
+
+    /// [`Scene::split_face_inner`] carrying the drawn circle's analytic
+    /// identity (`center`, `radius`), so pushing the imprinted face THROUGH
+    /// the solid re-attributes the tunnel walls as a smooth cylinder instead
+    /// of leaving faceted walls that refuse whole-wall push/pull
+    /// (docs/design/true-curves.md, playtest fix C3). The tool that drew the
+    /// circle owns the truth — the kernel never fits a circle to `loop_pts`
+    /// and refuses a claim that does not describe them.
+    pub fn split_face_inner_with_curve(
+        &mut self,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+        center: &[f64],
+        radius: f64,
+    ) -> Result<u64, ApiError> {
+        if center.len() != 3 {
+            return Err(ApiError(
+                "BadCurve: center must be an xyz triple".to_string(),
+            ));
+        }
+        let curve = kernel::CurveGeom {
+            center: Point3::new(center[0], center[1], center[2]),
+            radius,
+        };
+        self.split_face_inner_impl(object, face, loop_pts, Some(curve))
+    }
+
+    fn split_face_inner_impl(
+        &mut self,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+        curve: Option<kernel::CurveGeom>,
+    ) -> Result<u64, ApiError> {
         if !loop_pts.len().is_multiple_of(3) || loop_pts.len() < 9 {
             return Err(ApiError(
                 "BadLoop: loop needs at least three xyz triples".to_string(),
@@ -2374,9 +2501,19 @@ impl Scene {
         let op = KernelOp::SplitFaceInner {
             face: FaceId::from(KeyData::from_ffi(face)),
             loop_path: points,
+            restore: None,
+            curve,
         };
         match self.apply_op(object, op)? {
-            KernelOpReport::FaceSplitInner(r) => Ok(r.sub_face.data().as_ffi()),
+            KernelOpReport::FaceSplitInner(r) => {
+                recording::record(recording::RecordedCall::SplitFaceInner {
+                    object,
+                    face,
+                    loop_pts: loop_pts.to_vec(),
+                    curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+                });
+                Ok(r.sub_face.data().as_ffi())
+            }
             other => Err(api_err(
                 &other,
                 &"unexpected report kind for split_face_inner",
@@ -2403,6 +2540,7 @@ impl Scene {
         let op = KernelOp::SplitFace {
             face: FaceId::from(KeyData::from_ffi(face)),
             path: points,
+            restore: None,
         };
         match self.apply_op(object, op)? {
             KernelOpReport::FaceSplit(inner) => Ok(FaceSplitJs { inner }),
@@ -3211,6 +3349,15 @@ impl Scene {
                     SketchBeginCurve { sketch } => {
                         self.sketch_begin_curve(sketch)?;
                     }
+                    SketchBeginCurveWith {
+                        sketch,
+                        center,
+                        radius,
+                    } => {
+                        self.sketch_begin_curve_with(
+                            sketch, center[0], center[1], center[2], radius,
+                        )?;
+                    }
                     SketchEndCurve { sketch } => {
                         self.sketch_end_curve(sketch)?;
                     }
@@ -3246,6 +3393,32 @@ impl Scene {
                     }
                     DeleteNode { kind, id } => {
                         self.delete_node(kind, id)?;
+                    }
+                    SplitFaceInner {
+                        object,
+                        face,
+                        loop_pts,
+                        curve,
+                    } => match curve {
+                        Some(c) => {
+                            self.split_face_inner_with_curve(
+                                object,
+                                face,
+                                &loop_pts,
+                                &c[..3],
+                                c[3],
+                            )?;
+                        }
+                        None => {
+                            self.split_face_inner(object, face, &loop_pts)?;
+                        }
+                    },
+                    PushPull {
+                        object,
+                        face,
+                        distance,
+                    } => {
+                        self.push_pull(object, face, distance)?;
                     }
                 }
             }
@@ -3647,6 +3820,126 @@ mod tests {
         );
         // Replaying must not itself record.
         assert!(!replayed.is_recording());
+    }
+
+    /// Draw-on-face with an analytic circle, then push the disk THROUGH the
+    /// solid, records and replays to the exact same state (adversarial review,
+    /// major): a C3 session must not diverge on replay. Red-checks by removing
+    /// the imprint's recording — replay then diverges.
+    #[test]
+    fn draw_on_face_circle_then_through_cut_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        // The +Z top face at z = 1.
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        // Imprint a circle carrying its identity, strictly inside the unit top.
+        let (cx, cy, cz, r, n) = (0.5, 0.5, 1.0, 0.3, 24usize);
+        let mut loop_pts = Vec::with_capacity(n * 3);
+        for i in 0..n {
+            let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+            loop_pts.push(cx + r * a.cos());
+            loop_pts.push(cy + r * a.sin());
+            loop_pts.push(cz);
+        }
+        let disk = scene
+            .split_face_inner_with_curve(obj, top, &loop_pts, &[cx, cy, cz], r)
+            .unwrap();
+        // Push the disk straight down through the whole box.
+        scene.push_pull(obj, disk, -2.0).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        // The imprint call was captured WITH its circle, and the push recorded.
+        let rec: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let calls = rec["calls"].as_array().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c["method"] == "split_face_inner" && c["curve"].is_array()),
+            "the draw-on-face imprint carrying its circle was recorded"
+        );
+        assert!(
+            calls.iter().any(|c| c["method"] == "push_pull"),
+            "the through-cut push was recorded"
+        );
+
+        // Replay into a fresh scene reproduces the exact state.
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying the C3 session reproduces the golden state_hash"
+        );
+        assert_eq!(
+            replayed.save(),
+            scene.save(),
+            "replay reproduces byte-identical document bytes (the tunnel's cylinder refs included)"
+        );
+    }
+
+    /// A curve bracket carrying its analytic circle records and replays:
+    /// the replayed document is byte-identical, so the curve geometry
+    /// (persisted in manifest v10) survived the round trip.
+    #[test]
+    fn analytic_curve_bracket_records_and_replays() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let sketch = scene.begin_ground_sketch();
+        scene
+            .sketch_begin_curve_with(sketch, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        // Two facets of the unit circle.
+        scene
+            .sketch_add_segment(sketch, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(sketch, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0)
+            .unwrap();
+        scene.sketch_end_curve(sketch).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(
+            json.contains("sketch_begin_curve_with"),
+            "the analytic bracket is captured as its own call"
+        );
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// A degenerate analytic bracket is refused with a typed error and
+    /// leaves no bracket open.
+    #[test]
+    fn analytic_curve_bracket_rejects_degenerate_radius() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        let err = scene
+            .sketch_begin_curve_with(sketch, 0.0, 0.0, 0.0, 0.0)
+            .unwrap_err();
+        assert!(err.0.starts_with("DegenerateCurve:"), "got: {}", err.0);
     }
 
     /// A version mismatch in a recording artifact is rejected, not mis-replayed.

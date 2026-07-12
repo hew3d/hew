@@ -326,7 +326,14 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestC
                 p + (q - p) * t
             };
             let path = vec![point_on(a, *ta), point_on(b, *tb)];
-            let _ = doc.apply_object_op(oid, KernelOp::SplitFace { face, path });
+            let _ = doc.apply_object_op(
+                oid,
+                KernelOp::SplitFace {
+                    face,
+                    path,
+                    restore: None,
+                },
+            );
         }
         DocOp::SplitFaceInner {
             obj_sel,
@@ -370,7 +377,15 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestC
                 });
                 boundary.iter().map(|&p| c + (p - c) * *shrink).collect()
             };
-            let _ = doc.apply_object_op(oid, KernelOp::SplitFaceInner { face, loop_path });
+            let _ = doc.apply_object_op(
+                oid,
+                KernelOp::SplitFaceInner {
+                    face,
+                    loop_path,
+                    restore: None,
+                    curve: None,
+                },
+            );
         }
         DocOp::Boolean { kind, a_sel, b_sel } => {
             let ids = doc.visible_object_ids();

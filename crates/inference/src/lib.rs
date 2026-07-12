@@ -73,10 +73,30 @@ pub struct PickRay {
 pub enum SnapKind {
     /// Exactly on an existing vertex.
     Endpoint,
+    /// On the true center of a drawn circle or arc, derived from the
+    /// solid's analytic surface references (`kernel::SurfaceRef`,
+    /// docs/design/true-curves.md) — the exact drawn center, not a facet
+    /// artifact. Ranked just below Endpoint: a real vertex at the same spot
+    /// still wins, but a center beats everything derived (midpoints,
+    /// intersections, edges, faces).
+    Center,
+    /// On a quadrant point of a drawn circle or arc's rim — the four
+    /// cardinal points of the exact analytic circle, offered only over the
+    /// angular range the facets actually cover. Derived from the same
+    /// surface references as [`SnapKind::Center`]; ranked with it (a
+    /// center at the same spot still wins on order).
+    Quadrant,
     /// On the midpoint of an edge.
     Midpoint,
     /// On the apparent intersection of two edges.
     Intersection,
+    /// On the point of a drawn circle or arc's rim where the segment from
+    /// the tool's anchor is tangent to the exact analytic circle. Needs an
+    /// anchor ([`SnapQuery::anchor`]); offered only over the covered
+    /// angular range. Beats bare OnEdge (it is a *specific* point of the
+    /// rim) but loses to explicit points (endpoints, quadrants, midpoints,
+    /// intersections).
+    Tangent,
     /// Anywhere along an edge.
     OnEdge,
     /// Anywhere on a face.
@@ -225,6 +245,51 @@ pub struct ScenePoint {
     pub source: SnapSource,
 }
 
+/// A rim circle of a claimed cylinder in world space, for tangent
+/// inference (mirrors [`kernel::AnalyticRim`] through a placement).
+#[derive(Debug, Clone, PartialEq)]
+struct SceneRim {
+    center: Point3,
+    /// Unit rim-plane normal (the cylinder axis).
+    axis: Vec3,
+    radius: f64,
+    /// Unit angular-frame basis (perpendicular to `axis`).
+    u: Vec3,
+    v: Vec3,
+    /// Merged coverage intervals in the (u, v) frame; `None` = full circle
+    /// (see [`kernel::AnalyticRim::coverage`]). Angles are similarity
+    /// invariant, so the object-space intervals apply verbatim.
+    coverage: Option<Vec<[f64; 2]>>,
+    source: SnapSource,
+}
+
+impl SceneRim {
+    /// Whether `angle` (radians in the (u, v) frame) is covered, within the
+    /// same tolerance rule as [`kernel::AnalyticRim::covers`].
+    fn covers(&self, angle: f64) -> bool {
+        let Some(intervals) = &self.coverage else {
+            return true;
+        };
+        let eps = tol::POINT_MERGE / self.radius;
+        let tau = 2.0 * std::f64::consts::PI;
+        let mut a = angle;
+        while a >= std::f64::consts::PI {
+            a -= tau;
+        }
+        while a < -std::f64::consts::PI {
+            a += tau;
+        }
+        intervals.iter().any(|&[s, e]| {
+            (a >= s - eps && a <= e + eps) || (a + tau >= s - eps && a + tau <= e + eps)
+        })
+    }
+
+    /// The rim point at `angle` in the (u, v) frame.
+    fn point_at(&self, angle: f64) -> Point3 {
+        self.center + self.u * (self.radius * angle.cos()) + self.v * (self.radius * angle.sin())
+    }
+}
+
 /// A snappable segment (kernel edge in world space).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SceneSegment {
@@ -292,6 +357,21 @@ pub struct InferenceScene {
     points: Vec<ScenePoint>,
     segments: Vec<SceneSegment>,
     faces: Vec<SceneFace>,
+    /// True circle centers derived from objects' analytic surface
+    /// references (see [`SnapKind::Center`]): few per scene, registered
+    /// alongside `points` and resolved on a linear walk (never indexed).
+    centers: Vec<ScenePoint>,
+    /// Rim quadrant points (see [`SnapKind::Quadrant`]): the covered
+    /// cardinal points of each claimed cylinder's two rim circles. Same
+    /// lifecycle and linear-walk resolution as `centers`.
+    quadrants: Vec<ScenePoint>,
+    /// Rim circles for tangent inference (see [`SnapKind::Tangent`]):
+    /// exact center/axis/radius plus angular coverage, in world space.
+    /// Registered only for placements that preserve circles (world objects
+    /// and similarity-posed instances) — a non-uniformly scaled instance's
+    /// rims are ellipses the reference cannot represent, so they are
+    /// dropped, never approximated. Linear walk, like `centers`.
+    rims: Vec<SceneRim>,
     guides: Vec<SceneGuide>,
     /// Persistent sketch candidates (committed sketch edges, not yet kernel
     /// Objects): keyed by `SketchId` so a caller can replace one sketch's
@@ -354,6 +434,9 @@ impl Default for InferenceScene {
             points: Vec::new(),
             segments: Vec::new(),
             faces: Vec::new(),
+            centers: Vec::new(),
+            quadrants: Vec::new(),
+            rims: Vec::new(),
             guides: Vec::new(),
             sketch_segments: Vec::new(),
             sketch_vertices: Vec::new(),
@@ -555,6 +638,63 @@ impl InferenceScene {
                 },
             });
         }
+
+        // --- Analytic rims -> Center / Quadrant / Tangent candidates ---
+        // Derived from the object's surface references
+        // (docs/design/true-curves.md): each claimed cylinder's two rim
+        // circles yield a Center at the exact axis point, Quadrant points
+        // over the covered angular range, and — when the placement
+        // preserves circles — the rim itself for anchor-based tangent
+        // resolution at query time.
+        let similarity = placement.similarity_scale();
+        for rim in object.analytic_rims() {
+            // A rim with zero surviving arc (a slant-cut station) offers no
+            // candidates AT ALL: its center would be the center of no
+            // surviving circle, its quadrant set is empty by construction,
+            // and tangency has no arc to touch. Same gate as the kernel's
+            // own `analytic_cap_centers`.
+            if !rim.has_coverage() {
+                continue;
+            }
+            let source = SnapSource {
+                object: owner,
+                element: ElementRef::Face(rim.rep),
+                instance,
+            };
+            self.centers.push(ScenePoint {
+                position: placement.apply_point(rim.center),
+                source,
+            });
+            // Quadrant points transform as plain points: under any affine
+            // placement they stay on the (possibly elliptical) rim curve.
+            for q in rim.quadrant_points() {
+                self.quadrants.push(ScenePoint {
+                    position: placement.apply_point(q),
+                    source,
+                });
+            }
+            // Tangency needs a genuine circle: map the rim under
+            // similarities, drop it otherwise (never approximate — the
+            // kernel's map-or-drop rule, applied at the query layer).
+            if let Some(scale) = similarity {
+                let map_unit = |w: Vec3| placement.apply_vector(w).normalized();
+                if let (Ok(axis), Ok(u), Ok(v)) = (
+                    map_unit(rim.axis),
+                    map_unit(rim.basis_u),
+                    map_unit(rim.basis_v),
+                ) {
+                    self.rims.push(SceneRim {
+                        center: placement.apply_point(rim.center),
+                        axis,
+                        radius: rim.radius * scale,
+                        u,
+                        v,
+                        coverage: rim.coverage.clone(),
+                        source,
+                    });
+                }
+            }
+        }
     }
 
     /// Drops all **world-object** candidates registered for `id` (instanced
@@ -578,11 +718,19 @@ impl InferenceScene {
         // so the whole spatial index is stale: mark it dirty for a lazy full
         // rebuild on the next query (per-committed-op, never per-frame).
         *self.spatial.get_mut() = None;
-        self.removal_visits += (self.points.len() + self.segments.len() + self.faces.len()) as u64;
+        self.removal_visits += (self.points.len()
+            + self.segments.len()
+            + self.faces.len()
+            + self.centers.len()
+            + self.quadrants.len()
+            + self.rims.len()) as u64;
         let world = |s: &SnapSource| s.object == id && s.instance.is_none();
         self.points.retain(|p| !world(&p.source));
         self.segments.retain(|s| !world(&s.source));
         self.faces.retain(|f| !world(&f.source));
+        self.centers.retain(|c| !world(&c.source));
+        self.quadrants.retain(|c| !world(&c.source));
+        self.rims.retain(|r| !world(&r.source));
     }
 
     /// Drops all candidates registered for `instance` (across every definition
@@ -601,11 +749,19 @@ impl InferenceScene {
         // Same index-shifting retain passes as `remove_object`: dirty the
         // spatial index for a lazy rebuild.
         *self.spatial.get_mut() = None;
-        self.removal_visits += (self.points.len() + self.segments.len() + self.faces.len()) as u64;
+        self.removal_visits += (self.points.len()
+            + self.segments.len()
+            + self.faces.len()
+            + self.centers.len()
+            + self.quadrants.len()
+            + self.rims.len()) as u64;
         let key = Some(instance);
         self.points.retain(|p| p.source.instance != key);
         self.segments.retain(|s| s.source.instance != key);
         self.faces.retain(|f| f.source.instance != key);
+        self.centers.retain(|c| c.source.instance != key);
+        self.quadrants.retain(|c| c.source.instance != key);
+        self.rims.retain(|r| r.source.instance != key);
     }
 
     /// Drops every object- and instance-sourced candidate at once, leaving
@@ -620,6 +776,9 @@ impl InferenceScene {
         self.points.clear();
         self.segments.clear();
         self.faces.clear();
+        self.centers.clear();
+        self.quadrants.clear();
+        self.rims.clear();
         self.world_owners.clear();
         self.instance_owners.clear();
     }
@@ -786,6 +945,72 @@ impl InferenceScene {
                     Some(Provenance::Object(sp.source)),
                     None,
                 ));
+            }
+        }
+
+        // --- Center candidates: true circle centers (linear walk — few per
+        //     scene and deliberately outside the spatial index, so the
+        //     indexed and reference paths see the identical set). ---
+        for cp in &self.centers {
+            if let Some((ang, depth)) = cone_test(origin, dir, cp.position, aperture) {
+                candidates.push((
+                    SnapKind::Center,
+                    ang,
+                    depth,
+                    cp.position,
+                    Some(Provenance::Object(cp.source)),
+                    None,
+                ));
+            }
+        }
+
+        // --- Quadrant candidates: covered cardinal points of the rim
+        //     circles. Same linear-walk rationale as centers. ---
+        for qp in &self.quadrants {
+            if let Some((ang, depth)) = cone_test(origin, dir, qp.position, aperture) {
+                candidates.push((
+                    SnapKind::Quadrant,
+                    ang,
+                    depth,
+                    qp.position,
+                    Some(Provenance::Object(qp.source)),
+                    None,
+                ));
+            }
+        }
+
+        // --- Tangent candidates: for each rim circle, the two points where
+        //     a segment from the tool's anchor touches the exact circle —
+        //     computed per query (they depend on the anchor), offered only
+        //     over the covered angular range, and only when the anchor lies
+        //     strictly outside the circle in its own plane. Linear walk,
+        //     like centers. ---
+        if let Some(anchor) = query.anchor {
+            for rim in &self.rims {
+                let d = anchor - rim.center;
+                let in_plane = d - rim.axis * d.dot(rim.axis);
+                let dist = in_plane.length();
+                if dist <= rim.radius + tol::POINT_MERGE {
+                    continue; // anchor inside or on the circle: no tangent
+                }
+                let phi = in_plane.dot(rim.v).atan2(in_plane.dot(rim.u));
+                let alpha = (rim.radius / dist).acos();
+                for angle in [phi + alpha, phi - alpha] {
+                    if !rim.covers(angle) {
+                        continue;
+                    }
+                    let pos = rim.point_at(angle);
+                    if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                        candidates.push((
+                            SnapKind::Tangent,
+                            ang,
+                            depth,
+                            pos,
+                            Some(Provenance::Object(rim.source)),
+                            None,
+                        ));
+                    }
+                }
             }
         }
 
@@ -1529,9 +1754,12 @@ mod tests {
     #[test]
     fn snap_kind_priority_is_declaration_order() {
         // Strongest first; tools sort by this.
-        assert!(SnapKind::Endpoint < SnapKind::Midpoint);
+        assert!(SnapKind::Endpoint < SnapKind::Center);
+        assert!(SnapKind::Center < SnapKind::Quadrant);
+        assert!(SnapKind::Quadrant < SnapKind::Midpoint);
         assert!(SnapKind::Midpoint < SnapKind::Intersection);
-        assert!(SnapKind::Intersection < SnapKind::OnEdge);
+        assert!(SnapKind::Intersection < SnapKind::Tangent);
+        assert!(SnapKind::Tangent < SnapKind::OnEdge);
         assert!(SnapKind::OnEdge < SnapKind::OnFace);
         assert!(SnapKind::OnFace < SnapKind::OnGuide);
         assert!(SnapKind::OnGuide < SnapKind::OnAxis);

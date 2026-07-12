@@ -47,6 +47,7 @@ fn split_op(
     Some(KernelOp::SplitFace {
         face,
         path: vec![point_on(a, ta), point_on(b, tb)],
+        restore: None,
     })
 }
 

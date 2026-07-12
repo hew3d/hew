@@ -30,8 +30,11 @@ export const SNAP_BREAK_RADIUS_PX = 16
  * "resistance" has no meaning (any point on the face/ground is equally valid). */
 const STICKY_KINDS = new Set([
   'endpoint',
+  'center',
+  'quadrant',
   'midpoint',
   'intersection',
+  'tangent',
   'on-edge',
   'on-guide',
   'on-axis',

@@ -11,8 +11,8 @@
 //! poses, materials, and the consumed set are not.
 
 use kernel::{
-    Document, Guide, ImageFormat, Material, NodeId, Object, Plane, Point3, Profile, Rgba8, Texture,
-    Transform, Vec3, WatertightState,
+    CurveGeom, DecodeError, Document, Guide, ImageFormat, Material, NodeId, Object, Plane, Point3,
+    Profile, Rgba8, SurfaceRef, Texture, Transform, Vec3, WatertightState, tol,
 };
 use kernel::{ImportNode, ImportScene, MeshRecipe};
 
@@ -208,6 +208,161 @@ fn geometry_buffer_round_trips_a_holed_solid() {
         holed_faces,
         "the same number of holed faces survive"
     );
+}
+
+#[test]
+fn imprinted_circle_edge_claim_round_trips_through_geometry_buffer_v5() {
+    // A circle imprinted on a solid face carries its analytic identity onto
+    // the solid edges (playtest fix C3). Geometry buffer v5 persists that
+    // claim so a save between the imprint and its push-through does not lose
+    // the circle — verified both directly and end-to-end (the reloaded disk
+    // still pushes through as a smooth cylinder).
+    let h = 1.0;
+    let radius = 0.5;
+    let center = Point3::new(0.0, 0.0, h);
+    let rect = vec![
+        Point3::new(-2.0, -2.0, 0.0),
+        Point3::new(2.0, -2.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(-2.0, 2.0, 0.0),
+    ];
+    let mut obj =
+        Object::from_extrusion(&Profile::new(ground(), rect, vec![]).unwrap(), h).unwrap();
+    let top = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+                && obj
+                    .loop_positions(f.outer_loop)
+                    .all(|p| (p.z - h).abs() < tol::POINT_MERGE)
+        })
+        .map(|(id, _)| id)
+        .expect("top cap");
+    let circle: Vec<Point3> = (0..24)
+        .map(|i| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64) / 24.0;
+            Point3::new(radius * a.cos(), radius * a.sin(), h)
+        })
+        .collect();
+    obj.split_face_inner_with_curve(top, &circle, Some(CurveGeom { center, radius }))
+        .unwrap();
+    assert_eq!(
+        obj.edges().values().filter(|e| e.curve.is_some()).count(),
+        24,
+        "the imprinted circle's 24 edges carry the claim"
+    );
+
+    let bytes = obj.encode(&|_| 0);
+    assert_eq!(bytes, obj.encode(&|_| 0), "encode is deterministic");
+    let decoded = Object::decode(&bytes, &|_| None).expect("decode");
+    decoded.validate().unwrap();
+
+    // The claim survives, bitwise.
+    assert_eq!(
+        decoded
+            .edges()
+            .values()
+            .filter(|e| e.curve.is_some())
+            .count(),
+        24,
+        "the edge claim survives the geometry-buffer v5 round-trip"
+    );
+    let g = decoded.edges().values().find_map(|e| e.curve).unwrap();
+    assert_eq!(g.radius, radius);
+    assert!(g.center.approx_eq(center, tol::POINT_MERGE));
+
+    // End-to-end: the RELOADED disk still pushes through as a cylinder.
+    let disk = decoded
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.inner_loops.is_empty()
+                && f.plane
+                    .normal()
+                    .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+                && decoded.loop_positions(f.outer_loop).count() == 24
+        })
+        .map(|(id, _)| id)
+        .expect("the reloaded disk sub-face");
+    let drilled = decoded.push_through(disk, -(h + 1.0)).unwrap();
+    let attributed = drilled
+        .faces()
+        .values()
+        .filter(|f| matches!(f.surface, Some(SurfaceRef::Cylinder { .. })))
+        .count();
+    assert_eq!(
+        attributed, 24,
+        "the reloaded imprint drills a smooth tunnel"
+    );
+}
+
+#[test]
+fn disagreeing_shared_edge_claims_are_rejected_on_load() {
+    // Validating loader (adversarial review, major): a v5 buffer stores each
+    // edge claim twice — once per incident face. A tampered/inconsistent file
+    // whose two incident faces claim DIFFERENT circles for one shared edge
+    // must be rejected typed, never silently resolved to whichever face loads
+    // last. The circle center is offset so the (distinctive) radius appears in
+    // the bytes ONLY as an edge-curve radius, never as a coordinate.
+    let h = 1.0;
+    let radius = 0.4321;
+    let center = Point3::new(1.234, 0.567, h);
+    let rect = vec![
+        Point3::new(-2.0, -2.0, 0.0),
+        Point3::new(2.0, -2.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(-2.0, 2.0, 0.0),
+    ];
+    let mut obj =
+        Object::from_extrusion(&Profile::new(ground(), rect, vec![]).unwrap(), h).unwrap();
+    let top = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+                && obj
+                    .loop_positions(f.outer_loop)
+                    .all(|p| (p.z - h).abs() < tol::POINT_MERGE)
+        })
+        .map(|(id, _)| id)
+        .expect("top cap");
+    let circle: Vec<Point3> = (0..24)
+        .map(|i| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64) / 24.0;
+            Point3::new(center.x + radius * a.cos(), center.y + radius * a.sin(), h)
+        })
+        .collect();
+    obj.split_face_inner_with_curve(top, &circle, Some(CurveGeom { center, radius }))
+        .unwrap();
+
+    let mut bytes = obj.encode(&|_| 0);
+    // A clean round-trip loads.
+    assert!(Object::decode(&bytes, &|_| None).is_ok());
+
+    // Tamper the LAST stored radius so one incident face disagrees with its
+    // twin. (The radius appears only in edge-curve blocks with this center.)
+    let pat = radius.to_le_bytes();
+    let pos = bytes
+        .windows(8)
+        .rposition(|w| w == pat)
+        .expect("the stored radius is present in the buffer");
+    bytes[pos..pos + 8].copy_from_slice(&(radius + 0.1).to_le_bytes());
+
+    // The loader rejects the disagreement typed — not silent last-writer-wins.
+    match Object::decode(&bytes, &|_| None) {
+        Err(DecodeError::Corrupt { what, .. }) => {
+            assert!(
+                what.contains("disagreeing"),
+                "rejected for the wrong reason: {what}"
+            );
+        }
+        other => panic!("expected a typed corruption error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1247,5 +1402,196 @@ fn state_hash_is_undo_redo_identity() {
         full,
         doc.state_hash(),
         "undo+redo restores the exact state_hash"
+    );
+}
+
+/// Analytic curve geometry (manifest v10) round-trips exactly: a chain
+/// opened with `begin_curve_with` comes back carrying its circle, an
+/// identity-only chain comes back with none, and the re-save is
+/// byte-stable.
+#[test]
+fn curve_geometry_round_trips_through_save_load() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        sk.begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(1.0, 2.0, 0.0),
+            radius: 0.75,
+        })
+        .unwrap();
+        sk.add_segment(Point3::new(1.75, 2.0, 0.0), Point3::new(1.0, 2.75, 0.0))
+            .unwrap();
+        sk.add_segment(Point3::new(1.0, 2.75, 0.0), Point3::new(0.25, 2.0, 0.0))
+            .unwrap();
+        sk.end_curve();
+        // Identity-only chain alongside (pre-capture behavior).
+        sk.begin_curve();
+        sk.add_segment(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 0.5, 0.0))
+            .unwrap();
+        sk.end_curve();
+    }
+
+    let bytes = doc.save();
+    let doc2 = Document::load(&bytes).expect("round-trip");
+    let s2 = doc2.sketch_ids()[0];
+    let sk2 = doc2.sketch(s2).expect("live");
+
+    let mut with_geom = 0;
+    let mut without_geom = 0;
+    let mut seen: std::collections::BTreeSet<kernel::SketchCurveId> =
+        std::collections::BTreeSet::new();
+    for e in sk2.edges().values() {
+        let Some(cid) = e.curve else { continue };
+        if !seen.insert(cid) {
+            continue;
+        }
+        match sk2.curve_geom(cid) {
+            Some(g) => {
+                assert!(g.center.approx_eq(Point3::new(1.0, 2.0, 0.0), 1e-12));
+                assert_eq!(g.radius, 0.75, "radius is exact through the manifest");
+                with_geom += 1;
+            }
+            None => without_geom += 1,
+        }
+    }
+    assert_eq!((with_geom, without_geom), (1, 1));
+
+    assert_eq!(doc2.save(), bytes, "deterministic re-save");
+}
+
+/// A saved two-chain document for the curve tamper tests below: chain 0 has
+/// analytic geometry, chain 1 is identity-only. One edge each.
+fn saved_two_chain_doc() -> Vec<u8> {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        sk.begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        })
+        .unwrap();
+        sk.add_segment(Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0))
+            .unwrap();
+        sk.end_curve();
+        sk.begin_curve();
+        sk.add_segment(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 0.0, 0.0))
+            .unwrap();
+        sk.end_curve();
+    }
+    doc.save()
+}
+
+/// Re-packs `bytes` with its manifest JSON transformed by `patch`.
+fn with_patched_manifest(bytes: &[u8], patch: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    use std::io::{Cursor, Read as _, Write as _};
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    patch(&mut manifest);
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    new_zip.finish().unwrap().into_inner()
+}
+
+/// A v10 manifest whose curve entry carries a non-positive radius is a
+/// malformed file: rejected with a typed error, never defaulted or dropped.
+#[test]
+fn degenerate_curve_radius_in_manifest_is_rejected() {
+    let bytes = saved_two_chain_doc();
+    let patched = with_patched_manifest(&bytes, |m| {
+        m["sketches"][0]["curves"][0]["radius"] = serde_json::json!(0.0);
+    });
+    assert!(
+        Document::load(&patched).is_err(),
+        "degenerate curve radius must be a typed load failure"
+    );
+}
+
+/// A `curves[]` entry whose id no edge references — PAST the referenced
+/// range — is a dangling definition: typed load failure, never silently
+/// accepted.
+#[test]
+fn curves_entry_past_referenced_range_is_rejected() {
+    let bytes = saved_two_chain_doc();
+    let patched = with_patched_manifest(&bytes, |m| {
+        m["sketches"][0]["curves"][0]["id"] = serde_json::json!(5);
+    });
+    assert!(
+        Document::load(&patched).is_err(),
+        "a curves[] entry no edge references must be a typed load failure"
+    );
+}
+
+/// The gap case the naive `id < max_referenced` check misses: retag the
+/// edges so their curve indices skip an id (0 and 2, no 1). Non-dense first
+/// appearance is malformed per the spec — gap-filling a phantom chain would
+/// also let a `curves[]` entry at the gap index load silently as a dangling
+/// definition.
+#[test]
+fn non_dense_curve_indices_are_rejected() {
+    let bytes = saved_two_chain_doc();
+    let patched = with_patched_manifest(&bytes, |m| {
+        // Second chain's edge: curve 1 -> 2, leaving index 1 a gap.
+        let edges = m["sketches"][0]["edges"].as_array_mut().unwrap();
+        for e in edges.iter_mut() {
+            if e.get("curve").and_then(|c| c.as_u64()) == Some(1) {
+                e["curve"] = serde_json::json!(2);
+            }
+        }
+    });
+    assert!(
+        Document::load(&patched).is_err(),
+        "a curve index skipping ahead of first-appearance density must be          a typed load failure"
+    );
+}
+
+/// And a `curves[]` definition sitting IN such a gap must never load: the
+/// combination the gap-filling loader accepted silently. With density
+/// enforced the file already fails on the edge index; this pins the whole
+/// tampered shape (gap indices + gap-addressed definition) as a load error.
+#[test]
+fn curves_entry_in_a_gap_is_rejected() {
+    let bytes = saved_two_chain_doc();
+    let patched = with_patched_manifest(&bytes, |m| {
+        let edges = m["sketches"][0]["edges"].as_array_mut().unwrap();
+        for e in edges.iter_mut() {
+            if e.get("curve").and_then(|c| c.as_u64()) == Some(1) {
+                e["curve"] = serde_json::json!(2);
+            }
+        }
+        // Point the analytic definition at the gap index.
+        m["sketches"][0]["curves"][0]["id"] = serde_json::json!(1);
+    });
+    assert!(
+        Document::load(&patched).is_err(),
+        "a curves[] definition in an index gap must be a typed load failure"
     );
 }

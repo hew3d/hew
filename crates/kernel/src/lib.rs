@@ -49,17 +49,17 @@ pub use import::{
 pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
-    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceMergeInnerReport,
-    FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, Operand, PushPullError, PushPullReport,
-    SliceError, StickyError,
+    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
+    FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, Operand,
+    PushPullError, PushPullReport, SliceError, StickyError,
 };
 pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,
 };
 pub use sketch::{
-    EdgeRemoved, Profile, ProfileError, SegmentAdded, Sketch, SketchCurveId, SketchEdge,
+    CurveGeom, EdgeRemoved, Profile, ProfileError, SegmentAdded, Sketch, SketchCurveId, SketchEdge,
     SketchEdgeId, SketchError, SketchIsland, SketchIslandId, SketchRegion, SketchRegionId,
     SketchVertex, SketchVertexId,
 };
-pub use topo::{Object, WatertightState};
+pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};

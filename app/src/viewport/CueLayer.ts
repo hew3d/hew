@@ -25,6 +25,9 @@ import { getResolvedTheme } from '../settings/theme'
 
 const SNAP_COLORS: Record<string, number> = {
   endpoint: 0x00cc44,
+  center: 0x00aa88,
+  quadrant: 0x00aa88,
+  tangent: 0xb050d0,
   midpoint: 0x00cccc,
   intersection: 0xffaa00,
   'on-edge': 0xcc2200,

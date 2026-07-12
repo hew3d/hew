@@ -1245,6 +1245,10 @@ export default function App() {
   // 4) — when any exported object is not a watertight solid.
   const [stlWarning, setStlWarning] = useState<string[] | null>(null)
 
+  /** Curve resolution (segments per full turn; 0 = stored facets) chosen in
+   *  the Export dialog, held across the solid-gating confirmation step. */
+  const stlSegmentsRef = useRef(48)
+
   /** The actual export — runs directly when all objects are solid, or after
    *  "Export Anyway" in the gating dialog. */
   const doExportStl = useCallback(async () => {
@@ -1255,7 +1259,7 @@ export default function App() {
     }
     let result: Awaited<ReturnType<typeof api.exportStl>>
     try {
-      result = await api.exportStl()
+      result = await api.exportStl(stlSegmentsRef.current)
     } catch (err: unknown) {
       handleToast(`Export failed: ${String(err)}`)
       return
@@ -1289,7 +1293,8 @@ export default function App() {
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
   /** Entry point (Export dialog, STL format): gate on solid status first. */
-  const exportStl = useCallback(async () => {
+  const exportStl = useCallback(async (segmentsPerTurn: number) => {
+    stlSegmentsRef.current = segmentsPerTurn
     const scene = sceneRef.current
     const offenders = scene !== null ? collectNonSolidObjects(scene) : []
     if (offenders.length > 0) {
@@ -1306,12 +1311,12 @@ export default function App() {
   // dialog remains the follow-on step (chain unchanged).
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
 
-  const handleExportFormat = useCallback((format: ExportFormat) => {
+  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number) => {
     setExportDialogOpen(false)
     if (format === 'glb') {
       void exportGltf()
     } else {
-      void exportStl()
+      void exportStl(stlSegmentsPerTurn)
     }
   }, [exportGltf, exportStl])
 

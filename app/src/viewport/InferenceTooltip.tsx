@@ -12,6 +12,9 @@ import type { InferenceInfo } from './Viewport'
 
 const KIND_LABEL: Record<string, string> = {
   endpoint: 'Endpoint',
+  center: 'Center',
+  quadrant: 'Quadrant',
+  tangent: 'Tangent',
   midpoint: 'Midpoint',
   intersection: 'Intersection',
   'on-edge': 'On Edge',

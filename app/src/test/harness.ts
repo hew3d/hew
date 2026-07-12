@@ -31,7 +31,7 @@ import type { ViewportApi } from '../viewport/Viewport'
 import type { NodeRef } from '../panels/treeModel'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
-import { arcPolylineOnPlane } from '../tools/arcMath'
+import { arcFromChord, arcPolylineOnPlane } from '../tools/arcMath'
 import { facePlaneBasis, type V3 } from '../viewport/geoHelpers'
 import {
   formatLength,
@@ -117,10 +117,29 @@ export interface HewTestHarness {
   /**
    * Draw a regular N-gon approximation of a circle in a new ground sketch.
    * `center` is the XY centroid (Z ignored), `radius` in meters, `nSegments`
-   * defaults to 24 (same as CircleTool). Returns the sketch and the one closed
-   * region that forms (the N-gon). Equivalent to CircleTool's commit.
+   * defaults to a fixed 24 for test determinism (CircleTool itself adapts
+   * the count to the radius — docs/design/true-curves.md §6; pass an
+   * explicit count to exercise other densities). Returns the sketch and the
+   * one closed region that forms (the N-gon). Equivalent to CircleTool's
+   * commit, including the analytic curve bracket.
    */
   drawCircle(center: Vec3, radius: number, nSegments?: number): { sketch: string; region: string }
+
+  /**
+   * Imprint a circle onto an existing solid face (draw-on-face), carrying the
+   * circle's analytic identity so a later push-through of the imprinted disk
+   * shades smooth and offsets its radius (docs/design/true-curves.md, playtest
+   * fix C3). `center` must lie on the face plane; `radius` in meters. Mirrors
+   * CircleTool face mode (`split_face_inner_with_curve`). Returns the new disk
+   * sub-face handle — pick nothing, push it straight through with `pushPull`.
+   */
+  imprintCircleOnFace(
+    object: string,
+    face: string,
+    center: Vec3,
+    radius: number,
+    nSegments?: number,
+  ): string
 
   /**
    * Draw a faceted 2-point arc in a new ground sketch. `a`/`b` are the
@@ -475,12 +494,16 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         let lastRegion: bigint | null = null
         s.sketch_begin_gesture(sketch)
         try {
+          // One curve chain carrying the analytic circle, exactly as
+          // CircleTool commits (docs/design/true-curves.md).
+          s.sketch_begin_curve_with(sketch, center[0], center[1], center[2], radius)
           for (let i = 0; i < nSegments; i++) {
             const a = pts[i]
             const b = pts[(i + 1) % nSegments]
             const added = s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
             for (const r of added.regions_created()) lastRegion = r
           }
+          s.sketch_end_curve(sketch)
         } finally {
           s.sketch_end_gesture(sketch)
         }
@@ -493,17 +516,51 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         return { sketch: sketch.toString(), region: lastRegion.toString() }
       }),
 
+    imprintCircleOnFace: (object, face, center, radius, nSegments = 24) =>
+      act((s) => {
+        if (radius <= 0) throw new Error('imprintCircleOnFace: radius must be positive')
+        const nrm = s.face_normal(BigInt(object), BigInt(face))
+        const normal: V3 = [nrm[0], nrm[1], nrm[2]]
+        const basis = facePlaneBasis(normal)
+        if (basis === null) throw new Error('imprintCircleOnFace: degenerate face normal')
+        const { u, v } = basis
+        const loop = new Float64Array(nSegments * 3)
+        for (let i = 0; i < nSegments; i++) {
+          const theta = (2 * Math.PI * i) / nSegments
+          const cs = Math.cos(theta) * radius
+          const sn = Math.sin(theta) * radius
+          loop[i * 3 + 0] = center[0] + u[0] * cs + v[0] * sn
+          loop[i * 3 + 1] = center[1] + u[1] * cs + v[1] * sn
+          loop[i * 3 + 2] = center[2] + u[2] * cs + v[2] * sn
+        }
+        const sub = s.split_face_inner_with_curve(
+          BigInt(object),
+          BigInt(face),
+          loop,
+          new Float64Array([center[0], center[1], center[2]]),
+          radius,
+        )
+        return sub.toString()
+      }),
+
     drawArc: (a, b, sagitta, close = false) =>
       act((s) => {
         const pts = arcPolylineOnPlane(a, b, sagitta, [1, 0, 0], [0, 1, 0])
         if (pts === null) throw new Error('drawArc: degenerate chord or flat sagitta')
+        const arc = arcFromChord([a[0], a[1]], [b[0], b[1]], sagitta)
         const sketch = s.begin_ground_sketch()
         const regionsAll = new Set<bigint>()
         const addSeg = (p: V3, q: V3): void => {
           const added = s.sketch_add_segment(sketch, p[0], p[1], p[2], q[0], q[1], q[2])
           for (const r of added.regions_created()) regionsAll.add(r)
         }
+        // The arc's facets are one curve chain carrying the analytic circle,
+        // exactly as ArcTool commits; the closing chord stays a plain line.
+        if (arc !== null) {
+          s.sketch_begin_curve_with(sketch, arc.center[0], arc.center[1], 0, arc.radius)
+        }
         for (let i = 0; i < pts.length - 1; i++) addSeg(pts[i], pts[i + 1])
+        s.sketch_end_curve(sketch)
         if (close) addSeg(pts[pts.length - 1], pts[0])
         return {
           sketch: sketch.toString(),

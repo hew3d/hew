@@ -363,7 +363,7 @@ describe('ExportDialog', () => {
     const onExport = vi.fn()
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('glb')
+    expect(onExport).toHaveBeenCalledWith('glb', 48)
   })
 
   it('calls onExport with "stl" after switching the Format select to STL', () => {
@@ -371,7 +371,32 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('stl')
+    expect(onExport).toHaveBeenCalledWith('stl', 48)
+  })
+
+  it('hides the curve-resolution select for glTF and shows it for STL', () => {
+    render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.queryByLabelText(/curve resolution/i)).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
+    expect(screen.getByLabelText(/curve resolution/i)).toBeInTheDocument()
+  })
+
+  it('passes the chosen STL curve resolution through onExport', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
+    fireEvent.change(screen.getByLabelText(/curve resolution/i), { target: { value: '96' } })
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenCalledWith('stl', 96)
+  })
+
+  it('offers a stored-facets ("as modeled") resolution choice', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
+    fireEvent.change(screen.getByLabelText(/curve resolution/i), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenCalledWith('stl', 0)
   })
 
   it('calls onCancel when Cancel is clicked', () => {

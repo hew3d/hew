@@ -83,8 +83,16 @@ fn union_with_concave_imprint_never_panics() {
         at(0.8, 0.9),
         at(0.2, 0.9),
     ];
-    doc.apply_object_op(oid, KernelOp::SplitFaceInner { face, loop_path })
-        .expect("staple imprints");
+    doc.apply_object_op(
+        oid,
+        KernelOp::SplitFaceInner {
+            face,
+            loop_path,
+            restore: None,
+            curve: None,
+        },
+    )
+    .expect("staple imprints");
 
     // The union must complete (or refuse typed) — never panic — and every
     // visible object must validate afterwards.

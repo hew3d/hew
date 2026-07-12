@@ -4,11 +4,19 @@
 //! f32/u32 arrays a WebGL2 viewport can upload directly. Flat-shaded look:
 //! vertices are duplicated per face so each face keeps its own normal, and
 //! unique edges come out as line segments for the SketchUp-style display.
+//! Faces stamped with an analytic surface reference
+//! (docs/design/true-curves.md) are the exception: they shade with the
+//! true per-vertex surface normal, and the seams interior to one logical
+//! wall land in a separate, suppressed soft-edge buffer.
 //!
 //! Triangulation supports non-convex faces and faces with holes via ear
 //! clipping with hole bridging (Eberly "Triangulation by Ear Clipping").
 
 use kernel::{FaceId, MaterialId, MaterialPalette, Object, Rgba8};
+
+mod refacet;
+
+pub use refacet::{MAX_SEGMENTS_PER_TURN, MIN_SEGMENTS_PER_TURN, export_triangles};
 
 /// Default face color when no material is assigned (or the id is stale):
 /// a neutral light gray (`0xcccccc`).
@@ -79,8 +87,18 @@ pub struct RenderMesh {
     /// Contiguous runs of the index buffer per material (used by the renderer
     /// to build `addGroup` calls). Always at least one entry.
     pub groups: Vec<MaterialGroup>,
-    /// Line-segment endpoints (xyz pairs), one segment per unique edge.
+    /// Line-segment endpoints (xyz pairs), one segment per unique **hard**
+    /// edge — every edge except the interior facet seams of one logical
+    /// curved wall (see `soft_edge_positions`).
     pub edge_positions: Vec<f32>,
+    /// Line-segment endpoints (xyz pairs) of the **soft** edges: interior
+    /// seams between two facets claiming the same analytic surface
+    /// (`kernel::SurfaceRef`, docs/design/true-curves.md stage 4). The
+    /// viewport suppresses these — a drawn cylinder reads as one smooth
+    /// wall, not 24 pin-striped facets — while cap rims and the seams
+    /// against unattributed faces stay hard. Derived at tessellation time
+    /// from surface equality; nothing new is persisted.
+    pub soft_edge_positions: Vec<f32>,
 }
 
 /// Tessellates an Object into flat-shaded triangle and edge-line buffers.
@@ -113,6 +131,28 @@ pub fn tessellate(
     for (face_id, face) in object.faces() {
         let normal = face.plane.normal();
         let n = [normal.x as f32, normal.y as f32, normal.z as f32];
+
+        // Analytic smooth shading (docs/design/true-curves.md stage 4): a
+        // chord facet of a stamped cylinder wall shades with the TRUE
+        // surface normal at each vertex — the radial direction off the
+        // axis, oriented to the same side the facet faces (outer walls
+        // radiate outward, hole walls inward). Adjacent facets of one wall
+        // then share identical vertex normals along their seams, so the
+        // wall renders as one smooth surface with no per-edge data.
+        let smooth: Option<(kernel::Point3, kernel::Vec3, f64)> = face.surface.and_then(|sr| {
+            let kernel::SurfaceRef::Cylinder {
+                axis_point, axis, ..
+            } = sr;
+            // A chord plane never contains the axis; the side it faces
+            // fixes the radial sign (same derivation as the kernel's
+            // whole-wall push/pull).
+            let side = face.plane.signed_distance(axis_point);
+            (side.abs() > kernel::tol::POINT_MERGE).then_some((
+                axis_point,
+                axis,
+                if side < 0.0 { 1.0 } else { -1.0 },
+            ))
+        });
 
         // Build the orthonormal 2D basis (u, v) such that u × v = normal.
         let (u_ax, v_ax) = plane_basis(normal);
@@ -171,7 +211,20 @@ pub fn tessellate(
         // Append polygon vertices (positions, normals, colors, UVs).
         for &[x, y, z, u2d, v2d] in &poly {
             mesh.positions.extend([x as f32, y as f32, z as f32]);
-            mesh.normals.extend(n);
+            let vertex_normal = match smooth {
+                Some((axis_point, axis, sign)) => {
+                    let d = kernel::Point3::new(x, y, z) - axis_point;
+                    let radial = d - axis * d.dot(axis);
+                    match (radial * sign).normalized() {
+                        Ok(u) => [u.x as f32, u.y as f32, u.z as f32],
+                        // A vertex on the axis cannot happen on a valid
+                        // claim (radius > 0); shade flat rather than guess.
+                        Err(_) => n,
+                    }
+                }
+                None => n,
+            };
+            mesh.normals.extend(vertex_normal);
             mesh.colors.extend([cr, cg, cb]);
             // UV: if the face has an oriented UV frame (imported texcoords), use
             // it — `uv = frame.apply(p)`. Otherwise fall back to the planar
@@ -229,12 +282,32 @@ pub fn tessellate(
         });
     }
 
-    // Edge lines are independent of material grouping.
+    // Edge lines are independent of material grouping. An edge is SOFT —
+    // routed to the suppressed buffer — iff its two faces claim the same
+    // analytic surface: it is then an interior facet seam of one logical
+    // curved wall, not a real feature edge. Everything else (boundary
+    // edges, cap rims, seams against unattributed or differently-attributed
+    // faces) stays hard, so silhouette-defining rims still draw.
     for edge in object.edges().values() {
         let he = &object.half_edges()[edge.half_edge];
         let from = object.vertices()[he.origin].position;
         let to = object.vertices()[object.half_edges()[he.next].origin].position;
-        mesh.edge_positions.extend([
+        let soft = edge.twin_half_edge.is_some_and(|twin_h| {
+            let face_of = |h| {
+                let loop_id = object.half_edges()[h].loop_id;
+                &object.faces()[object.loops()[loop_id].face]
+            };
+            match (face_of(edge.half_edge).surface, face_of(twin_h).surface) {
+                (Some(a), Some(b)) => a.same_surface(&b),
+                _ => false,
+            }
+        });
+        let buffer = if soft {
+            &mut mesh.soft_edge_positions
+        } else {
+            &mut mesh.edge_positions
+        };
+        buffer.extend([
             from.x as f32,
             from.y as f32,
             from.z as f32,

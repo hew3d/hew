@@ -13,7 +13,9 @@ use crate::ids::{EdgeId, FaceId, HalfEdgeId, VertexId};
 use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3};
 use crate::tol;
-use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Shell, Vertex, WatertightState};
+use crate::topo::{
+    Edge, Face, HalfEdge, Loop, LoopKind, Object, Shell, SurfaceRef, Vertex, WatertightState,
+};
 
 impl Object {
     /// Builds an Object from positions and faces given as CCW-wound (seen
@@ -28,7 +30,7 @@ impl Object {
         positions: &[Point3],
         faces: &[Vec<usize>],
     ) -> Result<Object, TopologyError> {
-        Object::from_polygons_impl(positions, faces, None, None, tol::PLANE_DIST, None)
+        Object::from_polygons_impl(positions, faces, None, None, None, tol::PLANE_DIST, None)
     }
 
     /// Like [`Object::from_polygons`], but assigns each face the material and
@@ -42,12 +44,14 @@ impl Object {
         faces: &[Vec<usize>],
         materials: &[FaceMaterial],
         uv_frames: &[Option<UvFrame>],
+        surfaces: &[Option<SurfaceRef>],
     ) -> Result<Object, TopologyError> {
         Object::from_polygons_impl(
             positions,
             faces,
             Some(materials),
             Some(uv_frames),
+            Some(surfaces),
             tol::PLANE_DIST,
             None,
         )
@@ -72,6 +76,7 @@ impl Object {
             faces,
             Some(materials),
             Some(uv_frames),
+            None,
             tol::IMPORT_PLANE_DIST,
             None,
         )
@@ -95,6 +100,7 @@ impl Object {
             faces,
             Some(materials),
             Some(uv_frames),
+            None,
             tol::IMPORT_PLANE_DIST,
             Some(holes),
         )
@@ -105,6 +111,7 @@ impl Object {
         faces: &[Vec<usize>],
         materials: Option<&[FaceMaterial]>,
         uv_frames: Option<&[Option<UvFrame>]>,
+        surfaces: Option<&[Option<SurfaceRef>]>,
         plane_tol: f64,
         holes: Option<&[Vec<Vec<usize>>]>,
     ) -> Result<Object, TopologyError> {
@@ -184,6 +191,7 @@ impl Object {
                 plane,
                 material: materials.and_then(|m| m.get(face_index).copied()).flatten(),
                 uv_frame: uv_frames.and_then(|f| f.get(face_index).copied()).flatten(),
+                surface: surfaces.and_then(|s| s.get(face_index).copied()).flatten(),
             });
             obj.loops[outer_loop_id].face = face_id;
             build_validated_loop(
@@ -229,6 +237,7 @@ impl Object {
                         let edge = obj.edges.insert(Edge {
                             half_edge: h,
                             twin_half_edge: Some(t),
+                            curve: None,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -240,6 +249,7 @@ impl Object {
                     let edge = obj.edges.insert(Edge {
                         half_edge: h,
                         twin_half_edge: None,
+                        curve: None,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -263,12 +273,13 @@ impl Object {
     /// (holes). Used by [`Object::from_extrusion`].
     ///
     /// `faces` is a list of `(outer_indices, inner_loops, plane, material,
-    /// uv_frame)` tuples where `outer_indices` and each inner-loop list are
-    /// index lists into `positions`. All winding must be consistent (outer CCW,
-    /// inner CW seen from the face normal) — this function does not validate;
-    /// callers are responsible. `material` is the face's material (
-    /// `None` = default). `uv_frame` is the per-face affine UV frame ( ext.;
-    /// `None` =  `world_size` fallback).
+    /// uv_frame, surface)` tuples where `outer_indices` and each inner-loop
+    /// list are index lists into `positions`. All winding must be consistent
+    /// (outer CCW, inner CW seen from the face normal) — this function does
+    /// not validate; callers are responsible. `material` is the face's
+    /// material (`None` = default). `uv_frame` is the per-face affine UV
+    /// frame ( ext.; `None` =  `world_size` fallback). `surface` is the
+    /// face's analytic surface reference (`None` = plain planar face).
     ///
     /// The public signature/behaviour of [`Object::from_polygons`] is
     /// unchanged; this function is a separate, internal path.
@@ -281,6 +292,7 @@ impl Object {
             Plane,
             FaceMaterial,
             Option<UvFrame>,
+            Option<SurfaceRef>,
         )],
     ) -> Object {
         let mut obj = Object::empty();
@@ -303,7 +315,7 @@ impl Object {
         let mut directed: BTreeMap<(VertexId, VertexId), HalfEdgeId> = BTreeMap::new();
         let mut all_face_ids: Vec<FaceId> = Vec::new();
 
-        for (outer_indices, hole_index_lists, plane, material, uv_frame) in faces {
+        for (outer_indices, hole_index_lists, plane, material, uv_frame, surface) in faces {
             // ---- outer loop ----
             let outer_loop_id = obj.loops.insert(Loop {
                 face: FaceId::default(),
@@ -317,6 +329,7 @@ impl Object {
                 plane: *plane,
                 material: *material,
                 uv_frame: *uv_frame,
+                surface: *surface,
             });
             obj.loops[outer_loop_id].face = face_id;
             all_face_ids.push(face_id);
@@ -356,6 +369,7 @@ impl Object {
                         let edge = obj.edges.insert(Edge {
                             half_edge: h,
                             twin_half_edge: Some(t),
+                            curve: None,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -367,6 +381,7 @@ impl Object {
                     let edge = obj.edges.insert(Edge {
                         half_edge: h,
                         twin_half_edge: None,
+                        curve: None,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -393,6 +408,41 @@ impl Object {
         };
 
         obj
+    }
+
+    /// Drop any per-edge circle claim ([`crate::topo::Edge::curve`]) that no
+    /// longer describes its (possibly moved) endpoints — the map-or-drop
+    /// discipline for `Edge::curve`, mirroring how `Face::surface` is dropped
+    /// when a face leaves its chord plane (docs/design/true-curves.md §4.2).
+    ///
+    /// Call at the tail of every op that moves a SUBSET of vertices, BEFORE
+    /// validation: a subset move can carry a claim's endpoints off its stored
+    /// circle (endpoints now `sqrt(r² + d²)` from the fixed center), and a
+    /// stale claim panics `check_invariants` in debug or false-refuses at the
+    /// release `validate` backstop — a spurious failure of an operation that
+    /// has nothing to do with the circle. Dropping degrades gracefully to
+    /// flat facets; a stale claim is never kept. The predicate is exactly the
+    /// validator's edge-curve check, so anything kept here passes validation.
+    pub(crate) fn drop_stale_edge_curves(&mut self) {
+        let tol = self.planarity_tol;
+        let stale: Vec<crate::ids::EdgeId> = self
+            .edges
+            .iter()
+            .filter_map(|(id, edge)| {
+                let g = edge.curve?;
+                let h = self.half_edges[edge.half_edge];
+                let a = self.vertices[h.origin].position;
+                let b = self.vertices[self.half_edges[h.next].origin].position;
+                let holds = g.radius.is_finite()
+                    && g.radius > crate::tol::POINT_MERGE
+                    && ((a - g.center).length() - g.radius).abs() <= tol
+                    && ((b - g.center).length() - g.radius).abs() <= tol;
+                (!holds).then_some(id)
+            })
+            .collect();
+        for id in stale {
+            self.edges[id].curve = None;
+        }
     }
 
     /// Exports the mesh back to indexed polygon soup (outer loops only; the

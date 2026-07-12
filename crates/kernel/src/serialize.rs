@@ -18,7 +18,9 @@ use slotmap::SecondaryMap;
 
 use crate::error::TopologyError;
 use crate::guide::Guide;
-use crate::ids::{ComponentId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId};
+use crate::ids::{
+    ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
+};
 use crate::material::{ImageFormat, Material, Texture, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::{
@@ -37,7 +39,19 @@ use crate::transform::Transform;
 /// the base-material u32. `1` → the object's faces are validated
 /// at the wider [`crate::tol::IMPORT_PLANE_DIST`]; absent (v1/v2) or `0` → strict
 /// [`crate::tol::PLANE_DIST`].
-pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
+/// v3 → v4: per-face optional analytic [`crate::topo::SurfaceRef`] added
+/// after the UV-frame block (`u8` flag + 7×f64 — axis point, unit axis,
+/// radius — when present; absent in v1-v3 files → all `surface = None`).
+/// The extruded side walls of arc/circle profiles carry it
+/// (docs/design/true-curves.md).
+/// v4 → v5: per-face optional edge-curve claims ([`crate::topo::Edge::curve`])
+/// appended AFTER each face's hole loops — a `u8` "any" flag (0 = no edge of
+/// this face carries a circle, the common case, one byte; 1 = per-loop-edge
+/// arrays follow: for every outer edge then every hole edge, a `u8` flag +
+/// 4×f64 center xyz + radius when present). Absent in v1-v4 files → all
+/// `Edge::curve = None`. An imprinted circle awaiting its push-through
+/// persists its identity here (docs/design/true-curves.md, playtest fix C3).
+pub const GEOMETRY_FORMAT_VERSION: u32 = 5;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
@@ -98,7 +112,16 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 3;
 /// Both fields are `#[serde(default, skip_serializing_if = ...)]` —
 /// back-compatible. Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION`
 /// stays 3).
-pub const MANIFEST_FORMAT_VERSION: u32 = 9;
+///
+/// v10: added optional `curves` to sketch entries — the analytic definition
+/// (`center`, `radius`) of each curve chain that has one, keyed by the same
+/// dense per-sketch curve id v7's `edges[].curve` references. Chains without
+/// geometry (drawn before capture existed) simply have no entry. The field
+/// is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so v1-v9
+/// files still load (every chain identity-only) — back-compatible. Geometry
+/// buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 3). See
+/// docs/design/true-curves.md.
+pub const MANIFEST_FORMAT_VERSION: u32 = 10;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -369,6 +392,16 @@ impl Object {
             holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)>,
             mat_id: u32,
             uv_frame: Option<UvFrame>,
+            /// Analytic surface claim (v4) — emitted per face, so it also
+            /// participates in the sort key below.
+            surface: Option<crate::topo::SurfaceRef>,
+            /// Per-outer-edge circle claims (v5) in canonical vertex order:
+            /// entry `k` is the claim on the loop edge originating at
+            /// `outer_verts[k]`. Emitted per face, so it participates in the key.
+            outer_curves: Vec<Option<crate::sketch::CurveGeom>>,
+            /// Per-hole-edge circle claims (v5), one list per hole in the
+            /// same sorted order as `holes`.
+            hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>>,
             /// Ordinal of the owning connected component (derived from twin
             /// adjacency, NOT the stored shell list, which may lump
             /// disconnected components together); replaced by the
@@ -376,9 +409,71 @@ impl Object {
             shell: usize,
         }
 
+        // Ordering over an analytic surface claim (present sorts after absent,
+        // then by axis_point, axis, radius) — another emitted payload, so a
+        // coincident face differing only in its surface must not tie.
+        fn surface_cmp(
+            a: &Option<crate::topo::SurfaceRef>,
+            b: &Option<crate::topo::SurfaceRef>,
+        ) -> std::cmp::Ordering {
+            fn key(s: &crate::topo::SurfaceRef) -> [f64; 7] {
+                let crate::topo::SurfaceRef::Cylinder {
+                    axis_point,
+                    axis,
+                    radius,
+                } = s;
+                [
+                    axis_point.x,
+                    axis_point.y,
+                    axis_point.z,
+                    axis.x,
+                    axis.y,
+                    axis.z,
+                    *radius,
+                ]
+            }
+            match (a, b) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(sa), Some(sb)) => key(sa)
+                    .iter()
+                    .zip(key(sb))
+                    .map(|(x, y)| x.total_cmp(&y))
+                    .find(|o| *o != std::cmp::Ordering::Equal)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            }
+        }
+        // Ordering over a per-edge circle-claim sequence: length, then each
+        // entry (present sorts after absent, then center xyz, radius).
+        fn curve_seq_cmp(
+            a: &[Option<crate::sketch::CurveGeom>],
+            b: &[Option<crate::sketch::CurveGeom>],
+        ) -> std::cmp::Ordering {
+            a.len().cmp(&b.len()).then_with(|| {
+                for (ca, cb) in a.iter().zip(b) {
+                    let c = match (ca, cb) {
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (Some(ga), Some(gb)) => [ga.center.x, ga.center.y, ga.center.z, ga.radius]
+                            .iter()
+                            .zip([gb.center.x, gb.center.y, gb.center.z, gb.radius])
+                            .map(|(x, y)| x.total_cmp(&y))
+                            .find(|o| *o != std::cmp::Ordering::Equal)
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    };
+                    if c != std::cmp::Ordering::Equal {
+                        return c;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            })
+        }
         // The full per-face key: every payload the record emits participates
-        // (ring, holes, material, UV frame), so two faces compare Equal only
-        // when their emitted bytes would be identical.
+        // (ring, holes, material, UV frame, analytic surface, edge-curve
+        // claims), so two faces compare Equal only when their emitted bytes
+        // would be identical.
         fn face_key_cmp(a: &CanonicalFace, b: &CanonicalFace) -> std::cmp::Ordering {
             ring_cmp(&a.outer_ring, &b.outer_ring)
                 .then_with(|| a.holes.len().cmp(&b.holes.len()))
@@ -393,11 +488,23 @@ impl Object {
                 })
                 .then_with(|| a.mat_id.cmp(&b.mat_id))
                 // Coincident faces (disjoint shells sharing positions) can
-                // tie on geometry and material alone; the UV frame is the
-                // last distinguishing payload, and leaving it out of the key
+                // tie on geometry and material alone; the UV frame, analytic
+                // surface, and edge-curve claims are the remaining
+                // distinguishing payloads, and leaving any out of the key
                 // would let such faces fall back to slot order — the drift
                 // class this canonical order exists to remove.
                 .then_with(|| uv_frame_cmp(&a.uv_frame, &b.uv_frame))
+                .then_with(|| surface_cmp(&a.surface, &b.surface))
+                .then_with(|| curve_seq_cmp(&a.outer_curves, &b.outer_curves))
+                .then_with(|| {
+                    for (ha, hb) in a.hole_curves.iter().zip(&b.hole_curves) {
+                        let c = curve_seq_cmp(ha, hb);
+                        if c != std::cmp::Ordering::Equal {
+                            return c;
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                })
         }
 
         // Connected components over faces, via twin adjacency (union-find).
@@ -452,17 +559,55 @@ impl Object {
             .max()
             .map_or(0, |m| m + 1);
 
+        // A loop's per-edge circle claims in CANONICAL vertex order: entry `k`
+        // is the claim on the loop edge originating at `verts[k]`. Keyed off
+        // the canonical vertex order (a rotation of the raw loop) rather than
+        // raw half-edge/slot order, so the bytes stay stable across undo/redo
+        // slot reallocation — the whole point of the canonical writer. Decode
+        // re-attaches by the same rule (edge `k` originates at stored vertex
+        // `k`).
+        let loop_edge_curves =
+            |loop_id: crate::ids::LoopId,
+             verts: &[crate::ids::VertexId]|
+             -> Vec<Option<crate::sketch::CurveGeom>> {
+                verts
+                    .iter()
+                    .map(|&v| {
+                        self.loop_half_edges(loop_id)
+                            .find(|&h| self.half_edges[h].origin == v)
+                            .and_then(|h| self.edges[self.half_edges[h].edge].curve)
+                    })
+                    .collect()
+            };
+
         let mut canonical_faces: Vec<CanonicalFace> = self
             .faces
             .iter()
             .map(|(fid, face)| {
                 let (outer_verts, outer_ring) = canonical_loop(face.outer_loop);
-                let mut holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)> = face
+                let outer_curves = loop_edge_curves(face.outer_loop, &outer_verts);
+                // Build each hole with its edge-curves, then sort the whole
+                // triple by ring so the curves stay paired with their hole.
+                let mut holes_full: Vec<(
+                    Vec<crate::ids::VertexId>,
+                    Vec<Point3>,
+                    Vec<Option<crate::sketch::CurveGeom>>,
+                )> = face
                     .inner_loops
                     .iter()
-                    .map(|&il| canonical_loop(il))
+                    .map(|&il| {
+                        let (hv, hr) = canonical_loop(il);
+                        let hc = loop_edge_curves(il, &hv);
+                        (hv, hr, hc)
+                    })
                     .collect();
-                holes.sort_by(|a, b| ring_cmp(&a.1, &b.1));
+                holes_full.sort_by(|a, b| ring_cmp(&a.1, &b.1));
+                let holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)> = holes_full
+                    .iter()
+                    .map(|(v, r, _)| (v.clone(), r.clone()))
+                    .collect();
+                let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
+                    holes_full.into_iter().map(|(_, _, c)| c).collect();
                 CanonicalFace {
                     outer_verts,
                     outer_ring,
@@ -472,6 +617,9 @@ impl Object {
                         None => NO_MATERIAL,
                     },
                     uv_frame: face.uv_frame,
+                    surface: face.surface,
+                    outer_curves,
+                    hole_curves,
                     shell: component_ordinal[fid],
                 }
             })
@@ -590,6 +738,26 @@ impl Object {
                 }
             }
 
+            // per-face analytic surface (v4): u8 flag (0=none, 1=cylinder)
+            // + 7×f64 LE (axis_point xyz, unit axis xyz, radius).
+            match cf.surface {
+                None => buf.push(0u8),
+                Some(crate::topo::SurfaceRef::Cylinder {
+                    axis_point,
+                    axis,
+                    radius,
+                }) => {
+                    buf.push(1u8);
+                    buf.extend_from_slice(&axis_point.x.to_le_bytes());
+                    buf.extend_from_slice(&axis_point.y.to_le_bytes());
+                    buf.extend_from_slice(&axis_point.z.to_le_bytes());
+                    buf.extend_from_slice(&axis.x.to_le_bytes());
+                    buf.extend_from_slice(&axis.y.to_le_bytes());
+                    buf.extend_from_slice(&axis.z.to_le_bytes());
+                    buf.extend_from_slice(&radius.to_le_bytes());
+                }
+            }
+
             // outer loop
             let outer_count = cf.outer_verts.len() as u32;
             buf.extend_from_slice(&outer_count.to_le_bytes());
@@ -605,6 +773,40 @@ impl Object {
                 buf.extend_from_slice(&hole_vertex_count.to_le_bytes());
                 for &vid in hole_verts {
                     buf.extend_from_slice(&vertex_index[vid].to_le_bytes());
+                }
+            }
+
+            // per-face edge-curve claims (v5): a u8 "any" flag; when 1, an
+            // (flag + optional 4×f64) entry per outer edge then per hole edge,
+            // in CANONICAL loop order — entry k is the edge originating at the
+            // k-th canonical vertex emitted above, captured on `cf`. Decode
+            // re-attaches by the same rule against the rebuilt loop.
+            let any = cf
+                .outer_curves
+                .iter()
+                .chain(cf.hole_curves.iter().flatten())
+                .any(Option::is_some);
+            if !any {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                let mut write_edge = |c: &Option<crate::sketch::CurveGeom>| match c {
+                    None => buf.push(0u8),
+                    Some(g) => {
+                        buf.push(1u8);
+                        buf.extend_from_slice(&g.center.x.to_le_bytes());
+                        buf.extend_from_slice(&g.center.y.to_le_bytes());
+                        buf.extend_from_slice(&g.center.z.to_le_bytes());
+                        buf.extend_from_slice(&g.radius.to_le_bytes());
+                    }
+                };
+                for c in &cf.outer_curves {
+                    write_edge(c);
+                }
+                for hole in &cf.hole_curves {
+                    for c in hole {
+                        write_edge(c);
+                    }
                 }
             }
         }
@@ -698,9 +900,19 @@ impl Object {
             Plane,
             crate::material::FaceMaterial,
             Option<UvFrame>,
+            Option<crate::topo::SurfaceRef>,
         );
         let face_count = r.read_u32()? as usize;
         let mut face_specs: Vec<FaceSpec> = Vec::with_capacity(face_count);
+        // v5 per-face edge-curve claims, parallel to `face_specs` (in the same
+        // face order `from_faces_with_holes` rebuilds them, so a positional zip
+        // stamps them back after the build). `(outer_edge_curves, per-hole
+        // edge_curves)`.
+        #[allow(clippy::type_complexity)]
+        let mut edge_curves: Vec<(
+            Vec<Option<crate::sketch::CurveGeom>>,
+            Vec<Vec<Option<crate::sketch::CurveGeom>>>,
+        )> = Vec::with_capacity(face_count);
 
         for _ in 0..face_count {
             let mat_raw = r.read_u32()?;
@@ -741,6 +953,48 @@ impl Object {
                 }
             } else {
                 None // v1 files: all faces have no UV frame
+            };
+
+            // v4: per-face analytic surface (flag + optional 7×f64).
+            // v1-v3: absent -> None.
+            let surface: Option<crate::topo::SurfaceRef> = if version >= 4 {
+                let flag = r.read_u8()?;
+                if flag == 1 {
+                    let px = r.read_f64()?;
+                    let py = r.read_f64()?;
+                    let pz = r.read_f64()?;
+                    let ax = r.read_f64()?;
+                    let ay = r.read_f64()?;
+                    let az = r.read_f64()?;
+                    let radius = r.read_f64()?;
+                    let axis = Vec3::new(ax, ay, az);
+                    if (axis.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 32,
+                            what: "surface axis is not a unit vector",
+                        });
+                    }
+                    if !radius.is_finite() || radius <= crate::tol::POINT_MERGE {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 8,
+                            what: "surface radius must be finite and positive",
+                        });
+                    }
+                    Some(crate::topo::SurfaceRef::Cylinder {
+                        axis_point: Point3::new(px, py, pz),
+                        axis,
+                        radius,
+                    })
+                } else if flag == 0 {
+                    None
+                } else {
+                    return Err(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "surface flag must be 0 or 1",
+                    });
+                }
+            } else {
+                None // pre-v4 files: no analytic surfaces
             };
 
             let outer_count = r.read_u32()? as usize;
@@ -793,7 +1047,68 @@ impl Object {
                 holes.push(hole);
             }
 
-            face_specs.push((outer, holes, plane, face_material, uv_frame));
+            // v5: per-face edge-curve claims, appended after the hole loops.
+            // A u8 "any" flag; when 1, one (flag + optional 4×f64) entry per
+            // outer edge then per hole edge, matching the loop vertex counts.
+            let (outer_curves, hole_curves) = if version >= 5 {
+                let any = r.read_u8()?;
+                if any == 0 {
+                    (Vec::new(), Vec::new())
+                } else if any == 1 {
+                    let read_edge = |r: &mut ByteReader<'_>| -> Result<
+                        Option<crate::sketch::CurveGeom>,
+                        DecodeError,
+                    > {
+                        let flag = r.read_u8()?;
+                        match flag {
+                            0 => Ok(None),
+                            1 => {
+                                let cx = r.read_f64()?;
+                                let cy = r.read_f64()?;
+                                let cz = r.read_f64()?;
+                                let radius = r.read_f64()?;
+                                if !radius.is_finite() || radius <= crate::tol::POINT_MERGE {
+                                    return Err(DecodeError::Corrupt {
+                                        offset: r.pos - 8,
+                                        what: "edge curve radius must be finite and positive",
+                                    });
+                                }
+                                Ok(Some(crate::sketch::CurveGeom {
+                                    center: Point3::new(cx, cy, cz),
+                                    radius,
+                                }))
+                            }
+                            _ => Err(DecodeError::Corrupt {
+                                offset: r.pos - 1,
+                                what: "edge curve flag must be 0 or 1",
+                            }),
+                        }
+                    };
+                    let mut oc = Vec::with_capacity(outer.len());
+                    for _ in 0..outer.len() {
+                        oc.push(read_edge(&mut r)?);
+                    }
+                    let mut hc = Vec::with_capacity(holes.len());
+                    for hole in &holes {
+                        let mut this = Vec::with_capacity(hole.len());
+                        for _ in 0..hole.len() {
+                            this.push(read_edge(&mut r)?);
+                        }
+                        hc.push(this);
+                    }
+                    (oc, hc)
+                } else {
+                    return Err(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "edge-curves flag must be 0 or 1",
+                    });
+                }
+            } else {
+                (Vec::new(), Vec::new()) // pre-v5: no edge-curve claims
+            };
+            edge_curves.push((outer_curves, hole_curves));
+
+            face_specs.push((outer, holes, plane, face_material, uv_frame, surface));
         }
 
         // Rebuild topology via the existing builder path.
@@ -803,6 +1118,42 @@ impl Object {
         // object's near-planar faces are held to IMPORT_PLANE_DIST, not the
         // strict default.
         obj.planarity_tol = planarity_tol;
+
+        // Restore per-edge circle claims (v5). Faces rebuild in `face_specs`
+        // order, so the face slotmap iterates in that same order and this
+        // positional zip re-attaches each face's loop-edge claims. The two
+        // incident faces of a shared edge each stored the claim; a VALIDATING
+        // loader requires they AGREE within tolerance and rejects a tampered
+        // file whose faces disagree — never silent last-writer-wins. Runs
+        // before validation, so a stale stored claim also fails
+        // (`EdgeCurveMismatch`).
+        let face_ids: Vec<FaceId> = obj.faces.keys().collect();
+        for (fid, (outer_curves, hole_curves)) in face_ids.iter().copied().zip(&edge_curves) {
+            let outer_loop = obj.faces[fid].outer_loop;
+            let inner_loops = obj.faces[fid].inner_loops.clone();
+            let loops = std::iter::once((outer_loop, outer_curves))
+                .chain(inner_loops.iter().copied().zip(hole_curves.iter()));
+            for (loop_id, curves) in loops {
+                let hes: Vec<_> = obj.loop_half_edges(loop_id).collect();
+                for (k, h) in hes.into_iter().enumerate() {
+                    let Some(g) = curves.get(k).copied().flatten() else {
+                        continue;
+                    };
+                    let e = obj.half_edges[h].edge;
+                    if let Some(existing) = obj.edges[e].curve {
+                        let agree = existing.center.approx_eq(g.center, crate::tol::POINT_MERGE)
+                            && (existing.radius - g.radius).abs() <= crate::tol::POINT_MERGE;
+                        if !agree {
+                            return Err(DecodeError::Corrupt {
+                                offset: r.pos,
+                                what: "shared edge has disagreeing analytic circle claims",
+                            });
+                        }
+                    }
+                    obj.edges[e].curve = Some(g);
+                }
+            }
+        }
 
         // Validate the rebuilt topology (rule 4: validate, never repair).
         obj.validate().map_err(DecodeError::InvalidTopology)?;
@@ -994,6 +1345,11 @@ pub(crate) struct SketchDto {
     pub vertices: Vec<SketchVertexDto>,
     pub edges: Vec<SketchEdgeDto>,
     pub regions: Vec<SketchRegionDto>,
+    /// Analytic curve-chain definitions (manifest v10+), keyed by the dense
+    /// curve id `edges[].curve` references. Sparse: chains without geometry
+    /// have no entry. Absent in v1-v9 files → every chain identity-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub curves: Vec<SketchCurveDto>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1017,6 +1373,18 @@ pub(crate) struct SketchRegionDto {
     pub id: u32,
     pub outer: Vec<u32>,
     pub holes: Vec<Vec<u32>>,
+}
+
+/// The analytic definition of one curve chain (manifest v10+): the exact
+/// circle whose facets the chain's edges are. `id` is the dense per-sketch
+/// curve id used by `SketchEdgeDto::curve`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SketchCurveDto {
+    pub id: u32,
+    /// Circle center, on the sketch plane.
+    pub center: [f64; 3],
+    /// Circle radius in meters (> 0).
+    pub radius: f64,
 }
 
 /// A reference to a node in the document tree.
@@ -1486,12 +1854,29 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         });
     }
 
+    // Analytic curve definitions (manifest v10+): one sparse entry per
+    // referenced chain that has geometry, in ascending dense-id order (the
+    // BTreeMap iterates by SketchCurveId, but dense ids were assigned by
+    // first appearance, so sort explicitly by the dense id).
+    let mut curve_dtos: Vec<SketchCurveDto> = curve_to_dense
+        .iter()
+        .filter_map(|(&cid, &dense)| {
+            sk.curve_geom(cid).map(|g| SketchCurveDto {
+                id: dense,
+                center: [g.center.x, g.center.y, g.center.z],
+                radius: g.radius,
+            })
+        })
+        .collect();
+    curve_dtos.sort_by_key(|c| c.id);
+
     SketchDto {
         id: 0, // patched by caller
         plane: plane_arr,
         vertices: vert_dtos,
         edges: edge_dtos,
         regions: region_dtos,
+        curves: curve_dtos,
     }
 }
 
@@ -1835,8 +2220,44 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
         vert_ids.push(id);
     }
 
+    // Analytic curve definitions (manifest v10+), keyed by dense curve id.
+    // Validated up front: a non-positive radius, or an entry for a dense id
+    // no edge references (checked after the edge pass), is a malformed file.
+    let mut curve_geoms: std::collections::BTreeMap<u32, crate::sketch::CurveGeom> =
+        std::collections::BTreeMap::new();
+    for c in &dto.curves {
+        if !c.radius.is_finite() || c.radius <= crate::tol::POINT_MERGE {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} curve {} has degenerate radius {}",
+                    dto.id, c.id, c.radius
+                ),
+            });
+        }
+        if curve_geoms
+            .insert(
+                c.id,
+                crate::sketch::CurveGeom {
+                    center: Point3::new(c.center[0], c.center[1], c.center[2]),
+                    radius: c.radius,
+                },
+            )
+            .is_some()
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!("sketch {} curve {} appears twice", dto.id, c.id),
+            });
+        }
+    }
+
     // Insert edges in dense id order, minting one SketchCurveId per dense
-    // curve index as they appear (indices need not arrive sorted).
+    // curve index, carrying the chain's analytic definition when the
+    // manifest supplies one. Writers assign curve ids densely in first
+    // appearance order over the edge list (HEW_FILE_FORMAT.md), and the
+    // reader HOLDS files to that: a first appearance that skips ahead is a
+    // malformed manifest, never silently gap-filled with phantom chains —
+    // gap-filling would also defeat the dangling-entry check below, letting
+    // a tampered `curves[]` definition load silently.
     let mut curve_ids: Vec<SketchCurveId> = Vec::new();
     for e in &dto.edges {
         let from_idx = e.from as usize;
@@ -1849,17 +2270,50 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                 ),
             });
         }
-        let curve = e.curve.map(|ci| {
-            let ci = ci as usize;
-            while curve_ids.len() <= ci {
-                curve_ids.push(sk.insert_curve_raw());
+        let curve = match e.curve {
+            None => None,
+            Some(ci) => {
+                let ci = ci as usize;
+                if ci > curve_ids.len() {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "sketch {} edge {} curve index {} is not dense in first \
+                             appearance order (next unseen index is {})",
+                            dto.id,
+                            e.id,
+                            ci,
+                            curve_ids.len()
+                        ),
+                    });
+                }
+                if ci == curve_ids.len() {
+                    let geom = curve_geoms.get(&(ci as u32)).copied();
+                    curve_ids.push(sk.insert_curve_raw(geom));
+                }
+                Some(curve_ids[ci])
             }
-            curve_ids[ci]
-        });
+        };
         sk.insert_edge_raw(SketchEdge {
             from: vert_ids[from_idx],
             to: vert_ids[to_idx],
             curve,
+        });
+    }
+
+    // Every curves[] entry must name a chain some edge references — a
+    // dangling definition is rejected like any other dangling id. Exact,
+    // because the density check above rules out gap indices: the referenced
+    // ids are precisely 0..curve_ids.len().
+    if let Some(dangling) = curve_geoms
+        .keys()
+        .copied()
+        .find(|&id| id as usize >= curve_ids.len())
+    {
+        return Err(LoadError::DanglingReference {
+            what: format!(
+                "sketch {} curve {} is referenced by no edge",
+                dto.id, dangling
+            ),
         });
     }
 

@@ -1719,6 +1719,7 @@ fn split_painted_extruded_box_face_propagates_material() {
             KernelOp::SplitFace {
                 face: top,
                 path: vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)],
+                restore: None,
             },
         )
         .expect("split the painted extruded top");
@@ -3272,6 +3273,8 @@ fn replacing_ops_refuse_a_grouped_leaf_and_leave_the_document_untouched() {
                     Point3::new(2.5, 2.5, 1.0),
                     Point3::new(1.5, 2.5, 1.0),
                 ],
+                restore: None,
+                curve: None,
             },
         )
         .expect("imprint sub-face")
@@ -3349,6 +3352,8 @@ fn push_through_sub_face_punches_hole_and_round_trips() {
                     Point3::new(2.5, 2.5, 1.0),
                     Point3::new(1.5, 2.5, 1.0),
                 ],
+                restore: None,
+                curve: None,
             },
         )
         .expect("imprint sub-face")

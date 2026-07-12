@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
-import { CircleTool, CIRCLE_SEGMENTS } from './CircleTool'
+import { CircleTool } from './CircleTool'
+import { segmentsPerTurn } from './arcMath'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
@@ -55,6 +56,7 @@ function makeWasmScene(opts: {
     }),
     sketch_end_gesture: vi.fn(),
     sketch_begin_curve: vi.fn(() => 91n),
+    sketch_begin_curve_with: vi.fn(() => 91n),
     sketch_end_curve: vi.fn(),
     sketch_add_segment: vi.fn(() => {
       if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
@@ -69,6 +71,10 @@ function makeWasmScene(opts: {
     face_normal: vi.fn(() => new Float64Array(opts.faceNormal ?? [0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array(opts.facePlane ?? [0, 0, 0, 0, 0, 1])),
     split_face_inner: vi.fn(() => {
+      if (opts.splitFaceThrows) throw new Error('LoopSelfIntersects: edges cross')
+      return 99n
+    }),
+    split_face_inner_with_curve: vi.fn(() => {
       if (opts.splitFaceThrows) throw new Error('LoopSelfIntersects: edges cross')
       return 99n
     }),
@@ -94,7 +100,8 @@ describe('CircleTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim, radius 3
 
     expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(CIRCLE_SEGMENTS)
+    // Adaptive facet count (true-curves §6): radius 3 caps at 96 per turn.
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(3))
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 42n, regionsCreated: [] })
     expect(onToast).not.toHaveBeenCalled()
@@ -113,7 +120,7 @@ describe('CircleTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0 }), RAY)
 
     const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
-    expect(calls).toHaveLength(CIRCLE_SEGMENTS)
+    expect(calls).toHaveLength(segmentsPerTurn(5))
     // First call's "p" (args 1-3) is vertex 0; last call's "q" (args 4-6) must match exactly.
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     const lastQ = [calls[calls.length - 1][4], calls[calls.length - 1][5], calls[calls.length - 1][6]]
@@ -189,7 +196,7 @@ describe('CircleTool — typed VCB radius entry', () => {
 
     tool.onKey(makeKeyEvent('Enter'))
 
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(CIRCLE_SEGMENTS)
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(5))
     expect(onCommit).toHaveBeenCalledTimes(1)
     // Default direction (+X) since cursor hasn't moved: vertex 0 should be (5, 0, 0).
     const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
@@ -226,7 +233,7 @@ describe('CircleTool — typed VCB radius entry', () => {
 })
 
 describe('CircleTool — face mode', () => {
-  it('two clicks on an entered object face call split_face_inner with N points', () => {
+  it('two clicks on an entered object face call split_face_inner_with_curve carrying the circle', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
@@ -235,12 +242,18 @@ describe('CircleTool — face mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center on face
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim click
 
-    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
-    const callArgs = (scene.split_face_inner as ReturnType<typeof vi.fn>).mock.calls[0]
+    // Plain imprint is NOT used — the identity-carrying variant is.
+    expect(scene.split_face_inner).not.toHaveBeenCalled()
+    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
+    const callArgs = (scene.split_face_inner_with_curve as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(callArgs[0]).toBe(7n)
     expect(callArgs[1]).toBe(3n)
     const loopPts = callArgs[2] as Float64Array
-    expect(loopPts.length).toBe(CIRCLE_SEGMENTS * 3)
+    expect(loopPts.length).toBe(segmentsPerTurn(3) * 3)
+    // center (0,0,0) and radius 3 travel with the imprint.
+    const centerArg = callArgs[3] as Float64Array
+    expect(Array.from(centerArg)).toEqual([0, 0, 0])
+    expect(callArgs[4]).toBeCloseTo(3)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
     expect(onToast).not.toHaveBeenCalled()
   })

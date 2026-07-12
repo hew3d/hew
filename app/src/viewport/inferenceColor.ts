@@ -12,6 +12,9 @@ import type { InferenceInfo } from './Viewport'
 /** CSS hex per snap kind. */
 export const KIND_CSS_COLOR: Record<string, string> = {
   endpoint: '#00cc44',
+  center: '#00aa88',
+  quadrant: '#00aa88',
+  tangent: '#b050d0',
   midpoint: '#00cccc',
   intersection: '#ffaa00',
   'on-edge': '#cc2200',

@@ -7,14 +7,14 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import * as THREE from 'three'
 import {
   STL_HEADER_BYTES,
   STL_TRIANGLE_BYTES,
   writeBinaryStl,
-  collectWorldTriangles,
+  collectKernelTriangles,
   collectNonSolidObjects,
   type SolidQueryScene,
+  type StlExportScene,
 } from './stlExport'
 
 // ---------------------------------------------------------------------------
@@ -163,53 +163,81 @@ describe('writeBinaryStl — geometry', () => {
   })
 })
 
-describe('collectWorldTriangles', () => {
-  /** One-triangle mesh (TRI_XY, non-indexed). */
-  function triMesh(): THREE.Mesh {
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRI_XY), 3))
-    return new THREE.Mesh(geo, new THREE.MeshBasicMaterial())
+describe('collectKernelTriangles', () => {
+  const IDENTITY_POSE = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+
+  function mockExportScene(overrides: Partial<StlExportScene>): StlExportScene {
+    return {
+      object_ids: () => new BigUint64Array(),
+      instance_ids: () => new BigUint64Array(),
+      instance_def: () => undefined,
+      component_member_objects: () => new BigUint64Array(),
+      object_solid: () => true,
+      object_name: () => undefined,
+      instance_pose: () => IDENTITY_POSE,
+      object_export_triangles: () => new Float32Array(TRI_XY),
+      ...overrides,
+    }
   }
 
-  it('applies world transforms (meters) and walks indexed geometry', () => {
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute(
-      'position',
-      new THREE.BufferAttribute(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0]), 3),
-    )
-    geo.setIndex(new THREE.BufferAttribute(new Uint32Array([0, 1, 2, 2, 1, 3]), 1))
-    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial())
-    mesh.position.set(10, 0, 0)
-    const root = new THREE.Group()
-    root.add(mesh)
-    root.updateMatrixWorld(true)
+  it('concatenates every top-level object soup verbatim (baked world coords)', () => {
+    const scene = mockExportScene({
+      object_ids: () => new BigUint64Array([1n, 2n]),
+      object_export_triangles: (id) =>
+        new Float32Array(TRI_XY.map((v) => v + Number(id) * 10)),
+    })
+    const tris = collectKernelTriangles(scene, 48)
+    expect(tris.length).toBe(18)
+    expect(tris.slice(0, 3)).toEqual([10, 10, 10])
+    expect(tris.slice(9, 12)).toEqual([20, 20, 20])
+  })
 
-    const tris = collectWorldTriangles(root)
-    expect(tris.length).toBe(18) // 2 triangles × 9
+  it('passes the chosen resolution through to the kernel', () => {
+    const seen: number[] = []
+    const scene = mockExportScene({
+      object_ids: () => new BigUint64Array([1n]),
+      object_export_triangles: (_id, segments) => {
+        seen.push(segments)
+        return new Float32Array(TRI_XY)
+      },
+    })
+    collectKernelTriangles(scene, 96)
+    expect(seen).toEqual([96])
+  })
+
+  it('applies instance poses to definition members (translation)', () => {
+    const scene = mockExportScene({
+      instance_ids: () => new BigUint64Array([10n]),
+      instance_def: () => 7n,
+      component_member_objects: () => new BigUint64Array([42n]),
+      instance_pose: () => new Float64Array([1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0]),
+    })
+    const tris = collectKernelTriangles(scene, 0)
     expect(tris.slice(0, 9)).toEqual([10, 0, 0, 11, 0, 0, 10, 1, 0])
   })
 
-  it('ignores non-mesh nodes (e.g. LineSegments)', () => {
-    const root = new THREE.Group()
-    const lineGeo = new THREE.BufferGeometry()
-    lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3))
-    root.add(new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial()))
-    root.add(triMesh())
-    root.updateMatrixWorld(true)
-    expect(collectWorldTriangles(root).length).toBe(9)
-  })
-
-  it('flips winding under a reflected (negative-determinant) transform so normals stay outward', () => {
-    const mesh = triMesh()
-    mesh.scale.set(-1, 1, 1) // mirror across YZ → det < 0
-    const root = new THREE.Group()
-    root.add(mesh)
-    root.updateMatrixWorld(true)
-
-    const { bytes } = writeBinaryStl(collectWorldTriangles(root))
+  it('flips winding under a mirrored (negative-determinant) pose so normals stay outward', () => {
+    const scene = mockExportScene({
+      instance_ids: () => new BigUint64Array([10n]),
+      instance_def: () => 7n,
+      component_member_objects: () => new BigUint64Array([42n]),
+      // Mirror across YZ: det < 0.
+      instance_pose: () => new Float64Array([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
+    })
+    const { bytes } = writeBinaryStl(collectKernelTriangles(scene, 0))
     // A +Z-facing triangle mirrored in X still faces +Z; without the winding
     // flip the emitted normal would be −Z (inward).
     expect(parseStl(bytes).tris[0].normal[2]).toBeCloseTo(1)
+  })
+
+  it('skips instances with stale defs or poses rather than guessing', () => {
+    const scene = mockExportScene({
+      instance_ids: () => new BigUint64Array([10n, 11n]),
+      instance_def: (id) => (id === 10n ? 7n : undefined),
+      instance_pose: (id) => (id === 10n ? undefined : IDENTITY_POSE),
+      component_member_objects: () => new BigUint64Array([42n]),
+    })
+    expect(collectKernelTriangles(scene, 0).length).toBe(0)
   })
 })
 
