@@ -1340,6 +1340,19 @@ impl Object {
         }
         let removed_faces = collapse_plans_surgery(&mut obj, face, &boundary_loops, &plans, sweep)?;
 
+        // Defensive map-or-drop for `Edge::curve` on the recorded-inverse
+        // path, mirroring every other push/pull-family mutator
+        // (docs/design/true-curves.md): the inverse translate moves the wall's
+        // shared vertices, and any incident edge whose analytic circle claim
+        // that move takes off its center must drop, never stay stale (a stale
+        // claim panics `check_invariants` in debug / false-refuses in release).
+        // `unbuild_push_pull` was authored on the pushpull branch before
+        // `Edge::curve` existed and was the one push/pull path missing this.
+        // (Reinstating a claim the forward push dropped is the same deferred
+        // "rigid-translate mapping" polish curves leaves for every push/pull
+        // move, universal to the family, not specific to this inverse.)
+        obj.drop_stale_edge_curves();
+
         obj.check_invariants();
         obj.validate()
             .map_err(|_| PushPullError::NonManifoldResult)?;

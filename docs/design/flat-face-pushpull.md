@@ -145,6 +145,18 @@ the undo are all keyed off boundary-edge geometry, not off any assumption that
 faces are surface-free. No shared state to reconcile beyond that top-level
 branch.
 
+**One reconciliation the merge did need (resolved on integration):** curves
+adds a per-edge `Edge::curve` analytic claim that every vertex-moving mutator
+must map-or-drop, but `unbuild_push_pull` (the recorded inverse of a
+wall-building push) was authored here before that field existed and lacked the
+`drop_stale_edge_curves()` call all siblings have. The integration added it, so
+the recorded-inverse path holds the same map-or-drop invariant — a stale claim
+can never reach the validator on undo. Reinstating a claim the forward push
+*dropped* is the same deferred "rigid-translate mapping" polish curves leaves
+for every push/pull move (universal to the family, not specific to this
+inverse); undo therefore restores topology and geometry exactly, and edge-curve
+identity up to that documented map-or-drop degradation.
+
 ## Known deferred case: P4 hole-edge push
 
 Pushing an **outer edge of a face into or past one of its own holes**

@@ -6,8 +6,9 @@
  * that `clearPreview`'s geometry.dispose() calls cannot corrupt the live
  * scene object's shared geometry.
  *
- * `buildMultiPreviewClone` does the same for a set of leaf-object ids (used
- * when a group is being transformed — all leaf meshes move together).
+ * `buildMultiPreviewClone` does the same for a group's leaves — its world
+ * objects AND its component instances (each pose-preserved) — so every leaf
+ * moves together when a group is transformed.
  */
 
 import * as THREE from 'three'
@@ -80,18 +81,62 @@ export function buildPreviewClone(
 /**
  * Build a semi-transparent clone of an instance's THREE.Group for use as a
  * drag preview. Returns null if the source group is not found.
+ *
+ * A materialized instance keeps its world pose ONLY in `instanceGroup.matrix`
+ * (SceneRenderer._materialize sets `matrixAutoUpdate = false` and copies the
+ * placement pose there); the child face/edge geometry is definition-LOCAL. So
+ * the preview MUST preserve that pose on the cloned group — otherwise the
+ * ghost renders at the definition origin (typically the first placement),
+ * detached from the instance the user actually grabbed.
+ *
+ * The pose is a full affine (it may be non-uniformly scaled or mirrored, i.e.
+ * negative-determinant), so it stays in the matrix rather than round-tripping
+ * through position/quaternion/scale. The transform tools translate/rotate/scale
+ * the returned object by driving its `.position` (Move) or `applyMatrix4`
+ * (Rotate/Scale) — both of which reset and recompose that object's own
+ * transform. Driving the posed clone directly would therefore clobber the
+ * pose, so the clone is nested under an identity OUTER wrapper: the tool drives
+ * the wrapper in world space and it composes with the child's preserved pose,
+ * moving the ghost from the instance's real location.
  */
 export function buildInstancePreviewClone(
   instanceGroup: THREE.Group | null,
 ): THREE.Object3D | null {
+  const posed = clonePosedInstanceGroup(instanceGroup)
+  if (posed === null) return null
+  // Identity wrapper the tool drives; its transform composes with the child's
+  // preserved pose in world space.
+  const wrapper = new THREE.Group()
+  wrapper.name = 'InstancePreview'
+  wrapper.add(posed)
+  return wrapper
+}
+
+/**
+ * Clone a materialized instance's THREE.Group as a pose-preserved, faded ghost:
+ * `matrixAutoUpdate` off with the instance's world pose copied into the matrix,
+ * over cloned (owned) definition-local geometry. Returns null if the source is
+ * null.
+ *
+ * The returned group holds the FULL affine pose in its matrix — never a
+ * position/quaternion/scale that would drop a non-uniform scale or a mirror —
+ * so a parent (the driven wrapper for a single instance, or the shared group
+ * container for a grouped instance) composes its world-space transform on top
+ * of the pose without disturbing it.
+ */
+function clonePosedInstanceGroup(
+  instanceGroup: THREE.Group | null,
+): THREE.Object3D | null {
   if (instanceGroup === null) return null
-  const clone = instanceGroup.clone(true)
-  // Reset the clone's matrix so the preview is in world-space identity —
-  // the tool will translate it directly.
-  clone.matrixAutoUpdate = true
-  clone.matrix.identity()
-  clone.matrixWorldNeedsUpdate = true
-  clone.traverse((child) => {
+  const posed = instanceGroup.clone(true)
+  // Keep the instance's world pose on the cloned group so the ghost starts
+  // exactly on that instance (clone() already copies the matrix, but pin it
+  // explicitly so the preview does not depend on the source group's
+  // matrixAutoUpdate state).
+  posed.matrixAutoUpdate = false
+  posed.matrix.copy(instanceGroup.matrix)
+  posed.matrixWorldNeedsUpdate = true
+  posed.traverse((child) => {
     if (child instanceof THREE.Mesh) {
       child.geometry = child.geometry.clone()
       child.material = fadePreviewMaterial(child.material)
@@ -101,7 +146,7 @@ export function buildInstancePreviewClone(
       child.material = fadePreviewMaterial(child.material)
     }
   })
-  return clone
+  return posed
 }
 
 /** Line color for a sketch drag preview — matches the live sketch line color
@@ -129,21 +174,38 @@ export function buildSketchPreviewClone(
 }
 
 /**
- * Build a combined semi-transparent preview for a set of leaf object ids
- * (used when transforming a group — all leaves must move together as one unit).
- * Returns a THREE.Group containing all found clones, or null if none found.
+ * Build a combined semi-transparent preview for a group's renderable leaves —
+ * its world Objects (`leafObjectIds`) AND its component instances
+ * (`leafInstanceGroups`, the live materialized groups) — so all leaves move
+ * together as one unit. A group's leaves are its objects PLUS its instances
+ * (see `Document::leaf_objects_under` / `leaf_instances_under`); leaving the
+ * instances out froze them in place during the whole drag.
+ *
+ * Object clones carry baked world-space geometry, so they ride the container's
+ * transform directly. Instance clones preserve their own world pose in their
+ * matrix (via `clonePosedInstanceGroup`) — the container is the single object
+ * the tool drives, and its world-space delta composes on top of each instance's
+ * pose. Returns a THREE.Group containing all found clones, or null if none found.
  */
 export function buildMultiPreviewClone(
   objectsGroup: THREE.Group | null,
-  leafIds: bigint[],
+  leafObjectIds: bigint[],
+  leafInstanceGroups: (THREE.Group | null)[] = [],
 ): THREE.Group | null {
-  if (objectsGroup === null || leafIds.length === 0) return null
-
   const container = new THREE.Group()
   container.name = 'MultiPreview'
   let found = 0
-  for (const id of leafIds) {
-    const clone = cloneObjectMesh(objectsGroup, id)
+  if (objectsGroup !== null) {
+    for (const id of leafObjectIds) {
+      const clone = cloneObjectMesh(objectsGroup, id)
+      if (clone !== null) {
+        container.add(clone)
+        found++
+      }
+    }
+  }
+  for (const instanceGroup of leafInstanceGroups) {
+    const clone = clonePosedInstanceGroup(instanceGroup)
     if (clone !== null) {
       container.add(clone)
       found++

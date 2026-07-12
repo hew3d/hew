@@ -42,8 +42,11 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
     doc.end_sketch_gesture(s).unwrap();
     let region = doc.sketch(s).unwrap().regions().keys().next().unwrap();
     let (oid, _) = doc.extrude_region(s, region, h).unwrap();
-    doc.transform_object(oid, &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)))
-        .unwrap();
+    doc.transform_object(
+        oid,
+        &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)),
+    )
+    .unwrap();
     oid
 }
 

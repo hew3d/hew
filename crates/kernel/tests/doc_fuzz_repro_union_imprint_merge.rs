@@ -50,8 +50,11 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
         .next()
         .expect("rectangle closes one region");
     let (oid, _) = doc.extrude_region(s, region, h).expect("box extrudes");
-    doc.transform_object(oid, &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)))
-        .expect("translate box into its real overlapping position");
+    doc.transform_object(
+        oid,
+        &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)),
+    )
+    .expect("translate box into its real overlapping position");
     oid
 }
 

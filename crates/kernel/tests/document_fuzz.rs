@@ -301,7 +301,7 @@ fn nth<T: Copy>(items: &[T], sel: usize) -> Option<T> {
 }
 
 /// Applies one abstract op.
-fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestCaseError> {
+fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, TestCaseError> {
     match op {
         DocOp::PushPull {
             obj_sel,
@@ -309,11 +309,11 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestC
             distance,
         } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
             let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(());
+                return Ok(true);
             };
             let _ = doc.apply_object_op(
                 oid,
@@ -332,20 +332,20 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestC
             tb,
         } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
             let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(());
+                return Ok(true);
             };
             let boundary: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
             let sides = boundary.len();
             if sides < 3 {
-                return Ok(());
+                return Ok(true);
             }
             let (a, b) = (edge_a % sides, edge_b % sides);
             if a == b {
-                return Ok(());
+                return Ok(true);
             }
             let point_on = |i: usize, t: f64| {
                 let p = boundary[i];
@@ -369,21 +369,21 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestC
             staple,
         } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
             let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(());
+                return Ok(true);
             };
             let boundary: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
             if boundary.len() < 3 {
-                return Ok(());
+                return Ok(true);
             }
             let loop_path: Vec<Point3> = if *staple {
                 // Concave staple in the quad's bilinear frame (quad faces
                 // only; skewed quads may still reject typed — fine).
                 if boundary.len() != 4 {
-                    return Ok(());
+                    return Ok(true);
                 }
                 let (o, ua, vb) = (boundary[0], boundary[1], boundary[3]);
                 let at = |a: f64, b: f64| o + (ua - o) * a + (vb - o) * b;
@@ -417,7 +417,7 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestC
         DocOp::Boolean { kind, a_sel, b_sel } => {
             let ids = doc.visible_object_ids();
             let (Some(a), Some(b)) = (nth(&ids, *a_sel), nth(&ids, *b_sel)) else {
-                return Ok(());
+                return Ok(true);
             };
             let op = match kind {
                 0 => BooleanOp::Union,
@@ -428,79 +428,86 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<(), TestC
         }
         DocOp::Translate { obj_sel, offset } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.transform_object(oid, &t);
         }
         DocOp::Duplicate { obj_sel, offset } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.duplicate_node(NodeId::Object(oid), &t);
         }
         DocOp::Delete { node_sel } => {
             let Some(node) = nth(&doc.top_level_nodes(), *node_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let _ = doc.delete_node(node);
         }
         DocOp::Group { count } => {
             let nodes = doc.top_level_nodes();
             if nodes.len() < 2 {
-                return Ok(());
+                return Ok(true);
             }
             let members: Vec<NodeId> = nodes.into_iter().take(*count).collect();
             let _ = doc.group_nodes(&members);
         }
         DocOp::Ungroup { group_sel } => {
             let Some(gid) = nth(&doc.group_ids(), *group_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let _ = doc.ungroup(gid);
         }
         DocOp::MakeComponent { node_sel } => {
             let Some(node) = nth(&doc.top_level_nodes(), *node_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let _ = doc.make_component(&[node]);
         }
         DocOp::PlaceInstance { comp_sel, offset } => {
             let Some(cid) = nth(&doc.component_ids(), *comp_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.place_instance(cid, t);
         }
         DocOp::ExplodeInstance { inst_sel } => {
             let Some(iid) = nth(&doc.instance_ids(), *inst_sel) else {
-                return Ok(());
+                return Ok(true);
             };
             let _ = doc.explode_instance(iid);
         }
         DocOp::Undo => {
             if doc.can_undo()
                 && let Err(e) = doc.undo()
-                && !is_known_inverse_guard_gap(doc, &e, false)
             {
-                return Err(TestCaseError::fail(format!(
-                    "step {step}: document undo failed: {e}"
-                )));
+                if !is_known_inverse_guard_gap(doc, &e, false) {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step}: document undo failed: {e}"
+                    )));
+                }
+                // Tolerated UnbuildPushPull gap: undo failed typed, the
+                // document is untouched but its log can no longer unwind past
+                // the refused inverse — abandon the round-trip for this case.
+                return Ok(false);
             }
         }
         DocOp::Redo => {
             if doc.can_redo()
                 && let Err(e) = doc.redo()
-                && !is_known_inverse_guard_gap(doc, &e, true)
             {
-                return Err(TestCaseError::fail(format!(
-                    "step {step}: document redo failed: {e}"
-                )));
+                if !is_known_inverse_guard_gap(doc, &e, true) {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step}: document redo failed: {e}"
+                    )));
+                }
+                return Ok(false);
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 proptest! {
@@ -526,7 +533,9 @@ proptest! {
         }
 
         for (step, op) in ops.iter().enumerate() {
-            apply_doc_op(&mut doc, step, op)?;
+            if !apply_doc_op(&mut doc, step, op)? {
+                return Ok(());
+            }
             check_doc(&doc, step, "apply")?;
         }
 

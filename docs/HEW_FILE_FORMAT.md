@@ -278,8 +278,14 @@ order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
 - faces are sorted by their rotated outer-ring position sequence, then hole
   count, then hole sequences, then material id, then UV frame (frameless
   faces first; frames compared elementwise `s.x s.y s.z t.x t.y t.z u0 v0`
-  under the same f64 total order) — coincident faces on disjoint shells can
-  tie on geometry alone, so every emitted payload participates in the key;
+  under the same f64 total order), then the per-face analytic surface (v4;
+  surface-less faces first, then by `axis_point.x y z axis.x y z radius`
+  under the f64 total order), then the per-edge circle claims (v5; the outer
+  loop's claim sequence in canonical vertex order, then each hole's, each
+  compared by length then entry — claim-less before claim-bearing, then by
+  `center.x y z radius`). Coincident faces on disjoint shells can tie on
+  geometry alone, so every emitted payload — ring, holes, material, UV
+  frame, surface, and edge-curve claims — participates in the key;
 - vertices are numbered by first appearance while walking the faces in that
   order (each face's outer loop, then its holes); a vertex referenced by no
   loop — which valid topology does not produce — is appended at the end in

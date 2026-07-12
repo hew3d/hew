@@ -30,6 +30,10 @@ import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { SceneRenderer } from './SceneRenderer'
+import { buildInstancePreviewClone } from '../tools/transformPreview'
+import { buildSelectionPreview } from '../tools/transformSelection'
+import { ScaleTool } from '../tools/ScaleTool'
+import type { NodeRef } from '../panels/treeModel'
 
 const SENTINEL = BigInt('18446744073709551615') // u64::MAX — default material group
 
@@ -610,6 +614,192 @@ describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
     expect(batches[0].count).toBe(2)
     const tx = slotMatrices(batches[0]).map((m) => m.elements[12]).sort()
     expect(tx).toEqual([0, 7])
+  })
+})
+
+describe('buildInstancePreviewClone — drag ghost sits on the selected instance', () => {
+  /** World-space bounding-box center of an object (after world matrices update). */
+  function worldCenter(obj: THREE.Object3D): THREE.Vector3 {
+    return new THREE.Box3().setFromObject(obj).getCenter(new THREE.Vector3())
+  }
+
+  // Definition-local geometry (one triangle + one edge) spans x[0,1] y[0,1]
+  // z[0,0]; its local bbox center is (0.5, 0.5, 0). The OLD buggy clone reset
+  // the pose to identity, so the ghost sat here regardless of the placement.
+  const DEF_ORIGIN_CENTER: [number, number, number] = [0.5, 0.5, 0]
+
+  // Poses with axis-aligned (diagonal) linear parts so the transformed AABB
+  // center is exactly the pose applied to the local center — covers the four
+  // cases the bug report names: plain, translated-far, mirrored, scaled.
+  const cases: Array<[string, number[]]> = [
+    ['plain (identity)', IDENTITY_POSE],
+    ['translated far from the origin', [1, 0, 0, 100, 0, 1, 0, -50, 0, 0, 1, 30]],
+    ['mirrored (negative determinant)', REFLECTED_POSE],
+    ['non-uniformly scaled', [2, 0, 0, 4, 0, 3, 0, -7, 0, 0, 0.5, 9]],
+  ]
+
+  for (const [label, pose] of cases) {
+    it(`preview world center matches the instance, not the definition origin — ${label}`, () => {
+      const scene3 = new THREE.Scene()
+      const renderer = new SceneRenderer(scene3, makeScene({
+        instances: {
+          '20': { def: 200n, pose, memberIds: [1n], memberWatertight: { '1': true } },
+        },
+      }))
+      renderer.refresh()
+
+      const live = renderer.getInstanceGroup(20n)
+      expect(live).not.toBeNull()
+      const preview = buildInstancePreviewClone(live)
+      expect(preview).not.toBeNull()
+      scene3.add(preview!)
+      scene3.updateMatrixWorld(true)
+
+      const previewC = worldCenter(preview!)
+      const liveC = worldCenter(live!)
+      expect(previewC.x).toBeCloseTo(liveC.x, 6)
+      expect(previewC.y).toBeCloseTo(liveC.y, 6)
+      expect(previewC.z).toBeCloseTo(liveC.z, 6)
+    })
+  }
+
+  it('a far placement ghost sits at the placement, not the definition origin (regression guard)', () => {
+    const scene3 = new THREE.Scene()
+    const renderer = new SceneRenderer(scene3, makeScene({
+      instances: {
+        '20': { def: 200n, pose: [1, 0, 0, 100, 0, 1, 0, -50, 0, 0, 1, 30], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    }))
+    renderer.refresh()
+
+    const preview = buildInstancePreviewClone(renderer.getInstanceGroup(20n))!
+    scene3.add(preview)
+    scene3.updateMatrixWorld(true)
+
+    const c = worldCenter(preview)
+    // Pose applied to the local center (0.5, 0.5, 0): (100.5, -49.5, 30).
+    expect(c.x).toBeCloseTo(100.5, 6)
+    expect(c.y).toBeCloseTo(-49.5, 6)
+    expect(c.z).toBeCloseTo(30, 6)
+    // NOT at the definition origin — the exact symptom the maintainer saw.
+    expect(c.distanceTo(new THREE.Vector3(...DEF_ORIGIN_CENTER))).toBeGreaterThan(50)
+  })
+
+  it('selecting the SECOND of two far-apart placements ghosts on the second, not the first', () => {
+    const scene3 = new THREE.Scene()
+    const renderer = new SceneRenderer(scene3, makeScene({
+      instances: {
+        '20': { def: 200n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+        '21': { def: 200n, pose: [1, 0, 0, 80, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    }))
+    renderer.refresh()
+
+    const preview = buildInstancePreviewClone(renderer.getInstanceGroup(21n))!
+    scene3.add(preview)
+    scene3.updateMatrixWorld(true)
+
+    const c = worldCenter(preview)
+    // The second placement is at x≈80.5, not the first at x≈0.5.
+    expect(c.x).toBeCloseTo(80.5, 6)
+  })
+
+  it('driving the wrapper position translates the ghost from the instance pose', () => {
+    const scene3 = new THREE.Scene()
+    const renderer = new SceneRenderer(scene3, makeScene({
+      instances: {
+        '20': { def: 200n, pose: [1, 0, 0, 100, 0, 1, 0, -50, 0, 0, 1, 30], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    }))
+    renderer.refresh()
+
+    const preview = buildInstancePreviewClone(renderer.getInstanceGroup(20n))!
+    scene3.add(preview)
+    scene3.updateMatrixWorld(true)
+    const start = worldCenter(preview)
+
+    // Mirror how MoveTool drives the ghost: set the outer wrapper's position
+    // to the world-space drag delta.
+    preview.position.set(3, 7, -2)
+    scene3.updateMatrixWorld(true)
+    const moved = worldCenter(preview)
+
+    expect(moved.x).toBeCloseTo(start.x + 3, 6)
+    expect(moved.y).toBeCloseTo(start.y + 7, 6)
+    expect(moved.z).toBeCloseTo(start.z - 2, 6)
+  })
+})
+
+describe('group drag preview + scale pivot include leaf INSTANCES, not just objects', () => {
+  // A group of one world object (near the origin) and one component instance
+  // placed far away in +X. The object's mesh spans x[0,1]; the instance is at
+  // x≈100. `node_leaf_objects` stops at instances, so a group preview built
+  // from it alone would omit the instance entirely.
+  function groupOfObjectAndFarInstance() {
+    return new SceneRenderer(new THREE.Scene(), makeScene({
+      objects: { '1': true },
+      instances: {
+        '20': { def: 200n, pose: [1, 0, 0, 100, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [2n], memberWatertight: { '2': true } },
+      },
+    }))
+  }
+
+  // Minimal wasm surface the group-preview / pivot enumeration needs: a group
+  // whose members are the world object AND the placed instance.
+  const groupMembersScene = {
+    group_members: () => [
+      { kind: 'object', id: 1n },
+      { kind: 'instance', id: 20n },
+    ],
+  } as unknown as WasmScene
+
+  const groupNode: NodeRef = { kind: 'group', id: 999n }
+
+  it('the group drag ghost spans BOTH the object and the far instance', () => {
+    const renderer = groupOfObjectAndFarInstance()
+    renderer.refresh()
+
+    const preview = buildSelectionPreview(
+      groupMembersScene,
+      renderer.objectsGroup,
+      (id) => renderer.getInstanceGroup(id),
+      [groupNode],
+    )
+    expect(preview).not.toBeNull()
+
+    const scene3 = new THREE.Scene()
+    scene3.add(preview!)
+    scene3.updateMatrixWorld(true)
+    const box = new THREE.Box3().setFromObject(preview!)
+
+    // Object leaf contributes near the origin; instance leaf contributes at
+    // x≈100. Without the instance the ghost would stop near x=1 (the bug).
+    expect(box.min.x).toBeLessThan(1.5)
+    expect(box.max.x).toBeGreaterThan(99)
+  })
+
+  it('ScaleTool pivot for the group sits at the combined center, not just the object', () => {
+    const renderer = groupOfObjectAndFarInstance()
+    renderer.refresh()
+
+    const tool = new ScaleTool(
+      groupMembersScene,
+      new THREE.Group(),
+      renderer.objectsGroup,
+      [],
+      () => { /* onCommit */ },
+      () => { /* onToast */ },
+      (id) => renderer.getInstanceGroup(id),
+    )
+    const center = (tool as unknown as {
+      _selectionCenter(nodes: NodeRef[]): [number, number, number] | null
+    })._selectionCenter([groupNode])
+
+    expect(center).not.toBeNull()
+    // Object center x≈0.5, instance center x≈100.5 → combined center x≈50.5.
+    // Object-only (the bug) would land near x≈0.5.
+    expect(center![0]).toBeGreaterThan(40)
+    expect(center![0]).toBeLessThan(60)
   })
 })
 

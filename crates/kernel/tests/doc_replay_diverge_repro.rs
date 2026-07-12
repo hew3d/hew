@@ -49,8 +49,11 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
     // place — an exact-enough baked translation; this is a byte-stability
     // (save1 == save2) test, so the consistent translation does not affect
     // what it asserts.
-    doc.transform_object(oid, &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)))
-        .expect("translate box into place");
+    doc.transform_object(
+        oid,
+        &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)),
+    )
+    .expect("translate box into place");
     oid
 }
 

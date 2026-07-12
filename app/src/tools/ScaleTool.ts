@@ -28,6 +28,7 @@ import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { editNumericBuffer, parseDistance } from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
+import { collectLeafIds, nodeRefFromJs } from '../panels/treeModel'
 
 export type OnScaleCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
@@ -230,14 +231,24 @@ export class ScaleTool implements Tool {
       } else if (node.kind === 'instance') {
         const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
         if (group !== null) box.expandByObject(group)
-      } else {
-        const leafIds = node.kind === 'group'
-          ? Array.from(this.wasmScene.node_leaf_objects(1, node.id))
-          : [node.id]
-        for (const id of leafIds) {
+      } else if (node.kind === 'group') {
+        // A group's leaves are its world objects AND its instances
+        // (`node_leaf_objects` stops at instances), so walk the JS tree to
+        // gather both — otherwise the scale pivot excludes grouped instances.
+        const { objectIds, instanceIds } = collectLeafIds(node, (groupId) =>
+          this.wasmScene.group_members(groupId).map(nodeRefFromJs),
+        )
+        for (const id of objectIds) {
           const objGroup = this.objectsGroup?.getObjectByName(`Object_${id}`)
           if (objGroup !== undefined) box.expandByObject(objGroup)
         }
+        for (const id of instanceIds) {
+          const g = this.instanceGroupGetter !== null ? this.instanceGroupGetter(id) : null
+          if (g !== null) box.expandByObject(g)
+        }
+      } else {
+        const objGroup = this.objectsGroup?.getObjectByName(`Object_${node.id}`)
+        if (objGroup !== undefined) box.expandByObject(objGroup)
       }
     }
     if (box.isEmpty()) return null

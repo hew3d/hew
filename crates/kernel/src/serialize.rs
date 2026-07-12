@@ -583,19 +583,18 @@ impl Object {
         // slot reallocation — the whole point of the canonical writer. Decode
         // re-attaches by the same rule (edge `k` originates at stored vertex
         // `k`).
-        let loop_edge_curves =
-            |loop_id: crate::ids::LoopId,
-             verts: &[crate::ids::VertexId]|
-             -> Vec<Option<crate::sketch::CurveGeom>> {
-                verts
-                    .iter()
-                    .map(|&v| {
-                        self.loop_half_edges(loop_id)
-                            .find(|&h| self.half_edges[h].origin == v)
-                            .and_then(|h| self.edges[self.half_edges[h].edge].curve)
-                    })
-                    .collect()
-            };
+        let loop_edge_curves = |loop_id: crate::ids::LoopId,
+                                verts: &[crate::ids::VertexId]|
+         -> Vec<Option<crate::sketch::CurveGeom>> {
+            verts
+                .iter()
+                .map(|&v| {
+                    self.loop_half_edges(loop_id)
+                        .find(|&h| self.half_edges[h].origin == v)
+                        .and_then(|h| self.edges[self.half_edges[h].edge].curve)
+                })
+                .collect()
+        };
 
         let mut canonical_faces: Vec<CanonicalFace> = self
             .faces
@@ -605,11 +604,12 @@ impl Object {
                 let outer_curves = loop_edge_curves(face.outer_loop, &outer_verts);
                 // Build each hole with its edge-curves, then sort the whole
                 // triple by ring so the curves stay paired with their hole.
-                let mut holes_full: Vec<(
+                type HoleFull = (
                     Vec<crate::ids::VertexId>,
                     Vec<Point3>,
                     Vec<Option<crate::sketch::CurveGeom>>,
-                )> = face
+                );
+                let mut holes_full: Vec<HoleFull> = face
                     .inner_loops
                     .iter()
                     .map(|&il| {

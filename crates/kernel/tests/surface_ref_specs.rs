@@ -1673,3 +1673,65 @@ fn thickening_a_box_after_bossing_an_imprinted_circle_map_or_drops_the_claim() {
         "the moved ring's claim was dropped (map-or-drop), leaving none stale"
     );
 }
+
+/// The curves × pushpull merge seam (integration review, major): pushing a
+/// boss side-wall facet outward is a SLANTED-neighbor translate-and-build,
+/// whose exact recorded inverse is `KernelOp::UnbuildPushPull` — a NEW
+/// vertex-moving path authored on the pushpull branch, which predates
+/// `Edge::curve`. The boss's base ring carries circle claims, so undoing the
+/// push moves claim-bearing vertices and MUST run map-or-drop on the
+/// recorded-inverse path too; a stale claim would panic `check_invariants`
+/// (debug) or false-refuse `NonManifoldResult` (release). Before the fix,
+/// `unbuild_push_pull` skipped `drop_stale_edge_curves`, unlike every sibling.
+#[test]
+fn undoing_a_boss_wall_push_keeps_edge_curve_claims_consistent() {
+    let (h, r) = (1.0, 0.5);
+    let (mut obj, disk) = imprint_circle(2.0, 2.0, h, r);
+    obj.extrude_sub_face(disk, 0.3).unwrap();
+    obj.validate().unwrap();
+
+    // A boss side wall: a facet whose vertices all sit near the axis (radius
+    // ~r, not the box walls at hw = 2.0) and span the boss height (some above
+    // the base plane z = h), with a roughly radial (horizontal) normal.
+    let wall = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane.normal().z.abs() < 0.3
+                && obj
+                    .loop_positions(f.outer_loop)
+                    .all(|p| (p.x * p.x + p.y * p.y).sqrt() < r + 0.1)
+                && obj
+                    .loop_positions(f.outer_loop)
+                    .any(|p| p.z > h + tol::POINT_MERGE)
+        })
+        .map(|(id, _)| id)
+        .expect("the boss has radial side-wall facets");
+
+    let mut history = kernel::History::new();
+    let report = history
+        .apply(
+            &mut obj,
+            kernel::KernelOp::PushPull {
+                face: wall,
+                distance: 0.1,
+            },
+        )
+        .expect("pushing a boss side wall outward succeeds");
+    let kernel::KernelOpReport::PushPull(pp) = &report else {
+        panic!("push_pull yields a PushPull report");
+    };
+    assert!(
+        pp.requires_unbuild_inverse,
+        "a slanted boss-wall push builds a wall and records UnbuildPushPull"
+    );
+    obj.validate().unwrap();
+
+    // Undo dispatches the recorded UnbuildPushPull; it must succeed and leave
+    // no stale claim (validate rejects a stale one).
+    history
+        .undo(&mut obj)
+        .expect("undo of the boss-wall push succeeds");
+    obj.validate()
+        .expect("no stale Edge::curve claim survives the recorded inverse");
+}

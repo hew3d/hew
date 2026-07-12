@@ -10,7 +10,7 @@
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
-import { nodeKindToNumber } from '../panels/treeModel'
+import { nodeKindToNumber, collectLeafIds, nodeRefFromJs } from '../panels/treeModel'
 import {
   buildPreviewClone,
   buildMultiPreviewClone,
@@ -77,8 +77,16 @@ export function buildNodePreview(
   node: NodeRef,
 ): THREE.Object3D | null {
   if (node.kind === 'group') {
-    const leafIds = Array.from(wasmScene.node_leaf_objects(1, node.id))
-    return buildMultiPreviewClone(objectsGroup, leafIds)
+    // A group's renderable leaves are its world objects AND its instances;
+    // `node_leaf_objects` stops at instances (kernel `leaf_objects_under`), so
+    // walk the JS tree instead to gather both — otherwise grouped instances
+    // are omitted from the drag ghost and freeze in place during the drag.
+    const { objectIds, instanceIds } = collectLeafIds(node, (groupId) =>
+      wasmScene.group_members(groupId).map(nodeRefFromJs),
+    )
+    const instanceGroups =
+      instanceGroupGetter !== null ? instanceIds.map((id) => instanceGroupGetter(id)) : []
+    return buildMultiPreviewClone(objectsGroup, objectIds, instanceGroups)
   }
   if (node.kind === 'instance') {
     const group = instanceGroupGetter !== null ? instanceGroupGetter(node.id) : null
