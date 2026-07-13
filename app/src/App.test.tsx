@@ -114,8 +114,30 @@ vi.mock('./io/fileHost', async (importOriginal) => {
   return { ...actual, makeFileHost: vi.fn(actual.makeFileHost) }
 })
 
+// io/recoveryStore — only makeRecoveryStore is mocked (jsdom has no
+// IndexedDB, so the real WebRecoveryStore silently no-ops and could never
+// report a snapshot). Tests seed `recoveryState.listings` to simulate a
+// crash snapshot awaiting recovery; shouldPromptRecovery stays real.
+const recoveryState = vi.hoisted(() => ({
+  listings: [] as { slot: string; meta: { version: 1; savedAt: number; name: string; path: string | null } }[],
+}))
+vi.mock('./io/recoveryStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./io/recoveryStore')>()
+  return {
+    ...actual,
+    makeRecoveryStore: () => ({
+      write: async () => {},
+      list: async () => recoveryState.listings,
+      claim: async () => null,
+      clear: async () => {},
+      discardAll: async () => {},
+    }),
+  }
+})
+
 import App from './App'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
+import { setShowWelcome } from './settings/welcomeScreen'
 import { makeFileHost, type FileHost } from './io/fileHost'
 
 // ---------------------------------------------------------------------------
@@ -128,6 +150,12 @@ import { makeFileHost, type FileHost } from './io/fileHost'
 // individual tests then seed their own layout where needed.
 beforeEach(() => {
   setTrayLayout(DEFAULT_TRAY_LAYOUT)
+  // A bare launch would (correctly) open the welcome screen over the app;
+  // these tests exercise other surfaces, so opt out. The welcome screen's
+  // own launch test re-enables it explicitly.
+  setShowWelcome(false)
+  // No crash snapshot unless a test seeds one.
+  recoveryState.listings = []
 })
 
 /**
@@ -712,5 +740,47 @@ describe('App — import overlay lifecycle', () => {
     await waitFor(() => expect(fakeFileHost.openForImport).toHaveBeenCalled())
     expect(mockScene.import_skp).not.toHaveBeenCalled()
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+})
+
+describe('App — welcome screen', () => {
+  it('opens on a bare launch and closes into the blank document', async () => {
+    setShowWelcome(true)
+    await renderAndLoad()
+    const dialog = await screen.findByRole('dialog', { name: /welcome to hew/i })
+    expect(dialog).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /start modeling/i }))
+    expect(screen.queryByRole('dialog', { name: /welcome to hew/i })).not.toBeInTheDocument()
+  })
+
+  it('yields to the crash-recovery prompt (recovery wins the startup handoff)', async () => {
+    setShowWelcome(true)
+    recoveryState.listings = [
+      { slot: 'web', meta: { version: 1, savedAt: Date.now(), name: 'Crashed Doc', path: null } },
+    ]
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    expect(screen.queryByRole('dialog', { name: /welcome to hew/i })).not.toBeInTheDocument()
+  })
+
+  it('swallows app shortcuts while open — no tool switch, no palette stacked underneath', async () => {
+    setShowWelcome(true)
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /welcome to hew/i })
+
+    // Bare-letter tool shortcut and the Ctrl+K palette must both be inert
+    // behind the modal (its overlay blocks the pointer but not the keyboard).
+    fireEvent.keyDown(document, { key: 'r' })
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
+    expect(screen.queryByRole('dialog', { name: /command palette/i })).not.toBeInTheDocument()
+
+    // Escape still dismisses the welcome screen itself…
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: /welcome to hew/i })).not.toBeInTheDocument()
+
+    // …and the earlier 'r' never reached the tool registry.
+    fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+    const rectangleItem = menubar().getByText('Rectangle').closest('div')
+    expect(rectangleItem?.textContent).not.toContain('✓')
   })
 })

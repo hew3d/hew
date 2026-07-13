@@ -50,10 +50,12 @@ export default defineConfig({
       },
 
       workbox: {
-        // Precache the app shell (js, css, html), icons, and the Rust kernel WASM.
+        // Precache the app shell (js, css, html), icons, the Rust kernel WASM,
+        // and the bundled sample models (.hew — the welcome screen fetches
+        // them, so they must work offline too).
         // The WASM chunk is typically ~700KB today; raise the ceiling to 10 MB so
         // a future kernel growth never silently drops the WASM from the precache.
-        globPatterns: ['**/*.{js,css,html,wasm,png,svg,ico}'],
+        globPatterns: ['**/*.{js,css,html,wasm,png,svg,ico,hew}'],
         maximumFileSizeToCacheInBytes: 10 * 1024 * 1024, // 10 MB
       },
 

@@ -163,6 +163,11 @@ export a file a slicer accepts as watertight, with no repair step.
 - Stage-aware status-bar guidance: every tool tells you what to do next
   ("Click the opposite corner — or type exact dimensions"), updating live
   as the gesture advances
+- A welcome screen on bare launches: recent files, the bundled samples,
+  and a getting-started link, with a persisted "show on startup" toggle
+- Bundled sample models, generated through the kernel's own API: a
+  finished printable pen cup, and a mid-construction side table showing
+  groups, components, materials, guides, and an open profile
 - Light and dark themes throughout
 - Native window chrome per platform — the system menu bar on macOS,
   native decorations on Windows, a custom title bar on Linux (WebKitGTK
@@ -214,10 +219,6 @@ export a file a slicer accepts as watertight, with no repair step.
   imprinted sub-faces punch through obliquely just fine), and pushing an
   outer face edge into or past one of its own holes (the deferred P4
   hole-edge case, revisited with true circles)
-- **A welcome screen** on launch, with recent files, bundled sample models,
-  and a link to a getting-started guide
-- **Bundled sample models** — a finished, printable object and a
-  mid-construction scene showing groups, components, materials, and guides
 - **A short first-model guide** — rectangle, push/pull, a circle or arc
   detail, export to STL, slice
 

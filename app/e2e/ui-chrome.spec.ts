@@ -220,3 +220,30 @@ test('palette: Ctrl+K opens it; running a tool entry activates the tool', async 
     page.getByRole('radiogroup', { name: 'Tools' }).getByRole('radio', { name: 'Arc' }),
   ).toHaveAttribute('aria-checked', 'true')
 })
+
+// ---------------------------------------------------------------------------
+// Welcome screen
+// ---------------------------------------------------------------------------
+
+test('welcome screen: appears on a first bare launch and a sample opens end-to-end', async ({
+  page,
+}) => {
+  // The suite-wide storageState seeds the opt-out so every other spec boots
+  // straight into the viewport; undo it here to simulate a genuine first launch.
+  await page.evaluate(() => localStorage.removeItem('hew.settings.showWelcome'))
+  await page.reload()
+  await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, {
+    timeout: 15_000,
+  })
+
+  const dialog = page.getByRole('dialog', { name: /welcome to hew/i })
+  await expect(dialog).toBeVisible()
+
+  // Opening a bundled sample exercises the whole path: fetch from the served
+  // public/ dir, kernel load, dialog dismissal, scene populated.
+  await dialog.getByText('Pen Cup').click()
+  await expect(dialog).not.toBeVisible()
+  await page.waitForFunction(() => (window.__hew_test?.getObjectCount() ?? 0) > 0, null, {
+    timeout: 15_000,
+  })
+})

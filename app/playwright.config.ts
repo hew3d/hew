@@ -58,6 +58,19 @@ export default defineConfig({
     baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
+    // Suppress the welcome screen on bare launches: every spec boots a fresh
+    // browser context (empty localStorage), and the dialog would otherwise
+    // overlay the viewport in all of them. Specs that test the welcome screen
+    // itself clear this key explicitly.
+    storageState: {
+      cookies: [],
+      origins: [
+        {
+          origin: baseURL,
+          localStorage: [{ name: 'hew.settings.showWelcome', value: 'false' }],
+        },
+      ],
+    },
   },
 
   projects: [
