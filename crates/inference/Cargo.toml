@@ -10,5 +10,8 @@ tracing.workspace = true
 
 # Test-only, mirroring crates/kernel (DEVELOPMENT.md rule 3): property-based
 # equivalence tests for the spatial index. Never a runtime dependency (rule 1).
+# slotmap (already in the kernel's own tree) mints distinct ObjectIds for
+# multi-member scenes; ids are opaque labels to this crate.
 [dev-dependencies]
 proptest.workspace = true
+slotmap.workspace = true

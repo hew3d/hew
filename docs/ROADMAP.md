@@ -87,6 +87,16 @@ export a file a slicer accepts as watertight, with no repair step.
   (feet-inches-fractions) input, with typed numeric entry on every
   length-driven tool
 - Live watertightness status for every solid
+- Snapping that stays fast on instance-heavy models: candidates are
+  stored once per component definition and every placement resolves
+  through a two-level spatial index, so load, undo, and visibility
+  changes no longer pay per-instance registration cost
+- Targeted refresh for history and palette mutations: undo/redo rebuilds
+  only the scene nodes its document change names (falling back to a full
+  rebuild only for group-structural steps), and the Materials panel's
+  opacity slider updates the renderer's already-built material opacities
+  in place — the same mechanism isolation dimming uses — with no
+  re-tessellation at all
 
 ### Objects & organization
 
@@ -227,29 +237,6 @@ export a file a slicer accepts as watertight, with no repair step.
   existing destructive Slice tool
 - **A WebGPU rendering path**, as a progressive enhancement over the
   current WebGL2 baseline
-- **Shared inference geometry across component instances.** The snapping
-  engine keeps its own world-space copy of every placement's geometry, so
-  a model with thousands of component instances pays registration time
-  and memory for each placement at load, import, and undo. Storing
-  candidates once per definition member and resolving each placement's
-  transform at query time — the same idea GPU instancing applies to draw
-  calls — collapses that cost to one copy per definition. It requires a
-  two-level spatial index (per-definition trees under a tree of placement
-  bounds), which is why it is staged after the flat index has proven out.
-- **Targeted refresh for palette-wide and history mutations.** Undo/redo,
-  and any mutation that can't cheaply name which objects it touched (e.g.
-  the Materials panel's opacity slider), fall back to a full-scene
-  rebuild — re-tessellating and re-uploading every object's GPU buffers,
-  not just the ones actually affected. On a large model this pays the same
-  cost class the large-model rendering work already targeted, just through
-  a different door: undo/redo has always paid it, and the opacity slider
-  now pays it too, once per commit. A real fix needs either a reverse
-  index (which objects/instances reference a given material) or a
-  live-mutation path that twiddles the renderer's already-built THREE.js
-  material opacities in place — the same trick isolation-dimming already
-  uses — instead of re-tessellating. Scope note: this is a renderer-wide
-  gap, not opacity-specific; fixing it should cover undo/redo's fallback
-  too, since they share the same root cause.
 - **An out-of-process kernel option** for very large models
 - **Multi-user collaboration**
 - **A plugin/extension API**

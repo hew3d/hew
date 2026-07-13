@@ -431,7 +431,7 @@ describe('MaterialPalette', () => {
     currentMaterialId: MATERIAL_SENTINEL,
     onSelectMaterial: vi.fn(),
     onDocumentChanged: vi.fn(),
-    onRefreshViewport: vi.fn(),
+    onAlphaCommitted: vi.fn(),
     selectedIds: [] as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[],
   }
 
@@ -577,7 +577,7 @@ describe('MaterialPalette', () => {
     expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
   })
 
-  it('releasing the opacity slider commits set_material_alpha and onRefreshViewport once, and does not double-fire onDocumentChanged', () => {
+  it('releasing the opacity slider commits set_material_alpha and onAlphaCommitted once, and does not double-fire onDocumentChanged', () => {
     const mockInfo = {
       r: () => 255,
       g: () => 0,
@@ -591,14 +591,14 @@ describe('MaterialPalette', () => {
       material_info: () => mockInfo,
     })
     const onDocumentChanged = vi.fn()
-    const onRefreshViewport = vi.fn()
+    const onAlphaCommitted = vi.fn()
     render(
       <MaterialPalette
         {...baseProps}
         scene={scene}
         currentMaterialId={7n}
         onDocumentChanged={onDocumentChanged}
-        onRefreshViewport={onRefreshViewport}
+        onAlphaCommitted={onAlphaCommitted}
       />,
     )
     const slider = screen.getByRole('slider')
@@ -606,8 +606,8 @@ describe('MaterialPalette', () => {
     fireEvent.blur(slider)
     expect((scene as any).set_material_alpha).toHaveBeenCalledTimes(1)
     expect((scene as any).set_material_alpha).toHaveBeenCalledWith(7n, 64)
-    expect(onRefreshViewport).toHaveBeenCalledTimes(1)
-    // onRefreshViewport (Viewport.refreshScene) already cascades into
+    expect(onAlphaCommitted).toHaveBeenCalledTimes(1)
+    // onAlphaCommitted (Viewport.syncMaterialOpacity) already cascades into
     // onDocumentChanged in the real app; MaterialPalette must not also call
     // it directly, or every commit double-bumps docRev.
     expect(onDocumentChanged).not.toHaveBeenCalled()

@@ -24,7 +24,7 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
-import type { Scene as WasmScene } from '../wasm/loader'
+import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
 import { SnapService } from './snapService'
 import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
@@ -224,6 +224,15 @@ export interface ViewportApi {
    * harness geometry exists in the kernel but never reaches the GPU.
    */
   refreshScene: () => void
+  /**
+   * Apply a committed palette-opacity edit to the already-built scene.
+   * Palette alpha is live render state, not baked geometry (the kernel's
+   * `set_material_alpha` returns an empty change for the same reason), so
+   * this updates the built THREE materials in place and re-renders — no
+   * re-tessellation, unlike `refreshScene`. Also fires the document-changed
+   * bookkeeping (docRev, dirty marking, undo-button state) a commit needs.
+   */
+  syncMaterialOpacity: () => void
   /**
    * True while the active tool is capturing raw keyboard input (mid-VCB entry),
    * so the global Delete/Backspace handler must not steal the key (Backspace
@@ -1103,6 +1112,15 @@ export default function Viewport({
       sceneRenderer.refreshGuides()
     }
 
+    // Apply a committed palette-opacity edit in place (ViewportApi.
+    // syncMaterialOpacity) — no re-tessellation; alpha lives on the
+    // already-built THREE materials.
+    function syncMaterialOpacity(): void {
+      sceneRenderer.syncPaletteOpacity()
+      onDocumentChangedRef.current?.()
+      scheduleRender()
+    }
+
     function handleToast(message: string, code?: string): void {
       onToastRef.current?.(message, code)
     }
@@ -1316,13 +1334,45 @@ export default function Viewport({
       sceneRenderer.refreshGuides()
     }
 
+    /**
+     * Refresh policy for an undo/redo step: the kernel's DocChange names
+     * exactly what the step touched, so rebuild only those scene nodes.
+     * A touched group can restructure arbitrarily many leaves (visibility
+     * cascades, membership), so any group falls back to the full rebuild.
+     * Sketch overlays refresh when a sketch OR an object changed — consumed
+     * regions derive from live object footprints, so an object-only change
+     * can still reshape a sketch's extrudable regions. Palette opacity is
+     * live render state the kernel deliberately reports as an empty change
+     * (never baked into geometry), so re-sync it unconditionally; it is a
+     * cheap walk over already-built materials.
+     */
+    function applyHistoryChange(change: DocChangeJs): void {
+      try {
+        if (change.groups_touched().length > 0) {
+          handleSceneRefresh()
+        } else {
+          handleSceneRefresh({
+            objectIds: Array.from(change.objects_touched()),
+            instanceIds: Array.from(change.instances_touched()),
+            componentIds: Array.from(change.components_touched()),
+          })
+        }
+        if (change.sketches_touched().length > 0 || change.objects_touched().length > 0) {
+          sceneRenderer.refreshAllSketches()
+        }
+        if (change.guides_touched().length > 0) {
+          sceneRenderer.refreshGuides()
+        }
+      } finally {
+        change.free()
+      }
+      sceneRenderer.syncPaletteOpacity()
+    }
+
     function runUndo(): void {
       if (wasmSceneRef.current.can_scene_undo()) {
         try {
-          wasmSceneRef.current.scene_undo()
-          handleSceneRefresh()
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
+          applyHistoryChange(wasmSceneRef.current.scene_undo())
         } catch (err) {
           console.warn('[Viewport] scene_undo failed:', err)
         }
@@ -1332,10 +1382,7 @@ export default function Viewport({
     function runRedo(): void {
       if (wasmSceneRef.current.can_scene_redo()) {
         try {
-          wasmSceneRef.current.scene_redo()
-          handleSceneRefresh()
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
+          applyHistoryChange(wasmSceneRef.current.scene_redo())
         } catch (err) {
           console.warn('[Viewport] scene_redo failed:', err)
         }
@@ -1482,7 +1529,7 @@ export default function Viewport({
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -2494,17 +2541,7 @@ export default function Viewport({
       // Undo: Cmd/Ctrl+Z — document-level, covers creations + per-object ops
       if (isMod && !ev.shiftKey && ev.key === 'z') {
         ev.preventDefault()
-        if (wasmSceneRef.current.can_scene_undo()) {
-          try {
-            wasmSceneRef.current.scene_undo()
-            handleSceneRefresh()
-            // Undoing an extrude un-consumes its region; re-show its fill.
-            sceneRenderer.refreshAllSketches()
-            sceneRenderer.refreshGuides()
-          } catch (err) {
-            console.warn('[Viewport] scene_undo failed:', err)
-          }
-        }
+        runUndo()
         return
       }
 
@@ -2514,17 +2551,7 @@ export default function Viewport({
       // E2E redo spec).
       if (isMod && ev.shiftKey && ev.key.toLowerCase() === 'z') {
         ev.preventDefault()
-        if (wasmSceneRef.current.can_scene_redo()) {
-          try {
-            wasmSceneRef.current.scene_redo()
-            handleSceneRefresh()
-            // Redoing an extrude re-consumes its region; drop its fill.
-            sceneRenderer.refreshAllSketches()
-            sceneRenderer.refreshGuides()
-          } catch (err) {
-            console.warn('[Viewport] scene_redo failed:', err)
-          }
-        }
+        runRedo()
         return
       }
 

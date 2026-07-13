@@ -2583,7 +2583,7 @@ export default function App() {
               currentMaterialId={currentMaterialId}
               onSelectMaterial={setCurrentMaterialId}
               onDocumentChanged={handleDocumentChanged}
-              onRefreshViewport={() => viewportApi.current?.refreshScene()}
+              onAlphaCommitted={() => viewportApi.current?.syncMaterialOpacity()}
               selectedIds={selectedIds}
             />
           </TraySection>

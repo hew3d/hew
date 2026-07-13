@@ -16,9 +16,10 @@
  *   `currentMaterialId` — currently selected material handle
  *   `onSelectMaterial`  — called when the user picks a different swatch
  *   `onDocumentChanged` — called after a material is added or changed
- *   `onRefreshViewport` — called after an opacity commit to re-tessellate the
- *     viewport (alpha isn't tracked by the doc-change touched lists, since
- *     it's resolved live at render time rather than baked into geometry)
+ *   `onAlphaCommitted` — called after an opacity commit so the viewport can
+ *     apply the new alpha to its already-built materials in place (alpha is
+ *     live render state, resolved from the palette at render time rather
+ *     than baked into geometry — no re-tessellation needed or wanted)
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -32,7 +33,7 @@ interface Props {
   currentMaterialId: bigint
   onSelectMaterial: (id: bigint) => void
   onDocumentChanged: () => void
-  onRefreshViewport: () => void
+  onAlphaCommitted: () => void
   /** Currently selected document nodes — used by "Fill selected object". */
   selectedIds?: NodeRef[]
 }
@@ -98,7 +99,7 @@ export function MaterialPalette({
   currentMaterialId,
   onSelectMaterial,
   onDocumentChanged,
-  onRefreshViewport,
+  onAlphaCommitted,
   selectedIds = [],
 }: Props) {
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
@@ -127,10 +128,11 @@ export function MaterialPalette({
     if (draggingAlpha === null || selectedMaterialInfo === undefined) return
     scene.set_material_alpha(currentMaterialId, draggingAlpha)
     setDraggingAlpha(null)
-    // onRefreshViewport re-tessellates via Viewport's handleSceneRefresh,
-    // which itself calls onDocumentChanged — calling it here too would
-    // double-fire the doc-change bookkeeping (docRev, dirty-marking) per commit.
-    onRefreshViewport()
+    // onAlphaCommitted (Viewport.syncMaterialOpacity) updates the built
+    // THREE materials in place and itself calls onDocumentChanged — calling
+    // it here too would double-fire the doc-change bookkeeping (docRev,
+    // dirty-marking) per commit.
+    onAlphaCommitted()
   }
   const commitAlphaRef = useRef(commitAlpha)
   commitAlphaRef.current = commitAlpha

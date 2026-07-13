@@ -641,11 +641,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getGuideIds: () => query((s) => Array.from(s.guide_ids()).map(String)),
 
     undo: () => {
-      act((s) => s.scene_undo())
+      act((s) => s.scene_undo().free())
     },
 
     redo: () => {
-      act((s) => s.scene_redo())
+      act((s) => s.scene_redo().free())
     },
 
     canUndo: () => query((s) => s.can_scene_undo()),

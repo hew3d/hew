@@ -86,17 +86,20 @@ fn arb_solid() -> impl Strategy<Value = Soup> {
     prop_oneof![boxes, tetras]
 }
 
-/// A placement: scale (possibly non-uniform, exercising the
-/// inverse-transpose plane path), then a rotation about a model axis, then
-/// a translation.
+/// A placement: scale (possibly non-uniform and possibly mirrored —
+/// instance poses admit reflection, exercising the inverse-transpose plane
+/// path in both orientations), then a rotation about a model axis, then a
+/// translation.
 fn arb_placement() -> impl Strategy<Value = Transform> {
     (
         (0.25..3.0f64, 0.25..3.0f64, 0.25..3.0f64),
+        any::<bool>(),
         prop_oneof![Just(Axis::X), Just(Axis::Y), Just(Axis::Z)],
         0.0..std::f64::consts::TAU,
         arb_point(40.0),
     )
-        .prop_map(|((sx, sy, sz), axis, angle, t)| {
+        .prop_map(|((sx, sy, sz), mirror, axis, angle, t)| {
+            let sx = if mirror { -sx } else { sx };
             Transform::scale(Vec3::new(sx, sy, sz))
                 .then(&Transform::rotation(axis.unit(), angle).expect("model axis is unit"))
                 .then(&Transform::translation(t.to_vec()))
@@ -123,7 +126,11 @@ fn arb_segments() -> impl Strategy<Value = Vec<(Point3, Point3)>> {
 
 #[derive(Debug, Clone)]
 struct SceneSpec {
-    solids: Vec<(Soup, Transform)>,
+    /// Each instanced solid either defines its own member (`share == false`)
+    /// or re-places the previous entry's member (`share == true`), so the
+    /// generated scenes cover both one-placement-per-member and the
+    /// mechanism the index exists for: N poses walking ONE shared DefIndex.
+    solids: Vec<(Soup, Transform, bool)>,
     guides: Vec<Guide>,
     sketch: Vec<(Point3, Point3)>,
     transient: Vec<(Point3, Point3)>,
@@ -131,7 +138,7 @@ struct SceneSpec {
 
 fn arb_scene() -> impl Strategy<Value = SceneSpec> {
     (
-        prop::collection::vec((arb_solid(), arb_placement()), 1..5),
+        prop::collection::vec((arb_solid(), arb_placement(), any::<bool>()), 1..5),
         prop::collection::vec(arb_guide(), 0..3),
         arb_segments(),
         arb_segments(),
@@ -146,20 +153,36 @@ fn arb_scene() -> impl Strategy<Value = SceneSpec> {
 
 fn build_scene(spec: &SceneSpec) -> InferenceScene {
     let mut scene = InferenceScene::new();
-    for (i, ((positions, faces), placement)) in spec.solids.iter().enumerate() {
-        let object = Object::from_polygons(positions, faces).expect("generated solids are valid");
+    // Distinct member ids per defining solid (shared definition storage has
+    // replace semantics per member — one label for different geometry would
+    // silently collapse the scene to the last solid). Ids stay opaque labels
+    // to the scene; a scratch slotmap mints them like the guide mint below.
+    // A `share`-flagged solid instead adds another placement of the PREVIOUS
+    // member (its own soup goes unused), so shared-DefIndex walks with
+    // several independent poses get randomized coverage too.
+    let mut member_mint: slotmap::SlotMap<ObjectId, ()> = slotmap::SlotMap::with_key();
+    let mut last_member: Option<ObjectId> = None;
+    for (i, ((positions, faces), placement, share)) in spec.solids.iter().enumerate() {
         if i == 0 {
-            // One world object; the rest register additively as instances
-            // (ids are opaque labels to the scene — see the specs header).
+            // One world object; the rest register as placements of definition
+            // members.
+            let object =
+                Object::from_polygons(positions, faces).expect("generated solids are valid");
             scene.add_object(ObjectId::default(), &object, placement);
-        } else {
-            scene.add_instance(
-                InstanceId::default(),
-                ObjectId::default(),
-                &object,
-                placement,
-            );
+            continue;
         }
+        let member = match last_member {
+            Some(member) if *share => member,
+            _ => {
+                let object =
+                    Object::from_polygons(positions, faces).expect("generated solids are valid");
+                let member = member_mint.insert(());
+                scene.set_def_member(member, &object);
+                member
+            }
+        };
+        scene.add_placement(InstanceId::default(), member, placement);
+        last_member = Some(member);
     }
     // Distinct ids per guide (add_guide has replace semantics — a shared
     // id would keep only the last one, hiding every multi-guide code path,

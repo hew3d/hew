@@ -1176,6 +1176,10 @@ export class SceneRenderer {
           depthWrite: baseOpacity >= 1,
         })
         m.userData.baseOpacity = baseOpacity
+        // Which palette entry this material renders — the hook that lets
+        // `syncPaletteOpacity` re-read live palette state (alpha) in place
+        // instead of re-tessellating anything.
+        m.userData.materialId = midStr
         materials.push(m)
         info?.free?.()
       }
@@ -1833,6 +1837,45 @@ export class SceneRenderer {
         mat.dispose()
       }
     })
+  }
+
+  /**
+   * Re-read per-material alpha from the palette and apply it to every built
+   * face material in place — object groups, member batches, and materialized
+   * instances alike.
+   *
+   * Palette alpha is live render state, never baked into tessellated
+   * geometry (see the kernel's `set_material_alpha`), so this is the entire
+   * refresh an opacity edit — or its undo/redo, whose `DocChange` is
+   * deliberately empty — needs: no re-tessellation, no wasm mesh pull, no
+   * GPU buffer re-upload. Effective opacities (base × isolation dim) are
+   * reasserted by re-running `_applyIsolation`, the same path that already
+   * owns the transparent/depthWrite flags.
+   */
+  syncPaletteOpacity(): void {
+    const alphaCache = new Map<string, number>()
+    const alphaOf = (midStr: string): number => {
+      let a = alphaCache.get(midStr)
+      if (a === undefined) {
+        const info = this.wasmScene.material_info(BigInt(midStr))
+        a = info !== undefined ? info.a() / 255 : 1
+        info?.free?.()
+        alphaCache.set(midStr, a)
+      }
+      return a
+    }
+    const touch = (mat: THREE.Material | THREE.Material[]) => {
+      for (const m of Array.isArray(mat) ? mat : [mat]) {
+        const midStr = m.userData.materialId as string | undefined
+        if (midStr !== undefined) m.userData.baseOpacity = alphaOf(midStr)
+      }
+    }
+    for (const g of this.objectGroups.values()) touch(g.facesMesh.material)
+    for (const b of this.batches.values()) touch(b.mesh.material)
+    for (const g of this.instanceGroups.values()) {
+      for (const mesh of g.facesMeshes) touch(mesh.material)
+    }
+    this._applyIsolation()
   }
 
   private _applyIsolation(): void {

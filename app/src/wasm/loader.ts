@@ -63,4 +63,4 @@ export async function loadKernel(): Promise<KernelApi> {
 
 // Re-export Scene type so consumers can type their references without
 // importing directly from the pkg (which requires the wasm init to have run).
-export type { Scene } from './pkg/wasm_api.js'
+export type { Scene, DocChangeJs } from './pkg/wasm_api.js'

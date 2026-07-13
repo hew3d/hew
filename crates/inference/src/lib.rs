@@ -37,26 +37,38 @@
 //! returned snap keeps the candidate's `kind`/`source` so the UI can still
 //! say *why* (e.g. "on axis, from endpoint").
 //!
-//! M1 status: point/segment/face candidates are pruned through a lazily
-//! rebuilt AABB BVH (see `index`) before the exact per-candidate tests run;
-//! constant-count candidates (guides, world axes/origin) and gesture-scoped
-//! ones (sketch/transient segments) stay on a linear walk. The API
-//! deliberately hides the storage so the index strategy can change without
-//! touching callers. Intersection snaps (`SnapKind::Intersection`) are
-//! emitted where a guide line crosses a segment (sketch or object edge) or
-//! another guide line — the crossing is precisely why the guide was drawn.
+//! # Storage and indexing
+//!
+//! World-object candidates are baked into world space at registration and
+//! pruned through a lazily rebuilt AABB BVH (see `index`) before the exact
+//! per-candidate tests run. Component-instance candidates are stored **once
+//! per definition member**, in definition space ([`InferenceScene::set_def_member`]);
+//! each placement is a lightweight `(instance, member, pose)` record
+//! ([`InferenceScene::add_placement`]), resolved through a two-level walk —
+//! a top-level BVH over placement world boxes, descending into the member's
+//! persistent definition-space tree with pose-mapped node tests. Exact tests
+//! always run in world space on `pose.apply_point(definition_position)`, the
+//! same computation per-placement baking used to perform, so query results
+//! are unchanged — only registration cost (once per member, not once per
+//! placement) and memory (one copy per definition) collapse. Constant-count
+//! candidates (guides, world axes/origin) and gesture-scoped ones
+//! (sketch/transient segments) stay on a linear walk. The API deliberately
+//! hides the storage so the index strategy can change without touching
+//! callers. Intersection snaps (`SnapKind::Intersection`) are emitted where
+//! a guide line crosses a segment (sketch or object edge) or another guide
+//! line — the crossing is precisely why the guide was drawn.
 
 use std::cell::{Cell, Ref, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
-    EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId,
-    SketchId, SketchVertexId, Transform, Vec3, VertexId, tol,
+    AnalyticRim, EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3,
+    SketchEdgeId, SketchId, SketchVertexId, Transform, Vec3, VertexId, tol,
 };
 
 mod index;
 
-use index::SceneIndex;
+use index::{DefIndex, SceneIndex};
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -316,6 +328,228 @@ pub struct SceneFace {
     pub source: SnapSource,
 }
 
+/// A definition-space snap point: one member vertex, stored once and shared
+/// by every placement (world position = `pose.apply_point(position)`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DefPoint {
+    pub(crate) position: Point3,
+    pub(crate) vertex: VertexId,
+}
+
+/// A definition-space snap segment (one member edge; see [`DefPoint`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DefSegment {
+    pub(crate) a: Point3,
+    pub(crate) b: Point3,
+    pub(crate) edge: EdgeId,
+}
+
+/// A definition-space snap face (one member face; see [`DefPoint`]). The
+/// plane is carried in definition space and mapped per placement via
+/// [`Transform::apply_plane`] — the same inverse-transpose-safe path
+/// registration-time baking used, so mirrored and non-uniformly scaled
+/// placements keep exact parity with the old per-placement storage.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DefFace {
+    pub(crate) plane: Plane,
+    pub(crate) boundary: Vec<Point3>,
+    pub(crate) holes: Vec<Vec<Point3>>,
+    pub(crate) face: FaceId,
+}
+
+/// One definition member's shared snap geometry: definition-space
+/// candidates extracted once ([`InferenceScene::set_def_member`]) plus the
+/// persistent per-member spatial trees. Every placement of the member
+/// resolves against this one copy.
+#[derive(Debug, Clone)]
+pub(crate) struct DefMember {
+    pub(crate) points: Vec<DefPoint>,
+    pub(crate) segments: Vec<DefSegment>,
+    pub(crate) faces: Vec<DefFace>,
+    /// Definition-space analytic rims (coverage-bearing only), materialized
+    /// per placement at query time (see [`DefMember::rims_at`]) — rims are
+    /// few per scene and linear-walked, so placements pay no baking cost and
+    /// every removal/replace path stays automatic.
+    pub(crate) rims: Vec<AnalyticRim>,
+    pub(crate) index: DefIndex,
+}
+
+impl DefMember {
+    /// Extracts `object`'s vertices/edges/faces into definition-space
+    /// candidates — the same element walk [`InferenceScene::register`] does
+    /// for world objects, minus the world transform (applied per placement
+    /// at query time instead).
+    fn extract(object: &Object) -> DefMember {
+        let mut points = Vec::new();
+        let mut segments = Vec::new();
+        let mut faces = Vec::new();
+        for (vid, vertex) in object.vertices() {
+            points.push(DefPoint {
+                position: vertex.position,
+                vertex: vid,
+            });
+        }
+        for (eid, edge) in object.edges() {
+            let half_edges = object.half_edges();
+            let he = &half_edges[edge.half_edge];
+            let origin_vid = he.origin;
+            let dest_vid = half_edges[he.next].origin;
+            segments.push(DefSegment {
+                a: object.vertices()[origin_vid].position,
+                b: object.vertices()[dest_vid].position,
+                edge: eid,
+            });
+        }
+        for (fid, face) in object.faces() {
+            let boundary: Vec<Point3> = object.loop_positions(face.outer_loop).collect();
+            let holes: Vec<Vec<Point3>> = face
+                .inner_loops
+                .iter()
+                .map(|&lid| object.loop_positions(lid).collect())
+                .collect();
+            faces.push(DefFace {
+                plane: face.plane,
+                boundary,
+                holes,
+                face: fid,
+            });
+        }
+        let index = DefIndex::build(&points, &segments, &faces);
+        // Analytic rims, gated on surviving coverage exactly like the world
+        // path (`register`): a vacant rim offers no candidates at all.
+        let rims = object
+            .analytic_rims()
+            .into_iter()
+            .filter(AnalyticRim::has_coverage)
+            .collect();
+        DefMember {
+            points,
+            segments,
+            faces,
+            rims,
+            index,
+        }
+    }
+
+    /// Materializes one placed point into the world-space candidate the old
+    /// per-placement baking would have stored: the identical
+    /// `apply_point` on the identical inputs, so positions are bit-equal.
+    fn point_at(&self, li: usize, pl: &Placement) -> ScenePoint {
+        let p = &self.points[li];
+        ScenePoint {
+            position: pl.pose.apply_point(p.position),
+            source: SnapSource {
+                object: pl.member,
+                element: ElementRef::Vertex(p.vertex),
+                instance: Some(pl.instance),
+            },
+        }
+    }
+
+    /// Materializes one placed segment (see [`DefMember::point_at`]).
+    fn segment_at(&self, li: usize, pl: &Placement) -> SceneSegment {
+        let s = &self.segments[li];
+        SceneSegment {
+            a: pl.pose.apply_point(s.a),
+            b: pl.pose.apply_point(s.b),
+            source: SnapSource {
+                object: pl.member,
+                element: ElementRef::Edge(s.edge),
+                instance: Some(pl.instance),
+            },
+        }
+    }
+
+    /// Materializes this member's analytic-rim candidates under one
+    /// placement, pushing them into the caller's per-query vectors: the
+    /// identical center/quadrant mapping the world path
+    /// ([`InferenceScene::register`]) bakes at registration time, and the
+    /// same map-or-drop similarity gate for the tangent rims — so a placed
+    /// cylinder snaps exactly like the world object it instances.
+    fn rims_at(
+        &self,
+        pl: &Placement,
+        centers: &mut Vec<ScenePoint>,
+        quadrants: &mut Vec<ScenePoint>,
+        rims: &mut Vec<SceneRim>,
+    ) {
+        let similarity = pl.pose.similarity_scale();
+        for rim in &self.rims {
+            let source = SnapSource {
+                object: pl.member,
+                element: ElementRef::Face(rim.rep),
+                instance: Some(pl.instance),
+            };
+            centers.push(ScenePoint {
+                position: pl.pose.apply_point(rim.center),
+                source,
+            });
+            // Quadrant points transform as plain points: under any affine
+            // pose they stay on the (possibly elliptical) rim curve.
+            for q in rim.quadrant_points() {
+                quadrants.push(ScenePoint {
+                    position: pl.pose.apply_point(q),
+                    source,
+                });
+            }
+            // Tangency needs a genuine circle: map the rim under
+            // similarities, drop it otherwise (never approximate).
+            if let Some(scale) = similarity {
+                let map_unit = |w: Vec3| pl.pose.apply_vector(w).normalized();
+                if let (Ok(axis), Ok(u), Ok(v)) = (
+                    map_unit(rim.axis),
+                    map_unit(rim.basis_u),
+                    map_unit(rim.basis_v),
+                ) {
+                    rims.push(SceneRim {
+                        center: pl.pose.apply_point(rim.center),
+                        axis,
+                        radius: rim.radius * scale,
+                        u,
+                        v,
+                        coverage: rim.coverage.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Materializes one placed face (see [`DefMember::point_at`]), or `None`
+    /// for a singular pose — the same faces registration-time baking used to
+    /// skip, so both storage schemes emit the same candidate set.
+    fn face_at(&self, li: usize, pl: &Placement) -> Option<SceneFace> {
+        let f = &self.faces[li];
+        let plane = pl.pose.apply_plane(&f.plane).ok()?;
+        Some(SceneFace {
+            plane,
+            boundary: f.boundary.iter().map(|&p| pl.pose.apply_point(p)).collect(),
+            holes: f
+                .holes
+                .iter()
+                .map(|hole| hole.iter().map(|&p| pl.pose.apply_point(p)).collect())
+                .collect(),
+            source: SnapSource {
+                object: pl.member,
+                element: ElementRef::Face(f.face),
+                instance: Some(pl.instance),
+            },
+        })
+    }
+}
+
+/// One placement of a definition member: everything an instance contributes
+/// to the scene, now that the geometry itself is shared (see [`DefMember`]).
+/// Registration order is the candidate enumeration order for placements, so
+/// it participates in ranking tie-breaks; callers drive registration from
+/// deterministic document iteration, keeping resolve results reproducible.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Placement {
+    pub(crate) instance: InstanceId,
+    pub(crate) member: ObjectId,
+    pub(crate) pose: Transform,
+}
+
 /// A construction guide registered with the inference engine, in world
 /// space. Guides carry no topology and have no `SnapSource` — like the world
 /// origin/axes, they snap with `source: None` (see [`SnapKind::OnGuide`]).
@@ -417,15 +651,39 @@ pub struct InferenceScene {
     /// id made that accidentally quadratic.
     world_owners: BTreeSet<ObjectId>,
     /// Instance ids currently registered via
-    /// [`InferenceScene::add_instance`] — exactly the ids for which
-    /// candidates with `instance == Some(id)` can exist (across every
-    /// definition member the instance places). Same fast path for
-    /// [`InferenceScene::remove_instance`].
+    /// [`InferenceScene::add_placement`] — exactly the ids for which
+    /// placements can exist (across every definition member the instance
+    /// places). Same fast path for [`InferenceScene::remove_instance`].
     instance_owners: BTreeSet<InstanceId>,
+    /// Member ids for which placements may exist (inserted by
+    /// [`InferenceScene::add_placement`]) — the fast path for
+    /// [`InferenceScene::remove_def_member`], which reconcile calls for
+    /// EVERY touched non-world object: without it each never-registered id
+    /// pays a full placement scan, the same accidental quadratic the other
+    /// owner sets exist to prevent. Like `instance_owners`, entries may be
+    /// stale ("may exist", not "exist") — a stale entry costs one wasted
+    /// retain pass, never a wrong skip.
+    member_owners: BTreeSet<ObjectId>,
     /// Cumulative count of candidates walked by the removal retain passes
     /// (see [`InferenceScene::removal_candidates_visited`]). Plain `u64`
-    /// (not `Cell`) because removal takes `&mut self`.
+    /// (not `Cell`) because removal takes `&mut self`. Instance removal no
+    /// longer visits candidates at all — placements are records, not
+    /// candidate spans — so only world-object removal contributes.
     removal_visits: u64,
+    /// Definition-space snap geometry, one entry per registered definition
+    /// member, shared by every placement of that member. Survives
+    /// [`InferenceScene::clear_solids`] (visibility changes never touch
+    /// definition geometry); a caller switching documents must start from a
+    /// fresh scene, since member ids from another document could collide.
+    /// `BTreeMap` (not a hash map) per the determinism rule
+    /// (DEVELOPMENT.md §7).
+    def_members: BTreeMap<ObjectId, DefMember>,
+    /// Live placements, in registration order (the enumeration order for
+    /// placed candidates — see [`Placement`]).
+    placements: Vec<Placement>,
+    /// Cumulative count of definition-member extraction passes (see
+    /// [`InferenceScene::def_extractions`]).
+    def_extractions: u64,
 }
 
 impl Default for InferenceScene {
@@ -447,7 +705,11 @@ impl Default for InferenceScene {
             occlusion_tests: Cell::new(0),
             world_owners: BTreeSet::new(),
             instance_owners: BTreeSet::new(),
+            member_owners: BTreeSet::new(),
             removal_visits: 0,
+            def_members: BTreeMap::new(),
+            placements: Vec::new(),
+            def_extractions: 0,
         }
     }
 }
@@ -471,9 +733,36 @@ impl InferenceScene {
     }
 
     /// Candidate counts as (points, segments, faces) — cheap introspection
-    /// for tests and debug overlays.
+    /// for tests and debug overlays. Counts what queries can *see*: world
+    /// candidates plus each placement's share of its member's candidates
+    /// (definition geometry with no live placement contributes nothing).
     pub fn candidate_counts(&self) -> (usize, usize, usize) {
-        (self.points.len(), self.segments.len(), self.faces.len())
+        let (mut p, mut s, mut f) = (self.points.len(), self.segments.len(), self.faces.len());
+        for pl in &self.placements {
+            if let Some(m) = self.def_members.get(&pl.member) {
+                p += m.points.len();
+                s += m.segments.len();
+                // Placed faces resolve through `apply_plane`, which refuses
+                // singular poses (`face_at` → None) — mirror its determinant
+                // gate so a degenerate placement's faces aren't counted as
+                // visible.
+                if pl.pose.determinant().abs() >= tol::NORMALIZE_MIN_LENGTH {
+                    f += m.faces.len();
+                }
+            }
+        }
+        (p, s, f)
+    }
+
+    /// Cumulative number of definition-member extraction passes performed by
+    /// [`InferenceScene::set_def_member`] across the scene's lifetime —
+    /// cheap introspection for tests and debug overlays, like
+    /// [`InferenceScene::occlusion_face_tests`]. Shared definition storage
+    /// exists to make this scale with *definitions*, not placements: the
+    /// registration perf-sanity spec asserts registering N instances of one
+    /// member costs exactly one extraction.
+    pub fn def_extractions(&self) -> u64 {
+        self.def_extractions
     }
 
     /// Cumulative number of exact ray-vs-face tests performed by occlusion
@@ -508,8 +797,13 @@ impl InferenceScene {
     /// docs).
     fn spatial_index(&self) -> Ref<'_, SceneIndex> {
         if self.spatial.borrow().is_none() {
-            *self.spatial.borrow_mut() =
-                Some(SceneIndex::build(&self.points, &self.segments, &self.faces));
+            *self.spatial.borrow_mut() = Some(SceneIndex::build(
+                &self.points,
+                &self.segments,
+                &self.faces,
+                &self.placements,
+                &self.def_members,
+            ));
         }
         Ref::map(self.spatial.borrow(), |slot| {
             slot.as_ref()
@@ -531,40 +825,88 @@ impl InferenceScene {
         // object whose candidates carry `instance == None`, which is exactly
         // what `remove_object`'s fast path keys on.
         self.world_owners.insert(id);
-        self.register(object, placement, id, None);
+        self.register(object, placement, id);
     }
 
-    /// Registers the candidates of one component instance: `object` is the
-    /// definition `member` geometry, placed by the instance `pose`; every
-    /// candidate is tagged with `instance` so two instances of one definition
-    /// never collide and a pick knows which placement it hit. **Additive** — the
-    /// caller clears an instance's prior candidates with
-    /// [`InferenceScene::remove_instance`] before re-registering its members.
-    pub fn add_instance(
-        &mut self,
-        instance: InstanceId,
-        member: ObjectId,
-        object: &Object,
-        pose: &Transform,
-    ) {
-        // Record the owner (idempotent across the instance's members):
-        // candidates carrying `instance == Some(instance)` now exist, which
-        // is exactly what `remove_instance`'s fast path keys on.
+    /// Registers (or re-registers) the shared definition-space snap geometry
+    /// of one component-definition member. Replace semantics: any prior
+    /// geometry for `member` is dropped, and existing placements of `member`
+    /// resolve against the new copy from the next query on — this is how a
+    /// definition edit propagates to every placement in one extraction.
+    ///
+    /// Cost model: linear in the member's elements (plus the per-member tree
+    /// build), paid once per member per geometry change — never per
+    /// placement, which is the entire point of the shared storage (see the
+    /// module docs). Callers re-registering placements cheaply gate on
+    /// [`InferenceScene::has_def_member`] to skip this when the geometry is
+    /// already current.
+    pub fn set_def_member(&mut self, member: ObjectId, object: &Object) {
+        self.def_members.insert(member, DefMember::extract(object));
+        self.def_extractions += 1;
+        // Placement-level world boxes derive from the member's class boxes:
+        // the top-level index is stale even though no placement changed.
+        *self.spatial.get_mut() = None;
+    }
+
+    /// Whether shared definition geometry is currently registered for
+    /// `member` (see [`InferenceScene::set_def_member`]).
+    pub fn has_def_member(&self, member: ObjectId) -> bool {
+        self.def_members.contains_key(&member)
+    }
+
+    /// Drops the shared definition geometry registered for `member`, along
+    /// with every placement of it (a placement without geometry can't
+    /// snap). Unknown ids are a no-op — callers invalidate freely: the
+    /// reconcile path calls this for every touched non-world object, using
+    /// removal as the staleness signal that makes the next placement
+    /// registration re-extract.
+    pub fn remove_def_member(&mut self, member: ObjectId) {
+        let had_geometry = self.def_members.remove(&member).is_some();
+        // Owner-set fast path, mirroring `remove_object`/`remove_instance`:
+        // reconcile calls this for every touched non-world id, and a
+        // never-registered id must not pay a placement scan (see
+        // `member_owners`).
+        let may_have_placements = self.member_owners.remove(&member);
+        if !had_geometry && !may_have_placements {
+            return; // nothing registered: keep the index valid
+        }
+        self.placements.retain(|p| p.member != member);
+        // `instance_owners` deliberately keeps ids whose last placement just
+        // vanished: the set means "placements may exist", so a stale entry
+        // only costs one wasted retain pass on a later remove_instance.
+        *self.spatial.get_mut() = None;
+    }
+
+    /// Registers one placement of definition member `member` by `instance`
+    /// at `pose`. **Additive** — an instance places every member of its
+    /// definition, one placement each; the caller clears an instance's prior
+    /// placements with [`InferenceScene::remove_instance`] before
+    /// re-registering. The member's geometry should already be registered
+    /// ([`InferenceScene::set_def_member`]); a placement of an unregistered
+    /// member is inert (it emits no candidates) until the geometry arrives.
+    pub fn add_placement(&mut self, instance: InstanceId, member: ObjectId, pose: &Transform) {
+        debug_assert!(
+            self.has_def_member(member),
+            "register the member's geometry before placing it"
+        );
+        // Record the owners (idempotent): placements for `instance` and for
+        // `member` now exist, which is exactly what `remove_instance`'s and
+        // `remove_def_member`'s fast paths key on.
         self.instance_owners.insert(instance);
-        self.register(object, pose, member, Some(instance));
+        self.member_owners.insert(member);
+        self.placements.push(Placement {
+            instance,
+            member,
+            pose: *pose,
+        });
+        *self.spatial.get_mut() = None;
     }
 
-    /// Extracts `object`'s vertices/edges/faces into world-space candidates owned
-    /// by `owner`, each optionally tagged with the placing `instance`. Shared by
-    /// [`InferenceScene::add_object`] (world solids, `instance == None`) and
-    /// [`InferenceScene::add_instance`] (instanced geometry).
-    fn register(
-        &mut self,
-        object: &Object,
-        placement: &Transform,
-        owner: ObjectId,
-        instance: Option<InstanceId>,
-    ) {
+    /// Extracts `object`'s vertices/edges/faces into world-space candidates
+    /// owned by `owner` — the [`InferenceScene::add_object`] path (world
+    /// solids only; instanced geometry lives in shared definition storage,
+    /// see [`InferenceScene::set_def_member`]).
+    fn register(&mut self, object: &Object, placement: &Transform, owner: ObjectId) {
         // The candidate Vecs are about to change shape: drop the spatial
         // index and let the next query rebuild it. Invalidation is
         // per-committed-op (this is never called per-frame), so the rebuild
@@ -578,7 +920,7 @@ impl InferenceScene {
                 source: SnapSource {
                     object: owner,
                     element: ElementRef::Vertex(vid),
-                    instance,
+                    instance: None,
                 },
             });
         }
@@ -598,7 +940,7 @@ impl InferenceScene {
                 source: SnapSource {
                     object: owner,
                     element: ElementRef::Edge(eid),
-                    instance,
+                    instance: None,
                 },
             });
         }
@@ -634,7 +976,7 @@ impl InferenceScene {
                 source: SnapSource {
                     object: owner,
                     element: ElementRef::Face(fid),
-                    instance,
+                    instance: None,
                 },
             });
         }
@@ -659,7 +1001,7 @@ impl InferenceScene {
             let source = SnapSource {
                 object: owner,
                 element: ElementRef::Face(rim.rep),
-                instance,
+                instance: None,
             };
             self.centers.push(ScenePoint {
                 position: placement.apply_point(rim.center),
@@ -733,44 +1075,40 @@ impl InferenceScene {
         self.rims.retain(|r| !world(&r.source));
     }
 
-    /// Drops all candidates registered for `instance` (across every definition
-    /// member it places). Idempotent, so document undo can call it freely —
-    /// and the unknown-id no-op never scans candidates (see
-    /// [`InferenceScene::removal_candidates_visited`]).
+    /// Drops all placements registered for `instance` (across every
+    /// definition member it places); the member geometry itself stays, since
+    /// other instances (or a later re-registration) share it. Idempotent, so
+    /// document undo can call it freely — and removal never scans
+    /// *candidates* at all (see
+    /// [`InferenceScene::removal_candidates_visited`]): placements are
+    /// lightweight records, so even the non-empty case is one retain pass
+    /// over the placement Vec, not the candidate storage.
     pub fn remove_instance(&mut self, instance: InstanceId) {
-        // Owner-set fast path, mirroring `remove_object`: candidates with
-        // `instance == Some(instance)` exist only for ids in
-        // `instance_owners` (`add_instance` inserts before registering), so
-        // a never-registered id has nothing to remove — return without
-        // scanning, and without dirtying the still-valid spatial index.
+        // Owner-set fast path, mirroring `remove_object`: placements for
+        // `instance` exist only for ids in `instance_owners`
+        // (`add_placement` inserts before pushing), so a never-registered id
+        // has nothing to remove — return without touching the still-valid
+        // spatial index.
         if !self.instance_owners.remove(&instance) {
             return;
         }
-        // Same index-shifting retain passes as `remove_object`: dirty the
-        // spatial index for a lazy rebuild.
+        self.placements.retain(|p| p.instance != instance);
         *self.spatial.get_mut() = None;
-        self.removal_visits += (self.points.len()
-            + self.segments.len()
-            + self.faces.len()
-            + self.centers.len()
-            + self.quadrants.len()
-            + self.rims.len()) as u64;
-        let key = Some(instance);
-        self.points.retain(|p| p.source.instance != key);
-        self.segments.retain(|s| s.source.instance != key);
-        self.faces.retain(|f| f.source.instance != key);
-        self.centers.retain(|c| c.source.instance != key);
-        self.quadrants.retain(|c| c.source.instance != key);
-        self.rims.retain(|r| r.source.instance != key);
     }
 
-    /// Drops every object- and instance-sourced candidate at once, leaving
-    /// guides, sketches, and transient segments registered. For bulk
-    /// visibility rebuilds (e.g. applying a whole hidden set): removing N
-    /// registered owners one at a time scans the candidate vectors once per
-    /// owner, while clearing and re-registering the visible remainder is one
-    /// linear pass in total — each re-registration's replace-semantics
-    /// removal hits the empty-owner fast path.
+    /// Drops every object-sourced candidate and every placement at once,
+    /// leaving guides, sketches, transient segments — and shared definition
+    /// geometry — registered. For bulk visibility rebuilds (e.g. applying a
+    /// whole hidden set): removing N registered owners one at a time scans
+    /// the world-candidate vectors once per owner, while clearing and
+    /// re-registering the visible remainder is one linear pass in total —
+    /// each re-registration's replace-semantics removal hits the empty-owner
+    /// fast path, and each placement re-registration reuses the surviving
+    /// definition geometry ([`InferenceScene::has_def_member`]) instead of
+    /// re-extracting it. Definition geometry is safe to keep precisely
+    /// because visibility changes never alter geometry; callers switching
+    /// documents start from a fresh scene (see the `def_members` field
+    /// docs).
     pub fn clear_solids(&mut self) {
         *self.spatial.get_mut() = None;
         self.points.clear();
@@ -781,6 +1119,8 @@ impl InferenceScene {
         self.rims.clear();
         self.world_owners.clear();
         self.instance_owners.clear();
+        self.member_owners.clear();
+        self.placements.clear();
     }
 
     /// Registers (or re-registers) one construction guide as a
@@ -915,7 +1255,11 @@ impl InferenceScene {
 
         // Candidate index sets. The spatial index prunes to a conservative
         // superset (the exact tests below re-filter); the linear reference
-        // takes everything.
+        // takes everything. World candidates are indices into the baked
+        // Vecs; placed candidates are (placement, member-local) pairs
+        // materialized into world space below — with the identical
+        // `apply_point`/`apply_plane` per-placement baking used to run at
+        // registration, so both storage schemes produce bit-equal positions.
         let (point_ids, segment_ids, face_ids) = match index {
             Some(ix) => (
                 ix.points_in_cone(origin, dir, tan_aperture),
@@ -928,14 +1272,63 @@ impl InferenceScene {
                 (0..self.faces.len()).collect::<Vec<_>>(),
             ),
         };
+        let (placed_point_ids, placed_segment_ids, placed_face_ids) = match index {
+            Some(ix) => (
+                ix.placed_points_in_cone(
+                    &self.placements,
+                    &self.def_members,
+                    origin,
+                    dir,
+                    tan_aperture,
+                ),
+                ix.placed_segments_in_cone(
+                    &self.placements,
+                    &self.def_members,
+                    origin,
+                    dir,
+                    tan_aperture,
+                ),
+                ix.placed_faces_crossing_ray(&self.placements, &self.def_members, origin, dir),
+            ),
+            None => (
+                self.all_placed(|m| m.points.len()),
+                self.all_placed(|m| m.segments.len()),
+                self.all_placed(|m| m.faces.len()),
+            ),
+        };
+        let placed_points: Vec<ScenePoint> = placed_point_ids
+            .iter()
+            .map(|&(pi, li)| {
+                let pl = &self.placements[pi];
+                self.def_members[&pl.member].point_at(li, pl)
+            })
+            .collect();
+        let placed_segments: Vec<SceneSegment> = placed_segment_ids
+            .iter()
+            .map(|&(pi, li)| {
+                let pl = &self.placements[pi];
+                self.def_members[&pl.member].segment_at(li, pl)
+            })
+            .collect();
+        // Singular poses drop out here (`face_at` is `None`), exactly as
+        // registration-time baking skipped them.
+        let placed_faces: Vec<SceneFace> = placed_face_ids
+            .iter()
+            .filter_map(|&(pi, li)| {
+                let pl = &self.placements[pi];
+                self.def_members[&pl.member].face_at(li, pl)
+            })
+            .collect();
 
         // Collect all candidates that fall inside the pick cone.
         // Tuple: (kind, angular_dist, depth, position, source, direction)
         let mut candidates: Vec<Candidate> = Vec::new();
 
-        // --- Endpoint candidates: from ScenePoints ---
-        for &pi in &point_ids {
-            let sp = &self.points[pi];
+        // --- Endpoint candidates: from ScenePoints (world, then placed —
+        //     ascending emission order on both index paths, so ranking ties
+        //     break identically) ---
+        let world_points = point_ids.iter().map(|&pi| &self.points[pi]);
+        for sp in world_points.chain(placed_points.iter()) {
             if let Some((ang, depth)) = cone_test(origin, dir, sp.position, aperture) {
                 candidates.push((
                     SnapKind::Endpoint,
@@ -948,10 +1341,23 @@ impl InferenceScene {
             }
         }
 
+        // --- Placed analytic candidates: each placement materializes its
+        //     member's rims on the fly (few per scene, linear like the world
+        //     ones below — never indexed, so the indexed and reference paths
+        //     see the identical set). ---
+        let mut placed_centers: Vec<ScenePoint> = Vec::new();
+        let mut placed_quadrants: Vec<ScenePoint> = Vec::new();
+        let mut placed_rims: Vec<SceneRim> = Vec::new();
+        for pl in &self.placements {
+            if let Some(dm) = self.def_members.get(&pl.member) {
+                dm.rims_at(pl, &mut placed_centers, &mut placed_quadrants, &mut placed_rims);
+            }
+        }
+
         // --- Center candidates: true circle centers (linear walk — few per
         //     scene and deliberately outside the spatial index, so the
         //     indexed and reference paths see the identical set). ---
-        for cp in &self.centers {
+        for cp in self.centers.iter().chain(placed_centers.iter()) {
             if let Some((ang, depth)) = cone_test(origin, dir, cp.position, aperture) {
                 candidates.push((
                     SnapKind::Center,
@@ -966,7 +1372,7 @@ impl InferenceScene {
 
         // --- Quadrant candidates: covered cardinal points of the rim
         //     circles. Same linear-walk rationale as centers. ---
-        for qp in &self.quadrants {
+        for qp in self.quadrants.iter().chain(placed_quadrants.iter()) {
             if let Some((ang, depth)) = cone_test(origin, dir, qp.position, aperture) {
                 candidates.push((
                     SnapKind::Quadrant,
@@ -986,7 +1392,7 @@ impl InferenceScene {
         //     strictly outside the circle in its own plane. Linear walk,
         //     like centers. ---
         if let Some(anchor) = query.anchor {
-            for rim in &self.rims {
+            for rim in self.rims.iter().chain(placed_rims.iter()) {
                 let d = anchor - rim.center;
                 let in_plane = d - rim.axis * d.dot(rim.axis);
                 let dist = in_plane.length();
@@ -1014,9 +1420,9 @@ impl InferenceScene {
             }
         }
 
-        // --- Segment candidates: Midpoint and OnEdge ---
-        for &si in &segment_ids {
-            let seg = &self.segments[si];
+        // --- Segment candidates: Midpoint and OnEdge (world, then placed) ---
+        let world_segments = || segment_ids.iter().map(|&si| &self.segments[si]);
+        for seg in world_segments().chain(placed_segments.iter()) {
             let mid = midpoint(seg.a, seg.b);
 
             // Midpoint candidate: emitted when the midpoint itself is in the cone.
@@ -1080,9 +1486,9 @@ impl InferenceScene {
             }
         }
 
-        // --- Face candidates: OnFace ---
-        for &fi in &face_ids {
-            let face = &self.faces[fi];
+        // --- Face candidates: OnFace (world, then placed) ---
+        let world_faces = face_ids.iter().map(|&fi| &self.faces[fi]);
+        for face in world_faces.chain(placed_faces.iter()) {
             if let Some((pos, ang, depth)) = face_cone_hit(
                 origin,
                 dir,
@@ -1163,16 +1569,16 @@ impl InferenceScene {
                 })
                 .collect();
 
-            // Guide × segment (object edges near the ray, plus every live
-            // sketch segment — sketch candidates stay on the linear walk).
+            // Guide × segment (object edges near the ray — world and placed
+            // alike — plus every live sketch segment; sketch candidates stay
+            // on the linear walk).
             let emit = |p: Point3, candidates: &mut Vec<Candidate>| {
                 if let Some((ang, depth)) = cone_test(origin, dir, p, aperture) {
                     candidates.push((SnapKind::Intersection, ang, depth, p, None, None));
                 }
             };
             for &(go, gd) in &guide_lines {
-                for &si in &segment_ids {
-                    let seg = &self.segments[si];
+                for seg in world_segments().chain(placed_segments.iter()) {
                     if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b) {
                         emit(p, &mut candidates);
                     }
@@ -1322,9 +1728,22 @@ impl InferenceScene {
             Some(ix) => ix.faces_crossing_ray(origin, dir),
             None => (0..self.faces.len()).collect(),
         };
+        let placed_face_ids: Vec<(usize, usize)> = match index {
+            Some(ix) => {
+                ix.placed_faces_crossing_ray(&self.placements, &self.def_members, origin, dir)
+            }
+            None => self.all_placed(|m| m.faces.len()),
+        };
+        let placed_faces: Vec<SceneFace> = placed_face_ids
+            .iter()
+            .filter_map(|&(pi, li)| {
+                let pl = &self.placements[pi];
+                self.def_members[&pl.member].face_at(li, pl)
+            })
+            .collect();
         let mut best: Option<(f64, SnapSource)> = None;
-        for &fi in &face_ids {
-            let face = &self.faces[fi];
+        let world_faces = face_ids.iter().map(|&fi| &self.faces[fi]);
+        for face in world_faces.chain(placed_faces.iter()) {
             // `face_cone_hit` ignores its aperture arg for faces (a face hit
             // is pure ray-polygon containment), so any value works here.
             if let Some((_pos, _ang, depth)) =
@@ -1335,6 +1754,20 @@ impl InferenceScene {
             }
         }
         best.map(|(_, source)| source)
+    }
+
+    /// Every `(placement, member-local)` candidate pair of one class, in
+    /// enumeration order — the linear reference's counterpart to the
+    /// two-level index walks. Placements of an unregistered member are
+    /// skipped, matching the indexed paths (their world boxes are empty).
+    fn all_placed(&self, count: impl Fn(&DefMember) -> usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (pi, pl) in self.placements.iter().enumerate() {
+            if let Some(m) = self.def_members.get(&pl.member) {
+                out.extend((0..count(m)).map(|li| (pi, li)));
+            }
+        }
+        out
     }
 
     /// Visibility test for snap occlusion: is `pos` hidden behind an opaque
@@ -1370,14 +1803,37 @@ impl InferenceScene {
             face_cone_hit(origin, dir, &face.plane, &face.boundary, &face.holes, 0.0)
                 .is_some_and(|(_pos, _ang, depth)| depth < near_threshold)
         };
+        // A placed face materializes on demand and skips singular poses,
+        // exactly like the candidate paths (`DefMember::face_at`).
+        let occludes_placed = |pi: usize, li: usize| {
+            let pl = &self.placements[pi];
+            self.def_members[&pl.member]
+                .face_at(li, pl)
+                .is_some_and(|face| occludes(&face))
+        };
         match index {
-            // Early-out walk: only subtrees whose boxes the ray enters
-            // nearer than the threshold can hold an occluder, and the walk
-            // stops at the first face that actually occludes.
+            // Early-out walks: only subtrees whose boxes the ray enters
+            // nearer than the threshold can hold an occluder, and each walk
+            // stops at the first face that actually occludes. World faces
+            // first, placed faces second — order can't change the boolean.
             Some(ix) => {
                 ix.any_face_hit_before(origin, dir, near_threshold, |fi| occludes(&self.faces[fi]))
+                    || ix.any_placed_face_hit_before(
+                        &self.placements,
+                        &self.def_members,
+                        origin,
+                        dir,
+                        near_threshold,
+                        occludes_placed,
+                    )
             }
-            None => self.faces.iter().any(occludes),
+            None => {
+                self.faces.iter().any(occludes)
+                    || self
+                        .all_placed(|m| m.faces.len())
+                        .into_iter()
+                        .any(|(pi, li)| occludes_placed(pi, li))
+            }
         }
     }
 

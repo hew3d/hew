@@ -255,12 +255,12 @@ fn unknown_id_removal_is_free_and_unobservable() {
     // Instance-only scene: the shared member *label* is not a world-object
     // registration, so `remove_object` must key on the exact predicate it
     // retains by (`object == id && instance == None`) — and therefore stay a
-    // free no-op that spares the instanced candidates.
+    // free no-op that spares the placed candidates.
     let mut scene = InferenceScene::new();
-    scene.add_instance(
+    scene.set_def_member(ObjectId::default(), &unit_cube());
+    scene.add_placement(
         InstanceId::default(),
         ObjectId::default(),
-        &unit_cube(),
         &Transform::IDENTITY,
     );
     let counts = scene.candidate_counts();
@@ -317,19 +317,24 @@ fn removal_scans_candidates_once_then_never_again() {
     scene.remove_object(ObjectId::default());
     assert_eq!(scene.removal_candidates_visited(), scan * 2);
 
-    // Instances mirror the same bookkeeping: additive registration never
-    // scans; removal scans once; the idempotent repeat is free.
-    scene.add_instance(
+    // Instances go further: registration AND removal never scan candidates
+    // at all — placements are lightweight records over shared definition
+    // geometry, not candidate spans, so there is nothing to walk.
+    scene.set_def_member(ObjectId::default(), &cube);
+    scene.add_placement(
         InstanceId::default(),
         ObjectId::default(),
-        &cube,
         &Transform::IDENTITY,
     );
     assert_eq!(scene.removal_candidates_visited(), scan * 2);
     scene.remove_instance(InstanceId::default());
-    assert_eq!(scene.removal_candidates_visited(), scan * 3);
+    assert_eq!(
+        scene.removal_candidates_visited(),
+        scan * 2,
+        "instance removal drops placement records, never candidate spans"
+    );
     scene.remove_instance(InstanceId::default());
-    assert_eq!(scene.removal_candidates_visited(), scan * 3);
+    assert_eq!(scene.removal_candidates_visited(), scan * 2);
 }
 
 #[test]
@@ -365,34 +370,35 @@ fn instanced_candidates_are_keyed_separately_from_world_objects() {
     assert!(world.0 > 0 && world.1 > 0 && world.2 > 0);
 
     // An instance of the same geometry adds to — never replaces — the world set.
-    scene.add_instance(
+    scene.set_def_member(ObjectId::default(), &cube);
+    scene.add_placement(
         InstanceId::default(),
         ObjectId::default(),
-        &cube,
         &Transform::translation(Vec3::new(10.0, 0.0, 0.0)),
     );
     assert_eq!(
         scene.candidate_counts(),
         (world.0 * 2, world.1 * 2, world.2 * 2),
-        "instance candidates coexist with the world object's"
+        "placed candidates coexist with the world object's"
     );
 
-    // Removing the instance leaves the world object untouched...
+    // Removing the instance leaves the world object untouched (the shared
+    // definition geometry stays registered but placementless, contributing
+    // nothing a query — or the counts — can see)...
     scene.remove_instance(InstanceId::default());
     assert_eq!(scene.candidate_counts(), world);
 
     // ...and removing the world object leaves a re-added instance's candidates.
-    scene.add_instance(
+    scene.add_placement(
         InstanceId::default(),
         ObjectId::default(),
-        &cube,
         &Transform::IDENTITY,
     );
     scene.remove_object(ObjectId::default());
     assert_eq!(
         scene.candidate_counts(),
         world,
-        "remove_object spares instanced candidates sharing the label"
+        "remove_object spares placed candidates sharing the label"
     );
 }
 
@@ -415,19 +421,19 @@ fn mixed_scene() -> InferenceScene {
     let cube = unit_cube();
     let mut scene = InferenceScene::new();
     scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
-    scene.add_instance(
+    scene.set_def_member(ObjectId::default(), &cube);
+    scene.add_placement(
         InstanceId::default(),
         ObjectId::default(),
-        &cube,
         &Transform::translation(Vec3::new(10.0, 0.0, 0.0)),
     );
     let rotated = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.5)
         .unwrap()
         .then(&Transform::translation(Vec3::new(0.0, 10.0, 0.0)));
-    scene.add_instance(InstanceId::default(), ObjectId::default(), &cube, &rotated);
+    scene.add_placement(InstanceId::default(), ObjectId::default(), &rotated);
     let squashed = Transform::scale(Vec3::new(0.5, 2.0, 1.5))
         .then(&Transform::translation(Vec3::new(10.0, 10.0, 0.0)));
-    scene.add_instance(InstanceId::default(), ObjectId::default(), &cube, &squashed);
+    scene.add_placement(InstanceId::default(), ObjectId::default(), &squashed);
     scene.add_guide(
         GuideId::default(),
         &Guide::Line {
@@ -571,11 +577,11 @@ fn index_invalidation_tracks_every_mutation() {
     scene.remove_object(ObjectId::default());
     assert!(probe(&scene, far_corner).is_none());
 
-    // add_instance / remove_instance.
-    scene.add_instance(
+    // set_def_member + add_placement / remove_instance.
+    scene.set_def_member(ObjectId::default(), &cube);
+    scene.add_placement(
         InstanceId::default(),
         ObjectId::default(),
-        &cube,
         &Transform::translation(Vec3::new(20.0, 19.0, 0.0)),
     );
     assert_eq!(
@@ -641,13 +647,15 @@ fn occlusion_early_out_respects_holes_and_matches_linear() {
     let mut scene = InferenceScene::new();
     scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
     // A crowd of plain cubes so the occlusion walk has subtrees to skip.
+    // NOTE: the member label deliberately collides with the world object's
+    // id — shared definition storage must not bleed into world candidates.
     let plain = unit_cube();
+    scene.set_def_member(ObjectId::default(), &plain);
     for gx in 0..5 {
         for gy in 0..5 {
-            scene.add_instance(
+            scene.add_placement(
                 InstanceId::default(),
                 ObjectId::default(),
-                &plain,
                 &Transform::translation(Vec3::new(
                     10.0 + 3.0 * gx as f64,
                     10.0 + 3.0 * gy as f64,
@@ -709,18 +717,23 @@ fn occlusion_early_out_respects_holes_and_matches_linear() {
 fn occlusion_on_a_large_scene_tests_a_small_fraction_of_faces() {
     let cube = unit_cube();
     let mut scene = InferenceScene::new();
+    scene.set_def_member(ObjectId::default(), &cube);
     for gx in 0..41 {
         for gy in 0..41 {
-            scene.add_instance(
+            scene.add_placement(
                 InstanceId::default(),
                 ObjectId::default(),
-                &cube,
                 &Transform::translation(Vec3::new(3.0 * gx as f64, 3.0 * gy as f64, 0.0)),
             );
         }
     }
     let total_faces = scene.candidate_counts().2 as u64;
     assert_eq!(total_faces, 41 * 41 * 6, "the grid registered 10k+ faces");
+    assert_eq!(
+        scene.def_extractions(),
+        1,
+        "1681 placements of one member cost exactly one extraction"
+    );
 
     // Case 1 — visible winner: straight down at the centre of one cube's
     // top face. The winner's own face enters the ray only at ~its own
@@ -871,10 +884,10 @@ fn clear_solids_drops_solids_and_keeps_guides_and_sketches() {
     let q = query(ray_at(Point3::new(3.0, 3.0, 3.0), corner), WIDE);
 
     let mut scene = cube_scene();
-    scene.add_instance(
+    scene.set_def_member(ObjectId::default(), &unit_cube());
+    scene.add_placement(
         InstanceId::default(),
         ObjectId::default(),
-        &unit_cube(),
         &Transform::translation(Vec3::new(10.0, 0.0, 0.0)),
     );
     let guide_target = Point3::new(6.0, 2.0, 1.0);
@@ -1162,7 +1175,8 @@ fn instanced_centers_follow_the_pose_and_the_instance_key() {
     let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 0.5, 12, 1.0);
     let inst = InstanceId::default();
     let pose = Transform::translation(Vec3::new(10.0, 0.0, 0.0));
-    scene.add_instance(inst, ObjectId::default(), &cyl, &pose);
+    scene.set_def_member(ObjectId::default(), &cyl);
+    scene.add_placement(inst, ObjectId::default(), &pose);
 
     let snap = scene
         .resolve(&query(
@@ -1384,4 +1398,93 @@ fn quadrant_and_tangent_candidates_die_with_their_object() {
             .is_none(),
         "no candidates survive removal"
     );
+}
+/// An axis-aligned cube of edge length `s` at the origin (the unit cube's
+/// shape, scaled) — a second definition "revision" for the edit spec below.
+fn scaled_cube(s: f64) -> Object {
+    Object::from_polygons(
+        &[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(s, 0.0, 0.0),
+            Point3::new(s, s, 0.0),
+            Point3::new(0.0, s, 0.0),
+            Point3::new(0.0, 0.0, s),
+            Point3::new(s, 0.0, s),
+            Point3::new(s, s, s),
+            Point3::new(0.0, s, s),
+        ],
+        &[
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+    )
+    .unwrap()
+}
+
+/// The shared-storage contract end to end: N placements of one member cost
+/// exactly one extraction, and a definition edit — invalidate, re-extract
+/// once, re-register placements, the order wasm-api's reconcile uses —
+/// propagates to every placement, with the indexed path never going stale
+/// against the linear reference.
+#[test]
+fn definition_geometry_extracts_once_and_edits_propagate_to_all_placements() {
+    let mut scene = InferenceScene::new();
+    let place_all = |scene: &mut InferenceScene| {
+        for i in 0..8 {
+            scene.add_placement(
+                InstanceId::default(),
+                ObjectId::default(),
+                &Transform::translation(Vec3::new(4.0 * i as f64, 0.0, 0.0)),
+            );
+        }
+    };
+    scene.set_def_member(ObjectId::default(), &unit_cube());
+    place_all(&mut scene);
+    assert_eq!(
+        scene.def_extractions(),
+        1,
+        "eight placements share one extraction"
+    );
+
+    // The second placement's far corner snaps where its pose puts it.
+    let corner = Point3::new(5.0, 1.0, 1.0);
+    let q = query(ray_at(Point3::new(8.0, 4.0, 4.0), corner), NARROW);
+    let snap = scene.resolve(&q).expect("posed corner snaps");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert!(snap.position.approx_eq(corner, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+
+    // Definition edit: drop the member (which drops its placements), extract
+    // the new revision once, re-register the placements.
+    scene.remove_def_member(ObjectId::default());
+    assert_eq!(
+        scene.candidate_counts(),
+        (0, 0, 0),
+        "placements can't outlive their member's geometry"
+    );
+    scene.set_def_member(ObjectId::default(), &scaled_cube(2.0));
+    place_all(&mut scene);
+    assert_eq!(scene.def_extractions(), 2, "the edit re-extracts once");
+
+    // Every placement now resolves against the new geometry: the second
+    // placement's far corner moved from (5,1,1) to (6,2,2)...
+    let grown = Point3::new(6.0, 2.0, 2.0);
+    let q_grown = query(ray_at(Point3::new(9.0, 5.0, 5.0), grown), NARROW);
+    let snap = scene.resolve(&q_grown).expect("grown corner snaps");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert!(snap.position.approx_eq(grown, tol::POINT_MERGE));
+    // ...and the old corner position is no longer a vertex (an edge point at
+    // most), so stale geometry would be caught here.
+    let stale = scene.resolve(&q);
+    assert_ne!(
+        stale.map(|s| (s.kind, s.position)),
+        Some((SnapKind::Endpoint, corner)),
+        "old revision's corner must not snap as a vertex"
+    );
+    assert_eq!(scene.resolve(&q_grown), scene.resolve_linear(&q_grown));
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
 }

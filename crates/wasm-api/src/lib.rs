@@ -612,6 +612,72 @@ impl FaceSplitJs {
     }
 }
 
+/// What a document mutation touched (mirrors `kernel::DocChange`). Undo and
+/// redo return this so the renderer can rebuild only the affected scene
+/// graph nodes instead of falling back to a full-scene refresh.
+#[wasm_bindgen]
+pub struct DocChangeJs {
+    inner: kernel::DocChange,
+}
+
+#[wasm_bindgen]
+impl DocChangeJs {
+    /// Objects whose geometry or visibility may have changed.
+    pub fn objects_touched(&self) -> Vec<u64> {
+        self.inner
+            .objects_touched
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Sketches whose contents or extrudable regions may have changed.
+    pub fn sketches_touched(&self) -> Vec<u64> {
+        self.inner
+            .sketches_touched
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Groups whose membership or visibility may have changed.
+    pub fn groups_touched(&self) -> Vec<u64> {
+        self.inner
+            .groups_touched
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Instances whose pose, definition, or visibility may have changed.
+    pub fn instances_touched(&self) -> Vec<u64> {
+        self.inner
+            .instances_touched
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Component definitions whose membership, geometry, or visibility may
+    /// have changed.
+    pub fn components_touched(&self) -> Vec<u64> {
+        self.inner
+            .components_touched
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Guides whose geometry or visibility may have changed.
+    pub fn guides_touched(&self) -> Vec<u64> {
+        self.inner
+            .guides_touched
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+}
+
 /// What `merge_faces` did (mirrors `kernel::FaceMergeReport`).
 #[wasm_bindgen]
 pub struct FaceMergeJs {
@@ -904,6 +970,14 @@ impl Scene {
                 self.inference.add_object(id, object, &Transform::IDENTITY);
             } else {
                 self.inference.remove_object(id);
+                // A touched non-world id may be a definition member whose
+                // shared geometry just changed — a definition edit reports
+                // the member here and every instance of it in
+                // `instances_touched`. Dropping the cached definition-space
+                // candidates makes the instance re-registration below
+                // re-extract from the new geometry; for a plain hidden or
+                // deleted world object this is a no-op.
+                self.inference.remove_def_member(id);
             }
         }
         // Instances: re-register each touched instance's definition geometry at
@@ -977,9 +1051,15 @@ impl Scene {
         }
     }
 
-    /// Registers a visible instance's definition members with inference, each
-    /// placed at the instance pose. A no-op for a hidden/stale instance (its
-    /// candidates were already cleared by the caller).
+    /// Registers a visible instance's definition members with inference, one
+    /// lightweight placement each at the instance pose. A no-op for a
+    /// hidden/stale instance (its placements were already cleared by the
+    /// caller). The member's shared definition-space geometry is extracted
+    /// only if inference doesn't hold it yet — `reconcile` invalidates it
+    /// (`remove_def_member`) whenever a touched object turns out to be a
+    /// definition member, so "already registered" always means "current",
+    /// and registering N instances of one definition extracts its geometry
+    /// exactly once.
     fn register_instance(&mut self, iid: InstanceId) {
         let (Some(def), Some(pose)) = (self.doc.instance_def(iid), self.doc.instance_pose(iid))
         else {
@@ -989,9 +1069,13 @@ impl Scene {
             return;
         };
         for m in members {
-            if let Some(object) = self.doc.object(m) {
-                self.inference.add_instance(iid, m, object, &pose);
+            if !self.inference.has_def_member(m) {
+                let Some(object) = self.doc.object(m) else {
+                    continue;
+                };
+                self.inference.set_def_member(m, object);
             }
+            self.inference.add_placement(iid, m, &pose);
         }
     }
 
@@ -2513,22 +2597,24 @@ impl Scene {
 
     /// Reverses the most recent document action (LIFO across creations and
     /// per-object ops alike). Undoing a creation hides the object; undoing a
-    /// per-object op delegates to that object's [`History`].
-    pub fn scene_undo(&mut self) -> Result<(), ApiError> {
+    /// per-object op delegates to that object's [`History`]. Returns what the
+    /// undo touched so callers can refresh only the affected scene nodes.
+    pub fn scene_undo(&mut self) -> Result<DocChangeJs, ApiError> {
         let change = self.doc.undo().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SceneUndo);
-        Ok(())
+        Ok(DocChangeJs { inner: change })
     }
 
     /// Re-applies the most recently undone document action. Object handles are
     /// stable across undo/redo (undone creations are hidden, not deleted), so
-    /// redo never has to remap ids.
-    pub fn scene_redo(&mut self) -> Result<(), ApiError> {
+    /// redo never has to remap ids. Returns what the redo touched so callers
+    /// can refresh only the affected scene nodes.
+    pub fn scene_redo(&mut self) -> Result<DocChangeJs, ApiError> {
         let change = self.doc.redo().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SceneRedo);
-        Ok(())
+        Ok(DocChangeJs { inner: change })
     }
 
     // ------------------------------------------------------------ inference
