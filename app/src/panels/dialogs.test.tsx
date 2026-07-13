@@ -421,7 +421,7 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: '3mf' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('3mf')
+    expect(onExport).toHaveBeenCalledWith('3mf', 48)
   })
 
   it('calls onCancel when Cancel is clicked', () => {

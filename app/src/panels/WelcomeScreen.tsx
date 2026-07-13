@@ -27,14 +27,16 @@ export interface SampleEntry {
  * `cargo run -p kernel --example build_samples`). */
 export const BUNDLED_SAMPLES: SampleEntry[] = [
   {
-    file: 'pen-cup.hew',
-    title: 'Pen Cup',
-    description: 'A finished, printable object — export it to STL or 3MF and slice it.',
+    file: 'wall-clock.hew',
+    title: 'Wall Clock',
+    description:
+      'A finished piece: true-curve oak rim, brass hour markers as components, and a translucent glass cover.',
   },
   {
-    file: 'side-table.hew',
-    title: 'Side Table',
-    description: 'A scene mid-construction: groups, components, materials, and guides.',
+    file: 'cafe-table.hew',
+    title: 'Café Table',
+    description:
+      'A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup.',
   },
 ]
 

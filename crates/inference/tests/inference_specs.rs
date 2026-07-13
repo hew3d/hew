@@ -1399,6 +1399,100 @@ fn quadrant_and_tangent_candidates_die_with_their_object() {
         "no candidates survive removal"
     );
 }
+
+/// Analytic candidates materialized through a component PLACEMENT (not a
+/// world object) obey the same index/linear-parity contract as world
+/// objects, for Center, Quadrant, and Tangent alike — the placed-rim
+/// path (`DefMember::rims_at`) must be a faithful mirror of the world path.
+/// The property fuzz only generates boxes/tetras, so this is the sole guard
+/// against a placement/mirror regression in curved-instance snapping.
+#[test]
+fn placed_analytic_candidates_match_the_linear_reference() {
+    let mut scene = InferenceScene::new();
+    let member = ObjectId::default();
+    let cyl = analytic_cylinder(Point3::new(0.0, 0.0, 0.0), 0.5, 26, 1.0);
+    scene.set_def_member(member, &cyl);
+
+    // A plain translated placement: its top-rim center, a +Y quadrant, and
+    // an anchored tangent must each snap AND agree between the two paths.
+    scene.add_placement(
+        InstanceId::default(),
+        member,
+        &Transform::translation(Vec3::new(10.0, 0.0, 0.0)),
+    );
+
+    // Center at (10, 0, 1).
+    let center = Point3::new(10.0, 0.0, 1.0);
+    let cq = query(ray_at(Point3::new(10.0, 0.0, 4.0), center), NARROW);
+    let snap = scene.resolve(&cq).expect("placed center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(snap.position.approx_eq(center, tol::POINT_MERGE));
+    assert_eq!(
+        snap.source
+            .expect("placed center carries provenance")
+            .instance,
+        Some(InstanceId::default())
+    );
+    assert_eq!(scene.resolve(&cq), scene.resolve_linear(&cq));
+
+    // +Y quadrant at (10, 0.5, 1) (26-gon: no vertex at 90°, so Quadrant
+    // wins over the straddling Endpoints under the pin cone).
+    let quad = Point3::new(10.0, 0.5, 1.0);
+    let qq = query(ray_at(Point3::new(10.0, 3.0, 4.0), quad), PIN);
+    let snap = scene.resolve(&qq).expect("placed quadrant resolves");
+    assert_eq!(snap.kind, SnapKind::Quadrant);
+    assert!(snap.position.approx_eq(quad, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&qq), scene.resolve_linear(&qq));
+
+    // Anchored tangent: anchor at (13, 0, 1), tangent at +alpha off +X.
+    let alpha = (0.5f64 / 3.0).acos();
+    let tan = Point3::new(10.0 + 0.5 * alpha.cos(), 0.5 * alpha.sin(), 1.0);
+    let mut tq = query(ray_at(Point3::new(10.0, 3.0, 4.0), tan), PIN);
+    tq.anchor = Some(Point3::new(13.0, 0.0, 1.0));
+    let snap = scene.resolve(&tq).expect("placed tangent resolves");
+    assert_eq!(snap.kind, SnapKind::Tangent);
+    assert_eq!(scene.resolve(&tq), scene.resolve_linear(&tq));
+
+    // A MIRRORED placement (reflection, negative determinant): a similarity,
+    // so its tangent rim survives the map-or-drop gate. Its analytic
+    // candidates must still agree between the two paths. `scale(-1,1,1)`
+    // then translate clear to (0, 20, 0): (x,y,z) -> (-x, y+20, z).
+    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0))
+        .then(&Transform::translation(Vec3::new(0.0, 20.0, 0.0)));
+    scene.add_placement(InstanceId::default(), member, &mirror);
+
+    // Mirrored top-rim center at (0, 20, 1).
+    let mcenter = Point3::new(0.0, 20.0, 1.0);
+    let mcq = query(ray_at(Point3::new(0.0, 20.0, 4.0), mcenter), NARROW);
+    let snap = scene
+        .resolve(&mcq)
+        .expect("mirrored placed center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(snap.position.approx_eq(mcenter, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&mcq), scene.resolve_linear(&mcq));
+
+    // A mirrored quadrant at (0, 20.5, 1), and a mirrored anchored tangent —
+    // the reflected basis path must stay index/linear consistent.
+    let mquad = Point3::new(0.0, 20.5, 1.0);
+    let mqq = query(ray_at(Point3::new(0.0, 23.0, 4.0), mquad), PIN);
+    let snap = scene
+        .resolve(&mqq)
+        .expect("mirrored placed quadrant resolves");
+    assert_eq!(snap.kind, SnapKind::Quadrant);
+    assert_eq!(scene.resolve(&mqq), scene.resolve_linear(&mqq));
+
+    let mtan_anchor = Point3::new(0.0, 23.0, 1.0);
+    let malpha = (0.5f64 / 3.0).acos();
+    // Anchor is +Y of the mirrored center; tangent at +alpha off +Y.
+    let mtan = Point3::new(-0.5 * malpha.sin(), 20.0 + 0.5 * malpha.cos(), 1.0);
+    let mut mtq = query(ray_at(Point3::new(-2.0, 21.0, 4.0), mtan), PIN);
+    mtq.anchor = Some(mtan_anchor);
+    // Whatever it resolves to, the two paths must agree (the load-bearing
+    // parity claim — never vacuous, since the center/quadrant above proved
+    // the mirrored placement emits analytic candidates).
+    assert_eq!(scene.resolve(&mtq), scene.resolve_linear(&mtq));
+}
+
 /// An axis-aligned cube of edge length `s` at the origin (the unit cube's
 /// shape, scaled) — a second definition "revision" for the edit spec below.
 fn scaled_cube(s: f64) -> Object {

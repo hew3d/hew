@@ -165,9 +165,12 @@ export a file a slicer accepts as watertight, with no repair step.
   as the gesture advances
 - A welcome screen on bare launches: recent files, the bundled samples,
   and a getting-started link, with a persisted "show on startup" toggle
-- Bundled sample models, generated through the kernel's own API: a
-  finished printable pen cup, and a mid-construction side table showing
-  groups, components, materials, guides, and an open profile
+- Bundled sample models, generated through the kernel's own API: a wall
+  clock (a true-curve oak rim, twelve brass hour markers as component
+  instances, grouped hands, a translucent glass cover on a tag) and a
+  café table (a textured oak top on walnut cylinder legs, crossed
+  stretchers, and a resting pen cup) — showing true curves, image
+  textures, components, groups, per-material opacity, tags, and guides
 - Light and dark themes throughout
 - Native window chrome per platform — the system menu bar on macOS,
   native decorations on Windows, a custom title bar on Linux (WebKitGTK

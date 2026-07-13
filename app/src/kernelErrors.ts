@@ -55,8 +55,10 @@ const DESCRIPTIONS: Record<string, string> = {
     'Moving this point would make lines cross or merge. Move it somewhere clear, or delete and redraw the lines instead.',
   MalformedRegion:
     "This profile's outline couldn't be traced. Redraw the shape; if it keeps failing, use Report Bug.",
-  RegionConsumed:
-    'A solid is already standing on this profile. Push/pull the solid itself, or draw the new shape somewhere clear.',
+  DegenerateCurve:
+    'That circle or arc is too small to keep. Drag a larger radius, or type an exact one.',
+  RestoreConflicts:
+    'Undo needs to put the original outline back, but newer drawing is in its way. Erase the overlapping lines and undo again.',
   SketchGestureAlreadyOpen:
     'The drawing tools got out of step. Press Escape and try again.',
   SketchGestureNotOpen:
@@ -76,6 +78,10 @@ const DESCRIPTIONS: Record<string, string> = {
     "The walls this would create run into the object's other geometry. Try a different distance, or reshape the surrounding faces first.",
   NotASubFace:
     'Push/Pull here needs a shape drawn on the face. Draw a closed outline on the face first.',
+  RadiusVanishes:
+    'Pushing that far would shrink the curved wall to nothing. Push a shorter distance.',
+  WallNeighborNonPlanar:
+    'Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first.',
 
   // ------------------------------------------- drawing on faces / merging
   PathTooShort: 'The cut needs at least two points. Click a start and an end.',
@@ -93,6 +99,10 @@ const DESCRIPTIONS: Record<string, string> = {
     'The same face is on both sides of this edge, so dissolving it would puncture the surface.',
   SharedChainDisconnected:
     "These faces touch along more than one separate edge run, which merge can't dissolve yet. Merge along one shared run at a time.",
+  SharedChainCoversBoundary:
+    "One face's entire boundary lies on the other, so this isn't an edge merge. Select the inner face itself and remove it instead.",
+  CurveClaimOffLoop:
+    "The drawn outline and its circle disagree, so the imprint was refused. Redraw the circle; if it keeps failing, use Report Bug.",
   LoopNotStrictlyInside:
     'The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.',
   LoopSelfIntersects:
@@ -148,6 +158,8 @@ const DESCRIPTIONS: Record<string, string> = {
   NothingToRedo: 'Nothing to redo.',
   InverseFailed:
     "This step couldn't be undone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.",
+  InverseDiverged:
+    'Undo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.',
 
   // ------------------------------------------------------ file loading
   NotAContainer: "This file isn't a Hew document. Pick a .hew file saved by Hew.",

@@ -241,7 +241,7 @@ test('welcome screen: appears on a first bare launch and a sample opens end-to-e
 
   // Opening a bundled sample exercises the whole path: fetch from the served
   // public/ dir, kernel load, dialog dismissal, scene populated.
-  await dialog.getByText('Pen Cup').click()
+  await dialog.getByText('Wall Clock').click()
   await expect(dialog).not.toBeVisible()
   await page.waitForFunction(() => (window.__hew_test?.getObjectCount() ?? 0) > 0, null, {
     timeout: 15_000,

@@ -1350,7 +1350,12 @@ impl InferenceScene {
         let mut placed_rims: Vec<SceneRim> = Vec::new();
         for pl in &self.placements {
             if let Some(dm) = self.def_members.get(&pl.member) {
-                dm.rims_at(pl, &mut placed_centers, &mut placed_quadrants, &mut placed_rims);
+                dm.rims_at(
+                    pl,
+                    &mut placed_centers,
+                    &mut placed_quadrants,
+                    &mut placed_rims,
+                );
             }
         }
 

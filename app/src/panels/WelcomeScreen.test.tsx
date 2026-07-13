@@ -28,8 +28,8 @@ describe('WelcomeScreen', () => {
   it('renders the dialog with both bundled samples and the guide link', () => {
     render(<WelcomeScreen {...makeProps()} />)
     expect(screen.getByRole('dialog', { name: /welcome to hew/i })).toBeInTheDocument()
-    expect(screen.getByText('Pen Cup')).toBeInTheDocument()
-    expect(screen.getByText('Side Table')).toBeInTheDocument()
+    expect(screen.getByText('Wall Clock')).toBeInTheDocument()
+    expect(screen.getByText('Café Table')).toBeInTheDocument()
     const link = screen.getByRole('link', { name: /getting-started guide/i })
     expect(link).toHaveAttribute('href', GETTING_STARTED_URL)
     expect(link).toHaveAttribute('target', '_blank')
@@ -38,9 +38,9 @@ describe('WelcomeScreen', () => {
   it('clicking a sample reports that sample entry', () => {
     const props = makeProps()
     render(<WelcomeScreen {...props} />)
-    fireEvent.click(screen.getByText('Side Table'))
+    fireEvent.click(screen.getByText('Café Table'))
     expect(props.onOpenSample).toHaveBeenCalledWith(
-      BUNDLED_SAMPLES.find((s) => s.file === 'side-table.hew'),
+      BUNDLED_SAMPLES.find((s) => s.file === 'cafe-table.hew'),
     )
   })
 

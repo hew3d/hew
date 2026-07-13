@@ -22,25 +22,28 @@ import {
  */
 const KERNEL_ERROR_CODES = [
   // DocumentError (flat variants)
-  'UnknownSketch', 'RegionConsumed', 'UnknownObject', 'UnknownFace',
+  'UnknownSketch', 'UnknownObject', 'UnknownFace',
   'UnknownMaterial', 'UnknownGroup', 'UnknownComponent', 'UnknownInstance',
   'UnknownGuide', 'SketchGestureAlreadyOpen', 'SketchGestureNotOpen',
   'DegenerateGuide', 'EmptyGroup', 'EmptySelection', 'EmptyComponent',
   'NestedComponentUnsupported', 'CannotExplodeReflected', 'DuplicateMember',
   'MixedParents', 'GroupedOperand', 'NothingToUndo', 'NothingToRedo',
-  'InverseFailed',
+  'InverseFailed', 'InverseDiverged',
   // SketchError
   'PointOffPlane', 'DegenerateSegment', 'UnknownEdge', 'UnknownVertex',
   'UnknownRegion', 'WouldRetopologize', 'UnknownIsland', 'MalformedRegion',
+  'DegenerateCurve', 'RestoreConflicts',
   // ExtrudeError
   'DistanceTooSmall', 'DegenerateGeometry',
   // PushPullError
   'ObjectNotSolid', 'WouldVanish', 'NonManifoldResult', 'NotASubFace',
+  'RadiusVanishes', 'WallNeighborNonPlanar',
   // StickyError
   'PathTooShort', 'EndpointNotOnBoundary', 'PointNotOnFace', 'PathNotSimple',
   'FacesNotCoplanar', 'BoundaryEdge', 'SameFaceOnBothSides',
-  'SharedChainDisconnected', 'LoopNotStrictlyInside', 'LoopSelfIntersects',
-  'NotAnInnerFace', 'WouldCorrupt',
+  'SharedChainDisconnected', 'SharedChainCoversBoundary',
+  'LoopNotStrictlyInside', 'LoopSelfIntersects',
+  'NotAnInnerFace', 'WouldCorrupt', 'CurveClaimOffLoop',
   // BooleanError
   'OperandNotSolid', 'EmptyResult', 'SingularTransform', 'DegenerateContact',
   // SliceError
@@ -107,9 +110,10 @@ describe('kernelErrorMessage — coverage', () => {
   it('refusals that need action carry a suggested next step (second sentence)', () => {
     // Spot the pattern on representative refusals across the op families.
     for (const code of [
-      'WouldVanish', 'NonManifoldResult', 'RegionConsumed', 'DistanceTooSmall',
+      'WouldVanish', 'NonManifoldResult', 'RadiusVanishes', 'DistanceTooSmall',
       'EndpointNotOnBoundary', 'DegenerateContact', 'PlaneMissesSolid',
       'MixedParents', 'CannotExplodeReflected', 'WouldRetopologize',
+      'RestoreConflicts', 'WallNeighborNonPlanar',
     ]) {
       const sentences = kernelErrorMessage(code, '').match(/[.!?](\s|$)/g) ?? []
       expect(sentences.length, code).toBeGreaterThanOrEqual(2)
