@@ -2216,17 +2216,17 @@ fn hole_interior_survives_and_stays_editable() {
 }
 
 /// Sketch edits that bypass the gesture bracket entirely (direct
-/// `sketch_mut` mutation — a scripting path, a future tool bug) cannot
-/// extrude under a solid either: the standing-solid gate derives from live
-/// scene geometry at the moment of the call, so there is no index to go
-/// stale.
+/// `sketch_mut` mutation — a scripting path) produce ordinary extrudable
+/// regions: redrawing a standing solid's base extrudes into a coincident
+/// second solid, like every other overlap (the standing-solid gate was
+/// dropped — docs/design/sketch-solid-model.md).
 #[test]
-fn unbracketed_edits_cannot_expose_claimed_area_to_extrude() {
+fn unbracketed_redraw_over_a_solid_extrudes() {
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
     let left = only_region(&doc, s);
-    let (obj, _) = doc.extrude_region(s, left, 1.0).expect("extrude left");
+    let (_obj, _) = doc.extrude_region(s, left, 1.0).expect("extrude left");
 
     // No gesture bracket: redraw the standing solid's base directly.
     let s2 = doc.add_sketch(ground());
@@ -2241,8 +2241,6 @@ fn unbracketed_edits_cannot_expose_claimed_area_to_extrude() {
             sk.add_segment(a, b).expect("segment");
         }
     }
-    // The region closed but is blocked, so it is not in extrudable_regions;
-    // fetch it raw.
     let redrawn = doc
         .sketch(s2)
         .expect("live")
@@ -2250,10 +2248,8 @@ fn unbracketed_edits_cannot_expose_claimed_area_to_extrude() {
         .keys()
         .next()
         .expect("the redrawn base closes a region");
-    assert!(matches!(
-        doc.extrude_region(s2, redrawn, 1.0).unwrap_err(),
-        DocumentError::RegionBlocked { by } if by == NodeId::Object(obj)
-    ));
+    doc.extrude_region(s2, redrawn, 1.0)
+        .expect("a coincident redraw extrudes — interpenetration is allowed");
 }
 
 // ──────────────────────────────── boolean coplanar-seam cleanup ─────────────
@@ -3098,9 +3094,8 @@ fn torture_mode_toggles_and_passes_a_real_op_sequence() {
     // result passes the validator, so none of these `expect`s — nor the post-op
     // torture validation — panics. (Slice goes last because it consumes `u`.)
     let a = extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0);
-    // Overlapping solids are built by extruding beside and moving into
-    // place: the standing-solid gate refuses extruding THROUGH `a`'s base,
-    // while a move is free to create physical overlap.
+    // A second box moved into overlap with `a` (interpenetration is allowed
+    // everywhere in Hew), giving the union a real coplanar-seam job.
     let b = extrude_box(&mut doc, 4.0, 1.0, 6.0, 3.0, 0.0, 3.0);
     doc.transform_object(b, &Transform::translation(Vec3::new(-3.0, 0.0, 0.0)))
         .expect("move b into overlap");

@@ -1674,15 +1674,17 @@ fn thickening_a_box_after_bossing_an_imprinted_circle_map_or_drops_the_claim() {
     );
 }
 
-/// The curves × pushpull merge seam (integration review, major): pushing a
-/// boss side-wall facet outward is a SLANTED-neighbor translate-and-build,
-/// whose exact recorded inverse is `KernelOp::UnbuildPushPull` — a NEW
-/// vertex-moving path authored on the pushpull branch, which predates
-/// `Edge::curve`. The boss's base ring carries circle claims, so undoing the
-/// push moves claim-bearing vertices and MUST run map-or-drop on the
-/// recorded-inverse path too; a stale claim would panic `check_invariants`
-/// (debug) or false-refuse `NonManifoldResult` (release). Before the fix,
-/// `unbuild_push_pull` skipped `drop_stale_edge_curves`, unlike every sibling.
+/// Undoing a boss-wall push keeps `Edge::curve` claims consistent. A boss
+/// raised from an imprinted circle now carries `SurfaceRef::Cylinder` on its
+/// side walls (playtest Part A), so pushing a boss wall routes to the
+/// WHOLE-WALL radial offset (`offset_cylinder_wall`), whose recorded inverse
+/// is the ordinary `PushPull{-d}` — not the slanted-neighbor translate-and-
+/// build's `UnbuildPushPull`. The base ring carries circle claims that the
+/// radial offset moves off their stored circle; the offset's map-or-drop
+/// clears them, and undo must leave nothing stale. (Before Part A this same
+/// geometry exercised `UnbuildPushPull` — a boss wall was a bare facet whose
+/// slanted neighbors built walls; that path's `drop_stale_edge_curves` remains
+/// as defensive code, with structural coverage in op_specs' wedge specs.)
 #[test]
 fn undoing_a_boss_wall_push_keeps_edge_curve_claims_consistent() {
     let (h, r) = (1.0, 0.5);
@@ -1722,16 +1724,318 @@ fn undoing_a_boss_wall_push_keeps_edge_curve_claims_consistent() {
         panic!("push_pull yields a PushPull report");
     };
     assert!(
-        pp.requires_unbuild_inverse,
-        "a slanted boss-wall push builds a wall and records UnbuildPushPull"
+        !pp.requires_unbuild_inverse,
+        "a stamped boss wall push is a radial offset, inverted by PushPull{{-d}}"
     );
     obj.validate().unwrap();
 
-    // Undo dispatches the recorded UnbuildPushPull; it must succeed and leave
+    // Undo dispatches the ordinary PushPull inverse; it must succeed and leave
     // no stale claim (validate rejects a stale one).
     history
         .undo(&mut obj)
         .expect("undo of the boss-wall push succeeds");
     obj.validate()
-        .expect("no stale Edge::curve claim survives the recorded inverse");
+        .expect("no stale Edge::curve claim survives the inverse offset");
+}
+
+// -------------------------------------------- boss stamping (playtest Part A)
+// docs/design/true-curves.md §4.6, clause `extrude_sub_face`: the pull-UP
+// mirror of the push-THROUGH tunnel stamping (C3). Bossing a sub-face raised
+// from an imprinted circle stamps its side walls `SurfaceRef::Cylinder`, so
+// the boss shades smooth and a wall push offsets its radius. A mixed/partial
+// boundary loop stamps nothing (map-or-drop). Red-check: disabling the stamp
+// drops `carrying` to 0 (the raised disk cap and the box faces carry none).
+
+#[test]
+fn bossing_an_imprinted_circle_stamps_the_boss_walls() {
+    let (h, r) = (1.0, 0.5);
+    let (mut obj, disk) = imprint_circle(2.0, 2.0, h, r);
+    // The flat imprint claims no cylinder; the box has 6 faces, none attributed.
+    assert_eq!(
+        surface_census(&obj).1,
+        0,
+        "a flat imprint claims no cylinder"
+    );
+
+    // Boss the disk UP into a cylinder standing on the box top.
+    obj.extrude_sub_face(disk, 0.3).unwrap();
+    obj.validate().unwrap();
+
+    // Every one of the 24 boss side walls carries the drawn circle, axis +Z
+    // through the center, radius the exact drawn radius.
+    let (distinct, carrying) = surface_census(&obj);
+    assert_eq!(carrying, 24, "24 boss walls, all attributed");
+    assert_eq!(distinct.len(), 1, "one cylinder");
+    let SurfaceRef::Cylinder {
+        axis_point,
+        axis,
+        radius,
+    } = distinct[0];
+    assert!(
+        axis_point.approx_eq(Point3::new(0.0, 0.0, h), tol::POINT_MERGE),
+        "axis passes through the drawn center on the base plane"
+    );
+    assert!(
+        axis.approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION),
+        "axis is the sweep (pull-up) direction"
+    );
+    assert_eq!(radius, r, "the exact drawn radius, not a chord measure");
+}
+
+#[test]
+fn bossed_wall_push_offsets_the_radius_not_a_single_facet() {
+    let (h, r) = (1.0, 0.5);
+    let (mut obj, disk) = imprint_circle(2.0, 2.0, h, r);
+    obj.extrude_sub_face(disk, 0.3).unwrap();
+
+    // A boss wall faces AWAY from the axis; a positive push adds material and
+    // grows the radius (unlike a hole wall, which shrinks). The whole logical
+    // wall moves — all 24 facets share the new radius — not a single facet.
+    let wall = any_wall(&obj);
+    let before: Vec<Point3> = obj.vertices().values().map(|v| v.position).collect();
+    let report = obj.push_pull(wall, 0.1).unwrap();
+    obj.validate().unwrap();
+    let (distinct, carrying) = surface_census(&obj);
+    assert_eq!(
+        carrying, 24,
+        "still 24 attributed walls — no facet was split off"
+    );
+    assert_eq!(distinct.len(), 1, "still one cylinder");
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    assert!(
+        (radius - 0.6).abs() <= tol::POINT_MERGE,
+        "the boss radius grew by the push distance (0.5 → 0.6)"
+    );
+
+    // Exact round-trip: push the same wall back in.
+    obj.push_pull(report.face, -0.1).unwrap();
+    obj.validate().unwrap();
+    let after: Vec<Point3> = obj.vertices().values().map(|v| v.position).collect();
+    assert_eq!(before.len(), after.len());
+    for (b, a) in before.iter().zip(&after) {
+        assert!(
+            b.approx_eq(*a, tol::POINT_MERGE),
+            "the boss returns to radius 0.5"
+        );
+    }
+}
+
+#[test]
+fn shrinking_a_boss_wall_past_its_radius_refuses_typed() {
+    let (h, r) = (1.0, 0.5);
+    let (mut obj, disk) = imprint_circle(2.0, 2.0, h, r);
+    obj.extrude_sub_face(disk, 0.3).unwrap();
+    let wall = any_wall(&obj);
+
+    // Shrinking by the full radius drives the wall to radius 0.
+    let err = obj.push_pull(wall, -r).unwrap_err();
+    assert_eq!(err, kernel::PushPullError::RadiusVanishes);
+}
+
+#[test]
+fn bossing_a_rectangular_imprint_stays_flat() {
+    // A mixed/partial loop stamps nothing — a rectangle's sides are on no one
+    // circle, so `split_face_inner` leaves the sub-face's boundary edges with
+    // no `Edge::curve` claim and the boss walls stay honest flat facets.
+    let h = 1.0;
+    let mut obj = box_obj(2.0, 2.0, h);
+    let top = top_cap(&obj, h);
+    let rect = [
+        Point3::new(-0.4, -0.3, h),
+        Point3::new(0.4, -0.3, h),
+        Point3::new(0.4, 0.3, h),
+        Point3::new(-0.4, 0.3, h),
+    ];
+    let report = obj.split_face_inner(top, &rect).unwrap();
+    obj.extrude_sub_face(report.sub_face, 0.3).unwrap();
+    obj.validate().unwrap();
+    assert_eq!(
+        surface_census(&obj).1,
+        0,
+        "a rectangular boss has no analytic circle to stamp"
+    );
+}
+
+#[test]
+fn bossing_an_arc_closed_by_a_chord_stays_flat() {
+    // Adversarial (review F2/F6): a loop of 20 short arc-chords (0→300°) plus
+    // ONE long straight closing chord (300°→360°, a 60° secant) — every vertex
+    // lies on the circle, so `split_face_inner_with_curve` stamps the SAME
+    // curve on all 21 edges and the weak "every edge carries a matching curve"
+    // test would pass. But the closing secant is a flat wall, not a cylinder
+    // facet: the ring is non-uniform (its steps are 20×15° + 1×60°), so the
+    // strengthened full-circle-ring check must REFUSE to stamp (map-or-drop —
+    // stamp-wrong is worse than don't-stamp). Red-check: drop the uniformity
+    // test and this wrongly stamps 21 cylinder walls.
+    let (h, r) = (1.0, 0.5);
+    let mut obj = box_obj(2.0, 2.0, h);
+    let top = top_cap(&obj, h);
+    // 21 vertices at 0,15,…,300°, all on the circle; the loop closes 300°→0°.
+    let loop_pts: Vec<Point3> = (0..21)
+        .map(|i| {
+            let a = std::f64::consts::PI / 12.0 * (i as f64); // 15° steps
+            Point3::new(r * a.cos(), r * a.sin(), h)
+        })
+        .collect();
+    let disk = obj
+        .split_face_inner_with_curve(
+            top,
+            &loop_pts,
+            Some(CurveGeom {
+                center: Point3::new(0.0, 0.0, h),
+                radius: r,
+            }),
+        )
+        .unwrap()
+        .sub_face;
+    // The imprint DID stamp every edge (all endpoints are on the circle)…
+    assert_eq!(
+        obj.edges().values().filter(|e| e.curve.is_some()).count(),
+        21,
+        "the imprint stamps all 21 arc+chord edges (endpoints on the circle)"
+    );
+    // …but bossing must NOT sweep the secant into a cylinder wall.
+    obj.extrude_sub_face(disk, 0.3).unwrap();
+    obj.validate().unwrap();
+    assert_eq!(
+        surface_census(&obj).1,
+        0,
+        "an arc closed by a straight chord is not a full circle — no stamp"
+    );
+}
+
+/// Imprint an `n`-point concyclic loop (uniform, radius `r` at z=h, centered
+/// at origin) carrying one shared circle claim, boss it up, and return the
+/// object plus how many boss walls carry a surface.
+fn boss_concyclic(n: usize, r: f64, h: f64) -> (Object, usize) {
+    let mut obj = box_obj(2.0, 2.0, h);
+    let top = top_cap(&obj, h);
+    let disk = obj
+        .split_face_inner_with_curve(
+            top,
+            &circle_loop(0.0, 0.0, h, r, n),
+            Some(CurveGeom {
+                center: Point3::new(0.0, 0.0, h),
+                radius: r,
+            }),
+        )
+        .unwrap()
+        .sub_face;
+    // Every edge carries the shared claim (all vertices lie on the circle).
+    assert_eq!(
+        obj.edges().values().filter(|e| e.curve.is_some()).count(),
+        n,
+        "the imprint stamps all {n} concyclic edges"
+    );
+    obj.extrude_sub_face(disk, 0.3).unwrap();
+    let carrying = surface_census(&obj).1;
+    (obj, carrying)
+}
+
+#[test]
+fn bossing_an_equilateral_triangle_on_a_circle_stays_flat() {
+    // Adversarial re-review (major): the uniformity test alone passes ANY
+    // regular n-gon (every step is exactly 2π/n), so a coarse but uniform ring
+    // slips through. An equilateral triangle — 3 concyclic points, 120° facets
+    // — carries the SAME claim on all 3 edges (validate even passes: a secant
+    // wall's plane is parallel to the axis and within radius) yet its walls are
+    // flat secants, not cylinder facets. The absolute density floor
+    // (`MIN_CIRCLE_SEGMENTS`) must reject it. Red-check: drop the density gate
+    // and this stamps 3 cylinder walls.
+    let (obj, carrying) = boss_concyclic(3, 0.5, 1.0);
+    obj.validate().unwrap();
+    assert_eq!(
+        carrying, 0,
+        "a triangle inscribed in a circle is not a circle — no stamp"
+    );
+}
+
+#[test]
+fn bossing_a_skip_connected_12gon_stays_flat() {
+    // The same break via a homogeneous COARSE ring at a higher count: 12
+    // concyclic points at 30° steps (every other vertex of a 24-gon). Uniform,
+    // so only the density floor catches it. Red-check: drop the density gate
+    // and this stamps 12 secant walls.
+    let (obj, carrying) = boss_concyclic(12, 0.5, 1.0);
+    obj.validate().unwrap();
+    assert_eq!(
+        carrying, 0,
+        "a 30°-facet 12-gon is too coarse to be a circle — no stamp"
+    );
+}
+
+#[test]
+fn bossing_a_48gon_circle_stamps_every_facet() {
+    // The floor accepts the tool's 24-segment minimum AND finer adaptive
+    // counts: a 48-gon (7.5° facets) is a genuine circle and stamps every wall.
+    let (obj, carrying) = boss_concyclic(48, 0.5, 1.0);
+    obj.validate().unwrap();
+    assert_eq!(
+        carrying, 48,
+        "a 48-gon (finer than the 24 floor) stamps all facets"
+    );
+}
+
+/// A boss whose wall was then whole-wall offset must survive a full History
+/// unwind/replay (DEVELOPMENT.md rule 9). The boss stamps `Face::surface`
+/// from `Edge::curve`, which the offset drops; without restoring the surface
+/// on rule-9 alignment, the re-done boss comes back a bare facet, the re-done
+/// offset reroutes to translate-and-build, and replay DIVERGES. Red-check:
+/// drop the `surface` restore in `StateProof::verify_and_align` and the redo
+/// diverges here.
+#[test]
+fn a_bossed_wall_offset_round_trips_through_history() {
+    use kernel::{History, KernelOp};
+    let (h, r) = (1.0, 0.5);
+    let (mut obj, disk) = imprint_circle(2.0, 2.0, h, r);
+    let mut history = History::new();
+
+    history
+        .apply(
+            &mut obj,
+            KernelOp::ExtrudeSubFace {
+                sub_face: disk,
+                distance: 0.3,
+            },
+        )
+        .expect("boss");
+    let wall = any_wall(&obj);
+    history
+        .apply(
+            &mut obj,
+            KernelOp::PushPull {
+                face: wall,
+                distance: 0.1,
+            },
+        )
+        .expect("offset the boss wall");
+
+    // Full unwind, then full replay — every undo and redo must succeed
+    // (no InverseDiverged), and the replayed boss wall must again carry a
+    // cylinder (its surface was restored on alignment, not left bare).
+    let mut n = 0;
+    while history.can_undo() {
+        history
+            .undo(&mut obj)
+            .unwrap_or_else(|e| panic!("undo #{n}: {e}"));
+        n += 1;
+    }
+    n = 0;
+    while history.can_redo() {
+        history
+            .redo(&mut obj)
+            .unwrap_or_else(|e| panic!("redo #{n}: {e}"));
+        n += 1;
+    }
+    obj.validate().unwrap();
+    let (distinct, carrying) = surface_census(&obj);
+    assert_eq!(
+        carrying, 24,
+        "the replayed boss walls carry the cylinder again"
+    );
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    assert!(
+        (radius - 0.6).abs() <= tol::POINT_MERGE,
+        "and at the offset radius (0.5 → 0.6)"
+    );
 }

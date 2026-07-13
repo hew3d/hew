@@ -53,6 +53,17 @@ new_key_type! {
     pub struct SketchIslandId;
 }
 
+/// The fewest facets a closed chord ring may have and still count as a
+/// "circle" for analytic stamping — the density floor below which a ring is
+/// a coarse polygon of secants, not a curve. Coupled to the draw tools'
+/// segments-per-turn floor (24, docs/design/true-curves.md §6: "24 becomes
+/// the floor, adaptive by radius up to 96"), so every genuine tool-produced
+/// circle clears it while a triangle/hexagon/skip-connected coarse ring does
+/// not. The kernel legitimately owns "what density counts as a circle": an
+/// analytic claim on a coarser ring would sweep a secant into a cylinder
+/// wall, and stamp-wrong is worse than don't-stamp (map-or-drop).
+pub(crate) const MIN_CIRCLE_SEGMENTS: usize = 24;
+
 /// The analytic definition a curve chain was drawn from: the exact circle
 /// (or circular arc) whose facets the chain's edges are. The circle lies in
 /// the sketch plane; arc extent is derived from the chain's member edges,

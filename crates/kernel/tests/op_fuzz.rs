@@ -791,3 +791,73 @@ proptest! {
         check_serialize_roundtrip(&object, "maximal")?;
     }
 }
+
+/// Distilled from this harness's own minimization (adversarial review
+/// F1/F4/F5): a `from_extrusion` octagon cylinder, imprint + whole-wall push,
+/// imprint + RECESS, then a whole-wall offset — UNDOING that offset must
+/// succeed. Before the GuardMode fix, `offset_cylinder_wall` ran its
+/// interpenetration + engulfment sweeps unconditionally, so `push_pull_replay`
+/// refused the exact inverse of a push the forward path had accepted
+/// (DEVELOPMENT.md rule 9): "inverse op failed (kernel bug): push/pull sweep
+/// has no manifold result". The seed shape and op values are the proptest
+/// shrink verbatim; resolving them against the identically-rebuilt seed
+/// reproduces the exact case deterministically.
+///
+/// Red-check: force `GuardMode::Enforced` inside `offset_cylinder_wall` and
+/// `undo #0` here fails ("push/pull sweep has no manifold result").
+#[test]
+fn recess_wall_offset_undo_is_guard_exempt_on_replay() {
+    let plane =
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+    let (n, r, h) = (8usize, 4.350810287226727, 3.0548298421408533);
+    let outer: Vec<Point3> = (0..n)
+        .map(|k| {
+            let a = std::f64::consts::TAU * k as f64 / n as f64;
+            Point3::new(r * a.cos(), r * a.sin(), 0.0)
+        })
+        .collect();
+    let profile = Profile::new(plane, outer, vec![]).unwrap();
+    let mut object = Object::from_extrusion(&profile, h).unwrap();
+
+    let ops = [
+        FuzzOp::ImprintCircle {
+            face_sel: 6848993228301163776,
+            radius_frac: 0.43861651058317136,
+        },
+        FuzzOp::PushPull {
+            face_sel: 16580540856130512422,
+            distance: -1.6229609464500998,
+        },
+        FuzzOp::ImprintCircle {
+            face_sel: 5449998564999423468,
+            radius_frac: 0.2,
+        },
+        FuzzOp::ExtrudeSubFace {
+            face_sel: 2168687426265071568,
+            distance: -2.584905941553409,
+        },
+        FuzzOp::PushPull {
+            face_sel: 1755326213407740,
+            distance: 0.3458394466774271,
+        },
+    ];
+
+    let mut history = History::new();
+    for (i, op) in ops.iter().enumerate() {
+        let resolved = resolve(&object, op).unwrap_or_else(|| panic!("op {i} resolves"));
+        history
+            .apply(&mut object, resolved)
+            .unwrap_or_else(|e| panic!("forward op {i} applies: {e}"));
+    }
+
+    // The offending step: undoing the whole-wall offset (and the rest) must not
+    // be refused by a guard the replay must skip.
+    let mut u = 0;
+    while history.can_undo() {
+        history
+            .undo(&mut object)
+            .unwrap_or_else(|e| panic!("undo #{u}: {e}"));
+        u += 1;
+    }
+    object.validate().unwrap();
+}

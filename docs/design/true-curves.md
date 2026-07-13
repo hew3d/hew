@@ -430,10 +430,34 @@ map-or-drop rule specialized per mode):
    — both are "distance along the normal", so the tool needs no
    special-casing.
 4. **`extrude_sub_face` / `collapse_sub_face`** (boss/recess on a face):
-   the raised sub-face **drops** its inherited claim (it leaves the chord
-   plane); the parent keeps its own; collapse does **not** restore the
-   claim (only undo's snapshot path may, see §4.4). Implemented,
-   spec-covered.
+   pulling a flat imprinted sub-face UP (boss) or DOWN (recess) sweeps the
+   walls of a cylinder, so `extrude_sub_face` **stamps** each raised wall
+   `SurfaceRef::Cylinder` — the pull-up mirror of `from_extrusion`'s
+   `wall_surface` and of the push-through tunnel stamping (§C3). Both signs
+   stamp: a recess is a resizable cylindrical pocket exactly as a boss is a
+   resizable cylinder. The stamp is gated on the sub-face boundary being a
+   genuine **full circle** — every boundary edge a chord of one imprinted
+   circle (`Edge::curve`, consistent center/radius) **and** the ring passing
+   a geometric test in two independent parts: the vertices wind once around
+   the center in near-uniform angular steps (heterogeneity gate), AND the
+   ring has at least `MIN_CIRCLE_SEGMENTS` (24, the draw tools'
+   segments-per-turn floor, §6) facets (absolute density gate). Both are
+   load-bearing. The heterogeneity gate rejects an arc closed by a straight
+   chord (every edge can carry the same claim, but the long closing chord is
+   a flat wall). The density gate rejects a homogeneous COARSE ring — an
+   equilateral triangle or a skip-connected 12-gon of concyclic points whose
+   steps are uniform yet far too large to be facets — which the relative
+   uniformity test cannot see, since a regular n-gon's steps are all exactly
+   2π/n for any n. Stamping either sweeps a secant into a "cylinder wall": a
+   map-or-drop soundness break (stamp-wrong is worse than don't-stamp). A
+   rectangle, a mixed loop, or a split fragment stamps nothing. The raised sub-face itself **drops** its
+   inherited claim (it leaves the chord plane); the parent keeps its own;
+   collapse does **not** restore the claim (only undo's snapshot path may,
+   see §4.4). Because the boss/recess wall then carries a surface, a later
+   push of it routes to whole-wall offset (clause 3), whose obstruction
+   guards are `GuardMode`-gated and skipped on replay (rule 9) — the boss
+   put those guards on a History op's exact-inverse path for the first time.
+   Implemented, spec-covered.
 5. **Push-through** (inward overshoot → boolean subtract): boolean
    inheritance rules apply — arrangement fragments of attributed faces
    inherit, cutter-derived faces carry `None`, and the coplanar-dissolve
@@ -839,6 +863,47 @@ Four findings, all empirically confirmed; fixed in order of severity.
 Maintainer playtest findings resolved after the branch's original scope.
 Each status-changing commit updates this section; a successor resuming cold
 reads it after §4.
+
+- **Boss/recess wall stamping — the pull-UP mirror of C3 (§4.6 clause 4).**
+  Drawing a circle on a solid cap and pulling that disk UP into a boss (or
+  DOWN into a recess) rendered FACETED and a push of a boss wall hit the
+  flat translate-and-build path (one facet) instead of the whole-wall
+  radial offset — `Object::extrude_sub_face` never stamped its raised walls,
+  the exact mirror of the fixed push-through hole case. Fix:
+  `extrude_sub_face` now stamps each raised wall `SurfaceRef::Cylinder`
+  (both signs — a recess is a resizable cylindrical pocket) when the
+  sub-face boundary is a genuine **full circle**: every boundary edge a
+  chord of one imprinted `Edge::curve` (consistent center/radius) AND the
+  ring passing two independent geometric gates — the vertices wind once
+  around the center in near-uniform angular steps (heterogeneity, rejecting
+  an arc closed by a straight chord) AND the ring has at least
+  `MIN_CIRCLE_SEGMENTS` (24) facets (absolute density, rejecting a coarse
+  uniform ring — a triangle or a skip-connected 12-gon — that the relative
+  uniformity test alone lets through, since a regular n-gon's steps are all
+  exactly 2π/n). Both gates matter — stamping a secant into a "cylinder
+  wall" is a map-or-drop soundness break. `collapse_sub_face` leaves no
+  stale surface (the walls it removes carry it). Specs
+  (`surface_ref_specs.rs`, red-checked): a 24-gon and a finer 48-gon boss
+  stamp every wall; a wall push offsets the whole radius and round-trips;
+  shrinking past the radius refuses `RadiusVanishes`; rectangle,
+  arc-plus-chord, equilateral-triangle, and skip-12 bosses stay flat; a
+  bossed-wall offset survives a full History unwind/replay.
+
+  Two adversarial-review follow-ups landed with it. **Rule-9 replay
+  soundness (two parts):** (a) `Face::surface` decides push/pull routing but
+  was not restored by `StateProof::verify_and_align`, so a re-created boss
+  came back a bare facet and the next offset rerouted and diverged — the
+  proof now carries and restores `surface`. (b) `offset_cylinder_wall` ran
+  its interpenetration + engulfment obstruction sweeps unconditionally, so
+  `push_pull_replay` refused the exact inverse of a push the forward path
+  accepted ("push/pull sweep has no manifold result"); those sweeps are now
+  `GuardMode`-gated and skipped on replay, exactly like the translate-and-
+  build guards and `extrude_sub_face`'s obstruction ray. This is a
+  pre-existing whole-wall-code gap the boss work merely made reachable in
+  op_fuzz (a `from_extrusion` cylinder wall pushed and undone hits it too);
+  the fix improves main. Distilled regression:
+  `op_fuzz::recess_wall_offset_undo_is_guard_exempt_on_replay` (the harness's
+  own minimization, red-checked). op_fuzz + document_fuzz green at 16k.
 
 - **C3 — imprinted circles kept their identity onto the solid; tunnel walls
   from a through-cut now stamp `SurfaceRef::Cylinder`.** Drawing a circle on

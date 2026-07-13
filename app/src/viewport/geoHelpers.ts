@@ -142,7 +142,6 @@ export function kernelErrorMessage(code: string, rawMsg: string): string {
     PathNotSimple: 'Path must be a simple (non-self-intersecting) polygon',
     NothingToUndo: 'Nothing to undo',
     NothingToRedo: 'Nothing to redo',
-    RegionBlocked: 'A standing solid already occupies this area',
     UnknownObject: 'Unknown object handle (stale reference)',
     LoopNotStrictlyInside: 'Rectangle must lie fully inside the face',
     LoopSelfIntersects: "Rectangle edges can't cross",

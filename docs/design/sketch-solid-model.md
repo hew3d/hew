@@ -1,11 +1,26 @@
 # Sketch–Solid Consumption: A Redesign
 
-Status: **ratified — Model D (§4D/§6), implementation in progress** (see
-the Implementation status appendix at the end of this document). The
-maintainer's rulings on the open questions of §8: delete-to-recover is not
-load-bearing (undo is the only way back); the re-extrusion gate stays, in
-its global form; files older than manifest v10 are treated as nonexistent —
-loading simply ignores their stored `footprints`/`consumed` fields.
+Status: **ratified — Model D (§4D/§6), shipped; the re-extrusion gate was
+subsequently DROPPED after playtest** (see the Implementation status
+appendix at the end of this document). The maintainer's rulings on the open
+questions of §8: delete-to-recover is not load-bearing (undo is the only
+way back); the re-extrusion gate — initially kept in its global form — was
+ultimately dropped as inconsistent with Hew's freely-interpenetrating-solids
+model, confusing in practice, and a blocker of legitimate work (§8 Q2,
+resolved below), so re-extruding occupied ground is now simply **allowed**,
+producing a coincident second solid like any other overlap; files older than
+manifest v10 are treated as nonexistent — loading simply ignores their
+stored `footprints`/`consumed` fields.
+
+> **Gate dropped (playtest ruling).** Everything below describing the
+> "derived standing-solid gate" (§4D stage 2, §6 stage 1, §8 Q2) documents
+> the model *as first shipped*. The gate is gone: `extrude_region` never
+> refuses on overlap, `Document::region_blocker` and its helpers are
+> deleted, and `DocumentError::RegionBlocked` is removed. The "consumption
+> is becoming" half of Model D — extrusion deletes the region's scaffolding,
+> nothing hidden resurrects — is unchanged and remains the model of record.
+> The launder case (Z10) is now *allowed*, not refused: redrawing a standing
+> solid's base and extruding produces a coincident second solid.
 
 This document catalogs the user-visible failure modes of
 the shipped Sketch-vs-Solid relationship, develops four candidate
@@ -397,12 +412,17 @@ intuition expects to exist.
    deleting a solid to get its profile back (rather than undo or push/pull
    to re-dimension) dies with D and A alike. If it must survive, C is the
    only candidate that keeps it coherent, at its stated cost.
-2. **How wide should the gate be?** D makes the standing-solid refusal
-   global across sketches. The alternative — dropping the gate entirely,
-   SketchUp-style, and letting a deliberate redraw over an occupied base
-   extrude an overlapping solid — removes still more mechanism, at the cost
-   of the one accident the gate genuinely prevents (double-extruding the
-   same spot). How frequent is that accident in practice?
+2. **How wide should the gate be? — RESOLVED: drop it entirely.** D first
+   shipped the standing-solid refusal global across sketches. Playtest
+   settled the alternative named here: drop the gate entirely,
+   SketchUp-style, and let a deliberate redraw over an occupied base extrude
+   an overlapping solid. The gate proved inconsistent with Hew's
+   freely-interpenetrating-solids model (overlap is creatable by move, copy,
+   and boolean anyway), confusing (a refusal with no physical obstruction
+   visible), and a blocker of legitimate work (a larger coaxial solid over a
+   smaller one). The one accident it prevented — double-extruding the same
+   spot — is cheaply undone and rare enough not to justify the mechanism.
+   `extrude_region` now never refuses on overlap.
 3. **Migration posture for ownerless legacy claims.** Honoring pre-v10
    consumed sets by deletion (D) changes what an old file *refuses*
    compared to the freeze-forever behavior. Is that acceptable, or must
@@ -418,6 +438,27 @@ Maintained in every status-changing commit (successor-handoff contract).
 If you are resuming this work cold: read §4D and §6 above first, then this.
 
 ### Done
+
+- **The standing-solid gate was DROPPED (playtest ruling).** After the model
+  shipped, the maintainer's playtest resolved §8 Q2: drop the re-extrusion
+  gate entirely rather than keep it global. Removed: `extrude_region`'s gate
+  check, `Document::region_blocker` and its gate-only helpers
+  (`ancestor_group_hidden`, `tags_hidden`, the free `object_contact_overlaps`,
+  and the geom2d `loops_overlap`/`bboxes_touch`/`segments_cross_properly`
+  chain that only it used), and `DocumentError::RegionBlocked`.
+  `extrudable_regions` is now simply all closed regions. The wasm
+  `sketch_regions`/`pick_sketch_region` split (which surfaced blocked regions
+  so a push/pull attempt could show the refusal) collapses — every region is
+  extrudable — and the app's `RegionBlocked` toast mapping is gone. No file
+  format change: the gate was always derived, never stored; manifest stays
+  v11 and goldens are unaffected. The Z-spec suite's gate-refusal specs
+  (Z3/Z4/Z6/Z7/Z8/Z9/Z10 and the tag-visibility/adjacency/top-face/
+  two-solids extras) were flipped to the no-gate behavior or deleted; the
+  consumption-by-deletion specs (Z1/Z2/Z5/Z11 and the extrusion-undo specs)
+  are unchanged. The document-fuzz repros' gate-clearance workarounds
+  (`GATE_CLEARANCE_Y` + extrude-far-then-transform-back) were reverted to
+  plain overlapping extrudes. **The "consumption is becoming" half of Model
+  D is untouched.**
 
 - **Round-2 F2 — undo/redo are recordable** (this commit):
   `RecordedCall::SceneUndo`/`SceneRedo` (additive variants, the
@@ -601,8 +642,9 @@ If you are resuming this work cold: read §4D and §6 above first, then this.
 
 ### Remaining (priority order)
 
-Nothing. The implementation, docs, and verification are complete; the
-maintainer's gate-ergonomics playtest is the next human step.
+Nothing. The gate was dropped after playtest (see the top of this appendix
+and the Status banner); the "consumption is becoming" model, its docs, and
+its verification are complete.
 
 ### Gotchas
 
@@ -611,16 +653,13 @@ maintainer's gate-ergonomics playtest is the next human step.
 - `scripts/verify.sh` exit code must be checked DIRECTLY (tail masks it).
 - Goldens regenerate with `REGENERATE_GOLDEN=1 cargo test -p kernel
   --test golden_file`.
-- Tests may no longer extrude two overlapping/coincident bases on one
-  plane: build beside + move into place (moves permit physical overlap).
-- The gate reads ANY coplanar face of a visible solid — including top
-  faces: a free sketch on a box-top plane refuses over the box. This is
-  per §4D ("any face … lying in the sketch's plane"); maintainer playtests
-  ergonomics after everything lands.
+- The gate is gone: tests, fuzz repros, and the app may extrude overlapping
+  or coincident bases directly (interpenetration is allowed everywhere).
+  The earlier "build beside + move into place" workaround is no longer
+  needed and was reverted where it existed.
 
 ### Next action
 
-None — hand to the maintainer for the gate-ergonomics playtest. If that
-playtest asks for changes, start from `Document::region_blocker`
-(kernel), `sketch_regions`/`pick_sketch_region` (wasm-api), and the
-`RegionBlocked` mapping in app/src/viewport/geoHelpers.ts.
+None. The gate is dropped; the consumption-by-deletion model stands. Any
+future revisit of re-extrusion ergonomics starts from `extrude_region`
+(kernel — no longer gated) and the sketch/region wasm surface.

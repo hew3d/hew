@@ -49,7 +49,6 @@ use crate::sketch::{
     Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
     SketchVertexId,
 };
-use crate::tol;
 use crate::topo::{Object, WatertightState};
 use crate::transform::{Transform, TransformError};
 
@@ -570,18 +569,6 @@ pub struct DocChange {
 pub enum DocumentError {
     /// The sketch handle is stale or from another Document.
     UnknownSketch,
-    /// `extrude_region` on a region whose material overlaps the coplanar
-    /// face contact of a visible solid (the standing-solid gate,
-    /// docs/design/sketch-solid-model.md §4D). Extruding would stack a
-    /// second solid through the one already standing there, so it is
-    /// refused, never built. Carries the blocking node so callers can name
-    /// or highlight it. The claim is the solid's own face: it moves with
-    /// the solid and dies with it — derived live, never stored.
-    RegionBlocked {
-        /// The visible solid standing on the region's area (a world object
-        /// or a component instance).
-        by: NodeId,
-    },
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
     /// The face handle is not present in the target object ( paint).
@@ -664,9 +651,6 @@ impl std::fmt::Display for DocumentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DocumentError::UnknownSketch => write!(f, "no such sketch in this document"),
-            DocumentError::RegionBlocked { .. } => {
-                write!(f, "a standing solid already occupies this area")
-            }
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
             DocumentError::UnknownFace => write!(f, "no such face in the target object"),
             DocumentError::UnknownMaterial => write!(f, "no such material in this document"),
@@ -1175,13 +1159,13 @@ impl Document {
         // consumption to it: delete each consumed region's exclusive
         // scaffolding (an edge shared with a surviving region survives,
         // exactly as at extrusion), remove a sketch the deletion emptied,
-        // and then discard the index — the re-extrusion gate is derived
-        // live from standing solids, never from file data
+        // and then discard the index — consumption is becoming, so nothing
+        // about re-extrusion is stored in the file
         // (docs/design/sketch-solid-model.md §6). Without this, every
         // previously extruded outline would load back as live, drawable
         // geometry. The per-object `footprints` (v9/v10) and `source` (v8)
-        // fields ARE ignored entirely: they carried the stored claims the
-        // derived gate replaces.
+        // fields ARE ignored entirely: they carried the stored claims a
+        // pre-v11 build used and Model D no longer keeps.
         //
         // VERSION-gated, not presence-gated: this runs only for files that
         // declare a pre-retirement format. Decode already rejected a
@@ -1605,135 +1589,16 @@ impl Document {
         })
     }
 
-    // ------------------------------------------- the standing-solid gate
-
-    /// The visible solid whose coplanar face contact overlaps `region`'s
-    /// material, or `None` when the region is free to extrude — Model D's
-    /// re-extrusion gate (docs/design/sketch-solid-model.md §4D).
-    ///
-    /// Derived live from the scene, never stored: the claim IS the solid's
-    /// own face lying in the sketch's plane, so it moves when the solid
-    /// moves and dies when the solid dies, with no bookkeeping. Global
-    /// across sketches — any sketch on any plane is blocked where a visible
-    /// solid's face sits on it, so redrawing a standing solid's base on a
-    /// fresh sketch refuses like the original would.
-    ///
-    /// "Visible" means what the user sees: world objects and component
-    /// instances that are not tombstoned (undone/deleted), not user-hidden,
-    /// and not tag-hidden — each checked on the node itself and on every
-    /// ancestor group, the same union the Tags panel computes (a node is
-    /// tag-hidden iff any of its tag paths is at or under a hidden path in
-    /// [`Document::tag_meta`]). The wasm-layer session hide
-    /// (`Scene::set_hidden`) is the app-computed cache of exactly these two
-    /// persisted signals, so it needs no separate consultation here. An
-    /// instance contributes its definition members' faces mapped through
-    /// its pose — a definition with no visible instance claims nothing.
-    /// Overlap is material overlap ([`crate::geom2d::loops_overlap`]):
-    /// shared boundary alone is not overlap, so a region merely adjacent to
-    /// a solid's base stays extrudable.
-    ///
-    /// Deterministic: candidates are scanned in slotmap order (world
-    /// objects first, then instances) and the first blocker wins. `None`
-    /// for stale sketch/region handles.
-    pub fn region_blocker(&self, sketch: SketchId, region: SketchRegionId) -> Option<NodeId> {
-        let sk = self.sketches.get(sketch)?;
-        if self.hidden_sketches.contains(&sketch) {
-            return None;
-        }
-        let r = sk.regions().get(region)?;
-        let plane = sk.plane();
-        let outer: Vec<Point3> = r
-            .outer
-            .iter()
-            .map(|&vid| sk.vertices()[vid].position)
-            .collect();
-        let holes: Vec<Vec<Point3>> = r
-            .holes
-            .iter()
-            .map(|h| h.iter().map(|&vid| sk.vertices()[vid].position).collect())
-            .collect();
-
-        for (oid, rec) in &self.objects {
-            if rec.hidden || !rec.is_world() {
-                continue;
-            }
-            if self.user_hidden_objects.contains(&oid)
-                || self.tags_hidden(&rec.tags)
-                || self.ancestor_group_hidden(rec.group_parent())
-            {
-                continue;
-            }
-            if object_contact_overlaps(&rec.object, None, &plane, &outer, &holes) {
-                return Some(NodeId::Object(oid));
-            }
-        }
-        for (iid, rec) in &self.instances {
-            if rec.hidden
-                || self.user_hidden_instances.contains(&iid)
-                || self.tags_hidden(&rec.tags)
-                || self.ancestor_group_hidden(rec.parent)
-            {
-                continue;
-            }
-            let Some(def) = self.components.get(rec.def).filter(|c| !c.hidden) else {
-                continue;
-            };
-            for &m in &def.members {
-                let Some(mrec) = self.objects.get(m).filter(|r| !r.hidden) else {
-                    continue;
-                };
-                if object_contact_overlaps(&mrec.object, Some(&rec.pose), &plane, &outer, &holes) {
-                    return Some(NodeId::Instance(iid));
-                }
-            }
-        }
-        None
-    }
-
-    /// Whether any group on the ancestor chain starting at `parent` is
-    /// user-hidden or tag-hidden — hiding a group hides everything beneath
-    /// it, so a member of a hidden group is not a visible solid.
-    fn ancestor_group_hidden(&self, mut parent: Option<GroupId>) -> bool {
-        while let Some(g) = parent {
-            if self.user_hidden_groups.contains(&g) {
-                return true;
-            }
-            let Some(rec) = self.groups.get(g) else {
-                return false;
-            };
-            if self.tags_hidden(&rec.tags) {
-                return true;
-            }
-            parent = rec.parent;
-        }
-        false
-    }
-
-    /// Whether a hidden tag path covers any of `tags` — the kernel half of
-    /// the Tags panel rule: a node is tag-hidden iff any of its tag paths
-    /// is at or under a hidden anchor path in [`Document::tag_meta`] (the
-    /// anchor is a prefix, so hiding a parent tag covers everything tagged
-    /// further down — the app's `isPathUnder`).
-    fn tags_hidden(&self, tags: &[Vec<String>]) -> bool {
-        tags.iter().any(|path| {
-            self.tag_meta.iter().any(|(anchor, &hidden)| {
-                hidden && path.len() >= anchor.len() && path[..anchor.len()] == anchor[..]
-            })
-        })
-    }
-
-    /// The extrudable regions of `sketch`: its closed regions minus any the
-    /// standing-solid gate refuses ([`Document::region_blocker`]). `Err` if
-    /// the sketch is stale.
+    /// The extrudable regions of `sketch`: simply its closed regions. Every
+    /// closed region extrudes — Hew's solids interpenetrate freely, so
+    /// re-extruding occupied ground is allowed like every other overlap
+    /// (docs/design/sketch-solid-model.md). `Err` if the sketch is stale.
     pub fn extrudable_regions(
         &self,
         sketch: SketchId,
     ) -> Result<Vec<SketchRegionId>, DocumentError> {
         let s = self.sketch(sketch).ok_or(DocumentError::UnknownSketch)?;
-        Ok(s.regions()
-            .keys()
-            .filter(|&r| self.region_blocker(sketch, r).is_none())
-            .collect())
+        Ok(s.regions().keys().collect())
     }
 
     // -------------------------------------------------------------- materials
@@ -2667,9 +2532,11 @@ impl Document {
     /// wholly became the solid). Undo restores the exact pre-extrusion
     /// snapshot and hides the solid atomically.
     ///
-    /// Refuses ([`DocumentError::RegionBlocked`]) when the region overlaps
-    /// a visible solid's coplanar face contact — the standing-solid gate
-    /// ([`Document::region_blocker`]).
+    /// Never refuses on account of a solid already standing there:
+    /// interpenetration on re-extrude is allowed exactly as everywhere else
+    /// in Hew (docs/design/sketch-solid-model.md — the standing-solid gate
+    /// was dropped as inconsistent with the freely-interpenetrating-solids
+    /// model).
     ///
     /// Returns the new Object's handle and the [`DocChange`] it caused (the
     /// new Object plus the sketch that lost the scaffolding).
@@ -2682,13 +2549,6 @@ impl Document {
         info!(target: "kernel::op", op = "extrude_region", distance);
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
-        }
-        // The standing-solid gate (docs/design/sketch-solid-model.md §4D):
-        // refuse when a visible solid's coplanar face contact overlaps the
-        // region's material — global across sketches, derived live from the
-        // scene, so no fresh sketch, copy, or moved solid slips past it.
-        if let Some(by) = self.region_blocker(sketch, region) {
-            return Err(DocumentError::RegionBlocked { by });
         }
         let s = self
             .sketches
@@ -5678,62 +5538,6 @@ fn made_component_change(
         components_touched: vec![component],
         guides_touched: Vec::new(),
     }
-}
-
-/// Whether any face of `object` — mapped through `pose` when given — lies
-/// in `plane` and materially overlaps the polygon-with-holes (`outer`,
-/// `holes`) there: the per-solid half of [`Document::region_blocker`]'s
-/// standing-solid gate.
-///
-/// A face counts as coplanar contact when its (posed) plane normal is
-/// parallel to `plane`'s — either orientation, so a solid's bottom face
-/// blocks the plane it stands on and its top face blocks a plane it rises
-/// to — and every vertex of its outer loop lies within
-/// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST) of `plane`. Overlap is
-/// [`crate::geom2d::loops_overlap`]'s material-overlap test (shared
-/// boundary alone is not overlap). Deterministic: faces are scanned in
-/// slotmap order.
-fn object_contact_overlaps(
-    object: &Object,
-    pose: Option<&Transform>,
-    plane: &Plane,
-    outer: &[Point3],
-    holes: &[Vec<Point3>],
-) -> bool {
-    let normal = plane.normal();
-    for face in object.faces().values() {
-        let face_plane = match pose {
-            // A live instance pose is invertible by construction
-            // (`transform_instance` validates); a plane it cannot map would
-            // be a kernel bug upstream, so a failure here just excludes the
-            // face rather than panicking in a pure query.
-            Some(t) => match t.apply_plane(&face.plane) {
-                Ok(p) => p,
-                Err(_) => continue,
-            },
-            None => face.plane,
-        };
-        if face_plane.normal().dot(normal).abs() < 1.0 - tol::NORMAL_DIRECTION {
-            continue;
-        }
-        let map = |p: Point3| pose.map_or(p, |t| t.apply_point(p));
-        let face_outer: Vec<Point3> = object.loop_positions(face.outer_loop).map(map).collect();
-        if face_outer
-            .iter()
-            .any(|&p| plane.signed_distance(p).abs() > tol::PLANE_DIST)
-        {
-            continue;
-        }
-        let face_holes: Vec<Vec<Point3>> = face
-            .inner_loops
-            .iter()
-            .map(|&l| object.loop_positions(l).map(map).collect())
-            .collect();
-        if crate::geom2d::loops_overlap(outer, holes, &face_outer, &face_holes, normal) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Map a per-Object [`HistoryError`] onto a [`DocumentError`]. Empty-stack cases

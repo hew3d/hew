@@ -490,12 +490,23 @@ struct StateProof {
 }
 
 /// One face's fingerprint: outer ring and hole rings as position cycles,
-/// plus the face's stored plane.
+/// plus the face's stored plane and analytic surface.
+///
+/// `surface` is not part of the geometric MATCH (two faces of identical shape
+/// fingerprint alike regardless of their `SurfaceRef`), but it IS restored on
+/// alignment: `Face::surface` decides push/pull routing (a facet claiming a
+/// cylinder offsets the whole wall; a bare facet translates-and-builds), so a
+/// replay that re-created the face — a re-done `extrude_sub_face` boss whose
+/// stamp derives from a now-dropped `Edge::curve`, say — must come back
+/// carrying the surface the recorded state had, or the NEXT op reroutes and
+/// diverges. Restoring it is the same "the aligned state IS the accepted
+/// state" principle the plane/position restore already applies.
 #[derive(Debug, Clone)]
 struct FaceProof {
     outer: Vec<Point3>,
     holes: Vec<Vec<Point3>>,
     plane: crate::math::Plane,
+    surface: Option<crate::topo::SurfaceRef>,
 }
 
 /// The cyclic shift under which `a[i]` matches `b[(i + shift) % n]` within
@@ -526,6 +537,7 @@ impl StateProof {
                         .map(|&il| object.loop_positions(il).collect())
                         .collect(),
                     plane: face.plane,
+                    surface: face.surface,
                 })
                 .collect(),
         }
@@ -621,8 +633,12 @@ impl StateProof {
             }
             true
         };
-        let mut face_plane: Vec<(crate::ids::FaceId, crate::math::Plane)> =
-            Vec::with_capacity(live.len());
+        #[allow(clippy::type_complexity)]
+        let mut face_align: Vec<(
+            crate::ids::FaceId,
+            crate::math::Plane,
+            Option<crate::topo::SurfaceRef>,
+        )> = Vec::with_capacity(live.len());
         for lf in &live {
             let mut matched = false;
             for (k, rec) in self.faces.iter().enumerate() {
@@ -669,7 +685,7 @@ impl StateProof {
                         return false;
                     }
                 }
-                face_plane.push((lf.id, rec.plane));
+                face_align.push((lf.id, rec.plane, rec.surface));
                 taken[k] = true;
                 matched = true;
                 break;
@@ -683,8 +699,11 @@ impl StateProof {
         for (v, target) in &vertex_target {
             candidate.vertices[v].position = *target;
         }
-        for (f, plane) in face_plane {
+        for (f, plane, surface) in face_align {
             candidate.faces[f].plane = plane;
+            // Restore the routing-relevant analytic surface too (see FaceProof):
+            // the aligned face IS the recorded face, cylinder claim included.
+            candidate.faces[f].surface = surface;
         }
         // The aligned state is the recorded accepted state; hold it to the
         // full validator anyway (typed refusal beats trusting the alignment).

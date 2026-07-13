@@ -1008,8 +1008,8 @@ fn patch_manifest(bytes: &[u8], patch: impl FnOnce(&mut serde_json::Value)) -> V
 /// each consumed region's exclusive scaffolding is deleted on load (shared
 /// edges with surviving regions survive, exactly as at extrusion), an
 /// emptied sketch ceases to exist, and the index itself is then discarded
-/// — the gate stays derived from the standing solids. `footprints` and
-/// `source` are ignored outright. Without this, every previously extruded
+/// — consumption is becoming, so nothing about re-extrusion is stored.
+/// `footprints` and `source` are ignored outright. Without this, every previously extruded
 /// outline would resurrect as live, drawable geometry at load — the exact
 /// zombie the model exists to kill.
 #[test]

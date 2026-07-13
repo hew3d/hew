@@ -940,7 +940,7 @@ impl Object {
         // wall's radius", never "translate this one facet"
         // (docs/design/true-curves.md §4.6).
         if self.faces[face].surface.is_some() {
-            return self.offset_cylinder_wall(face, distance);
+            return self.offset_cylinder_wall(face, distance, guards);
         }
 
         let face_normal = self.faces[face].plane.normal();
@@ -1386,12 +1386,27 @@ impl Object {
     /// orientation preserved) and the wall's surface references map to the
     /// new radius — never dropped, the wall is still exactly that cylinder.
     ///
+    /// The interpenetration (all-pairs improper contact) and engulfment
+    /// (parity ray-cast) sweeps are best-effort obstruction heuristics: they
+    /// run only under [`GuardMode::Enforced`] and are SKIPPED on history
+    /// replay (rule 9), exactly like [`push_pull`](Object::push_pull)'s
+    /// translate-and-build guards and [`extrude_sub_face`]'s obstruction ray.
+    /// A replayed inverse/redo re-enters a state the kernel already accepted;
+    /// the [`History`](crate::history::History) verifies it against the
+    /// recorded fingerprint, so running these heuristics there could refuse
+    /// the exact inverse of a push the forward path accepted (they read
+    /// geometry around the swept volume, which an intervening edit can make
+    /// them misjudge). The structural checks — planarity, hole disjointness,
+    /// `refit_face_plane`, and the always-on `validate()` backstop — run in
+    /// every mode.
+    ///
     /// Strong guarantee: on `Err` the object is untouched (clone, mutate,
     /// validate, swap).
     fn offset_cylinder_wall(
         &mut self,
         face: FaceId,
         distance: f64,
+        guards: GuardMode,
     ) -> Result<PushPullReport, PushPullError> {
         let surface = self.faces[face]
             .surface
@@ -1517,113 +1532,46 @@ impl Object {
             }
         }
 
-        // Interpenetration guard (DEVELOPMENT.md rule 4;
-        // docs/design/true-curves.md §4.6, review follow-up F2). The radial
-        // map can move the wall a long way, and everything above only
-        // re-validates faces sharing a moved vertex — a grown wall passing
-        // straight through geometry it shares nothing with (another shell,
-        // or a distant feature of this one) would come out planar,
-        // twin-consistent, and invisible to the structural validator. Every
-        // reshaped face is therefore tested against every other face of the
-        // object — same shell or not — and any contact that is not along
-        // elements the two faces legitimately share (common vertices, twin
-        // edges) refuses the offset. Mirrors the stretch-mode guard of the
-        // generalized push/pull so the two unify at integration.
-        let affected_set: std::collections::BTreeSet<FaceId> = affected.iter().copied().collect();
-        let all_faces: Vec<FaceId> = obj.faces.keys().collect();
-        for &t in &affected {
-            for &g in &all_faces {
-                if g == t || (affected_set.contains(&g) && g <= t) {
-                    continue;
-                }
-                if faces_improperly_contact(&obj, t, g) {
-                    return Err(PushPullError::NonManifoldResult);
-                }
-            }
-        }
-
-        // Engulfment guard: contact detection cannot see a shell the wall
-        // sweeps cleanly PAST — afterwards nothing touches anything, and
-        // the entombed (or newly exposed) shell still validates. Refuse if
-        // any vertex of a non-moving shell changes its point-in-solid
-        // classification against the moving shells' faces between the pre-
-        // and post-offset positions (parity ray-cast, the boolean
-        // classifier's mechanism — exact for every neighbor motion class:
-        // radial, translating, and pivoting alike).
-        //
-        // Why testing VERTICES suffices (completeness): the volume the
-        // offset claims (grow) or vacates (shrink) is bounded by the moving
-        // shells' OLD boundary and their NEW boundary. A non-moving shell
-        // that intersects that volume either
-        //   (a) crosses the OLD boundary — impossible for valid input:
-        //       those were real faces of this object, and the improper
-        //       face contact that crossing implies cannot have been
-        //       present before the call;
-        //   (b) crosses the NEW boundary — a transversal intersection of
-        //       two planar faces is a line segment whose endpoints cross a
-        //       boundary edge of one face inside the other, exactly what
-        //       the all-pairs sweep above refuses (coplanar overlap is
-        //       probed per boundary-cut interval there too); or
-        //   (c) touches neither boundary — then it lies ENTIRELY inside
-        //       the swept volume, every one of its vertices changed
-        //       classification, and this test sees the change.
-        // A shell therefore cannot straddle the swept volume "between
-        // vertices": straddling means crossing its boundary, which is case
-        // (a) or (b). Same-shell geometry needs no vertex test: anything
-        // connected to the wall either moved with it or is held by the
-        // boundary/hole checks above (e.g. a cap imprint orphaned by a
-        // shrink refuses in `refit_face_plane`).
-        let moving_shells: Vec<crate::ids::ShellId> = obj
-            .shells
-            .iter()
-            .filter(|(_, sh)| sh.faces.iter().any(|f| affected_set.contains(f)))
-            .map(|(id, _)| id)
-            .collect();
-        let shell_faces = |o: &Object| -> Vec<ShellFace> {
-            moving_shells
-                .iter()
-                .flat_map(|&sid| o.shells[sid].faces.iter().copied())
-                .map(|fid| {
-                    let f = &o.faces[fid];
-                    (
-                        f.plane,
-                        o.loop_positions(f.outer_loop).collect(),
-                        f.inner_loops
-                            .iter()
-                            .map(|&il| o.loop_positions(il).collect())
-                            .collect(),
-                    )
-                })
-                .collect()
-        };
-        // `obj` is a clone of `self`, so ids coincide; `self` still holds
-        // the pre-offset geometry (strong guarantee: nothing swapped yet).
-        let old_faces = shell_faces(self);
-        let new_faces = shell_faces(&obj);
-        for (sid, sh) in &obj.shells {
-            if moving_shells.contains(&sid) {
-                continue;
-            }
-            let verts: std::collections::BTreeSet<VertexId> = sh
-                .faces
-                .iter()
-                .flat_map(|&fid| {
-                    let f = &obj.faces[fid];
-                    std::iter::once(f.outer_loop)
-                        .chain(f.inner_loops.iter().copied())
-                        .collect::<Vec<_>>()
-                })
-                .flat_map(|lid| obj.loop_half_edges(lid).collect::<Vec<_>>())
-                .map(|h| obj.half_edges[h].origin)
-                .collect();
-            for &vid in &verts {
-                // Non-moving shells never move: the position is identical
-                // in `self` and `obj`.
-                let p = obj.vertices[vid].position;
-                if point_in_shell_faces(&old_faces, p) != point_in_shell_faces(&new_faces, p) {
-                    return Err(PushPullError::NonManifoldResult);
+        // Interpenetration + engulfment guards (DEVELOPMENT.md rule 4;
+        // docs/design/true-curves.md §4.6, review follow-up F2). Best-effort
+        // obstruction heuristics: they read geometry AROUND the swept volume,
+        // so on history replay (GuardMode not Enforced, rule 9) they are
+        // skipped — the recorded-state fingerprint supersedes them, and a
+        // whole-wall push's exact inverse (an equal-and-opposite offset that
+        // re-enters an accepted state) must never be refused by a guard that
+        // reads a shape the forward pass already validated. The structural
+        // checks above and the `validate()` backstop below still run.
+        if guards == GuardMode::Enforced {
+            // The radial map can move the wall a long way, and everything
+            // above only re-validates faces sharing a moved vertex — a grown
+            // wall passing straight through geometry it shares nothing with
+            // (another shell, or a distant feature of this one) would come out
+            // planar, twin-consistent, and invisible to the structural
+            // validator. Every reshaped face is therefore tested against every
+            // other face of the object — same shell or not — and any contact
+            // that is not along elements the two faces legitimately share
+            // (common vertices, twin edges) refuses the offset. Mirrors the
+            // stretch-mode guard of the generalized push/pull so the two unify
+            // at integration.
+            let affected_set: std::collections::BTreeSet<FaceId> =
+                affected.iter().copied().collect();
+            let all_faces: Vec<FaceId> = obj.faces.keys().collect();
+            for &t in &affected {
+                for &g in &all_faces {
+                    if g == t || (affected_set.contains(&g) && g <= t) {
+                        continue;
+                    }
+                    if faces_improperly_contact(&obj, t, g) {
+                        return Err(PushPullError::NonManifoldResult);
+                    }
                 }
             }
+            // Engulfment guard: catches a shell the wall sweeps cleanly PAST
+            // (afterwards nothing touches, and the entombed/newly-exposed shell
+            // still validates) — extracted so both guards share one Enforced
+            // gate. Uses `self` (pre-offset geometry, not yet swapped) and
+            // `obj` (post-offset).
+            self.offset_engulfment_guard(&obj, &affected_set)?;
         }
 
         // The wall still is exactly that cylinder, one radius over: map the
@@ -1656,6 +1604,99 @@ impl Object {
             // same facet; it builds no walls, so no recorded UnbuildPushPull.
             requires_unbuild_inverse: false,
         })
+    }
+
+    /// The engulfment half of [`offset_cylinder_wall`](Object::offset_cylinder_wall)'s
+    /// obstruction guard (best-effort, GuardMode::Enforced only — see that
+    /// method's contract for why replay skips it). Contact detection cannot
+    /// see a shell the wall sweeps cleanly PAST — afterwards nothing touches
+    /// anything, and the entombed (or newly exposed) shell still validates.
+    /// Refuse if any vertex of a non-moving shell changes its point-in-solid
+    /// classification against the moving shells' faces between the pre- and
+    /// post-offset positions (parity ray-cast, the boolean classifier's
+    /// mechanism — exact for every neighbor motion class: radial, translating,
+    /// and pivoting alike).
+    ///
+    /// Why testing VERTICES suffices (completeness): the volume the offset
+    /// claims (grow) or vacates (shrink) is bounded by the moving shells' OLD
+    /// boundary and their NEW boundary. A non-moving shell that intersects
+    /// that volume either
+    ///   (a) crosses the OLD boundary — impossible for valid input: those were
+    ///       real faces of this object, and the improper face contact that
+    ///       crossing implies cannot have been present before the call;
+    ///   (b) crosses the NEW boundary — a transversal intersection of two
+    ///       planar faces is a line segment whose endpoints cross a boundary
+    ///       edge of one face inside the other, exactly what the all-pairs
+    ///       sweep in the caller refuses (coplanar overlap is probed per
+    ///       boundary-cut interval there too); or
+    ///   (c) touches neither boundary — then it lies ENTIRELY inside the swept
+    ///       volume, every one of its vertices changed classification, and
+    ///       this test sees the change.
+    /// A shell therefore cannot straddle the swept volume "between vertices":
+    /// straddling means crossing its boundary, which is case (a) or (b).
+    /// Same-shell geometry needs no vertex test: anything connected to the
+    /// wall either moved with it or is held by the boundary/hole checks in the
+    /// caller (e.g. a cap imprint orphaned by a shrink refuses in
+    /// `refit_face_plane`).
+    ///
+    /// `self` holds the pre-offset geometry; `obj` (a clone with coincident
+    /// ids) holds the post-offset geometry.
+    fn offset_engulfment_guard(
+        &self,
+        obj: &Object,
+        affected_set: &std::collections::BTreeSet<FaceId>,
+    ) -> Result<(), PushPullError> {
+        let moving_shells: Vec<crate::ids::ShellId> = obj
+            .shells
+            .iter()
+            .filter(|(_, sh)| sh.faces.iter().any(|f| affected_set.contains(f)))
+            .map(|(id, _)| id)
+            .collect();
+        let shell_faces = |o: &Object| -> Vec<ShellFace> {
+            moving_shells
+                .iter()
+                .flat_map(|&sid| o.shells[sid].faces.iter().copied())
+                .map(|fid| {
+                    let f = &o.faces[fid];
+                    (
+                        f.plane,
+                        o.loop_positions(f.outer_loop).collect(),
+                        f.inner_loops
+                            .iter()
+                            .map(|&il| o.loop_positions(il).collect())
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        let old_faces = shell_faces(self);
+        let new_faces = shell_faces(obj);
+        for (sid, sh) in &obj.shells {
+            if moving_shells.contains(&sid) {
+                continue;
+            }
+            let verts: std::collections::BTreeSet<VertexId> = sh
+                .faces
+                .iter()
+                .flat_map(|&fid| {
+                    let f = &obj.faces[fid];
+                    std::iter::once(f.outer_loop)
+                        .chain(f.inner_loops.iter().copied())
+                        .collect::<Vec<_>>()
+                })
+                .flat_map(|lid| obj.loop_half_edges(lid).collect::<Vec<_>>())
+                .map(|h| obj.half_edges[h].origin)
+                .collect();
+            for &vid in &verts {
+                // Non-moving shells never move: the position is identical in
+                // `self` and `obj`.
+                let p = obj.vertices[vid].position;
+                if point_in_shell_faces(&old_faces, p) != point_in_shell_faces(&new_faces, p) {
+                    return Err(PushPullError::NonManifoldResult);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Sticky rule inside an Object: imprints a closed `loop_path` strictly
@@ -2065,6 +2106,14 @@ impl Object {
     /// parent's hole. Positive embosses a boss; negative recesses. Reversed by
     /// [`collapse_sub_face`]; handle-stable (the sub-face keeps its id).
     ///
+    /// When the sub-face boundary is a clean circle chain (every boundary edge
+    /// a full chord of one imprinted circle — [`Edge::curve`](crate::topo::Edge::curve)),
+    /// the raised walls are stamped [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef)
+    /// so the boss shades smooth and a wall push offsets its radius, exactly as
+    /// a from-extrusion cylinder does. A mixed or partial loop stamps nothing
+    /// (map-or-drop). The raised sub-face itself drops any inherited claim (it
+    /// leaves its chord plane).
+    ///
     /// # Errors
     /// See [`PushPullError`]; [`PushPullError::NotASubFace`] if `sub_face` is not
     /// a flat imprinted sub-face. All leave the object untouched.
@@ -2108,6 +2157,103 @@ impl Object {
         let n = h_sub.len();
         let normal = self.faces[sub_face].plane.normal();
         let sweep = normal * distance;
+
+        // The boss side walls are chord facets of the cylinder swept from the
+        // sub-face's boundary circle — the pull-UP mirror of `from_extrusion`'s
+        // `wall_surface` and of the push-THROUGH tunnel stamping (playtest fix
+        // C3). Stamp them `SurfaceRef::Cylinder` iff the sub-face boundary is a
+        // clean, WHOLE circle ring, tested in two parts:
+        //   (1) every boundary edge carries an `Edge::curve` claim (a chord of
+        //       an imprinted circle) and they agree on center and radius; and
+        //   (2) the ring is a genuine full circle of short chord facets — the
+        //       vertices advance MONOTONICALLY around the center (winding once)
+        //       in near-uniform angular steps (heterogeneity gate), AND the
+        //       ring has at least [`MIN_CIRCLE_SEGMENTS`] facets (absolute
+        //       density gate) so no facet is a coarse secant.
+        // (2) is load-bearing in two ways. The heterogeneity gate rejects an
+        // arc closed by a straight chord (20 short arc-chords 0→300° + one 60°
+        // closing secant): all endpoints lie on the circle so every edge can
+        // carry the SAME claim, yet the long closing chord is a flat wall, not
+        // a cylinder facet. The density gate rejects a homogeneous COARSE ring
+        // — an equilateral triangle or a skip-connected 12-gon (every other
+        // point of a 24-gon) whose steps are uniform but far too large to be
+        // facets; the relative uniformity test alone cannot see these, since a
+        // regular n-gon's steps are all exactly 2π/n. Stamping either would
+        // sweep a secant into a "cylinder wall": map-or-drop soundness break
+        // (stamp-wrong is worse than don't-stamp). A rectangle, a partial loop,
+        // or a split fragment that dropped its claim fails (1) and also stamps
+        // nothing. The axis is the sweep direction through the circle's center;
+        // angular/axial extent derive from the facets (docs/design/true-curves.md
+        // §4.6, clause `extrude_sub_face`).
+        let boss_surface: Option<crate::topo::SurfaceRef> = {
+            let mut geom: Option<crate::sketch::CurveGeom> = None;
+            let mut clean = true;
+            for &h in &h_sub {
+                match self.edges[self.half_edges[h].edge].curve {
+                    Some(g) => match geom {
+                        None => geom = Some(g),
+                        Some(g0) => {
+                            if !g0.center.approx_eq(g.center, tol::POINT_MERGE)
+                                || (g0.radius - g.radius).abs() > tol::POINT_MERGE
+                            {
+                                clean = false;
+                                break;
+                            }
+                        }
+                    },
+                    None => {
+                        clean = false;
+                        break;
+                    }
+                }
+            }
+            // Part (2): the boundary vertices wind once around the center in
+            // near-uniform steps (a full ring of short chord facets).
+            let full_circle_ring = |g: crate::sketch::CurveGeom| -> bool {
+                let (u, v) = crate::geom2d::plane_axes(normal);
+                let angle = |h: HalfEdgeId| -> f64 {
+                    let d = self.vertices[self.half_edges[h].origin].position - g.center;
+                    d.dot(v).atan2(d.dot(u))
+                };
+                // Wrap an angular delta into (-π, π]: the shortest signed step
+                // to the angularly adjacent vertex.
+                let wrap = |mut a: f64| -> f64 {
+                    let two_pi = std::f64::consts::TAU;
+                    while a <= -std::f64::consts::PI {
+                        a += two_pi;
+                    }
+                    while a > std::f64::consts::PI {
+                        a -= two_pi;
+                    }
+                    a
+                };
+                let steps: Vec<f64> = (0..n)
+                    .map(|k| wrap(angle(h_sub[(k + 1) % n]) - angle(h_sub[k])))
+                    .collect();
+                // Monotonic: a closed loop whose angle only ever advances one
+                // way winds exactly once around the center (sum = ±2π), so no
+                // separate winding-sum check is needed.
+                let monotonic = steps.iter().all(|&s| s > 0.0) || steps.iter().all(|&s| s < 0.0);
+                // Uniform: a regular ring's steps are all 2π/n; reject any that
+                // exceeds twice that (a secant, or a mixed arc+chord loop).
+                let cap = 2.0 * std::f64::consts::TAU / n as f64;
+                let uniform = steps.iter().all(|&s| s.abs() <= cap);
+                // Dense enough: an ABSOLUTE facet-count floor, not relative to
+                // the loop's own count — a regular n-gon passes the uniformity
+                // test for any n, so a coarse triangle (n = 3) or skip-12
+                // (n = 12) needs this gate to be rejected. Every real
+                // tool-produced circle clears the floor (see MIN_CIRCLE_SEGMENTS).
+                let dense = n >= crate::sketch::MIN_CIRCLE_SEGMENTS;
+                monotonic && uniform && dense
+            };
+            geom.filter(|&g| clean && full_circle_ring(g)).map(|g| {
+                crate::topo::SurfaceRef::Cylinder {
+                    axis_point: g.center,
+                    axis: normal,
+                    radius: g.radius,
+                }
+            })
+        };
 
         // Obstruction guard: unlike `push_pull`, an extrusion has no
         // push-through semantics — a recess deeper than the material under
@@ -2239,11 +2385,15 @@ impl Object {
                 outer_loop: wloop,
                 inner_loops: Vec::new(),
                 plane,
-                // Freshly generated push/pull side walls take the default
-                // material, no UV frame, and no analytic surface.
+                // Freshly generated boss walls take the default material and no
+                // UV frame. `surface` carries the swept cylinder when the
+                // sub-face boundary was a clean circle chain (computed above),
+                // else `None` — so bossing an imprinted circle raises a wall
+                // that shades smooth and whose push offsets the radius, while a
+                // rectangular or mixed loop stays flat facets (map-or-drop).
                 material: None,
                 uv_frame: None,
-                surface: None,
+                surface: boss_surface,
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);

@@ -1332,8 +1332,8 @@ export class SceneRenderer {
   /**
    * Build translucent fill meshes for one sketch's closed regions. For M1
    * rectangles each boundary is a convex polygon, so a triangle fan from
-   * vertex 0 is correct. Regions the standing-solid gate blocks still fill
-   * and pick — attempting to extrude one surfaces the refusal message.
+   * vertex 0 is correct. Every closed region fills and picks — all of them
+   * extrude (interpenetration is allowed everywhere in Hew).
    */
   private _buildRegionFills(sketchHandle: bigint): void {
     const regionHandles = this.wasmScene.sketch_regions(sketchHandle)

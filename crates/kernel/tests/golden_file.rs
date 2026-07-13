@@ -141,9 +141,9 @@ fn build_representative_doc() -> Document {
     let sd = doc.add_sketch(ground);
     {
         let sk = doc.sketch_mut(sd).unwrap();
-        // Rectangle 1: to be consumed by extrusion. Placed on free ground —
-        // (0,0)-(1,1) is obj_a's base, and the standing-solid gate
-        // (docs/design/sketch-solid-model.md §4D) refuses redrawing it.
+        // Rectangle 1: to be consumed by extrusion. Placed at (-2,0)-(-1,1),
+        // clear of obj_a's base — its exact position is incidental to this
+        // golden, which fixes the on-disk bytes.
         for (a, b) in [
             (Point3::new(-2.0, 0.0, 0.0), Point3::new(-1.0, 0.0, 0.0)),
             (Point3::new(-1.0, 0.0, 0.0), Point3::new(-1.0, 1.0, 0.0)),

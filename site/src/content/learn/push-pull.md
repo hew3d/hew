@@ -22,7 +22,7 @@ While dragging, you can rest the cursor on any precise snap point in the scene (
 
 Push/pulling a closed sketch region creates a brand-new **Object** — a watertight solid. This is the only "create geometry" step in Hew; there is no separate group-making or solid-making command. The outline you drew becomes the solid's base face and leaves the sketch: a sketch is the larval form of a solid, and once it extrudes there is no separate 2D copy lying around. Undo reverses the whole step — the solid disappears and the outline returns, ready to re-extrude.
 
-While a solid stands somewhere, that ground is taken: a region drawn over any visible solid's base (or any face lying in the sketch's plane) refuses to extrude — "A standing solid already occupies this area" — so you can't accidentally stack a second solid through the first. Draw beside it, or move or delete the solid first. The claim is the solid itself: move the solid and the claim moves with it; hide or delete it and the ground frees immediately.
+Solids interpenetrate freely in Hew, so a region drawn over a standing solid extrudes into a second solid coinciding with the first — nothing stops you overlapping or stacking solids. Merging two into one is always a separate, explicit step (a boolean union). If you overlapped something by accident, undo, or move one of the solids apart.
 
 ## Reshaping a solid
 

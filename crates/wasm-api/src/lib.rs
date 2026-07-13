@@ -1415,11 +1415,10 @@ impl Scene {
         Ok(out)
     }
 
-    /// Handles of the sketch's current closed regions — ALL of them,
-    /// including any the standing-solid gate would refuse to extrude
-    /// (`Document::region_blocker`): a blocked region still renders and
-    /// picks, so attempting to extrude it surfaces the refusal instead of
-    /// the region being silently unselectable.
+    /// Handles of the sketch's current closed regions — every closed region
+    /// extrudes (Hew's solids interpenetrate freely, so re-extruding occupied
+    /// ground is allowed like any other overlap), so this is exactly
+    /// `Document::extrudable_regions`.
     pub fn sketch_regions(&self, sketch: u64) -> Result<Vec<u64>, ApiError> {
         let sid = sketch_id(sketch);
         let s = self
@@ -2686,10 +2685,10 @@ impl Scene {
     /// smallest-area region whose material contains the hit point (nested
     /// regions resolve to the innermost — the same rule the push/pull tool
     /// always used, now kernel-side and multi-sketch). EVERY closed region
-    /// participates, including ones the standing-solid gate would refuse —
-    /// attempting to extrude a blocked pick is what surfaces the refusal.
-    /// Hidden sketches never match (and an extruded region cannot: its
-    /// scaffolding was deleted with it); `undefined` when nothing is hit.
+    /// participates and every one is extrudable (interpenetration is allowed
+    /// everywhere in Hew). Hidden sketches never match (and an extruded
+    /// region cannot: its scaffolding was deleted with it); `undefined` when
+    /// nothing is hit.
     ///
     /// The "any sketch" targeting primitive: push/pull region targeting,
     /// select-by-interior, and dock hover all resolve through this, replacing
@@ -2720,9 +2719,8 @@ impl Scene {
                 continue; // plane is behind the ray origin
             }
             let hit = origin + dir * t;
-            // ALL closed regions participate, blocked ones included — the
-            // standing-solid refusal belongs to the extrude attempt (with
-            // its message), not to a silent pick miss.
+            // ALL closed regions participate; every one is extrudable
+            // (interpenetration is allowed everywhere in Hew).
             for rid in sketch.regions().keys() {
                 if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
                     continue;
@@ -3740,8 +3738,8 @@ mod tests {
 
         let (s1, r1) = ground_unit_square(&mut scene);
         let a = scene.extrude_region(s1, r1, 2.0).unwrap();
-        // b extrudes on free ground (the standing-solid gate refuses a's
-        // base) and moves to (0.5, 0.5) so it overlaps a, then union.
+        // b is drawn offset and moved to (0.5, 0.5) so it overlaps a, then
+        // union.
         let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let b = scene.extrude_region(s2, r2, 1.0).unwrap();
         scene
@@ -4040,10 +4038,9 @@ mod tests {
         ground_unit_square_at(scene, 0.0, 0.0)
     }
 
-    /// [`ground_unit_square`] at an (x, y) offset. Tests that need a second
-    /// solid draw it on FREE ground and move it into place — the
-    /// standing-solid gate (docs/design/sketch-solid-model.md §4D) refuses
-    /// extruding a region over a visible solid's base.
+    /// [`ground_unit_square`] at an (x, y) offset — for tests that need a
+    /// second solid drawn clear of the first (its position is otherwise
+    /// incidental; overlapping regions extrude directly now).
     fn ground_unit_square_at(scene: &mut Scene, x: f64, y: f64) -> (u64, u64) {
         let sketch = scene.begin_ground_sketch();
         let corners = [
@@ -4317,8 +4314,7 @@ mod tests {
         let mut scene = Scene::new();
         let (s1, r1) = ground_unit_square(&mut scene);
         let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
-        // The second box extrudes on free ground and moves into coincidence
-        // (extruding over o1's base is refused by the standing-solid gate).
+        // The second box is drawn offset and moved into coincidence with o1.
         let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
         scene

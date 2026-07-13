@@ -12,9 +12,7 @@
 //! format-compatible, topology-derived order that no longer depends on slot
 //! allocation. Set DUMP_DIR to write both containers for diffing on failure.
 
-use kernel::{Document, KernelOp, NodeId, ObjectId, Plane, Point3, Transform, Vec3};
-
-const GATE_CLEARANCE_Y: f64 = 1000.0;
+use kernel::{Document, KernelOp, NodeId, ObjectId, Plane, Point3, Vec3};
 
 fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> ObjectId {
     let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
@@ -23,12 +21,11 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
     doc.begin_sketch_gesture(s).expect("gesture opens");
     {
         let sk = doc.sketch_mut(s).expect("sketch exists");
-        let yo = y + GATE_CLEARANCE_Y;
         let p = [
-            Point3::new(x, yo, 0.0),
-            Point3::new(x + dx, yo, 0.0),
-            Point3::new(x + dx, yo + dy, 0.0),
-            Point3::new(x, yo + dy, 0.0),
+            Point3::new(x, y, 0.0),
+            Point3::new(x + dx, y, 0.0),
+            Point3::new(x + dx, y + dy, 0.0),
+            Point3::new(x, y + dy, 0.0),
         ];
         for k in 0..4 {
             sk.add_segment(p[k], p[(k + 1) % 4]).expect("segment adds");
@@ -42,18 +39,10 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
         .keys()
         .next()
         .expect("one region");
+    // The two seed boxes are coincident by design; with the standing-solid
+    // gate dropped, coincident regions extrude directly (interpenetration is
+    // allowed everywhere in Hew).
     let (oid, _) = doc.extrude_region(s, region, h).expect("box extrudes");
-    // The two seed boxes are coincident, which the Model D standing-solid
-    // gate refuses to extrude one atop another. Extrude clear along +Y (past
-    // the already-placed, already-moved-back box) then translate back into
-    // place — an exact-enough baked translation; this is a byte-stability
-    // (save1 == save2) test, so the consistent translation does not affect
-    // what it asserts.
-    doc.transform_object(
-        oid,
-        &Transform::translation(Vec3::new(0.0, -GATE_CLEARANCE_Y, 0.0)),
-    )
-    .expect("translate box into place");
     oid
 }
 

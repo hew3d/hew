@@ -167,6 +167,24 @@ each grow a wall — but the edge-into-hole *push* is not specifically handled;
 translate-and-build either builds a valid result or refuses typed. Do not
 over-invest; revisit with the curves work.
 
+## Known limitation: arc-wall offset splays pinned flat neighbours
+
+Whole-wall radial offset of an **arc** wall (the curves-branch `SurfaceRef`
+path — docs/design/true-curves.md §4.6 clause 3), performed **after** an
+adjacent flat face has been pulled or otherwise pinned, splays the flat
+neighbours into a **fan** rather than keeping them parallel. The move is
+over-constrained: as the radius changes, the arc's two endpoints travel
+along **non-parallel radial directions**, while the pinned face fixes the
+opposite side — so a neighbour bridging the two cannot both stay planar and
+keep its original orientation. The offset resolves this by **pivoting** the
+neighbour about its span (two parallel edges always span a plane), which
+preserves watertightness; the visible result is the fan. This is the
+correct watertight outcome of an over-constrained input, not a bug.
+
+**Workaround:** grow the arc to its final radius **before** extruding or
+pinning the adjacent flat faces, so those neighbours are built against the
+radius they will keep. No fix is intended.
+
 ## Test coverage
 
 `crates/kernel/tests/op_specs.rs` — the "flat-face push/pull

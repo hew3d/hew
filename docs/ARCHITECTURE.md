@@ -153,20 +153,16 @@ and removes the solid in the same atomic step. "What you see is what you
 have" is the invariant this buys: every entity in the document is either
 visible geometry or nothing.
 
-Re-extruding occupied ground is refused by a gate *derived live* from the
-scene, never stored: a region refuses to extrude iff its material
-overlaps a coplanar face of a visible solid on the sketch's plane (shared
-boundary alone is not overlap, so adjacent construction stays free).
-Because the claim is the solid's own face, it is kinematic and global by
-construction — it moves when the solid moves, dies when the solid dies or
-hides, applies to copies and component instances (through their poses)
-exactly as to originals, and holds across every sketch on the plane, so
-no fresh sketch, split, merge, or redraw can launder a standing solid's
-base into extrudability. Boolean, slice, and push-through results claim
-precisely the area their actual geometry stands on, because there is no
-inherited bookkeeping to diverge from reality. Files store none of this:
-the `.hew` format carries no claim data at v11, and the stored claims of
-older versions are ignored on load (HEW_FILE_FORMAT.md).
+Re-extruding occupied ground is allowed. Hew's solids interpenetrate
+freely, so drawing a region over a visible solid's base and extruding it
+simply produces a second, coincident solid — exactly as any other overlap
+does. An earlier design refused this with a derived "standing-solid gate"
+(a region overlapping a visible solid's coplanar face would not extrude);
+it was dropped as inconsistent with the interpenetration model and
+confusing in practice — it also blocked legitimate work, such as extruding
+a larger coaxial solid over a smaller one. Nothing about re-extrusion is
+stored or derived: the `.hew` format carries no claim data at v11, and the
+stored claims of older versions are ignored on load (HEW_FILE_FORMAT.md).
 
 Within a Sketch, the user-facing units are derived, identity-stable
 sub-entities, mirroring how regions already work: **islands** (connected

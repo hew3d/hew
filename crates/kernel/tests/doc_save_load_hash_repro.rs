@@ -38,10 +38,9 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
 fn save_load_is_a_fixed_point_after_pushpull() {
     let mut doc = Document::new();
     doc.set_torture_mode(true);
-    // The boxes sit on the same plane but apart: the standing-solid gate
-    // (docs/design/sketch-solid-model.md §4D) refuses the coincident
-    // placement the original fuzz case used, and the overlap was always
-    // incidental to what this repro pins (the push/pull save/load hash).
+    // The boxes sit on the same plane but apart; the overlap of the original
+    // fuzz case was always incidental to what this repro pins (the push/pull
+    // save/load hash).
     add_box(&mut doc, 0.0, 0.0, 1.0, 1.2150904306205195, 0.5);
     add_box(&mut doc, 2.0, 0.0, 1.0, 1.0, 0.5);
 

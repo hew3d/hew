@@ -205,9 +205,9 @@ A v11 reader treats them differently on an older file:
   on and never ignored (reject-not-repair; deleting sketch geometry on
   the say-so of a retired field would be silent repair).
 - **`objects[].footprints`** and **`objects[].source`** are ignored
-  entirely: they carried the stored claims the derived gate replaces. They
-  are not validated, not resolved, and change nothing about the loaded
-  document.
+  entirely: they carried the stored consumption claims of the retired
+  footprint model. They are not validated, not resolved, and change nothing
+  about the loaded document.
 
 Note `components[]` entries never carry a `tags` field at any version —
 tags are attached to *placements* (objects, groups, instances), not to
@@ -433,11 +433,11 @@ optional `name`, and optional `tags` ().
 
 An object needs no stored relationship to the sketch it was extruded from:
 extrusion deletes the profile's scaffolding from the sketch (the outline
-became the solid's base face), and the refusal to extrude a region that
-overlaps a standing solid is derived live from the solids' own coplanar
-faces, never from file data (docs/design/sketch-solid-model.md). Older
-files' `footprints` (v9/v10) and `source` (v8) fields are ignored on load
-(see the retired-fields note in the compatibility section).
+became the solid's base face), and re-extruding occupied ground is simply
+allowed — Hew's solids interpenetrate freely, so no claim data is stored or
+derived (docs/design/sketch-solid-model.md). Older files' `footprints`
+(v9/v10) and `source` (v8) fields are ignored on load (see the
+retired-fields note in the compatibility section).
 
 Every object id appears in **exactly one** structural position: either a
 member of exactly one component definition (`components[].members`), or

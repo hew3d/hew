@@ -139,10 +139,9 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
 }
 
 /// Seeds one box by sketching a rectangle on the ground plane and extruding.
-/// `None` when the standing-solid gate refused the placement — random seed
-/// rectangles may overlap an earlier box's base, which Model D refuses by
-/// design (docs/design/sketch-solid-model.md §4D); such a seed is skipped.
-fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Option<ObjectId> {
+/// Overlapping seed rectangles extrude directly — the standing-solid gate was
+/// dropped, so interpenetration is allowed everywhere (docs/design/sketch-solid-model.md).
+fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> ObjectId {
     let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
         .expect("unit normal");
     let s = doc.add_sketch(plane);
@@ -167,11 +166,8 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Opti
         .keys()
         .next()
         .expect("rectangle closes one region");
-    match doc.extrude_region(s, region, h) {
-        Ok((oid, _)) => Some(oid),
-        Err(DocumentError::RegionBlocked { .. }) => None,
-        Err(e) => panic!("box extrudes: {e:?}"),
-    }
+    let (oid, _) = doc.extrude_region(s, region, h).expect("box extrudes");
+    oid
 }
 
 /// The one tolerated undo/redo gap surfacing through the document layer: the
