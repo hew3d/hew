@@ -247,7 +247,9 @@ export a file a slicer accepts as watertight, with no repair step.
   current WebGL2 baseline
 - **An out-of-process kernel option** for very large models
 - **Multi-user collaboration**
-- **A plugin/extension API**
+- **A plugin/extension API** — sandboxed by design: plugins are separate
+  programs reaching Hew only through a documented API (see "Plugins run
+  sandboxed" in ARCHITECTURE.md §4), never linked in-process
 - **SketchUp (`.skp`) export** — import is supported today; writing `.skp`
   is not yet
 - **Signed, notarized installers, auto-update, and a hosted web build**

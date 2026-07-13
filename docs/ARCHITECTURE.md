@@ -375,6 +375,23 @@ built around a recompute model. Hosting Hew's interaction model inside one
 of those systems would mean fighting its document model at every turn rather
 than building on it.
 
+**Plugins run sandboxed, never in-process.** Hew will grow a SketchUp-style
+plugin ecosystem, and some plugins will be proprietary — but a plugin is a
+*separate program* that reaches Hew only through the documented Plugin API,
+running in an isolated realm (a worker or separate WASM context in the web
+build, a child process under Tauri) and communicating by message-passing. No
+plugin loads into the kernel's address space or links against its libraries.
+This is binding, for three reinforcing reasons. It makes the boundary the
+[Plugin API Exception](../LICENSE-EXCEPTION) is scoped to — interaction
+*solely through the documented Plugin API* — true by construction rather than
+by policy. It keeps proprietary plugins clear of the copyleft of any GPL
+dependency embedded in the kernel: a sandboxed plugin is mere aggregation,
+not a combined work, so OpenSKP's GPLv3 (or any future GPL dependency's) does
+not reach it. And it contains an untrusted third party — a plugin can crash
+neither the kernel nor the open document, and sees only what the API hands
+it. On a WASM stack this isolation is nearly free, where a native host would
+pay for it in IPC plumbing.
+
 **A Rust core.** A half-edge mesh kernel is fundamentally pointer-graph
 manipulation, and Rust's ownership model turns the failure mode of a broken
 mutation from silent memory corruption into a compile error, which matters a
