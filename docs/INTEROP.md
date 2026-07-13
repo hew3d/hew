@@ -2,8 +2,8 @@
 
 Hew's native format is a documented, open zip container (`.hew` — see
 `docs/HEW_FILE_FORMAT.md`), used for saving and loading with no round-trip
-loss. Everything else — COLLADA, SketchUp, glTF, STL — is interop: a way to
-bring outside geometry in, or send Hew models out to other tools.
+loss. Everything else — COLLADA, SketchUp, glTF, STL, 3MF — is interop: a
+way to bring outside geometry in, or send Hew models out to other tools.
 
 ## Format matrix
 
@@ -17,7 +17,8 @@ bring outside geometry in, or send Hew models out to other tools.
 | STL | Export | Supported | Binary STL, Z-up, millimeters (the slicer convention). Export is gated on the model being watertight — a non-solid Object is flagged before writing. |
 | STL | Import | Not implemented | No `.stl` reader exists yet. |
 | OBJ | Import / Export | Not implemented | No OBJ path exists in either direction. |
-| 3MF | Import / Export | Not implemented | No work has started on 3MF. |
+| 3MF | Export | Supported | OPC container with explicit millimeter units, Z-up; one `<object>` per world object / instance member carrying its display name and per-face colors (core-spec `basematerials`). Solid-gated like STL. |
+| 3MF | Import | Not implemented | No `.3mf` reader exists yet. |
 | STEP / IGES | Import / Export | Planned, not started | Planned as a C++ sidecar using OpenCASCADE, invoked from the desktop shell and converting through the native format. A full B-rep converter is a heavyweight piece of work and is not on the near-term path. |
 
 ## Import pipeline
@@ -132,8 +133,7 @@ effectively all SketchUp content in circulation.
 - **Curved/faceted surfaces stay triangulated on glTF import.** Coplanar
   merge only reconstructs a face where the source triangles are actually
   coplanar; genuinely curved geometry keeps its triangle-fan structure.
-- **No STL, OBJ, or 3MF import**, and no OBJ or 3MF export, in either
-  direction.
+- **No STL, OBJ, or 3MF import**, and no OBJ export.
 - **STEP/IGES is planned but not started.** It is scoped as an OpenCASCADE
   sidecar process rather than an in-process crate, reflecting how much
   heavier a full B-rep converter is than a mesh importer.

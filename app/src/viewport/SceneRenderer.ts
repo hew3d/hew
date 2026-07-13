@@ -1796,8 +1796,13 @@ export class SceneRenderer {
       return out
     }
 
+    // Document ids ride along as userData strings (never bigint — exporters
+    // like GLTFExporter JSON-serialize userData into extras), so structured
+    // exporters (3MF) can look up display names without parsing node names.
     for (const [id, g] of this.objectGroups) {
-      root.add(exportMesh(g.facesMesh, `Object_${id}`))
+      const mesh = exportMesh(g.facesMesh, `Object_${id}`)
+      mesh.userData.hewObjectId = id.toString()
+      root.add(mesh)
     }
 
     // Node-per-instance with geometry shared by reference — the batch exists
@@ -1807,6 +1812,7 @@ export class SceneRenderer {
     for (const [id, rec] of this.instanceRecords) {
       const node = new THREE.Group()
       node.name = `Instance_${id}`
+      node.userData.hewInstanceId = id.toString()
       node.matrixAutoUpdate = false
       node.matrix.copy(rec.matrix)
       node.matrixWorldNeedsUpdate = true
@@ -1814,7 +1820,9 @@ export class SceneRenderer {
         const key = this._batchKeyFor(memberId, rec)
         const batch = key !== undefined ? this.batches.get(key) : undefined
         if (batch === undefined) continue
-        node.add(exportMesh(batch.mesh, `Instance_${id}_member_${memberId}`))
+        const mesh = exportMesh(batch.mesh, `Instance_${id}_member_${memberId}`)
+        mesh.userData.hewObjectId = memberId.toString()
+        node.add(mesh)
       }
       root.add(node)
     }

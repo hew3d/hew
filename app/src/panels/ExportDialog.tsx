@@ -13,15 +13,15 @@
  * the ceiling. "As modeled" exports the stored facets verbatim.
  *
  * Escape cancels, mirroring the StlExportDialog / RecoveryDialog family
- * this is styled after. STL keeps its own solid-gating confirmation
- * (StlExportDialog) as a follow-on step after this dialog's Export is
- * clicked — this dialog only decides the format and options, never the
- * actual bytes-on-disk write.
+ * this is styled after. The slicer formats (STL, 3MF) keep their own
+ * solid-gating confirmation (StlExportDialog) as a follow-on step after
+ * this dialog's Export is clicked — this dialog only decides the format
+ * and options, never the actual bytes-on-disk write.
  */
 
 import { useEffect, useCallback, useState } from 'react'
 
-export type ExportFormat = 'glb' | 'stl'
+export type ExportFormat = 'glb' | 'stl' | '3mf'
 
 /** STL curve-resolution choices: segments per full turn (0 = stored facets). */
 const STL_RESOLUTIONS: { value: number; label: string }[] = [
@@ -161,6 +161,7 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
         >
           <option value="glb">glTF binary (.glb) — Y-up, meters</option>
           <option value="stl">STL binary (.stl) — Z-up, millimeters, for 3D printing</option>
+          <option value="3mf">3MF (.3mf) — Z-up, millimeters, keeps part names and colors</option>
         </select>
 
         {format === 'stl' && (

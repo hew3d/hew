@@ -1,6 +1,6 @@
 ---
 title: "Import and export"
-description: "Hew reads SketchUp, COLLADA, and glTF, and writes manifold STL for printing plus glTF for everything else."
+description: "Hew reads SketchUp, COLLADA, and glTF, and writes manifold STL and 3MF for printing plus glTF for everything else."
 order: 14
 ---
 
@@ -11,6 +11,7 @@ order: 14
 | COLLADA (`.dae`) | ✓ | — |
 | SketchUp (`.skp`, 2017 format) | ✓ | — |
 | STL (`.stl`) | — | ✓ |
+| 3MF (`.3mf`) | — | ✓ |
 
 ## Importing
 
@@ -44,10 +45,14 @@ The export dialog has a **Curve resolution** choice for STL. Because drawn circl
 
 The export is **gated on solidity**. If any object is leaky, Hew shows *Export STL Anyway?* with the offending objects listed by name; you can export regardless, but you've been told exactly what's wrong and where. STL contains geometry only (no names, colors, or units metadata) and merges everything into one mesh.
 
+### 3MF — for multi-part printing
+
+3MF is the modern print format: **explicit millimeter units**, Z-up, and — unlike STL — real structure. Every object and component instance exports as its own named part with its face colors, so a multi-part print arrives in your slicer as separate, recognizable pieces instead of one anonymous blob. The same solidity gate as STL applies.
+
 ### glTF (GLB) — for everything else
 
 A single `.glb` file in the industry-standard format: **meters, Y-up**, with your object hierarchy, per-instance transforms, names, colors, and embedded textures. Use it for Blender, game engines, web viewers, or any modern 3D pipeline; the round trip through Blender is tested for fidelity. Only solid geometry exports; sketches and guides stay home.
 
-### What about 3MF, STEP, or `.skp` export?
+### What about STEP or `.skp` export?
 
-3MF (a modern print format with units and per-object color) is next on the roadmap; STEP/IGES interchange and `.skp` export are planned further out. For today: STL to print, glTF to interchange, `.hew` to keep working.
+STEP/IGES interchange and `.skp` export are planned further out. For today: STL or 3MF to print, glTF to interchange, `.hew` to keep working.

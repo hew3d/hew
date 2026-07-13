@@ -31,6 +31,7 @@ import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
 import * as inputRecorder from '../recording/inputRecorder'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { exportSceneToStl, type StlBuildResult } from '../io/exporters/stlExport'
+import { exportSceneTo3mf, type ThreeMfBuildResult } from '../io/exporters/threeMfExport'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
 import { CircleTool } from '../tools/CircleTool'
@@ -299,6 +300,12 @@ export interface ViewportApi {
    * no solids.
    */
   exportStl: (segmentsPerTurn: number) => Promise<StlBuildResult | null>
+  /**
+   * Serialize the current solid geometry (objects + instances) to a 3MF
+   * container — millimeter unit, Z-up, one named colored mesh per part.
+   * Resolves null when the model has no solids.
+   */
+  export3mf: () => Promise<ThreeMfBuildResult | null>
 }
 
 /** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
@@ -1524,12 +1531,16 @@ export default function Viewport({
       return exportSceneToStl(wasmScene, segmentsPerTurn)
     }
 
+    async function export3mf(): Promise<ThreeMfBuildResult | null> {
+      return exportSceneTo3mf(sceneRenderer, wasmSceneRef.current)
+    }
+
     if (apiRefRef.current !== undefined) {
       const isCapturingInput = (): boolean => {
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
     }
 
     // ------------------------------------------------------------------ tool factories

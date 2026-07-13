@@ -150,7 +150,7 @@ test('dock: selecting an object swaps the context chip and verb set', async ({ p
 // Unified Export dialog
 // ---------------------------------------------------------------------------
 
-test('export: File ▸ Export… opens ONE dialog with a glTF/STL format select', async ({ page }) => {
+test('export: File ▸ Export… opens ONE dialog with a glTF/STL/3MF format select', async ({ page }) => {
   const menuBar = page.getByTestId('menu-bar')
   await menuBar.getByRole('button', { name: 'File' }).click()
 
@@ -161,17 +161,20 @@ test('export: File ▸ Export… opens ONE dialog with a glTF/STL format select'
   const dialog = page.getByRole('dialog', { name: 'Export' })
   await expect(dialog).toBeVisible()
 
-  // Both formats are offered in the select; glTF is the default.
+  // Every format is offered in the select; glTF is the default.
   const select = dialog.locator('#export-format-select')
   await expect(select).toHaveValue('glb')
   const options = select.locator('option')
-  await expect(options).toHaveCount(2)
+  await expect(options).toHaveCount(3)
   await expect(options.nth(0)).toContainText('glTF')
   await expect(options.nth(1)).toContainText('STL')
+  await expect(options.nth(2)).toContainText('3MF')
 
   // Format is switchable.
   await select.selectOption('stl')
   await expect(select).toHaveValue('stl')
+  await select.selectOption('3mf')
+  await expect(select).toHaveValue('3mf')
 
   // Cancel closes without exporting.
   await dialog.getByRole('button', { name: 'Cancel' }).click()

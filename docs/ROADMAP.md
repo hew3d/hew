@@ -137,6 +137,9 @@ export a file a slicer accepts as watertight, with no repair step.
 - STL curve resolution: cylinder walls re-facet from their analytic
   definitions at a chosen smoothness (the stored facets are the floor,
   not the ceiling), staying manifold at any setting
+- 3MF export — a modern print format alongside STL: explicit millimeter
+  units, one mesh per object carrying its name and per-face colors,
+  better suited to multi-part prints; gated on solids the same way STL is
 
 | Format | Import | Export |
 |---|---|---|
@@ -145,18 +148,22 @@ export a file a slicer accepts as watertight, with no repair step.
 | COLLADA (`.dae`) | yes | — |
 | SketchUp (`.skp`, 2017 format) | yes | — |
 | STL | — | yes |
+| 3MF | — | yes |
 
 ### Application shell & UX
 
 - Native desktop app (macOS, Windows, Linux) with native file dialogs,
-  recent files, and file-type association
+  recent files, and file-type association — double-clicking a file while
+  Hew is already running opens it in the running instance instead of
+  spawning a second app
 - Browser build with offline support and PWA install
 - A labeled tool rail, a command palette (Ctrl/Cmd-K) for finding any tool
   or action by name, a contextual action dock that follows the current
   selection, and a docked properties/outliner/materials tray
 - Light and dark themes throughout
-- Native window chrome per platform — the system menu bar on macOS, a
-  custom title bar on Windows and Linux
+- Native window chrome per platform — the system menu bar on macOS,
+  native decorations on Windows, a custom title bar on Linux (WebKitGTK
+  cannot repaint the native caption)
 
 ### Reliability & diagnostics
 
@@ -187,9 +194,6 @@ export a file a slicer accepts as watertight, with no repair step.
 
 ### Near-term
 
-- **3MF export** — a modern print format alongside STL: explicit units,
-  one mesh per object with its name and color, better suited to multi-part
-  prints
 - **Whole-wall push/pull for analytic curved surfaces.** Flat-face
   push/pull is done (see Shipped: translate-and-build for any planar face,
   including oblique-neighbor and mixed coplanar+oblique boundaries). The
@@ -214,8 +218,6 @@ export a file a slicer accepts as watertight, with no repair step.
   detail, export to STL, slice
 - **Consistent status-bar guidance** for every tool, so the app always
   tells you what to do next
-- **Reliable file-open on Windows and Linux** when double-clicking a file
-  while Hew is already running
 
 ### Longer-term
 

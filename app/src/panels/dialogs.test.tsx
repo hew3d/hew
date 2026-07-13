@@ -340,6 +340,22 @@ describe('StlExportDialog', () => {
     render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /export stl warning/i })).toBeInTheDocument()
   })
+
+  it('renames itself after the pending format via formatLabel (3MF)', () => {
+    render(
+      <StlExportDialog
+        offenders={offenders}
+        formatLabel="3MF"
+        onExport={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('dialog', { name: /export 3mf warning/i })).toBeInTheDocument()
+    expect(screen.getByText('Export 3MF Anyway?')).toBeInTheDocument()
+    expect(
+      screen.getByText(/not watertight solids; the 3MF may not be manifold/i),
+    ).toBeInTheDocument()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -353,10 +369,11 @@ describe('ExportDialog', () => {
     expect(screen.getByRole('dialog', { name: /export/i })).toBeInTheDocument()
   })
 
-  it('shows both format options in the Format select', () => {
+  it('shows every format option in the Format select', () => {
     render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.getByText(/gltf binary \(\.glb\).*y-up, meters/i)).toBeInTheDocument()
     expect(screen.getByText(/stl binary \(\.stl\).*millimeters, for 3d printing/i)).toBeInTheDocument()
+    expect(screen.getByText(/3mf \(\.3mf\).*part names and colors/i)).toBeInTheDocument()
   })
 
   it('defaults to glTF and calls onExport with "glb" when Export is clicked', () => {
@@ -397,6 +414,14 @@ describe('ExportDialog', () => {
     fireEvent.change(screen.getByLabelText(/curve resolution/i), { target: { value: '0' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
     expect(onExport).toHaveBeenCalledWith('stl', 0)
+  })
+
+  it('calls onExport with "3mf" after switching the Format select to 3MF', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: '3mf' } })
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenCalledWith('3mf')
   })
 
   it('calls onCancel when Cancel is clicked', () => {

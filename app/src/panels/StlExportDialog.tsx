@@ -1,10 +1,11 @@
 /**
  * StlExportDialog — pre-export confirmation shown when the model contains
- * objects that are not watertight solids ( solid gating).
+ * objects that are not watertight solids ( solid gating). Shared by every
+ * slicer-bound format (STL, 3MF) via the `formatLabel` prop.
  *
- * STL is consumed by slicers, which expect manifold geometry; Hew never
- * repairs geometry silently (rule 4), so the user chooses: Export Anyway or
- * Cancel. Escape cancels. Not shown at all when every object is solid.
+ * Slicers expect manifold geometry; Hew never repairs geometry silently
+ * (rule 4), so the user chooses: Export Anyway or Cancel. Escape cancels.
+ * Not shown at all when every object is solid.
  *
  * Styling follows the RecoveryDialog / ImportReportDialog family, but on the
  *  Studio theme tokens (with the same dark fallbacks the rest of the
@@ -20,6 +21,8 @@ interface StlExportDialogProps {
   onExport: () => void
   /** Abort the export (also triggered by Escape). */
   onCancel: () => void
+  /** Format name shown in the heading/body ("STL", "3MF"). */
+  formatLabel?: string
 }
 
 const OVERLAY_STYLE: React.CSSProperties = {
@@ -97,7 +100,12 @@ const EXPORT_BUTTON_STYLE: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-export function StlExportDialog({ offenders, onExport, onCancel }: StlExportDialogProps) {
+export function StlExportDialog({
+  offenders,
+  onExport,
+  onCancel,
+  formatLabel = 'STL',
+}: StlExportDialogProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -120,11 +128,11 @@ export function StlExportDialog({ offenders, onExport, onCancel }: StlExportDial
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Export STL warning"
+        aria-label={`Export ${formatLabel} warning`}
       >
-        <div style={HEADING_STYLE}>Export STL Anyway?</div>
+        <div style={HEADING_STYLE}>Export {formatLabel} Anyway?</div>
         <div style={BODY_STYLE}>
-          These objects are not watertight solids; the STL may not be manifold:
+          These objects are not watertight solids; the {formatLabel} may not be manifold:
         </div>
         <ul style={LIST_STYLE}>
           {offenders.map((name, i) => (

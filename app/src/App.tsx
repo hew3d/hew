@@ -1239,11 +1239,14 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
-  // ---------------------------------------------------------------- STL export
-  // Names of non-solid objects pending the solid-gating confirmation; null =
-  // no dialog. STL feeds slicers, so the export warns — never repairs (rule
-  // 4) — when any exported object is not a watertight solid.
-  const [stlWarning, setStlWarning] = useState<string[] | null>(null)
+  // ------------------------------------------------- slicer exports (STL/3MF)
+  // Non-solid objects pending the solid-gating confirmation, plus which
+  // format's export is waiting on it; null = no dialog. STL and 3MF feed
+  // slicers, so both warn — never repair (rule 4) — when any exported object
+  // is not a watertight solid.
+  const [solidWarning, setSolidWarning] = useState<
+    { format: 'stl' | '3mf'; names: string[] } | null
+  >(null)
 
   /** Curve resolution (segments per full turn; 0 = stored facets) chosen in
    *  the Export dialog, held across the solid-gating confirmation step. */
@@ -1292,23 +1295,68 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
-  /** Entry point (Export dialog, STL format): gate on solid status first. */
-  const exportStl = useCallback(async (segmentsPerTurn: number) => {
-    stlSegmentsRef.current = segmentsPerTurn
+  /** The actual 3MF export — runs directly when all objects are solid, or
+   *  after "Export Anyway" in the gating dialog. */
+  const doExport3mf = useCallback(async () => {
+    const api = viewportApi.current
+    if (api === null) {
+      handleToast('Export failed: viewport not ready.')
+      return
+    }
+    let result: Awaited<ReturnType<typeof api.export3mf>>
+    try {
+      result = await api.export3mf()
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${String(err)}`)
+      return
+    }
+    if (result === null) {
+      handleToast('Nothing to export — the model has no solids.')
+      return
+    }
+    // Suggest a name derived from the current document, dropping any .hew suffix.
+    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
+    const base = rawBase.replace(/\.hew$/i, '')
+    try {
+      const ok = await fileHostRef.current.exportBinary(result.bytes, base, {
+        description: '3MF',
+        ext: '3mf',
+        mime: 'model/3mf',
+      })
+      if (ok) {
+        handleToast('Exported 3MF.')
+        LogStore.log.info(
+          'app',
+          `Exported 3MF (${result.objectCount} parts, ${result.triangleCount} triangles, ` +
+            `${result.bytes.length} bytes` +
+            (result.skippedDegenerate > 0
+              ? `, ${result.skippedDegenerate} degenerate triangles skipped)`
+              : ')'),
+        )
+      }
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${String(err)}`)
+    }
+  }, [docSession.currentRef, docSession.importedName, handleToast])
+
+  /** Entry point (Export dialog, STL/3MF formats): gate on solid status
+   *  first. STL carries its chosen curve resolution (segments per turn)
+   *  into `stlSegmentsRef`, held across the confirmation step. */
+  const exportSolidGated = useCallback(async (format: 'stl' | '3mf', stlSegmentsPerTurn?: number) => {
+    if (stlSegmentsPerTurn !== undefined) stlSegmentsRef.current = stlSegmentsPerTurn
     const scene = sceneRef.current
     const offenders = scene !== null ? collectNonSolidObjects(scene) : []
     if (offenders.length > 0) {
-      setStlWarning(offenders.map((o) => o.name))
+      setSolidWarning({ format, names: offenders.map((o) => o.name) })
       return
     }
-    await doExportStl()
-  }, [doExportStl])
+    await (format === 'stl' ? doExportStl() : doExport3mf())
+  }, [doExportStl, doExport3mf])
 
   // ---------------------------------------------------------------- unified Export dialog
-  // File ▸ Export… now opens ONE dialog with a Format select (glTF/STL)
-  // instead of two separate menu entries — the dialog's Export dispatches to
-  // whichever of exportGltf/exportStl the user picked; STL's solid-gating
-  // dialog remains the follow-on step (chain unchanged).
+  // File ▸ Export… opens ONE dialog with a Format select (glTF/STL/3MF) —
+  // the dialog's Export dispatches to the picked format; the slicer formats'
+  // solid-gating dialog remains the follow-on step (chain unchanged).
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
 
   const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number) => {
@@ -1316,9 +1364,9 @@ export default function App() {
     if (format === 'glb') {
       void exportGltf()
     } else {
-      void exportStl(stlSegmentsPerTurn)
+      void exportSolidGated(format, format === 'stl' ? stlSegmentsPerTurn : undefined)
     }
-  }, [exportGltf, exportStl])
+  }, [exportGltf, exportSolidGated])
 
   // ---------------------------------------------------------------- settings window
   // Per-platform settings surface:
@@ -2668,9 +2716,9 @@ export default function App() {
       )}
 
       {/* Unified Export dialog  — File ▸ Export…'s one entry
-          point; the Format select decides glTF vs. STL, dispatching to
-          exportGltf/exportStl. STL's solid-gating confirmation below remains
-          the follow-on step. */}
+          point; the Format select decides glTF vs. STL vs. 3MF. The slicer
+          formats' solid-gating confirmation below remains the follow-on
+          step. */}
       {exportDialogOpen && (
         <ExportDialog
           onExport={handleExportFormat}
@@ -2678,16 +2726,19 @@ export default function App() {
         />
       )}
 
-      {/* STL solid-gating confirmation — shown before export when any
-          exported object is not a watertight solid; never silent repair (rule 4). */}
-      {stlWarning !== null && (
+      {/* Slicer-format solid-gating confirmation — shown before an STL/3MF
+          export when any exported object is not a watertight solid; never
+          silent repair (rule 4). */}
+      {solidWarning !== null && (
         <StlExportDialog
-          offenders={stlWarning}
+          offenders={solidWarning.names}
+          formatLabel={solidWarning.format === 'stl' ? 'STL' : '3MF'}
           onExport={() => {
-            setStlWarning(null)
-            void doExportStl()
+            const format = solidWarning.format
+            setSolidWarning(null)
+            void (format === 'stl' ? doExportStl() : doExport3mf())
           }}
-          onCancel={() => setStlWarning(null)}
+          onCancel={() => setSolidWarning(null)}
         />
       )}
 
