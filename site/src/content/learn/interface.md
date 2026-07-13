@@ -51,7 +51,7 @@ Everything on the dock also lives in the menus; nothing is reachable only from i
 
 The right-hand tray holds four collapsible panels. Click a panel's header to expand or collapse it; drag the tray's left edge to resize it. Each can also be shown or hidden from the **Window** menu:
 
-- **Entity Info** (Window ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the selected item's name, type, solid status, and tags. This is where you rename things and tag them.
+- **Object Info** (Window ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the selected item's name, type, solid status, and tags. This is where you rename things and tag them.
 - **Outliner** (Window ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) is the document tree: every object, group, component instance, and sketch, with per-item visibility toggles.
 - **Materials** (Window ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`) holds the document's material palette.
 - **Tags** (Window ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the tag tree, with visibility toggles per tag.

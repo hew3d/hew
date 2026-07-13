@@ -121,36 +121,6 @@ export function rayPlaneIntersect(
 }
 
 /**
- * Parse a "CODE: message" thrown error string, returning the code prefix.
- * Returns null if the format doesn't match.
- */
-export function parseKernelErrorCode(err: unknown): string | null {
-  const msg = err instanceof Error ? err.message : String(err)
-  const match = /^([A-Za-z][A-Za-z0-9_]*):\s/.exec(msg)
-  return match ? match[1] : null
-}
-
-/**
- * Human-readable descriptions for known kernel error codes.
- * Falls back to the raw code when unknown.
- */
-export function kernelErrorMessage(code: string, rawMsg: string): string {
-  const descriptions: Record<string, string> = {
-    WouldVanish: "Can't remove all material — object would vanish",
-    NonManifoldResult: 'Operation would create non-manifold geometry',
-    ObjectNotSolid: 'Object is not a solid',
-    PathNotSimple: 'Path must be a simple (non-self-intersecting) polygon',
-    NothingToUndo: 'Nothing to undo',
-    NothingToRedo: 'Nothing to redo',
-    UnknownObject: 'Unknown object handle (stale reference)',
-    LoopNotStrictlyInside: 'Rectangle must lie fully inside the face',
-    LoopSelfIntersects: "Rectangle edges can't cross",
-    BadLoop: 'Need a valid rectangle on the face',
-  }
-  return descriptions[code] ?? `${code}: ${rawMsg}`
-}
-
-/**
  * Build an orthonormal in-plane basis (u, v) for the plane with unit normal
  * `normal`, such that (u, v, normal) is right-handed — i.e. cross(u, v) ==
  * normal. Used to project points onto an arbitrary face plane.

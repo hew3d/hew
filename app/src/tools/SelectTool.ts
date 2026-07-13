@@ -33,6 +33,11 @@ export type OnSelect = (
 export class SelectTool implements Tool {
   readonly name = 'Select'
 
+  /** Live status-bar guidance (see Tool.statusHint). */
+  statusHint(): string {
+    return 'Click to select — drag for a marquee, double-click to enter a group or component.'
+  }
+
   /** Last snap seen on hover (for status display) */
   lastSnap: Snap | null = null
 

@@ -3480,12 +3480,15 @@ impl Scene {
     /// first, and the swap only happens after a successful parse.
     ///
     /// # Errors
-    /// Throws a `"LOAD: <message>"` `JsError` on any parse/validation failure
-    /// (bad magic, unsupported version, malformed manifest, dangling reference,
-    /// invalid topology).
+    /// Throws a `"CODE: message"` `JsError` on any parse/validation failure,
+    /// where CODE is the [`LoadError`] variant name (`NotAContainer`,
+    /// `UnsupportedVersion`, `MalformedManifest`, `DanglingReference`,
+    /// `MissingAsset`, `Geometry`) — the same boundary convention every
+    /// other typed error uses, so the UI's plain-language copy table can
+    /// key on it.
     pub fn load(&mut self, bytes: &[u8]) -> Result<(), JsError> {
         let new_doc =
-            Document::load(bytes).map_err(|e: LoadError| JsError::new(&format!("LOAD: {e}")))?;
+            Document::load(bytes).map_err(|e: LoadError| JsError::new(&api_err(&e, &e).0))?;
 
         // Swap is committed only after successful parse.
         self.doc = new_doc;

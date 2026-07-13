@@ -47,7 +47,7 @@ import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
 import { makeSketchHandleCache } from '../tools/sketchGesture'
-import { parseKernelErrorCode, kernelErrorMessage } from './geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray } from './math'
 import type { Snap } from '../tools/types'
 import { collectLeafIds, nodeRefFromJs, type NodeRef } from '../panels/treeModel'
@@ -117,6 +117,10 @@ interface Props {
   onSceneChange?: (watertightMap: Map<bigint, boolean>) => void
   /** Called when an error toast should be shown */
   onToast?: (message: string, code?: string) => void
+  /** Called when the active tool's live status-bar guidance changes.
+   * `null` = the tool has no stage hint; the status bar falls back to the
+   * palette's static tool description. */
+  onToolHint?: (hint: string | null) => void
   /** Active tool name from parent (undefined = parent doesn't control) */
   activeTool?: string
   /** Active context path. Empty = top level. */
@@ -524,6 +528,7 @@ export default function Viewport({
   onInferenceChange,
   onSceneChange,
   onToast,
+  onToolHint,
   activeTool: activeToolProp,
   activeContext = [],
   selectedIds = [],
@@ -552,6 +557,8 @@ export default function Viewport({
   onSceneChangeRef.current = onSceneChange
   const onToastRef = useRef(onToast)
   onToastRef.current = onToast
+  const onToolHintRef = useRef(onToolHint)
+  onToolHintRef.current = onToolHint
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
   const onSelectManyRef = useRef(onSelectMany)
@@ -860,6 +867,28 @@ export default function Viewport({
 
     const toolController = new ToolController(wasmScene, handleSelect)
     toolControllerRef.current = toolController
+
+    // Live status-bar guidance: re-poll the active tool's stage hint after
+    // every routed event (the wrapped listeners below) and on tool switches,
+    // pushing CHANGES up — a string compare keeps the per-move cost trivial.
+    let lastToolHint: string | null = null
+    function reportToolHint(): void {
+      // Camera tools (Orbit/Pan/Zoom) park the controller on Select while
+      // OrbitControls owns the left button — left-clicks navigate, they
+      // don't select — so Select's hint would mislabel them. Report null
+      // and let the status bar fall back to the camera tool's static
+      // description. cameraModeRef is set BEFORE resetToSelect() fires the
+      // tool-change listener, so this reads the new mode.
+      const hint = cameraModeRef.current
+        ? null
+        : (toolController.activeTool.statusHint?.() ?? null)
+      if (hint !== lastToolHint) {
+        lastToolHint = hint
+        onToolHintRef.current?.(hint)
+      }
+    }
+    toolController.onToolChange(() => reportToolHint())
+    reportToolHint()
 
     // ONE ground sketch shared by every draw tool (Line/Rectangle/Circle/
     // Arc), surviving tool switches, so mixed-tool profiles — an arc closed
@@ -1336,6 +1365,9 @@ export default function Viewport({
       if ('onDocumentReset' in at) {
         (at as { onDocumentReset(): void }).onDocumentReset()
       }
+      // The reset silently rewound the tool to idle — without a re-poll the
+      // status bar would keep the mid-gesture hint until the next mouse move.
+      reportToolHint()
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
       sceneRenderer.refreshGuides()
@@ -1501,7 +1533,7 @@ export default function Viewport({
       try {
         wasmScene.delete_all_guides()
       } catch (err) {
-        handleToast(err instanceof Error ? err.message : String(err))
+        handleToast(friendlyErrorText(err))
         return
       }
       sceneRenderer.refreshGuides()
@@ -1513,7 +1545,7 @@ export default function Viewport({
       try {
         wasmScene.delete_guide(id)
       } catch (err) {
-        handleToast(err instanceof Error ? err.message : String(err))
+        handleToast(friendlyErrorText(err))
         return
       }
       sceneRenderer.refreshGuides()
@@ -2608,12 +2640,20 @@ export default function Viewport({
       recordPointerInput('pointerup', ev)
       clearMarquee()
     }
-    renderer.domElement.addEventListener('pointermove', onPointerMove)
-    renderer.domElement.addEventListener('pointerdown', onPointerDown)
-    renderer.domElement.addEventListener('pointerup', onPointerUp)
+    // Each routed event may advance (or cancel) the active tool's gesture —
+    // wrap the handlers so the status-bar hint is re-polled after every one,
+    // whichever early-return path the handler took.
+    const onPointerMoveTracked = (ev: PointerEvent) => { onPointerMove(ev); reportToolHint() }
+    const onPointerDownTracked = (ev: PointerEvent) => { onPointerDown(ev); reportToolHint() }
+    const onPointerUpTracked = (ev: PointerEvent) => { onPointerUp(ev); reportToolHint() }
+    const onDoubleClickTracked = (ev: MouseEvent) => { onDoubleClick(ev); reportToolHint() }
+    const onKeyDownTracked = (ev: KeyboardEvent) => { onKeyDown(ev); reportToolHint() }
+    renderer.domElement.addEventListener('pointermove', onPointerMoveTracked)
+    renderer.domElement.addEventListener('pointerdown', onPointerDownTracked)
+    renderer.domElement.addEventListener('pointerup', onPointerUpTracked)
     renderer.domElement.addEventListener('pointercancel', onPointerCancel)
-    renderer.domElement.addEventListener('dblclick', onDoubleClick)
-    window.addEventListener('keydown', onKeyDown)
+    renderer.domElement.addEventListener('dblclick', onDoubleClickTracked)
+    window.addEventListener('keydown', onKeyDownTracked)
 
     // ------------------------------------------------------------------ resize
     const resizeObserver = new ResizeObserver(() => {
@@ -2651,13 +2691,13 @@ export default function Viewport({
       renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored)
       contextLostOverlay?.remove()
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
-      renderer.domElement.removeEventListener('pointermove', onPointerMove)
-      renderer.domElement.removeEventListener('pointerdown', onPointerDown)
-      renderer.domElement.removeEventListener('pointerup', onPointerUp)
+      renderer.domElement.removeEventListener('pointermove', onPointerMoveTracked)
+      renderer.domElement.removeEventListener('pointerdown', onPointerDownTracked)
+      renderer.domElement.removeEventListener('pointerup', onPointerUpTracked)
       renderer.domElement.removeEventListener('pointercancel', onPointerCancel)
-      renderer.domElement.removeEventListener('dblclick', onDoubleClick)
+      renderer.domElement.removeEventListener('dblclick', onDoubleClickTracked)
       marqueeOverlay.remove()
-      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keydown', onKeyDownTracked)
       resizeObserver.disconnect()
       unsubscribeTheme()
       disposeOriginAxes(originAxes)

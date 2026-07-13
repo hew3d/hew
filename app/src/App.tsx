@@ -43,6 +43,7 @@ import { RecoveryDialog } from './panels/RecoveryDialog'
 import { StlExportDialog } from './panels/StlExportDialog'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
+import { friendlyErrorText } from './kernelErrors'
 import { CommandPalette } from './palette/CommandPalette'
 import { toolHint, toolActionId, type PaletteEntry } from './palette/registry'
 import type { TagReveal } from './panels/TagsPanel'
@@ -136,6 +137,9 @@ export default function App() {
   const [state, setState] = useState<AppState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toolName, setToolName] = useState<string>('Select')
+  /** Live stage-aware guidance from the active tool (Tool.statusHint);
+   *  null = fall back to the palette's static tool description. */
+  const [toolStageHint, setToolStageHint] = useState<string | null>(null)
   const [snapKind, setSnapKind] = useState<string | null>(null)
   const [measurement, setMeasurement] = useState<string>('')
   /** Live inference-cursor info for the tooltip chip. */
@@ -680,7 +684,7 @@ export default function App() {
 
   // Choosing a Draw tool at top level clears the selection: the user is
   // about to create geometry, so a still-selected object/group/component
-  // would pin the contextual dock (and Entity Info) to stale context.
+  // would pin the contextual dock (and Object Info) to stale context.
   // In-context (edit-mode) selections are the drawing target and are kept.
   useEffect(() => {
     if (!DRAW_TOOLS.has(activeTool)) return
@@ -773,7 +777,7 @@ export default function App() {
       if (isPanicError(raw)) {
         setKernelPanicked(true)
       }
-      handleToast(raw)
+      handleToast(friendlyErrorText(err))
       return false
     }
     setSelectedIds([])
@@ -901,7 +905,7 @@ export default function App() {
         ).catch(() => { /* ignore */ })
       }
     }).catch((err: unknown) => {
-      handleToast(`Open failed: ${String(err)}`)
+      handleToast(`Open failed: ${friendlyErrorText(err)}`)
     })
   }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot])
 
@@ -926,7 +930,7 @@ export default function App() {
     try {
       result = await fileHostRef.current.openForImport()
     } catch (err: unknown) {
-      handleToast(`Import failed: ${String(err)}`)
+      handleToast(`Import failed: ${friendlyErrorText(err)}`)
       return
     }
     if (result === null) return // user cancelled — current document unchanged
@@ -981,8 +985,7 @@ export default function App() {
               )
       ) as ImportReport
     } catch (err: unknown) {
-      const raw = err instanceof Error ? err.message : String(err)
-      handleToast(`Import failed: ${raw}`)
+      handleToast(`Import failed: ${friendlyErrorText(err)}`)
       return
     } finally {
       // Always clear the overlay — even on throw, so it can never get stuck.
@@ -1039,7 +1042,7 @@ export default function App() {
         ).catch(() => { /* ignore */ })
       }
     }).catch((err: unknown) => {
-      handleToast(`Save failed: ${String(err)}`)
+      handleToast(`Save failed: ${friendlyErrorText(err)}`)
     })
   }, [docSession.currentRef, handleToast, clearRecoverySnapshot])
 
@@ -1064,7 +1067,7 @@ export default function App() {
         ).catch(() => { /* ignore */ })
       }
     }).catch((err: unknown) => {
-      handleToast(`Save As failed: ${String(err)}`)
+      handleToast(`Save As failed: ${friendlyErrorText(err)}`)
     })
   }, [docSession.currentRef, docSession.importedName, handleToast, clearRecoverySnapshot])
 
@@ -1214,7 +1217,7 @@ export default function App() {
     try {
       bytes = await api.exportGlb()
     } catch (err: unknown) {
-      handleToast(`Export failed: ${String(err)}`)
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
       return
     }
     if (bytes === null) {
@@ -1235,7 +1238,7 @@ export default function App() {
         LogStore.log.info('app', `Exported glTF (${bytes.length} bytes)`)
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${String(err)}`)
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -1264,7 +1267,7 @@ export default function App() {
     try {
       result = await api.exportStl(stlSegmentsRef.current)
     } catch (err: unknown) {
-      handleToast(`Export failed: ${String(err)}`)
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
       return
     }
     if (result === null) {
@@ -1291,7 +1294,7 @@ export default function App() {
         )
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${String(err)}`)
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -1307,7 +1310,7 @@ export default function App() {
     try {
       result = await api.export3mf()
     } catch (err: unknown) {
-      handleToast(`Export failed: ${String(err)}`)
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
       return
     }
     if (result === null) {
@@ -1335,7 +1338,7 @@ export default function App() {
         )
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${String(err)}`)
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -1449,7 +1452,7 @@ export default function App() {
   const menuActionRef = useRef<(payload: string) => void>(() => {})
   menuActionRef.current = (payload: string) => {
     // Palette "jump" entries (dynamic Model group) carry their target in the
-    // id. Nodes: select + reveal in the Outliner/Entity Info (the tree
+    // id. Nodes: select + reveal in the Outliner/Object Info (the tree
     // scrolls its primary selection into view). Tags: reveal + flash in the
     // Tags panel.
     if (payload.startsWith('jump-node:')) {
@@ -2009,7 +2012,7 @@ export default function App() {
         if (discardsUnsaved) void clearRecoverySnapshot()
       }
     }).catch((err: unknown) => {
-      handleToast(`Drop open failed: ${String(err)}`)
+      handleToast(`Drop open failed: ${friendlyErrorText(err)}`)
     })
   }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot])
 
@@ -2427,6 +2430,7 @@ export default function App() {
             onStatusChange={handleStatusChange}
             onSceneChange={handleSceneChange}
             onToast={handleToast}
+            onToolHint={setToolStageHint}
             activeTool={activeTool}
             activeContext={activeContext}
             selectedIds={selectedIds}
@@ -2532,7 +2536,7 @@ export default function App() {
         {/* Docked right tray (`06_docked_panels.md`) — permanently
             present, collapsible sections; replaces the old floating,
             draggable panels entirely (FloatingPanel.tsx deleted). Default
-            order per spec: Entity Info -> Outliner -> Materials, plus Tags
+            order per spec: Object Info -> Outliner -> Materials, plus Tags
             as a 4th section (not in the spec's default list, but a real
             shipped Hew feature — kept rather than dropped). The showX/setShowX
             state pairs are unchanged from the floating-panel era; they now
@@ -2601,7 +2605,7 @@ export default function App() {
             borderLeft: '1px solid var(--border-hairline)',
           }}
         >
-          <TraySection title="Entity Info" collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
+          <TraySection title="Object Info" collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
             <ObjectInfoPanel
               scene={state.scene}
               docRev={docRev}
@@ -2672,10 +2676,14 @@ export default function App() {
         }}
       >
         <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }}>{toolName}</span>
-        {toolHint(toolName) !== '' && (
+        {/* Stage-aware guidance from the active tool when it provides one
+            (Tool.statusHint — "Click the opposite corner…"), else the
+            palette's static description; the app always says what to do
+            next. */}
+        {(toolStageHint ?? toolHint(toolName)) !== '' && (
           <>
             <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
-            <span style={{ color: 'var(--text-faint)' }}>{toolHint(toolName)}</span>
+            <span style={{ color: 'var(--text-faint)' }}>{toolStageHint ?? toolHint(toolName)}</span>
           </>
         )}
         {/* Watertight badge — aggregate solids feedback; no other single-glance

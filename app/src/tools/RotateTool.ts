@@ -43,7 +43,8 @@ import {
   snapAngleDeg,
   affineToFloat64,
 } from './transformMath'
-import { rayPlaneIntersect, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { rayPlaneIntersect } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { arrowToAxis, editNumericBuffer, parseDistance } from './moveInput'
@@ -86,6 +87,18 @@ const AXIS_LABEL: Record<0 | 1 | 2, string> = { 0: 'X', 1: 'Y', 2: 'Z' }
 
 export class RotateTool implements Tool {
   readonly name = 'Rotate'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    switch (this.stage.kind) {
+      case 'pivot':
+        return 'Click a reference point for the starting direction.'
+      case 'ref':
+        return 'Click to set the angle — or type exact degrees.'
+      default:
+        return 'Click to place the pivot — on a face to rotate in its plane.'
+    }
+  }
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group

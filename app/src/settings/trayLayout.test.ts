@@ -38,7 +38,7 @@ afterEach(() => {
 const ALL_OPEN: TrayLayout = { modelInfo: true, objectInfo: true, materials: true, tags: true }
 
 describe('tray layout setting', () => {
-  it('defaults to the layout: Entity Info + Outliner open, Materials + Tags collapsed', () => {
+  it('defaults to the layout: Object Info + Outliner open, Materials + Tags collapsed', () => {
     expect(DEFAULT_TRAY_LAYOUT).toEqual({ modelInfo: true, objectInfo: true, materials: false, tags: false })
     expect(getTrayLayout()).toEqual(DEFAULT_TRAY_LAYOUT)
   })

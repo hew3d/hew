@@ -39,7 +39,7 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
-import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
@@ -81,6 +81,13 @@ type Stage =
 
 export class MoveTool implements Tool {
   readonly name = 'Move'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    return this.stage.kind === 'idle'
+      ? 'Click a base point to start the move.'
+      : 'Click the destination — type an exact distance, arrow keys lock an axis, Alt moves a copy.'
+  }
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group

@@ -15,10 +15,10 @@ An **Object** is Hew's unit of "a solid thing." Extruding a closed 2D profile cr
 Every Object knows whether it is a closed, manifold solid. Hew surfaces this constantly:
 
 - The **status bar badge** (bottom right) shows "N objects ✓ solid" in green, or "N leaky" in red, for the whole model.
-- The **Entity Info** panel reports the selected object's geometry as **Solid** or **Leaky**.
+- The **Object Info** panel reports the selected object's geometry as **Solid** or **Leaky**.
 - The **Outliner** draws a leaky object's icon with a dashed outline.
 
-![A selected box with Entity Info showing Geometry: Solid and the green solid badge in the status bar](/docs/box-selected.png)
+![A selected box with Object Info showing Geometry: Solid and the green solid badge in the status bar](/docs/box-selected.png)
 
 Nothing gets silently patched or "healed" behind your back. An operation that would produce invalid geometry fails with a clear error instead, and what you see is what you'll get when you export.
 

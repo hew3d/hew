@@ -4,8 +4,6 @@ import {
   faceRectangleCorners,
   projectRayOntoAxis,
   rayPlaneIntersect,
-  parseKernelErrorCode,
-  kernelErrorMessage,
   pointInPolygonXY,
   polygonAreaXY,
   circlePolygonGround,
@@ -135,40 +133,6 @@ describe('rayPlaneIntersect', () => {
   })
 })
 
-describe('parseKernelErrorCode', () => {
-  it('parses a CODE: message format', () => {
-    const code = parseKernelErrorCode(new Error('WouldVanish: face would be removed'))
-    expect(code).toBe('WouldVanish')
-  })
-
-  it('parses multi-word codes', () => {
-    expect(parseKernelErrorCode(new Error('NonManifoldResult: edge shared by 3+ faces'))).toBe(
-      'NonManifoldResult',
-    )
-  })
-
-  it('returns null when format does not match', () => {
-    expect(parseKernelErrorCode(new Error('something went wrong'))).toBeNull()
-    expect(parseKernelErrorCode(new Error(''))).toBeNull()
-    expect(parseKernelErrorCode('plain string')).toBeNull()
-  })
-
-  it('handles non-Error objects', () => {
-    expect(parseKernelErrorCode('WouldVanish: bad things')).toBe('WouldVanish')
-  })
-})
-
-describe('kernelErrorMessage', () => {
-  it('returns a human-readable description for known codes', () => {
-    const msg = kernelErrorMessage('WouldVanish', 'face 42 would be removed')
-    expect(msg).toContain("Can't remove all material")
-  })
-
-  it('falls back to raw code+message for unknown codes', () => {
-    const msg = kernelErrorMessage('SomeUnknownCode', 'raw detail')
-    expect(msg).toBe('SomeUnknownCode: raw detail')
-  })
-})
 
 // Helper to build a Float32Array from flat [x,y,0] triples
 function makePolygon(coords: [number, number][]): Float32Array {

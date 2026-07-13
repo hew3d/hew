@@ -18,7 +18,7 @@
  * decorations (WebView2 repaints the native caption correctly, unlike
  * WebKitGTK), so it — like macOS — keeps the OS-drawn title bar and window
  * controls; Hew has no way to inject a custom save-state indicator into that
- * native chrome (see the docked tray's Entity Info, for a possible future home).
+ * native chrome (see the docked tray's Object Info, for a possible future home).
  */
 import { useEffect, useRef, useState } from 'react'
 

@@ -19,7 +19,7 @@ Combining solids is always a command you issue; [Core concepts](/learn/core-conc
 
 The result is a single new Object (Subtract can produce several, if the cut separates the remainder into pieces; each piece becomes its own solid). Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable.
 
-If an input isn't solid, the operation is refused with an error naming the problem. Fix the leaky object first (check Entity Info to find it).
+If an input isn't solid, the operation is refused with an error naming the problem. Fix the leaky object first (check Object Info to find it).
 
 ## Slice
 

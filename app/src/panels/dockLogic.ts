@@ -6,7 +6,7 @@
  * Hew's real selection model (`treeModel.ts`'s `NodeRef`) only distinguishes
  * `object | group | instance | sketch` — there is no face/edge selection,
  * and building one (plus the `face_area()`/`edge_length()` wasm-api queries
- * Entity Info would also need) was explicitly declined as cross-crate kernel
+ * Object Info would also need) was explicitly declined as cross-crate kernel
  * work outside a UI push (see the decision log). So this module derives a
  * SMALLER context set from what Hew actually has: Object / Group / Instance
  * / Empty / Multi / Sketch. A selected construction guide still has no

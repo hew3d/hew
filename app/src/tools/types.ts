@@ -82,4 +82,14 @@ export interface Tool {
    * `notifyLoaded`. Feature-detected with `'onDocumentReset' in tool`.
    */
   onDocumentReset?(): void
+
+  /**
+   * (optional) One live "what do I do next" line for the status bar,
+   * reflecting the tool's CURRENT stage — "Click the opposite corner", not
+   * a static tool description. The Viewport re-polls after every routed
+   * event (move/down/key/double-click/cancel/switch) and pushes changes up;
+   * tools without it fall back to the palette's static description.
+   * Feature-detected with `'statusHint' in tool`.
+   */
+  statusHint?(): string
 }

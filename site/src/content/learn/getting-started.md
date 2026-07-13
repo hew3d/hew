@@ -34,9 +34,9 @@ Select **Push/Pull** (press `P`), then:
 2. Move the cursor away from it; a live preview of the extrusion follows.
 3. Click again to set the height, or type an exact height like `1.2m` and press `Enter`.
 
-![A rectangular box created by push/pulling the sketch, selected, with Entity Info reporting its geometry as Solid](/docs/first-box.png)
+![A rectangular box created by push/pulling the sketch, selected, with Object Info reporting its geometry as Solid](/docs/first-box.png)
 
-The moment you commit, Hew creates a real Object — a watertight solid. There is no separate "make this a group" step; extruding a closed profile *is* the step. Press `Space` to switch back to the **Select** tool and click the box: the Entity Info panel reports its geometry as **Solid**, and the badge in the bottom-right corner of the status bar confirms every object in the model is solid.
+The moment you commit, Hew creates a real Object — a watertight solid. There is no separate "make this a group" step; extruding a closed profile *is* the step. Press `Space` to switch back to the **Select** tool and click the box: the Object Info panel reports its geometry as **Solid**, and the badge in the bottom-right corner of the status bar confirms every object in the model is solid.
 
 ## 3. Orbit, pan, and zoom
 

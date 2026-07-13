@@ -173,6 +173,18 @@ function planeBasis(
 export class ProtractorTool implements Tool {
   readonly name = 'Protractor'
 
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    switch (this.stage.kind) {
+      case 'awaiting-baseline':
+        return 'Click a point to set the baseline direction.'
+      case 'sweeping':
+        return 'Click to drop an angular guide at the measured angle — or type exact degrees.'
+      default:
+        return "Click to place the protractor's apex — on a face to measure in its plane."
+    }
+  }
+
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group
   private wasmScene: WasmScene

@@ -64,4 +64,4 @@ Guides are construction geometry: dashed lines and point markers that are never 
 
 ## Reading precision from the model
 
-For a quick sanity check without any tool gymnastics: select an object and read Entity Info, or use the Tape Measure between two snap points. Endpoint-to-endpoint measurements come from the model's exact geometry.
+For a quick sanity check without any tool gymnastics: select an object and read Object Info, or use the Tape Measure between two snap points. Endpoint-to-endpoint measurements come from the model's exact geometry.

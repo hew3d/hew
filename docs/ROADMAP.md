@@ -160,6 +160,9 @@ export a file a slicer accepts as watertight, with no repair step.
 - A labeled tool rail, a command palette (Ctrl/Cmd-K) for finding any tool
   or action by name, a contextual action dock that follows the current
   selection, and a docked properties/outliner/materials tray
+- Stage-aware status-bar guidance: every tool tells you what to do next
+  ("Click the opposite corner — or type exact dimensions"), updating live
+  as the gesture advances
 - Light and dark themes throughout
 - Native window chrome per platform — the system menu bar on macOS,
   native decorations on Windows, a custom title bar on Linux (WebKitGTK
@@ -189,6 +192,9 @@ export a file a slicer accepts as watertight, with no repair step.
   session recording for troubleshooting
 - Automated testing at every level — unit, component, and end-to-end — plus
   visual-regression checks against reference renders, run on every change
+- Plain-language error messages: every operation Hew refuses explains what
+  happened and suggests a next step, in the user's vocabulary — the full
+  kernel error inventory is covered, enforced by an exhaustiveness test
 
 ## Planned
 
@@ -208,16 +214,12 @@ export a file a slicer accepts as watertight, with no repair step.
   imprinted sub-faces punch through obliquely just fine), and pushing an
   outer face edge into or past one of its own holes (the deferred P4
   hole-edge case, revisited with true circles)
-- **Plain-language error messages** for every operation Hew refuses, each
-  with a suggested next step, instead of a raw technical error
 - **A welcome screen** on launch, with recent files, bundled sample models,
   and a link to a getting-started guide
 - **Bundled sample models** — a finished, printable object and a
   mid-construction scene showing groups, components, materials, and guides
 - **A short first-model guide** — rectangle, push/pull, a circle or arc
   detail, export to STL, slice
-- **Consistent status-bar guidance** for every tool, so the app always
-  tells you what to do next
 
 ### Longer-term
 

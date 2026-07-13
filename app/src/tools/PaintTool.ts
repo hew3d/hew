@@ -16,7 +16,7 @@
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 
 export type OnPaintCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -26,6 +26,13 @@ export const MATERIAL_SENTINEL: bigint = BigInt('18446744073709551615')
 
 export class PaintTool implements Tool {
   readonly name = 'Paint'
+
+  /** Live status-bar guidance (see Tool.statusHint). `wholeObject` is set
+   *  and consumed within one click, so the hint documents the modifier
+   *  instead of branching on state a poll can never observe. */
+  statusHint(): string {
+    return 'Click a face to paint it with the current material — Ctrl/Cmd-click fills the whole object.'
+  }
 
   private wasmScene: WasmScene
   private onCommit: OnPaintCommit

@@ -33,7 +33,7 @@ import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { formatLength } from '../settings/units'
 
 export type OnVertexMoveCommit = () => void
@@ -65,6 +65,13 @@ function approxEqual(a: [number, number, number], b: [number, number, number]): 
 
 export class EditVertexTool implements Tool {
   readonly name = 'Edit Vertex'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    return this.stage.kind === 'idle'
+      ? 'Click a sketch point to pick it up.'
+      : 'Click where the point should go — its lines follow.'
+  }
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group

@@ -62,7 +62,7 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
-import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 
@@ -128,6 +128,11 @@ function planeBasis(
 
 export class SliceTool implements Tool {
   readonly name = 'Slice'
+
+  /** Live status-bar guidance (see Tool.statusHint). */
+  statusHint(): string {
+    return 'Click a solid to cut it along the plane — arrow keys aim the plane along an axis, hovering a face aligns to it, or type an offset.'
+  }
 
   private preview: THREE.Group
   private wasmScene: WasmScene

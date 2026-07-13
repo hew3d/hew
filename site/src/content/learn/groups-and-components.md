@@ -14,9 +14,9 @@ A group bundles objects (and other groups — they nest) into one selectable, mo
 - **Dissolve:** select a group and choose **Edit ▸ Ungroup** (`⇧⌘G` / `Ctrl+Shift+G`); the members return to being independent, unchanged.
 - **Edit the contents:** double-click the group (or click **Edit** on the contextual dock). You're now *inside* the group's context: the rest of the scene dims, and selection and drawing are scoped to the group's members. Press `Esc` to step back out one level.
 
-![A group named "Enclosure" selected: Entity Info shows its name, type, and tag; the contextual dock offers Edit, Move, Scale, Ungroup, Erase](/docs/organization.png)
+![A group named "Enclosure" selected: Object Info shows its name, type, and tag; the contextual dock offers Edit, Move, Scale, Ungroup, Erase](/docs/organization.png)
 
-Moving, rotating, or scaling a group transforms everything inside it together. Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Entity Info makes big models legible.
+Moving, rotating, or scaling a group transforms everything inside it together. Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Object Info makes big models legible.
 
 ## Components
 

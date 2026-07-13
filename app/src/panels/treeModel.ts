@@ -111,7 +111,7 @@ export function collectLeafIds(
  * Positional index of every node as the Outliner displays it: position within
  * its parent container (top-level order at depth 0, member order inside each
  * group), keyed by `nodeKey`. This is the index `resolveLabel`'s positional
- * fallback needs anywhere a label must match the Outliner — Entity Info and
+ * fallback needs anywhere a label must match the Outliner — Object Info and
  * the command palette previously numbered from the flat per-kind id lists, so
  * an unnamed object nested in a group could be "Object 1" in the Outliner but
  * "Object 3" elsewhere.

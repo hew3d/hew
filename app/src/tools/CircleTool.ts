@@ -43,7 +43,8 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { circlePolygonGround, circlePolygonFace, facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { circlePolygonGround, circlePolygonFace, facePlaneBasis } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
@@ -125,6 +126,13 @@ function intersectPlane(
 
 export class CircleTool implements Tool {
   readonly name = 'Circle'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    return this.groundStage.kind === 'idle' && this.faceStage.kind === 'idle'
+      ? "Click the circle's center — on the ground plane or any face."
+      : 'Click to set the radius — or type an exact radius.'
+  }
 
   private groundStage: GroundStage = { kind: 'idle' }
   private faceStage: FaceStage = { kind: 'idle' }

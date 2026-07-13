@@ -90,6 +90,18 @@ function perpComponent(
 export class TapeMeasureTool implements Tool {
   readonly name = 'Tape Measure'
 
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    switch (this.stage.kind) {
+      case 'parallel':
+        return 'Click to place the parallel guide — or type an exact offset.'
+      case 'measure':
+        return 'Click the second point to read the distance — or type an exact distance to drop a guide there.'
+      default:
+        return 'Click a point to measure from — or click an edge to drop a parallel guide.'
+    }
+  }
+
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group
   private wasmScene: WasmScene

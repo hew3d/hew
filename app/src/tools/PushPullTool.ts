@@ -17,7 +17,8 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import { intersectGroundPlane } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { projectRayOntoAxis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { projectRayOntoAxis } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
@@ -57,6 +58,13 @@ type Stage =
 
 export class PushPullTool implements Tool {
   readonly name = 'Push/Pull'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    return this.stage.kind === 'idle'
+      ? 'Click a face to push or pull it.'
+      : 'Move to extrude, click to commit — or type an exact distance.'
+  }
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group

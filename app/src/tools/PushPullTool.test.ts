@@ -127,3 +127,17 @@ describe('PushPullTool — Path B (sketch region, any live sketch)', () => {
     expect(tool.capturingInput()).toBe(false)
   })
 })
+
+describe('PushPullTool — status hint', () => {
+  it('switches from pick guidance to extrude guidance and back across a commit', () => {
+    const facePick = makeFacePick(3n, 4n)
+    const scene = makeWasmScene({ facePick })
+    const { tool } = makeTool(scene)
+
+    expect(tool.statusHint()).toContain('Click a face')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    expect(tool.statusHint()).toContain('click to commit')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(tool.statusHint()).toContain('Click a face')
+  })
+})

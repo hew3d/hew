@@ -26,7 +26,8 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { rectangleCorners, faceRectangleCorners, facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { rectangleCorners, faceRectangleCorners, facePlaneBasis } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
 import { editDimsBuffer } from './moveInput'
@@ -88,6 +89,13 @@ function intersectPlane(
 
 export class RectangleTool implements Tool {
   readonly name = 'Rectangle'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    return this.groundStage.kind === 'idle' && this.faceStage.kind === 'idle'
+      ? 'Click the first corner — on the ground plane or any face.'
+      : 'Click the opposite corner — or type exact dimensions.'
+  }
 
   private groundStage: GroundStage = { kind: 'idle' }
   private faceStage: FaceStage = { kind: 'idle' }

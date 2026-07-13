@@ -70,7 +70,8 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { facePlaneBasis, parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { facePlaneBasis } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween } from './lineInput'
@@ -166,6 +167,18 @@ function intersectPlane(
 
 export class ArcTool implements Tool {
   readonly name = 'Arc'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    const stage = this.faceStage.kind !== 'idle' ? this.faceStage.kind : this.groundStage.kind
+    if (stage === 'chord') {
+      return "Click the arc's second endpoint — or type an exact chord length."
+    }
+    if (stage === 'bulge') {
+      return 'Click to set the curve — Alt cycles open arc / pie / segment; or type an exact bulge.'
+    }
+    return "Click the arc's first endpoint — on the ground plane or any face."
+  }
 
   private groundStage: GroundStage = { kind: 'idle' }
   private faceStage: FaceStage = { kind: 'idle' }

@@ -700,3 +700,19 @@ describe('ArcTool — face mode', () => {
     expect(constraint?.constraintPlane?.normal).toEqual([0, 0, 1])
   })
 })
+
+describe('ArcTool — status hint', () => {
+  it('tracks the gesture stage: first endpoint → second endpoint → bulge → idle again', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    expect(tool.statusHint()).toContain('first endpoint')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY) // A
+    expect(tool.statusHint()).toContain('second endpoint')
+    tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY) // B
+    expect(tool.statusHint()).toContain('Alt cycles')
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0.5 }), RAY) // commit
+    expect(tool.statusHint()).toContain('first endpoint')
+  })
+})

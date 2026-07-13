@@ -23,7 +23,7 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { scaleAboutCenter, affineToFloat64 } from './transformMath'
-import { parseKernelErrorCode, kernelErrorMessage } from '../viewport/geoHelpers'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { editNumericBuffer, parseDistance } from './moveInput'
@@ -48,6 +48,13 @@ type Stage =
 
 export class ScaleTool implements Tool {
   readonly name = 'Scale'
+
+  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  statusHint(): string {
+    return this.stage.kind === 'idle'
+      ? 'Click a base point to scale the selection about its center.'
+      : 'Move to scale, click to commit — or type an exact factor.'
+  }
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group

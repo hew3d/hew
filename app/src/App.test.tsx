@@ -175,9 +175,9 @@ describe('App — loaded state', () => {
     expect(screen.getByTestId('menu-bar')).toBeInTheDocument()
   })
 
-  it('docked tray: Entity Info and Outliner expanded by default, Materials and Tags collapsed', async () => {
+  it('docked tray: Object Info and Outliner expanded by default, Materials and Tags collapsed', async () => {
     await renderAndLoad()
-    expect(screen.getByRole('button', { name: /entity info/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: /object info/i })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('button', { name: /^materials$/i })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByRole('button', { name: /^tags$/i })).toHaveAttribute('aria-expanded', 'false')
@@ -185,7 +185,7 @@ describe('App — loaded state', () => {
 
   it('Object Info panel shows no boilerplate when selection is empty', async () => {
     await renderAndLoad()
-    // The empty-selection Entity Info panel renders nothing at all now — the
+    // The empty-selection Object Info panel renders nothing at all now — the
     // old "Select an object." prompt was removed as boilerplate.
     expect(screen.queryByText(/select an object/i)).not.toBeInTheDocument()
   })
@@ -381,7 +381,7 @@ describe('App — tray layout persistence', () => {
     setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, tags: false })
     await renderAndLoad()
     expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.getByRole('button', { name: /entity info/i })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: /object info/i })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByRole('button', { name: /^materials$/i })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('button', { name: /^tags$/i })).toHaveAttribute('aria-expanded', 'false')
   })

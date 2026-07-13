@@ -241,10 +241,10 @@ test('panels: docked tray sections are mounted with the default layout', async (
   await page.goto('/')
   await waitForHarness(page)
 
-  // All four tray section headers exist; Entity Info + Outliner start
+  // All four tray section headers exist; Object Info + Outliner start
   // expanded, Materials + Tags start collapsed ( defaults).
   for (const [title, expanded] of [
-    ['Entity Info', 'true'],
+    ['Object Info', 'true'],
     ['Outliner', 'true'],
     ['Materials', 'false'],
     ['Tags', 'false'],

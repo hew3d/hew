@@ -2,7 +2,7 @@
  * Tray layout — module-level singleton.
  *
  * Persists the docked right tray's per-section expanded/collapsed state
- * (Entity Info / Outliner / Materials / Tags) across launches, so the
+ * (Object Info / Outliner / Materials / Tags) across launches, so the
  * app stops forgetting the user's layout. This module owns ONLY the persisted
  * flags + their cross-window sync; App.tsx keeps owning the React state (its
  * four showX/setShowX pairs initialize from here and write back on change),
@@ -24,7 +24,7 @@ import { isTauri } from '../io/fileHost'
 
 /** Expanded (true) / collapsed (false) per tray section. Key names follow
  * App.tsx's showX state names, not the section titles (modelInfo = the
- * Outliner section, objectInfo = Entity Info — a rename kept for continuity
+ * Outliner section, objectInfo = Object Info — a rename kept for continuity
  * with the pre- floating-panel era). */
 export interface TrayLayout {
   modelInfo: boolean
@@ -37,7 +37,7 @@ const STORAGE_KEY = 'hew.settings.trayLayout'
 
 const KEYS = ['modelInfo', 'objectInfo', 'materials', 'tags'] as const
 
-/**  defaults: Entity Info + Outliner open, Materials + Tags collapsed. */
+/**  defaults: Object Info + Outliner open, Materials + Tags collapsed. */
 export const DEFAULT_TRAY_LAYOUT: TrayLayout = {
   modelInfo: true,
   objectInfo: true,

@@ -46,7 +46,7 @@ Protractor, Slice, and Edit Vertex have no default key (as in SketchUp); reach t
 | Toggle Outliner (Model Info) | `⇧⌘I` | `Ctrl+Shift+I` |
 | Toggle Materials | `⇧⌘C` | `Ctrl+Shift+C` |
 | Toggle Tags | `⇧⌘T` | `Ctrl+Shift+T` |
-| Toggle Entity Info (Object Info) | `⇧⌘O` | `Ctrl+Shift+O` |
+| Toggle Object Info | `⇧⌘O` | `Ctrl+Shift+O` |
 | Settings | `⌘,` | `Ctrl+,` |
 
 ## During a gesture
