@@ -587,6 +587,30 @@ export default function App() {
     })
   }, [handleToast])
 
+  // Whether this desktop build carries the auto-updater (package-manager
+  // builds compile it out — see the shell's `updater` feature). The in-app
+  // menu bar (Windows/Linux) shows "Check for Updates" only when true; macOS
+  // reaches it through the native menu instead. Stays false on the web build,
+  // where the invoke simply never resolves.
+  const [updaterAvailable, setUpdaterAvailable] = useState(false)
+  useEffect(() => {
+    if (!isTauri) return
+    let cancelled = false
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<boolean>('updater_available'))
+      .then((ok) => { if (!cancelled) setUpdaterAvailable(ok) })
+      .catch(() => { /* command absent (updater compiled out) — leave hidden */ })
+    return () => { cancelled = true }
+  }, [])
+
+  // Manual "Check for Updates" — hands off to the shell, which runs the whole
+  // flow (check → native confirm → download → restart prompt).
+  const handleCheckForUpdates = useCallback(() => {
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke('check_for_updates'))
+      .catch(() => { /* ignore */ })
+  }, [])
+
   useEffect(() => {
     const unsub = LogStore.subscribe((entries) => {
       const latest = entries[entries.length - 1]
@@ -2424,6 +2448,7 @@ export default function App() {
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         onOpenSettings={openSettings}
         onReportBug={handleReportBug}
+        onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
       />
 
       {/* Kernel panic sticky banner */}

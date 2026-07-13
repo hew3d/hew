@@ -19,6 +19,20 @@ tauri-plugin-dialog = "2.7.1"
 # running instance: per-window-label autosave/recovery namespacing and
 # window-state.json assume one process owns the config dir.
 tauri-plugin-single-instance = "2"
+# In-app auto-updater (see the `updater` feature below). Optional so
+# package-manager builds can compile it out — they must own updates.
+tauri-plugin-updater = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+
+[features]
+# The in-app auto-updater: a check on launch plus a manual "Check for
+# Updates" menu item, talking to the signed `latest.json` published on
+# GitHub Releases. On by default, so the builds we ship directly (the
+# notarized .dmg, the NSIS installer, the AppImage) can update themselves
+# in place. Package-manager builds (Flathub, Homebrew, winget, AUR) own
+# their own updates, so they build with `--no-default-features` and the
+# updater — plugin, menu item, and launch check — compiles out entirely.
+default = ["updater"]
+updater = ["dep:tauri-plugin-updater"]

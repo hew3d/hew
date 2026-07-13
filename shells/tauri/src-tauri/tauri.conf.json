@@ -24,6 +24,14 @@
       "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3NTcwRjI1NjhCMDFBN0QKUldSOUdyQm9KUTlYdDl4NDhvOUN5V212bkM1cUVKK0ZOTkZENnRpN25Fek1pR3lxWFpGV3pOcloK",
+      "endpoints": [
+        "https://github.com/hew3d/hew/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

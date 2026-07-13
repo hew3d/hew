@@ -9,9 +9,11 @@
  * guide and a "show on startup" toggle persisted by
  * `settings/welcomeScreen.ts`.
  *
- * Styling follows the RecoveryDialog / ExportDialog family: theme tokens
- * with the same dark fallbacks. Escape and the overlay click both close
- * into the blank document.
+ * Layout is a branded two-panel dialog: a terracotta-tinted rail carrying
+ * the Hew mark, wordmark, and tagline, beside an actions pane grouping the
+ * ways in. Styling is a scoped `<style>` block over the design tokens (see
+ * theme/tokens.css) rather than ad-hoc inline fallbacks. Escape and the
+ * overlay click both close into the blank document.
  */
 
 import { useEffect, useCallback } from 'react'
@@ -60,111 +62,273 @@ interface WelcomeScreenProps {
   onShowOnStartupChange: (show: boolean) => void
 }
 
-const OVERLAY_STYLE: React.CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  background: 'var(--backdrop-dim, rgba(0,0,0,0.6))',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  zIndex: 2000,
+/**
+ * The Hew logo lockup — the open-cube mark plus the "Hew" wordmark, inlined
+ * from `brand/hew-lockup-outlined.svg` (the wordmark is Hanken Grotesk
+ * ExtraBold as vector outlines, since the font is deliberately not bundled
+ * into the app UI — see docs/BRAND.md). The mark keeps its brand Terracotta;
+ * the wordmark is `currentColor` so the rail can theme it (cream on the dark
+ * rail, charcoal on the light one).
+ */
+function HewLockup({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="20 20 400 160"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <g transform="translate(100,100) scale(2.1)">
+        <g
+          fill="none"
+          stroke="#c45d3c"
+          strokeWidth="4.6"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        >
+          <polygon points="0,-34 29.44,-17 29.44,17 0,34 -29.44,17 -29.44,-17" />
+          <line x1="0" y1="0" x2="0" y2="-34" />
+          <line x1="0" y1="0" x2="-29.44" y2="-17" />
+          <line x1="0" y1="0" x2="29.44" y2="-17" />
+        </g>
+      </g>
+      <path
+        fill="currentColor"
+        d="M216.55 136.24L216.55 63.76L231.42 63.76L231.42 92.04L261.17 92.04L261.17 63.76L276.04 63.76L276.04 136.24L261.17 136.24L261.17 105.67L231.42 105.67L231.42 136.24ZM308.92 137.28L308.92 137.28Q302.06 137.28 297.12 135.10Q292.18 132.92 289.11 129.17Q286.04 125.43 284.64 120.70Q283.23 115.96 283.23 110.87L283.23 110.87Q283.23 105.98 284.64 101.20Q286.04 96.41 288.95 92.51Q291.86 88.61 296.65 86.27Q301.43 83.93 308.09 83.93L308.09 83.93Q314.02 83.93 318.54 85.96Q323.06 87.99 326.08 91.58Q329.10 95.16 330.60 100.05Q332.11 104.94 332.11 110.56L332.11 110.56Q332.11 111.49 332.06 112.74Q332.01 113.99 331.80 115.55L331.80 115.55L297.48 115.55Q298.10 120.33 301.54 122.67Q304.97 125.01 309.75 125.01L309.75 125.01Q313.60 125.01 317.45 123.66Q321.30 122.31 324.21 119.81L324.21 119.81L330.76 129.80Q326.91 132.50 323.64 134.16Q320.36 135.83 316.88 136.56Q313.39 137.28 308.92 137.28ZM297.27 104.94L318.59 104.94Q318.59 102.96 317.86 101.30L317.86 101.30Q317.03 99.64 315.68 98.39Q314.33 97.14 312.46 96.46Q310.58 95.79 308.30 95.79L308.30 95.79Q304.66 95.79 302.32 97.19Q299.98 98.60 298.78 100.68Q297.58 102.76 297.27 104.94L297.27 104.94ZM362.60 136.24L349.70 136.24L333.69 84.97L348.87 84.97L356.88 114.30L365.20 84.97L377.37 84.97L385.69 114.09L393.80 84.97L409.09 84.97L392.97 136.24L380.28 136.24L371.34 105.36L362.60 136.24Z"
+      />
+    </svg>
+  )
 }
 
-const DIALOG_STYLE: React.CSSProperties = {
-  background: 'var(--surface-overlay, #2a2a2a)',
-  border: '1px solid var(--border-strong, #4a4a4a)',
-  borderRadius: 'var(--radius-control, 6px)',
-  boxShadow: 'var(--shadow-palette, 0 8px 32px rgba(0,0,0,0.6))',
-  padding: '24px 28px',
-  width: 'min(560px, calc(100vw - 48px))',
-  fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',
-  color: 'var(--text-secondary, #ddd)',
+/**
+ * Scoped styles for the welcome dialog. Kept as a single stylesheet (rather
+ * than per-element inline objects) so cards get real :hover / :focus-visible
+ * states and the layout reads in one place. All colors resolve through the
+ * design tokens; `--brand` is the terracotta mark color from favicon.svg.
+ */
+const WELCOME_CSS = `
+.hw-welcome__overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop-dim);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+.hw-welcome {
+  display: flex;
+  width: min(760px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  background: var(--surface-window);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-palette);
+  box-shadow: var(--shadow-window);
+  font-family: var(--font-family-ui);
+  color: var(--text-secondary);
+  overflow: hidden;
 }
 
-const HEADING_STYLE: React.CSSProperties = {
-  fontSize: '18px',
-  fontWeight: 600,
-  color: 'var(--text-primary, #eee)',
-  marginBottom: '4px',
+/* ---- Brand rail ------------------------------------------------------- */
+.hw-welcome__rail {
+  flex: 0 0 264px;
+  display: flex;
+  flex-direction: column;
+  padding: 32px 28px;
+  border-right: 1px solid var(--border-panel);
+  background:
+    radial-gradient(120% 80% at 20% 0%, rgba(196, 93, 60, 0.26), transparent 60%),
+    linear-gradient(160deg, rgba(196, 93, 60, 0.16), rgba(196, 93, 60, 0.03));
+}
+/* The logo lockup: terracotta mark (baked in) + wordmark via currentColor.
+   Cream on the dark rail, charcoal on the light one — both brand colors. */
+.hw-welcome__lockup {
+  width: 210px;
+  height: auto;
+  color: #f3ede3;
+  filter: drop-shadow(0 3px 10px rgba(0, 0, 0, 0.28));
+}
+[data-theme='light'] .hw-welcome__lockup {
+  color: #1b1a17;
+  filter: none;
+}
+.hw-welcome__tagline {
+  margin-top: 18px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-tertiary);
+}
+.hw-welcome__rail-spacer {
+  flex: 1 1 auto;
+  min-height: 24px;
+}
+.hw-welcome__guide {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-base);
+  text-decoration: none;
+}
+.hw-welcome__guide:hover {
+  text-decoration: underline;
+}
+.hw-welcome__guide svg {
+  width: 12px;
+  height: 12px;
 }
 
-const TAGLINE_STYLE: React.CSSProperties = {
-  fontSize: 'var(--font-size-body, 13px)',
-  color: 'var(--text-faint, #999)',
-  marginBottom: '18px',
+/* ---- Actions pane ----------------------------------------------------- */
+.hw-welcome__pane {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 28px 20px;
+  overflow-y: auto;
+  min-width: 0;
+}
+.hw-welcome__label {
+  font-size: var(--font-size-section-header);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-section);
+  margin: 0 0 8px;
+}
+.hw-welcome__label:not(:first-child) {
+  margin-top: 20px;
+}
+.hw-welcome__cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hw-welcome__card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 11px 13px;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-panel-item);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-tool-row);
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+.hw-welcome__card:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-tint-15);
+}
+.hw-welcome__card:active {
+  transform: translateY(1px);
+}
+.hw-welcome__card:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+.hw-welcome__card-desc {
+  display: block;
+  margin-top: 3px;
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.hw-welcome__recent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.hw-welcome__recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hw-welcome__recent svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--text-faint);
 }
 
-const SECTION_LABEL_STYLE: React.CSSProperties = {
-  fontSize: '11px',
-  fontWeight: 600,
-  letterSpacing: '0.06em',
-  textTransform: 'uppercase',
-  color: 'var(--text-section, #888)',
-  margin: '14px 0 6px',
+/* ---- Footer ----------------------------------------------------------- */
+.hw-welcome__footer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: auto;
+  padding-top: 22px;
+}
+.hw-welcome__toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.hw-welcome__toggle input {
+  accent-color: var(--accent-base);
+  cursor: pointer;
+}
+.hw-welcome__start {
+  margin-left: auto;
+  padding: 9px 24px;
+  background: var(--accent-base);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-control);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-tool-row);
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+.hw-welcome__start:hover {
+  filter: brightness(1.08);
+}
+.hw-welcome__start:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 2px;
+}
+`
+
+/** A small folder glyph for recent-file rows. */
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+        d="M1.8 4.2h4l1.4 1.6h7v6.4a1 1 0 0 1-1 1H2.8a1 1 0 0 1-1-1V4.2Z"
+      />
+    </svg>
+  )
 }
 
-const CARD_STYLE: React.CSSProperties = {
-  display: 'block',
-  width: '100%',
-  textAlign: 'left',
-  padding: '10px 12px',
-  background: 'var(--surface-input, #333)',
-  color: 'var(--text-primary, #eee)',
-  border: '1px solid var(--border-hairline, #444)',
-  borderRadius: 'var(--radius-control, 4px)',
-  fontSize: 'var(--font-size-body, 13px)',
-  fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',
-  cursor: 'pointer',
-  marginBottom: '6px',
-}
-
-const CARD_DESC_STYLE: React.CSSProperties = {
-  display: 'block',
-  marginTop: '2px',
-  fontSize: '12px',
-  color: 'var(--text-faint, #999)',
-}
-
-const RECENT_STYLE: React.CSSProperties = {
-  ...CARD_STYLE,
-  padding: '6px 12px',
-  whiteSpace: 'nowrap',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-}
-
-const FOOTER_STYLE: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: '12px',
-  marginTop: '18px',
-}
-
-const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
-  padding: '7px 22px',
-  background: 'var(--accent-base, #3a5e9e)',
-  color: 'var(--accent-text-strong, #fff)',
-  border: 'none',
-  borderRadius: 'var(--radius-control, 4px)',
-  fontSize: 'var(--font-size-menu-item, 13px)',
-  fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',
-  cursor: 'pointer',
-  marginLeft: 'auto',
-}
-
-const LINK_STYLE: React.CSSProperties = {
-  color: 'var(--accent-base, #6b9bd8)',
-  fontSize: 'var(--font-size-body, 13px)',
-  textDecoration: 'none',
-}
-
-const CHECKBOX_LABEL_STYLE: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: '6px',
-  fontSize: '12px',
-  color: 'var(--text-faint, #999)',
-  cursor: 'pointer',
+/** An outbound-link glyph for the guide link. */
+function ExternalIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M6.5 3.5H3.2v9.3h9.3V9.5" />
+        <path d="M9 3.2h3.8V7" />
+        <path d="M12.6 3.4 7.4 8.6" />
+      </g>
+    </svg>
+  )
 }
 
 /** The display name of a recent path — its basename, either separator. */
@@ -197,70 +361,89 @@ export function WelcomeScreen({
   }, [handleKeyDown])
 
   return (
-    <div style={OVERLAY_STYLE} onClick={onClose}>
+    <div className="hw-welcome__overlay" onClick={onClose}>
+      <style>{WELCOME_CSS}</style>
       <div
-        style={DIALOG_STYLE}
+        className="hw-welcome"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label="Welcome to Hew"
       >
-        <div style={HEADING_STYLE}>Welcome to Hew</div>
-        <div style={TAGLINE_STYLE}>
-          Draw a profile, push/pull it into a solid, and export a file your slicer accepts —
-          no repair step.
-        </div>
-
-        <div style={SECTION_LABEL_STYLE}>Sample models</div>
-        {BUNDLED_SAMPLES.map((s) => (
-          <button key={s.file} style={CARD_STYLE} onClick={() => onOpenSample(s)}>
-            {s.title}
-            <span style={CARD_DESC_STYLE}>{s.description}</span>
-          </button>
-        ))}
-
-        {recentFiles.length > 0 && (
-          <>
-            <div style={SECTION_LABEL_STYLE}>Recent</div>
-            {recentFiles.slice(0, 5).map((path) => (
-              <button
-                key={path}
-                style={RECENT_STYLE}
-                title={path}
-                onClick={() => onOpenRecent(path)}
-              >
-                {basename(path)}
-              </button>
-            ))}
-          </>
-        )}
-
-        <div style={SECTION_LABEL_STYLE}>Or</div>
-        <button style={CARD_STYLE} onClick={onOpen}>
-          Open a file…
-          <span style={CARD_DESC_STYLE}>.hew, or import SketchUp, COLLADA, and glTF.</span>
-        </button>
-
-        <div style={FOOTER_STYLE}>
+        <aside className="hw-welcome__rail">
+          <HewLockup className="hw-welcome__lockup" />
+          <p className="hw-welcome__tagline">
+            The intuitive, Open Source, cross-platform, solids-first 3D modeler.
+          </p>
+          <div className="hw-welcome__rail-spacer" />
           <a
-            style={LINK_STYLE}
+            className="hw-welcome__guide"
             href={GETTING_STARTED_URL}
             target="_blank"
             rel="noreferrer"
           >
             Getting-started guide
+            <ExternalIcon />
           </a>
-          <label style={CHECKBOX_LABEL_STYLE}>
-            <input
-              type="checkbox"
-              checked={showOnStartup}
-              onChange={(e) => onShowOnStartupChange(e.target.checked)}
-            />
-            Show on startup
-          </label>
-          <button style={PRIMARY_BUTTON_STYLE} onClick={onClose} autoFocus>
-            Start modeling
-          </button>
+        </aside>
+
+        <div className="hw-welcome__pane">
+          <div className="hw-welcome__label">Sample models</div>
+          <div className="hw-welcome__cards">
+            {BUNDLED_SAMPLES.map((s) => (
+              <button
+                key={s.file}
+                className="hw-welcome__card"
+                onClick={() => onOpenSample(s)}
+              >
+                {s.title}
+                <span className="hw-welcome__card-desc">{s.description}</span>
+              </button>
+            ))}
+          </div>
+
+          {recentFiles.length > 0 && (
+            <>
+              <div className="hw-welcome__label">Recent</div>
+              <div className="hw-welcome__cards">
+                {recentFiles.slice(0, 5).map((path) => (
+                  <button
+                    key={path}
+                    className="hw-welcome__card hw-welcome__recent"
+                    title={path}
+                    onClick={() => onOpenRecent(path)}
+                  >
+                    <FolderIcon />
+                    <span className="hw-welcome__recent-name">{basename(path)}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          <div className="hw-welcome__label">Open</div>
+          <div className="hw-welcome__cards">
+            <button className="hw-welcome__card" onClick={onOpen}>
+              Open a file…
+              <span className="hw-welcome__card-desc">
+                .hew, or import SketchUp, COLLADA, and glTF.
+              </span>
+            </button>
+          </div>
+
+          <div className="hw-welcome__footer">
+            <label className="hw-welcome__toggle">
+              <input
+                type="checkbox"
+                checked={showOnStartup}
+                onChange={(e) => onShowOnStartupChange(e.target.checked)}
+              />
+              Show on startup
+            </label>
+            <button className="hw-welcome__start" onClick={onClose} autoFocus>
+              Start modeling
+            </button>
+          </div>
         </div>
       </div>
     </div>

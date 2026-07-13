@@ -22,6 +22,191 @@ use tauri::{
 };
 
 // ---------------------------------------------------------------------------
+// In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
+//
+// Talks to the signed `latest.json` published on GitHub Releases: a silent
+// check on launch, plus a manual "Check for Updates" menu item. The whole
+// flow lives shell-side — check, native confirm, download, restart prompt —
+// so the webview is granted no update-related capability, and a
+// `--no-default-features` build (Flathub/Homebrew/winget/AUR, which own their
+// own updates) drops the module, the menu item, and the launch check together.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "updater")]
+mod updater {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tauri::{AppHandle, Manager};
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    use tauri_plugin_updater::UpdaterExt;
+
+    /// Single-flight guard (managed state). The silent launch check and the
+    /// manual "Check for Updates" run independently; without this, an update
+    /// that appears while the user also clicks the menu item would stack two
+    /// dialogs and — on accept — start two concurrent installs writing the same
+    /// target (the macOS bundle swap is not atomic). One flag serializes them.
+    #[derive(Default)]
+    pub struct UpdateGuard(pub AtomicBool);
+
+    /// Run an update check against the configured endpoint — at most one at a
+    /// time. A second call while one is in flight backs off: the launch check
+    /// silently, a manual click with a note.
+    ///
+    /// `interactive` splits the two entry points:
+    ///  - the manual menu item (`true`): always give feedback — report "up to
+    ///    date" and surface errors, so a click is never silent.
+    ///  - the launch check (`false`): stay quiet unless an update is actually
+    ///    available — no popup when current, no error dialog on an offline
+    ///    launch.
+    pub async fn run_check(app: AppHandle, interactive: bool) {
+        if app.state::<UpdateGuard>().0.swap(true, Ordering::SeqCst) {
+            if interactive {
+                info_dialog(&app, "Update in progress", "Hew is already checking for updates.");
+            }
+            return;
+        }
+        check_and_install(app.clone(), interactive).await;
+        app.state::<UpdateGuard>().0.store(false, Ordering::SeqCst);
+    }
+
+    /// The check → prompt → download → restart flow itself; `run_check`
+    /// serializes calls to it.
+    async fn check_and_install(app: AppHandle, interactive: bool) {
+        let updater = match app.updater() {
+            Ok(updater) => updater,
+            Err(err) => {
+                if interactive {
+                    error_dialog(&app, &format!("Could not start the updater.\n\n{err}"));
+                }
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => prompt_and_install(app, update).await,
+            Ok(None) => {
+                if interactive {
+                    info_dialog(
+                        &app,
+                        "You’re up to date",
+                        "Hew is running the latest version.",
+                    );
+                }
+            }
+            Err(err) => {
+                if interactive {
+                    error_dialog(&app, &format!("Could not check for updates.\n\n{err}"));
+                }
+            }
+        }
+    }
+
+    /// Offer the found update; on acceptance, download it and offer a restart.
+    /// Each prompt is a native modal, and the install replaces the running app
+    /// in place (the `.app` bundle on macOS, the NSIS install on Windows, the
+    /// AppImage on Linux).
+    async fn prompt_and_install(app: AppHandle, update: tauri_plugin_updater::Update) {
+        let install = confirm(
+            &app,
+            "Update available",
+            &format!(
+                "Hew {} is available — you have {}.\n\nDownload and install it now?",
+                update.version, update.current_version
+            ),
+            "Install",
+            "Later",
+        )
+        .await;
+        if !install {
+            return;
+        }
+        // Platform note: on macOS and Linux the install returns here and the
+        // restart below is offered (the user may choose "Later"). On Windows
+        // the plugin launches the NSIS/MSI installer and exits the process
+        // immediately, so the restart prompt is macOS/Linux-only in practice —
+        // the Windows path ends the app here. Autosave/crash-recovery covers a
+        // dirty document if that happens.
+        if let Err(err) = update
+            .download_and_install(|_chunk, _total| {}, || {})
+            .await
+        {
+            error_dialog(
+                &app,
+                &format!("The update could not be installed.\n\n{err}"),
+            );
+            return;
+        }
+        let restart = confirm(
+            &app,
+            "Update installed",
+            "The update has been installed. Restart Hew now to use it?",
+            "Restart",
+            "Later",
+        )
+        .await;
+        if restart {
+            app.restart();
+        }
+    }
+
+    /// A modal OK/Cancel, run off the event loop: the dialog plugin forbids its
+    /// blocking API on the main thread (the file pickers take the same
+    /// `spawn_blocking` route). Returns true when the primary button is chosen.
+    async fn confirm(app: &AppHandle, title: &str, body: &str, ok: &str, cancel: &str) -> bool {
+        let app = app.clone();
+        let title = title.to_string();
+        let body = body.to_string();
+        let ok = ok.to_string();
+        let cancel = cancel.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            app.dialog()
+                .message(body)
+                .title(title)
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(ok, cancel))
+                .blocking_show()
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// A non-blocking informational dialog (no decision to wait on).
+    fn info_dialog(app: &AppHandle, title: &str, body: &str) {
+        app.dialog()
+            .message(body)
+            .title(title)
+            .kind(MessageDialogKind::Info)
+            .show(|_| {});
+    }
+
+    /// A non-blocking error dialog.
+    fn error_dialog(app: &AppHandle, body: &str) {
+        app.dialog()
+            .message(body)
+            .title("Update")
+            .kind(MessageDialogKind::Error)
+            .show(|_| {});
+    }
+}
+
+/// Manually trigger an update check — the entry point for the in-app menu
+/// bar's "Check for Updates" item (Windows/Linux, where the webview drives the
+/// menu). macOS routes its native menu item through `on_menu_event` instead. A
+/// no-op when the updater was compiled out.
+#[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) {
+    #[cfg(feature = "updater")]
+    updater::run_check(app, true).await;
+    #[cfg(not(feature = "updater"))]
+    let _ = app;
+}
+
+/// Whether this build carries the auto-updater. The in-app menu bar shows the
+/// "Check for Updates" item only when true, so package-manager builds (which
+/// compile the updater out) never advertise an update path they don't have.
+#[tauri::command]
+fn updater_available() -> bool {
+    cfg!(feature = "updater")
+}
+
+// ---------------------------------------------------------------------------
 // Recent files — stored as JSON in the app config dir.
 // Max 10 entries, most-recent first, deduped by path.
 // ---------------------------------------------------------------------------
@@ -1333,7 +1518,7 @@ fn main() {
         }
     };
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Single-instance guard, registered first (its docs require it): a
         // second launch — a Windows/Linux file-association double-click —
         // joins the running instance instead of spawning a second process
@@ -1353,8 +1538,15 @@ fn main() {
             }
         }))
         // Register the dialog plugin (open/save native dialogs).
-        .plugin(tauri_plugin_dialog::init())
-        // Register custom file-I/O commands.
+        .plugin(tauri_plugin_dialog::init());
+
+    // The updater plugin ships only in updater-enabled builds (the `updater`
+    // feature); package-manager builds compile it out.
+    #[cfg(feature = "updater")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    // Register custom file-I/O commands.
+    builder
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
@@ -1378,6 +1570,8 @@ fn main() {
             log_append,
             log_rotate,
             reproducer_write,
+            check_for_updates,
+            updater_available,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -1396,8 +1590,16 @@ fn main() {
                 .accelerator("CmdOrCtrl+,")
                 .build(handle)?;
 
-            let app_menu = SubmenuBuilder::new(handle, "Hew")
-                .item(&PredefinedMenuItem::about(handle, None, None)?)
+            // "Check for Updates…" follows About (macOS convention), present
+            // only in updater-enabled builds.
+            let app_menu_builder = SubmenuBuilder::new(handle, "Hew")
+                .item(&PredefinedMenuItem::about(handle, None, None)?);
+            #[cfg(feature = "updater")]
+            let app_menu_builder = app_menu_builder.item(
+                &MenuItemBuilder::with_id("app-check-updates", "Check for Updates…")
+                    .build(handle)?,
+            );
+            let app_menu = app_menu_builder
                 .separator()
                 .item(&app_settings)
                 .separator()
@@ -1977,6 +2179,17 @@ fn main() {
                 let _ = main_window.show();
             }
 
+            // Serialize update checks (launch + manual) behind one flag, then
+            // kick off the silent launch check (updater-enabled builds only):
+            // quiet unless an update is actually available, at which point the
+            // user is prompted to download and restart.
+            #[cfg(feature = "updater")]
+            {
+                app.manage(updater::UpdateGuard::default());
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move { updater::run_check(handle, false).await });
+            }
+
             Ok(())
         })
         // Per-window bookkeeping: focus tracking for menu/open routing,
@@ -2043,6 +2256,15 @@ fn main() {
             }
             if id == "recent-clear" {
                 let _ = clear_recent(app.clone());
+                return;
+            }
+            // The macOS "Check for Updates…" item runs the whole flow shell-side
+            // rather than emitting to the webview (Windows/Linux reach the same
+            // `check_for_updates` command from the in-app menu bar).
+            #[cfg(feature = "updater")]
+            if id == "app-check-updates" {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { updater::run_check(app, true).await });
                 return;
             }
             let action = match id {

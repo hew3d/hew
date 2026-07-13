@@ -123,6 +123,10 @@ export interface MenuBarProps {
   onOpenSettings?: () => void
   /** Assemble and write a "Report Bug" bundle (Help → Report Bug…). */
   onReportBug?: () => void
+  /** Trigger a manual update check (Help → Check for Updates…). Omitted — and
+   *  the item hidden — on the web build and in package-manager desktop builds
+   *  that compile the updater out. */
+  onCheckForUpdates?: () => void
 }
 
 type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | 'help' | null
@@ -425,6 +429,7 @@ export function MenuBar({
   onStandardView,
   onOpenSettings,
   onReportBug,
+  onCheckForUpdates,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -829,6 +834,15 @@ export function MenuBar({
               label="Report Bug…"
               onClick={withClose(() => onReportBug?.())}
             />
+            {onCheckForUpdates !== undefined && (
+              <>
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem
+                  label="Check for Updates…"
+                  onClick={withClose(() => onCheckForUpdates())}
+                />
+              </>
+            )}
           </div>
         )}
       </div>
