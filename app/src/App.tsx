@@ -166,6 +166,14 @@ export default function App() {
   const [docRev, setDocRev] = useState(0)
   /** Currently selected material id for the Paint tool. */
   const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
+  // Picking a material makes it current AND activates the Paint tool, so the
+  // next click paints with it (Ctrl/Cmd-click fills the whole object). This is
+  // the whole-object path that the removed "Fill selected object" button used
+  // to serve — the status bar spells out the Ctrl/Cmd-click shortcut.
+  const handleSelectMaterial = (id: bigint) => {
+    setCurrentMaterialId(id)
+    setActiveTool('Paint')
+  }
   /** Document session: currentRef + dirty flag. */
   const [docSession, setDocSession] = useState<DocSessionState>(INITIAL_SESSION)
   /** Ticks every SAVE_STATE_TICK_MS purely to refresh the "Edited/Saved
@@ -2723,10 +2731,10 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               currentMaterialId={currentMaterialId}
-              onSelectMaterial={setCurrentMaterialId}
+              onSelectMaterial={handleSelectMaterial}
+              onMaterialCreated={setCurrentMaterialId}
               onDocumentChanged={handleDocumentChanged}
               onAlphaCommitted={() => viewportApi.current?.syncMaterialOpacity()}
-              selectedIds={selectedIds}
             />
           </TraySection>
           <TraySection title="Tags" collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>

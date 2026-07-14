@@ -25,17 +25,18 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { MATERIAL_SENTINEL } from '../tools/PaintTool'
-import { nodeKindToNumber, type NodeRef } from './treeModel'
 
 interface Props {
   scene: WasmScene
   docRev: number
   currentMaterialId: bigint
+  /** The user picked a swatch — make it current AND pick up the Paint tool. */
   onSelectMaterial: (id: bigint) => void
+  /** A material was just added — make it current, but do NOT switch tools (the
+   * user may be building a palette, not ready to paint). */
+  onMaterialCreated: (id: bigint) => void
   onDocumentChanged: () => void
   onAlphaCommitted: () => void
-  /** Currently selected document nodes — used by "Fill selected object". */
-  selectedIds?: NodeRef[]
 }
 
 const PANEL_STYLE: React.CSSProperties = {
@@ -98,9 +99,9 @@ export function MaterialPalette({
   docRev,
   currentMaterialId,
   onSelectMaterial,
+  onMaterialCreated,
   onDocumentChanged,
   onAlphaCommitted,
-  selectedIds = [],
 }: Props) {
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
   // re-query material_ids from the WASM scene on each document change.
@@ -157,7 +158,7 @@ export function MaterialPalette({
     const g = parseInt(hex.substring(2, 4), 16)
     const b = parseInt(hex.substring(4, 6), 16)
     const id = scene.add_material(name, r, g, b, 255)
-    onSelectMaterial(id)
+    onMaterialCreated(id)
     onDocumentChanged()
     setNewColorName('')
   }
@@ -180,7 +181,7 @@ export function MaterialPalette({
     const bytes = new Uint8Array(await file.arrayBuffer())
     try {
       const id = scene.add_texture_material(name, 255, 255, 255, 255, bytes, format, ww, wh)
-      onSelectMaterial(id)
+      onMaterialCreated(id)
       onDocumentChanged()
       setTexName('')
       setPendingFile(null)
@@ -193,34 +194,6 @@ export function MaterialPalette({
   // Texture thumbnail cache: object URLs keyed by material id (as string).
   // We hold them in module-level state to avoid re-creating blobs on re-render.
   const thumbCache = getThumbCache()
-
-  /**
-   * "Fill selected object" — applies `currentMaterialId` as the base material
-   * to every leaf object under each selected node (via node_leaf_objects for
-   * groups/instances; for an object node it resolves to itself).
-   */
-  function handleFillObject() {
-    if (selectedIds.length === 0) return
-    for (const node of selectedIds) {
-      if (node.kind !== 'object' && node.kind !== 'group') {
-        // Instances hold geometry via a component definition; a sketch (or a
-        // single sketch line) is drawn geometry with no faces and no kernel
-        // NodeId. Skip all three — only world objects / definition members
-        // support set_object_material.
-        continue
-      }
-      const kind = nodeKindToNumber(node.kind)  // 0 = object, 1 = group
-      const leafIds = Array.from(scene.node_leaf_objects(kind, node.id))
-      for (const objId of leafIds) {
-        scene.set_object_material(objId, currentMaterialId)
-      }
-    }
-    onDocumentChanged()
-  }
-
-  const canFill =
-    selectedIds.length > 0 &&
-    selectedIds.some((n) => n.kind === 'object' || n.kind === 'group')
 
   return (
     <div style={PANEL_STYLE}>
@@ -237,20 +210,6 @@ export function MaterialPalette({
         />
         <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Default</span>
       </div>
-
-      {/* Fill selected object */}
-      <button
-        style={{
-          ...BTN_STYLE,
-          opacity: canFill ? 1 : 0.4,
-          cursor: canFill ? 'pointer' : 'not-allowed',
-        }}
-        disabled={!canFill}
-        onClick={handleFillObject}
-        title="Apply current material as base color for selected object(s)"
-      >
-        Fill selected object
-      </button>
 
       {/* Material swatches */}
       {materialIds.map((id) => {

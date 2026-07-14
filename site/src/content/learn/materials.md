@@ -10,13 +10,12 @@ Materials in Hew are simple and per-document: a palette of flat colors and image
 
 Expand **Materials** in the right-hand tray (or Window ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`).
 
-![The Materials panel expanded, showing the Default swatch, a Fill selected object button, two named materials, and the Add color controls](/docs/materials-panel.png)
+![The Materials panel expanded, showing the Default swatch, two named materials, and the Add color controls](/docs/materials-panel.png)
 
 The panel contains:
 
 - **Default (unpainted)** is the built-in neutral gray. Select it to "paint with nothing," i.e. to reset faces back to unpainted.
-- Your **material swatches**: click one to make it the current material. Texture materials show a thumbnail.
-- **Fill selected object** applies the current material to whichever objects (or groups of objects) are selected, as their base material.
+- Your **material swatches**: click one to make it the current material and pick up the **Paint** tool in one move — the very next click paints with it (see [Painting](#painting) below). Texture materials show a thumbnail.
 - **Opacity**: drag the slider to make the selected swatch translucent — glass, screens, scrims, anything meant to be seen through. Works the same for colors and textures.
 - **Add color**: pick a color with the color picker, optionally name it, and add it to the palette.
 - **Add texture**: choose a PNG or JPEG image and give it a real-world size (width × height in meters). The image tiles across faces at that physical scale.
@@ -31,7 +30,7 @@ The change applies to every face and object currently painted with that material
 
 ## Painting
 
-Select the **Paint** tool (`B`), make sure the material you want is the current one in the panel, and:
+Click the swatch you want — that makes it the current material and switches you to the **Paint** tool automatically (you can also pick Paint yourself with `B`). Then:
 
 - **Click a face** to paint just that face.
 - **`⌘`/`Ctrl`-click** to set the whole object's **base material** in one go.
@@ -42,7 +41,7 @@ The hovered face highlights so you can see what you're about to paint. To un-pai
 
 Every object has an optional **base material** — the color its faces show when they haven't been painted individually. Individually painted faces override the base. The base is why painted models stay painted as you keep working: when an operation creates new faces (pulling a boss out of a painted box, slicing, booleans), the new faces inherit the object's base material instead of reverting to gray.
 
-Set the base material with `⌘`/`Ctrl`-click in the Paint tool, or with the **Fill selected object** button.
+Set the base material with `⌘`/`Ctrl`-click in the Paint tool.
 
 ## Materials survive modeling
 

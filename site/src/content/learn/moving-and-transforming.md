@@ -31,11 +31,15 @@ A quick refresher, since every transform starts here:
 
 ## Rotate (`Q`)
 
-1. Click the **pivot**. The rotation axis is the normal of the face you clicked (rotating on the ground spins around vertical Z).
-2. Click a **reference point** to define the zero direction.
-3. Sweep to the new angle and click to commit.
+Rotate puts a **protractor** — a round dial — under your cursor. The dial lies in the plane you'll rotate in, and its color is the axis you'll spin around: blue on the ground (vertical Z), red for X, green for Y, or purple for an off-axis face. As you move over the model the dial tilts to whatever **face or edge** is under the cursor, so you can see the axis before you commit to it.
 
-The live angle snaps to 15° increments as you sweep. For any other angle, type degrees (e.g. `22.5`, negative allowed) and press `Enter`. Arrow keys force the rotation axis to a world axis: `→` X, `←` Y, `↑` Z; `↓` returns to the face-derived axis.
+1. Hover until the dial shows the axis you want, then click the **pivot** (the center of rotation).
+2. Click a **reference point** to define the zero direction.
+3. Sweep to the new angle and click to commit. A dim arm marks 0° and a colored arm tracks the live angle.
+
+**Locking the axis.** Hold `Shift` to lock the dial to the axis it's currently showing — it renders solid, with a short stub along the axis, so the lock is obvious. Or force a world axis outright: `→` X, `←` Y, `↑` Z; `↓` clears the lock and goes back to following faces. Locking with an arrow is how you rotate something that offers no face to aim at — tipping a **cylinder** onto its side, say: hover it, press `←` or `→` to lock a horizontal axis, then pick your two points.
+
+The live angle snaps to 15° increments as you sweep. For any other angle, type degrees (e.g. `22.5`, negative allowed) and press `Enter`.
 
 ## Scale (`S`)
 

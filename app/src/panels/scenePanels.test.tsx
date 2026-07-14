@@ -430,9 +430,9 @@ describe('MaterialPalette', () => {
     docRev: 0,
     currentMaterialId: MATERIAL_SENTINEL,
     onSelectMaterial: vi.fn(),
+    onMaterialCreated: vi.fn(),
     onDocumentChanged: vi.fn(),
     onAlphaCommitted: vi.fn(),
-    selectedIds: [] as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[],
   }
 
   beforeEach(() => {
@@ -444,20 +444,9 @@ describe('MaterialPalette', () => {
     expect(screen.getByTitle('Default (unpainted)')).toBeInTheDocument()
   })
 
-  it('"Fill selected object" is disabled when nothing is selected', () => {
-    render(<MaterialPalette {...baseProps} scene={makeScene()} selectedIds={[]} />)
-    expect(screen.getByRole('button', { name: /fill selected object/i })).toBeDisabled()
-  })
-
-  it('"Fill selected object" is enabled when an object is selected', () => {
-    render(
-      <MaterialPalette
-        {...baseProps}
-        scene={makeScene()}
-        selectedIds={[{ kind: 'object', id: 1n }]}
-      />,
-    )
-    expect(screen.getByRole('button', { name: /fill selected object/i })).not.toBeDisabled()
+  it('has no "Fill selected object" button (whole-object paint is Ctrl/Cmd-click)', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    expect(screen.queryByRole('button', { name: /fill selected object/i })).not.toBeInTheDocument()
   })
 
   it('clicking the Default swatch calls onSelectMaterial(MATERIAL_SENTINEL)', () => {
@@ -474,21 +463,24 @@ describe('MaterialPalette', () => {
     expect(screen.getByRole('button', { name: /\+ add color/i })).toBeInTheDocument()
   })
 
-  it('clicking "+ Add color" calls add_material, onSelectMaterial, and onDocumentChanged', () => {
+  it('clicking "+ Add color" calls add_material, onMaterialCreated, and onDocumentChanged — but not onSelectMaterial (adding a color must not switch to the Paint tool)', () => {
     const scene = makeScene()
     const onSelectMaterial = vi.fn()
+    const onMaterialCreated = vi.fn()
     const onDocumentChanged = vi.fn()
     render(
       <MaterialPalette
         {...baseProps}
         scene={scene}
         onSelectMaterial={onSelectMaterial}
+        onMaterialCreated={onMaterialCreated}
         onDocumentChanged={onDocumentChanged}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: /\+ add color/i }))
     expect((scene as any).add_material).toHaveBeenCalled()
-    expect(onSelectMaterial).toHaveBeenCalled()
+    expect(onMaterialCreated).toHaveBeenCalled()
+    expect(onSelectMaterial).not.toHaveBeenCalled()
     expect(onDocumentChanged).toHaveBeenCalled()
   })
 

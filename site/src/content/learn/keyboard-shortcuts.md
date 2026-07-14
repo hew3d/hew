@@ -58,7 +58,7 @@ These keys change what the *current tool operation* does; they're covered in eac
 | `Esc` | Cancel / step back the current gesture; or exit one editing-context level |
 | `Enter` | Commit the typed value |
 | Type a number/length | Exact value for the current gesture (no input box needed) |
-| `Shift` (hold) | Lock to the dominant axis (Line, Move) · pin the plane (Protractor, Slice) · pan while orbiting (Orbit tool) |
+| `Shift` | Lock to the dominant axis (Line, Move) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool, held) |
 | `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice); `↓` clears |
 | `Option`/`Alt` (hold) | Move commits a copy instead of moving |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |

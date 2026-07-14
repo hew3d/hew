@@ -15,6 +15,8 @@ import {
   angleFromPivot,
   meshBoundingBoxCenter,
   affineToFloat64,
+  normalize3,
+  planeBasis,
   type Affine,
 } from './transformMath'
 
@@ -491,5 +493,52 @@ describe('affineToFloat64', () => {
     expect(f[3]).toBe(5)
     expect(f[7]).toBe(-3)
     expect(f[11]).toBe(1)
+  })
+})
+
+describe('normalize3', () => {
+  it('scales a vector to unit length', () => {
+    const u = normalize3([0, 3, 4])
+    expect(u).not.toBeNull()
+    expect(u![0]).toBeCloseTo(0)
+    expect(u![1]).toBeCloseTo(0.6)
+    expect(u![2]).toBeCloseTo(0.8)
+    expect(Math.hypot(...u!)).toBeCloseTo(1)
+  })
+
+  it('preserves an already-unit vector', () => {
+    const u = normalize3([0, 0, 1])
+    expect(u).toEqual([0, 0, 1])
+  })
+
+  it('returns null for a ~zero vector', () => {
+    expect(normalize3([0, 0, 0])).toBeNull()
+    expect(normalize3([1e-12, 0, 0])).toBeNull()
+  })
+})
+
+describe('planeBasis', () => {
+  const dot = (a: readonly number[], b: readonly number[]) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+  it('returns two unit vectors orthogonal to each other and to the normal', () => {
+    for (const n of [[0, 0, 1], [1, 0, 0], [0, 1, 0], normalize3([1, 2, 3])!] as [number, number, number][]) {
+      const { u, v } = planeBasis(n)
+      expect(Math.hypot(...u)).toBeCloseTo(1)
+      expect(Math.hypot(...v)).toBeCloseTo(1)
+      expect(dot(u, v)).toBeCloseTo(0)
+      expect(dot(u, n)).toBeCloseTo(0)
+      expect(dot(v, n)).toBeCloseTo(0)
+    }
+  })
+
+  it('u × v points along the normal (right-handed frame)', () => {
+    const n: [number, number, number] = [0, 0, 1]
+    const { u, v } = planeBasis(n)
+    const cross: [number, number, number] = [
+      u[1]*v[2] - u[2]*v[1],
+      u[2]*v[0] - u[0]*v[2],
+      u[0]*v[1] - u[1]*v[0],
+    ]
+    expect(dot(cross, n)).toBeCloseTo(1)
   })
 })

@@ -16,7 +16,8 @@
  * overlay click both close into the blank document.
  */
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, type MouseEvent } from 'react'
+import { isTauri } from '../io/fileHost'
 
 /** One bundled sample: the asset file under `samples/` plus display copy. */
 export interface SampleEntry {
@@ -360,6 +361,23 @@ export function WelcomeScreen({
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [handleKeyDown])
 
+  // The link is a real anchor (works in the web build, stays accessible), but a
+  // Tauri webview swallows a blank-target navigation — so on desktop, hand the
+  // URL to the OS default browser via the opener plugin instead.
+  const handleGuideClick = useCallback((e: MouseEvent<HTMLAnchorElement>) => {
+    if (!isTauri) return
+    e.preventDefault()
+    // Fire-and-forget, but swallow rejections: an unhandled one here would trip
+    // the global reproducer-dump handler (loader.ts) and misreport a benign
+    // "no browser to open the link" as a crash. Matches the .catch convention
+    // on the other lazy Tauri calls in App.tsx.
+    void import('@tauri-apps/plugin-opener')
+      .then(({ openUrl }) => openUrl(GETTING_STARTED_URL))
+      .catch(() => {
+        /* best effort — nothing useful to do if the OS can't open the URL */
+      })
+  }, [])
+
   return (
     <div className="hw-welcome__overlay" onClick={onClose}>
       <style>{WELCOME_CSS}</style>
@@ -381,6 +399,7 @@ export function WelcomeScreen({
             href={GETTING_STARTED_URL}
             target="_blank"
             rel="noreferrer"
+            onClick={handleGuideClick}
           >
             Getting-started guide
             <ExternalIcon />

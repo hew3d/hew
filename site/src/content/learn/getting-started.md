@@ -82,7 +82,7 @@ Four parts, four Objects. They touch and overlap on the tray, and the status bar
 
 Expand **Materials** in the right-hand tray. Click **Add color**, pick a wood tone, and name it *Oak*; add a few more — a teal, a terracotta, a slate.
 
-To paint a whole part, select it, click the swatch you want, and press **Fill selected object**. Do that for each of the four. (For finer control, the **Paint** tool (`B`) paints one face at a time.)
+To paint a whole part, click the swatch you want — that picks up the **Paint** tool — then `⌘`/`Ctrl`-click the part to fill it. Do that for each of the four. (A plain click paints one face at a time.)
 
 ![The set painted — oak tray, teal pen cup, terracotta bin, slate stand — with the Materials palette open](/docs/organizer-materials.png)
 

@@ -25,6 +25,7 @@ tauri-plugin-updater = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+tauri-plugin-opener = "2.5.4"
 
 [features]
 # The in-app auto-updater: a check on launch plus a manual "Check for

@@ -2602,7 +2602,17 @@ export default function Viewport({
       // as VCB length input, so an unhandled chord like Ctrl+K (palette) or
       // Ctrl+C would otherwise append its letter to a mid-entry buffer
       // ("5" → "5k") and wedge it. Tools only consume plain keys.
-      if (!isMod) toolController.activeTool.onKey(ev)
+      if (!isMod) {
+        toolController.activeTool.onKey(ev)
+        // A tool may have restyled its gizmo in response (e.g. Rotate /
+        // Protractor / Slice locking the axis with Shift or an arrow during
+        // the idle/hover phase, before capturingInput() is true). The
+        // capturing branch above schedules its own render; this fallthrough
+        // must too, or that change wouldn't repaint until the next pointer
+        // move. The render loop is on-demand, so a spurious schedule on an
+        // ignored key just skips one idle frame — cheap.
+        scheduleRender()
+      }
     }
 
     // Pointerup completes the Select tool's deferred press: a no-drag release

@@ -59,7 +59,11 @@ mod updater {
     pub async fn run_check(app: AppHandle, interactive: bool) {
         if app.state::<UpdateGuard>().0.swap(true, Ordering::SeqCst) {
             if interactive {
-                info_dialog(&app, "Update in progress", "Hew is already checking for updates.");
+                info_dialog(
+                    &app,
+                    "Update in progress",
+                    "Hew is already checking for updates.",
+                );
             }
             return;
         }
@@ -1538,7 +1542,11 @@ fn main() {
             }
         }))
         // Register the dialog plugin (open/save native dialogs).
-        .plugin(tauri_plugin_dialog::init());
+        .plugin(tauri_plugin_dialog::init())
+        // Opener: lets the webview hand a URL (the getting-started guide link on
+        // the welcome screen) to the OS default browser instead of trying to
+        // navigate the app's own webview.
+        .plugin(tauri_plugin_opener::init());
 
     // The updater plugin ships only in updater-enabled builds (the `updater`
     // feature); package-manager builds compile it out.

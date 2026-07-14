@@ -174,6 +174,52 @@ export function projectOntoPlane(
 }
 
 /**
+ * Normalize a 3-vector to unit length, or return null if it is ~zero
+ * (length < 1e-9) — callers treat that as a degenerate direction rather than
+ * risking a divide-by-zero / NaN axis.
+ */
+export function normalize3(
+  v: readonly [number, number, number],
+): [number, number, number] | null {
+  const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+  if (len < 1e-9) return null
+  return [v[0] / len, v[1] / len, v[2] / len]
+}
+
+/**
+ * Build two unit vectors (u, v) spanning the plane ⊥ `normal`: u is a stable
+ * in-plane vector (pick the world axis LEAST parallel to `normal`, then
+ * orthogonalize against it), v = normal × u. `normal` must already be unit
+ * length. Used to lay out disk/ring gizmo geometry in an arbitrary plane
+ * (Protractor, Rotate).
+ */
+export function planeBasis(
+  normal: readonly [number, number, number],
+): { u: [number, number, number]; v: [number, number, number] } {
+  const [nx, ny, nz] = normal
+  // Pick whichever world axis has the smallest |dot| with normal (least parallel).
+  const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz)
+  let seed: [number, number, number]
+  if (ax <= ay && ax <= az) seed = [1, 0, 0]
+  else if (ay <= ax && ay <= az) seed = [0, 1, 0]
+  else seed = [0, 0, 1]
+
+  const dot = seed[0] * nx + seed[1] * ny + seed[2] * nz
+  const raw: [number, number, number] = [
+    seed[0] - dot * nx,
+    seed[1] - dot * ny,
+    seed[2] - dot * nz,
+  ]
+  const u = normalize3(raw) ?? [1, 0, 0]
+  const v: [number, number, number] = [
+    ny * u[2] - nz * u[1],
+    nz * u[0] - nx * u[2],
+    nx * u[1] - ny * u[0],
+  ]
+  return { u, v }
+}
+
+/**
  * Signed angle (radians) from vector f to vector t, measured in the plane
  * perpendicular to the unit axis a (right-hand rule about a).
  *
