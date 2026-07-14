@@ -28,6 +28,20 @@ const { title, description, ogImage, type, eyebrow } = Astro.props;
       <slot />
     </div>
   </article>
+
+  <!-- Click-to-enlarge overlay for prose screenshots (the shots read small in
+       the text column; the PNGs are captured at 2×, so full size is legible). -->
+  <div
+    id="lightbox"
+    class="lightbox"
+    hidden
+    role="dialog"
+    aria-modal="true"
+    aria-label="Enlarged screenshot"
+    tabindex="-1"
+  >
+    <img class="lightbox__img" alt="" />
+  </div>
 </BaseLayout>
 
 <style>
@@ -54,4 +68,74 @@ const { title, description, ogImage, type, eyebrow } = Astro.props;
     color: var(--color-text-muted);
     font-size: 1.125rem;
   }
+
+  .lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4vmin;
+    background: rgba(0, 0, 0, 0.82);
+    backdrop-filter: blur(4px);
+    cursor: zoom-out;
+  }
+
+  .lightbox[hidden] {
+    display: none;
+  }
+
+  .lightbox__img {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: var(--radius-md);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  }
 </style>
+
+<script>
+  // Progressive enhancement: activating any prose image opens it full size in a
+  // dismissable modal overlay. Works by mouse and keyboard; no dependencies;
+  // safe if the overlay is absent.
+  const lightbox = document.getElementById('lightbox') as HTMLElement | null;
+  const full = lightbox?.querySelector('.lightbox__img') as HTMLImageElement | null;
+  if (lightbox && full) {
+    let lastFocused: HTMLElement | null = null;
+    const close = () => {
+      lightbox.hidden = true;
+      full.removeAttribute('src');
+      document.body.style.overflow = '';
+      lastFocused?.focus();
+      lastFocused = null;
+    };
+    const open = (trigger: HTMLElement, src: string, alt: string) => {
+      lastFocused = trigger;
+      full.src = src;
+      full.alt = alt;
+      lightbox.hidden = false;
+      document.body.style.overflow = 'hidden';
+      lightbox.focus(); // move focus into the dialog so Escape works and it's announced
+    };
+    document.querySelectorAll<HTMLImageElement>('.prose img').forEach((img) => {
+      // Make each image a real, keyboard-operable control for the zoom action.
+      img.tabIndex = 0;
+      img.setAttribute('role', 'button');
+      if (!img.getAttribute('aria-label')) {
+        img.setAttribute('aria-label', img.alt ? `Enlarge: ${img.alt}` : 'Enlarge image');
+      }
+      const activate = () => open(img, img.currentSrc || img.src, img.alt);
+      img.addEventListener('click', activate);
+      img.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          activate();
+        }
+      });
+    });
+    lightbox.addEventListener('click', close);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !lightbox.hidden) close();
+    });
+  }
+</script>

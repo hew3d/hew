@@ -10,6 +10,12 @@
  * Shots are 1440×900 @2x with a fixed camera per scene, so reruns after a UI
  * change produce comparable images. Keep scene setups deterministic (no
  * Date/random) for the same reason.
+ *
+ * The whole manual is captured in **dark mode** (seeded via localStorage before
+ * the app boots — themes both the CSS chrome and the WebGL clear color), since
+ * that is how most people run Hew. Modeling scenes hide the origin axes so the
+ * red/green/blue lines don't read on top of the solids; the interface tour
+ * (ui-default) keeps them, being a faithful shot of the default window.
  */
 import { chromium } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
@@ -27,11 +33,20 @@ const VIEWPORT = { width: 1440, height: 900 }
 // convention (position, target, Z-up, 45° fov).
 const CAM = { position: [8, 6, 8], target: [1, 1, 1], up: [0, 0, 1], fovDeg: 45 }
 
+// The desk-organizer project (getting-started chapter) is a bigger scene; this
+// frames the whole 14×7.5 tray with headroom for the pen cup.
+const ORG_CAM = { position: [26, 17, 14], target: [7.0, 3.7, 1.0], up: [0, 0, 1], fovDeg: 34 }
+
 const browser = await chromium.launch()
 
-/** Fresh page with the app booted and the harness ready. */
+/** Fresh page with the app booted, in dark mode, welcome dialog suppressed. */
 async function freshPage() {
   const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 2 })
+  await page.addInitScript(() => {
+    // Seed before any app module loads: dark theme + no welcome overlay.
+    localStorage.setItem('hew.settings.theme', 'dark')
+    localStorage.setItem('hew.settings.showWelcome', 'false')
+  })
   await page.goto(BASE)
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 30_000 })
   await page.waitForTimeout(400)
@@ -49,7 +64,7 @@ async function shot(page, name, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Default interface, empty document
+// 1. Default interface, empty document (keeps the axes — this is the tour shot)
 // ---------------------------------------------------------------------------
 {
   const page = await freshPage()
@@ -58,26 +73,26 @@ async function shot(page, name, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Getting started: rectangle on the ground, then the push/pulled box
+// 2. Getting-started primitives reused by other chapters: rectangle, box.
+//    (The getting-started chapter itself uses the desk-organizer shots below.)
 // ---------------------------------------------------------------------------
 {
   const page = await freshPage()
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
+    h.setAxesVisible(false)
     h.drawRectangle([0, 0, 0], [2, 2, 0])
   }, CAM)
   await shot(page, 'first-rectangle')
 
   await page.evaluate(() => {
     const h = window.__hew_test
-    // Redo the sketch as a box: clear and rebuild deterministically.
     h.undo()
     h.drawBox([0, 0, 0], [2, 2, 0], 1.2)
   })
   await shot(page, 'first-box')
 
-  // Select the box so Entity Info shows its solid status + the dock its verbs.
   await page.evaluate(() => {
     const h = window.__hew_test
     h.selectObjects(h.getObjectIds())
@@ -94,9 +109,7 @@ async function shot(page, name, opts = {}) {
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
-    // A small "bracket": base slab + upright, with a notch subtracted.
-    // Ground sketches live at z=0, so draw everything on the ground and
-    // lift the upper solids into place with moveObject.
+    h.setAxesVisible(false)
     const base = h.drawBox([0, 0, 0], [3, 2, 0], 0.4)
     const upright = h.drawBox([0, 0, 0], [0.5, 2, 0], 1.6)
     h.moveObject(upright, 0, 0, 0.4)
@@ -106,7 +119,6 @@ async function shot(page, name, opts = {}) {
     const slate = h.addMaterial('Slate', 90, 103, 118, 255)
     h.paintObject(base, slate)
     h.paintObject(upright, terracotta)
-    // boolean op codes: 0 union, 1 subtract, 2 intersect (kernel convention)
     h.boolean(1, upright, cutter)
   }, CAM)
   await shot(page, 'bracket-scene')
@@ -121,6 +133,7 @@ async function shot(page, name, opts = {}) {
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
+    h.setAxesVisible(false)
     h.drawBox([0, 0, 0], [2, 2, 0], 1)
     h.drawBox([1.2, 1.2, 0], [3, 3, 0], 1.6)
     h.selectObjects(h.getObjectIds())
@@ -145,6 +158,7 @@ async function shot(page, name, opts = {}) {
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
+    h.setAxesVisible(false)
     const box = h.drawBox([0, 0, 0], [2.4, 1.6, 0], 1.4)
     const [pos] = h.sliceObject(box, [1.2, 0.8, 0.7, 1, 0, 0.35])
     h.moveObject(pos, 0.9, 0, 0.25)
@@ -161,8 +175,8 @@ async function shot(page, name, opts = {}) {
   await page.evaluate(() => {
     const h = window.__hew_test
     h.setCamera({ position: [5, 3.6, 4.4], target: [1, 1, 0.5], up: [0, 0, 1], fovDeg: 45 })
+    h.setAxesVisible(false)
     h.drawBox([0, 0, 0], [2, 2, 0], 1)
-    // Guides on the box's top plane read clearly against the sky.
     h.addGuideLine(0, 2.4, 1, 1, 0, 0)
     h.addGuideLine(2.4, 0, 1, 0, 1, 0)
     h.addGuidePoint(2.4, 2.4, 1)
@@ -179,6 +193,7 @@ async function shot(page, name, opts = {}) {
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
+    h.setAxesVisible(false)
     const base = h.drawBox([0, 0, 0], [3, 2, 0], 0.4)
     const upright = h.drawBox([0, 0, 0], [0.5, 2, 0], 1.6)
     h.moveObject(upright, 0, 0, 0.4)
@@ -214,8 +229,9 @@ async function shot(page, name, opts = {}) {
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
+    h.setAxesVisible(false)
     h.drawBox([0, 0, 0], [1.4, 1.4, 0], 1)
-    const lid = h.drawBox([1.8, 0, 0], [3.2, 1.4, 0], 1)
+    h.drawBox([1.8, 0, 0], [3.2, 1.4, 0], 1)
     h.selectObjects(h.getObjectIds())
   }, CAM)
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
@@ -247,6 +263,7 @@ async function shot(page, name, opts = {}) {
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
+    h.setAxesVisible(false)
     h.drawBox([0, 0, 0], [2, 2, 0], 1.2)
   }, CAM)
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k')
@@ -264,6 +281,7 @@ async function shot(page, name, opts = {}) {
   await page.evaluate((cam) => {
     const h = window.__hew_test
     h.setCamera(cam)
+    h.setAxesVisible(false)
     h.drawBox([0, 0, 0], [2, 2, 0], 1.2)
   }, CAM)
   await page.getByRole('button', { name: 'File' }).click()
@@ -287,6 +305,138 @@ async function shot(page, name, opts = {}) {
   await page.keyboard.type('settings')
   await page.keyboard.press('Enter')
   await shot(page, 'settings')
+  await page.close()
+}
+
+// ---------------------------------------------------------------------------
+// 10. Getting started: the desk-organizer project, built stage by stage on a
+//     single page so the set grows shot to shot. Every solid is a discrete,
+//     watertight Object; combining (the bin's scoop) is always explicit.
+// ---------------------------------------------------------------------------
+{
+  const page = await freshPage()
+  await page.evaluate((cam) => {
+    const h = window.__hew_test
+    h.setCamera(cam)
+    h.setAxesVisible(false)
+  }, ORG_CAM)
+
+  // Draw the tray footprint (a closed rectangle sketch region).
+  await page.evaluate(() => {
+    window.__org = {}
+    window.__org.rect = window.__hew_test.drawRectangle([0, 0, 0], [14, 7.5, 0])
+  })
+  await shot(page, 'organizer-sketch')
+
+  // Push/pull it into a solid board; select it so Object Info reads Solid.
+  await page.evaluate(() => {
+    const h = window.__hew_test
+    const r = window.__org.rect
+    window.__org.tray = h.extrudeRegion(r.sketch, r.region, 0.6)
+    h.selectObjects([window.__org.tray])
+  })
+  await shot(page, 'organizer-tray')
+  await page.evaluate(() => window.__hew_test.selectObjects([]))
+
+  // Pen cup: a cylinder hollowed from the top face.
+  await page.evaluate(() => {
+    const h = window.__hew_test
+    const T = 0.6
+    const cupR = 1.5, cupH = 4.4, cx = 2.8, cy = 3.8
+    const circle = h.drawCircle([cx, cy, 0], cupR)
+    const cup = h.extrudeRegion(circle.sketch, circle.region, cupH)
+    const top = h.pickFace([cx, cy, 20], [0, 0, -1])
+    const inner = h.imprintCircleOnFace(cup, top.face, [cx, cy, cupH], cupR - 0.5)
+    h.pushPull(cup, inner, -(cupH - 0.9))
+    h.moveObject(cup, 0, 0, T)
+    window.__org.cup = cup
+  })
+  await shot(page, 'organizer-cup')
+
+  // Bin: scoop the solid block (thick material -> clean cut), then hollow it.
+  await page.evaluate(() => {
+    const h = window.__hew_test
+    const T = 0.6, binH = 2.8
+    let bin = h.drawBox([5.6, 2.2, 0], [9.0, 5.4, 0], binH)
+    const scoop = h.drawCircle([0, 0, 0], 1.4)
+    const scCyl = h.extrudeRegion(scoop.sketch, scoop.region, 5)
+    h.rotateObject(scCyl, 90, [0, 1, 0]) // axis Z -> axis X
+    h.moveObject(scCyl, 4.8, 5.4, binH + 0.55)
+    bin = h.boolean(1, bin, scCyl)
+    const cutter = h.drawBox([6.1, 2.7, 0], [8.5, 4.9, 0], binH + 0.5)
+    h.moveObject(cutter, 0, 0, 0.6)
+    bin = h.boolean(1, bin, cutter)
+    h.moveObject(bin, 0, 0, T)
+    window.__org.bin = bin
+  })
+  await shot(page, 'organizer-bin')
+
+  // Phone stand: a cradle profile extruded, then tipped onto its side.
+  await page.evaluate(() => {
+    const h = window.__hew_test
+    const T = 0.6
+    const chain = h.drawLineChain([[0, 0, 0], [0, 4.0, 0], [3.0, 0.7, 0], [3.0, 0, 0], [0, 0, 0]])
+    const stand = h.extrudeRegion(chain.sketch, chain.regions[0], 2.4)
+    h.rotateObject(stand, 90, [1, 0, 0])
+    h.moveObject(stand, 10.2, 5.0, T)
+    window.__org.stand = stand
+  })
+  await shot(page, 'organizer-set')
+
+  // Materials: paint each part, then reveal the Materials palette.
+  await page.evaluate(() => {
+    const h = window.__hew_test
+    const o = window.__org
+    const oak = h.addMaterial('Oak', 198, 161, 110, 255)
+    const teal = h.addMaterial('Teal', 74, 138, 138, 255)
+    const terracotta = h.addMaterial('Terracotta', 193, 104, 79, 255)
+    const slate = h.addMaterial('Slate', 90, 103, 118, 255)
+    h.paintObject(o.tray, oak)
+    h.paintObject(o.cup, teal)
+    h.paintObject(o.bin, terracotta)
+    h.paintObject(o.stand, slate)
+  })
+  await page.getByRole('button', { name: /materials/i }).click()
+  await shot(page, 'organizer-materials')
+
+  // Organize: rename each part in Object Info, group the set, tag it.
+  const names = [
+    ['tray', 'Tray'],
+    ['cup', 'Pen cup'],
+    ['bin', 'Bin'],
+    ['stand', 'Phone stand'],
+  ]
+  for (const [key, label] of names) {
+    await page.evaluate((k) => window.__hew_test.selectObjects([window.__org[k]]), key)
+    await settle(page, 150)
+    const input = page.getByPlaceholder(/^Object /)
+    await input.fill(label)
+    await input.press('Enter')
+    await settle(page, 120)
+  }
+  await page.evaluate(() => window.__hew_test.selectAll())
+  await settle(page, 150)
+  await page.getByRole('button', { name: 'Edit', exact: true }).click()
+  await settle(page, 200)
+  await page.getByText('Group', { exact: true }).click()
+  await settle(page, 400)
+  const groupName = page.getByPlaceholder(/^Group /)
+  await groupName.fill('Desk organizer')
+  await groupName.press('Enter')
+  await settle(page, 200)
+  await page.getByRole('button', { name: 'Add tag' }).click()
+  const tagInput = page.getByPlaceholder('Structure/Roof')
+  await tagInput.fill('Desk/Set')
+  await tagInput.press('Enter')
+  await settle(page, 200)
+  // Expand the group in the Outliner so the renamed parts (Tray, Pen cup, …) show.
+  // Relies on exactly one collapsed group ("Desk organizer") being present and the
+  // Tags tray still collapsed at this point, so the sole '▸' caret is this group's.
+  // If this scene grows a second group, scope this to the Outliner row instead.
+  await page.getByRole('button', { name: '▸' }).click()
+  await settle(page, 200)
+  await page.getByRole('button', { name: /tags/i }).click()
+  await shot(page, 'organizer-organized')
   await page.close()
 }
 

@@ -86,6 +86,17 @@ export interface HewTestHarness {
    * group context's direct members) — the same path ⌘A takes. */
   selectAll(): void
   setCamera(pose: CameraPose): void
+  /**
+   * Show/hide the origin axes (View ▸ Axes). Docs-screenshot convenience so a
+   * capture can drop the axes when they'd overshadow the modeled solids,
+   * without driving the View menu through the DOM. Delegates to the same
+   * `ViewportApi.setAxesVisible` the menu item calls.
+   */
+  setAxesVisible(visible: boolean): void
+  /** Show/hide the ground grid (View ▸ Grid). Same rationale as setAxesVisible. */
+  setGridVisible(visible: boolean): void
+  /** Show/hide all construction guides (View ▸ Guides). */
+  setGuidesVisible(visible: boolean): void
   replay(recordingJson: string): string
   // serialization ( — round-trips the live `.hew` container through the
   // app's real save/open path). Bytes cross `page.evaluate` as a plain number[]
@@ -421,6 +432,24 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       api.setCamera(pose.position, pose.target, pose.up ?? [0, 0, 1], pose.fovDeg ?? 45)
+    },
+
+    setAxesVisible: (visible) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.setAxesVisible(visible)
+    },
+
+    setGridVisible: (visible) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.setGridVisible(visible)
+    },
+
+    setGuidesVisible: (visible) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.setGuidesVisible(visible)
     },
 
     replay: (json) => act((s) => s.replay(json).toString()),
