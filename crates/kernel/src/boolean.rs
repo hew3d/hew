@@ -56,6 +56,18 @@
 //! sliver vertices that defeat the coincident-patch dedup and leave the weld
 //! non-manifold. [`collect_faces`] takes the coplanar boundary as authoritative
 //! and drops any transversal seam that lies along it ([`segment_lies_along_any`]).
+//!
+//! A second guard covers the same failure one step removed from coplanarity:
+//! a partner *edge* lying in the face's plane while neither adjacent partner
+//! face is coplanar with it — a lying prism whose facet row grazes a box face
+//! (the row of a 90°-rotated cylinder carries ~1e-16 of rotation noise, so it
+//! sits *near* the plane rather than on it). The membership transition across
+//! that tangent line is real, but the only plane-derived seams near it ride the
+//! adjacent facets' boundaries and get clipped away by the interval midpoint
+//! test, so the face is never split there and a strip inside the partner
+//! survives classification — the weld then leaks at T-junctions and the op is
+//! refused as a bogus `DegenerateContact`. [`collect_faces`] imprints such
+//! in-plane partner edges as authoritative seams, exactly like coplanar rims.
 
 use slotmap::SecondaryMap;
 
@@ -202,13 +214,14 @@ fn collect_faces(
         let coplanar: Vec<&FacePoly> = others.iter().filter(|o| coplanar_planes(fp, o)).collect();
 
         // Imprint: transversal seams (empty for parallel planes) plus coplanar
-        // partner boundaries, minus anything coincident with `fp`'s own edges or
-        // an already-collected segment.
+        // partner boundaries and partner edges lying in this face's plane, minus
+        // anything coincident with `fp`'s own edges or an already-collected
+        // segment.
         //
         // Coplanar partner boundaries are the *authoritative* imprint for any chord
         // they carry — their endpoints are exact partner vertices. Collect them up
         // front so a transversal seam that merely duplicates one can be dropped.
-        let coplanar_edges: Vec<(Point3, Point3)> = coplanar
+        let mut authoritative_edges: Vec<(Point3, Point3)> = coplanar
             .iter()
             .flat_map(|cp| {
                 loop_edges(&cp.outer)
@@ -216,6 +229,35 @@ fn collect_faces(
                     .collect::<Vec<_>>()
             })
             .collect();
+
+        // Partner edges lying in `fp`'s plane whose *faces* are not coplanar with
+        // it — tangency rows. Where the partner solid grazes this face's plane
+        // along an edge (a lying prism touching a box face along a facet row),
+        // the membership transition across that line is real: points of `fp`
+        // just past the edge are inside the partner, points before it outside.
+        // But the only plane-derived seams near it are the plane×plane lines of
+        // the two *adjacent* partner faces, and each rides its face's boundary —
+        // clipped to a region it touches only within floating-point noise of the
+        // rotation that put it there, so the interval midpoint test drops both
+        // and the transition is never imprinted; the strip past the tangent line
+        // is then classified by a test point on the wrong side and the weld
+        // leaks (a bogus DegenerateContact). The edge itself is the vertex-exact
+        // authoritative seam, exactly as a coplanar rim is.
+        for ofp in others {
+            if coplanar_planes(fp, ofp) {
+                continue; // its edges are already collected above
+            }
+            let in_plane = |p: Point3, q: Point3| {
+                fp.plane.signed_distance(p).abs() <= tol::PLANE_DIST
+                    && fp.plane.signed_distance(q).abs() <= tol::PLANE_DIST
+            };
+            for (p, q) in loop_edges(&ofp.outer).chain(ofp.holes.iter().flat_map(|h| loop_edges(h)))
+            {
+                if in_plane(p, q) {
+                    authoritative_edges.push((p, q));
+                }
+            }
+        }
 
         let mut seams: Vec<(Point3, Point3)> = Vec::new();
         for ofp in others {
@@ -228,14 +270,15 @@ fn collect_faces(
                 // `fp`, the rim edge is not) they seed near-duplicate collinear
                 // segments that the region tracer resolves into sliver vertices,
                 // breaking the coincident-patch dedup and the final weld. Drop the
-                // transversal copy in favour of the vertex-exact coplanar edge.
-                if segment_lies_along_any(seg, &coplanar_edges) {
+                // transversal copy in favour of the vertex-exact coplanar or
+                // in-plane partner edge.
+                if segment_lies_along_any(seg, &authoritative_edges) {
                     continue;
                 }
                 push_unique_segment(&mut seams, seg, fp);
             }
         }
-        for &seg in &coplanar_edges {
+        for &seg in &authoritative_edges {
             push_unique_segment(&mut seams, seg, fp);
         }
 
