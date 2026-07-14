@@ -6,7 +6,7 @@
  */
 
 import { render, screen, fireEvent, act } from '@testing-library/react'
-import { describe, expect, it, beforeEach } from 'vitest'
+import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { LogPanel } from './LogPanel'
 import * as LogStore from './LogStore'
 
@@ -84,6 +84,25 @@ describe('LogPanel', () => {
     expect(screen.getByText(/▼ Log/)).toBeInTheDocument()
     fireEvent.click(screen.getByText(/▼ Log/))
     expect(screen.getByText(/▶ Log/)).toBeInTheDocument()
+  })
+
+  it('copies the log entries to the clipboard when Copy is clicked', () => {
+    const writeText = vi.fn(() => Promise.resolve())
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    LogStore.log.error('tool', '[DegenerateContact] combining needs real overlap')
+    render(<LogPanel />)
+    fireEvent.click(screen.getByRole('button', { name: /copy/i }))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const copied = writeText.mock.calls[0][0] as string
+    expect(copied).toContain('ERR')
+    expect(copied).toContain('[tool]')
+    expect(copied).toContain('[DegenerateContact] combining needs real overlap')
+    vi.unstubAllGlobals()
+  })
+
+  it('disables Copy when there are no entries', () => {
+    render(<LogPanel />)
+    expect(screen.getByRole('button', { name: /copy/i })).toBeDisabled()
   })
 
   it('reacts to log entries added after mount', () => {

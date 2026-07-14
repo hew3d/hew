@@ -24,6 +24,18 @@ const LEVEL_COLORS: Record<LogStore.LogLevel, { fg: string; label: string }> = {
   error: { fg: 'var(--status-leaky)', label: 'ERR ' },
 }
 
+/**
+ * Render the entries as plain text for the clipboard, oldest-first (reading
+ * order), one line each: `HH:MM:SS LEVEL [source] message`. Mirrors what the
+ * rows show so a copied log matches the panel — the primary use is pasting an
+ * error line into a bug report.
+ */
+function entriesToText(entries: readonly LogEntry[]): string {
+  return entries
+    .map((e) => `${fmtTime(e.timestamp)} ${LEVEL_COLORS[e.level].label.trim().padEnd(4)} [${e.source}] ${e.message}`)
+    .join('\n')
+}
+
 interface EntryRowProps {
   entry: LogEntry
 }
@@ -59,6 +71,7 @@ interface Props {
 export function LogPanel({ panelHeight = 160 }: Props) {
   const [entries, setEntries] = useState<readonly LogEntry[]>(LogStore.getEntries())
   const [collapsed, setCollapsed] = useState(false)
+  const [copied, setCopied] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -85,15 +98,20 @@ export function LogPanel({ panelHeight = 160 }: Props) {
     badgeText = parts.join(' · ')
   }
 
+  const handleCopy = () => {
+    void navigator.clipboard?.writeText(entriesToText(entries))
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1200)
+  }
+
   return (
     <div
       style={{
         borderTop: '1px solid var(--border-hairline)',
         background: 'var(--surface-window)',
-        userSelect: 'none',
       }}
     >
-      {/* Header bar */}
+      {/* Header bar — a click toggles collapse, so it must not be text-selectable */}
       <div
         style={{
           display: 'flex',
@@ -102,6 +120,7 @@ export function LogPanel({ panelHeight = 160 }: Props) {
           background: 'var(--surface-panel)',
           cursor: 'pointer',
           gap: '8px',
+          userSelect: 'none',
         }}
         onClick={() => setCollapsed((c) => !c)}
       >
@@ -121,6 +140,27 @@ export function LogPanel({ panelHeight = 160 }: Props) {
         {/* Render stats — permanent readout, visible even when collapsed.
             Mounting it is what switches stats collection on (renderStats.ts). */}
         <RenderStatsReadout />
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            handleCopy()
+          }}
+          disabled={entries.length === 0}
+          title="Copy all log entries to the clipboard"
+          style={{
+            padding: '1px 8px',
+            fontSize: '11px',
+            fontFamily: 'monospace',
+            background: 'var(--surface-input)',
+            color: 'var(--text-muted)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: '2px',
+            cursor: entries.length === 0 ? 'default' : 'pointer',
+            opacity: entries.length === 0 ? 0.5 : 1,
+          }}
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
         <button
           onClick={(e) => {
             e.stopPropagation()
@@ -150,6 +190,8 @@ export function LogPanel({ panelHeight = 160 }: Props) {
             overflowY: 'auto',
             display: 'flex',
             flexDirection: 'column-reverse', // newest at top via CSS reverse
+            userSelect: 'text', // log lines are selectable/copyable
+            cursor: 'text',
           }}
         >
           {/* Render in forward order; flexDirection: column-reverse flips them */}
