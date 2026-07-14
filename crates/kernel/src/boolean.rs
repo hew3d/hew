@@ -27,19 +27,15 @@
 //! ground, shared walls, stacking, coincident solids, and interpenetrating
 //! coplanar overlaps.
 //!
-//! Known gaps (refused as `DegenerateContact`, never silently wrong):
-//! - **Face-adjacency with no volume overlap** — two solids that merely *touch*
-//!   on a partial coplanar face (e.g. boxes set side-by-side, different heights)
-//!   union to a non-watertight weld. The contact patch's boundary lies on the
-//!   perpendicular faces' *boundary edges*, which must be split consistently
-//!   across both solids; the per-face imprint here does not do that global
-//!   intersection-vertex insertion. Fix is a dedicated vertex-consistency pass
-//!   (deferred). Subtract/Intersect of this config work. Workaround: overlap the
-//!   solids slightly in volume.
-//! - **Measure-zero tangency** — an edge lying within a non-coplanar face, a lone
-//!   vertex touching a face.
+//! Known gap (refused as `DegenerateContact`, never silently wrong):
+//! - **Measure-zero tangency** — two solids whose only contact carries no volume:
+//!   a shared edge with no adjoining face overlap, an edge lying within a
+//!   non-coplanar face, or a lone vertex on a face. There is nothing to weld the
+//!   shells into, so assembly reports a non-watertight result. (Partial coplanar
+//!   *face* contact — boxes set side-by-side, a smaller face resting wholly
+//!   inside a larger one — does weld, resolved by the coplanar-boundary imprint.)
 //!
-//! Both surface as a clean refusal (a non-watertight weld caught at assembly)
+//! This surfaces as a clean refusal (a non-watertight weld caught at assembly)
 //! rather than a silently wrong result.
 //!
 //! Why the result is watertight: a seam is the real intersection of two faces,
@@ -48,6 +44,18 @@
 //! the *same* point, so that neighbour is split there too — T-junctions are
 //! consistent by construction, and welding coincident vertices pairs the seam
 //! half-edges into twins.
+//!
+//! One subtlety breaks that "computed once" rule unless guarded: when a face has
+//! a coplanar partner *and* a perpendicular neighbour of that partner meets the
+//! face exactly along the partner's rim — a cylinder's cap is coplanar with a box
+//! face while the cylinder's side walls stand on the cap circle — the rim is
+//! offered twice: as the coplanar partner's boundary edge (endpoints are exact
+//! partner vertices) and as the perpendicular neighbour's transversal seam
+//! (derived from its stored plane). In generic position the two disagree by
+//! rounding, and the region tracer turns the near-duplicate collinear pair into
+//! sliver vertices that defeat the coincident-patch dedup and leave the weld
+//! non-manifold. [`collect_faces`] takes the coplanar boundary as authoritative
+//! and drops any transversal seam that lies along it ([`segment_lies_along_any`]).
 
 use slotmap::SecondaryMap;
 
@@ -196,16 +204,39 @@ fn collect_faces(
         // Imprint: transversal seams (empty for parallel planes) plus coplanar
         // partner boundaries, minus anything coincident with `fp`'s own edges or
         // an already-collected segment.
+        //
+        // Coplanar partner boundaries are the *authoritative* imprint for any chord
+        // they carry — their endpoints are exact partner vertices. Collect them up
+        // front so a transversal seam that merely duplicates one can be dropped.
+        let coplanar_edges: Vec<(Point3, Point3)> = coplanar
+            .iter()
+            .flat_map(|cp| {
+                loop_edges(&cp.outer)
+                    .chain(cp.holes.iter().flat_map(|h| loop_edges(h)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
         let mut seams: Vec<(Point3, Point3)> = Vec::new();
         for ofp in others {
             for seg in seam_segments(fp, ofp) {
+                // A partner face perpendicular to `fp` that meets it exactly along a
+                // coplanar partner's rim — a cylinder's side wall meeting this face
+                // along its cap circle — yields a transversal seam collinear with,
+                // and covered by, that rim edge. It is the same chord computed two
+                // ways; clipped differently (the transversal copy is trimmed to
+                // `fp`, the rim edge is not) they seed near-duplicate collinear
+                // segments that the region tracer resolves into sliver vertices,
+                // breaking the coincident-patch dedup and the final weld. Drop the
+                // transversal copy in favour of the vertex-exact coplanar edge.
+                if segment_lies_along_any(seg, &coplanar_edges) {
+                    continue;
+                }
                 push_unique_segment(&mut seams, seg, fp);
             }
         }
-        for cp in &coplanar {
-            for seg in loop_edges(&cp.outer).chain(cp.holes.iter().flat_map(|h| loop_edges(h))) {
-                push_unique_segment(&mut seams, seg, fp);
-            }
+        for &seg in &coplanar_edges {
+            push_unique_segment(&mut seams, seg, fp);
         }
 
         for region in arrange_face(fp, &seams)? {
@@ -334,6 +365,27 @@ fn push_unique_segment(seams: &mut Vec<(Point3, Point3)>, seg: (Point3, Point3),
 fn seg_eq(a0: Point3, a1: Point3, b0: Point3, b1: Point3) -> bool {
     (a0.approx_eq(b0, tol::POINT_MERGE) && a1.approx_eq(b1, tol::POINT_MERGE))
         || (a0.approx_eq(b1, tol::POINT_MERGE) && a1.approx_eq(b0, tol::POINT_MERGE))
+}
+
+/// True if segment `s` lies *along* any segment in `along`.
+fn segment_lies_along_any(s: (Point3, Point3), along: &[(Point3, Point3)]) -> bool {
+    along.iter().any(|&c| segment_lies_along(s, c))
+}
+
+/// Whether segment `s` is contained in segment `c`: both of `s`'s endpoints lie
+/// within [`tol::POINT_MERGE`] of `c` (point-to-segment distance). Because both
+/// endpoints sit in `c`'s (convex) tolerance neighborhood, so does all of `s` —
+/// the two are the same chord, and `s` carries nothing `c` does not.
+///
+/// Containment is intentionally one-directional (`s ⊆ c`, not `c ⊆ s`): the only
+/// seam we drop is a wall's transversal copy of the coplanar rim it stands on,
+/// and clipping that copy to the face can only shorten it relative to the rim
+/// edge — so the redundant copy is always the subset. A rim edge shorter than a
+/// collinear seam from an *independent* partner does not arise from one
+/// watertight solid meeting another along a shared rim.
+fn segment_lies_along(s: (Point3, Point3), c: (Point3, Point3)) -> bool {
+    point_segment_distance(s.0, c.0, c.1) <= tol::POINT_MERGE
+        && point_segment_distance(s.1, c.0, c.1) <= tol::POINT_MERGE
 }
 
 /// Whether two oriented faces are the same boundary patch: identical outer
@@ -1021,5 +1073,91 @@ mod tests {
             Object::boolean(BooleanOp::Subtract, &a, &b, &id).unwrap_err(),
             BooleanError::EmptyResult
         );
+    }
+
+    /// A faceted cylinder built the way the app does — extrude a circle profile —
+    /// so its side walls carry real analytic planes. Axis vertical through
+    /// `(cx, cy)`, radius `r`, `n` facets from angle `phase`, height 1 (caps at
+    /// z = 0 and z = 1).
+    fn extruded_cylinder(cx: f64, cy: f64, r: f64, n: usize, phase: f64) -> Object {
+        use crate::sketch::CurveGeom;
+        let plane = Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        let mut s = Sketch::on_plane(plane);
+        s.begin_curve_with(CurveGeom {
+            center: Point3::new(cx, cy, 0.0),
+            radius: r,
+        })
+        .unwrap();
+        let pt = |k: usize| {
+            let a = phase + std::f64::consts::TAU * (k as f64) / (n as f64);
+            Point3::new(cx + r * a.cos(), cy + r * a.sin(), 0.0)
+        };
+        for i in 0..n {
+            s.add_segment(pt(i), pt(i + 1)).unwrap();
+        }
+        s.end_curve();
+        let region = s.regions().keys().next().unwrap();
+        Object::from_extrusion(&s.profile(region).unwrap(), 1.0).unwrap()
+    }
+
+    /// A cylinder whose axis coincides exactly with a cube's vertical edge, its
+    /// caps flush with the cube's top and bottom faces — the user's bug report.
+    /// The volumes genuinely overlap in a quarter-cylinder wedge, so every op
+    /// must succeed with a watertight result, and union/intersect must not
+    /// depend on operand order.
+    ///
+    /// Regression: the cylinder's cap is coplanar with the cube's top/bottom
+    /// face, and each side wall meets that face *exactly* along the cap's rim.
+    /// The rim was imprinted twice — once as the cap boundary (vertex-exact),
+    /// once as the side wall's transversal seam (plane-derived) — and once the
+    /// operand is nudged into generic position the near-duplicate collinear pair
+    /// seeds sliver vertices that defeat the coincident-patch dedup, so the weld
+    /// comes out non-manifold and the op is refused as a bogus DegenerateContact.
+    /// [`segment_lies_along_any`] drops the redundant transversal copy.
+    #[test]
+    fn cylinder_axis_on_cube_edge_with_flush_caps() {
+        let cube = unit_cube();
+        // Extrude off-axis, then translate the axis onto the cube's (x=1, y=0)
+        // edge (as a Move would) so the side-wall planes sit in generic position.
+        let mut cyl = extruded_cylinder(0.123, 0.789, 0.25, 52, 0.31);
+        cyl.apply_transform(&Transform::translation(Vec3::new(1.0 - 0.123, -0.789, 0.0)))
+            .unwrap();
+        let cyl_vol = volume(&cyl);
+        let id = Transform::IDENTITY;
+
+        let run = |op, a: &Object, b: &Object| {
+            let r = Object::boolean(op, a, b, &id).unwrap();
+            r.validate().unwrap();
+            assert_eq!(
+                r.watertight(),
+                WatertightState::Watertight,
+                "op {op:?} not watertight"
+            );
+            volume(&r)
+        };
+
+        // The overlap is a real quarter-wedge of the cylinder — strictly between
+        // nothing and the whole cutter — not a measure-zero contact.
+        let overlap = run(BooleanOp::Intersect, &cube, &cyl);
+        assert!(
+            overlap > 1e-3 && overlap < cyl_vol,
+            "overlap {overlap} not a proper subset"
+        );
+
+        // Intersect and union are commutative; every result obeys inclusion–exclusion.
+        assert!((run(BooleanOp::Intersect, &cyl, &cube) - overlap).abs() < VOL_TOL);
+        let union = run(BooleanOp::Union, &cube, &cyl);
+        assert!((run(BooleanOp::Union, &cyl, &cube) - union).abs() < VOL_TOL);
+        assert!(
+            (union - (1.0 + cyl_vol - overlap)).abs() < VOL_TOL,
+            "union {union}"
+        );
+        assert!((run(BooleanOp::Subtract, &cube, &cyl) - (1.0 - overlap)).abs() < VOL_TOL);
+        assert!((run(BooleanOp::Subtract, &cyl, &cube) - (cyl_vol - overlap)).abs() < VOL_TOL);
     }
 }

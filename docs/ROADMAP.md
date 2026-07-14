@@ -216,12 +216,13 @@ export a file a slicer accepts as watertight, with no repair step.
   part rather than bump one facet. That lives on the true-curves work: the
   merge-time dispatch is `if face carries a SurfaceRef → whole-wall expand,
   else → this branch's translate-and-build`, disjoint by face (see
-  docs/design/flat-face-pushpull.md). Still out of scope on the flat path:
-  a full-face through-cut on an oblique face (the swept tool grazes its
-  neighbors edge-on, which the boolean refuses as tangent contact —
-  imprinted sub-faces punch through obliquely just fine), and pushing an
-  outer face edge into or past one of its own holes (the deferred P4
-  hole-edge case, revisited with true circles)
+  docs/design/flat-face-pushpull.md). A full-face through-cut on an oblique
+  face now works too: the swept tool's walls meet the neighbors coplanarly
+  along their shared rim, which the boolean resolves rather than refusing as
+  tangent contact (it drops the redundant transversal seam that duplicated
+  the coplanar rim). Still out of scope on the flat path: pushing an outer
+  face edge into or past one of its own holes (the deferred P4 hole-edge
+  case, revisited with true circles)
 - **A short first-model guide** — rectangle, push/pull, a circle or arc
   detail, export to STL, slice
 

@@ -906,31 +906,50 @@ fn push_pull_holed_cut_face_builds_walls_and_keeps_the_hole() {
 }
 
 /// Through-cut interaction on a Slice-produced face. Overshoot detection
-/// reports the through case for a deep push, so the document layer routes it
-/// to `push_through` — whose boolean REFUSES a full-face sweep here, typed:
-/// the swept tool's side walls contain the cut face's boundary edges, which
-/// lie on the wedge's oblique legs — edge-on-face tangency, exactly the
-/// contact booleans refuse rather than guess at (ARCHITECTURE.md). The
-/// working through path on an oblique face is a sub-face imprint (see
-/// `push_pull_holed_cut_face_stretches_and_keeps_the_hole`, whose tunnel
-/// walls meet the solid transversally). Full-face oblique push-through is
-/// scoped in docs/ROADMAP.md.
+/// reports the through case for a deep push, so the document layer routes it to
+/// `push_through`, whose boolean shaves the oblique cut face inward.
+///
+/// The swept tool's side walls meet the wedge's oblique legs coplanarly, along
+/// the cut face's boundary edges. That contact once seeded sliver vertices in
+/// the boolean arrangement — the leg rim was imprinted twice, as the coplanar
+/// boundary and as the tool wall's transversal seam — so the weld came out
+/// non-manifold and the op was refused. With the redundant transversal seam
+/// dropped (crates/kernel/src/boolean.rs), the shave welds cleanly: pushing a
+/// wedge whose slant sits at distance 1/√2 from the far corner in by `d` yields
+/// a similar, smaller wedge of volume (1 − d√2)²/2, until the slant reaches the
+/// corner and the solid vanishes (refused typed).
 #[test]
-fn push_through_on_a_slice_cut_face_refuses_typed() {
+fn push_through_on_a_slice_cut_face_shaves_the_wedge() {
     let wedge = sliced_wedge();
     let cut = wedge_cut_face(&wedge);
+    assert!(
+        (signed_volume(&wedge) - 0.5).abs() < tol::POINT_MERGE,
+        "wedge is half the cube"
+    );
 
     // Deep inward pushes report as through-cuts (the document layer routes
     // them to `push_through`).
     assert!(wedge.push_pull_overshoots(cut, -0.8));
 
-    // The full-face sweep grazes the legs along the boundary: refused typed,
-    // source untouched (push_through borrows, never mutates).
-    let err = wedge.push_through(cut, -0.2).unwrap_err();
-    assert_eq!(err, PushPullError::NonManifoldResult);
+    // A full-face inward sweep shaves the slant into a smaller, still-watertight
+    // wedge whose volume is exactly the shaved similar triangle's.
+    for d in [0.2_f64, 0.5] {
+        let shaved = wedge.push_through(cut, -d).unwrap();
+        shaved.validate().unwrap();
+        assert_eq!(shaved.watertight(), WatertightState::Watertight);
+        assert_eq!(shaved.faces().len(), 5, "still a 5-faced wedge");
+        let expect = (1.0 - d * std::f64::consts::SQRT_2).powi(2) / 2.0;
+        assert!(
+            (signed_volume(&shaved) - expect).abs() < VOLUME_TOL,
+            "shave d={d}: vol {} != {expect}",
+            signed_volume(&shaved)
+        );
+    }
+    // Source untouched (push_through borrows, never mutates).
+    assert_eq!(wedge.faces().len(), 5);
 
-    // Sweeping past the far edge would consume the whole wedge; the empty
-    // result is refused typed as well.
+    // Sweeping to or past the far corner consumes the whole wedge; the empty
+    // result is refused typed.
     let err = wedge.push_through(cut, -0.8).unwrap_err();
     assert!(
         matches!(
