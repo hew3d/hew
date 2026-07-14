@@ -46,33 +46,41 @@ Navigation is always available, whatever tool is active. Drag the **middle mouse
 
 Two new moves here: drawing a circle, and hollowing a solid by pushing a face *inward*.
 
-1. Pick the **Circle** tool (`C`), click a center point on the ground beside the tray, and type a radius — `4cm` — then `Enter`.
+1. Pick the **Circle** tool (`C`), click a center point on the ground beside the tray, type `3cm`, and press `Enter`. What you type is the **radius**, so this makes a 6 cm-wide disk.
 2. With **Push/Pull** (`P`), click the disk and pull it up to `9cm`. You now have a solid cylinder.
-3. Hollow it: with the **Circle** tool, draw a smaller circle (`3cm`) directly on the cylinder's **top face** — it snaps to the face's center — then **Push/Pull** that inner disk *down* about `7.5cm`. Pushing a face inward carves a recess, so the cup becomes a cup.
-4. Switch to **Select** (`Space`) and click the cup to select it, then press `M` for **Move** and drag it onto the tray. (Move and Rotate always act on the current selection, so select first, then transform.) Because it's its own Object, it rests on the tray without merging into it.
+3. Hollow it. To draw *on* a solid instead of on the ground, you first step inside it: **double-click the cylinder** — the rest of the scene dims, and you're now editing just that Object. With the **Circle** tool, click the center of its top face and type `2.4cm`; then take **Push/Pull** (`P`) and push that inner disk *down* `7.5cm`. Pushing a face inward carves a recess, leaving a 1.5 cm floor — the cup is now a cup. Press `Esc` to step back out.
+4. Switch to **Select** (`Space`) and click the cup, then press `M` for **Move** and drag it onto the tray. (Move acts on the current selection, so select first, then move.) Because it's its own Object, it rests on the tray without merging into it.
 
 ![The tray with the hollowed pen cup resting on it; the Outliner lists two objects, both solid](/docs/organizer-cup.png)
 
 ## 4. The bin with a scooped front
 
-The bin starts like the tray — a rectangle pulled up into a block — then hollowed the same way you hollowed the cup. Its scooped front is the one place in this build where you'll *explicitly* combine solids.
+The bin starts as a hollow box, then gets its front scooped. The scoop is the one place in this build where you *explicitly* combine two solids.
 
-1. **Rectangle** (`R`) → a `10cm,8cm` footprint on the ground; **Push/Pull** (`P`) up to `6cm`.
-2. Hollow it: draw a rectangle on the block's top face, leaving a wall all around, and push it down to leave a floor — an open box.
-3. Model the scoop as its own solid: with **Circle** (`C`) and **Push/Pull**, make a short cylinder. Select it (`Space`, then click), and use **Rotate** (`Q`) to lay it on its side and **Move** (`M`) to position it straddling the top of the bin's front wall.
-4. Combine explicitly: with **Select**, click the bin, then `Shift`-click the cylinder, and choose **Edit ▸ Subtract**. The cylinder carves a smooth curved dip out of the front and vanishes, leaving one watertight bin — which stays selected, so press `M` and move it onto the tray.
+1. **Rectangle** (`R`) → a `7cm,5cm` footprint on the ground; **Push/Pull** (`P`) up `6cm` into a solid block.
+2. Hollow it, the same way you hollowed the cup — you have to be *inside* the solid to draw on it. **Double-click the block** to step in, draw a **Rectangle** (`R`) on its top face leaving roughly a `0.7cm` wall all the way around, then **Push/Pull** (`P`) that inner rectangle *down* `5cm` (a `1cm` floor). Press `Esc` to step out. You now have an open box.
+3. Make the cutter for the scoop: off to the side, with **Circle** (`C`, radius `2cm`) and **Push/Pull** (`P`), stand up a cylinder about `8cm` tall.
+4. Bring them together — and here you rotate the **bin**, not the cylinder. Select the bin, press `Q` for **Rotate**, hover one of its lower edges to set the axis, and tip it `90°` onto its side so the top edge of the front wall stands vertical, right beside the upright cylinder. **Move** (`M`) the bin until the cylinder bites into that edge.
+5. Select the bin, `Shift`-click the cylinder, and choose **Edit ▸ Subtract**. The cylinder carves a smooth curved dip along the rim and vanishes, leaving one watertight bin.
+6. **Rotate** (`Q`) the bin upright again, then **Move** (`M`) it onto the tray.
 
 ![The tray with the pen cup and the hollow bin, its front wall dipping in a smooth curved scoop](/docs/organizer-bin.png)
 
-Subtract is one of three booleans (with Union and Intersect); [Combining and splitting solids](/learn/combining-solids/) covers when to reach for each, and when — as with the hollowing above — Push/Pull already does the job.
+Rotating the *cylinder* onto its side instead — so the bin never has to move — is quicker once you're comfortable, but a cylinder's curved wall gives the Rotate tool no flat face to aim at, so you'd first press an arrow key (`→` / `←` / `↑`) to lock the X / Y / Z axis. Rotating the box is the gentler way in. Subtract is one of three booleans (with Union and Intersect); [Combining and splitting solids](/learn/combining-solids/) covers when to reach for each, and when — as with the hollowing — Push/Pull already does the job.
 
 ## 5. The phone stand
 
-The stand is a wedge, and the tidy way to make one is to draw its side profile flat, give it width, and tip it upright.
+The stand is a wedge: a tall back, a slope for the phone to lean on, and a `1cm` lip at the front so it can't slide off. Drawing that sloped profile freehand is fiddly — the easy way starts from a plain rectangle, and introduces two tools you'll use constantly: guide lines, and editing a sketch after the fact.
 
-1. With the **Line** tool (`L`), draw the profile on the ground: a tall back, a slope down to a low front, and a small lip at the front to keep a phone from sliding off. Click point to point and close the loop back on the start — it fills into a region.
-2. **Push/Pull** (`P`) the region to `7cm` of width.
-3. Select the wedge (`Space`, then click). Press `Q` for **Rotate** and tip it 90° so the slope faces up, then **Move** (`M`) it onto the tray next to the bin.
+1. **Rectangle** (`R`) → a `6cm,8cm` rectangle on the ground beside the tray. That's the profile's bounding box: 6 deep, 8 tall.
+2. Press `T` for **Tape Measure** and click the rectangle's bottom line, then move upward — a guide line parallel to that edge follows the cursor. Type `1cm` and press `Enter` to pin it exactly 1 cm up. Guides are construction lines: they never become geometry, they just give the next tool something to snap to.
+3. With the **Line** tool (`L`), draw one line from the point where the guide crosses the rectangle's front edge — watch for the amber **Intersection** snap — up to the rectangle's back top corner. The diagonal splits the rectangle into two filled regions.
+
+![The stand profile beside the tray: a 6 by 8 rectangle with a dashed guide line 1 cm above its base and a diagonal drawn from the guide intersection to the opposite top corner, splitting it into two regions](/docs/organizer-stand-profile.png)
+
+4. Switch to **Select** (`Space`) and delete the two lines you no longer need: click the rectangle's top edge and press `Delete`, then click the short piece of the front edge above the diagonal and press `Delete`. Each deletion updates the sketch — what's left filled in is the wedge profile. **Edit ▸ Delete Guide Lines** clears the guide, its job done.
+5. **Push/Pull** (`P`) the wedge region `5cm` wide.
+6. Select the wedge, press `Q` for **Rotate**, hover a bottom edge to set the axis, and tip it `90°` so the slope faces up. (It's a box-like shape with flat faces, so Rotate has an easy time.) Then **Move** (`M`) it onto the tray next to the bin.
 
 ![The finished grey set — tray, hollow pen cup, scooped bin, and the wedge phone stand — four solid objects on the tray](/docs/organizer-set.png)
 
@@ -112,7 +120,7 @@ Because every Object is watertight by construction, the STL is manifold — no g
 
 ## Where to go next
 
-You've drawn, pushed, hollowed, subtracted, rotated, painted, organized, and exported — the moves behind most of what you'll model. From here:
+You've drawn, measured, pushed, hollowed, subtracted, rotated, edited a sketch, painted, organized, and exported — the moves behind most of what you'll model. From here:
 
 - [Core concepts](/learn/core-concepts/) explains the ideas that make Hew diverge from SketchUp as models get complicated.
 - [The Hew interface](/learn/interface/) tours every panel and control.

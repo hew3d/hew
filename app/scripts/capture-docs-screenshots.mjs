@@ -35,7 +35,9 @@ const CAM = { position: [8, 6, 8], target: [1, 1, 1], up: [0, 0, 1], fovDeg: 45 
 
 // The desk-organizer project (getting-started chapter) is a bigger scene; this
 // frames the whole 14×7.5 tray with headroom for the pen cup.
-const ORG_CAM = { position: [26, 17, 14], target: [7.0, 3.7, 1.0], up: [0, 0, 1], fovDeg: 34 }
+// Units == centimeters here, matching the exact dimensions the chapter quotes
+// (24x14 tray, etc.), so the shots are dimensionally honest.
+const ORG_CAM = { position: [42, 28, 22], target: [12, 6.5, 2.0], up: [0, 0, 1], fovDeg: 34 }
 
 const browser = await chromium.launch()
 
@@ -324,63 +326,88 @@ async function shot(page, name, opts = {}) {
   // Draw the tray footprint (a closed rectangle sketch region).
   await page.evaluate(() => {
     window.__org = {}
-    window.__org.rect = window.__hew_test.drawRectangle([0, 0, 0], [14, 7.5, 0])
+    window.__org.rect = window.__hew_test.drawRectangle([0, 0, 0], [24, 14, 0])
   })
   await shot(page, 'organizer-sketch')
 
-  // Push/pull it into a solid board; select it so Object Info reads Solid.
+  // Push/pull it into a solid board (1.5 cm); select it so Object Info reads Solid.
   await page.evaluate(() => {
     const h = window.__hew_test
     const r = window.__org.rect
-    window.__org.tray = h.extrudeRegion(r.sketch, r.region, 0.6)
+    window.__org.tray = h.extrudeRegion(r.sketch, r.region, 1.5)
     h.selectObjects([window.__org.tray])
   })
   await shot(page, 'organizer-tray')
   await page.evaluate(() => window.__hew_test.selectObjects([]))
 
-  // Pen cup: a cylinder hollowed from the top face.
+  // Pen cup: a cylinder (r3 -> 6 cm across, 9 cm tall) hollowed from the top.
   await page.evaluate(() => {
     const h = window.__hew_test
-    const T = 0.6
-    const cupR = 1.5, cupH = 4.4, cx = 2.8, cy = 3.8
+    const T = 1.5
+    const cupR = 3, cupH = 9, cx = 4.5, cy = 7
     const circle = h.drawCircle([cx, cy, 0], cupR)
     const cup = h.extrudeRegion(circle.sketch, circle.region, cupH)
-    const top = h.pickFace([cx, cy, 20], [0, 0, -1])
-    const inner = h.imprintCircleOnFace(cup, top.face, [cx, cy, cupH], cupR - 0.5)
-    h.pushPull(cup, inner, -(cupH - 0.9))
+    const top = h.pickFace([cx, cy, 40], [0, 0, -1])
+    const inner = h.imprintCircleOnFace(cup, top.face, [cx, cy, cupH], 2.4)
+    h.pushPull(cup, inner, -(cupH - 1.5)) // hollow to a 1.5 cm floor
     h.moveObject(cup, 0, 0, T)
     window.__org.cup = cup
   })
   await shot(page, 'organizer-cup')
 
-  // Bin: scoop the solid block (thick material -> clean cut), then hollow it.
+  // Bin (7 x 5 x 6 cm): hollow it first (0.7 cm walls, 1 cm floor), then scoop
+  // the front with a cylinder — matching the chapter's order. The scoop
+  // position is chosen to avoid exact facet/face coincidences, which the
+  // kernel still (correctly) refuses as degenerate contact.
   await page.evaluate(() => {
     const h = window.__hew_test
-    const T = 0.6, binH = 2.8
-    let bin = h.drawBox([5.6, 2.2, 0], [9.0, 5.4, 0], binH)
-    const scoop = h.drawCircle([0, 0, 0], 1.4)
-    const scCyl = h.extrudeRegion(scoop.sketch, scoop.region, 5)
-    h.rotateObject(scCyl, 90, [0, 1, 0]) // axis Z -> axis X
-    h.moveObject(scCyl, 4.8, 5.4, binH + 0.55)
-    bin = h.boolean(1, bin, scCyl)
-    const cutter = h.drawBox([6.1, 2.7, 0], [8.5, 4.9, 0], binH + 0.5)
-    h.moveObject(cutter, 0, 0, 0.6)
+    const T = 1.5, binH = 6
+    let bin = h.drawBox([9, 4.5, 0], [16, 9.5, 0], binH)
+    const cutter = h.drawBox([9.7, 5.2, 0], [15.3, 8.8, 0], binH + 0.5)
+    h.moveObject(cutter, 0, 0, 1)
     bin = h.boolean(1, bin, cutter)
+    const scoop = h.drawCircle([0, 0, 0], 2.0)
+    const scCyl = h.extrudeRegion(scoop.sketch, scoop.region, 9)
+    h.rotateObject(scCyl, 90, [0, 1, 0]) // axis Z -> axis X
+    h.moveObject(scCyl, 8.0, 9.5, binH + 0.5)
+    bin = h.boolean(1, bin, scCyl)
     h.moveObject(bin, 0, 0, T)
     window.__org.bin = bin
   })
   await shot(page, 'organizer-bin')
 
-  // Phone stand: a cradle profile extruded, then tipped onto its side.
+  // Phone stand, step 1: the profile as the chapter teaches it — a 6 x 8
+  // rectangle, a guide line 1 cm above its bottom edge, and a diagonal from
+  // the guide/edge intersection to the opposite top corner, splitting the
+  // rectangle into two regions. Drawn as one Euler-path chain so the whole
+  // profile shares a sketch (as the shared ground sketch would in real use).
+  // Grid off so the dashed guide reads clearly.
   await page.evaluate(() => {
     const h = window.__hew_test
-    const T = 0.6
-    const chain = h.drawLineChain([[0, 0, 0], [0, 4.0, 0], [3.0, 0.7, 0], [3.0, 0, 0], [0, 0, 0]])
-    const stand = h.extrudeRegion(chain.sketch, chain.regions[0], 2.4)
-    h.rotateObject(stand, 90, [1, 0, 0])
-    h.moveObject(stand, 10.2, 5.0, T)
-    window.__org.stand = stand
+    const P = (x, y) => [27 + x, 3 + y, 0]
+    h.drawLineChain([P(0, 8), P(0, 0), P(6, 0), P(6, 1), P(6, 8), P(0, 8), P(6, 1)])
+    h.addGuideLine(27, 4, 0, 1, 0, 0)
+    h.setGridVisible(false)
+    h.setCamera({ position: [30, 1, 18], target: [30, 7.5, 0], up: [0, 0, 1], fovDeg: 40 })
   })
+  await shot(page, 'organizer-stand-profile')
+
+  // Phone stand, step 2: rebuild the trimmed wedge (the state after the two
+  // excess lines are deleted), extrude 5 cm, tip upright, move onto the tray.
+  // Undo x2 clears the guide and the teaching chain (and its emptied sketch).
+  await page.evaluate((cam) => {
+    const h = window.__hew_test
+    h.undo() // the guide
+    h.undo() // the profile chain (one gesture)
+    h.setGridVisible(true)
+    const P = (x, y) => [27 + x, 3 + y, 0]
+    const wedge = h.drawLineChain([P(0, 0), P(0, 8), P(6, 1), P(6, 0), P(0, 0)])
+    const stand = h.extrudeRegion(wedge.sketch, wedge.regions[0], 5)
+    h.rotateObject(stand, 90, [1, 0, 0])
+    h.moveObject(stand, -10, 9.5, -1.5)
+    h.setCamera(cam)
+    window.__org.stand = stand
+  }, ORG_CAM)
   await shot(page, 'organizer-set')
 
   // Materials: paint each part, then reveal the Materials palette.
