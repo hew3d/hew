@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: System libs (Tauri + Xvfb)
         run: |
@@ -52,7 +52,7 @@ jobs:
       # tauri-driver is a cargo-installed binary, which rust-cache does not
       # cover — cache it separately so warm runs skip the compile.
       - name: Cache tauri-driver
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/tauri-driver
           key: tauri-driver-${{ runner.os }}
@@ -67,7 +67,7 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.8.0 --activate
 
       - name: Cache pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/share/pnpm/store
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}

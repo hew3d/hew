@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The Tauri host crate's clippy pass needs the webkit2gtk/gtk stack;
       # the Playwright/WebGL smoke needs xvfb for the non-headless engines.
@@ -45,7 +45,7 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.8.0 --activate
 
       - name: Cache pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/share/pnpm/store
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
