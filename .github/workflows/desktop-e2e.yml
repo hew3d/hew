@@ -1,0 +1,91 @@
+# Hew desktop E2E — drives the REAL desktop binary (Tauri shell + WebKitGTK +
+# WASM kernel) through WebdriverIO + tauri-driver, asserting the semantic
+# harness round-trips a model. See shells/tauri/e2e/README.md.
+#
+# A SEPARATE workflow from the per-push CI pipeline, because it's heavy (a
+# full desktop Rust build + the native WebKitWebDriver + Xvfb). It auto-runs
+# only as a POST-MERGE gate on `main` — not on every PR, which would tax each
+# push with a desktop build — plus manual workflow_dispatch (Actions tab ▸
+# Desktop E2E ▸ Run workflow) to exercise a branch when a change warrants it.
+
+name: Desktop E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  desktop-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: System libs (Tauri + Xvfb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            xvfb xauth
+
+      # The native WebDriver tauri-driver delegates to. Both packages install
+      # the same /usr/bin/WebKitWebDriver binary; the package was renamed
+      # webkit2gtk-driver → webkitgtk-webdriver, so try the new name first
+      # and fall back.
+      - name: Install WebKitWebDriver
+        run: |
+          sudo apt-get install -y --no-install-recommends webkitgtk-webdriver \
+            || sudo apt-get install -y --no-install-recommends webkit2gtk-driver
+          command -v WebKitWebDriver
+
+      # rustup honors rust-toolchain.toml on the first cargo invocation.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            shells/tauri/src-tauri
+
+      # tauri-driver is a cargo-installed binary, which rust-cache does not
+      # cover — cache it separately so warm runs skip the compile.
+      - name: Cache tauri-driver
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/tauri-driver
+          key: tauri-driver-${{ runner.os }}
+
+      - name: Install tauri-driver
+        run: command -v tauri-driver || cargo install tauri-driver --locked
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # wasm-pack build first: e2e:build's `tauri build` runs the app's vite
+      # build, which imports the WASM pkg.
+      - name: Build WASM kernel
+        run: wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
+
+      # Harness-enabled debug binary (VITE_HEW_TEST=1 → window.__hew_test installs).
+      - name: Build desktop binary (harness-enabled)
+        run: pnpm --dir shells/tauri e2e:build
+
+      # tauri-driver needs a display even headless; wrap the run in Xvfb.
+      - name: Desktop E2E (tauri-driver, under Xvfb)
+        run: xvfb-run -a pnpm --dir shells/tauri e2e

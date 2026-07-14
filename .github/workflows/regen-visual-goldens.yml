@@ -1,0 +1,74 @@
+# Regen Visual Goldens — manually-triggered (Actions tab ▸ this workflow ▸
+# "Run workflow"). Re-renders the visual-regression suite on the pinned
+# configuration (ubuntu runner, 800×600 / DPR=1 / ANGLE-SwiftShader via
+# Playwright's pinned Chromium) with --update-snapshots, then uploads the
+# regenerated PNGs as a build artifact.
+#
+# The workflow deliberately does NOT commit: goldens are reviewed and
+# committed by the maintainer. Download the `visual-goldens` artifact,
+# unzip it over app/e2e/visual/ (it contains the *.spec.ts-snapshots/
+# directories), inspect the diff, and commit.
+
+name: Regen Visual Goldens
+
+on:
+  workflow_dispatch:
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rustup honors rust-toolchain.toml (stable + wasm32-unknown-unknown)
+      # on the first cargo invocation.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The app dev server imports the wasm bindings from app/src/wasm/pkg;
+      # Playwright's webServer boots vite, so the build must exist first.
+      - name: Build kernel to WASM (web)
+        run: wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir app exec playwright install --with-deps chromium
+
+      - name: Regenerate goldens (visual project, --update-snapshots)
+        env:
+          CI: '1'
+        run: pnpm --dir app run e2e:visual:update
+
+      # Prove self-consistency: the suite must pass against the PNGs it just
+      # wrote, or the regen itself is unstable and must not be committed.
+      - name: Verify the fresh goldens pass
+        env:
+          CI: '1'
+        run: pnpm --dir app run e2e:visual
+
+      - name: Show which goldens changed
+        run: git -C . status --short app/e2e/visual || true
+
+      - name: Upload regenerated goldens
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-goldens
+          path: app/e2e/visual/*-snapshots
+          if-no-files-found: error
