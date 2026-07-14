@@ -51,7 +51,7 @@ describe('WelcomeScreen', () => {
 
     const paths = [
       'C:\\models\\Bracket.hew',
-      '/home/kurt/models/Enclosure.hew',
+      '/home/user/models/Enclosure.hew',
       '/a/1.hew', '/a/2.hew', '/a/3.hew', '/a/4.hew',
     ]
     rerender(<WelcomeScreen {...props} recentFiles={paths} />)
@@ -62,7 +62,7 @@ describe('WelcomeScreen', () => {
     expect(screen.queryByText('4.hew')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByText('Enclosure.hew'))
-    expect(props.onOpenRecent).toHaveBeenCalledWith('/home/kurt/models/Enclosure.hew')
+    expect(props.onOpenRecent).toHaveBeenCalledWith('/home/user/models/Enclosure.hew')
   })
 
   it('Open a file, Start modeling, and Escape all report their callbacks', () => {

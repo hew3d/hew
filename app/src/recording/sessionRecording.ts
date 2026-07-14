@@ -1,9 +1,9 @@
 /**
  * Merge the high-level kernel command stream (from Rust `Scene::take_recording`)
  * with the low-level `input` array (from {@link module:inputRecorder}) into one
- * session artifact — the "sibling array in the same artifact" of RECORDING_FORMAT
- *. The result is what M17's Report-Bug bundle ships and what 's harness
- * can hand back.
+ * session artifact — the "sibling array in the same artifact" of
+ * RECORDING_FORMAT. The result is what M17's Report-Bug bundle ships and what
+ * the test harness can hand back.
  *
  * ## Precision: never JSON.parse the high-level stream
  *

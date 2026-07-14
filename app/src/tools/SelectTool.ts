@@ -1,6 +1,6 @@
 /**
- * SelectTool — M1 minimal implementation, extended for sketch selection (
- * "sketches are first-class interactable").
+ * SelectTool — M1 minimal implementation, extended for sketch selection
+ * ("sketches are first-class interactable").
  *
  * Hover-highlight via snap() provenance; click uses pick_face() for reliable
  * object-face detection (snap prefers vertices/edges and can miss face intent).

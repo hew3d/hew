@@ -11,10 +11,10 @@
  * Still deferred from the spec (M24 scope decision, not silently dropped):
  * the trailing "more actions" overflow affordance (would open the right-click
  * context menu, which isn't a reusable component yet). The two
- * deferrals M24 landed: context swaps cross-fade ( — the container is
+ * deferrals M24 landed: context swaps cross-fade (the container is
  * keyed on the context, so a swap remounts it and replays the `.hew-dock`
  * animation, ~140ms, spec's "quick cross-fade... rather than a hard cut"),
- * and the dock fades out while the camera is being pointer-dragged ( —
+ * and the dock fades out while the camera is being pointer-dragged (a
  * `hidden` prop, fed by Viewport.tsx's onCameraDragChange, riding the same
  * `.hew-dock` opacity transition). Reduced motion drops both (index.css).
  */
