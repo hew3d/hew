@@ -1,0 +1,348 @@
+# Hew release — tag push `v*` → one DRAFT GitHub Release carrying the full
+# installer matrix (see docs/RELEASE_PLANNING in the planning tree, RR8):
+#
+#   macOS      universal .dmg (+ .app.tar.gz updater bundle)
+#   Windows    NSIS -setup.exe, x64 + arm64
+#   Linux      AppImage + .deb + .rpm, x64 + arm64 (built on ubuntu-22.04 for
+#              the glibc floor — O3)
+#   Web        hew-web-vX.Y.Z.tar.gz self-hosting tarball + Cloudflare Pages
+#              deploy of app.hew3d.com (skipped loudly until the Cloudflare
+#              secrets exist)
+#   Updater    latest.json assembled from the per-platform .sig assets by a
+#              final job (NOT tauri-action's per-job merge, which loses
+#              updates when parallel matrix jobs race the read-modify-write)
+#
+# Releases stay DRAFTS: pre-v0.1.0 nothing is downloadable by the public
+# (quiet window, O14). Publishing is a deliberate human act after smoke
+# installs.
+#
+# Signing posture: the updater artifacts are minisign-signed via
+# TAURI_SIGNING_PRIVATE_KEY (independent of OS code signing). OS signing
+# (Apple notarization, SignPath) is added later by supplying the documented
+# secrets — macOS builds are ad-hoc signed and Windows installers unsigned
+# until then, which draft smoke tests must expect (right-click-open /
+# SmartScreen "More info").
+#
+# The tagged commit is assumed CI-green — this workflow builds and bundles;
+# it does not re-run the verify gate.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  # Version = tag minus the leading `v`; stamped into the bundle via a
+  # generated Tauri --config overlay so the in-tree 0.1.0 stays untouched
+  # during the v0.0.x test-tag window.
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Parse and guard the tag
+        id: version
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH — refusing to release."
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$TAG" \
+            -f name="Hew $TAG" \
+            -f body="Draft release. Artifacts are unsigned (pre-RR9); updater artifacts are minisign-signed." \
+            -F draft=true \
+            --jq '.id')"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            os: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+          - name: windows-x64
+            os: windows-latest
+            args: --bundles nsis
+          - name: windows-arm64
+            os: windows-11-arm
+            args: --bundles nsis
+          - name: linux-x64
+            os: ubuntu-22.04
+            args: --bundles appimage,deb,rpm
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
+            args: --bundles appimage,deb,rpm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Same stack ci.yml installs for the Tauri host crate, plus xdg-utils:
+      # the AppImage bundler embeds /usr/bin/xdg-open, which the arm64 runner
+      # image (unlike x64) does not preinstall.
+      - name: System libs (Tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            xdg-utils
+
+      # rustup honors rust-toolchain.toml (stable + wasm32-unknown-unknown)
+      # on the first cargo invocation; the universal build additionally needs
+      # both macOS targets present up front.
+      - name: Add macOS universal targets
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            shells/tauri/src-tauri
+
+      # Unix: the official prebuilt-binary installer (covers arm64 too).
+      # Windows: cargo install (the npm/installer shims aren't spawnable by
+      # build-wasm.mjs's spawnSync), with the compiled exe cached like
+      # desktop-e2e.yml caches tauri-driver.
+      - name: Cache wasm-pack (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/wasm-pack.exe
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install wasm-pack
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            command -v wasm-pack || cargo install wasm-pack --locked
+          else
+            curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          fi
+
+      # wasm-pack has no prebuilt wasm-opt for Windows-on-ARM and hard-fails
+      # there; it looks for wasm-opt on PATH before downloading, so supply
+      # binaryen's native arm64 build instead of shipping an unoptimized
+      # kernel in that installer.
+      - name: Install wasm-opt (Windows arm64)
+        if: matrix.name == 'windows-arm64'
+        shell: pwsh
+        run: |
+          curl.exe -sSL -o "$env:RUNNER_TEMP\binaryen.tar.gz" `
+            https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-arm64-windows.tar.gz
+          tar -xzf "$env:RUNNER_TEMP\binaryen.tar.gz" -C $env:RUNNER_TEMP
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\binaryen-version_130\bin"
+
+      - name: Enable pnpm
+        shell: bash
+        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.local/share/pnpm/store
+            ~/Library/pnpm/store
+            ~/AppData/Local/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install JS dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      # The overlay also switches on updater-artifact creation (.app.tar.gz /
+      # .sig files). That flag lives HERE, not in tauri.conf.json, on purpose:
+      # with it in the base config, a keyless local `pnpm --dir shells/tauri
+      # build` would fail demanding TAURI_SIGNING_PRIVATE_KEY.
+      - name: Stamp release version
+        shell: bash
+        run: |
+          printf '{"version": "%s", "bundle": {"createUpdaterArtifacts": true}}\n' \
+            "${TAG#v}" > release-version.json
+
+      # tauri-action runs beforeBuildCommand (app build, which builds the
+      # WASM kernel via build-wasm.mjs), bundles, and uploads the artifacts
+      # plus their .sig files to the draft release. includeUpdaterJson stays
+      # OFF — the updater-manifest job assembles latest.json race-free.
+      - name: Build and upload bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: shells/tauri
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          includeUpdaterJson: false
+          # Without this, tauri-action falls back to `npm run tauri`, which
+          # doesn't exist here — the CLI is a pnpm-managed devDependency.
+          tauriScript: pnpm tauri
+          args: ${{ matrix.args }} --config ${{ github.workspace }}/release-version.json
+
+  web:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+
+      - name: Cache pnpm store
+        uses: actions/cache@v6
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-X64-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-X64-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # app build + CSP <meta> injection (shells/web/inject-csp.mjs).
+      - name: Build web shell
+        run: pnpm --dir shells/web build
+
+      # The self-hosting artifact: "unzip behind any static file server".
+      # Deliberately excludes the Cloudflare-specific _headers file.
+      - name: Pack and upload self-hosting tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          tar -czf "hew-web-$TAG.tar.gz" -C shells/web/dist .
+          gh api --method POST \
+            -H "Content-Type: application/gzip" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=hew-web-$TAG.tar.gz" \
+            --input "hew-web-$TAG.tar.gz"
+
+      # app.hew3d.com — direct upload so the deployed bits are exactly the
+      # release build (RR11). Self-skips until the Cloudflare project +
+      # secrets exist. `frame-ancestors` can't live in the injected <meta>
+      # CSP, so it rides the host-level _headers file (see shells/web/README).
+      - name: Deploy app.hew3d.com (Cloudflare Pages)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Cloudflare secrets not set — skipping the app.hew3d.com deploy."
+            exit 0
+          fi
+          cp shells/web/_headers shells/web/dist/_headers
+          npx wrangler@4 pages deploy shells/web/dist \
+            --project-name=hew-app --branch=main --commit-dirty=true
+
+  # Assemble latest.json from the uploaded .sig assets. A single writer after
+  # the whole matrix, so no read-modify-write races. URLs use the published
+  # asset path (/releases/download/<tag>/…) — they resolve once the draft is
+  # published; during the draft window the updater is tested against an
+  # explicit endpoint override (RELEASE_PLANNING §14 step 9).
+  updater-manifest:
+    needs: [create-release, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+            --jq '.[] | [.name, .id] | @tsv' > assets.tsv
+          cat assets.tsv
+
+          sig_for() { # sig_for <asset-name> → prints signature file content
+            local id
+            id="$(awk -F'\t' -v n="$1.sig" '$1 == n {print $2}' assets.tsv)"
+            [ -n "$id" ] || { echo "::error::Missing $1.sig on the release." >&2; exit 1; }
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+          }
+
+          name_matching() { # name_matching <regex> → exactly one asset name
+            local m
+            m="$(cut -f1 assets.tsv | grep -E "$1" | grep -v '\.sig$' || true)"
+            [ "$(echo "$m" | grep -c .)" -eq 1 ] || {
+              echo "::error::Expected exactly one asset matching '$1', got: $m" >&2; exit 1; }
+            echo "$m"
+          }
+
+          MAC=$(name_matching '\.app\.tar\.gz$')
+          WIN_X64=$(name_matching 'x64.*-setup\.exe$')
+          WIN_ARM=$(name_matching 'arm64.*-setup\.exe$')
+          LIN_X64=$(name_matching '(amd64|x86_64).*\.AppImage$')
+          LIN_ARM=$(name_matching '(arm64|aarch64).*\.AppImage$')
+
+          url() { echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$1"; }
+
+          # Bare assignments, NOT inline $(sig_for …) in the jq argument list:
+          # an exit inside a command substitution used as one argument among
+          # many is swallowed by bash, and a missing .sig would ship a
+          # latest.json with a blank signature while the job reports green.
+          MAC_SIG=$(sig_for "$MAC")
+          WX_SIG=$(sig_for "$WIN_X64")
+          WA_SIG=$(sig_for "$WIN_ARM")
+          LX_SIG=$(sig_for "$LIN_X64")
+          LA_SIG=$(sig_for "$LIN_ARM")
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg mac_url "$(url "$MAC")"         --arg mac_sig "$MAC_SIG" \
+            --arg wx_url  "$(url "$WIN_X64")"     --arg wx_sig  "$WX_SIG" \
+            --arg wa_url  "$(url "$WIN_ARM")"     --arg wa_sig  "$WA_SIG" \
+            --arg lx_url  "$(url "$LIN_X64")"     --arg lx_sig  "$LX_SIG" \
+            --arg la_url  "$(url "$LIN_ARM")"     --arg la_sig  "$LA_SIG" \
+            '{
+              version: $version,
+              notes: "Hew \($version)",
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-x86_64":  { url: $mac_url, signature: $mac_sig },
+                "darwin-aarch64": { url: $mac_url, signature: $mac_sig },
+                "windows-x86_64": { url: $wx_url,  signature: $wx_sig },
+                "windows-aarch64":{ url: $wa_url,  signature: $wa_sig },
+                "linux-x86_64":   { url: $lx_url,  signature: $lx_sig },
+                "linux-aarch64":  { url: $la_url,  signature: $la_sig }
+              }
+            }' > latest.json
+
+          jq . latest.json
+          gh api --method POST \
+            -H "Content-Type: application/json" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=latest.json" \
+            --input latest.json

@@ -1,0 +1,8 @@
+# Cloudflare Pages response headers for app.hew3d.com. Copied into dist/ by
+# release.yml's deploy step ONLY — the self-hosting tarball stays free of
+# host-specific files. The injected <meta> CSP (inject-csp.mjs) cannot express
+# frame-ancestors, so the clickjacking protection lives here (see README.md).
+# If the kernel ever goes multithreaded, the COOP/COEP pair joins this file.
+/*
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
