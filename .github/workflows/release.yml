@@ -185,6 +185,49 @@ jobs:
           printf '{"version": "%s", "bundle": {"createUpdaterArtifacts": true}}\n' \
             "${TAG#v}" > release-version.json
 
+      # Apple code signing + notarization (RR9). Exported through GITHUB_ENV
+      # only when the secrets exist: `env:` on a step always materializes
+      # unset secrets as empty strings, and an empty APPLE_SIGNING_IDENTITY
+      # would send codesign chasing an identity named "" instead of falling
+      # back to ad-hoc signing. With no secrets set, this step is a no-op and
+      # the macOS build stays ad-hoc signed (the pre-RR9 posture). tauri-action
+      # imports the .p12 into a throwaway keychain; notarization (and
+      # stapling) engage only when the App Store Connect API-key trio exists.
+      - name: Stage Apple signing credentials
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+          API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          if [ -n "$CERT" ]; then
+            {
+              echo "APPLE_CERTIFICATE<<__EOF__";          echo "$CERT";          echo "__EOF__"
+              echo "APPLE_CERTIFICATE_PASSWORD<<__EOF__"; echo "$CERT_PASSWORD"; echo "__EOF__"
+              echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+              echo "APPLE_TEAM_ID=$TEAM_ID"
+            } >> "$GITHUB_ENV"
+            echo "::notice::Apple code signing enabled."
+          else
+            echo "::notice::APPLE_CERTIFICATE not set — macOS build will be ad-hoc signed."
+          fi
+          if [ -n "$API_KEY_CONTENT" ]; then
+            printf '%s\n' "$API_KEY_CONTENT" > "$RUNNER_TEMP/apple-api-key.p8"
+            {
+              echo "APPLE_API_ISSUER=$API_ISSUER"
+              echo "APPLE_API_KEY=$API_KEY"
+              echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple-api-key.p8"
+            } >> "$GITHUB_ENV"
+            echo "::notice::Notarization enabled."
+          else
+            echo "::notice::App Store Connect API key not set — skipping notarization."
+          fi
+
       # tauri-action runs beforeBuildCommand (app build, which builds the
       # WASM kernel via build-wasm.mjs), bundles, and uploads the artifacts
       # plus their .sig files to the draft release. includeUpdaterJson stays
