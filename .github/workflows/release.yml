@@ -243,6 +243,12 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           tar -czf "hew-web-$TAG.tar.gz" -C shells/web/dist .
+          # Idempotent: GitHub 422s on duplicate asset names, so a re-run of
+          # this job (e.g. to fire the Cloudflare deploy after the secrets
+          # appear) must first drop the asset it uploaded last time.
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+            --jq ".[] | select(.name == \"hew-web-$TAG.tar.gz\") | .id")"
+          [ -z "$existing" ] || gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$existing"
           gh api --method POST \
             -H "Content-Type: application/gzip" \
             "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=hew-web-$TAG.tar.gz" \
@@ -342,6 +348,12 @@ jobs:
             }' > latest.json
 
           jq . latest.json
+
+          # Idempotent for the same reason as the web tarball: a re-run must
+          # replace, not collide with, the latest.json it uploaded before.
+          # assets.tsv predates this upload, so it holds any previous copy.
+          existing="$(awk -F'\t' '$1 == "latest.json" {print $2}' assets.tsv)"
+          [ -z "$existing" ] || gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$existing"
           gh api --method POST \
             -H "Content-Type: application/json" \
             "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=latest.json" \
