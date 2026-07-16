@@ -87,6 +87,23 @@ export interface HewTestHarness {
   selectAll(): void
   setCamera(pose: CameraPose): void
   /**
+   * Render the scene at two camera poses and count the pixels that differ
+   * between the two frames: `differing` (any channel off by > 8/255) and
+   * `hard` (> 60/255 — a high-contrast flip, e.g. a dark edge line trading
+   * places with the face fill behind it). With poses a sub-pixel rotation
+   * apart, `hard` must stay near zero: a spray of hard flips means the
+   * depth test is resolving coplanar edge/face fragments by rounding noise
+   * (the edge-shimmer defect — every repaint of an orbit's damping tail
+   * re-rolls that noise). Counts, not pixels, cross the boundary — frames
+   * are megabytes and the verdict is a number.
+   */
+  frameStability(poseA: CameraPose, poseB: CameraPose): {
+    width: number
+    height: number
+    differing: number
+    hard: number
+  }
+  /**
    * Show/hide the origin axes (View ▸ Axes). Docs-screenshot convenience so a
    * capture can drop the axes when they'd overshadow the modeled solids,
    * without driving the View menu through the DOM. Delegates to the same
@@ -432,6 +449,32 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       api.setCamera(pose.position, pose.target, pose.up ?? [0, 0, 1], pose.fovDeg ?? 45)
+    },
+
+    frameStability: (poseA, poseB) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const capture = (pose: CameraPose) => {
+        api.setCamera(pose.position, pose.target, pose.up ?? [0, 0, 1], pose.fovDeg ?? 45)
+        return api.captureFrame()
+      }
+      const a = capture(poseA)
+      const b = capture(poseB)
+      if (a.width !== b.width || a.height !== b.height) {
+        throw new Error('__hew_test: frame size changed between captures')
+      }
+      let differing = 0
+      let hard = 0
+      for (let p = 0; p < a.pixels.length; p += 4) {
+        const d = Math.max(
+          Math.abs(a.pixels[p] - b.pixels[p]),
+          Math.abs(a.pixels[p + 1] - b.pixels[p + 1]),
+          Math.abs(a.pixels[p + 2] - b.pixels[p + 2]),
+        )
+        if (d > 8) differing++
+        if (d > 60) hard++
+      }
+      return { width: a.width, height: a.height, differing, hard }
     },
 
     setAxesVisible: (visible) => {

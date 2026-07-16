@@ -274,6 +274,17 @@ export interface ViewportApi {
     fovDeg: number,
   ) => void
   /**
+   * Render the scene at the current camera and read the framebuffer back
+   * (RGBA8, rows bottom-up per GL convention). Drives `__hew_test`
+   * frame-stability probes: consecutive captures at near-identical camera
+   * poses must differ only where the scene legitimately moved — a spray of
+   * high-contrast per-pixel flips is depth-test instability (the edge-shimmer
+   * defect). Renders synchronously because the drawing buffer is not
+   * preserved after the frame is composited, so pixels must be read in the
+   * same task as the draw.
+   */
+  captureFrame: () => { width: number; height: number; pixels: Uint8Array }
+  /**
    * Update the renderer's hidden object/instance sets.  Hidden groups have
    * `.visible = false` (not raypicked by three.js tools) and are excluded from
    * the kernel pick results in the Select tool path.
@@ -1503,6 +1514,16 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function captureFrame(): { width: number; height: number; pixels: Uint8Array } {
+      renderer.render(threeScene, camera)
+      const gl = renderer.getContext()
+      const width = gl.drawingBufferWidth
+      const height = gl.drawingBufferHeight
+      const pixels = new Uint8Array(width * height * 4)
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+      return { width, height, pixels }
+    }
+
     function setHidden(objectIds: bigint[], instanceIds: bigint[]): void {
       hiddenObjectIdsRef.current = new Set(objectIds)
       hiddenInstanceIdsRef.current = new Set(instanceIds)
@@ -1572,7 +1593,7 @@ export default function Viewport({
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
     }
 
     // ------------------------------------------------------------------ tool factories

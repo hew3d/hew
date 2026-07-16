@@ -1102,6 +1102,20 @@ export class SceneRenderer {
    * and BackSide/DoubleSide sign flips disagree with attribute normals on
    * mirrored slots — so batches pass `flatShading: true` for every bucket
    * except 'F' (see `BucketTag` for the full derivation).
+   *
+   * Every face material carries `polygonOffset(1, 1)`: the edge overlay
+   * (`LineSegments` over the exact same vertices) is exactly coplanar with
+   * the faces, so edge and face fragments land within one depth-buffer
+   * quantum of each other and the depth test resolves the tie by rounding
+   * noise. That noise is a function of the camera matrices, so the damping
+   * tail after an orbit (dozens of repaints at sub-pixel camera deltas)
+   * re-resolves it differently every frame — visible as edge shimmer on
+   * large models, where a far-away z (near = 0.01) leaves millimetres per
+   * depth quantum. Offsetting the fill by one slope unit plus one
+   * resolvable depth unit makes the coplanar edge pass deterministically —
+   * the coplanar line-over-polygon case glPolygonOffset exists for. It
+   * equally settles sketch lines and region fills drawn on a face, which
+   * sit in the same plane as that face.
    */
   private _buildMaterialArray(
     groupMaterialIds: BigUint64Array,
@@ -1125,6 +1139,9 @@ export class SceneRenderer {
             vertexColors: true,
             flatShading,
             side,
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1,
           }),
         )
       } else {
@@ -1174,6 +1191,9 @@ export class SceneRenderer {
           transparent: baseOpacity < 1,
           opacity: baseOpacity,
           depthWrite: baseOpacity >= 1,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
         })
         m.userData.baseOpacity = baseOpacity
         // Which palette entry this material renders — the hook that lets
@@ -1193,6 +1213,9 @@ export class SceneRenderer {
           color: FACE_COLOR_DEFAULT,
           flatShading,
           side,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
         }),
       )
     }
