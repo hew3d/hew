@@ -1,7 +1,7 @@
 ---
 title: "Organizing your model"
 description: "Names, tags, visibility toggles, and the Outliner keep a growing model legible and searchable."
-order: 12
+order: 13
 ---
 
 Once a model outgrows a dozen objects, you stop finding things by orbiting around looking for them. The right-hand tray is the answer: the **Outliner** shows everything, **Object Info** names and tags the selected thing, and **Tags** toggles whole categories on and off.

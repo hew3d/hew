@@ -399,6 +399,40 @@ export interface HewTestHarness {
 
   /** Replace the selection with arbitrary nodes (kind + handle string). */
   selectNodes(nodes: { kind: string; id: string }[]): void
+  // -------- follow me --------
+
+  /**
+   * Rotate a free-standing sketch by `angleDeg` about the world `axis`
+   * through `origin` — the same `transform_sketch` bake the Move/Rotate
+   * tools' sketch branch commits. Lets a driver stand a ground-drawn
+   * profile up perpendicular to a path before a `followMe*` call, exactly
+   * as a user would with the Rotate tool.
+   */
+  rotateSketch(sketch: string, angleDeg: number, axis: Vec3, origin: Vec3): void
+
+  /** Every edge handle of `sketch` (union of its islands' edges), as
+   * decimal strings — the raw material for a `followMeAlongEdges` path. */
+  getSketchEdgeIds(sketch: string): string[]
+
+  /**
+   * Follow Me along sketch edges (docs/design/follow-me.md): sweeps the
+   * closed profile `region` of `sketch` along the chain the `edges` of
+   * `pathSketch` form. Returns the new object handle. Equivalent to
+   * FollowMeTool's edge-path commit (`follow_me_along_edges`).
+   */
+  followMeAlongEdges(
+    sketch: string,
+    region: string,
+    pathSketch: string,
+    edges: string[],
+  ): string
+
+  /**
+   * Follow Me around a solid face's outer boundary loop (molding). Returns
+   * the new object handle. Equivalent to FollowMeTool's face-path commit
+   * (`follow_me_around_face`).
+   */
+  followMeAroundFace(sketch: string, region: string, object: string, face: string): string
 }
 
 declare global {
@@ -872,6 +906,64 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     paintFace: (object, face, material) => {
       act((s) => s.paint_face(BigInt(object), BigInt(face), materialHandle(material)))
     },
+
+    // -------- follow me --------
+
+    rotateSketch: (sketch, angleDeg, axis, origin) => {
+      // Rodrigues rotation about `axis` through `origin`:
+      // affine = T(origin) · R · T(−origin), i.e. translation = origin − R·origin.
+      const [ux, uy, uz] = axis
+      const len = Math.hypot(ux, uy, uz)
+      if (len < 1e-12) throw new Error('rotateSketch: axis must be non-zero')
+      const ax = ux / len, ay = uy / len, az = uz / len
+      const theta = (angleDeg * Math.PI) / 180
+      const c = Math.cos(theta), s_ = Math.sin(theta), t = 1 - c
+      const r = [
+        t * ax * ax + c,       t * ax * ay - s_ * az, t * ax * az + s_ * ay,
+        t * ay * ax + s_ * az, t * ay * ay + c,       t * ay * az - s_ * ax,
+        t * az * ax - s_ * ay, t * az * ay + s_ * ax, t * az * az + c,
+      ]
+      const [px, py, pz] = origin
+      const tx = px - (r[0] * px + r[1] * py + r[2] * pz)
+      const ty = py - (r[3] * px + r[4] * py + r[5] * pz)
+      const tz = pz - (r[6] * px + r[7] * py + r[8] * pz)
+      const affine = new Float64Array([
+        r[0], r[1], r[2], tx,
+        r[3], r[4], r[5], ty,
+        r[6], r[7], r[8], tz,
+      ])
+      act((s) => s.transform_sketch(BigInt(sketch), affine))
+    },
+
+    getSketchEdgeIds: (sketch) =>
+      query((s) => {
+        const out: string[] = []
+        for (const island of s.sketch_island_ids(BigInt(sketch))) {
+          for (const edge of s.sketch_island_edges(BigInt(sketch), island)) {
+            out.push(edge.toString())
+          }
+        }
+        return out
+      }),
+
+    followMeAlongEdges: (sketch, region, pathSketch, edges) =>
+      act((s) =>
+        s
+          .follow_me_along_edges(
+            BigInt(sketch),
+            BigInt(region),
+            BigInt(pathSketch),
+            new BigUint64Array(edges.map((e) => BigInt(e))),
+          )
+          .toString(),
+      ),
+
+    followMeAroundFace: (sketch, region, object, face) =>
+      act((s) =>
+        s
+          .follow_me_around_face(BigInt(sketch), BigInt(region), BigInt(object), BigInt(face))
+          .toString(),
+      ),
 
     // -------- components --------
 

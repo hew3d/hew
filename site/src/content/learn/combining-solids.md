@@ -1,7 +1,7 @@
 ---
 title: "Combining and splitting solids"
 description: "Union, Subtract, Intersect, and the Slice tool. When to use each, and when Push/Pull does the job without a boolean."
-order: 9
+order: 10
 ---
 
 Combining solids is always a command you issue; [Core concepts](/learn/core-concepts/) explains why Hew never does it for you. Every input to these commands is a watertight solid, and so is every result.

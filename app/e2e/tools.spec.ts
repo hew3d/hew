@@ -660,3 +660,119 @@ test('VCB: imperial architectural format (arch)', async ({ page }) => {
   // 0.3048 m = exactly 1 foot → "1'"
   expect(result.formatted).toBe("1'")
 })
+
+// ---------------------------------------------------------------------------
+// Follow Me — sweep a profile along a path (docs/design/follow-me.md)
+// ---------------------------------------------------------------------------
+
+test('Follow Me: profile swept along an L path becomes a solid; undo/redo round-trips', async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const hash0 = h.getStateHash()
+
+    // Profile: a square drawn on the ground, then stood upright (rotate 90°
+    // about the X axis through the origin) so it lies on the y = 0 plane —
+    // perpendicular to a path that leaves the origin along +y. Exactly the
+    // Rotate-tool move a user makes.
+    const profile = h.drawRectangle([-0.3, 0.4, 0], [0.3, 1.0, 0])
+    h.rotateSketch(profile.sketch, 90, [1, 0, 0], [0, 0, 0])
+
+    // Path: an L of two edges on the ground, starting on the profile plane.
+    const path = h.drawLineChain([
+      [0, 0, 0],
+      [0, 2, 0],
+      [2, 2, 0],
+    ])
+    const edges = h.getSketchEdgeIds(path.sketch)
+
+    const objId = h.followMeAlongEdges(profile.sketch, profile.region, path.sketch, edges)
+    const hash1 = h.getStateHash()
+    const countAfter = h.getObjectCount()
+
+    h.undo()
+    const countUndone = h.getObjectCount()
+    h.redo()
+    const countRedone = h.getObjectCount()
+    const idsRedone = h.getObjectIds()
+
+    return { hash0, hash1, objId, countAfter, countUndone, countRedone, idsRedone }
+  })
+
+  expect(result.countAfter).toBe(1)
+  expect(result.hash1).not.toBe(result.hash0)
+  expect(result.countUndone).toBe(0)
+  expect(result.countRedone).toBe(1)
+  // The same ObjectId returns across undo/redo (hide-not-delete).
+  expect(result.idsRedone).toContain(result.objId)
+})
+
+test('Follow Me: sweep around a solid face boundary leaves the solid untouched', async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+
+    // A unit cube, and its top face picked with a straight-down ray.
+    const boxId = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    const top = h.pickFace([0.5, 0.5, 5], [0, 0, -1])
+    if (top === null) throw new Error('no top face picked')
+
+    // Profile: drawn on the ground beside the cube, stood up (rotate 90°
+    // about the Y axis through x = 0.5) onto the x = 0.5 plane — crossing
+    // the top face's y = 0 boundary edge mid-span, straddling the rim.
+    const profile = h.drawRectangle([-1.15, -0.3, 0], [-0.9, -0.05, 0])
+    h.rotateSketch(profile.sketch, 90, [0, 1, 0], [0.5, 0, 0])
+
+    const ringId = h.followMeAroundFace(profile.sketch, profile.region, boxId, top.face)
+    return {
+      boxId,
+      ringId,
+      count: h.getObjectCount(),
+      ids: h.getObjectIds(),
+      lastError: h.getLastError(),
+    }
+  })
+
+  expect(result.lastError).toBeNull()
+  expect(result.count).toBe(2)
+  // The path solid survives untouched alongside the new molding ring.
+  expect(result.ids).toContain(result.boxId)
+  expect(result.ids).toContain(result.ringId)
+})
+
+test('Follow Me: a profile parallel to its path refuses typed with the document untouched', async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    // Profile AND path both on the ground plane: nowhere perpendicular.
+    const profile = h.drawRectangle([3, 3, 0], [4, 4, 0])
+    const path = h.drawLineChain([
+      [0, 0, 0],
+      [2, 0, 0],
+    ])
+    const edges = h.getSketchEdgeIds(path.sketch)
+    const hashBefore = h.getStateHash()
+    let threw = false
+    try {
+      h.followMeAlongEdges(profile.sketch, profile.region, path.sketch, edges)
+    } catch {
+      threw = true
+    }
+    return {
+      threw,
+      lastError: h.getLastError(),
+      hashAfter: h.getStateHash(),
+      hashBefore,
+      count: h.getObjectCount(),
+    }
+  })
+
+  expect(result.threw).toBe(true)
+  expect(result.lastError).toContain('ProfileNotPerpendicular')
+  expect(result.count).toBe(0)
+  // Typed refusal, document untouched (strong guarantee).
+  expect(result.hashAfter).toBe(result.hashBefore)
+})

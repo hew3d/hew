@@ -718,3 +718,143 @@ fn d_profile_interior_seams_soften_but_side_seams_stay_hard() {
     // against the chord wall stay hard.
     assert_eq!(mesh.soft_edge_positions.len(), 11 * 6);
 }
+
+// --------------------------------------------------- follow me sweeps
+
+/// A circle profile swept along a straight path drawn in several collinear
+/// strokes (docs/design/follow-me.md section 4): one true cylinder built as
+/// stacked wall rows sharing interior rims.
+fn swept_tube(radius: f64, n: usize, path: &[Point3]) -> Object {
+    let s = circle_sketch(Point3::new(0.0, 0.0, 0.0), radius, n);
+    let region = s.regions().keys().next().unwrap();
+    let profile = s.profile(region).unwrap();
+    Object::from_follow_me(&profile, path, false).unwrap()
+}
+
+#[test]
+fn collinear_sweep_rows_refacet_as_one_band() {
+    // Two collinear path segments -> two stacked wall rows on ONE stamped
+    // cylinder. Export re-faceting must engage across the stack exactly as
+    // it does for the equivalent single extrusion: the interior rim (fully
+    // interior to the wall) vanishes, and the refined solid IS the
+    // inscribed 96-gon prism.
+    let obj = swept_tube(
+        0.5,
+        24,
+        &[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 0.4),
+            Point3::new(0.0, 0.0, 1.0),
+        ],
+    );
+
+    let stored = export_triangles(&obj, 0).unwrap();
+    assert_manifold(&stored);
+    // 2 rows x 24 wall quads (96 triangles) + two 24-gon caps (22 each).
+    assert_eq!(stored.len() / 9, 96 + 2 * 22);
+    assert!((soup_volume(&stored) - prism_volume(24, 0.5, 1.0)).abs() < 1e-12);
+
+    let refined = export_triangles(&obj, 96).unwrap();
+    assert_manifold(&refined);
+    // One merged band: 96 wall quads (192 triangles) + two 96-gon caps —
+    // identical shape to the single-extrusion cylinder at this resolution.
+    assert_eq!(refined.len() / 9, 192 + 2 * 94);
+    assert!(
+        (soup_volume(&refined) - prism_volume(96, 0.5, 1.0)).abs() < 1e-12,
+        "the refined sweep is exactly the inscribed 96-gon prism"
+    );
+}
+
+#[test]
+fn bent_sweep_walls_deliberately_export_at_stored_facets() {
+    // Around a path turn the miter rims are elliptical sections — outside
+    // the band machinery's analytic-cap legitimacy. The whole wall demotes
+    // to stored facets DELIBERATELY (docs/design/follow-me.md section 4);
+    // this pin makes any accidental future engagement (or a crack) loud.
+    let mut s = kernel::Sketch::on_plane(
+        Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ])
+        .unwrap(),
+    );
+    s.begin_curve_with(CurveGeom {
+        center: Point3::new(0.0, 0.0, 0.0),
+        radius: 0.3,
+    })
+    .unwrap();
+    let p = |i: usize| {
+        let a = 2.0 * std::f64::consts::PI * ((i % 24) as f64) / 24.0;
+        Point3::new(0.0, 0.3 * a.cos(), 0.3 * a.sin())
+    };
+    for i in 0..24 {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+    let region = s.regions().keys().next().unwrap();
+    let profile = s.profile(region).unwrap();
+    let obj = Object::from_follow_me(
+        &profile,
+        &[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(2.0, 2.0, 0.0),
+        ],
+        false,
+    )
+    .unwrap();
+
+    let stored = export_triangles(&obj, 0).unwrap();
+    let refined = export_triangles(&obj, 96).unwrap();
+    assert_manifold(&refined);
+    assert_eq!(
+        stored, refined,
+        "bent-sweep walls export at drawn resolution — demotion is deliberate"
+    );
+}
+
+#[test]
+fn open_arc_sweep_rows_demote_rather_than_orphan_their_seam() {
+    // A D-profile (open arc + chord) swept along two collinear segments:
+    // the stacked arc rows share interior rim vertices that the flat chord
+    // wall ALSO references. Merging would drop those vertices from the
+    // export while the neighbor still uses them (a T-junction), so the
+    // group must demote to stored facets instead.
+    let mut s = kernel::Sketch::on_plane(ground());
+    s.begin_curve_with(CurveGeom {
+        center: Point3::new(0.0, 0.0, 0.0),
+        radius: 1.0,
+    })
+    .unwrap();
+    let p = |i: usize| {
+        let a = std::f64::consts::PI * (i as f64) / 12.0;
+        Point3::new(a.cos(), a.sin(), 0.0)
+    };
+    for i in 0..12 {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+    s.add_segment(Point3::new(-1.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let region = s.regions().keys().next().unwrap();
+    let profile = s.profile(region).unwrap();
+    let obj = Object::from_follow_me(
+        &profile,
+        &[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 0.5),
+            Point3::new(0.0, 0.0, 1.0),
+        ],
+        false,
+    )
+    .unwrap();
+
+    let stored = export_triangles(&obj, 0).unwrap();
+    let refined = export_triangles(&obj, 200).unwrap();
+    assert_manifold(&refined);
+    assert_eq!(
+        stored, refined,
+        "stacked open-arc rows demote; nothing may orphan the shared seam"
+    );
+}

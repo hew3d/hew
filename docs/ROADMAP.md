@@ -64,6 +64,17 @@ below.
   whose walls would ram a distant part of a non-convex solid still refuses,
   since that is a real self-intersection.) Undo of a wall-building push is
   exact, recorded as data
+- Follow Me: sweep a closed sketch profile along a path — a connected
+  chain of sketch edges (lines and arcs, open or closed) or a solid
+  face's outer boundary — into a new watertight solid, mitered at every
+  path corner. The profile must sit perpendicular across the path (Hew
+  never re-orients it); closed loops weld their seam exactly (frames,
+  faceted-lathe shapes); a drawn circle swept along a straight run stays
+  a true stamped cylinder, while walls around a path's turns keep honest
+  facets (no toroidal surface identity yet). Ineligible sweeps —
+  non-perpendicular or detached profiles, branching or disconnected
+  selections, bends tighter than the profile, self-intersecting results
+  — refuse typed with the document untouched (docs/design/follow-me.md)
 - Move and rotate with axis-locked inference snapping; Option/Alt-drag to
   copy while moving
 - Delete for objects, groups, instances, and guides
@@ -233,9 +244,10 @@ below.
 
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
-- **Follow Me and Offset tools** — now unblocked: the true-curves
-  analytic overlay they depend on (durable curve metadata, whole-wall
-  semantics, export re-faceting) has shipped
+- **Offset tool** — now unblocked: the true-curves analytic overlay it
+  depends on (durable curve metadata, whole-wall semantics, export
+  re-faceting) has shipped. (Follow Me, formerly tracked alongside it,
+  has shipped — see Modeling above)
 - **Non-uniform scale**, and moving/rotating/scaling multiple selected
   objects together
 - **Nested component definitions** (a component containing other

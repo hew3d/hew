@@ -183,6 +183,7 @@ fn doc_err(e: DocumentError) -> ApiError {
     match &e {
         DocumentError::Sketch(inner) => api_err(inner, &e),
         DocumentError::Extrude(inner) => api_err(inner, &e),
+        DocumentError::FollowMe(inner) => api_err(inner, &e),
         DocumentError::Boolean(inner) => api_err(inner, &e),
         DocumentError::Slice(inner) => api_err(inner, &e),
         DocumentError::Transform(inner) => api_err(inner, &e),
@@ -1532,6 +1533,74 @@ impl Scene {
             sketch,
             region,
             distance,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Follow Me along a chain of sketch edges (docs/design/follow-me.md):
+    /// sweeps the closed profile `region` of `sketch` along the path the
+    /// `path_edges` of `path_sketch` form (a single connected chain, open or
+    /// closed, in any order) into a new watertight Object and returns its
+    /// handle. The profile region's scaffolding is consumed exactly as
+    /// `extrude_region` consumes its outline (undo restores it); the path
+    /// sketch is never touched.
+    pub fn follow_me_along_edges(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let edges: Vec<SketchEdgeId> = path_edges
+            .iter()
+            .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
+            .collect();
+        let path = kernel::FollowMePath::SketchEdges {
+            sketch: sketch_id(path_sketch),
+            edges,
+        };
+        let (id, change) = self
+            .doc
+            .follow_me(sketch_id(sketch), region_id, &path)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeAlongEdges {
+            sketch,
+            region,
+            path_sketch,
+            path_edges,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Follow Me around a solid face's outer boundary loop (crown molding
+    /// around a tabletop): sweeps the closed profile `region` of `sketch`
+    /// around the loop into a new watertight Object and returns its handle.
+    /// The path solid is untouched — the sweep is a separate Object the
+    /// user unions or subtracts explicitly.
+    pub fn follow_me_around_face(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let path = kernel::FollowMePath::FaceLoop {
+            object: object_id(path_object),
+            face: FaceId::from(KeyData::from_ffi(path_face)),
+        };
+        let (id, change) = self
+            .doc
+            .follow_me(sketch_id(sketch), region_id, &path)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeAroundFace {
+            sketch,
+            region,
+            path_object,
+            path_face,
         });
         Ok(id.data().as_ffi())
     }
@@ -3473,6 +3542,22 @@ impl Scene {
                         distance,
                     } => {
                         self.extrude_region(sketch, region, distance)?;
+                    }
+                    FollowMeAlongEdges {
+                        sketch,
+                        region,
+                        path_sketch,
+                        path_edges,
+                    } => {
+                        self.follow_me_along_edges(sketch, region, path_sketch, path_edges)?;
+                    }
+                    FollowMeAroundFace {
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                    } => {
+                        self.follow_me_around_face(sketch, region, path_object, path_face)?;
                     }
                     Boolean { op, a, b } => {
                         self.boolean(op, a, b)?;

@@ -34,7 +34,7 @@ pub mod tol;
 pub mod topo;
 pub mod transform;
 
-pub use document::{DocChange, Document, DocumentError, NodeId};
+pub use document::{DocChange, Document, DocumentError, FollowMePath, NodeId};
 pub use error::TopologyError;
 pub use guide::Guide;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
@@ -50,8 +50,8 @@ pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, 
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
-    FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, Operand,
-    PushPullError, PushPullReport, SliceError, StickyError,
+    FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
+    Operand, PushPullError, PushPullReport, SliceError, StickyError,
 };
 pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,

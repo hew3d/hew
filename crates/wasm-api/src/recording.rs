@@ -74,6 +74,27 @@ pub enum RecordedCall {
         region: u64,
         distance: f64,
     },
+    /// `follow_me_along_edges(sketch, region, path_sketch, path_edges)` —
+    /// sweep a profile region along a chain of sketch edges. Additive
+    /// variant (the [`RecordedCall::SketchBeginCurveWith`] posture): old
+    /// recordings replay unchanged; one that sweeps fails to parse on older
+    /// builds — loudly, never silently divergent.
+    FollowMeAlongEdges {
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+    },
+    /// `follow_me_around_face(sketch, region, path_object, path_face)` —
+    /// sweep a profile region around a solid face's outer boundary loop.
+    /// Additive variant, same posture as
+    /// [`RecordedCall::FollowMeAlongEdges`].
+    FollowMeAroundFace {
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+    },
     /// `boolean(op, a, b)`.
     Boolean { op: u8, a: u64, b: u64 },
     /// `boolean_nodes(op, a_kind, a, b_kind, b)` — the node-operand boolean

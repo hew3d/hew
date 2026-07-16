@@ -9,6 +9,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { MenuBar, type MenuBarProps } from './MenuBar'
+import { TOOLS } from '../tools/toolRegistry'
 
 const defaultProps: MenuBarProps = {
   name: 'Untitled',
@@ -345,5 +346,27 @@ describe('MenuBar', () => {
     fireEvent.click(screen.getByRole('button', { name: /window/i }))
     expect(screen.getByText('Model Info')).toBeInTheDocument()
     expect(screen.queryByText('Settings…')).not.toBeInTheDocument()
+  })
+
+  // --- Rail <-> menu parity ---
+
+  it('menu parity: every TOOL_REGISTRY tool is selectable from the Draw/Tools/Camera menus', () => {
+    // The tool registry is the single source of truth for which tools
+    // exist; this hand-written menu must never silently fall behind it
+    // (Follow Me shipped wired into the dispatcher but missing from both
+    // menu surfaces — this pins the web one).
+    const onSelectTool = vi.fn()
+    render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={onSelectTool} />)
+    for (const tool of TOOLS) {
+      let item: HTMLElement | null = null
+      for (const menu of ['draw', 'tools', 'camera']) {
+        fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${menu}$`, 'i') }))
+        item = screen.queryByText(tool)
+        if (item !== null) break
+      }
+      expect(item, `tool "${tool}" is missing from every menu`).not.toBeNull()
+      fireEvent.mouseDown(item as HTMLElement)
+      expect(onSelectTool).toHaveBeenLastCalledWith(tool)
+    }
   })
 })

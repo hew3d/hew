@@ -1,7 +1,7 @@
 ---
 title: "Materials"
 description: "Paint faces or fill whole objects from a per-document palette of colors and textures that survives every modeling operation, and adjust opacity for glass and other see-through materials."
-order: 11
+order: 12
 ---
 
 Materials in Hew are simple and per-document: a palette of flat colors and image textures that you paint onto faces or assign to whole objects.

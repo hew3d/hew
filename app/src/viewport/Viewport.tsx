@@ -38,6 +38,7 @@ import { CircleTool } from '../tools/CircleTool'
 import { ArcTool } from '../tools/ArcTool'
 import { LineTool } from '../tools/LineTool'
 import { PushPullTool } from '../tools/PushPullTool'
+import { FollowMeTool } from '../tools/FollowMeTool'
 import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
@@ -1740,6 +1741,24 @@ export default function Viewport({
       return tool
     }
 
+    function makeFollowMeTool(): FollowMeTool {
+      return new FollowMeTool(
+        wasmScene,
+        previewGroup,
+        // A sweep births one new object and consumes its profile sketch's
+        // outline; refresh the object plus all sketch line buffers, then
+        // select the result so the highlight lands on the new solid.
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
+          sceneRenderer.refreshAllSketches()
+          onSelectRef.current?.({ kind: 'object', id: objectId }, false)
+        },
+        handleToast,
+        // The path may be preselected (SketchUp's primary Follow Me idiom).
+        [...selectedIdsRef.current],
+      )
+    }
+
     function makePaintTool(): PaintTool {
       return new PaintTool(
         wasmScene,
@@ -1912,6 +1931,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makePushPullTool())
+          break
+        case 'Follow Me':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeFollowMeTool())
           break
         case 'Paint': {
           cameraModeRef.current = false

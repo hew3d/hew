@@ -83,6 +83,28 @@ const DESCRIPTIONS: Record<string, string> = {
   WallNeighborNonPlanar:
     'Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first.',
 
+  // -------------------------------------------------------- follow me
+  EmptyPath: 'Follow Me needs a path. Select or click the line, curve, or face edge to follow.',
+  UnknownPathEdge: stale('path line'),
+  PathBranches:
+    'The path forks — Follow Me needs one continuous run of lines. Select a single chain with no branches.',
+  PathDisconnected:
+    'The path is in separate pieces. Select one connected run of lines.',
+  PathSegmentTooShort:
+    'Part of the path is too short to follow. Redraw the path without tiny segments.',
+  ProfileNotPerpendicular:
+    'The profile must sit square across the path where the sweep starts. Draw the profile on a surface perpendicular to the path.',
+  PathDetachedFromProfile:
+    "The path doesn't start on the profile's surface. Start the path at the profile — or, on a loop, cross the profile partway along a straight run, not at a corner.",
+  PathReverses:
+    'The path doubles back on itself — or turns nearly all the way around — so there is no clean corner to turn. Remove the reversal, or soften the corner.',
+  PathTooTight:
+    'The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.',
+  SweepSelfIntersects:
+    'Following this path would make the shape run into itself. Shorten the path or use a smaller profile.',
+  SweepDegenerate:
+    "This profile can't be swept along that path into a valid solid. Simplify the profile or the path and try again.",
+
   // ------------------------------------------- drawing on faces / merging
   PathTooShort: 'The cut needs at least two points. Click a start and an end.',
   EndpointNotOnBoundary:

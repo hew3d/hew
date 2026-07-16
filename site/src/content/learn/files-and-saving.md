@@ -1,7 +1,7 @@
 ---
 title: "Files, saving, and recovery"
 description: "Where your work lives: the open .hew format, saving in the browser vs. the desktop, and the 12-second autosave net."
-order: 13
+order: 14
 ---
 
 Hew's native format is **`.hew`**, an open, documented container (a zip holding a JSON manifest and binary geometry buffers) that saves everything: geometry, names, groups, components, materials, tags, and guides. Saving is deterministic: the same model always produces byte-identical output, which plays well with backups and version control.

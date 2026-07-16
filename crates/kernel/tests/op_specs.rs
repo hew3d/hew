@@ -223,6 +223,614 @@ fn extrusion_rejects_tiny_distance() {
     assert_eq!(err, kernel::ExtrudeError::DistanceTooSmall);
 }
 
+// ------------------------------------------------------------- follow me
+
+/// The x = 0 plane with normal +x.
+fn yz_plane() -> Plane {
+    Plane::from_polygon(&[
+        Point3::ORIGIN,
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(0.0, 0.0, 1.0),
+    ])
+    .unwrap()
+}
+
+/// Rectangle on the x = 0 plane spanning `[y0, y1] x [z0, z1]`, wound CCW
+/// seen from +x (the plane normal side).
+fn yz_profile(y0: f64, z0: f64, y1: f64, z1: f64) -> Profile {
+    Profile::new(
+        yz_plane(),
+        vec![
+            Point3::new(0.0, y0, z0),
+            Point3::new(0.0, y1, z0),
+            Point3::new(0.0, y1, z1),
+            Point3::new(0.0, y0, z1),
+        ],
+        vec![],
+    )
+    .unwrap()
+}
+
+/// A 24-facet circle profile with analytic curve attribution, built the way
+/// the drawing tools build one: a curve bracket carrying the exact
+/// [`CurveGeom`](kernel::CurveGeom), facets committed as segments. On the
+/// x = 0 plane, centered at `(0, cy, cz)`.
+fn circle_profile_yz(cy: f64, cz: f64, radius: f64) -> Profile {
+    let mut sketch = kernel::Sketch::on_plane(yz_plane());
+    sketch
+        .begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(0.0, cy, cz),
+            radius,
+        })
+        .unwrap();
+    let n = 24;
+    let pt = |i: usize| {
+        let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
+        Point3::new(0.0, cy + radius * a.cos(), cz + radius * a.sin())
+    };
+    for i in 0..n {
+        sketch.add_segment(pt(i), pt(i + 1)).unwrap();
+    }
+    sketch.end_curve();
+    let region = sketch.regions().keys().next().expect("circle closed");
+    sketch.profile(region).unwrap()
+}
+
+proptest! {
+    #[test]
+    fn follow_me_single_segment_matches_extrusion(
+        width in 0.1..10.0f64,
+        height in 0.1..10.0f64,
+        distance in 0.1..10.0f64,
+        up in proptest::bool::ANY,
+    ) {
+        // A one-segment path is an extrusion by another name — both
+        // directions along the profile normal (the flip branch).
+        let d = if up { distance } else { -distance };
+        let profile = rect_profile(width, height);
+        let swept = Object::from_follow_me(
+            &profile,
+            &[Point3::ORIGIN, Point3::new(0.0, 0.0, d)],
+            false,
+        )
+        .unwrap();
+        swept.validate().unwrap();
+        let extruded = Object::from_extrusion(&profile, d).unwrap();
+        prop_assert!(objects_equivalent(&swept, &extruded));
+    }
+
+    #[test]
+    fn follow_me_l_path_volume_is_exact(
+        len1 in 2.0..6.0f64,
+        len2 in 2.0..6.0f64,
+        w in 0.1..0.8f64,
+        y0 in -1.0..0.4f64,
+    ) {
+        // Path: +x for len1, 90-degree turn, +y for len2, in the ground
+        // plane. Profile: a w x w square on the x = 0 plane at lateral
+        // offset y0 (kept below len2's fold limit by the ranges). The
+        // mitered volume is exact: area * (len1 + len2 - 2 * y_bar)
+        // (each prism runs to the 45-degree miter x + y = len1).
+        let profile = yz_profile(y0, 0.1, y0 + w, 0.1 + w);
+        let path = [
+            Point3::ORIGIN,
+            Point3::new(len1, 0.0, 0.0),
+            Point3::new(len1, len2, 0.0),
+        ];
+        let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+        solid.validate().unwrap();
+        prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
+        // 2 caps + 4 walls per segment.
+        prop_assert_eq!(solid.faces().len(), 10);
+        prop_assert_eq!(euler_poincare(&solid), 2);
+        let area = w * w;
+        let y_bar = y0 + w / 2.0;
+        let expected = area * (len1 + len2 - 2.0 * y_bar);
+        let volume = signed_volume(&solid);
+        prop_assert!(
+            (volume - expected).abs() <= VOLUME_TOL,
+            "signed volume {volume}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn follow_me_closed_rectangle_ring_is_genus_one() {
+    // A closed rectangular path (picture frame) swept with a profile
+    // centered on the path spine (the anchor crossing at (0, -2, 0)). The
+    // anchor splits one side, so 5 segments x 4 profile edges = 20 walls,
+    // no caps; the offset-loop perimeter integral makes the volume exactly
+    // area * perimeter for a spine-centered profile.
+    let profile = yz_profile(-2.3, -0.3, -1.7, 0.3);
+    let path = [
+        Point3::new(-2.0, -2.0, 0.0),
+        Point3::new(2.0, -2.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(-2.0, 2.0, 0.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, true).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(solid.faces().len(), 20);
+    // Torus topology: V - E + F - H = 2(S - G) = 0.
+    assert_eq!(euler_poincare(&solid), 0);
+    let volume = signed_volume(&solid);
+    let expected = 0.36 * 16.0;
+    assert!(
+        (volume - expected).abs() <= VOLUME_TOL,
+        "signed volume {volume}, expected {expected}"
+    );
+}
+
+#[test]
+fn follow_me_lathe_loop_volume_follows_pappus() {
+    // A 24-gon "circle" path in the ground plane around the z axis, swept
+    // with a square profile straddling the path — a faceted torus. One
+    // facet's midpoint sits at angle 0 so the profile plane (y = 0,
+    // normal +y) crosses it strictly inside. Faceted Pappus is exact:
+    // every profile point at distance x from the axis traces a 24-gon of
+    // perimeter 48 * tan(pi/24) * x, so V = 48 tan(pi/24) * x_bar * area.
+    let n = 24usize;
+    let r = 2.0f64;
+    let step = std::f64::consts::TAU / n as f64;
+    let path: Vec<Point3> = (0..n)
+        .map(|i| {
+            let a = (i as f64 - 0.5) * step;
+            Point3::new(r * a.cos(), r * a.sin(), 0.0)
+        })
+        .collect();
+    // The y = 0 plane with normal +y (z cross x); outer ring CCW seen
+    // from +y is CCW in the (z, x) frame.
+    let profile = Profile::new(
+        Plane::from_polygon(&[
+            Point3::ORIGIN,
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(1.0, 0.0, 0.0),
+        ])
+        .unwrap(),
+        vec![
+            Point3::new(1.7, 0.0, -0.25),
+            Point3::new(1.7, 0.0, 0.25),
+            Point3::new(2.3, 0.0, 0.25),
+            Point3::new(2.3, 0.0, -0.25),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let solid = Object::from_follow_me(&profile, &path, true).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    // 24 path vertices + the anchor split = 25 segments x 4 profile edges.
+    assert_eq!(solid.faces().len(), 100);
+    assert_eq!(euler_poincare(&solid), 0);
+    let area = 0.6 * 0.5;
+    let x_bar = 2.0;
+    let expected = 48.0 * (std::f64::consts::PI / 24.0).tan() * x_bar * area;
+    let volume = signed_volume(&solid);
+    assert!(
+        (volume - expected).abs() <= VOLUME_TOL,
+        "signed volume {volume}, expected {expected}"
+    );
+}
+
+#[test]
+fn follow_me_straight_sweep_of_a_circle_is_a_stamped_cylinder() {
+    // The true-curves overlay (design docs/design/follow-me.md section 4):
+    // a straight path sweeping a drawn circle IS a cylinder, and every
+    // wall says so.
+    let profile = circle_profile_yz(0.0, 0.0, 0.5);
+    let path = [Point3::ORIGIN, Point3::new(2.0, 0.0, 0.0)];
+    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(solid.faces().len(), 26);
+    let expected = kernel::SurfaceRef::Cylinder {
+        axis_point: Point3::ORIGIN,
+        axis: Vec3::new(1.0, 0.0, 0.0),
+        radius: 0.5,
+    };
+    let stamped = solid
+        .faces()
+        .values()
+        .filter(|f| {
+            f.surface
+                .as_ref()
+                .is_some_and(|s| s.same_surface(&expected))
+        })
+        .count();
+    assert_eq!(stamped, 24, "every wall claims the one cylinder");
+    // Both rim circles survive with full coverage.
+    let rims = solid.analytic_rims();
+    assert_eq!(rims.len(), 2);
+    assert!(rims.iter().all(|rim| rim.coverage.is_none()));
+}
+
+#[test]
+fn follow_me_collinear_joints_sweep_like_one_segment() {
+    // A path drawn in two collinear strokes: the interior joint's miter
+    // normal degenerates to the segment direction itself (a perpendicular
+    // station), so the sweep must behave exactly like one long segment —
+    // same volume, coplanar adjacent walls, watertight — and a circle
+    // profile's per-segment cylinder stamps must agree on ONE cylinder.
+    let profile = yz_profile(-0.4, 0.1, 0.4, 0.9);
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(1.5, 0.0, 0.0),
+        Point3::new(4.0, 0.0, 0.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(solid.faces().len(), 10, "2 caps + 2 segments x 4 walls");
+    let volume = signed_volume(&solid);
+    let expected = 0.8 * 0.8 * 4.0;
+    assert!(
+        (volume - expected).abs() <= VOLUME_TOL,
+        "signed volume {volume}, expected {expected}"
+    );
+
+    let circle = circle_profile_yz(0.0, 0.5, 0.3);
+    let tube = Object::from_follow_me(&circle, &path, false).unwrap();
+    tube.validate().unwrap();
+    let expected_cyl = kernel::SurfaceRef::Cylinder {
+        axis_point: Point3::new(0.0, 0.0, 0.5),
+        axis: Vec3::new(1.0, 0.0, 0.0),
+        radius: 0.3,
+    };
+    let stamped = tube
+        .faces()
+        .values()
+        .filter(|f| {
+            f.surface
+                .as_ref()
+                .is_some_and(|s| s.same_surface(&expected_cyl))
+        })
+        .count();
+    assert_eq!(stamped, 48, "both segments claim the SAME cylinder");
+    // One logical wall: exactly one rim-circle pair, full coverage.
+    let rims = tube.analytic_rims();
+    assert_eq!(rims.len(), 2);
+    assert!(rims.iter().all(|rim| rim.coverage.is_none()));
+}
+
+#[test]
+fn follow_me_bent_sweep_stamps_cylinders_per_segment() {
+    // Around a bend the circle still sweeps exact cylinder patches per
+    // straight segment — two distinct axes, every wall stamped.
+    let profile = circle_profile_yz(0.0, 0.0, 0.3);
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(solid.faces().len(), 50);
+    let along_x = kernel::SurfaceRef::Cylinder {
+        axis_point: Point3::ORIGIN,
+        axis: Vec3::new(1.0, 0.0, 0.0),
+        radius: 0.3,
+    };
+    let along_y = kernel::SurfaceRef::Cylinder {
+        axis_point: Point3::new(2.0, 0.0, 0.0),
+        axis: Vec3::new(0.0, 1.0, 0.0),
+        radius: 0.3,
+    };
+    let count = |expected: &kernel::SurfaceRef| {
+        solid
+            .faces()
+            .values()
+            .filter(|f| f.surface.as_ref().is_some_and(|s| s.same_surface(expected)))
+            .count()
+    };
+    assert_eq!(count(&along_x), 24);
+    assert_eq!(count(&along_y), 24);
+}
+
+proptest! {
+    #[test]
+    fn follow_me_staircase_sweeps_are_watertight(
+        w in 0.05..0.3f64,
+        z0 in -0.5..0.5f64,
+        lens in proptest::collection::vec(1.0..3.0f64, 1..6),
+    ) {
+        // Random staircase paths (alternating +x / +y runs, every run far
+        // longer than the profile is wide) with a random square profile:
+        // the sweep must always be a valid, watertight, outward-wound
+        // solid — the mandatory watertightness property (rule 3).
+        let profile = yz_profile(-w, z0, w, z0 + 2.0 * w);
+        let mut pts = vec![Point3::ORIGIN];
+        for (i, len) in lens.iter().enumerate() {
+            let last = *pts.last().unwrap();
+            let step = if i % 2 == 0 {
+                Vec3::new(*len, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, *len, 0.0)
+            };
+            pts.push(last + step);
+        }
+        let solid = Object::from_follow_me(&profile, &pts, false).unwrap();
+        solid.validate().unwrap();
+        prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(solid.faces().len(), 2 + 4 * (pts.len() - 1));
+        prop_assert_eq!(euler_poincare(&solid), 2);
+        prop_assert!(signed_volume(&solid) > 0.0);
+    }
+}
+
+#[test]
+fn follow_me_refuses_parallel_profile() {
+    // Profile in the ground plane, path in the ground plane: nowhere
+    // perpendicular.
+    let profile = rect_profile(1.0, 1.0);
+    let path = [Point3::ORIGIN, Point3::new(0.0, 5.0, 0.0)];
+    // Path along +y, profile normal +z: not perpendicular to the plane.
+    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+}
+
+#[test]
+fn follow_me_refuses_detached_path() {
+    // Perpendicular but starting off the profile plane.
+    let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
+    let path = [Point3::new(0.5, 0.0, 0.0), Point3::new(3.0, 0.0, 0.0)];
+    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::PathDetachedFromProfile);
+}
+
+#[test]
+fn follow_me_refuses_reversing_path() {
+    let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(0.5, 0.0, 0.0),
+    ];
+    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::PathReverses);
+}
+
+#[test]
+fn follow_me_miter_limit_refuses_near_reversals_and_admits_ordinary_bends() {
+    // The unbounded-miter hole (design section 3): a joint eps radians
+    // short of a full reversal has a miter ratio ~ 2/eps — at eps = 1e-3
+    // the outer corner would spike ~2000x the model's scale into a
+    // "valid", watertight, absurd solid. Every such joint must refuse
+    // typed via the miter limit; every ordinary bend must still sweep.
+    let profile = yz_profile(-0.05, 0.1, 0.05, 0.2);
+    let bend_path = |turn: f64| {
+        // Two 4-meter legs; the second leaves the joint turned by `turn`
+        // radians from straight ahead (0 = collinear, pi = reversal).
+        [
+            Point3::ORIGIN,
+            Point3::new(4.0, 0.0, 0.0),
+            Point3::new(4.0 + 4.0 * turn.cos(), 4.0 * turn.sin(), 0.0),
+        ]
+    };
+
+    for eps in [1e-3, 1e-4, 1e-5, 1e-6] {
+        let err = Object::from_follow_me(&profile, &bend_path(std::f64::consts::PI - eps), false)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            kernel::FollowMeError::PathReverses,
+            "eps = {eps}: a near-reversal must refuse, never commit a miter spike"
+        );
+    }
+
+    for turn_deg in [45.0f64, 90.0, 150.0] {
+        let solid = Object::from_follow_me(&profile, &bend_path(turn_deg.to_radians()), false)
+            .unwrap_or_else(|e| panic!("a {turn_deg} degree bend must sweep, got {e:?}"));
+        solid.validate().unwrap();
+        assert_eq!(solid.watertight(), WatertightState::Watertight);
+        // The mitered solid stays at the scale of its inputs: nothing can
+        // sit farther out than the path extent plus the limited miter of
+        // the profile's own extent.
+        let max_coord = solid
+            .vertices()
+            .values()
+            .map(|v| {
+                v.position
+                    .x
+                    .abs()
+                    .max(v.position.y.abs())
+                    .max(v.position.z.abs())
+            })
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_coord < 12.0,
+            "{turn_deg} degree bend: coordinates stay bounded, got {max_coord}"
+        );
+    }
+}
+
+#[test]
+fn follow_me_chained_sharp_joints_do_not_compound_the_miter() {
+    // Several consecutive near-limit joints must NOT multiply their
+    // stretches (3.86^4 would be ~220x): the transport between
+    // perpendicular cross-sections is an isometry (design section 1), so
+    // every cross-section stays congruent to the profile and each miter
+    // ring is stretched at most once, by its own joint's ratio. A zigzag
+    // of four alternating 150-degree turns (each at ratio 3.86, near the
+    // limit of 8) sweeps into a bounded, watertight solid.
+    let profile = yz_profile(-0.05, 0.1, 0.05, 0.2);
+    let d_a = Vec3::new(1.0, 0.0, 0.0);
+    let turn = 150.0f64.to_radians();
+    let d_b = Vec3::new(turn.cos(), turn.sin(), 0.0);
+    let mut pts = vec![Point3::ORIGIN];
+    for i in 0..5 {
+        let last = *pts.last().unwrap();
+        pts.push(last + if i % 2 == 0 { d_a } else { d_b });
+    }
+    let solid = Object::from_follow_me(&profile, &pts, false).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(solid.faces().len(), 2 + 5 * 4);
+    assert_eq!(euler_poincare(&solid), 2);
+    assert!(signed_volume(&solid) > 0.0);
+    // Path extent ~1.3 plus ONE joint's limited miter of the profile's own
+    // ~0.2 extent — nowhere near a compounded 220x spike.
+    let max_coord = solid
+        .vertices()
+        .values()
+        .map(|v| {
+            v.position
+                .x
+                .abs()
+                .max(v.position.y.abs())
+                .max(v.position.z.abs())
+        })
+        .fold(0.0f64, f64::max);
+    assert!(
+        max_coord < 2.5,
+        "chained sharp joints stay bounded, got {max_coord}"
+    );
+}
+
+#[test]
+fn follow_me_refuses_bend_tighter_than_profile() {
+    // The profile extends 1.0 toward the inside of a 90-degree turn whose
+    // legs are only 0.4 long: ring vertices would be dragged backward.
+    let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(0.4, 0.0, 0.0),
+        Point3::new(0.4, 0.4, 0.0),
+    ];
+    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::PathTooTight);
+}
+
+#[test]
+fn follow_me_refuses_lathe_profile_touching_the_axis() {
+    // A revolve whose profile touches the axis of revolution: the on-axis
+    // ring vertex never advances. Refused typed (design scoped gap), not
+    // welded.
+    let n = 24usize;
+    let step = std::f64::consts::TAU / n as f64;
+    let path: Vec<Point3> = (0..n)
+        .map(|i| {
+            let a = (i as f64 - 0.5) * step;
+            Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)
+        })
+        .collect();
+    // The y = 0 plane with normal -y (x cross z); outer ring CCW seen
+    // from -y. One profile edge lies exactly on the z axis (x = 0).
+    let profile = Profile::new(
+        Plane::from_polygon(&[
+            Point3::ORIGIN,
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ])
+        .unwrap(),
+        vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.5, 0.0, 0.0),
+            Point3::new(0.5, 0.0, 0.5),
+            Point3::new(0.0, 0.0, 0.5),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let err = Object::from_follow_me(&profile, &path, true).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::PathTooTight);
+}
+
+#[test]
+fn follow_me_refuses_closed_seam_at_a_corner() {
+    // The profile plane passes exactly through a corner of the closed
+    // path: the seam would sit on a non-miter plane where the ring cannot
+    // close. Refused, never nudged.
+    let profile = yz_profile(-0.2, -0.2, 0.2, 0.2);
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let err = Object::from_follow_me(&profile, &path, true).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::PathDetachedFromProfile);
+}
+
+#[test]
+fn follow_me_refuses_self_intersecting_sweep() {
+    // A G-shaped path whose last leg re-enters the first leg's swept
+    // material: no local fold (every turn clears the advance check), but
+    // the distant legs interpenetrate. Refused whole.
+    let profile = yz_profile(-0.6, -0.6, 0.6, 0.6);
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(6.0, 0.0, 0.0),
+        Point3::new(6.0, 4.0, 0.0),
+        Point3::new(0.0, 4.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(3.0, 1.0, 0.0),
+    ];
+    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::SweepSelfIntersects);
+}
+
+#[test]
+fn follow_me_refuses_degenerate_paths() {
+    let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
+    assert_eq!(
+        Object::from_follow_me(&profile, &[], false).unwrap_err(),
+        kernel::FollowMeError::EmptyPath
+    );
+    assert_eq!(
+        Object::from_follow_me(&profile, &[Point3::ORIGIN], false).unwrap_err(),
+        kernel::FollowMeError::EmptyPath
+    );
+    assert_eq!(
+        Object::from_follow_me(
+            &profile,
+            &[
+                Point3::ORIGIN,
+                Point3::new(tol::POINT_MERGE / 2.0, 0.0, 0.0)
+            ],
+            false,
+        )
+        .unwrap_err(),
+        kernel::FollowMeError::PathSegmentTooShort
+    );
+}
+
+#[test]
+fn follow_me_sweeps_holes_into_tunnels() {
+    // A washer profile swept along an L: the hole tunnels the whole way,
+    // so the solid is genus 1 with annulus caps.
+    let profile = Profile::new(
+        yz_plane(),
+        vec![
+            Point3::new(0.0, -1.0, 0.5),
+            Point3::new(0.0, 1.0, 0.5),
+            Point3::new(0.0, 1.0, 2.5),
+            Point3::new(0.0, -1.0, 2.5),
+        ],
+        vec![vec![
+            Point3::new(0.0, -0.5, 1.0),
+            Point3::new(0.0, -0.5, 2.0),
+            Point3::new(0.0, 0.5, 2.0),
+            Point3::new(0.0, 0.5, 1.0),
+        ]],
+    )
+    .unwrap();
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(4.0, 0.0, 0.0),
+        Point3::new(4.0, 4.0, 0.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    // 2 annulus caps + 2 segments x (4 outer + 4 hole) walls.
+    assert_eq!(solid.faces().len(), 18);
+    let cap_holes: usize = solid.faces().values().map(|f| f.inner_loops.len()).sum();
+    assert_eq!(cap_holes, 2);
+    assert_eq!(euler_poincare(&solid), 0);
+}
+
 // ------------------------------------------------------------- push/pull
 
 proptest! {

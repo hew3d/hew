@@ -18,6 +18,7 @@ import circleSvg from '@material-symbols/svg-400/outlined/circle.svg?raw'
 import lineCurveSvg from '@material-symbols/svg-400/outlined/line_curve.svg?raw'
 import polylineSvg from '@material-symbols/svg-400/outlined/polyline.svg?raw'
 import unfoldMoreSvg from '@material-symbols/svg-400/outlined/unfold_more.svg?raw'
+import conversionPathSvg from '@material-symbols/svg-400/outlined/conversion_path.svg?raw'
 import formatPaintSvg from '@material-symbols/svg-400/outlined/format_paint.svg?raw'
 import openWithSvg from '@material-symbols/svg-400/outlined/open_with.svg?raw'
 import rotateRightSvg from '@material-symbols/svg-400/outlined/rotate_right.svg?raw'
@@ -40,6 +41,7 @@ export type ToolName =
   | 'Arc'
   | 'Line'
   | 'Push/Pull'
+  | 'Follow Me'
   | 'Paint'
   | 'Move'
   | 'Rotate'
@@ -60,6 +62,7 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Arc': lineCurveSvg,
   'Line': polylineSvg,
   'Push/Pull': unfoldMoreSvg, // matches the up/down-arrow cursor stop-gap
+  'Follow Me': conversionPathSvg,
   'Paint': formatPaintSvg,
   'Move': openWithSvg,
   'Rotate': rotateRightSvg,
@@ -83,6 +86,7 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Arc': { x: 0.1, y: 0.9 },
   'Line': { x: 0.1, y: 0.9 },
   'Push/Pull': { x: 0.5, y: 0.5 },
+  'Follow Me': { x: 0.25, y: 0.75 },
   'Paint': { x: 0.15, y: 0.9 },
   'Move': { x: 0.5, y: 0.5 },
   'Rotate': { x: 0.5, y: 0.5 },

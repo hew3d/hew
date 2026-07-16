@@ -55,6 +55,8 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Arc', group: 'Draw', macKey: 'A', winKey: 'A' },
   // ---- Modify ----
   { name: 'Push/Pull', group: 'Modify', macKey: 'P', winKey: 'P' },
+  // Follow Me: SketchUp defines no default key for it either.
+  { name: 'Follow Me', group: 'Modify', macKey: '', winKey: '' },
   { name: 'Move', group: 'Modify', macKey: 'M', winKey: 'M' },
   { name: 'Rotate', group: 'Modify', macKey: 'Q', winKey: 'Q' },
   { name: 'Scale', group: 'Modify', macKey: 'S', winKey: 'S' },

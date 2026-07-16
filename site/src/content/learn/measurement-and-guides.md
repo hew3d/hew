@@ -1,7 +1,7 @@
 ---
 title: "Precision, measurement, and guides"
 description: "Everything about exact dimensions: display units, the typed-input grammar, the Tape Measure and Protractor, and guides."
-order: 8
+order: 9
 ---
 
 Models made in Hew tend to get manufactured: 3D printed, cut, assembled. So exact dimensions are first-class, and they come from typed input on every tool, from the display units you choose, and from construction guides that extend the snapping system.

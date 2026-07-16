@@ -1,7 +1,7 @@
 ---
 title: "Keyboard shortcuts"
 description: "Every default shortcut on one page, including the modifier keys that change what a tool does mid-gesture."
-order: 16
+order: 17
 ---
 
 Tool shortcuts are plain letters, the same on every platform, and match SketchUp's defaults wherever SketchUp has one. Command shortcuts use `⌘` on macOS and `Ctrl` on Windows, Linux, and the web.

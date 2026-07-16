@@ -4548,3 +4548,213 @@ proptest! {
         prop_assert_eq!(doc.state_hash(), hash_before, "undo stays exact");
     }
 }
+
+// ----------------------------------------------------------------- follow me
+
+/// The x = 0 plane with normal +x (for Follow Me profiles perpendicular to
+/// a ground path heading +x).
+fn profile_plane_x(x: f64) -> Plane {
+    Plane::from_polygon(&[
+        Point3::new(x, 0.0, 0.0),
+        Point3::new(x, 1.0, 0.0),
+        Point3::new(x, 0.0, 1.0),
+    ])
+    .expect("vertical plane is well-defined")
+}
+
+/// Draw a square profile on the x = `x` plane spanning `[y0, y1] x [z0, z1]`.
+fn draw_profile_rect(doc: &mut Document, s: SketchId, x: f64, y0: f64, z0: f64, y1: f64, z1: f64) {
+    let sk = doc.sketch_mut(s).expect("sketch is live");
+    let corners = [
+        (Point3::new(x, y0, z0), Point3::new(x, y1, z0)),
+        (Point3::new(x, y1, z0), Point3::new(x, y1, z1)),
+        (Point3::new(x, y1, z1), Point3::new(x, y0, z1)),
+        (Point3::new(x, y0, z1), Point3::new(x, y0, z0)),
+    ];
+    for (a, b) in corners {
+        sk.add_segment(a, b).expect("profile segment");
+    }
+}
+
+#[test]
+fn follow_me_commits_like_extrusion_and_undo_restores_the_profile() {
+    let mut doc = Document::new();
+
+    // Profile: a square on the x = 0 plane.
+    let ps = doc.add_sketch(profile_plane_x(0.0));
+    draw_profile_rect(&mut doc, ps, 0.0, -0.3, 0.5, 0.3, 1.1);
+    let region = only_region(&doc, ps);
+
+    // Path: an L of two sketch edges on the ground, starting on the
+    // profile plane.
+    let gs = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(gs).expect("sketch is live");
+        sk.add_segment(Point3::ORIGIN, Point3::new(2.0, 0.0, 0.0))
+            .expect("path segment");
+        sk.add_segment(Point3::new(2.0, 0.0, 0.0), Point3::new(2.0, 2.0, 0.0))
+            .expect("path segment");
+    }
+    let edges: Vec<SketchEdgeId> = doc.sketch(gs).expect("live").edges().keys().collect();
+
+    let (id, change) = doc
+        .follow_me(
+            ps,
+            region,
+            &kernel::FollowMePath::SketchEdges { sketch: gs, edges },
+        )
+        .expect("follow me");
+    assert_eq!(change.objects_touched, vec![id]);
+    assert_eq!(change.sketches_touched, vec![ps]);
+    assert_eq!(doc.visible_object_ids(), vec![id]);
+
+    let solid = doc.object(id).expect("swept solid is live");
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(solid.faces().len(), 10, "2 caps + 2 segments x 4 walls");
+    assert!(doc.object_solid(id), "export gating sees a solid");
+
+    // The profile sketch was wholly consumed (Model D); the PATH sketch is
+    // untouched — its spine stays drawn.
+    assert!(doc.sketch(ps).is_none(), "profile sketch became the solid");
+    assert_eq!(doc.sketch(gs).expect("path sketch lives").edges().len(), 2);
+
+    // Undo: solid hidden, profile outline back, path still untouched.
+    doc.undo().expect("undo follow me");
+    assert!(doc.visible_object_ids().is_empty());
+    assert_eq!(doc.sketch(ps).expect("profile restored").edges().len(), 4);
+    assert_eq!(doc.sketch(gs).expect("path sketch lives").edges().len(), 2);
+
+    // Redo: the same ObjectId returns, the profile is consumed again.
+    doc.redo().expect("redo follow me");
+    assert_eq!(doc.visible_object_ids(), vec![id]);
+    assert!(doc.sketch(ps).is_none());
+}
+
+#[test]
+fn follow_me_around_a_face_loop_leaves_the_solid_untouched() {
+    let mut doc = Document::new();
+    let cube = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top: FaceId = doc
+        .object(cube)
+        .expect("cube is live")
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .expect("cube has a top face");
+
+    // Profile on the x = 0.5 plane, straddling the top rim from outside
+    // (y < 0), crossing the top face's y = 0 boundary edge mid-span.
+    let ps = doc.add_sketch(profile_plane_x(0.5));
+    draw_profile_rect(&mut doc, ps, 0.5, -0.3, 0.9, -0.05, 1.15);
+    let region = only_region(&doc, ps);
+
+    let (id, _) = doc
+        .follow_me(
+            ps,
+            region,
+            &kernel::FollowMePath::FaceLoop {
+                object: cube,
+                face: top,
+            },
+        )
+        .expect("follow me around the face loop");
+
+    let ring = doc.object(id).expect("molding ring is live");
+    assert_eq!(ring.watertight(), WatertightState::Watertight);
+    // Closed 4-corner loop, anchor split: 5 segments x 4 profile edges.
+    assert_eq!(ring.faces().len(), 20);
+    assert!(doc.object_solid(id));
+
+    // The path solid is untouched — the ring is a separate Object the user
+    // may union or subtract explicitly.
+    assert_eq!(doc.object(cube).expect("cube lives").faces().len(), 6);
+    assert!(doc.visible_object_ids().contains(&cube));
+
+    // Save/load round-trips the swept solid byte-exactly (state hash).
+    let bytes = doc.save();
+    let loaded = Document::load(&bytes).expect("load");
+    assert_eq!(loaded.state_hash(), doc.state_hash());
+}
+
+#[test]
+fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
+    let mut doc = Document::new();
+    let ps = doc.add_sketch(profile_plane_x(0.0));
+    draw_profile_rect(&mut doc, ps, 0.0, -0.3, 0.5, 0.3, 1.1);
+    let region = only_region(&doc, ps);
+
+    let gs = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(gs).expect("sketch is live");
+        // A branching fork: three edges meeting at (2, 0, 0)...
+        sk.add_segment(Point3::ORIGIN, Point3::new(2.0, 0.0, 0.0))
+            .expect("segment");
+        sk.add_segment(Point3::new(2.0, 0.0, 0.0), Point3::new(4.0, 0.0, 0.0))
+            .expect("segment");
+        sk.add_segment(Point3::new(2.0, 0.0, 0.0), Point3::new(2.0, 2.0, 0.0))
+            .expect("segment");
+        // ...plus a disconnected stroke far away.
+        sk.add_segment(Point3::new(9.0, 9.0, 0.0), Point3::new(9.5, 9.0, 0.0))
+            .expect("segment");
+    }
+    let all: Vec<SketchEdgeId> = doc.sketch(gs).expect("live").edges().keys().collect();
+    let hash_before = doc.state_hash();
+
+    let path = |edges: Vec<SketchEdgeId>| kernel::FollowMePath::SketchEdges { sketch: gs, edges };
+
+    // Branching fork.
+    assert!(matches!(
+        doc.follow_me(ps, region, &path(all.clone())).unwrap_err(),
+        DocumentError::FollowMe(kernel::FollowMeError::PathBranches)
+    ));
+    // Two disconnected chains (drop one fork arm, keep the far stroke).
+    assert!(matches!(
+        doc.follow_me(ps, region, &path(vec![all[0], all[1], all[3]]))
+            .unwrap_err(),
+        DocumentError::FollowMe(kernel::FollowMeError::PathDisconnected)
+    ));
+    // No edges at all.
+    assert!(matches!(
+        doc.follow_me(ps, region, &path(Vec::new())).unwrap_err(),
+        DocumentError::FollowMe(kernel::FollowMeError::EmptyPath)
+    ));
+    // A stale edge handle.
+    let stale = all[3];
+    doc.sketch_mut(gs)
+        .expect("live")
+        .remove_edge(stale)
+        .expect("remove");
+    assert!(matches!(
+        doc.follow_me(ps, region, &path(vec![all[0], stale]))
+            .unwrap_err(),
+        DocumentError::FollowMe(kernel::FollowMeError::UnknownPathEdge)
+    ));
+    let hash_after_removal = doc.state_hash();
+
+    // A sweep refusal from the kernel op surfaces through the same
+    // wrapper: edge 1 runs perpendicular to the profile plane but starts
+    // at x = 2, detached from it; edge 2 heads +y, never perpendicular.
+    assert!(matches!(
+        doc.follow_me(ps, region, &path(vec![all[1]])).unwrap_err(),
+        DocumentError::FollowMe(kernel::FollowMeError::PathDetachedFromProfile)
+    ));
+    assert!(matches!(
+        doc.follow_me(ps, region, &path(vec![all[2]])).unwrap_err(),
+        DocumentError::FollowMe(kernel::FollowMeError::ProfileNotPerpendicular)
+    ));
+
+    // The failed calls touched nothing (strong guarantee) — only the
+    // explicit remove_edge above changed the document.
+    assert_ne!(hash_before, hash_after_removal, "remove_edge is real");
+    assert_eq!(doc.state_hash(), hash_after_removal);
+    assert!(doc.sketch(ps).is_some(), "profile sketch untouched");
+    assert!(doc.visible_object_ids().is_empty());
+
+    // A hidden path sketch is unknown.
+    doc.delete_sketch(gs).expect("delete path sketch");
+    assert!(matches!(
+        doc.follow_me(ps, region, &path(vec![all[0]])).unwrap_err(),
+        DocumentError::UnknownSketch
+    ));
+}

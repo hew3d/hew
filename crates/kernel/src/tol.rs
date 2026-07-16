@@ -59,3 +59,25 @@ pub const CONE_SLACK: f64 = 1e-7;
 /// self-occluding it, robustly across the full range of scene scales (a fixed
 /// absolute skin would misbehave on very large or very small models).
 pub const OCCLUSION_REL: f64 = 1e-6;
+
+/// Maximum miter elongation at a Follow Me path joint (dimensionless).
+///
+/// At a joint turning by angle θ, the profile ring is carried onto the
+/// bisector plane by projecting along the incoming segment; every projected
+/// displacement is stretched by the classic stroke miter ratio
+/// `1 / cos(θ/2)`. As θ approaches a reversal (θ → 180°) that ratio
+/// diverges: a joint only 1e-3 rad short of doubling back stretches ~2000×,
+/// committing a "valid" watertight solid whose miter spike is thousands of
+/// times the model's own scale — geometrically absurd, yet caught by
+/// nothing structural (the spike is manifold, and the advance check bounds
+/// only the compressed inner side of a bend, never the stretched outer
+/// side).
+///
+/// A joint whose ratio would exceed this limit refuses as
+/// `FollowMeError::PathReverses` — a near-reversal is the same physical
+/// configuration as an exact reversal, approached in the limit. 8 admits
+/// every ordinary bend with wide margin (a 90° turn stretches 1.41×, 135°
+/// stretches 2.61×, even 150° only 3.86×) while refusing joints within
+/// ~14° of a full reversal, where no usefully bounded miter exists
+/// (docs/design/follow-me.md §3).
+pub const FOLLOW_ME_MITER_LIMIT: f64 = 8.0;

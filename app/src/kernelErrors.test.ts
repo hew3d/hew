@@ -37,6 +37,10 @@ const KERNEL_ERROR_CODES = [
   'DegenerateCurve', 'RestoreConflicts',
   // ExtrudeError
   'DistanceTooSmall', 'DegenerateGeometry',
+  // FollowMeError
+  'EmptyPath', 'UnknownPathEdge', 'PathBranches', 'PathDisconnected',
+  'PathSegmentTooShort', 'ProfileNotPerpendicular', 'PathDetachedFromProfile',
+  'PathReverses', 'PathTooTight', 'SweepSelfIntersects', 'SweepDegenerate',
   // PushPullError
   'ObjectNotSolid', 'WouldVanish', 'NonManifoldResult', 'NotASubFace',
   'RadiusVanishes', 'WallNeighborNonPlanar',

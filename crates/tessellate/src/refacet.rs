@@ -226,17 +226,26 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
     let group_set: BTreeSet<FaceId> = faces.iter().copied().collect();
 
     // Per-face structure: a chord quad with two vertices on each of two
-    // axial levels, all on the cylinder.
+    // axial levels, all on the cylinder. After the stacking pass below, one
+    // `Quad` may be a merged *column* of several vertically stacked faces
+    // (a Follow Me sweep along collinear path segments): `faces` lists its
+    // rows bottom to top, `lo`/`hi`/chords are the column extremes, and
+    // `extra_edges` carries the swallowed interior rims and upper-row
+    // verticals so anchor detection still counts them as band-owned.
     struct Quad {
-        face: FaceId,
+        faces: Vec<FaceId>,
         t_lo: f64,
         t_hi: f64,
         lo: [VertexId; 2],
         hi: [VertexId; 2],
-        /// The two vertical (lo–hi) edges, and the two rim chords (lo, hi).
+        /// The two vertical (lo–hi) edges of the BASE row — what chain
+        /// adjacency between angularly neighboring columns is keyed on.
         verticals: [EdgeId; 2],
         chord_lo: EdgeId,
         chord_hi: EdgeId,
+        /// Interior edges of a merged column (upper rows' verticals plus
+        /// the swallowed interior rim chords). Band-owned, never rim chords.
+        extra_edges: Vec<EdgeId>,
     }
 
     let mut quads: Vec<Quad> = Vec::new();
@@ -303,7 +312,7 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
         let lo: Vec<VertexId> = (0..4).filter(|&i| is_lo[i]).map(|i| verts[i]).collect();
         let hi: Vec<VertexId> = (0..4).filter(|&i| !is_lo[i]).map(|i| verts[i]).collect();
         quads.push(Quad {
-            face: fid,
+            faces: vec![fid],
             t_lo: t_min,
             t_hi: t_max,
             lo: [lo[0], lo[1]],
@@ -311,7 +320,118 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
             verticals: [verticals[0], verticals[1]],
             chord_lo,
             chord_hi,
+            extra_edges: Vec::new(),
         });
+    }
+
+    // ---- vertical stacking ------------------------------------------------
+    // One cylinder built in several axial rows — a Follow Me sweep along
+    // collinear path segments — is ONE logical wall: its rows meet
+    // rim-to-rim on chords shared between two group quads. Merge clean 1:1
+    // columns into taller quads so the wall re-facets as a single band.
+    // The swallowed interior rims vanish from a refined export, so they
+    // must be fully interior to the group: any outside edge referencing an
+    // interior rim vertex (an open-arc band's flat neighbors, an imprint, a
+    // boolean seam) demotes the whole group to stored facets instead.
+    let mut up_link: Vec<Option<usize>> = vec![None; quads.len()];
+    let mut down_link: Vec<Option<usize>> = vec![None; quads.len()];
+    {
+        let mut chord_owner: BTreeMap<EdgeId, Vec<(usize, RimLevel)>> = BTreeMap::new();
+        for (qi, q) in quads.iter().enumerate() {
+            chord_owner
+                .entry(q.chord_lo)
+                .or_default()
+                .push((qi, RimLevel::Lo));
+            chord_owner
+                .entry(q.chord_hi)
+                .or_default()
+                .push((qi, RimLevel::Hi));
+        }
+        for owners in chord_owner.values() {
+            match owners.as_slice() {
+                [_] => {} // rim against a non-group face: cap checks below
+                [(a, la), (b, lb)] => {
+                    // Two group quads share this rim: legal only as a clean
+                    // stack — one's hi rim is the other's lo rim, same
+                    // vertex pair, coincident levels, one link each way.
+                    let (lower, upper) = match (la, lb) {
+                        (RimLevel::Hi, RimLevel::Lo) => (*a, *b),
+                        (RimLevel::Lo, RimLevel::Hi) => (*b, *a),
+                        _ => return None,
+                    };
+                    let l = &quads[lower];
+                    let u = &quads[upper];
+                    if !(u.lo.contains(&l.hi[0]) && u.lo.contains(&l.hi[1]))
+                        || (l.t_hi - u.t_lo).abs() > tol_pm()
+                        || up_link[lower].is_some()
+                        || down_link[upper].is_some()
+                    {
+                        return None;
+                    }
+                    up_link[lower] = Some(upper);
+                    down_link[upper] = Some(lower);
+                }
+                _ => return None, // 3+ quads on one rim chord
+            }
+        }
+    }
+    if up_link.iter().any(Option::is_some) {
+        let group_edges: BTreeSet<EdgeId> = quads
+            .iter()
+            .flat_map(|q| q.verticals.iter().copied().chain([q.chord_lo, q.chord_hi]))
+            .collect();
+        let interior: BTreeSet<VertexId> = up_link
+            .iter()
+            .enumerate()
+            .filter(|(_, up)| up.is_some())
+            .flat_map(|(qi, _)| quads[qi].hi)
+            .collect();
+        for (eid, edge) in object.edges() {
+            if group_edges.contains(&eid) {
+                continue;
+            }
+            let he = &object.half_edges()[edge.half_edge];
+            let a = he.origin;
+            let b = object.half_edges()[he.next].origin;
+            if interior.contains(&a) || interior.contains(&b) {
+                return None; // outside geometry references a swallowed rim
+            }
+        }
+
+        let mut merged: Vec<Quad> = Vec::new();
+        for base in 0..quads.len() {
+            if down_link[base].is_some() {
+                continue; // reached via its column's base
+            }
+            let mut column = vec![base];
+            let mut top = base;
+            while let Some(next) = up_link[top] {
+                column.push(next);
+                top = next;
+            }
+            let mut extra: Vec<EdgeId> = Vec::new();
+            for (k, &qi) in column.iter().enumerate() {
+                if k > 0 {
+                    extra.extend(quads[qi].verticals);
+                    extra.push(quads[qi].chord_lo);
+                }
+            }
+            merged.push(Quad {
+                faces: column
+                    .iter()
+                    .flat_map(|&qi| quads[qi].faces.iter().copied())
+                    .collect(),
+                t_lo: quads[base].t_lo,
+                t_hi: quads[top].t_hi,
+                lo: quads[base].lo,
+                hi: quads[top].hi,
+                verticals: quads[base].verticals,
+                chord_lo: quads[base].chord_lo,
+                chord_hi: quads[top].chord_hi,
+                extra_edges: extra,
+            });
+        }
+        quads = merged;
     }
 
     // Bucket by (t_lo, t_hi) within tolerance.
@@ -327,19 +447,20 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
 
     // Rim chords must border a NON-group, surface-free face whose plane is
     // perpendicular to the axis — the analytic-cap legitimacy condition.
-    // Checked over every quad regardless of bucket, since the whole group
-    // stands or falls together.
+    // Checked over every (possibly merged) quad's EXTREME chords, since the
+    // whole group stands or falls together; interior rims were resolved by
+    // the stacking pass above.
     for q in &quads {
         for &chord in &[q.chord_lo, q.chord_hi] {
             let edge = &object.edges()[chord];
             let (h_a, h_b) = (edge.half_edge, edge.twin_half_edge?);
             for h in [h_a, h_b] {
                 let f = object.loops()[object.half_edges()[h].loop_id].face;
-                if f == q.face {
+                if q.faces.contains(&f) {
                     continue;
                 }
                 if group_set.contains(&f) {
-                    return None; // stacked bands sharing a rim: unsupported
+                    return None; // non-stack group contact: unsupported
                 }
                 let neighbor = &object.faces()[f];
                 if neighbor.surface.is_some() {
@@ -548,9 +669,10 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                 return None;
             }
 
-            // Outward or inward, from the first facet's plane.
+            // Outward or inward, from the first facet's plane (any row of a
+            // merged column faces the same radial way; use the base row).
             let q0 = &quads[chain[0]];
-            let face0 = &object.faces()[q0.face];
+            let face0 = &object.faces()[q0.faces[0]];
             let mid = {
                 let a = object.vertices()[q0.lo[0]].position;
                 let b = object.vertices()[q0.lo[1]].position;
@@ -567,6 +689,7 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
             for (k, &qi) in chain.iter().enumerate() {
                 let q = &quads[qi];
                 band_edges.extend(q.verticals);
+                band_edges.extend(q.extra_edges.iter().copied());
                 band_edges.insert(q.chord_lo);
                 band_edges.insert(q.chord_hi);
                 chords.insert(q.chord_lo, (RimLevel::Lo, k));
@@ -574,7 +697,10 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
             }
 
             bands.push(Band {
-                faces: chain.iter().map(|&qi| quads[qi].face).collect(),
+                faces: chain
+                    .iter()
+                    .flat_map(|&qi| quads[qi].faces.iter().copied())
+                    .collect(),
                 axis_point,
                 axis,
                 radius,
@@ -886,7 +1012,10 @@ fn rewrite_caps(
                 // stored position.
                 let k0 = marks[0].expect("marked").2;
                 let k1 = marks[1 % m].expect("marked").2;
-                let len = band.faces.len();
+                // Chain positions cycle over the band's COLUMNS — one chord
+                // per level per column — not its faces (a merged column
+                // carries several stacked faces).
+                let len = band.chords.len() / 2;
                 let forward = (k0 + 1) % len == k1 || (m == 1);
                 let pts: Vec<Point3> = band
                     .stations

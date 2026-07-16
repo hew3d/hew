@@ -193,6 +193,67 @@ pub enum ExtrudeError {
     DegenerateGeometry,
 }
 
+/// Typed failures of Follow Me — sweeping a closed [`Profile`] along a path
+/// ([`Object::from_follow_me`]) and the document-level path resolution that
+/// feeds it ([`Document::follow_me`](crate::Document::follow_me)). Every
+/// variant leaves the document untouched (docs/design/follow-me.md §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowMeError {
+    /// No path edges were given, or the path has no usable segments (fewer
+    /// than 2 points open / 3 points closed).
+    EmptyPath,
+    /// A path edge handle is stale or belongs to another sketch.
+    UnknownPathEdge,
+    /// A path vertex is incident to more than two of the selected edges —
+    /// the selection branches instead of forming one chain.
+    PathBranches,
+    /// The selected edges form more than one connected chain.
+    PathDisconnected,
+    /// Two consecutive path points are within
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) — no sweep direction
+    /// exists for that segment.
+    PathSegmentTooShort,
+    /// The profile plane is not perpendicular to the path where the sweep
+    /// would start: no open-path end segment (and no closed-path segment)
+    /// has its direction parallel to the profile plane's normal within
+    /// [`tol::NORMAL_DIRECTION`](crate::tol::NORMAL_DIRECTION). Also raised
+    /// when a closed sweep's transported ring fails to land back on the
+    /// profile ring within [`tol::POINT_MERGE`](crate::tol::POINT_MERGE)
+    /// (the seam does not close — the profile was only *nearly*
+    /// perpendicular). Hew does not re-orient the profile (rule 4).
+    ProfileNotPerpendicular,
+    /// Perpendicularity holds but the path is not attached to the profile
+    /// plane: an open path's matching end vertex is off the plane (beyond
+    /// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)), or a closed path's
+    /// perpendicular segment is not crossed strictly between its endpoints
+    /// (a profile plane through a path *corner* is refused — the seam would
+    /// sit on a non-miter plane where the ring provably cannot close;
+    /// docs/design/follow-me.md §2).
+    PathDetachedFromProfile,
+    /// Adjacent path segments double back on each other — exactly
+    /// (directions summing below
+    /// [`tol::NORMALIZE_MIN_LENGTH`](crate::tol::NORMALIZE_MIN_LENGTH), so
+    /// no miter plane exists) or effectively (the joint's miter ratio
+    /// `1 / cos(θ/2)` exceeds
+    /// [`tol::FOLLOW_ME_MITER_LIMIT`](crate::tol::FOLLOW_ME_MITER_LIMIT),
+    /// so the mitered ring would stretch without useful bound — a
+    /// near-reversal is the same configuration approached in the limit).
+    PathReverses,
+    /// The path bends tighter than the profile is wide: a ring vertex fails
+    /// to advance along its segment (the sweep would locally fold into
+    /// itself). Also raised for a lathe profile touching its own axis of
+    /// revolution — the on-axis vertex never advances.
+    PathTooTight,
+    /// The built solid's faces make improper contact away from their
+    /// legitimately shared elements (e.g. a U-shaped sweep whose legs
+    /// interpenetrate). Refused whole; nothing is committed.
+    SweepSelfIntersects,
+    /// The sweep produced geometry that is degenerate or fails the topology
+    /// validator. Reported instead of panicking, mirroring
+    /// [`ExtrudeError::DegenerateGeometry`].
+    SweepDegenerate,
+}
+
 /// Typed failures of push/pull.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushPullError {
@@ -404,6 +465,37 @@ impl std::fmt::Display for ExtrudeError {
 }
 
 impl std::error::Error for ExtrudeError {}
+
+impl std::fmt::Display for FollowMeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            FollowMeError::EmptyPath => "follow-me path has no segments",
+            FollowMeError::UnknownPathEdge => "a path edge handle is stale or from another sketch",
+            FollowMeError::PathBranches => "path edges branch; the path must be a single chain",
+            FollowMeError::PathDisconnected => "path edges form more than one chain",
+            FollowMeError::PathSegmentTooShort => {
+                "consecutive path points are within tol::POINT_MERGE"
+            }
+            FollowMeError::ProfileNotPerpendicular => {
+                "profile plane is not perpendicular to the path where the sweep starts"
+            }
+            FollowMeError::PathDetachedFromProfile => {
+                "path does not start on (or cross) the profile plane"
+            }
+            FollowMeError::PathReverses => {
+                "adjacent path segments double back on each other (at or beyond the miter limit)"
+            }
+            FollowMeError::PathTooTight => {
+                "path bends tighter than the profile is wide; the sweep would fold into itself"
+            }
+            FollowMeError::SweepSelfIntersects => "swept solid would intersect itself",
+            FollowMeError::SweepDegenerate => "sweep produced degenerate or invalid geometry",
+        };
+        write!(f, "{msg}")
+    }
+}
+
+impl std::error::Error for FollowMeError {}
 
 impl std::fmt::Display for PushPullError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -809,6 +901,445 @@ impl Object {
         // than tripping the debug-only validator panic at the WASM boundary.
         obj.validate()
             .map_err(|_| ExtrudeError::DegenerateGeometry)?;
+        Ok(obj)
+    }
+
+    /// Follow Me — the birth of a *swept* solid (docs/design/follow-me.md):
+    /// carries a closed [`Profile`] along a polyline `path` into a discrete
+    /// watertight Object, mitering the profile at every path joint. This is
+    /// [`Object::from_extrusion`]'s general sibling: a one-segment path
+    /// yields the same prism an extrusion would.
+    ///
+    /// Geometry produced: the profile ring is stationed on its own plane,
+    /// then carried onto each joint's miter plane (bisector normal) by
+    /// projecting every ring vertex along the incoming segment direction —
+    /// which makes every wall quad planar by construction. One quad wall per
+    /// profile boundary edge per path segment (outer walls face outward,
+    /// hole walls inward — holes sweep into tunnels). An open path gets two
+    /// caps (the profile itself at the start; the projected ring on the
+    /// plane perpendicular to the last segment at the end); a `closed` path
+    /// gets none — its final walls close onto the station-0 ring's own
+    /// vertices, welding the seam with shared vertices, and the transported
+    /// ring is verified to land back on the profile within
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) first.
+    ///
+    /// Anchoring (design §2): the profile plane must be perpendicular to
+    /// the path where the sweep starts — an open path's first (or last —
+    /// the path is reversed then) segment, with that end vertex on the
+    /// profile plane; a closed path must have some segment perpendicular to
+    /// the profile plane and crossed by it strictly between its endpoints
+    /// (the path is rotated to start there, splitting the segment in two
+    /// collinear halves). The profile is never re-oriented (rule 4).
+    ///
+    /// True-curves overlay (design §4): a profile edge carrying a
+    /// [`CurveGeom`](crate::sketch::CurveGeom) sweeps, along each segment, a
+    /// wall lying exactly on a right circular cylinder (axis = the segment
+    /// direction through the transported curve center); each such wall is
+    /// stamped [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef) after the
+    /// claim is verified against the validator's own predicates, and left
+    /// unstamped if floating-point transport drifted (map-or-drop). Walls
+    /// swept around a path *turn* are toroidal and stay honestly faceted
+    /// (no torus [`SurfaceRef`](crate::topo::SurfaceRef) exists). Cap edges
+    /// carry no curve claims, matching extrusion.
+    ///
+    /// The result is validated, must be watertight, and is checked globally
+    /// for self-intersection (no two faces contact away from their
+    /// legitimately shared vertices/edges). Nothing pre-existing is mutated;
+    /// the strong exception guarantee holds trivially.
+    ///
+    /// # Errors
+    /// See [`FollowMeError`] (design §5); every failure returns before any
+    /// commit. Path-chain errors (`EmptyPath` aside) are raised by the
+    /// document-level resolution, not here.
+    pub fn from_follow_me(
+        profile: &Profile,
+        path: &[Point3],
+        closed: bool,
+    ) -> Result<Object, FollowMeError> {
+        let plane = profile.plane();
+        let n = plane.normal();
+
+        let min_pts = if closed { 3 } else { 2 };
+        if path.len() < min_pts {
+            return Err(FollowMeError::EmptyPath);
+        }
+        // Consecutive path points must be distinct (including a closed
+        // path's wrap-around pair).
+        let raw_segs = if closed { path.len() } else { path.len() - 1 };
+        for i in 0..raw_segs {
+            if path[i].approx_eq(path[(i + 1) % path.len()], tol::POINT_MERGE) {
+                return Err(FollowMeError::PathSegmentTooShort);
+            }
+        }
+
+        // ---- anchor: fix station 0 to the profile plane (design §2) -----
+        // `pts` is the working path: an open path oriented to leave the
+        // profile plane from its matching end; a closed path rotated to
+        // start at the profile plane's strict-interior crossing of a
+        // perpendicular segment (split in two collinear halves) and
+        // reversed if needed so the first segment leaves along +n.
+        let pts: Vec<Point3> = if closed {
+            let m = path.len();
+            let mut anchor: Option<(usize, Point3)> = None;
+            let mut any_perp = false;
+            for k in 0..m {
+                let a = path[k];
+                let b = path[(k + 1) % m];
+                let dir = (b - a)
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+                if n.dot(dir).abs() < 1.0 - tol::NORMAL_DIRECTION {
+                    continue;
+                }
+                any_perp = true;
+                let sd_a = plane.signed_distance(a);
+                let sd_b = plane.signed_distance(b);
+                // Strict interior crossing only: a profile plane through a
+                // path corner is refused — the seam would sit on a
+                // non-miter plane, where the returning ring provably does
+                // not close (design §1/§2).
+                if sd_a.abs() <= tol::POINT_MERGE
+                    || sd_b.abs() <= tol::POINT_MERGE
+                    || sd_a * sd_b > 0.0
+                {
+                    continue;
+                }
+                let t = sd_a / (sd_a - sd_b);
+                anchor = Some((k, a + (b - a) * t));
+                break;
+            }
+            let Some((k, q)) = anchor else {
+                return Err(if any_perp {
+                    FollowMeError::PathDetachedFromProfile
+                } else {
+                    FollowMeError::ProfileNotPerpendicular
+                });
+            };
+            let mut rotated = Vec::with_capacity(m + 1);
+            rotated.push(q);
+            for i in 1..=m {
+                rotated.push(path[(k + i) % m]);
+            }
+            if n.dot(rotated[1] - rotated[0]) < 0.0 {
+                let tail: Vec<Point3> = rotated[1..].iter().rev().copied().collect();
+                rotated.truncate(1);
+                rotated.extend(tail);
+            }
+            rotated
+        } else {
+            let first = (path[1] - path[0])
+                .normalized()
+                .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+            let last = (path[path.len() - 1] - path[path.len() - 2])
+                .normalized()
+                .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+            let perp_first = n.dot(first).abs() >= 1.0 - tol::NORMAL_DIRECTION;
+            let perp_last = n.dot(last).abs() >= 1.0 - tol::NORMAL_DIRECTION;
+            let on_first = plane.signed_distance(path[0]).abs() <= tol::PLANE_DIST;
+            let on_last = plane.signed_distance(path[path.len() - 1]).abs() <= tol::PLANE_DIST;
+            if perp_first && on_first {
+                path.to_vec()
+            } else if perp_last && on_last {
+                path.iter().rev().copied().collect()
+            } else if perp_first || perp_last {
+                return Err(FollowMeError::PathDetachedFromProfile);
+            } else {
+                return Err(FollowMeError::ProfileNotPerpendicular);
+            }
+        };
+
+        let m = pts.len();
+        let seg_count = if closed { m } else { m - 1 };
+        let mut dirs: Vec<Vec3> = Vec::with_capacity(seg_count);
+        for i in 0..seg_count {
+            dirs.push(
+                (pts[(i + 1) % m] - pts[i])
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathSegmentTooShort)?,
+            );
+        }
+
+        // Station planes: 0 is the profile plane; interior stations are
+        // miter planes (bisector normal); an open path's last station is
+        // the end-cap plane perpendicular to the final segment. (A closed
+        // path's wrap joint back to station 0 is between the two collinear
+        // halves of the split anchor segment — its miter plane IS the
+        // profile plane, already station 0.)
+        let mut station_planes: Vec<Plane> = Vec::with_capacity(m);
+        station_planes.push(plane);
+        for s in 1..m {
+            let normal = if closed || s < m - 1 {
+                let bisector = (dirs[s - 1] + dirs[s % seg_count])
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathReverses)?;
+                // Miter limit (design §3): the transport onto this plane
+                // stretches every displacement by 1 / (dir · bisector) —
+                // the classic stroke miter ratio, divergent as the joint
+                // approaches a reversal. A near-reversal is the same
+                // physical configuration as an exact one; refuse it the
+                // same way rather than commit an unbounded miter spike.
+                if dirs[s - 1].dot(bisector) < 1.0 / tol::FOLLOW_ME_MITER_LIMIT {
+                    return Err(FollowMeError::PathReverses);
+                }
+                bisector
+            } else {
+                dirs[s - 1]
+            };
+            station_planes.push(
+                Plane::from_point_normal(pts[s], normal)
+                    .map_err(|_| FollowMeError::PathReverses)?,
+            );
+        }
+
+        let outer = profile.outer();
+        let holes = profile.holes();
+        let n_outer = outer.len();
+        let ring_size = n_outer + holes.iter().map(Vec::len).sum::<usize>();
+
+        // Carrier layout: the ring (outer vertices, then each hole's, as in
+        // from_extrusion) plus one extra carrier per attributed boundary
+        // edge — its circle center, transported alongside so per-segment
+        // cylinder stamps have their axis points (design §4).
+        let mut base: Vec<Point3> = Vec::with_capacity(ring_size);
+        base.extend_from_slice(outer);
+        for hole in holes {
+            base.extend_from_slice(hole);
+        }
+
+        struct WallEdge {
+            a: usize,
+            b: usize,
+            /// (carrier index of the transported circle center, radius).
+            curve: Option<(usize, f64)>,
+        }
+        let mut wall_edges: Vec<WallEdge> = Vec::with_capacity(ring_size);
+        {
+            let push_curve = |base: &mut Vec<Point3>, g: Option<crate::sketch::CurveGeom>| {
+                g.map(|g| {
+                    base.push(g.center);
+                    (base.len() - 1, g.radius)
+                })
+            };
+            for k in 0..n_outer {
+                wall_edges.push(WallEdge {
+                    a: k,
+                    b: (k + 1) % n_outer,
+                    curve: push_curve(&mut base, profile.outer_curve(k)),
+                });
+            }
+            let mut start = n_outer;
+            for (i, hole) in holes.iter().enumerate() {
+                for k in 0..hole.len() {
+                    wall_edges.push(WallEdge {
+                        a: start + k,
+                        b: start + (k + 1) % hole.len(),
+                        curve: push_curve(&mut base, profile.hole_curve(i, k)),
+                    });
+                }
+                start += hole.len();
+            }
+        }
+
+        // Transport the carriers station by station: each travels along the
+        // incoming segment direction onto the next station plane. Every
+        // wall quad is planar by construction — consecutive stations differ
+        // by per-vertex multiples of one shared direction.
+        let mut stations: Vec<Vec<Point3>> = Vec::with_capacity(m);
+        stations.push(base);
+        for s in 1..m {
+            let dir = dirs[s - 1];
+            let target = &station_planes[s];
+            let denom = dir.dot(target.normal());
+            if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
+                return Err(FollowMeError::PathReverses);
+            }
+            let next: Vec<Point3> = stations[s - 1]
+                .iter()
+                .map(|&v| v + dir * (-target.signed_distance(v) / denom))
+                .collect();
+            stations.push(next);
+        }
+
+        if closed {
+            // The seam must close exactly: transport the last station once
+            // more onto the profile plane and require it to land on the
+            // station-0 ring. A planar mitered loop returns the ring
+            // identically in exact arithmetic (design §1); a profile only
+            // *nearly* perpendicular to its segment fails here.
+            let dir = dirs[m - 1];
+            let denom = dir.dot(plane.normal());
+            if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
+                return Err(FollowMeError::PathReverses);
+            }
+            for (j, &v) in stations[m - 1].iter().take(ring_size).enumerate() {
+                let landed = v + dir * (-plane.signed_distance(v) / denom);
+                if !landed.approx_eq(stations[0][j], tol::POINT_MERGE) {
+                    return Err(FollowMeError::ProfileNotPerpendicular);
+                }
+            }
+        }
+
+        // Advance check (local self-intersection, design §3): every ring
+        // vertex must move forward along its segment, or the sweep folds
+        // into itself at that vertex (a bend tighter than the profile is
+        // wide; a lathe profile touching its own axis).
+        for s in 0..seg_count {
+            let next = &stations[(s + 1) % m];
+            let prev = &stations[s];
+            for j in 0..ring_size {
+                if (next[j] - prev[j]).dot(dirs[s]) <= tol::POINT_MERGE {
+                    return Err(FollowMeError::PathTooTight);
+                }
+            }
+        }
+
+        // ---- assemble faces ---------------------------------------------
+        let mut positions: Vec<Point3> = Vec::with_capacity(m * ring_size);
+        for st in &stations {
+            positions.extend_from_slice(&st[..ring_size]);
+        }
+        let idx = |s: usize, j: usize| s * ring_size + j;
+
+        #[allow(clippy::type_complexity)]
+        let mut face_specs: Vec<(
+            Vec<usize>,
+            Vec<Vec<usize>>,
+            Plane,
+            Option<crate::topo::SurfaceRef>,
+        )> = Vec::new();
+
+        if !closed {
+            // Caps, from_extrusion's shape: near cap on the profile plane
+            // wound to face against the sweep, far cap wound along it.
+            let hole_starts: Vec<usize> = {
+                let mut starts = Vec::with_capacity(holes.len());
+                let mut acc = n_outer;
+                for h in holes {
+                    starts.push(acc);
+                    acc += h.len();
+                }
+                starts
+            };
+            let near_outer: Vec<usize> = (0..n_outer).rev().collect();
+            let near_inners: Vec<Vec<usize>> = holes
+                .iter()
+                .enumerate()
+                .map(|(i, h)| (0..h.len()).rev().map(|k| hole_starts[i] + k).collect())
+                .collect();
+            let near_pts: Vec<Point3> = near_outer.iter().map(|&j| positions[j]).collect();
+            let near_plane =
+                Plane::from_polygon(&near_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+            face_specs.push((near_outer, near_inners, near_plane, None));
+
+            let far = m - 1;
+            let far_outer: Vec<usize> = (0..n_outer).map(|j| idx(far, j)).collect();
+            let far_inners: Vec<Vec<usize>> = holes
+                .iter()
+                .enumerate()
+                .map(|(i, h)| (0..h.len()).map(|k| idx(far, hole_starts[i] + k)).collect())
+                .collect();
+            let far_pts: Vec<Point3> = far_outer.iter().map(|&j| positions[j]).collect();
+            let far_plane =
+                Plane::from_polygon(&far_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+            face_specs.push((far_outer, far_inners, far_plane, None));
+        }
+
+        for s in 0..seg_count {
+            let s_next = (s + 1) % m;
+            for we in &wall_edges {
+                let quad = vec![
+                    idx(s, we.a),
+                    idx(s, we.b),
+                    idx(s_next, we.b),
+                    idx(s_next, we.a),
+                ];
+                let quad_pts: Vec<Point3> = quad.iter().map(|&j| positions[j]).collect();
+                let wall_plane =
+                    Plane::from_polygon(&quad_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+                let surface = we.curve.and_then(|(center_idx, radius)| {
+                    let surface = crate::topo::SurfaceRef::Cylinder {
+                        axis_point: stations[s][center_idx],
+                        axis: dirs[s],
+                        radius,
+                    };
+                    cylinder_claim_holds(&quad_pts, &wall_plane, &surface).then_some(surface)
+                });
+                face_specs.push((quad, vec![], wall_plane, surface));
+            }
+        }
+
+        // The construction winds outward for a sweep leaving station 0
+        // ALONG the profile normal; an open path may leave against it (a
+        // closed path was re-oriented above). Flip every loop then, exactly
+        // as from_extrusion does for a negative distance. Cylinder stamps
+        // survive the flip — the claim is unoriented.
+        if !closed && n.dot(dirs[0]) < 0.0 {
+            face_specs = face_specs
+                .into_iter()
+                .map(|(outer_idx, inner_lists, _plane, surface)| {
+                    let rev_outer: Vec<usize> = outer_idx.into_iter().rev().collect();
+                    let rev_inners: Vec<Vec<usize>> = inner_lists
+                        .into_iter()
+                        .map(|l| l.into_iter().rev().collect())
+                        .collect();
+                    let pts_rev: Vec<Point3> = rev_outer.iter().map(|&i| positions[i]).collect();
+                    let plane = Plane::from_polygon(&pts_rev)
+                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    Ok((rev_outer, rev_inners, plane, surface))
+                })
+                .collect::<Result<Vec<_>, FollowMeError>>()?;
+        }
+
+        let face_specs: Vec<_> = face_specs
+            .into_iter()
+            .map(|(o, i, p, surf)| (o, i, p, None, None, surf))
+            .collect();
+        let obj = Object::from_faces_with_holes(&positions, &face_specs);
+        obj.validate().map_err(|_| FollowMeError::SweepDegenerate)?;
+        if obj.watertight() != crate::topo::WatertightState::Watertight {
+            return Err(FollowMeError::SweepDegenerate);
+        }
+
+        // Global self-intersection (design §3): no two faces may contact
+        // away from their legitimately shared vertices/edges — the same
+        // primitive flat-face push/pull's result check uses, prefiltered by
+        // axis-aligned bounds so only near pairs pay the exact test.
+        let face_ids: Vec<FaceId> = obj.faces.keys().collect();
+        let boxes: Vec<[f64; 6]> = face_ids
+            .iter()
+            .map(|&f| {
+                let mut b = [
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                ];
+                for p in obj.loop_positions(obj.faces[f].outer_loop) {
+                    for (i, c) in [p.x, p.y, p.z].into_iter().enumerate() {
+                        b[i] = b[i].min(c);
+                        b[i + 3] = b[i + 3].max(c);
+                    }
+                }
+                b
+            })
+            .collect();
+        for i in 0..face_ids.len() {
+            for j in (i + 1)..face_ids.len() {
+                let (a, b) = (&boxes[i], &boxes[j]);
+                let apart = (0..3).any(|k| {
+                    a[k + 3] + tol::POINT_MERGE < b[k] || b[k + 3] + tol::POINT_MERGE < a[k]
+                });
+                if apart {
+                    continue;
+                }
+                if faces_improperly_contact(&obj, face_ids[i], face_ids[j]) {
+                    return Err(FollowMeError::SweepSelfIntersects);
+                }
+            }
+        }
+
         Ok(obj)
     }
 
@@ -4575,6 +5106,38 @@ fn validate_sweep_result(
     }
 
     Ok(())
+}
+
+/// Whether a swept wall quad genuinely lies on the cylinder it is about to
+/// claim, by the validator's own predicates tightened to "vertices AT the
+/// radius" (a chord facet's corners sit exactly on the cylinder, not merely
+/// inside it). [`Object::from_follow_me`] stamps a wall only when this
+/// holds and silently omits the stamp otherwise — stamping wrong is worse
+/// than not stamping (map-or-drop, the true-curves design); the geometry
+/// itself is identical either way.
+fn cylinder_claim_holds(quad: &[Point3], plane: &Plane, surface: &crate::topo::SurfaceRef) -> bool {
+    let crate::topo::SurfaceRef::Cylinder {
+        axis_point,
+        axis,
+        radius,
+    } = *surface;
+    if !radius.is_finite()
+        || radius <= tol::POINT_MERGE
+        || (axis.length() - 1.0).abs() > tol::NORMAL_DIRECTION
+    {
+        return false;
+    }
+    if axis.dot(plane.normal()).abs() > tol::NORMAL_DIRECTION {
+        return false;
+    }
+    if plane.signed_distance(axis_point).abs() > radius + tol::PLANE_DIST {
+        return false;
+    }
+    quad.iter().all(|&p| {
+        let d = p - axis_point;
+        let radial = (d - axis * d.dot(axis)).length();
+        (radial - radius).abs() <= tol::PLANE_DIST
+    })
 }
 
 /// Whether faces `a` and `b` of one Object make contact anywhere other than

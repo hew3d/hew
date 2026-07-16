@@ -1917,6 +1917,14 @@ fn main() {
                 Some("CmdOrCtrl+="),
                 Some("P"),
             )?;
+            let tool_follow_me = check_item(
+                handle,
+                &mut checks,
+                "tool-follow-me",
+                "Follow Me",
+                None,
+                None,
+            )?;
             let tool_tape_measure = check_item(
                 handle,
                 &mut checks,
@@ -1950,6 +1958,7 @@ fn main() {
                 .item(&tool_rotate)
                 .item(&tool_scale)
                 .item(&tool_pushpull)
+                .item(&tool_follow_me)
                 .separator()
                 .item(&tool_tape_measure)
                 .item(&tool_protractor)
@@ -2312,6 +2321,7 @@ fn main() {
                 "tool-rotate" => "tool-rotate",
                 "tool-scale" => "tool-scale",
                 "tool-pushpull" => "tool-pushpull",
+                "tool-follow-me" => "tool-follow-me",
                 "tool-tape-measure" => "tool-tape-measure",
                 "tool-protractor" => "tool-protractor",
                 "tool-slice" => "tool-slice",

@@ -1,7 +1,7 @@
 ---
 title: "Move, Rotate, and Scale"
 description: "Select first, then Move, Rotate, or Scale with full snapping, axis locks, and typed values. Copying is a Move with Alt held."
-order: 7
+order: 8
 ---
 
 Move, Rotate, and Scale all follow the same pattern: **select something first** (with the Select tool, `Space`), then activate the tool and place two or three reference points. If nothing is selected, the tool reminds you in a toast.

@@ -1,7 +1,7 @@
 ---
 title: "Groups and components"
 description: "Groups bundle things that move together; components repeat one definition across many instances. Neither merges geometry."
-order: 10
+order: 11
 ---
 
 Groups and components are how a model grows past a handful of boxes without becoming unmanageable. Both are organizational: they never merge geometry (that's what [booleans](/learn/combining-solids/) are for).

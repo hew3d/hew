@@ -43,7 +43,7 @@ use crate::ids::{
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::Material;
 use crate::math::{MathError, Plane, Point3, Vec3};
-use crate::ops::{BooleanError, BooleanOp, ExtrudeError, Operand, SliceError};
+use crate::ops::{BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
 use crate::sketch::{
     Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
@@ -573,6 +573,30 @@ enum DocAction {
     },
 }
 
+/// A Follow Me path source (docs/design/follow-me.md §2): either a chain of
+/// sketch edges or a solid face's outer boundary loop. Resolved by
+/// [`Document::follow_me`]; the path source is never consumed or modified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowMePath {
+    /// Edges of one visible sketch forming a single connected chain (open
+    /// or closed), in any order.
+    SketchEdges {
+        /// The sketch owning the edges.
+        sketch: SketchId,
+        /// The path edges.
+        edges: Vec<SketchEdgeId>,
+    },
+    /// The outer boundary loop of one face of a visible world object —
+    /// always a closed path (crown molding around a tabletop). The object
+    /// itself is untouched.
+    FaceLoop {
+        /// The path object.
+        object: ObjectId,
+        /// The face whose outer boundary is the path.
+        face: FaceId,
+    },
+}
+
 /// The entities a mutation touched, so the caller (the shim) can reconcile its
 /// own derived state (inference candidates, render caches) precisely.
 ///
@@ -676,6 +700,8 @@ pub enum DocumentError {
     Sketch(SketchError),
     /// Extruding the region into a solid failed.
     Extrude(ExtrudeError),
+    /// A Follow Me sweep failed (path resolution or the sweep itself).
+    FollowMe(FollowMeError),
     /// A boolean combine failed (non-solid operand, empty result, degenerate
     /// contact, …).
     Boolean(BooleanError),
@@ -767,6 +793,7 @@ impl std::fmt::Display for DocumentError {
             }
             DocumentError::Sketch(e) => write!(f, "{e}"),
             DocumentError::Extrude(e) => write!(f, "{e}"),
+            DocumentError::FollowMe(e) => write!(f, "{e}"),
             DocumentError::Boolean(e) => write!(f, "{e}"),
             DocumentError::Slice(e) => write!(f, "{e}"),
             DocumentError::Transform(e) => write!(f, "{e}"),
@@ -2719,10 +2746,106 @@ impl Document {
             .map_err(DocumentError::Sketch)?;
         let object = Object::from_extrusion(&profile, distance).map_err(DocumentError::Extrude)?;
 
-        // Everything that can fail has succeeded; commit. Capture the
-        // scaffolding as re-insertable rows (endpoints + curve chain) so
-        // undo can restore it by merging into the sketch's THEN-current
-        // contents rather than clobbering them with a snapshot.
+        // Everything that can fail has succeeded; commit.
+        Ok(self.commit_region_object(sketch, &scaffolding, object))
+    }
+
+    /// Follow Me (docs/design/follow-me.md): sweeps the closed profile
+    /// `region` of `sketch` along `path` into a new watertight world Object
+    /// via [`Object::from_follow_me`]. Commits exactly like
+    /// [`Document::extrude_region`]: the profile region's exclusive
+    /// scaffolding is consumed (Model D — the outline became the solid's
+    /// cross-section; the path sketch or solid is never touched) and the
+    /// step records [`DocAction::CreatedObject`], so undo hides the solid
+    /// and re-inserts the outline atomically, redo re-deletes by geometry.
+    ///
+    /// # Errors
+    /// [`DocumentError::UnknownSketch`] / [`DocumentError::UnknownObject`] /
+    /// [`DocumentError::UnknownFace`] for stale or hidden handles;
+    /// [`DocumentError::Sketch`] for a stale region;
+    /// [`DocumentError::FollowMe`] for everything path chaining and the
+    /// sweep itself refuse ([`FollowMeError`]). The document is untouched
+    /// on every error.
+    pub fn follow_me(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "follow_me");
+        if self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let s = self
+            .sketches
+            .get(sketch)
+            .ok_or(DocumentError::UnknownSketch)?;
+        let profile = s.profile(region).map_err(DocumentError::Sketch)?;
+        let scaffolding = s
+            .region_scaffolding(region)
+            .map_err(DocumentError::Sketch)?;
+
+        let (points, closed) = self.resolve_follow_me_path(path)?;
+        let object =
+            Object::from_follow_me(&profile, &points, closed).map_err(DocumentError::FollowMe)?;
+
+        // Everything that can fail has succeeded; commit.
+        Ok(self.commit_region_object(sketch, &scaffolding, object))
+    }
+
+    /// Resolves a [`FollowMePath`] into the polyline
+    /// [`Object::from_follow_me`] consumes: ordered points plus whether the
+    /// path closes. Pure query; the source entities are untouched.
+    fn resolve_follow_me_path(
+        &self,
+        path: &FollowMePath,
+    ) -> Result<(Vec<Point3>, bool), DocumentError> {
+        match path {
+            FollowMePath::SketchEdges { sketch, edges } => {
+                if self.hidden_sketches.contains(sketch) {
+                    return Err(DocumentError::UnknownSketch);
+                }
+                let s = self
+                    .sketches
+                    .get(*sketch)
+                    .ok_or(DocumentError::UnknownSketch)?;
+                chain_sketch_edges(s, edges).map_err(DocumentError::FollowMe)
+            }
+            FollowMePath::FaceLoop { object, face } => {
+                let rec = self
+                    .objects
+                    .get(*object)
+                    .filter(|r| !r.hidden && r.is_world())
+                    .ok_or(DocumentError::UnknownObject)?;
+                let f = rec
+                    .object
+                    .faces()
+                    .get(*face)
+                    .ok_or(DocumentError::UnknownFace)?;
+                let points: Vec<Point3> = rec.object.loop_positions(f.outer_loop).collect();
+                Ok((points, true))
+            }
+        }
+    }
+
+    /// Shared commit for the region-consuming solid births
+    /// ([`Document::extrude_region`], [`Document::follow_me`]): captures the
+    /// region's exclusive scaffolding as re-insertable rows (endpoints +
+    /// curve chain) so undo can restore it by merging into the sketch's
+    /// THEN-current contents rather than clobbering them with a snapshot,
+    /// deletes it (Model D), inserts the new object as a top-level world
+    /// solid, and records [`DocAction::CreatedObject`]. Callers must have
+    /// finished everything that can fail before calling.
+    fn commit_region_object(
+        &mut self,
+        sketch: SketchId,
+        scaffolding: &BTreeSet<SketchEdgeId>,
+        object: Object,
+    ) -> (ObjectId, DocChange) {
+        let s = self
+            .sketches
+            .get(sketch)
+            .expect("caller verified the sketch");
         let removed: Vec<(Point3, Point3, Option<SketchCurveId>)> = scaffolding
             .iter()
             .map(|&eid| {
@@ -2735,7 +2858,7 @@ impl Document {
             })
             .collect();
         let sk = self.sketches.get_mut(sketch).expect("sketch was just read");
-        sk.remove_edges(&scaffolding);
+        sk.remove_edges(scaffolding);
         let emptied = sk.edges().is_empty();
         if emptied {
             // The sketch wholly became the solid: nothing hidden survives —
@@ -2769,7 +2892,7 @@ impl Document {
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
         };
-        Ok((id, change))
+        (id, change)
     }
 
     /// Applies a per-Object op (push/pull, split, merge) through that Object's
@@ -6113,6 +6236,72 @@ fn made_component_change(
         components_touched: vec![component],
         guides_touched: Vec::new(),
     }
+}
+
+/// Orders a set of sketch edges into one connected chain of positions — the
+/// path half of Follow Me's eligibility (docs/design/follow-me.md §2).
+/// Duplicate ids are collapsed. Deterministic: an open chain starts at the
+/// smaller of its two end vertex ids; a closed chain starts at its smallest
+/// member vertex id and steps first onto that vertex's smaller-id incident
+/// edge.
+fn chain_sketch_edges(
+    sketch: &Sketch,
+    edges: &[SketchEdgeId],
+) -> Result<(Vec<Point3>, bool), FollowMeError> {
+    let unique: BTreeSet<SketchEdgeId> = edges.iter().copied().collect();
+    if unique.is_empty() {
+        return Err(FollowMeError::EmptyPath);
+    }
+    // Vertex -> incident selected edges, both in id order.
+    let mut incident: BTreeMap<SketchVertexId, Vec<SketchEdgeId>> = BTreeMap::new();
+    for &eid in &unique {
+        let e = sketch
+            .edges()
+            .get(eid)
+            .ok_or(FollowMeError::UnknownPathEdge)?;
+        for v in [e.from, e.to] {
+            let list = incident.entry(v).or_default();
+            list.push(eid);
+            if list.len() > 2 {
+                return Err(FollowMeError::PathBranches);
+            }
+        }
+    }
+    let ends: Vec<SketchVertexId> = incident
+        .iter()
+        .filter(|(_, l)| l.len() == 1)
+        .map(|(&v, _)| v)
+        .collect();
+    let closed = match ends.len() {
+        0 => true,
+        2 => false,
+        // With every degree at most 2, one chain has exactly 0 or 2
+        // degree-1 vertices; any other count means several open chains.
+        _ => return Err(FollowMeError::PathDisconnected),
+    };
+    // Walk from the deterministic start; visiting every selected edge
+    // exactly once proves connectedness.
+    let start = if closed {
+        *incident.keys().next().expect("nonempty incident map")
+    } else {
+        ends[0]
+    };
+    let mut points: Vec<Point3> = vec![sketch.vertices()[start].position];
+    let mut visited: BTreeSet<SketchEdgeId> = BTreeSet::new();
+    let mut at = start;
+    while let Some(&next_edge) = incident[&at].iter().find(|e| !visited.contains(e)) {
+        visited.insert(next_edge);
+        let e = sketch.edges()[next_edge];
+        at = if e.from == at { e.to } else { e.from };
+        if closed && at == start {
+            break;
+        }
+        points.push(sketch.vertices()[at].position);
+    }
+    if visited.len() != unique.len() {
+        return Err(FollowMeError::PathDisconnected);
+    }
+    Ok((points, closed))
 }
 
 /// Map a per-Object [`HistoryError`] onto a [`DocumentError`]. Empty-stack cases

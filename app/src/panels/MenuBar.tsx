@@ -718,6 +718,11 @@ export function MenuBar({
               checked={activeTool === 'Push/Pull'}
               onClick={withClose(() => onSelectTool?.('Push/Pull'))}
             />
+            <CheckMenuItem
+              label="Follow Me"
+              checked={activeTool === 'Follow Me'}
+              onClick={withClose(() => onSelectTool?.('Follow Me'))}
+            />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem
               label="Tape Measure"

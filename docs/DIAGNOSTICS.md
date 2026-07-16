@@ -168,6 +168,8 @@ literal internal handles from the recording session.
 | `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket segments into one curve chain |
 | `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
 | `extrude_region` | `sketch`, `region`, `distance` | extrude a closed profile into an Object |
+| `follow_me_along_edges` | `sketch`, `region`, `path_sketch`, `path_edges[]` | sweep a closed profile along a chain of sketch edges into an Object |
+| `follow_me_around_face` | `sketch`, `region`, `path_object`, `path_face` | sweep a closed profile around a solid face's outer boundary into an Object |
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
 | `boolean_nodes` | `op` (as `boolean`), `a_kind`/`a`, `b_kind`/`b` (kind 0=object, 1=group) | combine two tree nodes — plain solids or whole groups; the route every UI boolean command takes |
 | `group_nodes` | `kinds[]`/`ids[]` (parallel node lists, kind as `delete_node`) | form a merge group |

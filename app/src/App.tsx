@@ -92,14 +92,17 @@ let toastCounter = 0
  * not stay pinned to the old object). */
 const DRAW_TOOLS: ReadonlySet<string> = new Set(['Line', 'Rectangle', 'Circle', 'Arc'])
 
-/** Tool name → native menu item id, for the macOS menu's radio checks. */
-const TOOL_MENU_IDS: Record<string, string> = {
+/** Tool name → native menu item id, for the macOS menu's radio checks.
+ * Exported for the native-menu parity test (`nativeMenuParity.test.ts`):
+ * every id here must exist as a real item in the Tauri shell's menu. */
+export const TOOL_MENU_IDS: Record<string, string> = {
   Select: 'tool-select',
   Rectangle: 'draw-rectangle',
   Circle: 'draw-circle',
   Arc: 'draw-arc',
   Line: 'draw-line',
   'Push/Pull': 'tool-pushpull',
+  'Follow Me': 'tool-follow-me',
   Paint: 'tool-paint',
   Move: 'tool-move',
   Rotate: 'tool-rotate',
@@ -1602,6 +1605,7 @@ export default function App() {
       case 'tool-arc':       setActiveTool('Arc'); break
       case 'tool-line':      setActiveTool('Line'); break
       case 'tool-pushpull':  setActiveTool('Push/Pull'); break
+      case 'tool-follow-me': setActiveTool('Follow Me'); break
       case 'tool-paint':     setActiveTool('Paint'); break
       case 'tool-move':      setActiveTool('Move'); break
       case 'tool-rotate':    setActiveTool('Rotate'); break
