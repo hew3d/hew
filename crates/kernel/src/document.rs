@@ -475,6 +475,11 @@ enum DocAction {
         instance: InstanceId,
         prev_def: ComponentId,
         new_def: ComponentId,
+        /// The instance's own name at the moment of the op. A set name is
+        /// promoted to the new definition's name and cleared off the
+        /// instance, so undo restores it and redo re-clears it (an unnamed
+        /// instance round-trips as a no-op either way).
+        prev_instance_name: Option<String>,
     },
     /// `paint_face` reassigned a face's material. Non-topological, so it
     /// touches no [`History`]; undo restores `prev` exactly, redo re-applies
@@ -514,6 +519,15 @@ enum DocAction {
         next_name: Option<String>,
         prev_tags: Vec<Vec<String>>,
         next_tags: Vec<Vec<String>>,
+    },
+    /// `set_component_name` changed a component definition's display name —
+    /// the shared label every instance of that definition shows. Undo
+    /// restores `prev_name`; redo re-applies `next_name`. Handle-stable (the
+    /// definition is only annotated).
+    ComponentRenamed {
+        component: ComponentId,
+        prev_name: Option<String>,
+        next_name: Option<String>,
     },
     /// `Document::ingest` merged an imported scene into this document.
     /// Undo hides every created node/object/group/instance/component (ids
@@ -2459,6 +2473,97 @@ impl Document {
             .and_then(|c| c.name.as_deref())
     }
 
+    /// Rename a live component definition, recording an undoable
+    /// [`DocAction::ComponentRenamed`]. The definition name is the shared
+    /// display label of every instance that places it, so the returned
+    /// [`DocChange`] touches the component **and** all of its instances.
+    ///
+    /// `name = None` clears the name (instances fall back to a positional
+    /// label in the UI). Renaming to the current name is a no-op (no undo
+    /// entry) — consistent with [`Document::set_node_name`], so a focus-blur
+    /// re-commit in the UI never pollutes the undo stack.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownComponent`] — stale or hidden component.
+    pub fn set_component_name(
+        &mut self,
+        component: ComponentId,
+        name: Option<String>,
+    ) -> Result<DocChange, DocumentError> {
+        let prev_name = match self.components.get(component) {
+            Some(c) if !c.hidden => c.name.clone(),
+            _ => return Err(DocumentError::UnknownComponent),
+        };
+        if name == prev_name {
+            // No change — return a touching change without an undo entry.
+            return Ok(self.component_change(component));
+        }
+        self.components[component].name = name.clone();
+        self.undo.push(DocAction::ComponentRenamed {
+            component,
+            prev_name,
+            next_name: name,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(self.component_change(component))
+    }
+
+    /// Build a [`DocChange`] for a definition-metadata change: the component
+    /// plus every instance of it (each instance displays the definition's
+    /// name, so all of them are stale after a rename).
+    fn component_change(&self, component: ComponentId) -> DocChange {
+        DocChange {
+            components_touched: vec![component],
+            instances_touched: self.instances_of(component),
+            ..Default::default()
+        }
+    }
+
+    /// The names of all live component definitions, for name generation.
+    fn live_component_names(&self) -> Vec<&str> {
+        self.components
+            .iter()
+            .filter(|(_, c)| !c.hidden)
+            .filter_map(|(_, c)| c.name.as_deref())
+            .collect()
+    }
+
+    /// A generated definition name for a component whose selection carried no
+    /// name to inherit: `"Component N"` with the lowest `N ≥ 1` no live
+    /// definition already uses. Deterministic (a pure function of the live
+    /// definition set).
+    fn generated_component_name(&self) -> String {
+        let taken = self.live_component_names();
+        let mut n: u32 = 1;
+        loop {
+            let candidate = format!("Component {n}");
+            if !taken.iter().any(|&t| t == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// The name for a made-unique copy of a definition named `base`:
+    /// `"<base> Copy"`, or — when a live definition already holds that name —
+    /// `"<base> Copy 2"`, `"<base> Copy 3"`, … (the lowest free number).
+    fn copy_component_name(&self, base: &str) -> String {
+        let taken = self.live_component_names();
+        let first = format!("{base} Copy");
+        if !taken.iter().any(|&t| t == first) {
+            return first;
+        }
+        let mut n: u32 = 2;
+        loop {
+            let candidate = format!("{base} Copy {n}");
+            if !taken.iter().any(|&t| t == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
     /// The visible instances that place `component`, in stable order. Empty if
     /// the component is stale/hidden or unplaced. Drives shared-geometry
     /// propagation: a `apply_def_op` edit touches exactly these.
@@ -3419,6 +3524,18 @@ impl Document {
     /// selection/transform; editing the shared geometry later goes through
     /// [`Document::apply_def_op`].
     ///
+    /// The new component inherits its display identity from the selection.
+    /// A single selected node passes its name on as the **definition name**
+    /// (the shared label every instance of this component displays) and its
+    /// tags onto the new **instance** (tags attach to placements, never to
+    /// definitions — one definition may later be placed under different
+    /// tags). The source node keeps its own name and tags, so undo restores
+    /// it exactly as it was. A selection with no name to inherit — an
+    /// unnamed node, or multiple siblings — gets a generated definition name
+    /// (`"Component 1"`, `"Component 2"`, …: the lowest number no live
+    /// definition already uses), so every definition always has a name and
+    /// all instances of one definition always read identically.
+    ///
     /// Returns the new definition, its first instance, and the [`DocChange`].
     /// The whole act is one undoable step ([`DocAction::MadeComponent`]), exactly
     /// reversible and handle-stable (hide-not-delete).
@@ -3492,12 +3609,22 @@ impl Document {
         }
         let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
 
+        // Inherit display identity from a single-node selection (see the doc
+        // comment): its name becomes the definition name, its tags copy onto
+        // the new instance. The source keeps both, so undo is exact. With no
+        // name to inherit, generate one — a definition always has a name.
+        let (inherited_name, inherited_tags) = match members {
+            [single] => self.node_meta(*single)?,
+            _ => (None, Vec::new()),
+        };
+        let def_name = inherited_name.unwrap_or_else(|| self.generated_component_name());
+
         // Build the definition + its single identity-posed instance. No geometry
         // moves: the definition-local frame is the world frame at creation.
         let component = self.components.insert(ComponentDef {
             members: leaves.clone(),
             hidden: false,
-            name: None,
+            name: Some(def_name),
         });
         for &o in &leaves {
             self.objects[o].owner = ObjectOwner::Definition(component);
@@ -3511,7 +3638,7 @@ impl Document {
             parent,
             hidden: false,
             name: None,
-            tags: Vec::new(),
+            tags: inherited_tags,
         });
         if let Some(pg) = parent {
             self.splice_in_parent(pg, members, NodeId::Instance(instance));
@@ -3672,8 +3799,17 @@ impl Document {
     /// Each definition member is cloned, the instance pose is **baked** into the
     /// clone (reusing [`Object::apply_transform`]), and the clones are inserted
     /// as top-level world objects at the instance's parent; the instance is then
-    /// hidden. The definition and any sibling instances are untouched. Recorded
-    /// as [`DocAction::Exploded`]; handle-stable and reversible.
+    /// hidden. Each clone keeps its member's own tags, and for a
+    /// **single-member** definition the baked name is exactly the identity
+    /// the UI displays for the instance: the instance's own name, else the
+    /// **live definition name** (which a later [`Document::set_component_name`]
+    /// may have changed — the member record keeps only its stale pre-fold
+    /// name), else the member's own name. A multi-member definition keeps
+    /// each member's own name regardless (stamping one shared name onto
+    /// several objects would mint duplicates). The instance record itself is
+    /// only hidden, never edited, so undo restores it name and all. The
+    /// definition and any sibling instances are untouched. Recorded as
+    /// [`DocAction::Exploded`]; handle-stable and reversible.
     ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
@@ -3702,20 +3838,37 @@ impl Document {
 
         // Clone each member and bake the pose into the copy as an independent
         // world object in the instance's container. `pose` is invertible and
-        // orientation-preserving, so `apply_transform` cannot fail.
+        // orientation-preserving, so `apply_transform` cannot fail. The clone
+        // keeps the member's own tags (preserved on the member since before
+        // it was folded in); for a single-member definition its name is the
+        // identity the UI displays for the instance — instance name, else the
+        // LIVE definition name (the member record's name goes stale the
+        // moment set_component_name renames the definition), else the
+        // member's own pre-fold name (see the doc comment).
+        let instance_name = self.instances[instance].name.clone();
+        let def_name = self.components[def].name.clone();
+        let single_member = members.len() == 1;
         let mut created: Vec<ObjectId> = Vec::with_capacity(members.len());
         for m in members {
             let mut object = self.objects[m].object.clone();
             object
                 .apply_transform(&pose)
                 .map_err(DocumentError::Transform)?;
+            let name = if single_member {
+                instance_name
+                    .clone()
+                    .or_else(|| def_name.clone())
+                    .or_else(|| self.objects[m].name.clone())
+            } else {
+                self.objects[m].name.clone()
+            };
             let id = self.objects.insert(ObjectRecord {
                 object,
                 history: History::new(),
                 hidden: false,
                 owner: ObjectOwner::World { parent },
-                name: None,
-                tags: Vec::new(),
+                name,
+                tags: self.objects[m].tags.clone(),
             });
             created.push(id);
         }
@@ -3747,6 +3900,16 @@ impl Document {
     /// unchanged), so later [`Document::apply_def_op`] edits to this instance no
     /// longer affect its former siblings. Recorded as [`DocAction::MadeUnique`].
     ///
+    /// The new definition is a new component, so it gets its own name:
+    /// - the instance's **own name, if set, is promoted** to the definition
+    ///   name, and the instance name is cleared (the instance now reads as
+    ///   the new definition, not as a renamed placement of the old one);
+    /// - otherwise the old definition's name with `" Copy"` appended — and if
+    ///   a live definition already holds that name, `" Copy 2"`, `" Copy 3"`,
+    ///   … (the lowest free number);
+    /// - a nameless source definition (possible only via import — native
+    ///   definitions are always named) yields a nameless copy.
+    ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
     ///
@@ -3764,14 +3927,27 @@ impl Document {
             _ => return Err(DocumentError::UnknownComponent),
         };
 
+        // Name the new definition per the doc comment: promote the instance
+        // name if set, else derive a "<def> Copy" name from the source def.
+        let prev_instance_name = self.instances[instance].name.clone();
+        let new_name = match (
+            &prev_instance_name,
+            self.components[prev_def].name.as_deref(),
+        ) {
+            (Some(n), _) => Some(n.clone()),
+            (None, Some(d)) => Some(self.copy_component_name(d)),
+            (None, None) => None,
+        };
+        if prev_instance_name.is_some() {
+            self.instances[instance].name = None;
+        }
+
         // Deep-copy each member into a fresh private definition (def-local
-        // geometry, fresh per-object history). Inherit the source def's name so
-        // a made-unique instance keeps its label.
-        let prev_name = self.components[prev_def].name.clone();
+        // geometry, fresh per-object history).
         let new_def = self.components.insert(ComponentDef {
             members: Vec::new(),
             hidden: false,
-            name: prev_name,
+            name: new_name,
         });
         let mut new_members: Vec<ObjectId> = Vec::with_capacity(members.len());
         for m in members {
@@ -3793,6 +3969,7 @@ impl Document {
             instance,
             prev_def,
             new_def,
+            prev_instance_name,
         });
         self.redo.clear();
         self.debug_validate();
@@ -4561,12 +4738,17 @@ impl Document {
                 change.groups_touched.extend(parent);
                 change
             }
-            &DocAction::MadeUnique {
+            DocAction::MadeUnique {
                 instance,
                 prev_def,
                 new_def,
+                prev_instance_name,
             } => {
+                let (instance, prev_def, new_def) = (*instance, *prev_def, *new_def);
                 self.instances[instance].def = prev_def;
+                // Restore the instance name a promotion cleared (a no-op for
+                // an instance that was unnamed at the op).
+                self.instances[instance].name = prev_instance_name.clone();
                 let new_members = self.components[new_def].members.clone();
                 for o in new_members {
                     self.objects[o].hidden = true;
@@ -4612,6 +4794,16 @@ impl Document {
                 let node = *node;
                 self.apply_node_meta(node, prev_name.clone(), prev_tags.clone());
                 self.node_change(node)
+            }
+            DocAction::ComponentRenamed {
+                component,
+                prev_name,
+                ..
+            } => {
+                // Undo: restore the definition's previous name.
+                let component = *component;
+                self.components[component].name = prev_name.clone();
+                self.component_change(component)
             }
             DocAction::Imported {
                 objects,
@@ -5068,6 +5260,7 @@ impl Document {
                 instance,
                 prev_def,
                 new_def,
+                ..
             } => {
                 self.components[new_def].hidden = false;
                 let new_members = self.components[new_def].members.clone();
@@ -5075,6 +5268,11 @@ impl Document {
                     self.objects[o].hidden = false;
                 }
                 self.instances[instance].def = new_def;
+                // Re-clear the instance name a promotion moved onto the new
+                // definition (exact by LIFO: at redo time the name is the
+                // recorded `prev_instance_name` again, and the op left it
+                // `None` — unconditionally for an unnamed instance too).
+                self.instances[instance].name = None;
                 DocChange {
                     instances_touched: vec![instance],
                     components_touched: vec![prev_def, new_def],
@@ -5115,6 +5313,16 @@ impl Document {
                 let node = *node;
                 self.apply_node_meta(node, next_name.clone(), next_tags.clone());
                 self.node_change(node)
+            }
+            DocAction::ComponentRenamed {
+                component,
+                next_name,
+                ..
+            } => {
+                // Redo: re-apply the definition's next name.
+                let component = *component;
+                self.components[component].name = next_name.clone();
+                self.component_change(component)
             }
             DocAction::Imported {
                 objects,

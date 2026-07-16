@@ -1597,6 +1597,304 @@ fn make_unique_detaches_an_instance_from_its_siblings() {
     );
 }
 
+/// Make Component inherits its display identity from a single-node
+/// selection: the source's name becomes the definition name (the shared
+/// label of every instance) and its tags copy onto the new instance (tags
+/// attach to placements, never definitions). The source keeps both, so undo
+/// restores it exactly.
+#[test]
+fn make_component_inherits_name_and_tags_from_a_single_source() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(o), Some("The Box".to_string()))
+        .unwrap();
+    let tag = vec!["Objects".to_string(), "Boxes".to_string()];
+    doc.add_node_tag(NodeId::Object(o), tag.clone()).unwrap();
+
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    assert_eq!(doc.component_name(comp), Some("The Box"));
+    assert_eq!(
+        doc.instance_name(inst),
+        None,
+        "the inherited name is the definition's, not a per-instance override"
+    );
+    assert_eq!(
+        doc.node_tags(NodeId::Instance(inst)),
+        std::slice::from_ref(&tag)
+    );
+
+    // A second instance shares the same definition name automatically.
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(3.0, 0.0, 0.0)))
+        .unwrap();
+    assert_eq!(doc.instance_name(i2), None);
+    assert_eq!(doc.instance_def(i2), Some(comp));
+
+    // Undo the whole act: the source object is a world solid again with its
+    // name and tags exactly as they were.
+    doc.undo().unwrap(); // undo place_instance
+    doc.undo().unwrap(); // undo make_component
+    assert_eq!(doc.object_name(o), Some("The Box"));
+    assert_eq!(doc.node_tags(NodeId::Object(o)), std::slice::from_ref(&tag));
+
+    // Redo re-forms the component with the same identity (stable handles).
+    doc.redo().unwrap();
+    assert_eq!(doc.component_name(comp), Some("The Box"));
+    assert_eq!(
+        doc.node_tags(NodeId::Instance(inst)),
+        std::slice::from_ref(&tag)
+    );
+}
+
+/// A selection with no name to inherit — an unnamed node, or several
+/// siblings — gets a generated definition name (`"Component N"`, lowest free
+/// number over live definitions), so a definition always has a name and all
+/// of its instances read identically.
+#[test]
+fn make_component_generates_a_definition_name_when_nothing_to_inherit() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (c1, _i1, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+    assert_eq!(doc.component_name(c1), Some("Component 1"));
+
+    // A multi-node selection has no single source: generated name, no tags.
+    let b = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 5.0, 0.0, 6.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(b), Some("B".to_string()))
+        .unwrap();
+    doc.add_node_tag(NodeId::Object(b), vec!["T".to_string()])
+        .unwrap();
+    let (c2, i2, _) = doc
+        .make_component(&[NodeId::Object(b), NodeId::Object(c)])
+        .unwrap();
+    assert_eq!(doc.component_name(c2), Some("Component 2"));
+    assert_eq!(doc.node_tags(NodeId::Instance(i2)), &[] as &[Vec<String>]);
+}
+
+/// Explode keeps each member's own name and tags on the baked world object —
+/// the identity that rode into the definition at make_component rides back
+/// out, instead of degrading to an anonymous positional label.
+#[test]
+fn explode_carries_the_member_name_and_tags_onto_the_world_object() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(o), Some("The Box".to_string()))
+        .unwrap();
+    let tag = vec!["Objects".to_string(), "Boxes".to_string()];
+    doc.add_node_tag(NodeId::Object(o), tag.clone()).unwrap();
+    let (_comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+
+    let (created, _) = doc.explode_instance(inst).unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(doc.object_name(created[0]), Some("The Box"));
+    assert_eq!(
+        doc.node_tags(NodeId::Object(created[0])),
+        std::slice::from_ref(&tag)
+    );
+}
+
+/// Explode prefers the instance's own name for a single-member definition —
+/// the identity the user set on the placement survives the bake — while a
+/// multi-member definition keeps each member's own name (stamping one
+/// instance name onto several objects would mint duplicates). Undo restores
+/// the instance with its name intact.
+#[test]
+fn explode_prefers_the_instance_name_on_a_single_member_definition() {
+    let mut doc = Document::new();
+
+    // Single member: the instance's set name wins over the member name.
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(o), Some("The Box".to_string()))
+        .unwrap();
+    let (_comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    doc.set_node_name(NodeId::Instance(inst), Some("Special".to_string()))
+        .unwrap();
+    let (created, _) = doc.explode_instance(inst).unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(doc.object_name(created[0]), Some("Special"));
+
+    // Undo restores the instance, name intact.
+    doc.undo().unwrap();
+    assert_eq!(doc.instance_name(inst), Some("Special"));
+
+    // Multi-member: each member keeps its own name; the instance name is
+    // not stamped onto any of them.
+    let a = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 5.0, 0.0, 6.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(a), Some("A".to_string()))
+        .unwrap();
+    doc.set_node_name(NodeId::Object(b), Some("B".to_string()))
+        .unwrap();
+    let (_c2, i2, _) = doc
+        .make_component(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    doc.set_node_name(NodeId::Instance(i2), Some("Combo".to_string()))
+        .unwrap();
+    let (created2, _) = doc.explode_instance(i2).unwrap();
+    let names: Vec<Option<&str>> = created2.iter().map(|&c| doc.object_name(c)).collect();
+    assert!(
+        names.contains(&Some("A")) && names.contains(&Some("B")),
+        "{names:?}"
+    );
+    assert!(!names.contains(&Some("Combo")), "{names:?}");
+}
+
+/// A single-member explode bakes the name the UI displays for the instance —
+/// instance name, else the LIVE definition name, else the member's pre-fold
+/// name. In particular a definition renamed after creation (set_component_name
+/// touches only the definition, never the member record) must bake its
+/// current name, not the member's stale one.
+#[test]
+fn explode_bakes_the_displayed_name_after_a_definition_rename() {
+    let mut doc = Document::new();
+
+    // Definition renamed after creation: the live definition name wins over
+    // the member's pre-fold name.
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(o), Some("The Box".to_string()))
+        .unwrap();
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    doc.set_component_name(comp, Some("Cabinet".to_string()))
+        .unwrap();
+    let (created, _) = doc.explode_instance(inst).unwrap();
+    assert_eq!(doc.object_name(created[0]), Some("Cabinet"));
+
+    // An unnamed member under a generated definition name bakes that name
+    // (what every row displays), not a bare positional label.
+    let u = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 0.0, 1.0);
+    let (c2, i2, _) = doc.make_component(&[NodeId::Object(u)]).unwrap();
+    let generated = doc.component_name(c2).expect("generated name").to_string();
+    let (created2, _) = doc.explode_instance(i2).unwrap();
+    assert_eq!(doc.object_name(created2[0]), Some(generated.as_str()));
+
+    // The instance's own name still outranks the definition name.
+    let p = extrude_box(&mut doc, 6.0, 0.0, 7.0, 1.0, 0.0, 1.0);
+    let (c3, i3, _) = doc.make_component(&[NodeId::Object(p)]).unwrap();
+    doc.set_component_name(c3, Some("Cupboard".to_string()))
+        .unwrap();
+    doc.set_node_name(NodeId::Instance(i3), Some("Special".to_string()))
+        .unwrap();
+    let (created3, _) = doc.explode_instance(i3).unwrap();
+    assert_eq!(doc.object_name(created3[0]), Some("Special"));
+}
+
+/// Make Unique names the new definition: a set instance name is promoted to
+/// the definition name (and cleared off the instance); an unnamed instance
+/// derives `"<def> Copy"`, disambiguated `"<def> Copy 2"`, … against live
+/// definitions. Undo restores the promoted instance name exactly.
+#[test]
+fn make_unique_names_the_new_definition() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(o), Some("The Box".to_string()))
+        .unwrap();
+    let (comp, _i1, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(3.0, 0.0, 0.0)))
+        .unwrap();
+    let (i3, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(6.0, 0.0, 0.0)))
+        .unwrap();
+
+    // Unnamed instance → "<def> Copy".
+    let (u2, _) = doc.make_unique(i2).unwrap();
+    assert_eq!(doc.component_name(u2), Some("The Box Copy"));
+
+    // The next unnamed unique of the same def disambiguates.
+    let (u3, _) = doc.make_unique(i3).unwrap();
+    assert_eq!(doc.component_name(u3), Some("The Box Copy 2"));
+
+    // A named instance promotes its name to the new definition and clears
+    // its own — the row now reads as the new component, not "Name (Name)".
+    let (i4, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(9.0, 0.0, 0.0)))
+        .unwrap();
+    doc.set_node_name(NodeId::Instance(i4), Some("Special".to_string()))
+        .unwrap();
+    let (u4, _) = doc.make_unique(i4).unwrap();
+    assert_eq!(doc.component_name(u4), Some("Special"));
+    assert_eq!(doc.instance_name(i4), None);
+
+    // Undo restores the shared def AND the instance's own name; redo
+    // re-promotes.
+    doc.undo().unwrap();
+    assert_eq!(doc.instance_def(i4), Some(comp));
+    assert_eq!(doc.instance_name(i4), Some("Special"));
+    doc.redo().unwrap();
+    assert_eq!(doc.instance_def(i4), Some(u4));
+    assert_eq!(doc.instance_name(i4), None);
+    assert_eq!(doc.component_name(u4), Some("Special"));
+}
+
+/// `set_component_name` renames the shared definition label (undoable), is a
+/// no-op on the current name (no undo entry), and touches every instance in
+/// its change so the UI refreshes each row.
+#[test]
+fn set_component_name_is_undoable_and_touches_every_instance() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, i1, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(3.0, 0.0, 0.0)))
+        .unwrap();
+
+    let change = doc
+        .set_component_name(comp, Some("Widget".to_string()))
+        .unwrap();
+    assert_eq!(doc.component_name(comp), Some("Widget"));
+    assert!(change.components_touched.contains(&comp));
+    assert!(
+        change.instances_touched.contains(&i1) && change.instances_touched.contains(&i2),
+        "a definition rename touches every instance"
+    );
+
+    // Renaming to the current name pushes no undo entry: the next undo steps
+    // over it straight back to the real rename.
+    doc.set_component_name(comp, Some("Widget".to_string()))
+        .unwrap();
+    doc.undo().unwrap();
+    assert_eq!(doc.component_name(comp), Some("Component 1"));
+    doc.redo().unwrap();
+    assert_eq!(doc.component_name(comp), Some("Widget"));
+
+    // A stale handle fails typed.
+    doc.undo().unwrap(); // undo rename
+    doc.undo().unwrap(); // undo place_instance
+    doc.undo().unwrap(); // undo make_component — the def is now hidden
+    assert_eq!(
+        doc.set_component_name(comp, Some("X".to_string())),
+        Err(DocumentError::UnknownComponent)
+    );
+}
+
+/// Component display identity — the definition name and the instance's tags
+/// and own name — survives a save/load round trip.
+#[test]
+fn component_identity_round_trips_through_save_load() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(o), Some("The Box".to_string()))
+        .unwrap();
+    let tag = vec!["Objects".to_string(), "Boxes".to_string()];
+    doc.add_node_tag(NodeId::Object(o), tag.clone()).unwrap();
+    let (_comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    doc.set_node_name(NodeId::Instance(inst), Some("First".to_string()))
+        .unwrap();
+
+    let bytes = doc.save();
+    let loaded = Document::load(&bytes).expect("round trip loads");
+    let comps = loaded.component_ids();
+    assert_eq!(comps.len(), 1);
+    assert_eq!(loaded.component_name(comps[0]), Some("The Box"));
+    let insts = loaded.instance_ids();
+    assert_eq!(insts.len(), 1);
+    assert_eq!(loaded.instance_name(insts[0]), Some("First"));
+    assert_eq!(
+        loaded.node_tags(NodeId::Instance(insts[0])),
+        std::slice::from_ref(&tag)
+    );
+}
+
 /// make_component then place_instance round-trips through document undo/redo,
 /// restoring the original world object on undo and the *same* node handles on
 /// redo (hide-not-delete).

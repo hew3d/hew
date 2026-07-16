@@ -168,7 +168,12 @@ export function entityLabel(kind: EntityKind, index: number): string {
  * - `kernelName`: direct name on the node (object_name / group_name /
  *   instance_name), if any.
  * - `defName`: for instances only, the component_name of the instance's
- *   definition; used when the instance has no own name.
+ *   definition. An instance with no own name displays the definition name —
+ *   every unrenamed instance of one component reads identically, which is
+ *   what makes them obviously instances of each other. An instance that HAS
+ *   its own name displays "Instance Name (Definition Name)", keeping the
+ *   definition relationship visible; the parenthetical is dropped when the
+ *   two names coincide ("Box (Box)" says nothing).
  * - `kind` / `index`: passed to `entityLabel` as a last-resort fallback.
  */
 export function resolveLabel(
@@ -179,13 +184,18 @@ export function resolveLabel(
 ): string {
   // A name that is purely a tag suffix (unnamed group/object that the Ruby
   // tagged) strips to empty → fall through to the positional label, not a blank.
+  const strippedDef = defName !== undefined ? stripTagSuffix(defName) : ''
   if (kernelName !== undefined) {
     const stripped = stripTagSuffix(kernelName)
-    if (stripped.length > 0) return stripped
+    if (stripped.length > 0) {
+      if (kind === 'instance' && strippedDef.length > 0 && strippedDef !== stripped) {
+        return `${stripped} (${strippedDef})`
+      }
+      return stripped
+    }
   }
-  if (kind === 'instance' && defName !== undefined) {
-    const stripped = stripTagSuffix(defName)
-    if (stripped.length > 0) return stripped
+  if (kind === 'instance' && strippedDef.length > 0) {
+    return strippedDef
   }
   return entityLabel(kind, index)
 }

@@ -9,6 +9,16 @@
  *   - Solid / Leaky (only for Objects; calls scene.object_solid)
  *   - Tags (removable chips + a "+" affordance that reveals the add field)
  *
+ * A component instance gets the component treatment instead of the plain
+ * Name field:
+ *   - Definition Name (editable → scene.set_component_name) — the shared
+ *     label; renaming it renames every instance of the component.
+ *   - Instance Name (editable → scene.set_node_name) — this placement's own
+ *     override; the Outliner then shows "Instance Name (Definition Name)".
+ *   - Type reads "Component (N instances)", and the count is a button that
+ *     selects every instance of the definition — in the viewport and the
+ *     Outliner at once (both render from the same selection state).
+ *
  * Empty states are quiet: nothing selected renders nothing at all; a
  * multi-selection shows only the count ("3 selected").
  *
@@ -38,6 +48,11 @@ interface Props {
    * update. This is the same handleDocumentChanged that all other mutations use.
    */
   onDocumentChanged: () => void
+  /**
+   * Replace the selection with `nodes` (the "(N instances)" click). Routed to
+   * the same selection state the viewport and Outliner render from.
+   */
+  onSelectMany: (nodes: NodeRef[]) => void
 }
 
 /** Human-readable type label for each node kind. */
@@ -83,7 +98,7 @@ const INPUT_STYLE: React.CSSProperties = {
   outline: 'none',
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged, onSelectMany }: Props) {
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
@@ -137,6 +152,9 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
               : sketchLabel,
         tags: [] as string[][],
         solid: null as boolean | null,
+        defId: null as bigint | null,
+        defName: undefined as string | undefined,
+        instanceIds: [] as bigint[],
       }
     }
 
@@ -144,6 +162,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
 
     let nameFromScene: string | undefined
     let defName: string | undefined
+    let defId: bigint | null = null
+    let instanceIds: bigint[] = []
     if (kind === 'object') {
       nameFromScene = scene.object_name(id)
     } else if (kind === 'group') {
@@ -151,7 +171,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
     } else {
       nameFromScene = scene.instance_name(id)
       const def = scene.instance_def(id)
-      defName = def !== undefined ? scene.component_name(def) : undefined
+      if (def !== undefined) {
+        defId = def
+        defName = scene.component_name(def)
+        // Every visible sibling placing the same definition, this one included
+        // — the "(N instances)" count and the click-to-select set.
+        instanceIds = Array.from(scene.instances_of(def))
+      }
     }
 
     // The label the Outliner would show for this node when it carries no
@@ -179,7 +205,19 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
       solid = scene.object_solid(id)
     }
 
-    return { node, kind, kindNum, id, nameFromScene, defaultLabel, tags, solid }
+    return {
+      node,
+      kind,
+      kindNum,
+      id,
+      nameFromScene,
+      defaultLabel,
+      tags,
+      solid,
+      defId,
+      defName,
+      instanceIds,
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev, selectedIds])
 
@@ -188,16 +226,27 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
   // Sync with the kernel-derived name whenever nodeInfo changes (new selection
   // or doc mutation). This effect is idempotent — calling setLocalName with the
   // same value twice is harmless, so StrictMode double-invoke is safe.
+  //
+  // The reset is keyed on the selected node's IDENTITY as well as the value:
+  // resetting only when the value changes would carry uncommitted typed text
+  // across a selection change between two nodes whose kernel names happen to
+  // be equal (e.g. both unnamed), and the next blur would silently commit
+  // node A's typed name to node B.
   // --------------------------------------------------------------------------
+  const syncKey = nodeInfo !== null ? nodeKey(nodeInfo.node) : null
   const [localName, setLocalName] = useState(nodeInfo?.nameFromScene ?? '')
-  const prevNameFromSceneRef = useRef<string | undefined>(undefined)
+  const prevNameSyncRef = useRef<{ key: string | null; name: string | undefined }>({
+    key: null,
+    name: undefined,
+  })
   useEffect(() => {
     const next = nodeInfo?.nameFromScene
-    if (next !== prevNameFromSceneRef.current) {
-      prevNameFromSceneRef.current = next
+    const prev = prevNameSyncRef.current
+    if (syncKey !== prev.key || next !== prev.name) {
+      prevNameSyncRef.current = { key: syncKey, name: next }
       setLocalName(next ?? '')
     }
-  }, [nodeInfo?.nameFromScene, nodeInfo?.node.id, nodeInfo?.node.kind])
+  }, [nodeInfo?.nameFromScene, syncKey])
 
   // --------------------------------------------------------------------------
   // Name commit: called on Enter or blur.
@@ -210,6 +259,47 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
     scene.set_node_name(nodeInfo.kindNum, nodeInfo.id, trimmed === '' ? undefined : trimmed)
     onDocumentChanged()
   }, [nodeInfo, localName, scene, onDocumentChanged])
+
+  // --------------------------------------------------------------------------
+  // Definition Name (instances only) — local controlled state + commit,
+  // mirroring the name field's identity-keyed reset, but keyed on the
+  // DEFINITION's identity, not the instance's: this field edits the shared
+  // definition, so cycling between two instances of the same definition
+  // keeps an in-progress edit alive (it commits to that one definition
+  // either way), while moving to an instance of a different — possibly
+  // same-valued — definition resets it, so typed text never leaks onto
+  // another component.
+  // --------------------------------------------------------------------------
+  const [localDefName, setLocalDefName] = useState(nodeInfo?.defName ?? '')
+  const defSyncKey = nodeInfo !== null && nodeInfo.defId !== null ? String(nodeInfo.defId) : null
+  const prevDefSyncRef = useRef<{ key: string | null; name: string | undefined }>({
+    key: null,
+    name: undefined,
+  })
+  useEffect(() => {
+    const next = nodeInfo?.defName
+    const prev = prevDefSyncRef.current
+    if (defSyncKey !== prev.key || next !== prev.name) {
+      prevDefSyncRef.current = { key: defSyncKey, name: next }
+      setLocalDefName(next ?? '')
+    }
+  }, [nodeInfo?.defName, defSyncKey])
+
+  const commitDefName = useCallback(() => {
+    if (nodeInfo === null || nodeInfo.defId === null) return
+    const trimmed = localDefName.trim()
+    scene.set_component_name(nodeInfo.defId, trimmed === '' ? undefined : trimmed)
+    onDocumentChanged()
+  }, [nodeInfo, localDefName, scene, onDocumentChanged])
+
+  // --------------------------------------------------------------------------
+  // "(N instances)" click: select every instance of the definition. The
+  // viewport and the Outliner both render from this one selection state.
+  // --------------------------------------------------------------------------
+  const selectAllInstances = useCallback(() => {
+    if (nodeInfo === null || nodeInfo.instanceIds.length === 0) return
+    onSelectMany(nodeInfo.instanceIds.map((id) => ({ kind: 'instance' as const, id })))
+  }, [nodeInfo, onSelectMany])
 
   // --------------------------------------------------------------------------
   // Tag add state — hidden behind a "+" affordance (HIG-style disclosure).
@@ -268,12 +358,53 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
 
   return (
     <div style={PANEL_STYLE}>
-      {/* Name — sketches can't be named yet; show the read-only default label instead. */}
+      {/* Name — sketches can't be named yet; show the read-only default label
+       * instead. A component instance splits into Definition Name (the shared
+       * label — renames every instance) and Instance Name (this placement's
+       * own override; the Outliner then shows "Instance (Definition)"). */}
       {nodeInfo.kind !== 'object' && nodeInfo.kind !== 'group' && nodeInfo.kind !== 'instance' ? (
         <div>
           <div style={LABEL_STYLE}>Name</div>
           <div style={VALUE_STYLE}>{nodeInfo.defaultLabel}</div>
         </div>
+      ) : nodeInfo.kind === 'instance' ? (
+        <>
+          <div>
+            <div style={LABEL_STYLE}>Definition Name</div>
+            <input
+              style={INPUT_STYLE}
+              aria-label="Definition Name"
+              value={localDefName}
+              onChange={(e) => setLocalDefName(e.target.value)}
+              onBlur={commitDefName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.currentTarget.blur()
+                }
+              }}
+              title="Shared by every instance of this component"
+              spellCheck={false}
+            />
+          </div>
+          <div>
+            <div style={LABEL_STYLE}>Instance Name</div>
+            <input
+              style={INPUT_STYLE}
+              aria-label="Instance Name"
+              value={localName}
+              onChange={(e) => setLocalName(e.target.value)}
+              onBlur={commitName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.currentTarget.blur()
+                }
+              }}
+              placeholder={nodeInfo.defaultLabel}
+              title="This instance only — leave empty to show the definition name"
+              spellCheck={false}
+            />
+          </div>
+        </>
       ) : (
         <div>
           <div style={LABEL_STYLE}>Name</div>
@@ -293,10 +424,34 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged 
         </div>
       )}
 
-      {/* Type */}
+      {/* Type — an instance also shows how many placements share its
+       * definition; the count selects them all (viewport + Outliner). */}
       <div>
         <div style={LABEL_STYLE}>Type</div>
-        <div style={VALUE_STYLE}>{kindLabel(nodeInfo.kind)}</div>
+        <div style={VALUE_STYLE}>
+          <span>{kindLabel(nodeInfo.kind)}</span>
+          {nodeInfo.kind === 'instance' && nodeInfo.instanceIds.length > 0 && (
+            <>
+              {' '}
+              <button
+                onClick={selectAllInstances}
+                title="Select every instance of this component"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  font: 'inherit',
+                  fontFamily: 'var(--font-family-ui)',
+                  color: 'var(--accent-base, #7aa7e0)',
+                  cursor: 'pointer',
+                }}
+              >
+                ({nodeInfo.instanceIds.length}{' '}
+                {nodeInfo.instanceIds.length === 1 ? 'instance' : 'instances'})
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Solid / Leaky — only for objects */}

@@ -100,8 +100,16 @@ describe('resolveLabel', () => {
     expect(resolveLabel(undefined, 'TableDef', 'instance', 0)).toBe('TableDef')
   })
 
-  it('prefers the instance own name over the def name', () => {
-    expect(resolveLabel('My Table', 'TableDef', 'instance', 0)).toBe('My Table')
+  it('shows "Instance Name (Definition Name)" when an instance has its own name', () => {
+    expect(resolveLabel('My Table', 'TableDef', 'instance', 0)).toBe('My Table (TableDef)')
+  })
+
+  it('drops the parenthetical when instance and definition names coincide', () => {
+    expect(resolveLabel('Table', 'Table', 'instance', 0)).toBe('Table')
+  })
+
+  it('shows just the instance name when the definition is unnamed', () => {
+    expect(resolveLabel('My Table', undefined, 'instance', 0)).toBe('My Table')
   })
 
   it('ignores defName for non-instance kinds (falls through to entityLabel)', () => {

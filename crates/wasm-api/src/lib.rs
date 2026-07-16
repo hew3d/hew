@@ -1992,6 +1992,24 @@ impl Scene {
             .map(str::to_string)
     }
 
+    /// Rename a component definition (undoable). The definition name is the
+    /// shared display label of every instance that places it, so the change
+    /// refreshes all of them. `name = None` clears the name (instances fall
+    /// back to a positional label). Renaming to the current name is a no-op
+    /// (no undo entry). A stale/hidden component errors (`UnknownComponent`).
+    pub fn set_component_name(
+        &mut self,
+        component: u64,
+        name: Option<String>,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .set_component_name(component_id(component), name)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
     // ---------------------------------------------------------- node metadata
 
     /// Rename a visible tree node (undoable). `name = None` clears the name so

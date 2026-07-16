@@ -132,28 +132,34 @@ export function DocumentTree({
     }
   })
 
-  // Compute the set of group ancestor keys for the primary selected node so
-  // those groups can be auto-expanded when they're collapsed.
+  // Compute the union of group ancestor keys over EVERY selected node so
+  // those groups can be auto-expanded when they're collapsed. Walking only
+  // the primary's chain would leave the rest of a multi-selection (marquee,
+  // Select All, Object Info's "(N instances)" click) hidden inside collapsed
+  // groups. Cheap even for large selections: one parent-chain walk per node,
+  // cut short as soon as it rejoins a chain already in the set.
   const ancestorGroupKeys = useMemo(() => {
     const keys = new Set<string>()
-    if (selectedIds.length === 0) return keys
-    const primary = selectedIds[0]
-    // Sketch-scoped selections are always top-level with no kernel NodeId —
-    // no ancestors.
-    if (
-      primary.kind === 'sketch' ||
-      primary.kind === 'sketch-island' ||
-      primary.kind === 'sketch-curve' ||
-      primary.kind === 'sketch-edge'
-    ) {
-      return keys
-    }
-    // Walk up the parent chain from the primary node.
-    const kindNum = primary.kind === 'object' ? 0 : primary.kind === 'group' ? 1 : 2
-    let parentId = scene.node_parent(kindNum, primary.id)
-    while (parentId !== undefined) {
-      keys.add(nodeKey({ kind: 'group', id: parentId }))
-      parentId = scene.node_parent(1, parentId)
+    for (const node of selectedIds) {
+      // Sketch-scoped selections are always top-level with no kernel NodeId —
+      // no ancestors.
+      if (
+        node.kind === 'sketch' ||
+        node.kind === 'sketch-island' ||
+        node.kind === 'sketch-curve' ||
+        node.kind === 'sketch-edge'
+      ) {
+        continue
+      }
+      // Walk up the parent chain from this node.
+      const kindNum = node.kind === 'object' ? 0 : node.kind === 'group' ? 1 : 2
+      let parentId = scene.node_parent(kindNum, node.id)
+      while (parentId !== undefined) {
+        const key = nodeKey({ kind: 'group', id: parentId })
+        if (keys.has(key)) break // rest of this chain is already in the set
+        keys.add(key)
+        parentId = scene.node_parent(1, parentId)
+      }
     }
     return keys
   // eslint-disable-next-line react-hooks/exhaustive-deps

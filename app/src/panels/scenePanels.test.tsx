@@ -56,6 +56,8 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     node_parent: (_kind: number, _id: bigint) => undefined as bigint | undefined,
     instance_def: (_id: bigint) => undefined as bigint | undefined,
     component_name: (_id: bigint) => undefined as string | undefined,
+    instances_of: (_id: bigint) => new BigUint64Array(),
+    set_component_name: vi.fn(),
     ...overrides,
   } as unknown as WasmScene
 }
@@ -76,6 +78,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(container.textContent).toBe('')
@@ -92,6 +95,7 @@ describe('ObjectInfoPanel', () => {
           { kind: 'object', id: 3n },
         ]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByText('3 selected')).toBeInTheDocument()
@@ -109,6 +113,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByText('Object')).toBeInTheDocument()
@@ -126,6 +131,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     const input = screen.getByPlaceholderText('Object 1') as HTMLInputElement
@@ -148,6 +154,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 8n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     // 8n is the second top-level row → the same "Object 2" the Outliner shows.
@@ -178,6 +185,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 8n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByPlaceholderText('Object 1')).toBeInTheDocument()
@@ -196,9 +204,234 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'instance', id: 4n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByPlaceholderText('Door')).toBeInTheDocument()
+  })
+
+  it('shows Definition Name and Instance Name fields for an instance', () => {
+    render(
+      <ObjectInfoPanel
+        scene={makeScene({
+          instance_ids: () => new BigUint64Array([4n]),
+          instance_name: () => 'Front Door',
+          instance_def: () => 9n,
+          component_name: () => 'Door',
+          instances_of: () => new BigUint64Array([4n]),
+          node_tags: () => [],
+        })}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 4n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const defInput = screen.getByLabelText('Definition Name') as HTMLInputElement
+    expect(defInput.value).toBe('Door')
+    const instInput = screen.getByLabelText('Instance Name') as HTMLInputElement
+    expect(instInput.value).toBe('Front Door')
+  })
+
+  it('commits a Definition Name edit through set_component_name (renames every instance)', () => {
+    const scene = makeScene({
+      instance_ids: () => new BigUint64Array([4n]),
+      instance_name: () => undefined,
+      instance_def: () => 9n,
+      component_name: () => 'Door',
+      instances_of: () => new BigUint64Array([4n]),
+      node_tags: () => [],
+    })
+    const onDocumentChanged = vi.fn()
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 4n }]}
+        onDocumentChanged={onDocumentChanged}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const defInput = screen.getByLabelText('Definition Name')
+    fireEvent.change(defInput, { target: { value: 'Oak Door' } })
+    fireEvent.blur(defInput)
+    expect((scene as any).set_component_name).toHaveBeenCalledWith(9n, 'Oak Door')
+    expect(onDocumentChanged).toHaveBeenCalled()
+  })
+
+  it('shows "Component (N instances)" and the count selects every instance', () => {
+    const onSelectMany = vi.fn()
+    render(
+      <ObjectInfoPanel
+        scene={makeScene({
+          instance_ids: () => new BigUint64Array([4n, 5n, 6n]),
+          instance_name: () => undefined,
+          instance_def: () => 9n,
+          component_name: () => 'Door',
+          instances_of: () => new BigUint64Array([4n, 5n, 6n]),
+          node_tags: () => [],
+        })}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 4n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={onSelectMany}
+      />,
+    )
+    expect(screen.getByText('Component')).toBeInTheDocument()
+    const count = screen.getByRole('button', { name: '(3 instances)' })
+    fireEvent.click(count)
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'instance', id: 4n },
+      { kind: 'instance', id: 5n },
+      { kind: 'instance', id: 6n },
+    ])
+  })
+
+  it('a lone instance reads "(1 instance)" — singular', () => {
+    render(
+      <ObjectInfoPanel
+        scene={makeScene({
+          instance_ids: () => new BigUint64Array([4n]),
+          instance_name: () => undefined,
+          instance_def: () => 9n,
+          component_name: () => 'Door',
+          instances_of: () => new BigUint64Array([4n]),
+          node_tags: () => [],
+        })}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 4n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('button', { name: '(1 instance)' })).toBeInTheDocument()
+  })
+
+  it('does not leak uncommitted Name text across a selection change between same-valued nodes', () => {
+    // Objects 1n and 2n are both unnamed — the kernel-name VALUE is identical
+    // (undefined) across the selection change, so only an identity-keyed
+    // reset clears the typed-but-uncommitted text.
+    const scene = makeScene({
+      object_ids: () => new BigUint64Array([1n, 2n]),
+      top_level_nodes: () => [
+        { kind: 'object', id: 1n },
+        { kind: 'object', id: 2n },
+      ],
+      object_name: () => undefined,
+      node_tags: () => [],
+      object_solid: () => true,
+    })
+    const { rerender } = render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'object', id: 1n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const inputA = screen.getByPlaceholderText('Object 1') as HTMLInputElement
+    fireEvent.change(inputA, { target: { value: 'Sneaky' } })
+    // Selection moves to object 2 WITHOUT a commit (no blur).
+    rerender(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'object', id: 2n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const inputB = screen.getByPlaceholderText('Object 2') as HTMLInputElement
+    expect(inputB.value).toBe('')
+    fireEvent.blur(inputB)
+    expect((scene as any).set_node_name).not.toHaveBeenCalledWith(0, 2n, 'Sneaky')
+  })
+
+  it('does not leak uncommitted Definition Name text across a selection change between instances of same-valued definitions', () => {
+    // Instances 4n and 5n place two DIFFERENT definitions that are both
+    // unnamed — the defName VALUE is identical across the selection change.
+    const scene = makeScene({
+      instance_ids: () => new BigUint64Array([4n, 5n]),
+      top_level_nodes: () => [
+        { kind: 'instance', id: 4n },
+        { kind: 'instance', id: 5n },
+      ],
+      instance_name: () => undefined,
+      instance_def: (id: bigint) => (id === 4n ? 9n : 10n),
+      component_name: () => undefined,
+      instances_of: (id: bigint) => new BigUint64Array([id === 9n ? 4n : 5n]),
+      node_tags: () => [],
+    })
+    const { rerender } = render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 4n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const defA = screen.getByLabelText('Definition Name') as HTMLInputElement
+    fireEvent.change(defA, { target: { value: 'Sneaky' } })
+    // Selection moves to instance 5 (of the other, equally unnamed def).
+    rerender(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 5n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const defB = screen.getByLabelText('Definition Name') as HTMLInputElement
+    expect(defB.value).toBe('')
+    fireEvent.blur(defB)
+    expect((scene as any).set_component_name).not.toHaveBeenCalledWith(10n, 'Sneaky')
+  })
+
+  it('preserves an uncommitted Definition Name edit across instances of the SAME definition', () => {
+    // Instances 4n and 5n both place definition 9n. The field edits the
+    // shared definition, so its identity join key is the DEFINITION —
+    // switching between siblings must not wipe an in-progress edit, and the
+    // eventual blur commits to the (one) definition either way.
+    const scene = makeScene({
+      instance_ids: () => new BigUint64Array([4n, 5n]),
+      top_level_nodes: () => [
+        { kind: 'instance', id: 4n },
+        { kind: 'instance', id: 5n },
+      ],
+      instance_name: () => undefined,
+      instance_def: () => 9n,
+      component_name: () => undefined,
+      instances_of: () => new BigUint64Array([4n, 5n]),
+      node_tags: () => [],
+    })
+    const { rerender } = render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 4n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const defA = screen.getByLabelText('Definition Name') as HTMLInputElement
+    fireEvent.change(defA, { target: { value: 'Cabinet' } })
+    // Selection moves to the sibling instance of the SAME definition.
+    rerender(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'instance', id: 5n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const defB = screen.getByLabelText('Definition Name') as HTMLInputElement
+    expect(defB.value).toBe('Cabinet')
+    fireEvent.blur(defB)
+    expect((scene as any).set_component_name).toHaveBeenCalledWith(9n, 'Cabinet')
   })
 
   it('shows "Solid" for a watertight object', () => {
@@ -212,6 +445,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByText('Solid')).toBeInTheDocument()
@@ -228,6 +462,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByText('Leaky')).toBeInTheDocument()
@@ -243,6 +478,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'group', id: 2n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByText('Group')).toBeInTheDocument()
@@ -262,6 +498,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByText('Structure / Roof')).toBeInTheDocument()
@@ -280,6 +517,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={onDocumentChanged}
+        onSelectMany={vi.fn()}
       />,
     )
     fireEvent.click(screen.getByTitle('Remove tag'))
@@ -298,6 +536,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.queryByText(/no tags/i)).not.toBeInTheDocument()
@@ -319,6 +558,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={onDocumentChanged}
+        onSelectMany={vi.fn()}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Add tag' }))
@@ -345,6 +585,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Add tag' }))
@@ -367,6 +608,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Add tag' }))
@@ -388,6 +630,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
         onDocumentChanged={onDocumentChanged}
+        onSelectMany={vi.fn()}
       />,
     )
     const nameInput = screen.getByPlaceholderText('Object 1')
@@ -407,6 +650,7 @@ describe('ObjectInfoPanel', () => {
         docRev={0}
         selectedIds={[{ kind: 'sketch-island', id: 120n, sketch: 20n }]}
         onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
       />,
     )
     expect(screen.getByText('Sketch')).toBeInTheDocument()
@@ -710,6 +954,45 @@ describe('DocumentTree', () => {
     for (const label of [/union/i, /subtract/i, /intersect/i, /^group$/i, /ungroup/i, /make component/i, /place copy/i, /explode/i, /make unique/i]) {
       expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
     }
+  })
+
+  it('auto-expands the ancestor groups of EVERY selected node, not just the primary', () => {
+    // Two collapsed top-level groups, each holding one instance of the same
+    // definition. Selecting both instances (the "(N instances)" click) must
+    // reveal both rows — walking only selectedIds[0]'s ancestor chain leaves
+    // the second group collapsed and its instance invisible.
+    const scene = makeScene({
+      top_level_nodes: () => [
+        { kind: 'group', id: 20n },
+        { kind: 'group', id: 21n },
+      ],
+      group_members: (id: bigint) =>
+        id === 20n
+          ? [{ kind: 'instance', id: 4n }]
+          : id === 21n
+            ? [{ kind: 'instance', id: 5n }]
+            : [],
+      node_parent: (kind: number, id: bigint) => {
+        if (kind === 2) return id === 4n ? 20n : 21n
+        return undefined // groups are top-level
+      },
+      instance_name: () => undefined,
+      instance_def: () => 9n,
+      component_name: () => 'Door',
+    })
+    render(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        selectedIds={[
+          { kind: 'instance', id: 4n },
+          { kind: 'instance', id: 5n },
+        ]}
+      />,
+    )
+    // Both instance rows are visible: each group in the union of the
+    // selection's ancestor chains auto-expanded.
+    expect(screen.getAllByText('Door')).toHaveLength(2)
   })
 
   it('renders an object row using its positional label when unnamed', () => {

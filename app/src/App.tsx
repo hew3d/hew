@@ -464,6 +464,12 @@ export default function App() {
     })
   }, [])
 
+  /** Replace the selection outright (Object Info's "(N instances)" click). */
+  const handleReplaceSelection = useCallback(
+    (nodes: NodeRef[]) => handleSelectMany(nodes, false),
+    [handleSelectMany],
+  )
+
   /** Lift a guide pick from the viewport; clears node selection. */
   const handleSelectGuide = useCallback((id: bigint | null) => {
     setSelectedGuide(id)
@@ -547,6 +553,10 @@ export default function App() {
       getSelection: () => selectedIdsRef.current,
       setSelectedObjects: (ids) =>
         setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
+      setSelection: (nodes) => {
+        setSelectedGuide(null)
+        setSelectedIds(nodes)
+      },
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
     })
   }, [])
@@ -2709,6 +2719,7 @@ export default function App() {
               docRev={docRev}
               selectedIds={selectedIds}
               onDocumentChanged={handleDocumentChanged}
+              onSelectMany={handleReplaceSelection}
             />
           </TraySection>
           <TraySection title="Outliner" collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>

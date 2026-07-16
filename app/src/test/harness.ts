@@ -28,7 +28,7 @@
 
 import type { Scene } from '../wasm/loader'
 import type { ViewportApi } from '../viewport/Viewport'
-import type { NodeRef } from '../panels/treeModel'
+import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
 import { arcFromChord, arcPolylineOnPlane } from '../tools/arcMath'
@@ -60,6 +60,8 @@ export interface HarnessDeps {
   getSelection: () => NodeRef[]
   /** Replace the selection with these object handles. */
   setSelectedObjects: (ids: bigint[]) => void
+  /** Replace the selection with arbitrary nodes (objects/groups/instances). */
+  setSelection: (nodes: NodeRef[]) => void
   /**
    * Reload `.hew` bytes through the app's real Open path (the same
    * `scene.load` + UI reset + viewport `notifyLoaded` re-tessellation a user's
@@ -307,6 +309,60 @@ export interface HewTestHarness {
    * to reset the face to the (unpainted) default. Undoable.
    */
   paintFace(object: string, face: string, material: string | null): void
+
+  // -------- components --------
+
+  /**
+   * Fold the given nodes into a new component definition plus one
+   * identity-posed instance (Edit ▸ Make Component). Kinds are
+   * `'object' | 'group'` (instances refuse — nested definitions are
+   * deferred). Returns the new instance handle. The definition inherits a
+   * single source node's name and passes its tags to the instance.
+   */
+  makeComponent(nodes: { kind: string; id: string }[]): string
+
+  /**
+   * Copy an instance to a sibling instance of the same definition, offset by
+   * `(dx, dy, dz)` meters — `duplicate_node(2, id, affine)`, the instance arm
+   * of MoveTool's Option-drag. Returns the new instance handle.
+   */
+  copyInstance(id: string, dx: number, dy: number, dz: number): string
+
+  /**
+   * Detach an instance onto its own private definition copy (Make Unique).
+   * Returns the new definition handle. A set instance name is promoted to
+   * the new definition's name; otherwise the copy is named "<def> Copy"
+   * (disambiguated "<def> Copy 2", …).
+   */
+  makeUnique(instance: string): string
+
+  /** Rename a node (object/group/instance); `null` clears. Undoable. */
+  setNodeName(kind: string, id: string, name: string | null): void
+
+  /** A node's own kernel name, or `null` if unnamed. */
+  getNodeName(kind: string, id: string): string | null
+
+  /** Add a tag path (root-first segments) to a node. Undoable. */
+  addNodeTag(kind: string, id: string, path: string[]): void
+
+  /** A node's tag paths, `/`-joined (e.g. `"Objects/Boxes"`). */
+  getNodeTags(kind: string, id: string): string[]
+
+  /** Rename a component definition; `null` clears. Undoable, renames every
+   * instance's shared label. */
+  setComponentName(component: string, name: string | null): void
+
+  /** A component definition's name, or `null` if unnamed. */
+  getComponentName(component: string): string | null
+
+  /** The definition an instance places, or `null` if the handle is stale. */
+  getInstanceDef(instance: string): string | null
+
+  /** Every visible instance of a definition, as decimal handle strings. */
+  getInstancesOf(component: string): string[]
+
+  /** Replace the selection with arbitrary nodes (kind + handle string). */
+  selectNodes(nodes: { kind: string; id: string }[]): void
 }
 
 declare global {
@@ -360,6 +416,14 @@ export function installTestHarness(deps: HarnessDeps): () => void {
   // set_object_material in wasm-api). Map the harness's `null` to it.
   const MATERIAL_NONE = (1n << 64n) - 1n
   const materialHandle = (m: string | null): bigint => (m === null ? MATERIAL_NONE : BigInt(m))
+
+  // Map a harness kind string to the numeric FFI kind tag; sketch kinds have
+  // no kernel NodeId and must never reach a node_id-keyed wasm call.
+  const kindNum = (kind: string): number => {
+    const n = nodeKindToNumber(kind as NodeKind)
+    if (n < 0) throw new Error(`__hew_test: '${kind}' has no kernel NodeId`)
+    return n
+  }
 
   // Add the four edges of the axis-aligned rectangle p0→p1 (on p0's z plane) to
   // `sketch`, returning the first closed region handle it forms. Bracketed in
@@ -740,6 +804,62 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     paintFace: (object, face, material) => {
       act((s) => s.paint_face(BigInt(object), BigInt(face), materialHandle(material)))
     },
+
+    // -------- components --------
+
+    makeComponent: (nodes) =>
+      act((s) => {
+        const kinds = new Uint8Array(nodes.map((n) => kindNum(n.kind)))
+        const ids = new BigUint64Array(nodes.map((n) => BigInt(n.id)))
+        return s.make_component(kinds, ids).toString()
+      }),
+
+    copyInstance: (id, dx, dy, dz) => {
+      const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
+      return act((s) => s.duplicate_node(2, BigInt(id), affine).id.toString())
+    },
+
+    makeUnique: (instance) =>
+      act((s) => s.make_unique(BigInt(instance)).toString()),
+
+    setNodeName: (kind, id, name) => {
+      act((s) => s.set_node_name(kindNum(kind), BigInt(id), name ?? undefined))
+    },
+
+    getNodeName: (kind, id) =>
+      query((s) => {
+        const i = BigInt(id)
+        const name =
+          kind === 'object' ? s.object_name(i) :
+          kind === 'group' ? s.group_name(i) :
+          s.instance_name(i)
+        return name ?? null
+      }),
+
+    addNodeTag: (kind, id, path) => {
+      act((s) => s.add_node_tag(kindNum(kind), BigInt(id), path))
+    },
+
+    getNodeTags: (kind, id) =>
+      query((s) => Array.from(s.node_tags(kindNum(kind), BigInt(id)))),
+
+    setComponentName: (component, name) => {
+      act((s) => s.set_component_name(BigInt(component), name ?? undefined))
+    },
+
+    getComponentName: (component) =>
+      query((s) => s.component_name(BigInt(component)) ?? null),
+
+    getInstanceDef: (instance) =>
+      query((s) => s.instance_def(BigInt(instance))?.toString() ?? null),
+
+    getInstancesOf: (component) =>
+      query((s) => Array.from(s.instances_of(BigInt(component))).map(String)),
+
+    selectNodes: (nodes) =>
+      deps.setSelection(
+        nodes.map((n) => ({ kind: n.kind as NodeKind, id: BigInt(n.id) })),
+      ),
   }
 
   window.__hew_test = harness

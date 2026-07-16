@@ -34,9 +34,13 @@ below.
 - Non-destructive, nestable grouping (Group/Ungroup)
 - Components: shared geometry with independent per-instance position,
   rotation, scale, and mirroring; edit the definition once, every instance
-  updates
-- Make Unique (detach an instance into its own copy) and Explode (bake an
-  instance back into ordinary geometry)
+  updates. A component takes its name and tags from what it was made of;
+  every instance shows the definition's name (a renamed instance reads
+  "Instance Name (Definition Name)"), and Object Info counts a selected
+  instance's siblings — click the count to select them all
+- Make Unique (detach an instance into its own copy, named "<definition>
+  Copy" — or after the instance's own name if it has one) and Explode
+  (bake an instance back into ordinary geometry)
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —
