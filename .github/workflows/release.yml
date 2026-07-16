@@ -101,7 +101,8 @@ jobs:
 
       # Same stack ci.yml installs for the Tauri host crate, plus xdg-utils:
       # the AppImage bundler embeds /usr/bin/xdg-open, which the arm64 runner
-      # image (unlike x64) does not preinstall.
+      # image (unlike x64) does not preinstall. squashfs-tools serves the
+      # libwayland strip-and-repack step below.
       - name: System libs (Tauri)
         if: runner.os == 'Linux'
         run: |
@@ -110,7 +111,7 @@ jobs:
             pkg-config build-essential libssl-dev \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
-            xdg-utils
+            xdg-utils squashfs-tools
 
       # rustup honors rust-toolchain.toml (stable + wasm32-unknown-unknown)
       # on the first cargo invocation; the universal build additionally needs
@@ -249,6 +250,114 @@ jobs:
           # doesn't exist here — the CLI is a pnpm-managed devDependency.
           tauriScript: pnpm tauri
           args: ${{ matrix.args }} --config ${{ github.workspace }}/release-version.json
+
+      # The bundler sweeps the build distro's libwayland into the AppImage
+      # as a GTK dependency, and that stale copy breaks EGL display creation
+      # against newer hosts' graphics stacks — white window, "Could not
+      # create default EGL display: EGL_BAD_PARAMETER" (upstream:
+      # tauri-apps/tauri#11994; fix verified on a machine hitting it). The
+      # host's libwayland is always the right one, so: strip the bundled
+      # copies, repack around the AppImage's own runtime (no third-party
+      # repack tooling enters the release path), re-sign, and replace the
+      # asset pair tauri-action uploaded. Runs before updater-manifest, so
+      # latest.json picks up the replacement signature.
+      - name: Strip bundled libwayland from the AppImage
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          bundles=(shells/tauri/src-tauri/target/release/bundle/appimage/*.AppImage)
+          [ "${#bundles[@]}" -eq 1 ] || {
+            echo "::error::Expected exactly one AppImage, found: ${bundles[*]:-none}" >&2
+            exit 1
+          }
+          app="$(realpath "${bundles[0]}")"
+
+          workdir="$(mktemp -d)"
+          (cd "$workdir" && "$app" --appimage-extract > /dev/null)
+
+          # Locate by search, not a fixed path — an arm64 or future-bundler
+          # layout must not dodge the strip. Finding none is a hard failure:
+          # until the upstream bundler is confirmed fixed, "nothing to strip"
+          # means this step is no longer looking in the right place, and a
+          # loud release failure beats quietly shipping a broken AppImage.
+          # (When tauri stops bundling libwayland for real, delete this step.)
+          mapfile -t bundled < <(find "$workdir/squashfs-root" -name 'libwayland-*.so*')
+          if [ "${#bundled[@]}" -eq 0 ]; then
+            echo "::error::No bundled libwayland found in the AppImage — the strip step no longer matches the bundle layout." >&2
+            exit 1
+          fi
+          rm -v "${bundled[@]}"
+
+          # The squashfs offset doubles as the runtime's byte length. The
+          # runtime binary answers it directly; the python fallback reads it
+          # from the ELF header (end of the section-header table), verified
+          # byte-identical against a real bundle.
+          offset="$("$app" --appimage-offset 2>/dev/null)" || offset="$(python3 - "$app" <<'PY'
+          import struct, sys
+          with open(sys.argv[1], 'rb') as f:
+              hdr = f.read(64)
+          e_shoff, = struct.unpack_from('<Q', hdr, 0x28)
+          e_shentsize, e_shnum = struct.unpack_from('<HH', hdr, 0x3A)
+          print(e_shoff + e_shentsize * e_shnum)
+          PY
+          )"
+          head -c "$offset" "$app" > "$workdir/runtime"
+          python3 -c "import sys
+          with open(sys.argv[1], 'rb') as f:
+              f.seek(int(sys.argv[2]))
+              assert f.read(4) == b'hsqs', 'offset does not land on a squashfs superblock'
+          " "$app" "$offset"
+
+          # Same compression and block size the bundler used (zstd/128K), so
+          # the retained runtime is guaranteed to read the new image.
+          mksquashfs "$workdir/squashfs-root" "$workdir/filesystem.squashfs" \
+            -noappend -all-root -comp zstd -b 131072 > /dev/null
+          cat "$workdir/runtime" "$workdir/filesystem.squashfs" > "$app"
+          chmod +x "$app"
+
+          # Prove the surgery: the repacked image must extract, keep AppRun,
+          # and carry no libwayland.
+          rm -rf "$workdir/squashfs-root"
+          (cd "$workdir" && "$app" --appimage-extract > /dev/null)
+          if [ -n "$(find "$workdir/squashfs-root" -name 'libwayland-*.so*' -print -quit)" ]; then
+            echo "::error::libwayland survived the repack." >&2
+            exit 1
+          fi
+          [ -e "$workdir/squashfs-root/AppRun" ] || {
+            echo "::error::Repacked AppImage lost AppRun." >&2
+            exit 1
+          }
+
+          # Drop tauri-action's signature first so the size guard below can
+          # only ever be satisfied by the fresh one.
+          rm -f "$app.sig"
+          pnpm --dir shells/tauri exec tauri signer sign "$app"
+          [ -s "$app.sig" ] || {
+            echo "::error::Re-signing produced no signature." >&2
+            exit 1
+          }
+
+          # Replace the asset pair under the same names, so every download
+          # link and latest.json URL stays valid.
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+            --jq '.[] | [.name, .id] | @tsv' > "$workdir/assets.tsv"
+          for f in "$app" "$app.sig"; do
+            n="$(basename "$f")"
+            id="$(awk -F'\t' -v n="$n" '$1 == n {print $2}' "$workdir/assets.tsv")"
+            [ -z "$id" ] || gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+            gh api --method POST \
+              -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$n" \
+              --input "$f" > /dev/null
+            echo "Replaced release asset $n"
+          done
 
   web:
     needs: create-release
