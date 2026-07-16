@@ -50,7 +50,10 @@
  *   the current direction (locked axis or cursor direction) — identical in
  *   move and copy modes.
  *
- * If nothing is selected, the tool shows a hint toast and remains idle.
+ * If nothing is selected, the first click auto-selects whatever is under the
+ * cursor (via the Viewport-injected selection acquirer — same context-aware
+ * resolution a Select click uses) and starts the move on it in the same
+ * gesture; only a click over empty space shows a hint toast and stays idle.
  * On commit: one kernel transform call, then handleSceneRefresh + onDocumentChanged.
  */
 
@@ -116,6 +119,9 @@ export class MoveTool implements Tool {
       if (this.arrayHot !== null) {
         return 'Type ×3 to make 3 copies, or /3 to divide the distance — Enter applies.'
       }
+      if (this.selection.length === 0) {
+        return 'Click the object you want to move.'
+      }
       return this.copyMode
         ? 'Copy is on — click a base point to start the copy. Tap Alt to move instead.'
         : 'Click a base point to start the move.'
@@ -165,6 +171,16 @@ export class MoveTool implements Tool {
 
   /** The full selection at tool activation (set by Viewport from selectedIds). */
   private selection: NodeRef[] = []
+  /**
+   * Auto-select fallback, injected by the Viewport: given the click ray,
+   * pick + context-resolve the node under the cursor, lift it into the app
+   * selection, and return it — or null on a miss. Lets a click on an object
+   * with an empty selection select AND start moving it in one gesture.
+   */
+  private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
+  setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
+    this.acquireSelection = acquire
+  }
   /** THREE.js object group from the SceneRenderer (read-only reference for cloning). */
   private objectsGroup: THREE.Group | null = null
   /** THREE.js instances group from the SceneRenderer (read-only reference for cloning). */
@@ -303,13 +319,22 @@ export class MoveTool implements Tool {
     this._reportMeasurement(base, dest)
   }
 
-  onPointerDown(snap: Snap | null, _ray: Ray): void {
+  onPointerDown(snap: Snap | null, ray: Ray): void {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const nodes = this.selection
+      let nodes = this.selection
+      if (nodes.length === 0 && this.acquireSelection !== null) {
+        // Empty selection: auto-select whatever the click landed on and
+        // start the move on it in the same gesture (no separate Select step).
+        const acquired = this.acquireSelection(ray)
+        if (acquired !== null && acquired.length > 0) {
+          this.selection = acquired
+          nodes = acquired
+        }
+      }
       if (nodes.length === 0) {
-        this.onToast('Select an object first, then use Move')
+        this.onToast('Click an object to move it')
         return
       }
 

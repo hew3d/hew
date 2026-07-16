@@ -35,7 +35,7 @@ export class SelectTool implements Tool {
 
   /** Live status-bar guidance (see Tool.statusHint). */
   statusHint(): string {
-    return 'Click to select — drag for a marquee, double-click to enter a group or component.'
+    return 'Click to select — drag an object to move it, drag empty space for a marquee, double-click to enter a group or component.'
   }
 
   /** Last snap seen on hover (for status display) */

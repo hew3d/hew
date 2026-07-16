@@ -24,6 +24,7 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Move')).toBeInTheDocument()
     expect(screen.getByText('Push/Pull')).toBeInTheDocument()
     expect(screen.getByText('Paint')).toBeInTheDocument()
+    expect(screen.getByText('Make Component')).toBeInTheDocument()
     expect(screen.getByText('Erase')).toBeInTheDocument()
   })
 
@@ -31,6 +32,7 @@ describe('ContextualDock', () => {
     render(<ContextualDock selectedIds={[group(1n)]} selectedGuide={null} onRun={vi.fn()} />)
     expect(screen.getByText('GROUP')).toBeInTheDocument()
     expect(screen.getByText('Edit')).toBeInTheDocument()
+    expect(screen.getByText('Make Component')).toBeInTheDocument()
     expect(screen.getByText('Ungroup')).toBeInTheDocument()
   })
 
@@ -45,8 +47,54 @@ describe('ContextualDock', () => {
     render(<ContextualDock selectedIds={[obj(1n), group(2n)]} selectedGuide={null} onRun={vi.fn()} />)
     expect(screen.getByText('MULTI')).toBeInTheDocument()
     expect(screen.getByText('Move')).toBeInTheDocument()
+    expect(screen.getByText('Group')).toBeInTheDocument()
     expect(screen.getByText('Erase')).toBeInTheDocument()
     expect(screen.queryByText('Paint')).not.toBeInTheDocument()
+  })
+
+  // --- Structural verbs (Group / Make Component) dispatch + gating --------
+
+  it('clicking Group on a multi-selection dispatches edit-group', () => {
+    const onRun = vi.fn()
+    render(
+      <ContextualDock
+        selectedIds={[obj(1n), obj(2n)]}
+        selectedGuide={null}
+        onRun={onRun}
+        gates={{ canGroup: true, canMakeComponent: true }}
+      />,
+    )
+    fireEvent.click(screen.getByText('Group'))
+    expect(onRun).toHaveBeenCalledWith('edit-group')
+  })
+
+  it('clicking Make Component on an object dispatches edit-make-component', () => {
+    const onRun = vi.fn()
+    render(
+      <ContextualDock
+        selectedIds={[obj(1n)]}
+        selectedGuide={null}
+        onRun={onRun}
+        gates={{ canGroup: false, canMakeComponent: true }}
+      />,
+    )
+    fireEvent.click(screen.getByText('Make Component'))
+    expect(onRun).toHaveBeenCalledWith('edit-make-component')
+  })
+
+  it('hides the structural verbs when their gates are off', () => {
+    render(
+      <ContextualDock
+        selectedIds={[obj(1n), sketch(2n)]}
+        selectedGuide={null}
+        onRun={vi.fn()}
+        gates={{ canGroup: false, canMakeComponent: false }}
+      />,
+    )
+    // A multi-selection containing a sketch sub-entity is not groupable.
+    expect(screen.getByText('MULTI')).toBeInTheDocument()
+    expect(screen.queryByText('Group')).not.toBeInTheDocument()
+    expect(screen.queryByText('Make Component')).not.toBeInTheDocument()
   })
 
   // Contract change: a selected sketch used to render nothing — it

@@ -2,13 +2,15 @@
  * LineTool — SketchUp-style chained-segment line drawing.
  *
  * Mode is decided by what's under the cursor — NOT by whether an editing
- * context is active. `_activeContext` only scopes ELIGIBILITY of face mode:
- *   - Top level (`_activeContext === null`): any Object's face is eligible.
+ * context is active. Eligibility of face mode follows the shared plain-object
+ * policy in `faceDraw.ts` (or a richer predicate the Viewport injects via
+ * `setFaceEligibility`):
+ *   - Top level: any PLAIN object's face is eligible — ungrouped, not part
+ *     of a component instance. Groups/Components keep their explicit
+ *     double-click editing step.
  *   - Inside a context: only the entered object's faces are eligible.
- * Mirrors PushPullTool's `pick_face` + eligibility check (see its
- * onPointerDown Path A) so the #1 workflow — draw a line on a solid's face,
- * at top level, to split that face — works without first entering the
- * object.
+ * This is what makes the #1 workflow — draw a line on a solid's face, at top
+ * level, to split that face — work without first entering the object.
  *
  * Ground mode (no eligible face under the cursor):
  *   1. First click: anchor the first point (snapped, on Z=0).
@@ -56,6 +58,7 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
 import { segmentLength, directionBetween } from './lineInput'
 import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
+import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
 export type OnFaceImprint = (objectId: bigint) => void
@@ -147,40 +150,15 @@ export class LineTool implements Tool {
   /** True when the *current* axis lock was set by holding Shift (vs. an arrow). */
   private shiftAxisLock: boolean = false
 
-  /**
-   * Memoizes the single `pick_face` raycast for the CURRENT pointer event so
-   * `snapConstraint(ray)` and the `onPointerMove`/`onPointerDown` dispatcher
-   * (`_currentMode`) — both called back-to-back by the Viewport for the same
-   * ray, see Viewport.tsx's pointer-move handler — don't redo an O(faces)
-   * wasm raycast 2-3x per event. Keyed by reference equality on the `Ray`
-   * passed in; a miss just falls back to a fresh pick. `eligible: null`
-   * means either nothing was hit, or a face was hit but it's out of scope
-   * for the current `_activeContext`.
-   */
-  private _pickCache: { ray: Ray; eligible: { object: bigint; face: bigint } | null } | null = null
+  /** Per-pointer-event `pick_face` memo — see `FacePickCache` in faceDraw.ts. */
+  private readonly _pickCache = new FacePickCache()
 
   /** Run `pick_face` for `ray` and return the eligible {object, face} pair
    *  (or null), reusing a cached result for the same `ray` reference if one
    *  was already computed earlier in this same pointer event. */
   private _eligiblePickFor(ray: Ray): { object: bigint; face: bigint } | null {
-    if (this._pickCache !== null && this._pickCache.ray === ray) {
-      return this._pickCache.eligible
-    }
-    const pick = this.wasmScene.pick_face(
-      ray.origin[0], ray.origin[1], ray.origin[2],
-      ray.direction[0], ray.direction[1], ray.direction[2],
-    )
-    let eligible: { object: bigint; face: bigint } | null = null
-    if (pick !== undefined) {
-      try {
-        const object = pick.object()
-        if (this._isEligible(object)) eligible = { object, face: pick.face() }
-      } finally {
-        pick.free()
-      }
-    }
-    this._pickCache = { ray, eligible }
-    return eligible
+    return this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
+      this._isEligible(object, instance))
   }
 
   constructor(
@@ -282,11 +260,20 @@ export class LineTool implements Tool {
     return null
   }
 
-  /** Top level (null context): any Object's face is eligible. Inside a
-   *  context: only the entered object's faces are eligible ( scoped
-   *  editing) — mirrors PushPullTool's identical check. */
-  private _isEligible(objectHandle: bigint): boolean {
-    return this._activeContext === null || objectHandle === this._activeContext
+  /** Optional richer eligibility, injected by the Viewport (which knows the
+   *  full group/instance context path the tool can't see). Null = the shared
+   *  default policy in faceDraw.ts. */
+  private _faceEligible: FaceEligible | null = null
+  setFaceEligibility(pred: FaceEligible | null): void {
+    this._faceEligible = pred
+  }
+
+  /** Plain objects are directly drawable at the top level; inside an entered
+   *  object context only that object's faces are ( scoped editing). Groups
+   *  and Components keep their explicit editing step — see faceDraw.ts. */
+  private _isEligible(objectHandle: bigint, instanceHandle: bigint | undefined): boolean {
+    if (this._faceEligible !== null) return this._faceEligible(objectHandle, instanceHandle)
+    return defaultFaceEligible(this.wasmScene, this._activeContext, objectHandle, instanceHandle)
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
@@ -298,15 +285,20 @@ export class LineTool implements Tool {
   }
 
   /**
-   * Decide which mode governs the NEXT pointer event, based on what's
-   * actually anchored/under the cursor — never on `_activeContext` alone:
+   * Decide which mode governs the NEXT pointer event (same contract as
+   * Rectangle/Circle/Arc):
    *   - Already anchored in one mode: stick with it (mid-chain).
-   *   - Otherwise idle in both: face mode if an eligible Object face is
+   *   - Inside an entered object context: always face mode — drawing stays
+   *     scoped to that object's faces, so a click elsewhere is ignored by
+   *     the face handler rather than falling through to a TOP-LEVEL ground
+   *     sketch from inside the context.
+   *   - Otherwise idle at top level: face mode if an eligible Object face is
    *     under the cursor (via `pick_face`), else ground mode.
    */
   private _currentMode(ray?: Ray): 'face' | 'ground' {
     if (this.faceStage.kind === 'anchored') return 'face'
     if (this.groundStage.kind === 'anchored') return 'ground'
+    if (this._activeContext !== null) return 'face'
     if (ray === undefined) return 'ground'
 
     return this._eligiblePickFor(ray) !== null ? 'face' : 'ground'

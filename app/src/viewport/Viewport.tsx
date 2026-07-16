@@ -52,8 +52,9 @@ import { makeSketchHandleCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray } from './math'
 import type { Snap } from '../tools/types'
-import { collectLeafIds, nodeRefFromJs, type NodeRef } from '../panels/treeModel'
+import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
+import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
 import { InfiniteGrid } from './InfiniteGrid'
@@ -1069,6 +1070,91 @@ export default function Viewport({
       toolController.activeTool.onPointerDown(snap, ray)
     }
 
+    /**
+     * The transformable node under `ray`, resolved through the active
+     * editing context exactly like a Select click — an object pick resolves
+     * to its selectable ancestor (outermost group / the instance / itself),
+     * a miss falls back to a free-standing sketch island (top level only).
+     * Hidden geometry is filtered the same way `handleSelect` filters it.
+     * Null when nothing movable is under the cursor.
+     */
+    function pickTransformableUnderCursor(ray: Ray): NodeRef | null {
+      const pick = wasmScene.pick_face(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      if (pick !== undefined) {
+        try {
+          const objectId = pick.object()
+          const instanceId = pick.instance()
+          if (instanceId !== undefined && hiddenInstanceIdsRef.current.has(instanceId)) return null
+          if (hiddenObjectIdsRef.current.has(objectId)) return null
+          return resolvePickToSelectable(wasmScene, objectId, activeContextRef.current, instanceId)
+        } finally {
+          pick.free()
+        }
+      }
+      // Free-standing sketches are top-level-only (see handleSelect).
+      if (activeContextRef.current.length !== 0) return null
+      const regionPick = wasmScene.pick_sketch_region(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+      if (regionPick !== undefined) {
+        try {
+          const sketchId = regionPick.sketch()
+          const island = wasmScene.sketch_region_island(sketchId, regionPick.region())
+          return island !== undefined
+            ? { kind: 'sketch-island', id: island, sketch: sketchId }
+            : { kind: 'sketch', id: sketchId }
+        } finally {
+          regionPick.free()
+        }
+      }
+      return null
+    }
+
+    /**
+     * Auto-select for the transform tools (Move/Rotate/Scale): with an empty
+     * selection, their first click picks whatever is under the cursor,
+     * lifts it into the app selection (highlight + dock follow), and returns
+     * it so the gesture proceeds on it immediately — selecting and moving is
+     * one fluid motion, not a two-step Select-then-Move.
+     */
+    function acquireTransformTargets(ray: Ray): NodeRef[] | null {
+      const node = pickTransformableUnderCursor(ray)
+      if (node === null) return null
+      onSelectRef.current?.(node, false)
+      scheduleRender()
+      return [node]
+    }
+
+    /**
+     * "Plain objects are immediately editable": may a draw tool
+     * (Line/Rectangle/Circle/Arc) draw directly on this picked face?
+     * Injected into the draw tools (which only know an entered-object id)
+     * because the answer depends on the full context path:
+     *
+     * - Inside an entered object: only that object's faces.
+     * - Inside an entered component instance: that instance's member faces.
+     * - Top level / inside a group: yes iff the pick RESOLVES to the plain
+     *   object itself — i.e. the object is not wrapped by a group or
+     *   instance at this level. Groups and Components keep their explicit
+     *   double-click editing step.
+     */
+    function faceDrawEligible(objectId: bigint, instanceId: bigint | undefined): boolean {
+      const ctx = activeContextRef.current
+      const deepest = ctx.length > 0 ? ctx[ctx.length - 1] : null
+      if (deepest?.kind === 'object') {
+        return instanceId === undefined && objectId === deepest.id
+      }
+      if (deepest?.kind === 'instance') {
+        return instanceId === deepest.id
+      }
+      const resolved = resolvePickToSelectable(wasmScene, objectId, ctx, instanceId)
+      return resolved !== null && resolved.kind === 'object' && resolved.id === objectId
+    }
+
     // Marquee drag state (Select tool, top-level context only). Armed on
     // pointerdown; becomes active past a small threshold. While armed, the
     // click-pick is DEFERRED to pointerup so a drag can become a marquee
@@ -1081,6 +1167,38 @@ export default function Viewport({
       active: boolean
     }
     let marqueeDrag: MarqueeDrag | null = null
+
+    // Drag-to-move (Select tool): a press on a movable node arms this instead
+    // of the marquee. Past the drag threshold the gesture is handed to a
+    // one-shot Move tool (`beginDragMove`); a sub-threshold release is still
+    // a plain click (top level defers it to pointerup exactly like the
+    // marquee path; in-context the press already click-picked). The tool
+    // SPRINGS BACK to Select on release — matching OS drag muscle memory —
+    // so the tool rail never leaves Select.
+    interface DragMove {
+      startX: number
+      startY: number
+      /** The ray of the original press — the Move base point on activation. */
+      pressRay: Ray
+      /** What the drag moves: the whole selection when the pressed node was
+       * already part of it, else just the pressed node (OS convention). */
+      nodes: NodeRef[]
+      active: boolean
+      /** Top-level presses defer their click-pick to pointerup (mirrors the
+       * marquee); in-context presses already dispatched it. */
+      deferClick: boolean
+    }
+    let dragMove: DragMove | null = null
+
+    /** Abandon an armed/active drag-move (Esc, focus loss, pointercancel). */
+    function abortDragMove(): void {
+      if (dragMove === null) return
+      if (dragMove.active) {
+        toolController.activeTool.cancel()
+        switchToolRef.current?.('Select')
+      }
+      dragMove = null
+    }
 
     const marqueeOverlay = document.createElement('div')
     marqueeOverlay.style.position = 'absolute'
@@ -1205,16 +1323,18 @@ export default function Viewport({
 
     function runGroup(nodes: NodeRef[]): bigint | null {
       if (nodes.length === 0) return null
-      // kind: 0=object, 1=group, 2=instance — the same 3-way mapping as
-      // runDelete/runMakeComponent. Instances must not collapse to 0: the
-      // object and instance slotmaps reuse bit patterns, so a mis-kinded id
-      // can silently address a different live node.
-      const kinds = new Uint8Array(nodes.map((n) =>
-        n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0,
-      ))
-      const ids = new BigUint64Array(nodes.map((n) => n.id))
+      // Id-space boundary: only nodes with a kernel NodeId may cross into
+      // group_nodes' kind/id arrays. A sketch-scoped ref refuses here with a
+      // typed toast — its id lives in a different slotmap, and slotmaps reuse
+      // bit patterns, so collapsing it to kind 0 could silently mutate an
+      // unrelated live object (see structuralSelection in treeModel.ts).
+      const sel = structuralSelection(nodes)
+      if (sel === null) {
+        handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
+        return null
+      }
       try {
-        const groupId = wasmScene.group_nodes(kinds, ids)
+        const groupId = wasmScene.group_nodes(sel.kinds, sel.ids)
         handleSceneRefresh()
         return groupId
       } catch (err) {
@@ -1334,13 +1454,16 @@ export default function Viewport({
 
     function runMakeComponent(nodes: NodeRef[]): bigint | null {
       if (nodes.length === 0) return null
-      // kind: 0=object, 1=group, 2=instance
-      const kinds = new Uint8Array(nodes.map((n) =>
-        n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0,
-      ))
-      const ids = new BigUint64Array(nodes.map((n) => n.id))
+      // Same id-space boundary as runGroup: a sketch-scoped ref must never
+      // collapse into make_component's node-id arrays (typed refusal, never a
+      // kind-0 fallback that could alias an unrelated live object).
+      const sel = structuralSelection(nodes)
+      if (sel === null) {
+        handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
+        return null
+      }
       try {
-        const instanceId = wasmScene.make_component(kinds, ids)
+        const instanceId = wasmScene.make_component(sel.kinds, sel.ids)
         handleSceneRefresh()
         return instanceId
       } catch (err) {
@@ -1657,6 +1780,8 @@ export default function Viewport({
       const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
         ? ctx[ctx.length - 1].id : null
       tool.setActiveContext(ctxId)
+      // Plain objects are directly drawable — context-path-aware eligibility.
+      tool.setFaceEligibility(faceDrawEligible)
       return tool
     }
 
@@ -1682,6 +1807,8 @@ export default function Viewport({
       const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
         ? ctx[ctx.length - 1].id : null
       tool.setActiveContext(ctxId)
+      // Plain objects are directly drawable — context-path-aware eligibility.
+      tool.setFaceEligibility(faceDrawEligible)
       return tool
     }
 
@@ -1707,6 +1834,8 @@ export default function Viewport({
       const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
         ? ctx[ctx.length - 1].id : null
       tool.setActiveContext(ctxId)
+      // Plain objects are directly drawable — context-path-aware eligibility.
+      tool.setFaceEligibility(faceDrawEligible)
       return tool
     }
 
@@ -1732,6 +1861,8 @@ export default function Viewport({
       const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
         ? ctx[ctx.length - 1].id : null
       tool.setActiveContext(ctxId)
+      // Plain objects are directly drawable — context-path-aware eligibility.
+      tool.setFaceEligibility(faceDrawEligible)
       return tool
     }
 
@@ -1764,6 +1895,14 @@ export default function Viewport({
       } else {
         tool.setComponentContext(null)
       }
+      // Same context-path-aware eligibility as the draw tools: plain objects
+      // are directly push/pullable; group/instance members only from inside
+      // their container's editing context.
+      tool.setFaceEligibility(faceDrawEligible)
+      // The two id channels above only carry object/instance contexts; a
+      // GROUP context leaves both null, so tell the tool it is scoped
+      // explicitly (drives the refusal hint's wording only).
+      tool.setContextScoped(ctx.length > 0)
       return tool
     }
 
@@ -1824,12 +1963,12 @@ export default function Viewport({
       )
     }
 
-    function makeMoveTool(): MoveTool {
-      return new MoveTool(
+    function makeMoveTool(selection?: NodeRef[]): MoveTool {
+      const tool = new MoveTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
-        [...selectedIdsRef.current],
+        selection ?? [...selectedIdsRef.current],
         (nodes) => {
           handleSceneRefresh(touchedForNodes(nodes))
           // A sketch move bakes new vertex positions; rebuild sketch buffers so
@@ -1859,10 +1998,32 @@ export default function Viewport({
           else onSelectManyRef.current?.(nodes, false)
         },
       )
+      tool.setSelectionAcquirer(acquireTransformTargets)
+      return tool
+    }
+
+    /**
+     * Threshold crossed on a Select-tool drag that started on a movable node:
+     * hand the rest of the gesture to a one-shot Move tool. The press point
+     * becomes the Move base point (snapped through the same resolve a Move
+     * click gets), so the drag continues seamlessly with full inference,
+     * axis locks, Alt-copy, and VCB entry; pointerup commits (see
+     * onPointerUp) and the tool springs back to Select.
+     */
+    function beginDragMove(dm: DragMove): void {
+      // Select what's about to move so the highlight + dock follow the drag.
+      if (dm.nodes.length === 1) onSelectRef.current?.(dm.nodes[0], false)
+      else onSelectManyRef.current?.(dm.nodes, false)
+      const tool = makeMoveTool(dm.nodes)
+      toolController.setTool(tool)
+      renderer.domElement.style.cursor = cursorFor('Move')
+      const { snap } = snapService.resolve(dm.pressRay, el.clientHeight, camera.fov)
+      tool.onPointerDown(snap, dm.pressRay)
+      scheduleRender()
     }
 
     function makeRotateTool(): RotateTool {
-      return new RotateTool(
+      const tool = new RotateTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
@@ -1877,10 +2038,12 @@ export default function Viewport({
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         (text: string) => { onMeasurementRef.current?.(text) },
       )
+      tool.setSelectionAcquirer(acquireTransformTargets)
+      return tool
     }
 
     function makeScaleTool(): ScaleTool {
-      return new ScaleTool(
+      const tool = new ScaleTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
@@ -1895,6 +2058,8 @@ export default function Viewport({
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         (text: string) => { onMeasurementRef.current?.(text) },
       )
+      tool.setSelectionAcquirer(acquireTransformTargets)
+      return tool
     }
 
     function makeTapeMeasureTool(): TapeMeasureTool {
@@ -2407,7 +2572,24 @@ export default function Viewport({
           }
         }
       }
-      if (ev.buttons !== 0 && ev.button !== -1) return
+
+      // Armed drag-to-move: past the threshold, hand the gesture to a
+      // one-shot Move tool; while it runs, FALL THROUGH to normal routing so
+      // the Move tool gets live snapped pointer moves (inference, axis
+      // locks, Alt-copy all work exactly like a two-click Move).
+      if (dragMove !== null) {
+        if ((ev.buttons & 1) === 0) {
+          // The release happened outside our listeners (focus loss) — drop it.
+          abortDragMove()
+        } else if (!dragMove.active) {
+          const [px, py] = canvasPoint(ev)
+          if (exceedsDragThreshold(dragMove.startX, dragMove.startY, px, py)) {
+            dragMove.active = true
+            beginDragMove(dragMove)
+          }
+        }
+      }
+      if (ev.buttons !== 0 && ev.button !== -1 && dragMove?.active !== true) return
 
       const viewportH = el.clientHeight
       const fovY = camera.fov
@@ -2548,12 +2730,39 @@ export default function Viewport({
       selectAdditiveRef.current = ev.shiftKey
 
       if (toolController.activeToolName === 'Select') {
+        const [px, py] = canvasPoint(ev)
+        const topLevel = activeContextRef.current.length === 0
+
+        // A press on a movable node arms DRAG-TO-MOVE: dragging past the
+        // threshold hands the gesture to a one-shot Move (see beginDragMove),
+        // a plain release still just selects (click ≠ drag). Shift presses
+        // keep the additive-click/marquee path, and a press near a
+        // construction guide keeps the guide's click priority.
+        const pressedNode = ev.shiftKey || pickGuide(ndcX, ndcY) !== null
+          ? null
+          : pickTransformableUnderCursor(ray)
+        if (pressedNode !== null) {
+          // In-context presses click-pick immediately (as they always have);
+          // top level defers to pointerup like the marquee path.
+          if (!topLevel) dispatchSelectPick(ndcX, ndcY, ray)
+          dragMove = {
+            startX: px,
+            startY: py,
+            pressRay: ray,
+            nodes: dragMoveTargets(pressedNode, selectedIdsRef.current),
+            active: false,
+            deferClick: topLevel,
+          }
+          // Track the drag even when it leaves the canvas.
+          renderer.domElement.setPointerCapture(ev.pointerId)
+          return
+        }
+
         // Top level: arm a marquee and DEFER the pick to pointerup — a drag
         // becomes a rubber-band selection, a plain release runs the click-pick
         // at the release position. Inside an editing context the marquee is
         // out of scope; the press is an immediate click-pick.
-        if (activeContextRef.current.length === 0) {
-          const [px, py] = canvasPoint(ev)
+        if (topLevel) {
           marqueeDrag = { startX: px, startY: py, additive: ev.shiftKey, active: false }
           // Track the drag even when it leaves the canvas.
           renderer.domElement.setPointerCapture(ev.pointerId)
@@ -2640,6 +2849,13 @@ export default function Viewport({
       // Esc cancels an in-flight marquee before anything else.
       if (ev.key === 'Escape' && marqueeDrag !== null) {
         clearMarquee()
+        return
+      }
+
+      // Esc cancels an in-flight drag-to-move (before the context pop below,
+      // so escaping a drag inside a group doesn't ALSO exit the group).
+      if (ev.key === 'Escape' && dragMove !== null) {
+        abortDragMove()
         return
       }
 
@@ -2742,7 +2958,44 @@ export default function Viewport({
     // tools are click-based, so beyond input recording nothing else needs it.
     function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
-      if (ev.button !== 0 || marqueeDrag === null) return
+      if (ev.button !== 0) return
+
+      // Drag-to-move release: an ACTIVE drag commits the Move at the release
+      // position (the same second click a two-click Move would get, honoring
+      // any live axis lock), then springs back to Select. A sub-threshold
+      // release is a plain click — top level runs the deferred click-pick;
+      // in-context the press already picked.
+      if (dragMove !== null) {
+        const dm = dragMove
+        dragMove = null
+        if (dm.active) {
+          const tool = toolController.activeTool
+          if (
+            tool.name === 'Move' &&
+            'capturingInput' in tool &&
+            (tool as { capturingInput(): boolean }).capturingInput()
+          ) {
+            const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+            const ray = makeWorldRay(ndcX, ndcY, camera)
+            const constraint = 'snapConstraint' in tool
+              ? (tool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+              : null
+            const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+            tool.onPointerDown(snap, ray)
+          }
+          // (If the tool is no longer mid-gesture — a VCB Enter or Esc ended
+          // the move mid-drag — there is nothing to commit here.)
+          switchToolRef.current?.('Select')
+          return
+        }
+        if (dm.deferClick && toolController.activeToolName === 'Select') {
+          const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+          dispatchSelectPick(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
+        }
+        return
+      }
+
+      if (marqueeDrag === null) return
       const drag = marqueeDrag
       clearMarquee()
 
@@ -2770,6 +3023,7 @@ export default function Viewport({
     function onPointerCancel(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
       clearMarquee()
+      abortDragMove()
     }
     // Each routed event may advance (or cancel) the active tool's gesture —
     // wrap the handlers so the status-bar hint is re-polled after every one,
@@ -2879,6 +3133,12 @@ export default function Viewport({
         ? scene.instance_def(deepestCtx.id) ?? null
         : null
       ;(tool as { setComponentContext: (id: bigint | null) => void }).setComponentContext(componentId)
+    }
+    if (tool !== undefined && 'setContextScoped' in tool) {
+      // The id channels above only carry object/instance contexts; a GROUP
+      // context leaves both null — signal "scoped" explicitly (hint wording
+      // only; eligibility comes from the injected predicate).
+      ;(tool as { setContextScoped: (scoped: boolean) => void }).setContextScoped(activeContext.length > 0)
     }
     scheduleRenderRef.current()
   }, [activeContext, activeLitSet])

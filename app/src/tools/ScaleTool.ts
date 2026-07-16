@@ -15,7 +15,10 @@
  * Scale factor is clamped to a minimum of 0.01 to avoid degenerate / reflection
  * results (the kernel rejects factor ≤ 0 with "Singular" / "Reflection").
  *
- * If nothing is selected, shows a hint toast and stays idle.
+ * If nothing is selected, the first click auto-selects whatever is under the
+ * cursor (via the Viewport-injected selection acquirer) and starts the scale
+ * on it in the same gesture; only a click over empty space shows a hint
+ * toast and stays idle.
  */
 
 import * as THREE from 'three'
@@ -51,9 +54,12 @@ export class ScaleTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
-    return this.stage.kind === 'idle'
-      ? 'Click a base point to scale the selection about its center.'
-      : 'Move to scale, click to commit — or type an exact factor.'
+    if (this.stage.kind !== 'idle') {
+      return 'Move to scale, click to commit — or type an exact factor.'
+    }
+    return this.selection.length === 0
+      ? 'Click the object you want to scale.'
+      : 'Click a base point to scale the selection about its center.'
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -67,6 +73,12 @@ export class ScaleTool implements Tool {
   private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
   /** VCB buffer — raw string being typed by the user (unitless factor) */
   private typed: string = ''
+
+  /** Auto-select fallback, injected by the Viewport (see MoveTool's). */
+  private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
+  setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
+    this.acquireSelection = acquire
+  }
 
   constructor(
     wasmScene: WasmScene,
@@ -100,13 +112,22 @@ export class ScaleTool implements Tool {
     }
   }
 
-  onPointerDown(snap: Snap | null, _ray: Ray): void {
+  onPointerDown(snap: Snap | null, ray: Ray): void {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const nodes = this.selection
+      let nodes = this.selection
+      if (nodes.length === 0 && this.acquireSelection !== null) {
+        // Empty selection: auto-select whatever the click landed on and
+        // start the scale on it in the same gesture.
+        const acquired = this.acquireSelection(ray)
+        if (acquired !== null && acquired.length > 0) {
+          this.selection = acquired
+          nodes = acquired
+        }
+      }
       if (nodes.length === 0) {
-        this.onToast('Select an object first, then use Scale')
+        this.onToast('Click an object to scale it')
         return
       }
 

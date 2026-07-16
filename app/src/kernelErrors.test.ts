@@ -96,7 +96,11 @@ describe('kernelErrorMessage — coverage', () => {
   })
 
   it('has no orphaned copy for codes the kernel no longer emits', () => {
-    const known = new Set(KERNEL_ERROR_CODES)
+    // The app itself emits a few refusals through the same "CODE: copy"
+    // toast convention without a kernel enum behind them — enumerate them
+    // here so the guard still catches genuinely stale kernel copy.
+    const APP_ERROR_CODES = ['InvalidSelection']
+    const known = new Set([...KERNEL_ERROR_CODES, ...APP_ERROR_CODES])
     const orphans = describedErrorCodes().filter((c) => !known.has(c))
     expect(orphans).toEqual([])
   })
@@ -161,6 +165,12 @@ describe('friendlyErrorText', () => {
     expect(friendlyErrorText(new Error('glTF: buffer 0 out of range'))).toBe(
       'buffer 0 out of range',
     )
+  })
+
+  it('carries copy for the app-side InvalidSelection refusal (structuralSelection boundary)', () => {
+    const text = kernelErrorMessage('InvalidSelection', '')
+    expect(text).toContain('group or component')
+    expect(text).toContain('Sketches')
   })
 
   it('maps load failures through their typed variant codes', () => {

@@ -2347,6 +2347,10 @@ export default function App() {
   }
 
   const handleMakeComponent = () => {
+    // Same re-check handleGroup does: dispatchers without a disabled state
+    // (dock verbs are hidden, but keyboard/palette paths aren't) must not
+    // hand the kernel an ineligible selection.
+    if (!(menuGates?.canMakeComponent ?? false)) return
     const instanceId = viewportApi.current?.runMakeComponent(selectedIds)
     if (instanceId != null) {
       setSelectedIds([{ kind: 'instance', id: instanceId }])
@@ -2620,6 +2624,7 @@ export default function App() {
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
+              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp }}
               onRun={(id) => menuActionRef.current(id)}
             />
           </div>

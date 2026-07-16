@@ -194,7 +194,17 @@ below.
 - Browser build with offline support and PWA install
 - A labeled tool rail, a command palette (Ctrl/Cmd-K) for finding any tool
   or action by name, a contextual action dock that follows the current
-  selection, and a docked properties/outliner/materials tray
+  selection (including Group for a multi-selection and Make Component for
+  objects and groups, shown only when the selection qualifies), and a
+  docked properties/outliner/materials tray
+- One-gesture object interaction: with an empty selection, Move / Rotate /
+  Scale act on whatever the first click lands on; the Select tool drags
+  objects directly (a threshold-gated one-shot Move — full snapping, axis
+  locks, Alt-copy, typed distances — that springs back to Select on
+  release); and every draw tool imprints a plain object's face at the top
+  level, with push/pull holding to the same eligibility. Groups and
+  components keep their explicit double-click editing step — their members
+  are not directly editable from outside
 - Stage-aware status-bar guidance: every tool tells you what to do next
   ("Click the opposite corner — or type exact dimensions"), updating live
   as the gesture advances

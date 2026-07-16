@@ -22,6 +22,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
+import { defaultFaceEligible, type FaceEligible } from './faceDraw'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
  * cursor was parked on a real feature. `on-face` is excluded on purpose: it
@@ -131,10 +132,13 @@ export class PushPullTool implements Tool {
       if (pick !== undefined) {
         try {
           const objectHandle = pick.object()
-          // Inside an editing context, only the entered object is editable —
-          // ignore faces of other objects so isolated editing can't disturb
-          // neighbors. Top level (null) keeps the unrestricted behavior.
-          if (this._activeContext === null || objectHandle === this._activeContext) {
+          const instanceHandle = pick.instance()
+          // Same face-eligibility policy as the draw tools (faceDraw.ts): at
+          // the top level only PLAIN objects are directly push/pullable —
+          // faces inside a group or component instance keep their explicit
+          // editing step. Inside an editing context only that context's
+          // scope is editable, so isolated editing can't disturb neighbors.
+          if (this._isEligible(objectHandle, instanceHandle)) {
             const faceHandle = pick.face()
             const normalArr = this.wasmScene.face_normal(objectHandle, faceHandle)
             const normal: [number, number, number] = [normalArr[0], normalArr[1], normalArr[2]]
@@ -147,6 +151,14 @@ export class PushPullTool implements Tool {
               anchor = hit !== null ? [hit.x, hit.y, hit.z] : [...ray.origin]
             }
             target = { kind: 'face', objectHandle, faceHandle, normal }
+          } else {
+            // FAIL CLOSED: an ineligible face CONSUMES the click. Falling
+            // through to Path B would let a sketch region along the same ray
+            // (a ground sketch behind the group — ordinary mid-modeling
+            // state) silently start a drag and extrude geometry the user
+            // did not aim at. Refuse explicably instead.
+            this.onToast(this._ineligibleFaceHint(instanceHandle))
+            return
           }
         } finally {
           pick.free()
@@ -278,6 +290,25 @@ export class PushPullTool implements Tool {
     this._activeContext = objectId
   }
 
+  /** Optional richer eligibility, injected by the Viewport (which knows the
+   *  full group/instance context path the tool can't see). Null = the shared
+   *  default policy in faceDraw.ts. */
+  private _faceEligible: FaceEligible | null = null
+  setFaceEligibility(pred: FaceEligible | null): void {
+    this._faceEligible = pred
+  }
+
+  /** The draw tools' plain-object policy, applied to push/pull. The one
+   *  tool-local addition: inside a component editing context (the Viewport
+   *  pairs `setComponentContext` with its injected predicate in production)
+   *  instanced picks are the editable set — the commit routes through
+   *  `push_pull_in_component`. */
+  private _isEligible(object: bigint, instance: bigint | undefined): boolean {
+    if (this._faceEligible !== null) return this._faceEligible(object, instance)
+    if (this._activeComponent !== null) return instance !== undefined
+    return defaultFaceEligible(this.wasmScene, this._activeContext, object, instance)
+  }
+
   /**
    * Set the active component context: when the user has double-clicked into an
    * instance, push/pull routes face operations through `push_pull_in_component`
@@ -287,6 +318,34 @@ export class PushPullTool implements Tool {
   private _activeComponent: bigint | null = null
   setComponentContext(componentId: bigint | null): void {
     this._activeComponent = componentId
+  }
+
+  /**
+   * True while ANY editing context is entered — object, GROUP, or component.
+   * The two id channels above only carry object/instance contexts (a group
+   * context leaves both null), so the Viewport sets this alongside them.
+   * Affects only the refusal hint's wording; eligibility itself comes from
+   * the injected predicate, which already understands the full context path.
+   */
+  private _contextScoped = false
+  setContextScoped(scoped: boolean): void {
+    this._contextScoped = scoped
+  }
+
+  /** Why an ineligible face refused, phrased as the way in. Inside ANY
+   *  editing context the refusal is the scope — the clicked face may not be
+   *  in any group, and double-click can't enter an out-of-scope container
+   *  from here, so 'step out' is the only honest guidance. At the top level
+   *  (where plain objects always pass) an instanced pick belongs to a
+   *  component and anything else was a grouped face. */
+  private _ineligibleFaceHint(instance: bigint | undefined): string {
+    if (this._contextScoped || this._activeContext !== null || this._activeComponent !== null) {
+      return 'Push/pull is scoped to what you are editing — press Esc to step out first'
+    }
+    if (instance !== undefined) {
+      return 'That face is part of a component — double-click it to edit the component'
+    }
+    return 'That face is inside a group — double-click to enter the group and edit it'
   }
 
   /**

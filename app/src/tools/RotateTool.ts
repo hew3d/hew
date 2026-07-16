@@ -44,7 +44,10 @@
  * vertical plane floating in space), the live sweep uses ray/plane
  * intersection rather than the resolved snap point.
  *
- * If nothing is selected, the first click shows a hint toast and stays idle.
+ * If nothing is selected, the first click auto-selects whatever is under the
+ * cursor (via the Viewport-injected selection acquirer) and starts the
+ * rotation on it in the same gesture; only a click over empty space shows a
+ * hint toast and stays idle.
  */
 
 import * as THREE from 'three'
@@ -138,7 +141,9 @@ export class RotateTool implements Tool {
       case 'ref':
         return 'Move to set the angle (snaps to 15°), or type exact degrees, then click. Shift or → / ← / ↑ lock the axis.'
       default:
-        return 'Click to set the center of rotation. The protractor tilts to the face or edge under the cursor — Shift locks that axis, or press → / ← / ↑ to lock X / Y / Z (needed to tip a cylinder onto its side).'
+        return this.selection.length === 0
+          ? 'Click the object you want to rotate.'
+          : 'Click to set the center of rotation. The protractor tilts to the face or edge under the cursor — Shift locks that axis, or press → / ← / ↑ to lock X / Y / Z (needed to tip a cylinder onto its side).'
     }
   }
 
@@ -151,6 +156,12 @@ export class RotateTool implements Tool {
   private selection: NodeRef[] = []
   private objectsGroup: THREE.Group | null = null
   private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
+
+  /** Auto-select fallback, injected by the Viewport (see MoveTool's). */
+  private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
+  setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
+    this.acquireSelection = acquire
+  }
 
   /** Axis locked by Shift/arrow (unit). Overrides inference; null = infer. */
   private lockedNormal: Vec3 | null = null
@@ -247,9 +258,18 @@ export class RotateTool implements Tool {
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
-      const nodes = this.selection
+      let nodes = this.selection
+      if (nodes.length === 0 && this.acquireSelection !== null) {
+        // Empty selection: auto-select whatever the click landed on and
+        // start the rotation on it in the same gesture.
+        const acquired = this.acquireSelection(ray)
+        if (acquired !== null && acquired.length > 0) {
+          this.selection = acquired
+          nodes = acquired
+        }
+      }
       if (nodes.length === 0) {
-        this.onToast('Select an object first, then use Rotate')
+        this.onToast('Click an object to rotate it')
         return
       }
       const pivot: Vec3 = [snap.x, snap.y, snap.z]

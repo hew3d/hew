@@ -39,13 +39,13 @@ The floating bar at the bottom-center of the viewport follows your selection and
 | Selection | Dock shows |
 |---|---|
 | Nothing | Rectangle, Line, Circle, Arc |
-| An Object | Push/Pull, Move, Paint, Erase |
-| A group | Edit, Move, Scale, Ungroup, Erase |
+| An Object | Push/Pull, Move, Paint, Make Component, Erase |
+| A group | Edit, Move, Scale, Make Component, Ungroup, Erase |
 | A component instance | Edit, Move, Scale, Make Unique, Explode |
-| Several things | Move, Erase |
+| Several things | Move, Group, Erase |
 | A sketch | Push/Pull, Move, Rotate, Scale, Erase |
 
-Everything on the dock also lives in the menus; nothing is reachable only from it.
+Group and Make Component appear only when the selection qualifies (Group needs two or more siblings; Make Component takes objects and groups, not instances). Everything on the dock also lives in the menus; nothing is reachable only from it.
 
 ## The panels tray
 

@@ -152,12 +152,46 @@ describe('RotateTool — axis locking', () => {
 })
 
 describe('RotateTool — gesture', () => {
-  it('requires a selection: the first click toasts and stays idle', () => {
+  // Deliberate contract change (selection-UX overhaul): an empty-selection
+  // click no longer demands a prior Select step — the Viewport injects an
+  // acquirer that picks the node under the cursor. The toast survives only
+  // for a genuine miss (nothing under the cursor / no acquirer injected).
+  it('empty selection with no acquirer (or a miss): toasts and stays idle', () => {
     const { tool, onToast } = makeTool({ selection: [] })
     tool.onPointerMove(makeSnap(), rayThrough(0, 0))
     tool.onPointerDown(makeSnap(), rayThrough(0, 0))
     expect(onToast).toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false) // never advanced past idle
+
+    const missTool = makeTool({ selection: [] })
+    missTool.tool.setSelectionAcquirer(() => null)
+    missTool.tool.onPointerDown(makeSnap(), rayThrough(0, 0))
+    expect(missTool.onToast).toHaveBeenCalled()
+    expect(missTool.tool.capturingInput()).toBe(false)
+  })
+
+  it('idle status hint matches the selection state (empty → "click the object")', () => {
+    expect(makeTool({ selection: [] }).tool.statusHint())
+      .toBe('Click the object you want to rotate.')
+    expect(makeTool().tool.statusHint()).toContain('center of rotation')
+  })
+
+  it('empty selection auto-selects via the injected acquirer and starts the gesture in one click', () => {
+    const { tool, onToast, wasmScene, onCommit } = makeTool({ selection: [] })
+    const acquire = vi.fn(() => [{ kind: 'object', id: 5n } as NodeRef])
+    tool.setSelectionAcquirer(acquire)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot + auto-select
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(true) // advanced past idle in the same click
+
+    // The rest of the gesture proceeds on the acquired node.
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference
+    tool.onPointerMove(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // sweep 90°
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // commit
+    expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 5n }])
   })
 
   it('commits a rotation from a full three-click gesture (pivot → reference → sweep)', () => {

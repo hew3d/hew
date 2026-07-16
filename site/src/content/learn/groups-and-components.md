@@ -10,11 +10,11 @@ Groups and components are how a model grows past a handful of boxes without beco
 
 A group bundles objects (and other groups — they nest) into one selectable, movable unit.
 
-- **Create:** select two or more things and choose **Edit ▸ Group** (`⌘G` / `Ctrl+G`).
+- **Create:** select two or more things and choose **Edit ▸ Group** (`⌘G` / `Ctrl+G`), or click **Group** on the contextual dock.
 - **Dissolve:** select a group and choose **Edit ▸ Ungroup** (`⇧⌘G` / `Ctrl+Shift+G`); the members return to being independent, unchanged.
 - **Edit the contents:** double-click the group (or click **Edit** on the contextual dock). You're now *inside* the group's context: the rest of the scene dims, and selection and drawing are scoped to the group's members. Press `Esc` to step back out one level.
 
-![A group named "Enclosure" selected: Object Info shows its name, type, and tag; the contextual dock offers Edit, Move, Scale, Ungroup, Erase](/docs/organization.png)
+![A group named "Enclosure" selected: Object Info shows its name, type, and tag; the contextual dock offers Edit, Move, Scale, Make Component, Ungroup, Erase](/docs/organization.png)
 
 Moving, rotating, or scaling a group transforms everything inside it together, and Move with `Option`/`Alt` held copies the whole group — nested groups, names, tags, and materials included; component instances inside come along as new instances of the same definition ([Move](/learn/moving-and-transforming/)). Groups also work as boolean operands: Union, Subtract, and Intersect accept a group anywhere they accept a solid ([Combining solids](/learn/combining-solids/)). Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Object Info makes big models legible.
 
@@ -22,7 +22,7 @@ Moving, rotating, or scaling a group transforms everything inside it together, a
 
 A component is shared geometry: one **definition**, any number of placed **instances**. Every instance has its own position, rotation, scale, and mirroring, but they all reference the same shape. Model one screw, place it eight times; fix the thread once, all eight update.
 
-- **Create a definition:** select an object and choose **Edit ▸ Make Component**. The selection becomes the definition's geometry, and what you had selected is replaced by the first instance.
+- **Create a definition:** select an object or group and choose **Edit ▸ Make Component**, or click **Make Component** on the contextual dock. The selection becomes the definition's geometry, and what you had selected is replaced by the first instance.
 - **Place more instances:** select an instance and choose **Edit ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with copy mode on (tap `Option`/`Alt`) to drop copies where you want them — and type `x5` right after a copy to place a whole row ([Move](/learn/moving-and-transforming/)).
 - **Edit the definition:** double-click any instance. Changes — push/pulls, added detail, paint — appear in every instance when you step out.
 

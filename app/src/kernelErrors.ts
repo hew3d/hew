@@ -164,6 +164,13 @@ const DESCRIPTIONS: Record<string, string> = {
     "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.",
 
   // ------------------------------------------- groups & components
+  // App-side refusal (not a kernel code): a selection containing sketch
+  // geometry reached a node-only structural command — see treeModel.ts's
+  // structuralSelection. NOTE for the rebase onto the centralized
+  // kernelErrors.isErrorLevelCode: classify InvalidSelection as
+  // error-level there (App.tsx carries it inline until then).
+  InvalidSelection:
+    'Sketches can\'t be part of a group or component. Select only objects, groups, or components.',
   EmptyGroup: 'Select at least one object to group.',
   EmptySelection:
     'The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible.',
@@ -271,6 +278,8 @@ const ERROR_LEVEL_CODES: ReadonlySet<string> = new Set([
   'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
   'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
   'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
+  // App-emitted refusal (no kernel enum): structural verbs on a sketch selection.
+  'InvalidSelection',
 ])
 
 /** Whether `code` should be logged/toasted as an error (vs a warning). */

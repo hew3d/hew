@@ -62,22 +62,27 @@ const EMPTY_VERBS: DockVerb[] = [
 
 /** Spec's Face row (Push/Pull primary, then Offset · Move · Paint · Erase) is
  * the nearest analog for Hew's Object context — Offset is skipped because Hew
- * has no Offset tool (align only where the verb already exists). */
+ * has no Offset tool (align only where the verb already exists). Make
+ * Component rides along (gated by `DockGates.canMakeComponent`) so turning a
+ * plain object into a reusable definition is one click, not a menu dive. */
 const OBJECT_VERBS: DockVerb[] = [
   { id: 'tool-pushpull', label: 'Push/Pull' },
   { id: 'tool-move', label: 'Move' },
   { id: 'tool-paint', label: 'Paint' },
+  { id: 'edit-make-component', label: 'Make Component' },
   { id: 'edit-delete', label: 'Erase' },
 ]
 
 /** Spec's Component/Group row: Edit (enter) primary, then Move · Scale ·
  * Make Unique · Explode. For a Group, Make Unique/Explode don't apply —
  * Ungroup is Hew's group-level explode analog (kept under its menu name so
- * the dock stays a shortcut surface for the same verb, not a synonym). */
+ * the dock stays a shortcut surface for the same verb, not a synonym).
+ * Make Component (gated) promotes the group to a component definition. */
 const GROUP_VERBS: DockVerb[] = [
   { id: 'enter-context', label: 'Edit' },
   { id: 'tool-move', label: 'Move' },
   { id: 'tool-scale', label: 'Scale' },
+  { id: 'edit-make-component', label: 'Make Component' },
   { id: 'ungroup', label: 'Ungroup' },
   { id: 'edit-delete', label: 'Erase' },
 ]
@@ -92,8 +97,11 @@ const INSTANCE_VERBS: DockVerb[] = [
   { id: 'explode-instance', label: 'Explode' },
 ]
 
+/** Group (gated by `DockGates.canGroup`) is the natural next step after
+ * sweeping up several things — the same `edit-group` action as Edit ▸ Group. */
 const MULTI_VERBS: DockVerb[] = [
   { id: 'tool-move', label: 'Move' },
+  { id: 'edit-group', label: 'Group' },
   { id: 'edit-delete', label: 'Erase' },
 ]
 
@@ -124,16 +132,40 @@ export function isDockVerbEnabled(verb: DockVerb, hoverPreviewOnly: boolean): bo
   return !hoverPreviewOnly || verb.id === 'tool-pushpull'
 }
 
-/** The curated, ordered verb list for a context — first item is primary. */
-export function dockVerbsFor(context: DockContext): DockVerb[] {
-  switch (context) {
-    case 'empty': return EMPTY_VERBS
-    case 'object': return OBJECT_VERBS
-    case 'group': return GROUP_VERBS
-    case 'instance': return INSTANCE_VERBS
-    case 'multi': return MULTI_VERBS
-    case 'sketch': return SKETCH_VERBS
-  }
+/**
+ * Selection-dependent applicability for the structural verbs. Derived in
+ * App.tsx from the same `menuGates` memo the Edit menu uses, so the dock and
+ * the menus always agree on what's currently possible. A verb whose gate is
+ * false is HIDDEN (the dock is a curated shortcut row, not a full menu —
+ * an inapplicable verb is noise, not information).
+ */
+export interface DockGates {
+  /** ≥2 distinct sibling nodes, no sketch sub-entities (Edit ▸ Group). */
+  canGroup: boolean
+  /** ≥1 sibling object/group, no instances, top level (Edit ▸ Make Component). */
+  canMakeComponent: boolean
+}
+
+/** The curated, ordered verb list for a context — first item is primary.
+ * `gates` (when given) filters out the structural verbs that don't apply to
+ * the actual selection. */
+export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[] {
+  const verbs = (() => {
+    switch (context) {
+      case 'empty': return EMPTY_VERBS
+      case 'object': return OBJECT_VERBS
+      case 'group': return GROUP_VERBS
+      case 'instance': return INSTANCE_VERBS
+      case 'multi': return MULTI_VERBS
+      case 'sketch': return SKETCH_VERBS
+    }
+  })()
+  if (gates === undefined) return verbs
+  return verbs.filter((v) => {
+    if (v.id === 'edit-group') return gates.canGroup
+    if (v.id === 'edit-make-component') return gates.canMakeComponent
+    return true
+  })
 }
 
 /** Display label for the context chip (`FACE`/`EDGE`/`COMPNT` in the spec's

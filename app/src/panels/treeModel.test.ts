@@ -19,6 +19,7 @@ import {
   collectLeafIds,
   buildTreeIndexMap,
   nodeKey,
+  structuralSelection,
   type NodeRef,
 } from './treeModel'
 
@@ -172,6 +173,65 @@ describe('canMakeComponent', () => {
   it('false for nodes with different parents', () => {
     const mixedParent = (n: NodeRef) => n.id === 1n ? 99n : 100n
     expect(canMakeComponent([a, b], mixedParent)).toBe(false)
+  })
+
+  // Sketch-scoped NodeRefs have no kernel NodeId: letting one through the
+  // gate forwards its id into the object handle space downstream, where the
+  // slotmaps' reused bit patterns can silently alias an unrelated live node.
+  it('false for any sketch-kind selection (no kernel NodeId — id-space guard)', () => {
+    const sk: NodeRef = { kind: 'sketch', id: 5n }
+    const island: NodeRef = { kind: 'sketch-island', id: 6n, sketch: 5n }
+    const edge: NodeRef = { kind: 'sketch-edge', id: 7n, sketch: 5n }
+    expect(canMakeComponent([sk], noParent)).toBe(false)
+    expect(canMakeComponent([island], noParent)).toBe(false)
+    expect(canMakeComponent([a, sk], noParent)).toBe(false)
+    expect(canMakeComponent([a, edge], noParent)).toBe(false)
+  })
+})
+
+describe('canGroup — sketch-kind guard', () => {
+  const a: NodeRef = { kind: 'object', id: 1n }
+  const b: NodeRef = { kind: 'object', id: 2n }
+  const noParent = (_n: NodeRef) => undefined
+
+  it('false when any sketch-kind node is in the selection', () => {
+    const sk: NodeRef = { kind: 'sketch', id: 5n }
+    const curve: NodeRef = { kind: 'sketch-curve', id: 6n, sketch: 5n }
+    expect(canGroup([a, sk], noParent)).toBe(false)
+    expect(canGroup([a, b, curve], noParent)).toBe(false)
+  })
+})
+
+describe('structuralSelection — the node-id-space boundary', () => {
+  it('collapses object/group/instance selections to parallel kind/id arrays', () => {
+    const sel = structuralSelection([
+      { kind: 'object', id: 1n },
+      { kind: 'group', id: 2n },
+      { kind: 'instance', id: 3n },
+    ])
+    expect(sel).not.toBeNull()
+    expect(Array.from(sel!.kinds)).toEqual([0, 1, 2])
+    expect(Array.from(sel!.ids)).toEqual([1n, 2n, 3n])
+  })
+
+  it('refuses (null) when ANY node is sketch-scoped — a sketch id must never enter the node-id handle space', () => {
+    expect(structuralSelection([{ kind: 'sketch', id: 5n }])).toBeNull()
+    expect(structuralSelection([
+      { kind: 'object', id: 1n },
+      { kind: 'sketch-island', id: 6n, sketch: 5n },
+    ])).toBeNull()
+    expect(structuralSelection([
+      { kind: 'sketch-edge', id: 7n, sketch: 5n },
+    ])).toBeNull()
+    expect(structuralSelection([
+      { kind: 'sketch-curve', id: 8n, sketch: 5n },
+    ])).toBeNull()
+  })
+
+  it('an empty selection collapses to empty arrays (caller guards emptiness itself)', () => {
+    const sel = structuralSelection([])
+    expect(sel).not.toBeNull()
+    expect(sel!.kinds.length).toBe(0)
   })
 })
 

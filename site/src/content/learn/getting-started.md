@@ -34,7 +34,7 @@ Switch to **Push/Pull** (`P`):
 2. Move the cursor up and away; a live preview of the extrusion follows.
 3. Click to set the height, or type `1.5cm` and press `Enter`.
 
-![The tray board selected, with Object Info reporting its geometry as Solid and the object dock showing Push/Pull, Move, Paint, Erase](/docs/organizer-tray.png)
+![The tray board selected, with Object Info reporting its geometry as Solid and the object dock showing Push/Pull, Move, Paint, Make Component, Erase](/docs/organizer-tray.png)
 
 That's your tray. The moment you commit, Hew turns the sketch into a real Object — a watertight solid. There's no separate "make it a group" or "make it solid" step; push/pulling a closed profile *is* that step. Press `Space` for the **Select** tool and click the board: Object Info reads **Solid**, and the badge at the bottom-right of the status bar confirms every object in the model is watertight.
 
@@ -48,8 +48,8 @@ Two new moves here: drawing a circle, and hollowing a solid by pushing a face *i
 
 1. Pick the **Circle** tool (`C`), click a center point on the ground beside the tray, type `3cm`, and press `Enter`. What you type is the **radius**, so this makes a 6 cm-wide disk.
 2. With **Push/Pull** (`P`), click the disk and pull it up to `9cm`. You now have a solid cylinder.
-3. Hollow it. To draw *on* a solid instead of on the ground, you first step inside it: **double-click the cylinder** — the rest of the scene dims, and you're now editing just that Object. With the **Circle** tool, click the center of its top face and type `2.4cm`; then take **Push/Pull** (`P`) and push that inner disk *down* `7.5cm`. Pushing a face inward carves a recess, leaving a 1.5 cm floor — the cup is now a cup. Press `Esc` to step back out.
-4. Switch to **Select** (`Space`) and click the cup, then press `M` for **Move** and drag it onto the tray. (Move acts on the current selection, so select first, then move.) Because it's its own Object, it rests on the tray without merging into it.
+3. Hollow it. Drawing works directly on a solid's face: with the **Circle** tool (`C`), click the center of the cylinder's top face and type `2.4cm`; then take **Push/Pull** (`P`) and push that inner disk *down* `7.5cm`. Pushing a face inward carves a recess, leaving a 1.5 cm floor — the cup is now a cup.
+4. Switch to **Select** (`Space`) and simply **drag** the cup onto the tray — dragging an object moves it, snapping all the way. (Pressing `M` for **Move** and clicking two points works too.) Because it's its own Object, it rests on the tray without merging into it.
 
 ![The tray with the hollowed pen cup resting on it; the Outliner lists two objects, both solid](/docs/organizer-cup.png)
 
@@ -58,7 +58,7 @@ Two new moves here: drawing a circle, and hollowing a solid by pushing a face *i
 The bin starts as a hollow box, then gets its front scooped. The scoop is the one place in this build where you *explicitly* combine two solids.
 
 1. **Rectangle** (`R`) → a `7cm,5cm` footprint on the ground; **Push/Pull** (`P`) up `6cm` into a solid block.
-2. Hollow it, the same way you hollowed the cup — you have to be *inside* the solid to draw on it. **Double-click the block** to step in, draw a **Rectangle** (`R`) on its top face leaving roughly a `0.7cm` wall all the way around, then **Push/Pull** (`P`) that inner rectangle *down* `5cm` (a `1cm` floor). Press `Esc` to step out. You now have an open box.
+2. Hollow it, the same way you hollowed the cup: draw a **Rectangle** (`R`) on its top face leaving roughly a `0.7cm` wall all the way around, then **Push/Pull** (`P`) that inner rectangle *down* `5cm` (a `1cm` floor). You now have an open box.
 3. Make the cutter for the scoop: off to the side, with **Circle** (`C`, radius `2cm`) and **Push/Pull** (`P`), stand up a cylinder about `8cm` tall.
 4. Bring them together — and here you rotate the **bin**, not the cylinder. Select the bin, press `Q` for **Rotate**, hover one of its lower edges to set the axis, and tip it `90°` onto its side so the top edge of the front wall stands vertical, right beside the upright cylinder. **Move** (`M`) the bin until the cylinder bites into that edge.
 5. Select the bin, `Shift`-click the cylinder, and choose **Edit ▸ Subtract**. The cylinder carves a smooth curved dip along the rim and vanishes, leaving one watertight bin.

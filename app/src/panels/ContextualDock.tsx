@@ -24,15 +24,19 @@ import { TOOL_ICON_SVG, type ToolName } from '../tools/toolIcons'
 import inkEraserSvg from '@material-symbols/svg-400/outlined/ink_eraser.svg?raw'
 import editSvg from '@material-symbols/svg-400/outlined/edit.svg?raw'
 import groupOffSvg from '@material-symbols/svg-400/outlined/group_off.svg?raw'
+import groupWorkSvg from '@material-symbols/svg-400/outlined/group_work.svg?raw'
+import deployedCodeSvg from '@material-symbols/svg-400/outlined/deployed_code.svg?raw'
 import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?raw'
 import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
-import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled, type DockContext, type DockVerb } from './dockLogic'
+import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled, type DockContext, type DockGates, type DockVerb } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
 const NON_TOOL_ICON_SVG: Record<string, string> = {
   'edit-delete': inkEraserSvg,
   'enter-context': editSvg,
   'ungroup': groupOffSvg,
+  'edit-group': groupWorkSvg,
+  'edit-make-component': deployedCodeSvg,
   'make-unique': contentCopySvg,
   'explode-instance': callSplitSvg,
 }
@@ -136,6 +140,10 @@ export interface ContextualDockProps {
    * empty-selection draw-tool row for the 'sketch' verb set (Push/Pull
    * primary) as a preview of what a click there would do. */
   hoveringSketchRegion?: boolean
+  /** Selection-dependent applicability for the structural verbs (Group /
+   * Make Component) — derived in App.tsx from the same `menuGates` memo the
+   * Edit menu uses. Omitted (tests, storybook-style mounts) = ungated. */
+  gates?: DockGates
 }
 
 export function ContextualDock({
@@ -145,6 +153,7 @@ export function ContextualDock({
   hidden = false,
   activeToolId,
   hoveringSketchRegion = false,
+  gates,
 }: ContextualDockProps) {
   const baseContext = deriveDockContext(selectedIds, selectedGuide)
   // Hover only ever promotes 'empty' -> 'sketch' — any other context (an
@@ -153,7 +162,7 @@ export function ContextualDock({
   const context = hoverPreviewOnly ? 'sketch' : baseContext
   if (context === null) return null
 
-  const verbs = dockVerbsFor(context)
+  const verbs = dockVerbsFor(context, gates)
 
   return (
     <div

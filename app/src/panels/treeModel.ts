@@ -279,17 +279,44 @@ export function nodeKindToNumber(kind: NodeKind): number {
 }
 
 /**
+ * Collapse a structural selection into the kernel's parallel kind/id arrays
+ * (`group_nodes`, `make_component`, …) — or refuse with `null` if ANY node
+ * has no kernel NodeId (the sketch-scoped kinds).
+ *
+ * This is the id-space boundary: sketch handles live in a different slotmap
+ * than node ids, and slotmaps reuse bit patterns, so forwarding a sketch id
+ * as kind 0 can silently address an UNRELATED live object. Callers that feed
+ * node-id-keyed wasm calls must collapse through here rather than mapping
+ * kinds ad hoc, and must treat `null` as a typed refusal — never a fallback.
+ */
+export function structuralSelection(
+  nodes: readonly NodeRef[],
+): { kinds: Uint8Array; ids: BigUint64Array } | null {
+  const kinds: number[] = []
+  const ids: bigint[] = []
+  for (const n of nodes) {
+    const kind = nodeKindToNumber(n.kind)
+    if (kind < 0) return null
+    kinds.push(kind)
+    ids.push(n.id)
+  }
+  return { kinds: new Uint8Array(kinds), ids: new BigUint64Array(ids) }
+}
+
+/**
  * Whether a selection can be folded into a component.
- * Rules: one or more distinct objects/groups (no instances — nested defs are
- * deferred). A single object is the common case; multiple must be siblings
- * (share a parent), like canGroup but without its ≥2 requirement.
+ * Rules: one or more distinct objects/groups only — no instances (nested defs
+ * are deferred) and no sketch-scoped nodes (they have no kernel NodeId; see
+ * `structuralSelection`). A single object is the common case; multiple must
+ * be siblings (share a parent), like canGroup but without its ≥2 requirement.
  */
 export function canMakeComponent(
   selected: NodeRef[],
   parentOf: (n: NodeRef) => bigint | undefined,
 ): boolean {
-  // No instances allowed as members.
-  if (selected.some((n) => n.kind === 'instance')) return false
+  // Objects and groups only: instances are deferred (nested defs), and a
+  // sketch-kind node must never reach the kernel's node-id space.
+  if (selected.some((n) => n.kind !== 'object' && n.kind !== 'group')) return false
 
   // Deduplicate by kind+id.
   const seen = new Set<string>()
@@ -347,6 +374,10 @@ export function canGroup(
   parentOf: (n: NodeRef) => bigint | undefined,
 ): boolean {
   if (selected.length < 2) return false
+
+  // Only nodes with a kernel NodeId can be grouped — a sketch-scoped ref in
+  // the selection disqualifies it outright (see `structuralSelection`).
+  if (selected.some((n) => nodeKindToNumber(n.kind) < 0)) return false
 
   // Deduplicate by kind+id
   const seen = new Set<string>()

@@ -1,26 +1,29 @@
 ---
 title: "Move, Rotate, and Scale"
-description: "Select first, then Move, Rotate, or Scale with full snapping, axis locks, and typed values. Copying is a Move with Alt tapped — and ×N multiplies it into an array."
+description: "Move, Rotate, or Scale with full snapping, axis locks, and typed values — or just drag an object with Select. Copying is a Move with Alt tapped — and ×N multiplies it into an array."
 order: 8
 ---
 
-Move, Rotate, and Scale all follow the same pattern: **select something first** (with the Select tool, `Space`), then activate the tool and place two or three reference points. If nothing is selected, the tool reminds you in a toast.
+Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, clicking an object with any of the three selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. With a selection already made, the click places the first reference point as usual.
 
-All three show a live ghost preview of the result and a live readout, and all three accept typed exact values mid-gesture.
+The fastest move doesn't even need the Move tool: with **Select** active, press on an object and **drag** it. Past a few pixels the drag becomes a real move — full snapping, axis locks, Alt-copy, typed distances — and releasing the button commits it. The tool stays Select throughout, like dragging an icon on your desktop. Dragging a member of a multi-selection drags the whole selection.
+
+All three transform tools show a live ghost preview of the result and a live readout, and all three accept typed exact values mid-gesture.
 
 ## Select (`Space`)
 
-A quick refresher, since every transform starts here:
+A quick refresher:
 
 - **Click** an object, sketch, or guide to select it. Clicking empty space clears the selection.
 - **Shift-click** adds to or removes from the selection.
-- **Drag** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid rectangle and selects what falls **entirely inside** it; dragging right→left draws a dashed rectangle and selects everything the rectangle **touches**. Hold `Shift` to add the result to the current selection; `Esc` cancels a drag in progress.
+- **Drag an object** to move it (see above). `Esc` mid-drag cancels the move and puts everything back.
+- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid rectangle and selects what falls **entirely inside** it; dragging right→left draws a dashed rectangle and selects everything the rectangle **touches**. Hold `Shift` to add the result to the current selection (a `Shift`-drag always rubber-bands, even over an object); `Esc` cancels a drag in progress.
 - **Select All** (`⌘A` / `Ctrl+A`, or Edit ▸ Select All) selects every visible object, group, component, and free-standing sketch — the whole model. Inside a group's editing context it selects that group's contents instead.
 - **Double-click** a group, component, or object to enter its editing context (the rest of the scene dims); press `Esc` to step back out.
 
 ## Move (`M`)
 
-1. Click a **base point**. Pick a meaningful one, like a corner you want to land somewhere.
+1. Click a **base point**. Pick a meaningful one, like a corner you want to land somewhere. (With nothing selected, this click also selects the object under the cursor.)
 2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds.
 
 **Exact distance:** after the base point, type a length (`1.5m`, `8"`) and press `Enter` — the selection moves exactly that far in the direction you were dragging (or along the locked axis).

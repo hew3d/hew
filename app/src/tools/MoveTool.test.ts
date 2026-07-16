@@ -359,3 +359,94 @@ describe('MoveTool — ×N / /N array copy', () => {
     expect(t.scene.max_array_count).toHaveBeenCalled()
   })
 })
+
+// ---- select-and-transform acquirer coverage (select-ux branch) ----
+
+/** A ray straight down (−Z) through world (x, y). */
+function rayThroughSel(x: number, y: number): Ray {
+  return { origin: [x, y, 5], direction: [0, 0, -1] }
+}
+
+function makeSnapSel(overrides: Partial<Snap> = {}): Snap {
+  return { x: 0, y: 0, z: 0, kind: 'ground', ...overrides }
+}
+
+/** Minimal WasmScene stub — only the members MoveTool calls in these paths. */
+function makeWasmSceneSel() {
+  return {
+    transform_selection: vi.fn(),
+  }
+}
+
+function makeToolSel(selection: NodeRef[] = []) {
+  const preview = new THREE.Group()
+  const onCommit = vi.fn()
+  const onToast = vi.fn()
+  const onMeasurement = vi.fn()
+  const wasmScene = makeWasmSceneSel()
+  const tool = new MoveTool(
+    wasmScene as never,
+    preview,
+    null, // objectsGroup — null means no ghost mesh is cloned (fine for logic tests)
+    selection,
+    onCommit,
+    onToast,
+    onMeasurement,
+    null,
+  )
+  return { tool, preview, onCommit, onToast, onMeasurement, wasmScene }
+}
+
+describe('MoveTool — auto-select on click', () => {
+  // Deliberate contract change (selection-UX overhaul): moving an object no
+  // longer requires a two-step Select-then-Move — an empty-selection click
+  // acquires the node under the cursor and starts the move on it.
+  it('empty selection: the first click acquires the node under the cursor and sets the base point', () => {
+    const { tool, onToast } = makeToolSel([])
+    const acquire = vi.fn(() => [{ kind: 'object', id: 7n } as NodeRef])
+    tool.setSelectionAcquirer(acquire)
+
+    tool.onPointerDown(makeSnapSel({ x: 1, y: 1, z: 0 }), rayThroughSel(1, 1))
+
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(acquire).toHaveBeenCalledWith(rayThroughSel(1, 1))
+    expect(onToast).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(true) // in 'base' stage — the move began
+  })
+
+  it('the acquired node is what the second click commits (one fluid select-and-move)', () => {
+    const { tool, wasmScene, onCommit } = makeToolSel([])
+    tool.setSelectionAcquirer(() => [{ kind: 'object', id: 7n }])
+
+    tool.onPointerDown(makeSnapSel({ x: 0, y: 0, z: 0 }), rayThroughSel(0, 0)) // base (auto-select)
+    tool.onPointerMove(makeSnapSel({ x: 2, y: 0, z: 0 }), rayThroughSel(2, 0))
+    tool.onPointerDown(makeSnapSel({ x: 2, y: 0, z: 0 }), rayThroughSel(2, 0)) // destination
+
+    expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    const [kinds, ids, , affine] = (wasmScene.transform_selection as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(kinds as Uint8Array)).toEqual([0]) // one object
+    expect(Array.from(ids as BigUint64Array)).toEqual([7n])
+    expect((affine as Float64Array)[3]).toBeCloseTo(2) // tx = 2
+    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 7n }])
+    expect(tool.capturingInput()).toBe(false) // reset to idle after commit
+  })
+
+  it('a genuine miss (acquirer returns null) toasts and stays idle', () => {
+    const { tool, onToast } = makeToolSel([])
+    tool.setSelectionAcquirer(() => null)
+    tool.onPointerDown(makeSnapSel(), rayThroughSel(0, 0))
+    expect(onToast).toHaveBeenCalledWith('Click an object to move it')
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('an existing selection is never re-acquired — the click is the base point as before', () => {
+    const { tool, onToast } = makeToolSel([{ kind: 'object', id: 3n }])
+    const acquire = vi.fn(() => [{ kind: 'object', id: 7n } as NodeRef])
+    tool.setSelectionAcquirer(acquire)
+
+    tool.onPointerDown(makeSnapSel({ x: 1, y: 1, z: 0 }), rayThroughSel(1, 1))
+    expect(acquire).not.toHaveBeenCalled()
+    expect(onToast).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(true)
+  })
+})

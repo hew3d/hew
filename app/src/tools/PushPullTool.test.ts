@@ -19,11 +19,11 @@ function makeSnap(overrides: Partial<Snap> = {}): Snap {
 }
 
 /** A fake `FacePickJs` returning the seeded handles. */
-function makeFacePick(object: bigint, face: bigint) {
+function makeFacePick(object: bigint, face: bigint, instance?: bigint) {
   return {
     object: () => object,
     face: () => face,
-    instance: () => undefined,
+    instance: () => instance,
     free: vi.fn(),
   }
 }
@@ -40,10 +40,13 @@ function makeRegionPick(sketch: bigint, region: bigint) {
 function makeWasmScene(opts: {
   facePick?: ReturnType<typeof makeFacePick>
   regionPick?: ReturnType<typeof makeRegionPick>
+  /** node_parent(0, id) result per object (a grouped object's group id). */
+  parents?: Map<bigint, bigint>
 } = {}): WasmScene {
   return {
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
+    node_parent: vi.fn((_kind: number, id: bigint) => opts.parents?.get(id)),
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
     region_boundary: vi.fn(() => new Float32Array([])),
     face_boundary: vi.fn(() => new Float32Array([])),
@@ -81,6 +84,117 @@ describe('PushPullTool — Path A (object face)', () => {
     expect(call[2]).toBeCloseTo(2)
     expect(onCommit).toHaveBeenCalledWith(3n)
     expect(onToast).not.toHaveBeenCalled()
+  })
+
+  // Deliberate contract change (selection-UX overhaul, policy consistency
+  // with the draw tools — see faceDraw.ts): at the top level only PLAIN
+  // objects are directly editable. Faces inside a group or a component
+  // instance keep their explicit double-click editing step, for push/pull
+  // exactly as for drawing.
+  it('a GROUPED object\'s face is not push/pullable from outside its group', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      parents: new Map([[3n, 9n]]), // object 3 lives inside group 9
+    })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(tool.capturingInput()).toBe(false) // no drag started
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('instanced (component) geometry is not push/pullable from outside its instance', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  // Fail-closed, not fail-open: an INELIGIBLE face under the cursor must
+  // CONSUME the click — never fall through to Path B, where a sketch region
+  // along the same ray (a ground sketch behind the group — ordinary
+  // mid-modeling state) would silently start a drag and extrude geometry
+  // the user did not aim at.
+  it('an ineligible (grouped) face with a region on the same ray consumes the click — no drag, no extrude, hint shown', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      parents: new Map([[3n, 9n]]),          // grouped → ineligible
+      regionPick: makeRegionPick(50n, 51n),  // live region behind it
+    })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2 }), RAY)
+
+    expect(tool.capturingInput()).toBe(false)      // no drag ever started
+    expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+    expect(scene.extrude_region).not.toHaveBeenCalled()
+    expect(scene.push_pull).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(2)       // one explicable refusal per click
+    expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('group')
+  })
+
+  it('an ineligible (instanced) face over a region consumes the click with the component hint', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, 12n),
+      regionPick: makeRegionPick(50n, 51n),
+    })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(scene.extrude_region).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(false)
+    expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('component')
+  })
+
+  it('inside a GROUP context the refusal is the scoped hint, never the group default', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onToast } = makeTool(scene)
+    // Mirror the real Viewport wiring for a deepest 'group' context: the two
+    // id channels stay null (they only carry object/instance contexts) and
+    // the injected context-path predicate does the rejecting.
+    tool.setActiveContext(null)
+    tool.setComponentContext(null)
+    tool.setContextScoped(true)
+    tool.setFaceEligibility(() => false)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+    const msg = String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])
+    // The clicked face may not be in any group; 'double-click to enter'
+    // would be a lie here — the correct guidance is stepping out.
+    expect(msg).toContain('step out')
+    expect(msg).not.toContain('double-click')
+  })
+
+  it('inside a scoped context an out-of-scope COMPONENT face also gets the scoped hint (double-click cannot enter it from here)', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool, onToast } = makeTool(scene)
+    tool.setContextScoped(true)
+    tool.setFaceEligibility(() => false)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    const msg = String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])
+    expect(msg).toContain('step out')
+  })
+
+  it('in-context: a foreign face consumes the click with the scoped-editing hint', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(999n, 4n) })
+    const { tool, onToast } = makeTool(scene)
+    tool.setActiveContext(7n)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(tool.capturingInput()).toBe(false)
+    expect(onToast).toHaveBeenCalledTimes(1)
   })
 })
 

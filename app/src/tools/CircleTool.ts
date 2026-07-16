@@ -10,7 +10,11 @@
  *
  * Two modes:
  *
- * Ground mode (activeContext === null):
+ * Mode is decided by what's under the cursor per pointer event (mirrors
+ * LineTool; see `faceDraw.ts` for the shared plain-object eligibility
+ * policy), never by `_activeContext` alone.
+ *
+ * Ground mode (no eligible face under the cursor):
  *   1. First click: anchor center (snapped on Z=0)
  *   2. Move: rubber-band N-gon preview whose first vertex passes through the
  *      cursor (radius = distance from center to cursor; start angle = angle
@@ -23,11 +27,10 @@
  *   Calls onCommit() after each successful commit so the viewport can
  *   refresh scene geometry and trigger re-render.
  *
- * Face mode (activeContext !== null):
- *   1. First click on a face of the entered object: anchor center (on face
- *      plane)
+ * Face mode (an eligible Object face is under the cursor):
+ *   1. First click on an eligible face: anchor center (on face plane)
  *   2. Move: rubber-band N-gon preview projected onto that face plane
- *   3. Second click: commit — split_face_inner() on the entered object face
+ *   3. Second click: commit — split_face_inner() on that face
  *      with N loop points
  *   4. Esc: cancel
  *   Calls onFaceImprint(objectId) after each successful imprint so the
@@ -49,6 +52,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
+import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
 
 import { segmentsPerTurn } from './arcMath'
 
@@ -182,23 +186,59 @@ export class CircleTool implements Tool {
     this.cancel()
   }
 
+  /** Per-pointer-event `pick_face` memo — see `FacePickCache` in faceDraw.ts. */
+  private readonly _pickCache = new FacePickCache()
+
+  /** Optional richer eligibility, injected by the Viewport (which knows the
+   *  full group/instance context path the tool can't see). Null = the shared
+   *  default policy in faceDraw.ts. */
+  private _faceEligible: FaceEligible | null = null
+  setFaceEligibility(pred: FaceEligible | null): void {
+    this._faceEligible = pred
+  }
+
+  /** Plain objects are directly drawable at the top level; inside an entered
+   *  object context only that object's faces are — see faceDraw.ts. */
+  private _isEligible(objectHandle: bigint, instanceHandle: bigint | undefined): boolean {
+    if (this._faceEligible !== null) return this._faceEligible(objectHandle, instanceHandle)
+    return defaultFaceEligible(this.wasmScene, this._activeContext, objectHandle, instanceHandle)
+  }
+
+  /** The eligible face under `ray`, or null (memoized per pointer event). */
+  private _eligiblePickFor(ray: Ray): { object: bigint; face: bigint } | null {
+    return this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
+      this._isEligible(object, instance))
+  }
+
+  /**
+   * Decide which mode governs the NEXT pointer event (same contract as the
+   * other draw tools): sticky mid-gesture; always face mode inside an
+   * entered object context (scoped drawing — no top-level ground sketch
+   * from inside); else decided by what's under the cursor.
+   */
+  private _currentMode(ray?: Ray): 'face' | 'ground' {
+    if (this.faceStage.kind === 'anchored') return 'face'
+    if (this.groundStage.kind === 'anchored') return 'ground'
+    // Inside an entered object context, drawing stays scoped to that
+    // object's faces — a click elsewhere is ignored by the face handler
+    // rather than falling through to a top-level ground sketch.
+    if (this._activeContext !== null) return 'face'
+    if (ray === undefined) return 'ground'
+    return this._eligiblePickFor(ray) !== null ? 'face' : 'ground'
+  }
+
   /**
    * Provide a constraint plane for snap so off-plane/occluded geometry is
    * excluded while snapping during face-mode drawing.
    *
-   * - Ground mode: return null (unconstrained).
    * - Face mode, anchored: return the already-known face plane so subsequent
    *   snaps stay on that plane.
-   * - Face mode, idle: pick the hovered face and return its plane so the
-   *   FIRST-click center lands precisely on the face, preventing the kernel
-   *   from rejecting a non-planar loop.
+   * - Idle: pick the hovered face (if an eligible one is under the cursor)
+   *   and return its plane so the FIRST-click center lands precisely on the
+   *   face, preventing the kernel from rejecting a non-planar loop.
+   * - Otherwise (ground mode): return null (unconstrained).
    */
   snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null {
-    if (this._activeContext === null) {
-      // Ground mode — no constraint
-      return null
-    }
-
     if (this.faceStage.kind === 'anchored') {
       // Already anchored: lock to the established face plane
       return {
@@ -209,32 +249,26 @@ export class CircleTool implements Tool {
       }
     }
 
-    // Face mode, idle: pick the face under the cursor and use its plane
-    const pick = this.wasmScene.pick_face(
-      ray.origin[0], ray.origin[1], ray.origin[2],
-      ray.direction[0], ray.direction[1], ray.direction[2],
-    )
-    if (pick === undefined) return null
+    if (this.groundStage.kind === 'anchored') {
+      // Mid ground gesture — no constraint
+      return null
+    }
 
-    try {
-      const objectHandle = pick.object()
-      if (objectHandle !== this._activeContext) return null
+    // Idle: face mode iff an eligible face is under the cursor
+    const eligible = this._eligiblePickFor(ray)
+    if (eligible === null) return null
 
-      const faceHandle = pick.face()
-      const a = this.wasmScene.face_plane(objectHandle, faceHandle)
-      return {
-        constraintPlane: {
-          point: [a[0], a[1], a[2]],
-          normal: [a[3], a[4], a[5]],
-        },
-      }
-    } finally {
-      pick.free()
+    const a = this.wasmScene.face_plane(eligible.object, eligible.face)
+    return {
+      constraintPlane: {
+        point: [a[0], a[1], a[2]],
+        normal: [a[3], a[4], a[5]],
+      },
     }
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
-    if (this._activeContext !== null) {
+    if (this._currentMode(ray) === 'face') {
       // Face mode
       if (this.faceStage.kind !== 'anchored') {
         this._clearPreview()
@@ -280,7 +314,7 @@ export class CircleTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
-    if (this._activeContext !== null) {
+    if (this._currentMode(ray) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
       this._onPointerDownGround(snap)
@@ -486,36 +520,25 @@ export class CircleTool implements Tool {
 
   private _onPointerDownFace(snap: Snap | null, ray: Ray): void {
     if (this.faceStage.kind === 'idle') {
-      // First click: pick a face of the entered object
+      // First click: anchor on the eligible face under the cursor
       if (snap === null) return
 
-      const pick = this.wasmScene.pick_face(
-        ray.origin[0], ray.origin[1], ray.origin[2],
-        ray.direction[0], ray.direction[1], ray.direction[2],
-      )
-      if (pick === undefined) return
+      const eligible = this._eligiblePickFor(ray)
+      if (eligible === null) return
 
-      try {
-        const objectHandle = pick.object()
-        if (objectHandle !== this._activeContext) return
+      const normalArr = this.wasmScene.face_normal(eligible.object, eligible.face)
+      const normal: V3 = [normalArr[0], normalArr[1], normalArr[2]]
+      const center: V3 = [snap.x, snap.y, snap.z]
 
-        const faceHandle = pick.face()
-        const normalArr = this.wasmScene.face_normal(objectHandle, faceHandle)
-        const normal: V3 = [normalArr[0], normalArr[1], normalArr[2]]
-        const center: V3 = [snap.x, snap.y, snap.z]
-
-        this.faceStage = {
-          kind: 'anchored',
-          object: objectHandle,
-          face: faceHandle,
-          normal,
-          planePoint: center,
-          center,
-        }
-        this._lastFaceCursor = null
-      } finally {
-        pick.free()
+      this.faceStage = {
+        kind: 'anchored',
+        object: eligible.object,
+        face: eligible.face,
+        normal,
+        planePoint: center,
+        center,
       }
+      this._lastFaceCursor = null
     } else {
       // Second click: commit the face imprint
       const { object, face, normal, planePoint, center } = this.faceStage

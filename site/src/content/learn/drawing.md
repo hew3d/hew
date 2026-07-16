@@ -56,7 +56,7 @@ A two-point arc, like SketchUp's:
 
 ## Drawing on a face
 
-Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level you can draw on any object's face; once you've double-clicked into an object's editing context, drawing is scoped to that object.
+Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level, any plain object's face is drawable directly — objects are immediately editable, just as they are with Push/Pull. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered.
 
 ## Offset (`F`)
 

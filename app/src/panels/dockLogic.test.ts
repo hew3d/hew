@@ -59,14 +59,17 @@ describe('dockVerbsFor', () => {
     expect(verbs.map((v) => v.id)).toEqual(['tool-rectangle', 'tool-line', 'tool-circle', 'tool-arc'])
   })
 
-  it('object: primary Push/Pull, then Move, Paint, Erase (spec Face row)', () => {
+  // Deliberate contract change (selection-UX overhaul): the Object and Group
+  // rows gained Make Component and the Multi row gained Group, so the two
+  // structural commands are one click from the selection that enables them.
+  it('object: primary Push/Pull, then Move, Paint, Make Component, Erase', () => {
     const verbs = dockVerbsFor('object')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'edit-make-component', 'edit-delete'])
   })
 
-  it('group: primary Edit, then Move, Scale, Ungroup, Erase (spec Component/Group row)', () => {
+  it('group: primary Edit, then Move, Scale, Make Component, Ungroup, Erase', () => {
     const verbs = dockVerbsFor('group')
-    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'ungroup', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'edit-make-component', 'ungroup', 'edit-delete'])
   })
 
   it('instance: primary Edit, then Move, Scale, Make Unique, Explode (spec Component row)', () => {
@@ -74,9 +77,30 @@ describe('dockVerbsFor', () => {
     expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'make-unique', 'explode-instance'])
   })
 
-  it('multi: primary Move, then Erase', () => {
+  it('multi: primary Move, then Group, Erase', () => {
     const verbs = dockVerbsFor('multi')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-group', 'edit-delete'])
+  })
+
+  it('gates hide Group / Make Component when the selection is ineligible', () => {
+    // Multi containing a sketch sub-entity: not groupable.
+    expect(
+      dockVerbsFor('multi', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
+    ).toEqual(['tool-move', 'edit-delete'])
+    // Object inside an editing context (canMakeComponent is top-level-only).
+    expect(
+      dockVerbsFor('object', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
+    ).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'edit-delete'])
+    expect(
+      dockVerbsFor('group', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
+    ).toEqual(['enter-context', 'tool-move', 'tool-scale', 'ungroup', 'edit-delete'])
+    // Eligible selections keep the structural verbs.
+    expect(
+      dockVerbsFor('multi', { canGroup: true, canMakeComponent: true }).map((v) => v.id),
+    ).toContain('edit-group')
+    expect(
+      dockVerbsFor('object', { canGroup: false, canMakeComponent: true }).map((v) => v.id),
+    ).toContain('edit-make-component')
   })
 
   it('sketch: primary Push/Pull, then Move, Rotate, Scale, Erase', () => {
