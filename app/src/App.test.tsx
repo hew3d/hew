@@ -20,7 +20,7 @@
  * against the in-memory Storage polyfill provided by src/test/setup.ts.
  */
 
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 /**
@@ -136,6 +136,7 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
 })
 
 import App from './App'
+import Viewport from './viewport/Viewport'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 import { setShowWelcome } from './settings/welcomeScreen'
 import { makeFileHost, type FileHost } from './io/fileHost'
@@ -740,6 +741,32 @@ describe('App — import overlay lifecycle', () => {
     await waitFor(() => expect(fakeFileHost.openForImport).toHaveBeenCalled())
     expect(mockScene.import_skp).not.toHaveBeenCalled()
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+})
+
+describe('App — toast severity', () => {
+  /** The onToast prop the App handed the (mocked) Viewport on its last render. */
+  function latestOnToast(): (message: string, code?: string) => void {
+    const calls = vi.mocked(Viewport).mock.calls
+    const props = calls[calls.length - 1][0] as { onToast: (m: string, c?: string) => void }
+    return props.onToast
+  }
+
+  it('renders error-level kernel refusals as red bubbles, from the single classification source', async () => {
+    await renderAndLoad()
+    // A group-boolean refusal must render exactly like its sibling
+    // OperandNotSolid — one classification source (isErrorLevelCode), used
+    // by the log level AND the bubble color alike.
+    act(() => latestOnToast()('not solid', 'BooleanOperandNotSolid'))
+    const bubble = screen.getByText(/not solid/).closest('div')!
+    expect(bubble.style.background).toBe('rgb(204, 51, 34)')
+  })
+
+  it('renders warning-level refusals as neutral bubbles', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
+    const bubble = screen.getByText(/nothing to undo/).closest('div')!
+    expect(bubble.style.background).toBe('rgb(51, 51, 51)')
   })
 })
 

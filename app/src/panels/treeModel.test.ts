@@ -5,6 +5,7 @@ import {
   breadcrumb,
   isTreeRowDimmed,
   nextSelection,
+  canBoolean,
   canGroup,
   canUngroup,
   nodeEq,
@@ -386,6 +387,43 @@ describe('canGroup', () => {
 
   it('true for object + group at top level', () => {
     expect(canGroup([a, c], noParent)).toBe(true)
+  })
+})
+
+describe('canBoolean', () => {
+  const a: NodeRef = { kind: 'object', id: 1n }
+  const b: NodeRef = { kind: 'object', id: 2n }
+  const g: NodeRef = { kind: 'group', id: 3n }
+  const inst: NodeRef = { kind: 'instance', id: 4n }
+
+  const topLevel = (_n: NodeRef) => undefined
+  const live = (_n: NodeRef) => true
+
+  it('true for two top-level objects, object+group, and two groups', () => {
+    expect(canBoolean([a, b], topLevel, live)).toBe(true)
+    expect(canBoolean([a, g], topLevel, live)).toBe(true)
+    expect(canBoolean([g, { kind: 'group', id: 5n }], topLevel, live)).toBe(true)
+  })
+
+  it('requires exactly two distinct operands', () => {
+    expect(canBoolean([a], topLevel, live)).toBe(false)
+    expect(canBoolean([a, a], topLevel, live)).toBe(false)
+    expect(canBoolean([a, b, g], topLevel, live)).toBe(false)
+  })
+
+  it('false when either operand is NESTED inside a group — the gate must match the kernel GroupedOperand refusal', () => {
+    const nestedFirst = (n: NodeRef) => (n.id === 1n ? 99n : undefined)
+    expect(canBoolean([a, b], nestedFirst, live)).toBe(false)
+    const nestedSecond = (n: NodeRef) => (n.id === 3n ? 99n : undefined)
+    expect(canBoolean([a, g], nestedSecond, live)).toBe(false)
+    const bothNested = (_n: NodeRef) => 99n
+    expect(canBoolean([a, b], bothNested, live)).toBe(false)
+  })
+
+  it('false for instances and non-live operands', () => {
+    expect(canBoolean([a, inst], topLevel, live)).toBe(false)
+    const bStale = (n: NodeRef) => n.id !== 2n
+    expect(canBoolean([a, b], topLevel, bStale)).toBe(false)
   })
 })
 

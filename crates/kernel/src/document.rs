@@ -43,7 +43,7 @@ use crate::ids::{
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::Material;
 use crate::math::{MathError, Plane, Point3, Vec3};
-use crate::ops::{BooleanError, BooleanOp, ExtrudeError, SliceError};
+use crate::ops::{BooleanError, BooleanOp, ExtrudeError, Operand, SliceError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
 use crate::sketch::{
     Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
@@ -259,6 +259,26 @@ enum DocAction {
         result: ObjectId,
         a: ObjectId,
         b: ObjectId,
+    },
+    /// `boolean_nodes` combined two tree nodes (each a plain Object or a
+    /// whole Group; docs/design/group-ops.md) into a result of one Object per
+    /// connected volume — several arriving inside a fresh result group. Undo
+    /// hides the result (objects + container group) and unhides exactly
+    /// `hidden_operands`; redo reverses. Pure visibility flipping, all
+    /// handles stable (hide-not-delete) — nothing is recomputed on replay.
+    BooleanNodes {
+        /// The first operand's root node.
+        a: NodeId,
+        /// The second operand's root node.
+        b: NodeId,
+        /// Every node hidden by consuming the operands (both subtrees,
+        /// pre-order), so undo unhides exactly this set and nothing else.
+        hidden_operands: Vec<NodeId>,
+        /// The result pieces (one per connected component of the result).
+        result_objects: Vec<ObjectId>,
+        /// The result container group, present iff there was more than one
+        /// piece.
+        result_group: Option<GroupId>,
     },
     /// A slice cut one solid into two. Undo hides both pieces and unhides
     /// the source; redo reverses. Like `Boolean`, all three handles stay stable
@@ -635,6 +655,23 @@ pub enum DocumentError {
     /// tree-consistency violation). Refused loudly (DEVELOPMENT.md rule 4) rather than
     /// silently re-homed — ungroup, or enter no group context, first.
     GroupedOperand,
+    /// A [`Document::boolean_nodes`] operand is, or contains, a component
+    /// instance. A boolean consumes its operand, and an instance's geometry is
+    /// *shared* — consuming it would either mutate every sibling instance or
+    /// hide an implicit Make Unique inside another verb (the exact implicit
+    /// magic Hew refuses; docs/design/group-ops.md §2.2). Explode the
+    /// instance (or Make Unique, then Explode) first.
+    BooleanOperandHasInstance,
+    /// A leaf object under a [`Document::boolean_nodes`] operand is not a
+    /// watertight solid. Booleans are volume algebra; a leaky leaf anywhere
+    /// under an operand refuses the whole op, naming the offending side.
+    BooleanOperandNotSolid {
+        /// Which operand holds the non-solid leaf.
+        which: Operand,
+    },
+    /// A [`Document::boolean_nodes`] operand contains no solid objects at all
+    /// (defensive: the tree normally cannot produce an empty group).
+    BooleanOperandEmpty,
     /// A sketch operation (region lookup / profile tracing) failed.
     Sketch(SketchError),
     /// Extruding the region into a solid failed.
@@ -711,6 +748,23 @@ impl std::fmt::Display for DocumentError {
                 f,
                 "cannot combine, slice, or push-through an object inside a group — ungroup it first"
             ),
+            DocumentError::BooleanOperandHasInstance => write!(
+                f,
+                "cannot combine a component instance — explode it (or make it unique, then explode) first"
+            ),
+            DocumentError::BooleanOperandNotSolid { which } => {
+                let side = match which {
+                    Operand::A => "first",
+                    Operand::B => "second",
+                };
+                write!(
+                    f,
+                    "an object in the {side} selection is not a watertight solid"
+                )
+            }
+            DocumentError::BooleanOperandEmpty => {
+                write!(f, "the selection contains no solids to combine")
+            }
             DocumentError::Sketch(e) => write!(f, "{e}"),
             DocumentError::Extrude(e) => write!(f, "{e}"),
             DocumentError::Boolean(e) => write!(f, "{e}"),
@@ -2827,6 +2881,243 @@ impl Document {
         Ok((id, change))
     }
 
+    /// Explicitly combines two **tree nodes** — each a plain solid Object or a
+    /// whole Group, mixed freely — consuming both operands
+    /// (docs/design/group-ops.md §2). Subtract is `a − b`.
+    ///
+    /// Each operand is first *composed*: its leaf solids (in tree order) are
+    /// folded with the boolean engine's Union — the user explicitly asked for
+    /// volume algebra, so the non-destructive container becomes one composite
+    /// volume, disjoint members yielding a multi-shell composite. `op` then
+    /// applies between the two composites; coplanar seams the composition and
+    /// the op introduced are dissolved (imprints the original leaves already
+    /// carried are preserved), and the result is split into connected
+    /// components:
+    ///
+    /// - exactly one component → a single top-level Object (unnamed, base
+    ///   material from operand `a`'s first leaf), like [`Document::boolean`];
+    /// - several solids → one top-level **result group** named from the
+    ///   operands (`"A − B"`), holding one Object per solid. A **cavity** (a
+    ///   hollowing subtract leaves its walls as a negative-volume component)
+    ///   is not a solid: it stays attached to the positive shell that
+    ///   contains it ([`Object::split_solids`]) — never split out as an
+    ///   inside-out "solid", and never fusing unrelated solids either.
+    ///
+    /// Both operand subtrees are hidden (tombstoned, never erased). One undo
+    /// step ([`DocAction::BooleanNodes`]) restores them and removes the result,
+    /// handle-stably.
+    ///
+    /// Every fallible step runs on clones before the document is touched, so
+    /// any `Err` leaves the entire document untouched (the strong guarantee
+    /// across a multi-solid compound op).
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / `UnknownGroup` / `UnknownInstance`
+    ///   — a stale or hidden operand handle.
+    /// - [`DocumentError::BooleanOperandHasInstance`] — an operand is, or
+    ///   contains, a component instance; explode it first (never an implicit
+    ///   Make Unique).
+    /// - [`DocumentError::BooleanOperandNotSolid`] — a leaf under an operand
+    ///   is not watertight, naming the offending side.
+    /// - [`DocumentError::BooleanOperandEmpty`] — an operand flattens to no
+    ///   solids (defensive).
+    /// - [`DocumentError::GroupedOperand`] — an operand is itself inside a
+    ///   group (replacing ops consume operands and emit top-level results).
+    /// - [`DocumentError::Boolean`] — the engine refused (degenerate contact
+    ///   between members or operands, empty result, …), including
+    ///   [`BooleanError::DegenerateContact`] for `a == b`.
+    pub fn boolean_nodes(
+        &mut self,
+        op: BooleanOp,
+        a: NodeId,
+        b: NodeId,
+    ) -> Result<(NodeId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "boolean_nodes", boolean_op = ?op);
+        if a == b {
+            // A node cannot be combined with itself (fully coincident faces —
+            // a degenerate contact); reject before doing any work.
+            return Err(DocumentError::Boolean(BooleanError::DegenerateContact));
+        }
+        let leaves_a = self.boolean_operand_leaves(a, Operand::A)?;
+        let leaves_b = self.boolean_operand_leaves(b, Operand::B)?;
+        // Replacing op: operands are consumed and the result lands at the top
+        // level, so an operand inside some other group would orphan that
+        // group's member list. Both operands top-level also means their
+        // subtrees are disjoint (neither can contain the other).
+        if self.node_parent(a).is_some() || self.node_parent(b).is_some() {
+            return Err(DocumentError::GroupedOperand);
+        }
+
+        // ── Fallible geometry, entirely on clones (document untouched) ─────
+        let composite_a = self.compose_operand_union(&leaves_a)?;
+        let composite_b = self.compose_operand_union(&leaves_b)?;
+        let mut result = Object::boolean(op, &composite_a, &composite_b, &Transform::IDENTITY)
+            .map_err(DocumentError::Boolean)?;
+
+        // Dissolve the coplanar seams the composition unions and the final op
+        // introduced, preserving imprints the original leaves already carried
+        // (drawn-but-unextruded face imprints are content, not seams) — the
+        // same preserve rule as `boolean`, collected across every leaf.
+        let preserve: Vec<_> = leaves_a
+            .iter()
+            .chain(leaves_b.iter())
+            .flat_map(|&o| self.objects[o].object.coplanar_edge_segments())
+            .collect();
+        result.merge_coplanar_faces(&preserve);
+        // Split disjoint volumes into discrete solids. A hollowing subtract
+        // leaves cavity walls as their own negative-volume component;
+        // `split_solids` assigns each cavity to the positive shell that
+        // contains it (never minting an inside-out "solid"), while unrelated
+        // solids still split out discretely.
+        let pieces = result.split_solids();
+        debug_assert!(!pieces.is_empty(), "a non-empty boolean result has faces");
+
+        // ── Everything fallible has succeeded; commit (infallible) ─────────
+        // The result-group name derives from the operands' display names —
+        // resolved before hiding them (name lookups filter hidden records).
+        let group_name = if pieces.len() > 1 {
+            let sym = match op {
+                BooleanOp::Union => "\u{222a}",     // ∪
+                BooleanOp::Subtract => "\u{2212}",  // −
+                BooleanOp::Intersect => "\u{2229}", // ∩
+            };
+            Some(format!(
+                "{} {} {}",
+                self.node_label(a),
+                sym,
+                self.node_label(b)
+            ))
+        } else {
+            None
+        };
+
+        let mut hidden_operands = Vec::new();
+        self.collect_subtree(a, &mut hidden_operands);
+        self.collect_subtree(b, &mut hidden_operands);
+        for &n in &hidden_operands {
+            match n {
+                NodeId::Object(id) => self.objects[id].hidden = true,
+                NodeId::Group(id) => self.groups[id].hidden = true,
+                NodeId::Instance(_) => unreachable!("instance operands were refused"),
+            }
+        }
+
+        let result_group = group_name.map(|name| {
+            self.groups.insert(GroupRecord {
+                members: Vec::new(),
+                parent: None,
+                hidden: false,
+                name: Some(name),
+                tags: Vec::new(),
+            })
+        });
+        let mut result_objects: Vec<ObjectId> = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            let id = self.objects.insert(ObjectRecord {
+                object: piece,
+                history: History::new(),
+                hidden: false,
+                owner: ObjectOwner::World {
+                    parent: result_group,
+                },
+                name: None,
+                tags: Vec::new(),
+            });
+            result_objects.push(id);
+        }
+        if let Some(g) = result_group {
+            self.groups[g].members = result_objects.iter().map(|&o| NodeId::Object(o)).collect();
+        }
+
+        let root = match result_group {
+            Some(g) => NodeId::Group(g),
+            None => NodeId::Object(result_objects[0]),
+        };
+        let change = boolean_nodes_change(&hidden_operands, &result_objects, result_group);
+        self.undo.push(DocAction::BooleanNodes {
+            a,
+            b,
+            hidden_operands,
+            result_objects,
+            result_group,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok((root, change))
+    }
+
+    /// Validate one [`Document::boolean_nodes`] operand and flatten it to its
+    /// leaf solids: live, no instances anywhere in the subtree, at least one
+    /// leaf, every leaf watertight. Read-only — the document is untouched.
+    fn boolean_operand_leaves(
+        &self,
+        node: NodeId,
+        which: Operand,
+    ) -> Result<Vec<ObjectId>, DocumentError> {
+        if !self.node_is_live(node) {
+            return Err(match node {
+                NodeId::Object(_) => DocumentError::UnknownObject,
+                NodeId::Group(_) => DocumentError::UnknownGroup,
+                NodeId::Instance(_) => DocumentError::UnknownInstance,
+            });
+        }
+        // Instances are refused, never implicitly made unique
+        // (docs/design/group-ops.md §2.2) — as the operand itself or anywhere
+        // in its subtree.
+        if matches!(node, NodeId::Instance(_)) || !self.leaf_instances_under(node).is_empty() {
+            return Err(DocumentError::BooleanOperandHasInstance);
+        }
+        let leaves = self.leaf_objects_under(node);
+        if leaves.is_empty() {
+            return Err(DocumentError::BooleanOperandEmpty);
+        }
+        for &o in &leaves {
+            if self.objects[o].object.watertight() != WatertightState::Watertight {
+                return Err(DocumentError::BooleanOperandNotSolid { which });
+            }
+        }
+        Ok(leaves)
+    }
+
+    /// Fold one operand's leaves into a single composite volume with the
+    /// boolean engine's Union, on clones, in tree order (deterministic).
+    /// Group transforms are always baked (a group holds no pose), so members
+    /// already share the world frame and map with the identity transform.
+    fn compose_operand_union(&self, leaves: &[ObjectId]) -> Result<Object, DocumentError> {
+        let mut iter = leaves.iter();
+        let &first = iter.next().expect("operand leaves are non-empty");
+        let mut acc = self.objects[first].object.clone();
+        for &next in iter {
+            acc = Object::boolean(
+                BooleanOp::Union,
+                &acc,
+                &self.objects[next].object,
+                &Transform::IDENTITY,
+            )
+            .map_err(DocumentError::Boolean)?;
+        }
+        Ok(acc)
+    }
+
+    /// A node's display label for result-group naming: its name when it has
+    /// one, else its kind word. UI positional labels ("Object 2") are a
+    /// presentation concern the kernel does not know.
+    fn node_label(&self, node: NodeId) -> String {
+        match node {
+            NodeId::Object(id) => self.object_name(id).unwrap_or("Object").to_string(),
+            NodeId::Group(id) => self.group_name(id).unwrap_or("Group").to_string(),
+            NodeId::Instance(id) => self
+                .instance_name(id)
+                .map(str::to_string)
+                .or_else(|| {
+                    self.instance_def(id)
+                        .and_then(|d| self.component_name(d).map(str::to_string))
+                })
+                .unwrap_or_else(|| "Component".to_string()),
+        }
+    }
+
     /// Slice a visible world solid by `plane` into two independent watertight
     /// Objects. The source is hidden (tombstone) and the two pieces are
     /// inserted as top-level world objects; re-joining is an explicit Union.
@@ -4372,6 +4663,29 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            DocAction::BooleanNodes {
+                hidden_operands,
+                result_objects,
+                result_group,
+                ..
+            } => {
+                // Undo a node combine: hide the result (pieces + container
+                // group), unhide exactly the consumed operand subtrees.
+                for &o in result_objects {
+                    self.objects[o].hidden = true;
+                }
+                if let Some(g) = *result_group {
+                    self.groups[g].hidden = true;
+                }
+                for &n in hidden_operands {
+                    match n {
+                        NodeId::Object(id) => self.objects[id].hidden = false,
+                        NodeId::Group(id) => self.groups[id].hidden = false,
+                        NodeId::Instance(id) => self.instances[id].hidden = false,
+                    }
+                }
+                boolean_nodes_change(hidden_operands, result_objects, *result_group)
+            }
             &DocAction::Sliced { source, a, b } => {
                 // Undo a slice: hide both pieces, bring the source back.
                 if let Some(rec) = self.objects.get_mut(a) {
@@ -4904,6 +5218,29 @@ impl Document {
                     components_touched: Vec::new(),
                     guides_touched: Vec::new(),
                 }
+            }
+            DocAction::BooleanNodes {
+                hidden_operands,
+                result_objects,
+                result_group,
+                ..
+            } => {
+                // Redo a node combine: re-hide the operand subtrees, show the
+                // result again.
+                for &n in hidden_operands {
+                    match n {
+                        NodeId::Object(id) => self.objects[id].hidden = true,
+                        NodeId::Group(id) => self.groups[id].hidden = true,
+                        NodeId::Instance(id) => self.instances[id].hidden = true,
+                    }
+                }
+                if let Some(g) = *result_group {
+                    self.groups[g].hidden = false;
+                }
+                for &o in result_objects {
+                    self.objects[o].hidden = false;
+                }
+                boolean_nodes_change(hidden_operands, result_objects, *result_group)
             }
             &DocAction::Sliced { source, a, b } => {
                 // Redo a slice: hide the source again, show both pieces.
@@ -5682,6 +6019,36 @@ fn group_change(group: GroupId, parent: Option<GroupId>, members: &[NodeId]) -> 
             NodeId::Instance(i) => instances_touched.push(i),
         }
     }
+    DocChange {
+        objects_touched,
+        sketches_touched: Vec::new(),
+        groups_touched,
+        instances_touched,
+        components_touched: Vec::new(),
+        guides_touched: Vec::new(),
+    }
+}
+
+/// The [`DocChange`] for `boolean_nodes`/its undo/redo: every node in the
+/// consumed operand subtrees changed visibility, and every result piece (plus
+/// the result container group, when present) appeared or disappeared.
+fn boolean_nodes_change(
+    hidden_operands: &[NodeId],
+    result_objects: &[ObjectId],
+    result_group: Option<GroupId>,
+) -> DocChange {
+    let mut objects_touched: Vec<ObjectId> = Vec::new();
+    let mut groups_touched: Vec<GroupId> = Vec::new();
+    let mut instances_touched: Vec<InstanceId> = Vec::new();
+    for &n in hidden_operands {
+        match n {
+            NodeId::Object(o) => objects_touched.push(o),
+            NodeId::Group(g) => groups_touched.push(g),
+            NodeId::Instance(i) => instances_touched.push(i),
+        }
+    }
+    objects_touched.extend_from_slice(result_objects);
+    groups_touched.extend(result_group);
     DocChange {
         objects_touched,
         sketches_touched: Vec::new(),

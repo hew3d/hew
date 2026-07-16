@@ -32,6 +32,16 @@ below.
 - Explicit boolean union, subtract, and intersect, with coplanar seams
   dissolved on the result (a union of two flush boxes reads as one box)
 - Non-destructive, nestable grouping (Group/Ungroup)
+- Group-level booleans: Union/Subtract/Intersect accept a whole group on
+  either side (or mixed with a plain solid). The group's solids are fused
+  first, then the operation applies; one connected result stays a single
+  solid, and disjoint pieces arrive together in a result group named from
+  the operands. Instances inside an operand refuse with a typed error
+  (explode first) rather than being made unique implicitly
+- Group duplication: Move+Alt-copy deep-copies a whole group — nested
+  groups recursively, contained component instances as new instances of
+  the same definition, names/tags/materials preserved — fully independent
+  afterward, removed by a single undo
 - Components: shared geometry with independent per-instance position,
   rotation, scale, and mirroring; edit the definition once, every instance
   updates. A component takes its name and tags from what it was made of;
@@ -232,7 +242,6 @@ below.
   components)
 - **Array copy** — duplicate an object along a line a set number of times
   in one step
-- **Group-level booleans and group duplication**
 - **Layers and saved Scenes** (named camera bookmarks)
 - **Section planes** — non-destructive visual clipping, distinct from the
   existing destructive Slice tool

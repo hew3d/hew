@@ -27,7 +27,7 @@ A quick refresher, since every transform starts here:
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.
 
-**Copy instead of move:** hold `Option`/`Alt` while committing — the original stays put and a copy lands at the destination, with the readout prefixed "Copy ·". The copy becomes the new selection, so repeated Alt-moves chain copies one after another.
+**Copy instead of move:** hold `Option`/`Alt` while committing — the original stays put and a copy lands at the destination, with the readout prefixed "Copy ·". The copy becomes the new selection, so repeated Alt-moves chain copies one after another. This works on whatever you have selected: an object copies its geometry, a **group** copies its entire contents — nested groups and all, names, tags, and materials included — and a component instance copies as another instance of the same definition (the copies still update together; use Make Unique to break that). A copied group is fully independent of the original, and one undo removes the whole copy.
 
 ## Rotate (`Q`)
 

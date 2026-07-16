@@ -3128,10 +3128,143 @@ impl Object {
     /// leave one Object holding two disjoint watertight shells, which this
     /// splits back into independent solids the document can own separately.
     pub fn split_connected_components(&self) -> Vec<Object> {
+        let components = self.face_components();
+        if components.len() <= 1 {
+            return vec![self.clone()];
+        }
+        components
+            .into_iter()
+            .map(|faces| self.rebuild_component(&faces))
+            .collect()
+    }
+
+    /// Partition this Object into discrete **solids**: connected face
+    /// components regrouped so each positive-signed-volume shell becomes one
+    /// Object carrying every **cavity** shell (negative signed volume) it
+    /// contains — the shell-assignment primitive behind
+    /// [`Document::boolean_nodes`](crate::Document::boolean_nodes)
+    /// (docs/design/group-ops.md §2.3).
+    ///
+    /// Unlike [`Object::split_connected_components`], which emits one Object
+    /// per component unconditionally, this never strands a cavity as its own
+    /// inside-out "solid": each cavity attaches to the smallest
+    /// positive-volume component whose interior contains it (the immediate
+    /// host under nesting — a floating island inside a cavity is itself a
+    /// positive component and splits out as a discrete solid). Containment is
+    /// the boolean classifier's parity ray-cast ([`point_in_shell_faces`]),
+    /// volumes are divergence-theorem sums over every loop (hole loops wind
+    /// opposite and subtract correctly).
+    ///
+    /// Degenerate inputs fall back conservatively to a single clone of the
+    /// whole Object (never a wrong split): a cavity with no containing
+    /// positive component, or a result with no positive component at all.
+    /// A connected Object also returns a single clone, untouched.
+    ///
+    /// Deterministic: component order, volume comparison (`f64::total_cmp`),
+    /// and host tie-breaking (first, i.e. lowest component index) are all
+    /// derived from the deterministic face iteration order. Each returned
+    /// Object is rebuilt via the same path as
+    /// [`Object::split_connected_components`] (materials/UV frames/analytic
+    /// surfaces preserved, `default_material` and `planarity_tol` carried
+    /// over, debug-validated before return).
+    pub fn split_solids(&self) -> Vec<Object> {
+        let components = self.face_components();
+        if components.len() <= 1 {
+            return vec![self.clone()];
+        }
+
+        // Signed volume per component: positive = a solid's outer boundary,
+        // negative = the walls of a cavity.
+        let component_volume = |faces: &[FaceId]| -> f64 {
+            let mut six_v = 0.0;
+            for &fid in faces {
+                let f = &self.faces[fid];
+                for lid in std::iter::once(f.outer_loop).chain(f.inner_loops.iter().copied()) {
+                    let p: Vec<Vec3> = self.loop_positions(lid).map(|pt| pt.to_vec()).collect();
+                    for i in 1..p.len().saturating_sub(1) {
+                        six_v += p[0].dot(p[i].cross(p[i + 1]));
+                    }
+                }
+            }
+            six_v / 6.0
+        };
+        let volumes: Vec<f64> = components.iter().map(|f| component_volume(f)).collect();
+        let positive: Vec<usize> = (0..components.len())
+            .filter(|&i| volumes[i] > 0.0)
+            .collect();
+        if positive.is_empty() {
+            // Cavity-only result: nothing can host the shells. Conservative
+            // fallback — keep the whole Object rather than emit inside-out
+            // pieces (should be unreachable from a valid boolean).
+            return vec![self.clone()];
+        }
+        if positive.len() == components.len() {
+            // No cavities: every component is its own discrete solid.
+            return components
+                .into_iter()
+                .map(|faces| self.rebuild_component(&faces))
+                .collect();
+        }
+
+        // Flatten each positive component once for the parity casts.
+        let shell_faces = |faces: &[FaceId]| -> Vec<ShellFace> {
+            faces
+                .iter()
+                .map(|&fid| {
+                    let f = &self.faces[fid];
+                    (
+                        f.plane,
+                        self.loop_positions(f.outer_loop).collect(),
+                        f.inner_loops
+                            .iter()
+                            .map(|&il| self.loop_positions(il).collect())
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        let positive_faces: Vec<Vec<ShellFace>> = positive
+            .iter()
+            .map(|&i| shell_faces(&components[i]))
+            .collect();
+
+        let mut grouped: Vec<Vec<FaceId>> =
+            positive.iter().map(|&i| components[i].clone()).collect();
+        for ci in 0..components.len() {
+            if volumes[ci] > 0.0 {
+                continue;
+            }
+            // Sample the cavity at one of its vertices (distinct components
+            // share no geometry, so the point lies on no host face) and
+            // attach it to the smallest containing positive component.
+            let sample = self
+                .loop_positions(self.faces[components[ci][0]].outer_loop)
+                .next()
+                .expect("a face loop has at least three vertices");
+            let host = (0..positive.len())
+                .filter(|&j| point_in_shell_faces(&positive_faces[j], sample))
+                .min_by(|&a, &b| volumes[positive[a]].total_cmp(&volumes[positive[b]]));
+            match host {
+                Some(j) => grouped[j].extend(components[ci].iter().copied()),
+                // A cavity nothing contains: conservative fallback, as above.
+                None => return vec![self.clone()],
+            }
+        }
+        grouped
+            .into_iter()
+            .map(|faces| self.rebuild_component(&faces))
+            .collect()
+    }
+
+    /// Partition this Object's faces into connected components by shared-edge
+    /// (twin) adjacency, in deterministic first-appearance order — the shared
+    /// substrate of [`Object::split_connected_components`] and
+    /// [`Object::split_solids`]. A connected Object yields one component.
+    fn face_components(&self) -> Vec<Vec<FaceId>> {
         // Faces in deterministic slotmap order, with a dense index for union-find.
         let face_ids: Vec<FaceId> = self.faces.keys().collect();
         if face_ids.len() <= 1 {
-            return vec![self.clone()];
+            return vec![face_ids];
         }
         let index_of: std::collections::BTreeMap<FaceId, usize> =
             face_ids.iter().enumerate().map(|(i, &f)| (f, i)).collect();
@@ -3180,14 +3313,7 @@ impl Object {
             components[comp].push(fid);
         }
 
-        if components.len() <= 1 {
-            return vec![self.clone()];
-        }
-
         components
-            .into_iter()
-            .map(|faces| self.rebuild_component(&faces))
-            .collect()
     }
 
     /// Rebuild the subset of faces `faces` (all from `self`) as a standalone

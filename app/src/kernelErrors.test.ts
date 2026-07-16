@@ -14,6 +14,7 @@ import {
   kernelErrorMessage,
   friendlyErrorText,
   describedErrorCodes,
+  isErrorLevelCode,
 } from './kernelErrors'
 
 /**
@@ -27,8 +28,9 @@ const KERNEL_ERROR_CODES = [
   'UnknownGuide', 'SketchGestureAlreadyOpen', 'SketchGestureNotOpen',
   'DegenerateGuide', 'EmptyGroup', 'EmptySelection', 'EmptyComponent',
   'NestedComponentUnsupported', 'CannotExplodeReflected', 'DuplicateMember',
-  'MixedParents', 'GroupedOperand', 'NothingToUndo', 'NothingToRedo',
-  'InverseFailed', 'InverseDiverged',
+  'MixedParents', 'GroupedOperand', 'BooleanOperandHasInstance',
+  'BooleanOperandNotSolid', 'BooleanOperandEmpty', 'NothingToUndo',
+  'NothingToRedo', 'InverseFailed', 'InverseDiverged',
   // SketchError
   'PointOffPlane', 'DegenerateSegment', 'UnknownEdge', 'UnknownVertex',
   'UnknownRegion', 'WouldRetopologize', 'UnknownIsland', 'MalformedRegion',
@@ -163,5 +165,34 @@ describe('friendlyErrorText', () => {
     const text = friendlyErrorText(new Error('NotAContainer: bad magic'))
     expect(text).toBe(kernelErrorMessage('NotAContainer', 'bad magic'))
     expect(text).toContain('Hew document')
+  })
+})
+
+describe('isErrorLevelCode', () => {
+  it('classifies every boolean-operand refusal as an error, like its siblings', () => {
+    // The three group-boolean refusals must not render one level softer than
+    // OperandNotSolid (adversarial review, minor).
+    for (const code of [
+      'OperandNotSolid', 'DegenerateContact', 'EmptyResult',
+      'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
+    ]) {
+      expect(isErrorLevelCode(code), code).toBe(true)
+    }
+  })
+
+  it('leaves ordinary refusals at warning level', () => {
+    expect(isErrorLevelCode('DistanceTooSmall')).toBe(false)
+    expect(isErrorLevelCode('GroupedOperand')).toBe(false)
+  })
+
+  it('only classifies codes that actually have copy', () => {
+    const described = new Set(describedErrorCodes())
+    for (const code of [
+      'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
+      'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
+      'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
+    ]) {
+      expect(described.has(code), `${code} has copy`).toBe(true)
+    }
   })
 })

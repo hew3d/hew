@@ -82,6 +82,42 @@ export interface HewTestHarness {
   pickFace(rayOrigin: Vec3, rayDir: Vec3): { object: string; face: string } | null
   pushPull(object: string, face: string, distance: number): void
   boolean(op: number, a: string, b: string): string
+  /**
+   * Combine two tree nodes — plain solids or whole groups (`boolean_nodes`,
+   * docs/design/group-ops.md). `op` is 0=union, 1=subtract (a−b), 2=intersect;
+   * `a`/`b` are `{kind, id}` refs with kind `'object' | 'group'`. Returns the
+   * result root: a single object, or a result group of disjoint pieces.
+   */
+  booleanNodes(
+    op: number,
+    a: { kind: string; id: string },
+    b: { kind: string; id: string },
+  ): { kind: string; id: string }
+  /**
+   * Group nodes into a merge group (the same `group_nodes` call Edit ▸ Group
+   * commits) and return the group handle. Each ref's kind is
+   * `'object' | 'group' | 'instance'`.
+   */
+  groupNodes(nodes: { kind: string; id: string }[]): string
+  /**
+   * Direct members of a group, as `{kind, id}` refs — for asserting result
+   * and copy structure without the Outliner DOM.
+   */
+  getGroupMembers(id: string): { kind: string; id: string }[]
+  /** Whether an object is currently a watertight solid (`object_solid`). */
+  isObjectSolid(id: string): boolean
+  /**
+   * Deep-copy ANY tree node — object, group, or instance — offset by
+   * `(dx, dy, dz)` meters: `duplicate_node` on the node's own kind, exactly
+   * the Move+Alt copy commit. Returns the new root node.
+   */
+  copyNode(
+    kind: string,
+    id: string,
+    dx: number,
+    dy: number,
+    dz: number,
+  ): { kind: string; id: string }
   deleteObject(id: string): void
   selectObjects(ids: string[]): void
   /** Edit ▸ Select All: every visible top-level node + free sketch (or a
@@ -496,6 +532,38 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     boolean: (op, a, b) =>
       act((s) => s.boolean(op, BigInt(a), BigInt(b)).toString()),
+
+    booleanNodes: (op, a, b) =>
+      act((s) => {
+        const kindNum = (k: string) => (k === 'group' ? 1 : k === 'instance' ? 2 : 0)
+        const node = s.boolean_nodes(op, kindNum(a.kind), BigInt(a.id), kindNum(b.kind), BigInt(b.id))
+        return { kind: node.kind, id: node.id.toString() }
+      }),
+
+    groupNodes: (nodes) =>
+      act((s) => {
+        const kinds = new Uint8Array(
+          nodes.map((n) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)),
+        )
+        const ids = new BigUint64Array(nodes.map((n) => BigInt(n.id)))
+        return s.group_nodes(kinds, ids).toString()
+      }),
+
+    getGroupMembers: (id) =>
+      query((s) =>
+        s.group_members(BigInt(id)).map((n) => ({ kind: n.kind, id: n.id.toString() })),
+      ),
+
+    isObjectSolid: (id) => query((s) => s.object_solid(BigInt(id))),
+
+    copyNode: (kind, id, dx, dy, dz) => {
+      const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
+      const kindNum = kind === 'group' ? 1 : kind === 'instance' ? 2 : 0
+      return act((s) => {
+        const node = s.duplicate_node(kindNum, BigInt(id), affine)
+        return { kind: node.kind, id: node.id.toString() }
+      })
+    },
 
     deleteObject: (id) => {
       act((s) => s.delete_node(0, BigInt(id))) // kind 0 = object

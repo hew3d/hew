@@ -76,6 +76,32 @@ pub enum RecordedCall {
     },
     /// `boolean(op, a, b)`.
     Boolean { op: u8, a: u64, b: u64 },
+    /// `boolean_nodes(op, a_kind, a, b_kind, b)` — the node-operand boolean
+    /// (plain solids or whole groups; docs/design/group-ops.md) the UI routes
+    /// every boolean command through. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings replay
+    /// unchanged; a recording that uses it fails to parse on older builds —
+    /// loudly, never silently divergent.
+    BooleanNodes {
+        op: u8,
+        a_kind: u8,
+        a: u64,
+        b_kind: u8,
+        b: u64,
+    },
+    /// `group_nodes(kinds, ids)` — form a merge group. Additive variant;
+    /// closes a pre-existing structural-op recording gap alongside
+    /// [`RecordedCall::BooleanNodes`] (a group boolean is unreplayable
+    /// without the grouping that built its operand).
+    GroupNodes { kinds: Vec<u8>, ids: Vec<u64> },
+    /// `duplicate_node(kind, id, affine)` — the Move+Alt deep copy. Additive
+    /// variant; closes the same pre-existing gap as
+    /// [`RecordedCall::GroupNodes`].
+    DuplicateNode {
+        kind: u8,
+        id: u64,
+        affine: [f64; 12],
+    },
     /// `slice_object(object, plane)`.
     SliceObject { object: u64, plane: [f64; 6] },
     /// `transform_object(object, affine)`.

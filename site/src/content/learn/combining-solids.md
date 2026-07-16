@@ -8,7 +8,7 @@ Combining solids is always a command you issue; [Core concepts](/learn/core-conc
 
 ## Union, Subtract, Intersect
 
-1. With the Select tool, click the first object, then **Shift-click** the second.
+1. With the Select tool, click the first object or group, then **Shift-click** the second.
 2. Choose **Edit ▸ Union**, **Edit ▸ Subtract**, or **Edit ▸ Intersect**.
 
 ![Two overlapping boxes, both selected, ready to combine](/docs/boolean-selection.png)
@@ -17,9 +17,15 @@ Combining solids is always a command you issue; [Core concepts](/learn/core-conc
 
 ![The union result: a single watertight object](/docs/boolean-union.png)
 
-The result is a single new Object (Subtract can produce several, if the cut separates the remainder into pieces; each piece becomes its own solid). Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable.
+When the result is one connected solid, it's a single new Object. When it comes apart — a Subtract that severs the target, or operands that never touched — each piece is its own watertight solid, and the pieces arrive together in a group named after the operands ("Bar − Cutter"), so nothing scatters. Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable in one step.
 
 If an input isn't solid, the operation is refused with an error naming the problem. Fix the leaky object first (check Object Info to find it).
+
+### Combining groups
+
+Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object, or you can mix — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, the solids inside a group are first fused into one composite (grouping alone never merges anything), and the command then applies between the two composites. Every solid under a group operand has to be watertight; a leaky one anywhere refuses the whole operation and the message says which side to fix.
+
+One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. If an operand is (or contains) an instance, the command refuses and tells you so; **Explode** the instance first (or **Make Unique**, then Explode) and combine the result.
 
 ## Slice
 

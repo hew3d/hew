@@ -169,6 +169,9 @@ literal internal handles from the recording session.
 | `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
 | `extrude_region` | `sketch`, `region`, `distance` | extrude a closed profile into an Object |
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
+| `boolean_nodes` | `op` (as `boolean`), `a_kind`/`a`, `b_kind`/`b` (kind 0=object, 1=group) | combine two tree nodes — plain solids or whole groups; the route every UI boolean command takes |
+| `group_nodes` | `kinds[]`/`ids[]` (parallel node lists, kind as `delete_node`) | form a merge group |
+| `duplicate_node` | `kind`, `id`, `affine[12]` (row-major 3×4) | deep-copy a node (Move+Alt) at the affine offset |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
 | `split_face_inner` | `object`, `face`, `loop_pts[]` (xyz triples), optional `curve[4]` (`[cx,cy,cz,radius]`) | imprint a closed loop on a solid face (draw-on-face); `curve` present ⇒ the loop is a circle carrying its analytic identity, so a later push-through stamps the tunnel walls |
 | `push_pull` | `object`, `face`, `distance` | push/pull a solid face; the kernel re-derives the routing (translate, whole-wall radial offset, boss/recess, or through-cut) on replay |
@@ -185,7 +188,27 @@ parse on an older build loudly (a typed error), never silently divergent.
 `version` bumps (to 3 and beyond) are reserved for changes an old reader
 would MISinterpret: renaming or re-typing an existing method's fields, or
 changing a field's meaning. No such change is planned; existing recorded
-fixtures stay valid as-is. `u64` values (`golden_hash` and handle fields)
+fixtures stay valid as-is.
+
+Known residual gap: a number of committed, save-state-mutating commands are
+not yet in the recorded call set, so a session using them is not fully
+replayable:
+
+- free-sketch edits — `transform_sketch`, `transform_sketch_island`,
+  `move_sketch_vertex`, `delete_sketch`;
+- the remaining node-structural commands — `ungroup`, `transform_group`,
+  `make_component`, `place_instance`, `transform_instance`,
+  `explode_instance`, `make_unique`;
+- construction guides — `add_guide_line`, `add_guide_point`, `delete_guide`,
+  `delete_all_guides`;
+- materials and metadata — `add_material`, `paint_face`,
+  `set_object_material`, `set_material_alpha`, and the name/tag/visibility
+  setters;
+- `merge_faces` (the eraser's solid-edge commit).
+
+Imports (`import_dae`/`import_gltf`/`import_skp`) and `load` are out of
+scope by design: a recording replays from a fresh document. Everything
+above joins the set under the same additive posture as coverage grows. `u64` values (`golden_hash` and handle fields)
 can exceed a JSON number's safe integer range in some languages — see the
 note under Replay below.
 

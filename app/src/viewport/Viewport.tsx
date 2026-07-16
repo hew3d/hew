@@ -199,8 +199,11 @@ const STANDARD_VIEWS: Record<StandardView, { eye: [number, number, number] }> = 
 }
 
 export interface ViewportApi {
-  /** Combine two objects (0=union, 1=subtract a−b, 2=intersect). */
-  runBoolean: (op: number, a: bigint, b: bigint) => void
+  /** Combine two nodes — plain solids or whole groups (0=union,
+   * 1=subtract a−b, 2=intersect). Returns the result root (a single object,
+   * or a result group when the result has disjoint pieces); null on a
+   * refused op (already toasted). */
+  runBoolean: (op: number, a: NodeRef, b: NodeRef) => NodeRef | null
   /** Group the given nodes into a merge group. */
   runGroup: (nodes: NodeRef[]) => bigint | null
   /** Dissolve a group. */
@@ -1173,21 +1176,29 @@ export default function Viewport({
     }
 
     // Imperative command surface for the parent.
-    function runBoolean(op: number, a: bigint, b: bigint): void {
-      let result: bigint
+    function runBoolean(op: number, a: NodeRef, b: NodeRef): NodeRef | null {
+      // Operands are plain solids or whole groups; the kernel composes group
+      // operands and owns every eligibility rule (boolean_nodes,
+      // docs/design/group-ops.md). kind: 0=object, 1=group — the same
+      // mapping as runGroup; instances are refused typed by the kernel.
+      const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
+      let result: NodeRef
       try {
-        result = wasmScene.boolean(op, a, b)
+        result = nodeRefFromJs(
+          wasmScene.boolean_nodes(op, kindNum(a), a.id, kindNum(b), b.id),
+        )
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
         handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-        return
+        return null
       }
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
       sceneRenderer.refreshGuides()
-      onSelectRef.current?.({ kind: 'object', id: result }, false)
+      onSelectRef.current?.(result, false)
       scheduleRender()
+      return result
     }
 
     function runGroup(nodes: NodeRef[]): bigint | null {

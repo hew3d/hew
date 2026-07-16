@@ -152,6 +152,12 @@ const DESCRIPTIONS: Record<string, string> = {
     'Only siblings can be grouped — everything selected must be top-level, or all inside the same group. Move them to one level first.',
   GroupedOperand:
     "This operation can't target an object inside a group. Ungroup it, or leave the group context, first.",
+  BooleanOperandHasInstance:
+    "Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.",
+  BooleanOperandNotSolid:
+    'Something in that selection is not a watertight solid, so it can\'t be combined. Check each object\'s solid badge in Object Info and fix or remove the leaky one.',
+  BooleanOperandEmpty:
+    'That selection has no solids to combine. Pick a solid object or a group of solids.',
 
   // ---------------------------------------------------------- history
   NothingToUndo: 'Nothing to undo.',
@@ -227,4 +233,21 @@ export function friendlyErrorText(err: unknown): string {
 /** Every kernel error code with copy — exported for the exhaustiveness test. */
 export function describedErrorCodes(): string[] {
   return Object.keys(DESCRIPTIONS)
+}
+
+/**
+ * Codes logged at ERROR level (a real refusal of the user's geometry) rather
+ * than warn — the single source App.tsx's toast/log path reads, kept here
+ * beside the copy table so a new code gets its severity where it gets its
+ * message, instead of drifting in a second hand-maintained array.
+ */
+const ERROR_LEVEL_CODES: ReadonlySet<string> = new Set([
+  'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
+  'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
+  'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
+])
+
+/** Whether `code` should be logged/toasted as an error (vs a warning). */
+export function isErrorLevelCode(code: string): boolean {
+  return ERROR_LEVEL_CODES.has(code)
 }

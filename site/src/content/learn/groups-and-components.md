@@ -16,7 +16,7 @@ A group bundles objects (and other groups — they nest) into one selectable, mo
 
 ![A group named "Enclosure" selected: Object Info shows its name, type, and tag; the contextual dock offers Edit, Move, Scale, Ungroup, Erase](/docs/organization.png)
 
-Moving, rotating, or scaling a group transforms everything inside it together. Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Object Info makes big models legible.
+Moving, rotating, or scaling a group transforms everything inside it together, and Move with `Option`/`Alt` held copies the whole group — nested groups, names, tags, and materials included; component instances inside come along as new instances of the same definition ([Move](/learn/moving-and-transforming/)). Groups also work as boolean operands: Union, Subtract, and Intersect accept a group anywhere they accept a solid ([Combining solids](/learn/combining-solids/)). Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Object Info makes big models legible.
 
 ## Components
 
@@ -50,4 +50,4 @@ Groups appear as folders you can expand; component instances get their own hexag
 
 ## Current limits
 
-Component definitions can't yet contain other components, and booleans operate on objects rather than whole groups. Both are planned.
+Component definitions can't yet contain other components. That's planned.

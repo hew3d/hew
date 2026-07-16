@@ -17,7 +17,7 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
+import { nextSelection, canBoolean as canBooleanHelper, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -45,7 +45,7 @@ import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
 import { StlExportDialog } from './panels/StlExportDialog'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
-import { friendlyErrorText } from './kernelErrors'
+import { friendlyErrorText, isErrorLevelCode } from './kernelErrors'
 import { CommandPalette } from './palette/CommandPalette'
 import { toolHint, toolActionId, type PaletteEntry } from './palette/registry'
 import type { TagReveal } from './panels/TagsPanel'
@@ -80,6 +80,9 @@ interface Toast {
   id: number
   message: string
   code?: string
+  /** Error-level (red bubble, error log) vs warning — classified ONCE at
+   * creation via kernelErrors' isErrorLevelCode, the single source. */
+  isError: boolean
 }
 
 let toastCounter = 0
@@ -562,9 +565,9 @@ export default function App() {
   }, [])
 
   const handleToast = useCallback((message: string, code?: string) => {
-    const isError = code !== undefined &&
-      ['WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
-        'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform'].includes(code)
+    // Severity lives beside the copy table in kernelErrors.ts (one source; a
+    // new code gets its level where it gets its message).
+    const isError = code !== undefined && isErrorLevelCode(code)
     const level = isError ? 'error' : 'warn'
     const logMessage = code !== undefined ? `[${code}] ${message}` : message
     LogStore.log[level]('tool', logMessage)
@@ -574,7 +577,7 @@ export default function App() {
     }
 
     const id = ++toastCounter
-    setToasts((prev) => [...prev, { id, message, code }])
+    setToasts((prev) => [...prev, { id, message, code, isError }])
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
     }, 4000)
@@ -706,9 +709,14 @@ export default function App() {
     const scene = state?.scene
     if (scene == null) return null
     const objectIdSet = new Set(Array.from(scene.object_ids()))
-    const booleanOperands = selectedIds.filter(
-      (n) => n.kind === 'object' && objectIdSet.has(n.id),
-    )
+    const groupIdSet = new Set(Array.from(scene.group_ids()))
+    // Booleans take plain solids AND whole groups (boolean_nodes; the kernel
+    // owns eligibility — solidity, instances — and refuses typed). Liveness
+    // here; top-level-ness in canBooleanHelper below.
+    const isBooleanOperand = (n: NodeRef) =>
+      (n.kind === 'object' && objectIdSet.has(n.id)) ||
+      (n.kind === 'group' && groupIdSet.has(n.id))
+    const booleanOperands = selectedIds.filter(isBooleanOperand)
     const isSketchKind = (n: NodeRef) =>
       n.kind === 'sketch' ||
       n.kind === 'sketch-island' ||
@@ -724,7 +732,12 @@ export default function App() {
     const hasSketch = selectedIds.some(isSketchKind)
     return {
       booleanOperands,
-      canBoolean: activeContext.length === 0 && booleanOperands.length === 2,
+      // Same top-level rule the kernel enforces (GroupedOperand): a nested
+      // node picked in the Outliner must not light the commands up only to
+      // be refused on commit.
+      canBoolean:
+        activeContext.length === 0 &&
+        canBooleanHelper(selectedIds, parentOf, isBooleanOperand),
       canGroup: !hasSketch && canGroupHelper(selectedIds, parentOf),
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
@@ -2293,8 +2306,14 @@ export default function App() {
   const canExplode = menuGates?.canExplode ?? false
   const canUnique = menuGates?.canMakeUnique ?? false
   const handleBoolean = (op: number) => {
-    if (booleanOperands.length === 2) {
-      viewportApi.current?.runBoolean(op, booleanOperands[0].id, booleanOperands[1].id)
+    // Re-check the full gate (the accelerator path dispatches here
+    // unconditionally, like handleGroup): exactly two operands, each a plain
+    // solid or a group, at the top level.
+    if (!(menuGates?.canBoolean ?? false)) return
+    const result = viewportApi.current?.runBoolean(op, booleanOperands[0], booleanOperands[1])
+    if (result != null) {
+      setSelectedIds([result])
+      setDocRev((r) => r + 1)
     }
   }
 
@@ -2618,9 +2637,7 @@ export default function App() {
                 onClick={() => dismissToast(toast.id)}
                 style={{
                   padding: '8px 16px',
-                  background: toast.code !== undefined && ['WouldVanish', 'NonManifoldResult', 'ObjectNotSolid'].includes(toast.code)
-                    ? '#cc3322'
-                    : '#333',
+                  background: toast.isError ? '#cc3322' : '#333',
                   color: '#fff',
                   borderRadius: '4px',
                   fontFamily: 'monospace',

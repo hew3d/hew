@@ -12,9 +12,9 @@
 
 use kernel::{
     BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, ImageFormat,
-    KernelOp, KernelOpReport, Material, MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8,
-    SketchEdgeId, SketchError, SketchId, SketchRegionId, SketchVertexId, Texture, Transform,
-    TransformError, Vec3, WatertightState,
+    ImportNode, ImportScene, KernelOp, KernelOpReport, Material, MaterialId, MeshRecipe, NodeId,
+    Object, ObjectId, Operand, Plane, Point3, Rgba8, SketchEdgeId, SketchError, SketchId,
+    SketchRegionId, SketchVertexId, Texture, Transform, TransformError, Vec3, WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -3579,4 +3579,972 @@ fn gesture_bracket_misuse_errors_loudly() {
         doc.begin_sketch_gesture(s),
         Err(DocumentError::UnknownSketch)
     ));
+}
+
+// ══════════════════════════════════ group ops (docs/design/group-ops.md) ═════
+
+// -------------------------------------------- group duplication hardening
+
+/// Duplicating a nested group deep-clones the whole subtree: nested groups
+/// become new groups, instances become new instances of the SAME definition,
+/// and names / tags / base materials / painted faces all carry over.
+#[test]
+fn duplicate_nested_group_clones_structure_instances_and_attributes() {
+    let mut doc = Document::new();
+    // Inner content: a painted, named, tagged object plus a component instance.
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+    doc.set_object_material(a, Some(red)).unwrap();
+    let a_top = face_with_normal(&doc, a, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(a, a_top, Some(blue)).unwrap();
+    doc.set_node_name(NodeId::Object(a), Some("Leg".into()))
+        .unwrap();
+    doc.add_node_tag(NodeId::Object(a), vec!["Furniture".into()])
+        .unwrap();
+
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(b)]).unwrap();
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+
+    let (inner, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Instance(inst)])
+        .unwrap();
+    let (outer, _) = doc
+        .group_nodes(&[NodeId::Group(inner), NodeId::Object(c)])
+        .unwrap();
+    doc.set_node_name(NodeId::Group(outer), Some("Assembly".into()))
+        .unwrap();
+
+    let offset = Vec3::new(0.0, 10.0, 0.0);
+    let hash_before = doc.state_hash();
+    let (root, _) = doc
+        .duplicate_node(NodeId::Group(outer), &Transform::translation(offset))
+        .expect("duplicate nested group");
+    let hash_after = doc.state_hash();
+    let outer2 = match root {
+        NodeId::Group(id) => id,
+        _ => panic!("a group copy is a group"),
+    };
+    assert_ne!(outer, outer2);
+
+    // Structure mirrored: [Group(inner2), Object(c2)] / [Object(a2), Instance(inst2)].
+    let outer2_members = doc.group_members(outer2).unwrap();
+    assert_eq!(outer2_members.len(), 2);
+    let inner2 = match outer2_members[0] {
+        NodeId::Group(id) => id,
+        _ => panic!("first member of the copy mirrors the source (a group)"),
+    };
+    assert!(matches!(outer2_members[1], NodeId::Object(_)));
+    let inner2_members = doc.group_members(inner2).unwrap();
+    assert_eq!(inner2_members.len(), 2);
+    let a2 = match inner2_members[0] {
+        NodeId::Object(id) => id,
+        _ => panic!("nested object clone"),
+    };
+    let inst2 = match inner2_members[1] {
+        NodeId::Instance(id) => id,
+        _ => panic!("nested instance clone"),
+    };
+
+    // The cloned instance shares the SAME definition (never an implicit
+    // make-unique) at the composed pose.
+    assert_eq!(doc.instance_def(inst2), Some(comp));
+    assert_eq!(doc.component_ids().len(), 1, "no new definition was minted");
+    let probe = Point3::new(0.2, 0.4, 0.6);
+    assert!(
+        doc.instance_pose(inst2)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(probe + offset, 1e-9),
+        "instance pose composed with the placement"
+    );
+
+    // Attributes carried over; geometry offset; leaves distinct.
+    assert_ne!(a2, a);
+    assert_eq!(doc.object_name(a2), Some("Leg"));
+    assert_eq!(
+        doc.node_tags(NodeId::Object(a2)),
+        &[vec![String::from("Furniture")]]
+    );
+    assert_eq!(doc.object(a2).unwrap().default_material(), Some(red));
+    assert_eq!(faces_painted(&doc, a2, blue), 1, "painted face survives");
+    assert_eq!(doc.group_name(outer2), Some("Assembly"));
+    assert!(approx_pt(
+        centroid(doc.object(a2).unwrap()),
+        centroid(doc.object(a).unwrap()) + offset
+    ));
+
+    // Independence: moving the copy's leaf leaves the source put.
+    let a_centroid = centroid(doc.object(a).unwrap());
+    doc.transform_object(a2, &Transform::translation(Vec3::new(0.0, 0.0, 5.0)))
+        .unwrap();
+    assert!(approx_pt(centroid(doc.object(a).unwrap()), a_centroid));
+    doc.undo().unwrap(); // drop the probe transform
+
+    // One undo step removes the WHOLE copy, exactly; redo restores it exactly.
+    doc.undo().expect("undo duplicate");
+    assert_eq!(doc.state_hash(), hash_before, "undo is exact");
+    assert!(!doc.top_level_nodes().contains(&NodeId::Group(outer2)));
+    doc.redo().expect("redo duplicate");
+    assert_eq!(doc.state_hash(), hash_after, "redo is exact");
+}
+
+proptest! {
+    /// Property (docs/design/group-ops.md §1): duplicating a group undoes to
+    /// the exact prior document, and redoes to the exact copied document,
+    /// under arbitrary translations.
+    #[test]
+    fn duplicate_group_round_trips_exactly(
+        dx in -10.0..10.0f64,
+        dy in -10.0..10.0f64,
+        dz in -10.0..10.0f64,
+    ) {
+        let mut doc = Document::new();
+        let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+        let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+        let (inner, _) = doc
+            .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+            .unwrap();
+        let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+        let (outer, _) = doc
+            .group_nodes(&[NodeId::Group(inner), NodeId::Object(c)])
+            .unwrap();
+
+        let hash_before = doc.state_hash();
+        doc.duplicate_node(
+            NodeId::Group(outer),
+            &Transform::translation(Vec3::new(dx, dy, dz)),
+        )
+        .expect("duplicate nested group");
+        let hash_after = doc.state_hash();
+
+        doc.undo().expect("undo duplicate");
+        prop_assert_eq!(doc.state_hash(), hash_before, "undo is exact");
+        doc.redo().expect("redo duplicate");
+        prop_assert_eq!(doc.state_hash(), hash_after, "redo is exact");
+    }
+}
+
+/// Divergence-theorem signed volume, fan-triangulating every loop of every
+/// face — hole loops wind opposite the outer, so their fans subtract
+/// correctly. Boolean results can carry annulus faces (a seam strictly inside
+/// a face), which the hole-free `signed_volume` above overcounts.
+fn enclosed_volume(obj: &Object) -> f64 {
+    let mut six_v = 0.0;
+    for f in obj.faces().values() {
+        for lid in std::iter::once(f.outer_loop).chain(f.inner_loops.iter().copied()) {
+            let p: Vec<Vec3> = obj.loop_positions(lid).map(|pt| pt.to_vec()).collect();
+            for i in 1..p.len().saturating_sub(1) {
+                six_v += p[0].dot(p[i].cross(p[i + 1]));
+            }
+        }
+    }
+    six_v / 6.0
+}
+
+// ------------------------------------------------ boolean_nodes (group booleans)
+
+/// Union of two overlapping groups fuses every solid under both into ONE
+/// watertight top-level Object; both operand subtrees are consumed; undo and
+/// redo restore the exact document states.
+#[test]
+fn boolean_nodes_union_of_two_groups_yields_one_solid_and_round_trips() {
+    let mut doc = Document::new();
+    // Group A: two overlapping boxes; group B: two overlapping boxes, with
+    // B's first box overlapping A's second. No coplanar faces anywhere.
+    let a1 = extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0);
+    let a2 = extrude_box(&mut doc, 1.0, 1.0, 3.0, 3.0, 0.5, 2.0);
+    let b1 = extrude_box(&mut doc, 2.5, 1.5, 4.5, 2.75, 1.0, 1.0);
+    let b2 = extrude_box(&mut doc, 4.0, 1.6, 5.0, 2.6, 1.2, 1.0);
+    let (ga, _) = doc
+        .group_nodes(&[NodeId::Object(a1), NodeId::Object(a2)])
+        .unwrap();
+    let (gb, _) = doc
+        .group_nodes(&[NodeId::Object(b1), NodeId::Object(b2)])
+        .unwrap();
+
+    let hash_before = doc.state_hash();
+    let (root, change) = doc
+        .boolean_nodes(BooleanOp::Union, NodeId::Group(ga), NodeId::Group(gb))
+        .expect("group union");
+    let hash_after = doc.state_hash();
+
+    let result = match root {
+        NodeId::Object(id) => id,
+        _ => panic!("a connected union is a single plain Object"),
+    };
+    assert!(change.objects_touched.contains(&result));
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![result],
+        "every operand leaf was consumed"
+    );
+    assert_eq!(
+        doc.top_level_nodes(),
+        vec![NodeId::Object(result)],
+        "both operand groups were consumed"
+    );
+    assert_eq!(
+        doc.object(result).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+    let expected_volume = {
+        // Inclusion-exclusion over the four boxes (pairwise overlaps only:
+        // a1∩a2, a2∩b1, b1∩b2 — no triple overlaps by construction).
+        let v = |x0: f64, y0: f64, x1: f64, y1: f64, z0: f64, z1: f64| {
+            (x1 - x0) * (y1 - y0) * (z1 - z0)
+        };
+        v(0.0, 0.0, 2.0, 2.0, 0.0, 2.0) + v(1.0, 1.0, 3.0, 3.0, 0.5, 2.5)
+            + v(2.5, 1.5, 4.5, 2.75, 1.0, 2.0)
+            + v(4.0, 1.6, 5.0, 2.6, 1.2, 2.2)
+            - v(1.0, 1.0, 2.0, 2.0, 0.5, 2.0)   // a1∩a2
+            - v(2.5, 1.5, 3.0, 2.75, 1.0, 2.0)  // a2∩b1
+            - v(4.0, 1.6, 4.5, 2.6, 1.2, 2.0) // b1∩b2
+    };
+    assert!(
+        (enclosed_volume(doc.object(result).unwrap()) - expected_volume).abs() < 1e-9,
+        "union volume matches set algebra: got {}, expected {}",
+        enclosed_volume(doc.object(result).unwrap()),
+        expected_volume
+    );
+
+    doc.undo().expect("undo group union");
+    assert_eq!(doc.state_hash(), hash_before, "undo is exact");
+    let visible = doc.visible_object_ids();
+    assert!(
+        [a1, a2, b1, b2].iter().all(|o| visible.contains(o)),
+        "operand leaves restored with stable handles"
+    );
+    assert!(
+        doc.top_level_nodes().contains(&NodeId::Group(ga))
+            && doc.top_level_nodes().contains(&NodeId::Group(gb)),
+        "operand groups restored"
+    );
+
+    doc.redo().expect("redo group union");
+    assert_eq!(doc.state_hash(), hash_after, "redo is exact");
+}
+
+/// Mixed operands: subtracting a GROUP of cutters from a plain solid removes
+/// each cutter's volume (the group is composed first, then subtracted).
+#[test]
+fn boolean_nodes_subtracts_a_group_from_a_plain_object() {
+    let mut doc = Document::new();
+    let target = extrude_box(&mut doc, 0.0, 0.0, 4.0, 1.0, 0.0, 1.0);
+    // Two disjoint cutters, each biting a corner-through notch out of the
+    // target (they poke out of it on y and z — no coplanar faces).
+    let c1 = extrude_box(&mut doc, 0.5, -0.25, 1.0, 1.25, 0.5, 1.0);
+    let c2 = extrude_box(&mut doc, 2.5, -0.25, 3.0, 1.25, 0.5, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(c1), NodeId::Object(c2)])
+        .unwrap();
+
+    let (root, _) = doc
+        .boolean_nodes(
+            BooleanOp::Subtract,
+            NodeId::Object(target),
+            NodeId::Group(g),
+        )
+        .expect("subtract group from object");
+    let result = match root {
+        NodeId::Object(id) => id,
+        _ => panic!("a connected subtract result is a single Object"),
+    };
+    assert_eq!(
+        doc.object(result).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+    let expected = 4.0 - 2.0 * (0.5 * 1.0 * 0.5);
+    assert!(
+        (enclosed_volume(doc.object(result).unwrap()) - expected).abs() < 1e-9,
+        "both cutters' overlap removed"
+    );
+}
+
+/// A subtract that severs the target yields one Object per piece, housed in a
+/// result group named from the operands; every piece is watertight.
+#[test]
+fn boolean_nodes_severing_subtract_yields_named_group_of_solids() {
+    let mut doc = Document::new();
+    let bar = extrude_box(&mut doc, 0.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    doc.set_node_name(NodeId::Object(bar), Some("Bar".into()))
+        .unwrap();
+    let cutter = extrude_box(&mut doc, 1.2, -0.3, 1.8, 1.3, -0.4, 1.8);
+    let (g, _) = doc.group_nodes(&[NodeId::Object(cutter)]).unwrap();
+    doc.set_node_name(NodeId::Group(g), Some("Cutter".into()))
+        .unwrap();
+
+    let hash_before = doc.state_hash();
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Subtract, NodeId::Object(bar), NodeId::Group(g))
+        .expect("severing subtract");
+    let result_group = match root {
+        NodeId::Group(id) => id,
+        _ => panic!("a multi-solid result arrives in a result group"),
+    };
+    assert_eq!(
+        doc.group_name(result_group),
+        Some("Bar \u{2212} Cutter"),
+        "the result group is named from the operands"
+    );
+    let members = doc.group_members(result_group).unwrap();
+    assert_eq!(members.len(), 2, "the cut severed the bar into two");
+    let mut volumes = Vec::new();
+    for m in &members {
+        let NodeId::Object(o) = *m else {
+            panic!("result group members are plain Objects");
+        };
+        assert_eq!(
+            doc.object(o).unwrap().watertight(),
+            WatertightState::Watertight,
+            "every piece is watertight"
+        );
+        let v = enclosed_volume(doc.object(o).unwrap());
+        assert!(v > 0.0, "every piece is a genuine solid");
+        volumes.push(v);
+    }
+    let total: f64 = volumes.iter().sum();
+    assert!(
+        (total - (3.0 - 0.6)).abs() < 1e-9,
+        "pieces sum to bar minus the cut slab"
+    );
+    assert_eq!(
+        doc.top_level_nodes(),
+        vec![NodeId::Group(result_group)],
+        "operands consumed; the result group is the only root"
+    );
+
+    doc.undo().expect("undo severing subtract");
+    assert_eq!(doc.state_hash(), hash_before, "undo is exact");
+    doc.redo().expect("redo severing subtract");
+    assert_eq!(doc.group_members(result_group).unwrap().len(), 2);
+}
+
+/// A subtract that hollows the target (the cutter is strictly inside) keeps
+/// the cavity with its solid — ONE multi-shell Object, never an inside-out
+/// "solid" split out on its own.
+#[test]
+fn boolean_nodes_hollowing_subtract_stays_one_object() {
+    let mut doc = Document::new();
+    let block = extrude_box(&mut doc, 0.0, 0.0, 3.0, 3.0, 0.0, 3.0);
+    let void = extrude_box(&mut doc, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0);
+    let (g, _) = doc.group_nodes(&[NodeId::Object(void)]).unwrap();
+
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Subtract, NodeId::Object(block), NodeId::Group(g))
+        .expect("hollowing subtract");
+    let result = match root {
+        NodeId::Object(id) => id,
+        _ => panic!("a hollowed solid stays one Object, cavity and all"),
+    };
+    assert_eq!(
+        doc.object(result).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+    assert!(
+        (enclosed_volume(doc.object(result).unwrap()) - (27.0 - 1.0)).abs() < 1e-9,
+        "the cavity subtracts from the enclosed volume"
+    );
+}
+
+/// A hollowing subtract must not fuse UNRELATED solids into the hollow: a
+/// cavity attaches to the host that contains it, and every other solid stays
+/// its own discrete Object (adversarial review, major — the first guard
+/// collapsed everything whenever any shell was a cavity).
+#[test]
+fn boolean_nodes_hollowing_subtract_keeps_unrelated_solids_discrete() {
+    let mut doc = Document::new();
+    let block1 = extrude_box(&mut doc, 0.0, 0.0, 3.0, 3.0, 0.0, 3.0);
+    let block2 = extrude_box(&mut doc, 10.0, 0.0, 11.0, 1.0, 0.0, 1.0);
+    let void = extrude_box(&mut doc, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0);
+    let (ga, _) = doc
+        .group_nodes(&[NodeId::Object(block1), NodeId::Object(block2)])
+        .unwrap();
+    let (gb, _) = doc.group_nodes(&[NodeId::Object(void)]).unwrap();
+
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Subtract, NodeId::Group(ga), NodeId::Group(gb))
+        .expect("hollowing subtract with a bystander");
+    let NodeId::Group(rg) = root else {
+        panic!("two discrete solids arrive in a result group, never one multi-shell blob");
+    };
+    let members = doc.group_members(rg).unwrap();
+    assert_eq!(members.len(), 2, "hollow block1 and untouched block2");
+    let mut volumes: Vec<f64> = members
+        .iter()
+        .map(|m| {
+            let NodeId::Object(o) = *m else {
+                panic!("result group members are Objects");
+            };
+            assert_eq!(
+                doc.object(o).unwrap().watertight(),
+                WatertightState::Watertight
+            );
+            enclosed_volume(doc.object(o).unwrap())
+        })
+        .collect();
+    volumes.sort_by(f64::total_cmp);
+    assert!(
+        (volumes[0] - 1.0).abs() < 1e-9,
+        "the bystander block is untouched (got {})",
+        volumes[0]
+    );
+    assert!(
+        (volumes[1] - 26.0).abs() < 1e-9,
+        "the hollowed block keeps its cavity (got {})",
+        volumes[1]
+    );
+}
+
+/// Two hosts, each hollowed by its own cutter, split into two discrete
+/// hollow solids — each cavity assigned to the host that contains it.
+#[test]
+fn boolean_nodes_two_hollowed_hosts_split_apart() {
+    let mut doc = Document::new();
+    let block_a = extrude_box(&mut doc, 0.0, 0.0, 3.0, 3.0, 0.0, 3.0);
+    let block_b = extrude_box(&mut doc, 10.0, 0.0, 13.0, 3.0, 0.0, 3.0);
+    let void_a = extrude_box(&mut doc, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0);
+    let void_b = extrude_box(&mut doc, 11.0, 1.0, 12.0, 2.0, 1.0, 1.0);
+    let (ga, _) = doc
+        .group_nodes(&[NodeId::Object(block_a), NodeId::Object(block_b)])
+        .unwrap();
+    let (gb, _) = doc
+        .group_nodes(&[NodeId::Object(void_a), NodeId::Object(void_b)])
+        .unwrap();
+
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Subtract, NodeId::Group(ga), NodeId::Group(gb))
+        .expect("hollow both hosts");
+    let NodeId::Group(rg) = root else {
+        panic!("two hollow hosts arrive as two discrete Objects in a result group");
+    };
+    let members = doc.group_members(rg).unwrap();
+    assert_eq!(members.len(), 2);
+    for m in &members {
+        let NodeId::Object(o) = *m else {
+            panic!("result group members are Objects");
+        };
+        assert_eq!(
+            doc.object(o).unwrap().watertight(),
+            WatertightState::Watertight
+        );
+        assert!(
+            (enclosed_volume(doc.object(o).unwrap()) - 26.0).abs() < 1e-9,
+            "each host keeps exactly its own cavity"
+        );
+    }
+}
+
+/// MULTIPLE candidate hosts: a cavity whose sample point lies inside more
+/// than one positive shell must attach to the SMALLEST containing one (the
+/// immediate host). A pre-hollowed frame fully surrounds the host with
+/// clearance, so the host's new cavity is geometrically inside both the host
+/// and the frame — this pins the min-by-volume discrimination against
+/// min/max swaps and index mixups (delta review).
+#[test]
+fn boolean_nodes_cavity_with_two_candidate_hosts_picks_the_smallest() {
+    let mut doc = Document::new();
+    // A hollow frame: 5-cube outer, 4-cube void — built through the same
+    // document ops a user would take.
+    let frame_outer = extrude_box(&mut doc, -1.0, -1.0, 4.0, 4.0, -1.0, 5.0);
+    let frame_void = extrude_box(&mut doc, -0.5, -0.5, 3.5, 3.5, -0.5, 4.0);
+    let (gfv, _) = doc.group_nodes(&[NodeId::Object(frame_void)]).unwrap();
+    let (frame_root, _) = doc
+        .boolean_nodes(
+            BooleanOp::Subtract,
+            NodeId::Object(frame_outer),
+            NodeId::Group(gfv),
+        )
+        .expect("hollow the frame");
+    let NodeId::Object(frame) = frame_root else {
+        panic!("a hollowed frame is one Object");
+    };
+
+    // The host cube floats inside the frame's void with clearance; both go
+    // in one operand group. Subtracting the cutter hollows the host — and
+    // the new cavity's sample point is inside BOTH the host and the frame.
+    let host = extrude_box(&mut doc, 0.0, 0.0, 3.0, 3.0, 0.0, 3.0);
+    let (ga, _) = doc
+        .group_nodes(&[NodeId::Object(host), NodeId::Object(frame)])
+        .unwrap();
+    let cutter = extrude_box(&mut doc, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0);
+    let (gb, _) = doc.group_nodes(&[NodeId::Object(cutter)]).unwrap();
+
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Subtract, NodeId::Group(ga), NodeId::Group(gb))
+        .expect("hollow the host inside the frame");
+    let NodeId::Group(rg) = root else {
+        panic!("host and frame are two discrete solids in a result group");
+    };
+    let members = doc.group_members(rg).unwrap();
+    assert_eq!(
+        members.len(),
+        2,
+        "the hollowed host and the untouched frame"
+    );
+    let mut volumes: Vec<f64> = members
+        .iter()
+        .map(|m| {
+            let NodeId::Object(o) = *m else {
+                panic!("result group members are Objects");
+            };
+            assert_eq!(
+                doc.object(o).unwrap().watertight(),
+                WatertightState::Watertight
+            );
+            enclosed_volume(doc.object(o).unwrap())
+        })
+        .collect();
+    volumes.sort_by(f64::total_cmp);
+    assert!(
+        (volumes[0] - 26.0).abs() < 1e-9,
+        "the cavity landed in the SMALLEST containing host (got {})",
+        volumes[0]
+    );
+    assert!(
+        (volumes[1] - 61.0).abs() < 1e-9,
+        "the surrounding frame is untouched (got {})",
+        volumes[1]
+    );
+}
+
+/// Nested shells: subtracting a HOLLOW cutter leaves a floating island where
+/// the cutter's cavity was. The island is a discrete solid; the big cavity
+/// stays with the host that contains it (smallest-containing-host rule).
+#[test]
+fn boolean_nodes_island_inside_cavity_assigns_shells_correctly() {
+    let mut doc = Document::new();
+    // Build the hollow cutter first: 3-cube shell minus 1-cube core, one
+    // Object carrying its cavity.
+    let cutter_outer = extrude_box(&mut doc, 1.0, 1.0, 4.0, 4.0, 1.0, 3.0);
+    let cutter_void = extrude_box(&mut doc, 2.0, 2.0, 3.0, 3.0, 2.0, 1.0);
+    let (gv, _) = doc.group_nodes(&[NodeId::Object(cutter_void)]).unwrap();
+    let (hollow_root, _) = doc
+        .boolean_nodes(
+            BooleanOp::Subtract,
+            NodeId::Object(cutter_outer),
+            NodeId::Group(gv),
+        )
+        .expect("make the hollow cutter");
+    let NodeId::Object(hollow_cutter) = hollow_root else {
+        panic!("a hollowed solid is one Object, cavity and all");
+    };
+
+    // 5-cube block minus the hollow cutter: the cutter's material (26)
+    // leaves; the cutter's core survives as a floating 1-cube island inside
+    // the cavity.
+    let block = extrude_box(&mut doc, 0.0, 0.0, 5.0, 5.0, 0.0, 5.0);
+    let (root, _) = doc
+        .boolean_nodes(
+            BooleanOp::Subtract,
+            NodeId::Object(block),
+            NodeId::Object(hollow_cutter),
+        )
+        .expect("subtract the hollow cutter");
+    let NodeId::Group(rg) = root else {
+        panic!("host + island are two discrete solids in a result group");
+    };
+    let members = doc.group_members(rg).unwrap();
+    assert_eq!(members.len(), 2, "the hollowed host and the island");
+    let mut volumes: Vec<f64> = members
+        .iter()
+        .map(|m| {
+            let NodeId::Object(o) = *m else {
+                panic!("result group members are Objects");
+            };
+            assert_eq!(
+                doc.object(o).unwrap().watertight(),
+                WatertightState::Watertight
+            );
+            enclosed_volume(doc.object(o).unwrap())
+        })
+        .collect();
+    volumes.sort_by(f64::total_cmp);
+    assert!(
+        (volumes[0] - 1.0).abs() < 1e-9,
+        "the island (got {})",
+        volumes[0]
+    );
+    assert!(
+        (volumes[1] - 98.0).abs() < 1e-9,
+        "the host keeps the 3-cube cavity (got {})",
+        volumes[1]
+    );
+}
+
+/// Instance operands are refused typed — as the operand itself and nested
+/// anywhere under a group operand — never implicitly made unique. The
+/// document is untouched by every refusal.
+#[test]
+fn boolean_nodes_refuses_instance_operands() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+    let b = extrude_box(&mut doc, 0.5, 0.5, 1.5, 1.5, 0.5, 1.0);
+    let c = extrude_box(&mut doc, 0.25, 0.25, 1.75, 0.75, 0.75, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Instance(inst), NodeId::Object(b)])
+        .unwrap();
+    let hash = doc.state_hash();
+
+    assert_eq!(
+        doc.boolean_nodes(BooleanOp::Union, NodeId::Instance(inst), NodeId::Object(c))
+            .map(|_| ()),
+        Err(DocumentError::BooleanOperandHasInstance),
+        "an instance operand is refused"
+    );
+    assert_eq!(
+        doc.boolean_nodes(BooleanOp::Union, NodeId::Group(g), NodeId::Object(c))
+            .map(|_| ()),
+        Err(DocumentError::BooleanOperandHasInstance),
+        "an instance nested under a group operand is refused"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash,
+        "refusals leave the document untouched"
+    );
+}
+
+/// A leaky (non-watertight) leaf anywhere under an operand refuses the whole
+/// op, naming the offending side; the document is untouched.
+#[test]
+fn boolean_nodes_refuses_leaky_leaves_naming_the_side() {
+    let mut doc = Document::new();
+    // Ingest an open shell (a box missing its top) — the one honest way a
+    // leaky object exists in a document.
+    let open = MeshRecipe {
+        name: "open".into(),
+        positions: vec![
+            Point3::new(10.0, 10.0, 10.0),
+            Point3::new(11.0, 10.0, 10.0),
+            Point3::new(11.0, 11.0, 10.0),
+            Point3::new(10.0, 11.0, 10.0),
+            Point3::new(10.0, 10.0, 11.0),
+            Point3::new(11.0, 10.0, 11.0),
+            Point3::new(11.0, 11.0, 11.0),
+            Point3::new(10.0, 11.0, 11.0),
+        ],
+        faces: vec![
+            vec![0, 3, 2, 1],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+        face_materials: vec![kernel::NO_MATERIAL; 5],
+        face_uv_frames: vec![None; 5],
+        face_holes: vec![Vec::new(); 5],
+        base_material: kernel::NO_MATERIAL,
+        tags: Vec::new(),
+    };
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![ImportNode::Mesh(open)],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    let (report, change) = doc.ingest(scene, vec![]).unwrap();
+    assert_eq!(report.leaky, 1);
+    let leaky = change.objects_touched[0];
+    assert!(!doc.object_solid(leaky));
+
+    let solid = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let other = extrude_box(&mut doc, 0.5, 0.5, 1.5, 1.5, 0.5, 1.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(leaky), NodeId::Object(solid)])
+        .unwrap();
+    let hash = doc.state_hash();
+
+    assert_eq!(
+        doc.boolean_nodes(BooleanOp::Union, NodeId::Group(g), NodeId::Object(other))
+            .map(|_| ()),
+        Err(DocumentError::BooleanOperandNotSolid { which: Operand::A })
+    );
+    assert_eq!(
+        doc.boolean_nodes(BooleanOp::Union, NodeId::Object(other), NodeId::Group(g))
+            .map(|_| ()),
+        Err(DocumentError::BooleanOperandNotSolid { which: Operand::B })
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash,
+        "refusals leave the document untouched"
+    );
+}
+
+/// Structural refusals: an operand nested inside another group, self-combine,
+/// and stale handles — all typed, all leaving the document untouched.
+#[test]
+fn boolean_nodes_refuses_nested_self_and_stale_operands() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let (g1, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let (_g2, _) = doc
+        .group_nodes(&[NodeId::Group(g1), NodeId::Object(c)])
+        .unwrap();
+    let d = extrude_box(&mut doc, 6.0, 0.0, 7.0, 1.0, 0.0, 1.0);
+    let hash = doc.state_hash();
+
+    assert_eq!(
+        doc.boolean_nodes(BooleanOp::Union, NodeId::Group(g1), NodeId::Object(d))
+            .map(|_| ()),
+        Err(DocumentError::GroupedOperand),
+        "an operand inside another group is refused, like every replacing op"
+    );
+    assert_eq!(
+        doc.boolean_nodes(BooleanOp::Union, NodeId::Object(d), NodeId::Object(d))
+            .map(|_| ()),
+        Err(DocumentError::Boolean(BooleanError::DegenerateContact)),
+        "self-combine is refused"
+    );
+    assert_eq!(
+        doc.boolean_nodes(
+            BooleanOp::Union,
+            NodeId::Group(GroupId::default()),
+            NodeId::Object(d)
+        )
+        .map(|_| ()),
+        Err(DocumentError::UnknownGroup),
+        "a stale operand is refused"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash,
+        "refusals leave the document untouched"
+    );
+    assert!(doc.can_undo(), "only the construction steps are on the log");
+}
+
+/// Materials follow the existing boolean rules through a group boolean:
+/// painted faces survive onto the result, and the result's base material is
+/// operand A's first leaf's base.
+#[test]
+fn boolean_nodes_preserves_materials() {
+    let mut doc = Document::new();
+    let a1 = extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0);
+    let a2 = extrude_box(&mut doc, 1.0, 1.0, 3.0, 3.0, 0.5, 2.0);
+    let b = extrude_box(&mut doc, 2.5, 1.5, 4.0, 2.5, 1.0, 2.0);
+    let oak = doc.add_material(Material::solid("Oak", Rgba8::rgb(180, 140, 90)));
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+    doc.set_object_material(a1, Some(oak)).unwrap();
+    let a1_bottom = face_with_normal(&doc, a1, Vec3::new(0.0, 0.0, -1.0));
+    doc.paint_face(a1, a1_bottom, Some(red)).unwrap();
+    let b_top = face_with_normal(&doc, b, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(b, b_top, Some(blue)).unwrap();
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a1), NodeId::Object(a2)])
+        .unwrap();
+
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Union, NodeId::Group(g), NodeId::Object(b))
+        .expect("painted union");
+    let NodeId::Object(result) = root else {
+        panic!("connected union is one Object");
+    };
+    assert_eq!(
+        doc.object(result).unwrap().default_material(),
+        Some(oak),
+        "result base material is operand A's first leaf's base"
+    );
+    assert!(faces_painted(&doc, result, red) >= 1, "A's paint survives");
+    assert!(faces_painted(&doc, result, blue) >= 1, "B's paint survives");
+}
+
+/// A NESTED group operand composes its whole subtree: an outer group holding
+/// an inner group plus its own solid fuses all three levels' leaves before
+/// the op applies (nesting appears only in refusal tests otherwise).
+#[test]
+fn boolean_nodes_composes_nested_group_operands() {
+    let mut doc = Document::new();
+    // inner{box1} nested in outer{inner, box2}; box1 and box2 overlap each
+    // other, and the operand `c` overlaps box2 — one connected union.
+    let box1 = extrude_box(&mut doc, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0);
+    let box2 = extrude_box(&mut doc, 1.0, 1.0, 3.0, 3.0, 0.5, 2.0);
+    let (inner, _) = doc.group_nodes(&[NodeId::Object(box1)]).unwrap();
+    let (outer, _) = doc
+        .group_nodes(&[NodeId::Group(inner), NodeId::Object(box2)])
+        .unwrap();
+    let c = extrude_box(&mut doc, 2.5, 1.5, 4.0, 2.5, 1.0, 1.0);
+
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Union, NodeId::Group(outer), NodeId::Object(c))
+        .expect("nested-group union");
+    let NodeId::Object(result) = root else {
+        panic!("a connected union of a nested group is one Object");
+    };
+    assert_eq!(
+        doc.object(result).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+    let expected = {
+        let v = |x0: f64, y0: f64, x1: f64, y1: f64, z0: f64, z1: f64| {
+            (x1 - x0) * (y1 - y0) * (z1 - z0)
+        };
+        v(0.0, 0.0, 2.0, 2.0, 0.0, 2.0) + v(1.0, 1.0, 3.0, 3.0, 0.5, 2.5)
+            + v(2.5, 1.5, 4.0, 2.5, 1.0, 2.0)
+            - v(1.0, 1.0, 2.0, 2.0, 0.5, 2.0) // box1∩box2
+            - v(2.5, 1.5, 3.0, 2.5, 1.0, 2.0) // box2∩c
+    };
+    assert!(
+        (enclosed_volume(doc.object(result).unwrap()) - expected).abs() < 1e-9,
+        "every level of the nested operand contributed its volume"
+    );
+    assert_eq!(
+        doc.top_level_nodes(),
+        vec![NodeId::Object(result)],
+        "the whole nested operand subtree was consumed"
+    );
+}
+
+/// FLUSH group members weld during composition and their coplanar seams
+/// dissolve on the result: a group of two side-by-side boxes unioned with an
+/// interior solid reads as the canonical 2×1×1 box — six faces, no seams
+/// (every other boolean_nodes fixture deliberately avoids coplanar faces).
+#[test]
+fn boolean_nodes_dissolves_seams_between_flush_group_members() {
+    let mut doc = Document::new();
+    let b1 = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b2 = extrude_box(&mut doc, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0); // flush at x=1
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(b1), NodeId::Object(b2)])
+        .unwrap();
+    // Strictly interior to the fused slab, so it changes nothing visible —
+    // the result must be exactly the seamless slab.
+    let c = extrude_box(&mut doc, 0.4, 0.4, 1.6, 0.6, 0.3, 0.4);
+
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Union, NodeId::Group(g), NodeId::Object(c))
+        .expect("flush-members union");
+    let NodeId::Object(result) = root else {
+        panic!("one connected slab");
+    };
+    assert_eq!(
+        doc.object(result).unwrap().faces().len(),
+        6,
+        "composition seams between flush members dissolve to the canonical box"
+    );
+    assert!(
+        (enclosed_volume(doc.object(result).unwrap()) - 2.0).abs() < 1e-9,
+        "the interior operand adds nothing"
+    );
+}
+
+proptest! {
+    /// Property (docs/design/group-ops.md §3): unioning a group of disjoint
+    /// boxes with a plain box that bridges them is the SAME volume algebra as
+    /// unioning the same solids sequentially with the object-level boolean —
+    /// same watertightness, same connectivity, same enclosed volume.
+    #[test]
+    fn boolean_nodes_group_union_matches_sequential_unions(
+        dx in 0.05..0.9f64,
+        w in 0.2..0.35f64,
+    ) {
+        // Two disjoint boxes bridged by a tube whose base is COPLANAR with
+        // theirs (z = 0), so every case exercises exact coplanar-contact
+        // resolution during composition, not just transversal crossings.
+        let build = |doc: &mut Document| -> (ObjectId, ObjectId, ObjectId) {
+            let a1 = extrude_box(doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+            let a2 = extrude_box(doc, 2.0 + dx, 0.0, 3.0 + dx, 1.0, 0.0, 1.0);
+            let c = extrude_box(doc, -0.3, 0.5 - w, 2.3 + dx, 0.5 + w, 0.0, 0.5);
+            (a1, a2, c)
+        };
+
+        // Compound path: group {a1, a2}, then one group union with c.
+        let mut doc1 = Document::new();
+        let (a1, a2, c) = build(&mut doc1);
+        let (g, _) = doc1
+            .group_nodes(&[NodeId::Object(a1), NodeId::Object(a2)])
+            .unwrap();
+        let (root, _) = doc1
+            .boolean_nodes(BooleanOp::Union, NodeId::Group(g), NodeId::Object(c))
+            .expect("group union");
+        let NodeId::Object(r1) = root else {
+            panic!("bridged union is connected — a single Object");
+        };
+
+        // Sequential path: (a1 ∪ c) ∪ a2 through the object-level boolean.
+        let mut doc2 = Document::new();
+        let (a1, a2, c) = build(&mut doc2);
+        let (s1, _) = doc2.boolean(BooleanOp::Union, a1, c).expect("a1 ∪ c");
+        let (r2, _) = doc2.boolean(BooleanOp::Union, s1, a2).expect("∪ a2");
+
+        let o1 = doc1.object(r1).unwrap();
+        let o2 = doc2.object(r2).unwrap();
+        prop_assert_eq!(o1.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(o2.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(o1.split_connected_components().len(), 1);
+        prop_assert_eq!(o2.split_connected_components().len(), 1);
+        prop_assert!(
+            (enclosed_volume(o1) - enclosed_volume(o2)).abs() < 1e-9,
+            "both paths enclose the same volume: {} vs {}",
+            enclosed_volume(o1),
+            enclosed_volume(o2)
+        );
+    }
+
+    /// Property (docs/design/group-ops.md §3): a severing group subtract
+    /// always yields all-watertight, positive-volume pieces in a result
+    /// group, and every boolean_nodes op undoes (and redoes) to the EXACT
+    /// prior document state.
+    #[test]
+    fn boolean_nodes_severs_watertight_and_round_trips_exactly(
+        u in 0.05..1.3f64,
+        op_pick in 0..3usize,
+    ) {
+        let mut doc = Document::new();
+        let bar = extrude_box(&mut doc, 0.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+        let cutter = extrude_box(&mut doc, 1.0 + u, -0.3, 1.5 + u, 1.3, -0.4, 1.8);
+        // The cutter arrives NESTED (group in group), so every case also
+        // exercises multi-level operand composition.
+        let (inner, _) = doc.group_nodes(&[NodeId::Object(cutter)]).unwrap();
+        let (g, _) = doc.group_nodes(&[NodeId::Group(inner)]).unwrap();
+
+        let op = [BooleanOp::Union, BooleanOp::Subtract, BooleanOp::Intersect][op_pick];
+        let hash_before = doc.state_hash();
+        let (root, _) = doc
+            .boolean_nodes(op, NodeId::Object(bar), NodeId::Group(g))
+            .expect("transversal operands combine cleanly");
+        let hash_after = doc.state_hash();
+
+        // Every result piece is watertight with positive volume; a severing
+        // subtract arrives as a result group of two.
+        let pieces: Vec<ObjectId> = match root {
+            NodeId::Object(o) => vec![o],
+            NodeId::Group(rg) => doc
+                .group_members(rg)
+                .unwrap()
+                .into_iter()
+                .map(|m| match m {
+                    NodeId::Object(o) => o,
+                    _ => panic!("result group members are Objects"),
+                })
+                .collect(),
+            NodeId::Instance(_) => panic!("a boolean result is never an instance"),
+        };
+        if op == BooleanOp::Subtract {
+            prop_assert_eq!(pieces.len(), 2, "the cut severs the bar");
+        }
+        for &p in &pieces {
+            prop_assert_eq!(
+                doc.object(p).unwrap().watertight(),
+                WatertightState::Watertight
+            );
+            prop_assert!(enclosed_volume(doc.object(p).unwrap()) > 0.0);
+        }
+
+        doc.undo().expect("undo");
+        prop_assert_eq!(doc.state_hash(), hash_before, "undo is exact");
+        doc.redo().expect("redo");
+        prop_assert_eq!(doc.state_hash(), hash_after, "redo is exact");
+        doc.undo().expect("undo again");
+        prop_assert_eq!(doc.state_hash(), hash_before, "undo stays exact");
+    }
 }

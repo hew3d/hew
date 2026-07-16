@@ -1556,6 +1556,44 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// Explicit combine of two **tree nodes** — each a plain solid or a whole
+    /// group, mixed freely (docs/design/group-ops.md). `op` is 0 = union,
+    /// 1 = subtract (`a - b`), 2 = intersect; `a_kind`/`b_kind` use the
+    /// `duplicate_node` convention (0 = object, 1 = group; instances are
+    /// refused typed by the kernel). Each operand's solids are composed
+    /// (unioned) first, then `op` applies between the composites. Returns the
+    /// result root: a single object when the result is one connected solid,
+    /// or a result group (named from the operands) holding one object per
+    /// disjoint piece. Operands are consumed; everything is one undo step
+    /// with stable handles.
+    pub fn boolean_nodes(
+        &mut self,
+        op: u8,
+        a_kind: u8,
+        a: u64,
+        b_kind: u8,
+        b: u64,
+    ) -> Result<NodeJs, ApiError> {
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        let na = node_id(a_kind, a)?;
+        let nb = node_id(b_kind, b)?;
+        let (root, change) = self.doc.boolean_nodes(bop, na, nb).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanNodes {
+            op,
+            a_kind,
+            a,
+            b_kind,
+            b,
+        });
+        Ok(node_js(root))
+    }
+
     /// Slice a watertight solid by a plane into two independent watertight
     /// solids. `plane` is 6 floats `[px,py,pz,nx,ny,nz]` — a point on the
     /// cut plane and its (unnormalized) normal. Returns the two new object
@@ -1672,6 +1710,11 @@ impl Scene {
         let t = Transform::from_affine(rows);
         let (new_node, change) = self.doc.duplicate_node(node, &t).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::DuplicateNode {
+            kind,
+            id,
+            affine: *rows,
+        });
         Ok(node_js(new_node))
     }
 
@@ -1705,6 +1748,10 @@ impl Scene {
             .collect::<Result<Vec<_>, _>>()?;
         let (group, change) = self.doc.group_nodes(&members).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::GroupNodes {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+        });
         Ok(group.data().as_ffi())
     }
 
@@ -3430,6 +3477,21 @@ impl Scene {
                     Boolean { op, a, b } => {
                         self.boolean(op, a, b)?;
                     }
+                    BooleanNodes {
+                        op,
+                        a_kind,
+                        a,
+                        b_kind,
+                        b,
+                    } => {
+                        self.boolean_nodes(op, a_kind, a, b_kind, b)?;
+                    }
+                    GroupNodes { kinds, ids } => {
+                        self.group_nodes(&kinds, &ids)?;
+                    }
+                    DuplicateNode { kind, id, affine } => {
+                        self.duplicate_node(kind, id, &affine)?;
+                    }
                     SliceObject { object, plane } => {
                         self.slice_object(object, &plane)?;
                     }
@@ -3884,6 +3946,103 @@ mod tests {
         );
         // Replaying must not itself record.
         assert!(!replayed.is_recording());
+    }
+
+    /// The UI routes EVERY boolean through `boolean_nodes` — plain
+    /// object–object subtracts included — so the recorder must capture it,
+    /// or the bug-report bundle silently loses the whole boolean feature and
+    /// a session with a later undo replays against a differently-shaped undo
+    /// stack (adversarial review, critical). Red-checks by removing the
+    /// `RecordedCall::BooleanNodes` capture — replay then diverges.
+    #[test]
+    fn ui_boolean_route_records_and_replays() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        // extrude → extrude → subtract (plain objects, the UI route) → undo →
+        // redo. The undo/redo pin the stack shape: if the boolean is missing
+        // from the stream, the replayed undo pops a different action.
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 2.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        scene
+            .transform_object(
+                b,
+                &[1.0, 0.0, 0.0, -1.5, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.25],
+            )
+            .unwrap();
+        let sub = scene.boolean_nodes(1, 0, a, 0, b).unwrap();
+        assert_eq!(sub.kind(), "object");
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let live_count = scene.object_ids().len();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            replayed.object_ids().len(),
+            live_count,
+            "replay reproduces the live object count"
+        );
+        assert_eq!(
+            final_hash, golden,
+            "replaying a UI boolean session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// A whole group session — group, duplicate the group, group-boolean —
+    /// records and replays to the exact same state. Covers the structural
+    /// calls (`group_nodes`, `duplicate_node`, `boolean_nodes`) added to the
+    /// recording set together (adversarial review; the first two were a
+    /// pre-existing gap).
+    #[test]
+    fn group_session_records_and_replays() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let g = scene.group_nodes(&[0, 0], &[a, b]).unwrap();
+        let copy = scene
+            .duplicate_node(
+                1,
+                g,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 4.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        assert_eq!(copy.kind(), "group");
+        // Union the source group with its copy: all four boxes are disjoint,
+        // so the result is a result group of four solids.
+        let root = scene.boolean_nodes(0, 1, g, 1, copy.id()).unwrap();
+        assert_eq!(root.kind(), "group");
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let live_count = scene.object_ids().len();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(replayed.object_ids().len(), live_count);
+        assert_eq!(
+            final_hash, golden,
+            "replaying a group session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save());
     }
 
     /// Draw-on-face with an analytic circle, then push the disk THROUGH the
@@ -4436,6 +4595,36 @@ mod tests {
         // coincident solids is one box — operands consumed, one object left.
         let result = scene.boolean(0, o1, o2).unwrap();
         assert_eq!(scene.object_ids(), vec![result]);
+    }
+
+    #[test]
+    fn boolean_nodes_group_operand_returns_result_node() {
+        let mut scene = Scene::new();
+        // Three disjoint unit boxes; the first two grouped.
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 4.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let (s3, r3) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o3 = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let g = scene.group_nodes(&[0, 0], &[o1, o2]).unwrap();
+
+        // Union of a group of two disjoint solids with a third disjoint
+        // solid: three connected volumes → a result group of three objects.
+        let root = scene.boolean_nodes(0, 1, g, 0, o3).unwrap();
+        assert_eq!(root.kind(), "group");
+        assert_eq!(scene.group_members(root.id()).len(), 3);
+        assert_eq!(scene.object_ids().len(), 3, "one object per volume");
+        assert!(
+            !scene.object_ids().contains(&o1) && !scene.object_ids().contains(&o3),
+            "operands consumed"
+        );
+
+        // One undo restores the operands (stable handles).
+        scene.scene_undo().unwrap();
+        let ids = scene.object_ids();
+        assert!(ids.contains(&o1) && ids.contains(&o2) && ids.contains(&o3));
+        assert_eq!(scene.group_ids(), vec![g], "the operand group is back");
     }
 
     #[test]
