@@ -67,7 +67,18 @@ export default defineConfig({
       origins: [
         {
           origin: baseURL,
-          localStorage: [{ name: 'hew.settings.showWelcome', value: 'false' }],
+          localStorage: [
+            { name: 'hew.settings.showWelcome', value: 'false' },
+            // This suite runs Chromium on SwiftShader ON PURPOSE (see
+            // SWIFTSHADER_ARGS); without this pin, the viewport's software-GL
+            // detection (src/viewport/gpuCapability.ts) would fire in every
+            // spec — a notice overlaying the canvas, antialias off, pixel
+            // ratio capped — changing the visual goldens and screenshots.
+            // Force the hardware profile so the suite keeps testing the
+            // pinned rendering path; the detection logic itself is
+            // unit-tested (gpuCapability.test.ts).
+            { name: 'hew.debug.gpuProfile', value: 'hardware' },
+          ],
         },
       ],
     },

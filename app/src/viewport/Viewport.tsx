@@ -62,6 +62,12 @@ import { getLengthUnit, homeFramingScale } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
 import { SketchHoverGate } from './sketchHoverGate'
 import { isRenderStatsActive, recordRender } from './renderStats'
+import {
+  currentGpuEnvironment,
+  webglUnavailableMessage,
+  detectRenderProfile,
+  shouldShowSoftwareNotice,
+} from './gpuCapability'
 
 /**
  * Centered message overlay shown over the viewport when the WebGL2 context is
@@ -71,7 +77,7 @@ import { isRenderStatsActive, recordRender } from './renderStats'
  * explanation. The node is absolutely positioned, so its container must be
  * `position: relative`.
  */
-function buildViewportOverlay(title: string, detail: string): HTMLDivElement {
+function buildViewportOverlay(title: string, detail: string | readonly string[]): HTMLDivElement {
   const overlay = document.createElement('div')
   overlay.className = 'viewport-overlay'
   overlay.style.cssText = [
@@ -83,12 +89,55 @@ function buildViewportOverlay(title: string, detail: string): HTMLDivElement {
   const h = document.createElement('div')
   h.textContent = title
   h.style.cssText = 'font-size:16px;font-weight:600'
-  const p = document.createElement('div')
-  p.textContent = detail
-  p.style.cssText = 'font-size:13px;max-width:36em;line-height:1.4;opacity:0.8'
   overlay.appendChild(h)
-  overlay.appendChild(p)
+  const lines = typeof detail === 'string' ? [detail] : detail
+  for (const line of lines) {
+    const p = document.createElement('div')
+    p.textContent = line
+    p.style.cssText = 'font-size:13px;max-width:36em;line-height:1.4;opacity:0.8'
+    overlay.appendChild(p)
+  }
   return overlay
+}
+
+/**
+ * One-time, non-blocking notice pinned to the top of the viewport when the
+ * session is running on a software rasterizer (see gpuCapability.ts). Unlike
+ * `buildViewportOverlay` this never blocks the view — modeling continues under
+ * it — and it carries a Dismiss button, so the container ignores pointer
+ * events while the button alone accepts them (a stray click near the top of
+ * the viewport must still reach the canvas).
+ */
+function buildSoftwareNotice(onDismiss: () => void): HTMLDivElement {
+  const notice = document.createElement('div')
+  notice.className = 'viewport-software-notice'
+  notice.style.cssText = [
+    // Below the camera-preset button row (top-left, ~40px tall) so the
+    // notice never visually covers controls.
+    'position:absolute', 'top:52px', 'left:50%', 'transform:translateX(-50%)',
+    'display:flex', 'align-items:center', 'gap:12px', 'padding:8px 14px',
+    'max-width:calc(100% - 48px)',
+    'background:var(--surface-panel, #d0d0d0)', 'color:var(--text-primary, #333)',
+    'border:1px solid var(--border-strong, rgba(0,0,0,0.2))', 'border-radius:6px',
+    'box-shadow:var(--shadow-chip, 0 2px 8px rgba(0,0,0,0.25))',
+    'font-family:system-ui,sans-serif', 'font-size:12.5px', 'line-height:1.4',
+    'z-index:9', 'pointer-events:none',
+  ].join(';')
+  const text = document.createElement('span')
+  text.textContent = 'Running without graphics acceleration — large models will be slow.'
+  notice.appendChild(text)
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.textContent = 'Dismiss'
+  button.setAttribute('aria-label', 'Dismiss the graphics-acceleration notice')
+  button.style.cssText = [
+    'pointer-events:auto', 'cursor:pointer', 'font:inherit', 'font-weight:600',
+    'background:none', 'border:none', 'padding:0', 'color:inherit',
+    'text-decoration:underline', 'white-space:nowrap',
+  ].join(';')
+  button.addEventListener('click', onDismiss)
+  notice.appendChild(button)
+  return notice
 }
 
 /**
@@ -680,28 +729,46 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ renderer
     //
-    // WebGL2 context creation can fail outright on WebKitGTK (no GPU, software
-    // GL disabled, or a headless session). three throws in that case; catch it
-    // and show a readable message instead of an unhandled error + blank grey
+    // GPU triage first (gpuCapability.ts): one throwaway probe context decides
+    // hardware vs software GL, which picks the constructor's antialias flag and
+    // the pixel-ratio cap — on llvmpipe/SwiftShader every fragment is CPU-shaded,
+    // so both are direct fill-rate wins.
+    //
+    // WebGL2 context creation can then still fail outright — WebKitGTK with no
+    // GPU path, or Chrome 137+ on a machine with acceleration off (Chrome removed
+    // its software fallback). three throws in that case; catch it and show
+    // environment-specific guidance instead of an unhandled error + blank grey
     // panel, then bail out of setup.
+    const gpuProfile = detectRenderProfile()
     let renderer: THREE.WebGLRenderer
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true })
+      renderer = new THREE.WebGLRenderer({ antialias: gpuProfile.antialias })
     } catch (err) {
       console.error('[viewport] WebGL2 renderer creation failed:', err)
-      el.appendChild(
-        buildViewportOverlay(
-          'WebGL2 is unavailable',
-          'Hew needs a WebGL2-capable GPU to render. On Linux, check that ' +
-            'hardware acceleration is enabled and your graphics drivers are installed.',
-        ),
-      )
+      const message = webglUnavailableMessage(currentGpuEnvironment())
+      el.appendChild(buildViewportOverlay(message.title, message.lines))
       return () => {
         el.style.position = ''
         el.replaceChildren()
       }
     }
-    renderer.setPixelRatio(window.devicePixelRatio)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, gpuProfile.maxPixelRatio))
+    // Software rasterizer: say so once (ever), quietly — the degrade above is
+    // already active; the notice only sets expectations for large models.
+    let softwareNotice: HTMLDivElement | null = null
+    if (gpuProfile.software) {
+      console.info(
+        `[viewport] software WebGL detected (${gpuProfile.rendererString || 'renderer string unavailable'})` +
+          ' — antialias off, pixel ratio capped at 1',
+      )
+      if (shouldShowSoftwareNotice()) {
+        softwareNotice = buildSoftwareNotice(() => {
+          softwareNotice?.remove()
+          softwareNotice = null
+        })
+        el.appendChild(softwareNotice)
+      }
+    }
     // Canvas clear color — theme-aware. Matches --surface-canvas-page: dark is the exact
     // token hex; light approximates the CSS gradient with its middle stop
     // (a flat WebGL clear color can't reproduce a gradient).
@@ -3149,6 +3216,7 @@ export default function Viewport({
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost)
       renderer.domElement.removeEventListener('webglcontextrestored', onContextRestored)
       contextLostOverlay?.remove()
+      softwareNotice?.remove()
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('pointermove', onPointerMoveTracked)
       renderer.domElement.removeEventListener('pointerdown', onPointerDownTracked)
