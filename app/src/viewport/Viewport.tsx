@@ -28,6 +28,7 @@ import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
 import { SnapService } from './snapService'
 import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
+import { expandByVisibleObject } from './visibleBounds'
 import * as inputRecorder from '../recording/inputRecorder'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { exportSceneToStl, type StlBuildResult } from '../io/exporters/stlExport'
@@ -57,6 +58,7 @@ import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } 
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
+import { getLengthUnit, homeFramingScale } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
 import { SketchHoverGate } from './sketchHoverGate'
 import { isRenderStatsActive, recordRender } from './renderStats'
@@ -147,6 +149,13 @@ interface Props {
   onExitContext?: () => void
   /** Fired after any document change so the parent can refresh the tree. */
   onDocumentChanged?: () => void
+  /** Fired after a SUCCESSFUL undo/redo, from the one code path every
+   * entry point shares (menu, palette, and the viewport's own Cmd+Z/Cmd+
+   * Shift+Z all funnel into runUndo/runRedo). Undo/redo can change state
+   * that plain document changes cannot — e.g. restore a deleted tag's
+   * registry entry — so the parent reconciles view state (tag visibility)
+   * here rather than per entry point. */
+  onHistoryChanged?: () => void
   /** Populated by the viewport with imperative commands the parent can call. */
   apiRef?: React.MutableRefObject<ViewportApi | null>
   /** Called with the live measurement text from tools that support VCB entry. */
@@ -290,6 +299,14 @@ export interface ViewportApi {
    * same task as the draw.
    */
   captureFrame: () => { width: number; height: number; pixels: Uint8Array }
+
+  /**
+   * Re-pose the camera at the default home view, `scale`× the meter-scale
+   * distance (the welcome screen's unit choice re-frames a blank document —
+   * see settings/units.ts homeFramingScale). Callers guard that the scene is
+   * empty; this never inspects geometry.
+   */
+  setHomeFraming: (scale: number) => void
   /**
    * Update the renderer's hidden object/instance sets.  Hidden groups have
    * `.visible = false` (not raypicked by three.js tools) and are excluded from
@@ -557,6 +574,7 @@ export default function Viewport({
   onEnterContext,
   onExitContext,
   onDocumentChanged,
+  onHistoryChanged,
   apiRef,
   onMeasurement,
   onCameraDragChange,
@@ -588,6 +606,8 @@ export default function Viewport({
   onExitContextRef.current = onExitContext
   const onDocumentChangedRef = useRef(onDocumentChanged)
   onDocumentChangedRef.current = onDocumentChanged
+  const onHistoryChangedRef = useRef(onHistoryChanged)
+  onHistoryChangedRef.current = onHistoryChanged
   const apiRefRef = useRef(apiRef)
   apiRefRef.current = apiRef
   const onMeasurementRef = useRef(onMeasurement)
@@ -690,7 +710,10 @@ export default function Viewport({
     const camera = new THREE.PerspectiveCamera(45, el.clientWidth / el.clientHeight, 0.01, 100)
     // Person-scale default: frames a ~2–3 m region; classic SketchUp 3/4 angle.
     // Distance ≈ 4.7 m; a 1.8 m figure reads as substantial, not dwarfed.
-    camera.position.set(3.5, -3.0, 2.5)
+    // Scaled down for small-scale display units (cm/mm/inches imply a small
+    // model — see homeFramingScale); the direction is always the same 3/4 view.
+    const homeScale = homeFramingScale(getLengthUnit())
+    camera.position.set(3.5 * homeScale, -3.0 * homeScale, 2.5 * homeScale)
     camera.up.set(0, 0, 1)
     camera.lookAt(0, 0, 0)
 
@@ -1574,6 +1597,11 @@ export default function Viewport({
       sceneRenderer.syncPaletteOpacity()
     }
 
+    // The shared undo/redo choke point: the Edit menu and command palette
+    // (via App.handleUndo/handleRedo → ViewportApi) and this component's own
+    // Cmd+Z / Cmd+Shift+Z keydown all land here, so post-history
+    // reconciliation (onHistoryChanged) fires for EVERY entry point instead
+    // of being duplicated per caller.
     function runUndo(): void {
       if (wasmSceneRef.current.can_scene_undo()) {
         // As explicit as menu delete: the undo executes AND ends the armed
@@ -1582,6 +1610,7 @@ export default function Viewport({
         disarmActiveArrayWindow()
         try {
           applyHistoryChange(wasmSceneRef.current.scene_undo())
+          onHistoryChangedRef.current?.()
         } catch (err) {
           console.warn('[Viewport] scene_undo failed:', err)
         }
@@ -1594,6 +1623,7 @@ export default function Viewport({
         disarmActiveArrayWindow()
         try {
           applyHistoryChange(wasmSceneRef.current.scene_redo())
+          onHistoryChangedRef.current?.()
         } catch (err) {
           console.warn('[Viewport] scene_redo failed:', err)
         }
@@ -1601,10 +1631,18 @@ export default function Viewport({
     }
 
     function zoomExtents(): void {
-      // Compute the world bounding box over all rendered objects and instances.
+      // Compute the world bounding box over all rendered model geometry:
+      // objects, instances, AND sketches — a document that is only a drawn
+      // rectangle must frame correctly too. Guides are deliberately
+      // excluded: they are reference geometry, and a long construction line
+      // would blow the framing out past the model it references. Hidden
+      // geometry (eye/tag hides flip wrapper-group `.visible`, which
+      // Box3.expandByObject ignores) is excluded too — Zoom Extents frames
+      // every VISIBLE thing (learn/viewing.md), not invisible solids.
       const box = new THREE.Box3()
-      box.expandByObject(sceneRenderer.objectsGroup)
-      box.expandByObject(sceneRenderer.instancesGroup)
+      expandByVisibleObject(box, sceneRenderer.objectsGroup)
+      expandByVisibleObject(box, sceneRenderer.instancesGroup)
+      expandByVisibleObject(box, sceneRenderer.sketchGroup)
       if (box.isEmpty()) return
 
       const center = new THREE.Vector3()
@@ -1633,11 +1671,14 @@ export default function Viewport({
       // tiny tilt baked into their eye direction — see POLE_TILT).
       const spec = STANDARD_VIEWS[view]
 
-      // Re-frame the scene each time (like zoomExtents), falling back to the
-      // current target/distance when the scene is empty.
+      // Re-frame the scene each time (like zoomExtents, same group set —
+      // sketches count as model geometry, guides stay excluded, hidden
+      // geometry is skipped), falling back to the current target/distance
+      // when nothing is visible.
       const box = new THREE.Box3()
-      box.expandByObject(sceneRenderer.objectsGroup)
-      box.expandByObject(sceneRenderer.instancesGroup)
+      expandByVisibleObject(box, sceneRenderer.objectsGroup)
+      expandByVisibleObject(box, sceneRenderer.instancesGroup)
+      expandByVisibleObject(box, sceneRenderer.sketchGroup)
 
       const center = new THREE.Vector3()
       let distance: number
@@ -1683,6 +1724,17 @@ export default function Viewport({
       const pixels = new Uint8Array(width * height * 4)
       gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
       return { width, height, pixels }
+    }
+
+    function setHomeFraming(scale: number): void {
+      // Re-pose the camera at the default 3/4 home view, `scale`× the
+      // meter-scale distance (welcome-screen unit choice on a blank
+      // document). Same direction and target as the mount-time default.
+      camera.position.set(3.5 * scale, -3.0 * scale, 2.5 * scale)
+      controls.target.set(0, 0, 0)
+      camera.updateProjectionMatrix()
+      controls.update()
+      scheduleRender()
     }
 
     function setHidden(objectIds: bigint[], instanceIds: bigint[]): void {
@@ -1754,7 +1806,7 @@ export default function Viewport({
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
     }
 
     // ------------------------------------------------------------------ tool factories

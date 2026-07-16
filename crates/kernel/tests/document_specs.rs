@@ -2801,6 +2801,151 @@ fn tag_and_name_ops_work_on_group_and_instance_nodes() {
     assert_eq!(doc.node_tags(NodeId::Instance(iid)), &[] as &[Vec<String>]);
 }
 
+/// `delete_tag` unassigns the tag from every node kind (object, group,
+/// instance) and never touches geometry.
+#[test]
+fn delete_tag_unassigns_from_all_nodes_and_keeps_geometry() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let d = extrude_box(&mut doc, 6.0, 0.0, 7.0, 1.0, 0.0, 1.0);
+    doc.group_nodes(&[NodeId::Object(b), NodeId::Object(c)])
+        .unwrap();
+    let gid = *doc.group_ids().first().unwrap();
+    let (_, iid, _) = doc.make_component(&[NodeId::Object(d)]).unwrap();
+
+    let tag = vec!["Walls".to_string()];
+    doc.add_node_tag(NodeId::Object(a), tag.clone()).unwrap();
+    doc.add_node_tag(NodeId::Group(gid), tag.clone()).unwrap();
+    doc.add_node_tag(NodeId::Instance(iid), tag.clone())
+        .unwrap();
+
+    let change = doc.delete_tag(&tag).unwrap();
+    // Every carrier is reported touched; nothing else changes.
+    assert_eq!(change.objects_touched, vec![a]);
+    assert_eq!(change.groups_touched, vec![gid]);
+    assert_eq!(change.instances_touched, vec![iid]);
+    assert_eq!(doc.node_tags(NodeId::Object(a)), &[] as &[Vec<String>]);
+    assert_eq!(doc.node_tags(NodeId::Group(gid)), &[] as &[Vec<String>]);
+    assert_eq!(doc.node_tags(NodeId::Instance(iid)), &[] as &[Vec<String>]);
+    // Geometry is never deleted — every carrier is still live.
+    assert!(doc.object(a).is_some(), "tagged object survives");
+    assert!(doc.group_ids().contains(&gid), "tagged group survives");
+    assert!(
+        doc.instance_ids().contains(&iid),
+        "tagged instance survives"
+    );
+}
+
+/// `delete_tag` removes the registry entry (and its hidden flag) plus every
+/// registered descendant tag, while unrelated tags survive.
+#[test]
+fn delete_tag_unregisters_path_and_descendants() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let arch = vec!["Architecture".to_string()];
+    let walls = vec!["Architecture".to_string(), "Walls".to_string()];
+    let level = vec!["Level".to_string()];
+    doc.set_tag_hidden(arch.clone(), true);
+    doc.set_tag_hidden(walls.clone(), false);
+    doc.set_tag_hidden(level.clone(), true);
+    doc.add_node_tag(NodeId::Object(a), walls.clone()).unwrap();
+
+    doc.delete_tag(&arch).unwrap();
+
+    // The path and its descendant are gone from registry and nodes …
+    assert!(!doc.tag_meta().any(|(p, _)| p == arch.as_slice()));
+    assert!(!doc.tag_meta().any(|(p, _)| p == walls.as_slice()));
+    assert_eq!(doc.node_tags(NodeId::Object(a)), &[] as &[Vec<String>]);
+    // … while the unrelated tag keeps its hidden flag.
+    assert!(doc.tag_hidden(&level));
+}
+
+/// Undoing `delete_tag` restores the registry entries — including the
+/// hidden-by-default flag — and every node's tag list; redo strips them again.
+#[test]
+fn delete_tag_undo_redo_roundtrip() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let tag = vec!["Scaffolding".to_string()];
+    doc.add_node_tag(NodeId::Object(a), tag.clone()).unwrap();
+    doc.set_tag_hidden(tag.clone(), true);
+
+    doc.delete_tag(&tag).unwrap();
+    assert_eq!(doc.node_tags(NodeId::Object(a)), &[] as &[Vec<String>]);
+    assert!(!doc.tag_hidden(&tag));
+    assert!(!doc.tag_meta().any(|(p, _)| p == tag.as_slice()));
+
+    doc.undo().expect("undo delete_tag");
+    assert_eq!(doc.node_tags(NodeId::Object(a)), std::slice::from_ref(&tag));
+    assert!(
+        doc.tag_hidden(&tag),
+        "undo restores the hidden-by-default flag"
+    );
+
+    doc.redo().expect("redo delete_tag");
+    assert_eq!(doc.node_tags(NodeId::Object(a)), &[] as &[Vec<String>]);
+    assert!(!doc.tag_meta().any(|(p, _)| p == tag.as_slice()));
+}
+
+/// `delete_tag` of an unknown or empty path is a no-op (no undo entry pushed).
+#[test]
+fn delete_unknown_tag_is_no_op_no_undo_entry() {
+    let mut doc = Document::new();
+    let _ = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+
+    doc.delete_tag(&["Ghost".to_string()]).unwrap();
+    doc.delete_tag(&[]).unwrap();
+    // Only the extrude is on the undo stack.
+    doc.undo().unwrap(); // undo extrude
+    assert!(!doc.can_undo(), "delete_tag no-ops pushed nothing");
+}
+
+/// Undoing `delete_tag` must NOT clobber a registry entry the user
+/// re-registered after the delete. `set_tag_hidden` is deliberately
+/// non-undoable view state, so a fresh post-delete registration wins over
+/// the captured pre-delete flag: undo only restores entries whose path is
+/// not currently registered.
+#[test]
+fn delete_tag_undo_keeps_fresh_reregistration() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let tag = vec!["A".to_string()];
+    doc.add_node_tag(NodeId::Object(a), tag.clone()).unwrap();
+    doc.set_tag_hidden(tag.clone(), false); // registered, visible
+
+    doc.delete_tag(&tag).unwrap(); // captures (A, hidden=false)
+
+    // The user re-creates the same tag and hides it — non-undoable view state.
+    doc.set_tag_hidden(tag.clone(), true);
+
+    doc.undo().expect("undo delete_tag");
+    // The node's assignment is restored…
+    assert_eq!(doc.node_tags(NodeId::Object(a)), std::slice::from_ref(&tag));
+    // …but the fresh hidden flag survives: undo must not revert it to the
+    // captured pre-delete value.
+    assert!(
+        doc.tag_hidden(&tag),
+        "undo reverted a post-delete set_tag_hidden — non-undoable view state was clobbered"
+    );
+}
+
+/// A contentless registered tag (imported empty layer) deletes cleanly.
+#[test]
+fn delete_contentless_registered_tag() {
+    let mut doc = Document::new();
+    let tag = vec!["Empty Layer".to_string()];
+    doc.set_tag_hidden(tag.clone(), false);
+    assert!(doc.tag_meta().any(|(p, _)| p == tag.as_slice()));
+
+    doc.delete_tag(&tag).unwrap();
+    assert!(!doc.tag_meta().any(|(p, _)| p == tag.as_slice()));
+
+    doc.undo().expect("undo delete_tag");
+    assert!(doc.tag_meta().any(|(p, _)| p == tag.as_slice()));
+}
+
 // ------------------------------------------------------------------- guides
 
 #[test]

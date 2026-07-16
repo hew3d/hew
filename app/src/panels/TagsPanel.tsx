@@ -7,6 +7,10 @@
  * (DocumentTree eye toggles) — a node hidden by either stays hidden; unhiding
  * a tag does not un-hide a node that is also manually hidden.
  *
+ * Each row also has a delete (×) button: deleting a tag unassigns it (and
+ * its sub-tags) from every node and drops it from the registry — geometry is
+ * never deleted, and the action is undoable (Scene.delete_tag).
+ *
  * If the model has no encoded tags, the panel renders nothing — an empty
  * list is self-explanatory and boilerplate would just be noise.
  */
@@ -32,6 +36,8 @@ interface Props {
   hiddenTagPaths: Set<string>
   /** Toggle hide/show for a tag (and all its descendants). */
   onToggleTagPath: (path: string[]) => void
+  /** Delete a tag (and all its descendants): unassign everywhere, undoable. */
+  onDeleteTag: (path: string[]) => void
   /** Reveal request from the command palette (null = none). */
   revealTag?: TagReveal | null
 }
@@ -50,7 +56,7 @@ const ROW_BASE: React.CSSProperties = {
   color: 'var(--text-secondary, #ccc)',
 }
 
-export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, revealTag }: Props) {
+export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDeleteTag, revealTag }: Props) {
   // Re-query the scene on every docRev bump.
   const tagTree = useMemo(() => {
     // Collect all nodes (objects, groups, instances) and parse their names.
@@ -115,6 +121,7 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, reve
             depth={0}
             hiddenTagPaths={hiddenTagPaths}
             onToggleTagPath={onToggleTagPath}
+            onDeleteTag={onDeleteTag}
             revealTag={revealTag ?? null}
             revealExpandKeys={revealExpandKeys}
           />
@@ -133,6 +140,7 @@ function TagRow({
   depth,
   hiddenTagPaths,
   onToggleTagPath,
+  onDeleteTag,
   revealTag,
   revealExpandKeys,
 }: {
@@ -140,6 +148,7 @@ function TagRow({
   depth: number
   hiddenTagPaths: Set<string>
   onToggleTagPath: (path: string[]) => void
+  onDeleteTag: (path: string[]) => void
   revealTag: TagReveal | null
   revealExpandKeys: Set<string>
 }) {
@@ -250,6 +259,25 @@ function TagRow({
         >
           {hidden ? '○' : '●'}
         </button>
+
+        {/* Delete tag — unassigns everywhere (undoable); never deletes geometry */}
+        <button
+          onClick={() => onDeleteTag(node.path)}
+          title={hasChildren ? 'Delete tag and sub-tags (objects are kept)' : 'Delete tag (objects are kept)'}
+          aria-label={`Delete tag ${node.segment}`}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-faint, #666)',
+            cursor: 'pointer',
+            padding: '0 2px',
+            fontSize: '12px',
+            lineHeight: 1,
+            flexShrink: 0,
+          }}
+        >
+          ×
+        </button>
       </div>
 
       {/* Children — shown when expanded */}
@@ -260,6 +288,7 @@ function TagRow({
           depth={depth + 1}
           hiddenTagPaths={hiddenTagPaths}
           onToggleTagPath={onToggleTagPath}
+          onDeleteTag={onDeleteTag}
           revealTag={revealTag}
           revealExpandKeys={revealExpandKeys}
         />

@@ -5,8 +5,10 @@
  *
  * Offers the three ways into the app — start modeling in the already-open
  * blank document, open a file (recents listed when the shell provides
- * them), or load a bundled sample — plus a link to the getting-started
- * guide and a "show on startup" toggle persisted by
+ * them), or load a bundled sample — plus a one-dropdown unit choice (every
+ * format flat, unlike Settings' system × format two-step; persisted as the
+ * default, and a small-scale pick re-frames the blank scene closer), a link
+ * to the getting-started guide, and a "show on startup" toggle persisted by
  * `settings/welcomeScreen.ts`.
  *
  * Layout is a branded two-panel dialog: a terracotta-tinted rail carrying
@@ -18,6 +20,7 @@
 
 import { useEffect, useCallback, type MouseEvent } from 'react'
 import { isTauri } from '../io/fileHost'
+import { LENGTH_FORMAT_OPTIONS, type LengthFormat } from '../settings/units'
 
 /** One bundled sample: the asset file under `samples/` plus display copy. */
 export interface SampleEntry {
@@ -61,6 +64,11 @@ interface WelcomeScreenProps {
   showOnStartup: boolean
   /** Persist a new "show on startup" value. */
   onShowOnStartupChange: (show: boolean) => void
+  /** The current length unit (display format). */
+  unit: LengthFormat
+  /** Persist a new default unit; a small-scale choice (cm/mm/inches) also
+   * re-frames the blank scene closer (App.tsx owns that side effect). */
+  onUnitChange: (unit: LengthFormat) => void
 }
 
 /**
@@ -261,6 +269,32 @@ const WELCOME_CSS = `
   color: var(--text-faint);
 }
 
+/* ---- Units ------------------------------------------------------------ */
+.hw-welcome__units {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hw-welcome__units select {
+  padding: 6px 8px;
+  background: var(--surface-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-control);
+  font-family: var(--font-family-ui);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.hw-welcome__units select:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+.hw-welcome__units-hint {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 /* ---- Footer ----------------------------------------------------------- */
 .hw-welcome__footer {
   display: flex;
@@ -345,6 +379,8 @@ export function WelcomeScreen({
   onOpenSample,
   showOnStartup,
   onShowOnStartupChange,
+  unit,
+  onUnitChange,
 }: WelcomeScreenProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -448,6 +484,24 @@ export function WelcomeScreen({
                 .hew, or import SketchUp, COLLADA, and glTF.
               </span>
             </button>
+          </div>
+
+          <div className="hw-welcome__label">Units</div>
+          <div className="hw-welcome__units">
+            <select
+              aria-label="Units"
+              value={unit}
+              onChange={(e) => onUnitChange(e.target.value as LengthFormat)}
+            >
+              {LENGTH_FORMAT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <span className="hw-welcome__units-hint">
+              Sets the default. A small unit also starts the view zoomed in.
+            </span>
           </div>
 
           <div className="hw-welcome__footer">

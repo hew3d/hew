@@ -68,6 +68,16 @@ export interface HarnessDeps {
    * File→Open runs). Returns false if the load was rejected..
    */
   loadBytes: (bytes: Uint8Array) => boolean
+  /**
+   * Toggle a tag path's hidden flag through the app's real Tags-panel path
+   * (session hidden set + union push to renderer/kernel + persisted
+   * `set_tag_hidden`) — NOT a bare scene call, which would skip the app's
+   * visibility state.
+   */
+  toggleTagPath: (path: string[]) => void
+  /** Delete a tag everywhere through the app's real Tags-panel path
+   * (kernel `delete_tag` + tag-visibility resync + document-changed). */
+  deleteTag: (path: string[]) => void
 }
 
 export interface HewTestHarness {
@@ -450,6 +460,21 @@ export interface HewTestHarness {
    * (`follow_me_around_face`).
    */
   followMeAroundFace(sketch: string, region: string, object: string, face: string): string
+
+  // -------- tags --------
+
+  /**
+   * Toggle a tag path's hidden flag through the app's real Tags-panel eye
+   * path — session hidden set, renderer/kernel union push, and the
+   * persisted `set_tag_hidden` flag together.
+   */
+  toggleTagHidden(path: string[]): void
+
+  /**
+   * Delete a tag everywhere through the app's real Tags-panel delete path
+   * (undoable kernel `delete_tag` + tag-visibility resync).
+   */
+  deleteTag(path: string[]): void
 }
 
 declare global {
@@ -1056,6 +1081,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       deps.setSelection(
         nodes.map((n) => ({ kind: n.kind as NodeKind, id: BigInt(n.id) })),
       ),
+
+    // -------- tags --------
+
+    toggleTagHidden: (path) => deps.toggleTagPath(path),
+
+    deleteTag: (path) => deps.deleteTag(path),
   }
 
   window.__hew_test = harness

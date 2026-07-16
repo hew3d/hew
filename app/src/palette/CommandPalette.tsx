@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { TOOL_ICON_SVG } from '../tools/toolIcons'
 import boltSvg from '@material-symbols/svg-400/outlined/bolt.svg?raw'
-import { paletteEntries, paletteShortcut, type PaletteEntry, type PaletteGroup } from './registry'
+import { paletteEntries, paletteShortcut, type PaletteEntry, type PaletteGate, type PaletteGroup } from './registry'
 import { rankEntries } from './search'
 import { getRecent, recordRun, subscribe as subscribeRecent } from './recency'
 import { isMac } from '../platform'
@@ -27,6 +27,10 @@ export interface CommandPaletteProps {
   /** Dynamic per-document entries (Model group: object/group/component/tag
    * names built by App.tsx) searched alongside the static registry. */
   extraEntries?: PaletteEntry[]
+  /** Current values of the selection gates (App.tsx's menuGates + a plain
+   * has-selection flag). A gated entry whose flag is false (or missing)
+   * renders disabled — listed but not runnable, like a greyed menu item. */
+  gates?: Partial<Record<PaletteGate, boolean>>
 }
 
 const GROUP_ORDER: PaletteGroup[] = ['Tools', 'Actions', 'Model']
@@ -46,7 +50,7 @@ function RowIcon({ entry }: { entry: PaletteEntry }) {
   )
 }
 
-export function CommandPalette({ open, onClose, onRun, extraEntries }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, onRun, extraEntries, gates }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [recentIds, setRecentIds] = useState<string[]>(() => getRecent())
@@ -74,7 +78,11 @@ export function CommandPalette({ open, onClose, onRun, extraEntries }: CommandPa
     setSelectedIndex((i) => Math.max(0, Math.min(i, ranked.length - 1)))
   }, [ranked.length])
 
+  const isDisabled = (entry: PaletteEntry): boolean =>
+    entry.gate !== undefined && (gates?.[entry.gate] ?? false) === false
+
   const run = (entry: PaletteEntry) => {
+    if (isDisabled(entry)) return
     recordRun(entry.id)
     onRun(entry.id)
     onClose()
@@ -209,12 +217,14 @@ export function CommandPalette({ open, onClose, onRun, extraEntries }: CommandPa
               {items.map((entry) => {
                 flatIndex += 1
                 const selected = flatIndex === selectedIndex
+                const disabled = isDisabled(entry)
                 const shortcut = paletteShortcut(entry, isMac)
                 return (
                   <div
                     key={entry.id}
                     role="option"
                     aria-selected={selected}
+                    aria-disabled={disabled || undefined}
                     onMouseEnter={() => setSelectedIndex(flatIndex)}
                     onClick={() => run(entry)}
                     style={{
@@ -222,7 +232,8 @@ export function CommandPalette({ open, onClose, onRun, extraEntries }: CommandPa
                       alignItems: 'center',
                       gap: 'var(--space-4)',
                       padding: '7px var(--space-6)',
-                      cursor: 'pointer',
+                      cursor: disabled ? 'default' : 'pointer',
+                      opacity: disabled ? 0.45 : 1,
                       background: selected ? 'var(--accent-tint-18)' : 'transparent',
                     }}
                   >
@@ -232,7 +243,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries }: CommandPa
                         style={{
                           fontSize: 'var(--font-size-palette-title)',
                           fontWeight: 600,
-                          color: selected ? 'var(--accent-text-strong)' : 'var(--text-primary)',
+                          color: selected && !disabled ? 'var(--accent-text-strong)' : 'var(--text-primary)',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
@@ -252,6 +263,17 @@ export function CommandPalette({ open, onClose, onRun, extraEntries }: CommandPa
                         {entry.description}
                       </div>
                     </div>
+                    {disabled && (
+                      <span
+                        style={{
+                          fontSize: 'var(--font-size-palette-desc)',
+                          color: 'var(--text-faint)',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        needs a selection
+                      </span>
+                    )}
                     {shortcut !== '' && (
                       <span
                         style={{

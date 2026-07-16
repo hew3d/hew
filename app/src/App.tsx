@@ -19,6 +19,7 @@ import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
 import { nextSelection, canBoolean as canBooleanHelper, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
+import { isSceneVisiblyEmpty, isLoneVisibleSketchScene, type HiddenLeafIds } from './sceneVisibility'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness } from './test/harness'
@@ -42,6 +43,7 @@ import { ImportingOverlay } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { WelcomeScreen, type SampleEntry } from './panels/WelcomeScreen'
 import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
+import { getLengthUnit, setLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit, type LengthFormat } from './settings/units'
 import { StlExportDialog } from './panels/StlExportDialog'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
@@ -243,6 +245,11 @@ export default function App() {
   /** Mirror of the persisted "show welcome on startup" flag, so the
    *  dialog's checkbox re-renders on toggle. */
   const [showWelcomeSetting, setShowWelcomeSetting] = useState(getShowWelcome)
+  // The welcome screen's unit dropdown mirrors the units singleton; kept in
+  // React state so the select re-renders, and re-synced from external
+  // changes (the Settings surface) while the screen is up.
+  const [welcomeUnit, setWelcomeUnit] = useState<LengthFormat>(getLengthUnit)
+  useEffect(() => subscribeLengthUnit(setWelcomeUnit), [])
   /** Right-tray width (px), user-resizable via the drag handle; persisted. */
   const [trayWidth, setTrayWidth] = useState<number>(() => {
     const raw = window.localStorage.getItem(TRAY_WIDTH_KEY)
@@ -272,6 +279,17 @@ export default function App() {
   // applyLoadedBytesRef, so applyLoadedBytes and importDocument — both defined
   // earlier — can push freshly-seeded hidden state without a stale closure.
   const pushUnionHiddenRef = useRef<(nextHiddenKeys: Set<string>, nextHiddenTagPaths: Set<string>) => void>(() => {})
+  // Re-seeds the session's hidden-tag set from the document's tag registry
+  // and re-pushes the visibility union. Undo/redo can change the registry
+  // (delete tag restores/removes hidden flags with it), so handleUndo/
+  // handleRedo — defined before the seeding helpers — reach the latest
+  // closure through this ref, same pattern as pushUnionHiddenRef.
+  const resyncTagVisibilityRef = useRef<() => void>(() => {})
+  // Latest tag handlers for the test harness — it installs once on mount
+  // (before these are defined further down), so it reaches them through
+  // refs, the same pattern as reconcileRef/applyLoadedBytesRef.
+  const toggleTagPathRef = useRef<(path: string[]) => void>(() => {})
+  const deleteTagRef = useRef<(path: string[]) => void>(() => {})
   // True when a mutation has occurred since the last successful autosave tick
   // (or since the last explicit Save, which also resets it). Avoids redundant
   // writes when the document hasn't changed between ticks.
@@ -522,10 +540,46 @@ export default function App() {
     return path.slice(0, trimIndex)
   }, [])
 
+  // Whether the viewport was VISIBLY empty after the PREVIOUS document (or
+  // visibility) change — the pre-state for the first-sketch zoom below. The
+  // edge is defined on visible emptiness, not kernel emptiness: a document
+  // whose only solid is eye/tag-hidden renders a blank viewport, and a small
+  // rectangle drawn into that blank view must reframe too (sceneVisibility.ts).
+  // Starts true (a fresh window holds a blank document) and re-seeds itself
+  // on every document change here AND on every hidden-set push
+  // (pushUnionHidden), so loads, news, deletes, undos, and hides all keep it
+  // honest without extra wiring.
+  const prevSceneEmptyRef = useRef(true)
+  // The hidden leaf-id union (eye hides ∪ tag hides) as last pushed by
+  // pushUnionHidden — what the visible-emptiness checks subtract.
+  const hiddenLeafIdsRef = useRef<HiddenLeafIds>({ objects: new Set(), instances: new Set() })
+
   // Bump the tree's revision; trim stale context path entries; mark dirty.
   // Every scene mutation flows through here via Viewport's handleSceneRefresh.
   const handleDocumentChanged = useCallback(() => {
     setDocRev((r) => r + 1)
+    // First entity committed into a visibly empty document: when it's a lone
+    // visible sketch, zoom to fit so the drawn shape — not the default
+    // meter-scale framing — sets the view's scope (a 4×10 cm rectangle is
+    // near-invisible at the default distance). Fires only on the
+    // visibly-empty→sketch-only edge, so it never yanks the camera during
+    // normal work (it can't re-fire while anything is visible); loads are
+    // excluded (suppressDirtyRef) and frame themselves in applyLoadedBytes.
+    {
+      const scene = sceneRef.current
+      if (scene !== null) {
+        const wasEmpty = prevSceneEmptyRef.current
+        const hidden = hiddenLeafIdsRef.current
+        prevSceneEmptyRef.current = isSceneVisiblyEmpty(scene, hidden)
+        if (
+          wasEmpty &&
+          !suppressDirtyRef.current &&
+          isLoneVisibleSketchScene(scene, hidden)
+        ) {
+          requestAnimationFrame(() => viewportApi.current?.zoomExtents())
+        }
+      }
+    }
     setActiveContext((ctx) => {
       const scene = sceneRef.current
       if (scene === null) return ctx
@@ -565,6 +619,8 @@ export default function App() {
         setSelectedIds(nodes)
       },
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
+      toggleTagPath: (path) => toggleTagPathRef.current(path),
+      deleteTag: (path) => deleteTagRef.current(path),
     })
   }, [])
 
@@ -1297,12 +1353,24 @@ export default function App() {
   }, [])
 
   // ---------------------------------------------------------------- undo/redo for Edit menu
+  // Tag-visibility resync is NOT called here: it hangs off the viewport's
+  // onHistoryChanged (handleHistoryChanged below), the choke point shared by
+  // every undo/redo entry point — menu, palette, AND the viewport's own
+  // Cmd+Z/Cmd+Shift+Z keydown, which never passes through these handlers.
   const handleUndo = useCallback(() => {
     viewportApi.current?.runUndo()
   }, [])
 
   const handleRedo = useCallback(() => {
     viewportApi.current?.runRedo()
+  }, [])
+
+  // Fired by the viewport after ANY successful undo/redo. Undoing/redoing a
+  // tag deletion changes the tag registry (and its hidden flags): re-seed so
+  // content hidden solely via a restored hidden tag re-hides — and stays
+  // unpickable — no matter which entry point drove the history step.
+  const handleHistoryChanged = useCallback(() => {
+    resyncTagVisibilityRef.current()
   }, [])
 
   // ---------------------------------------------------------------- zoom extents
@@ -2232,6 +2300,12 @@ export default function App() {
       // be unable to click past a hidden solid's edges/faces.
       viewportApi.current?.setHidden(objIds, instIds)
       scene.set_hidden(new BigUint64Array(objIds), new BigUint64Array(instIds))
+      // (3) Mirror the union for the visible-emptiness checks, and re-seed
+      // the first-sketch-zoom pre-state: hiding is not a document mutation,
+      // so without this a hide-everything → draw-rectangle sequence would
+      // read a stale "not empty" pre-state and skip the reframe.
+      hiddenLeafIdsRef.current = { objects: new Set(objIds), instances: new Set(instIds) }
+      prevSceneEmptyRef.current = isSceneVisiblyEmpty(scene, hiddenLeafIdsRef.current)
     },
     // state?.scene changes on every render; we capture it fresh via the closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2276,6 +2350,38 @@ export default function App() {
     // hiddenTagPaths set above (which drives this render's UI immediately).
     sceneRef.current?.set_tag_hidden(path.join('/'), nowHidden)
   }, [hiddenTagPaths, hiddenKeys, pushUnionHidden])
+  toggleTagPathRef.current = handleToggleTagPath
+
+  // Re-seed hiddenTagPaths from the document's registry and re-push the
+  // union — the shared tail of every operation that can change the registry
+  // out from under the session set (delete tag, undo/redo of a deletion).
+  const resyncTagVisibility = useCallback(() => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const seeded = seedHiddenTagPathsFromRegistry(scene)
+    setHiddenTagPaths(seeded)
+    pushUnionHidden(hiddenKeys, seeded)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hiddenKeys, pushUnionHidden])
+  resyncTagVisibilityRef.current = resyncTagVisibility
+
+  // Delete a tag everywhere (undoable, kernel-side): unassigns it — and its
+  // sub-tags — from every node and drops the registry entries. Geometry is
+  // never deleted; content hidden solely via the deleted tag becomes visible
+  // again through the registry re-seed.
+  const handleDeleteTag = useCallback((path: string[]) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    try {
+      scene.delete_tag(path.join('/'))
+    } catch (err: unknown) {
+      handleToast(`Delete tag failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    resyncTagVisibility()
+    handleDocumentChanged()
+  }, [resyncTagVisibility, handleDocumentChanged, handleToast])
+  deleteTagRef.current = handleDeleteTag
 
   if (error !== null) {
     return (
@@ -2580,6 +2686,7 @@ export default function App() {
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
             onDocumentChanged={handleDocumentChanged}
+            onHistoryChanged={handleHistoryChanged}
             apiRef={viewportApi}
             onMeasurement={handleMeasurement}
             onInferenceChange={handleInferenceChange}
@@ -2783,6 +2890,7 @@ export default function App() {
               docRev={docRev}
               hiddenTagPaths={hiddenTagPaths}
               onToggleTagPath={handleToggleTagPath}
+              onDeleteTag={handleDeleteTag}
               revealTag={revealTag}
             />
           </TraySection>
@@ -2924,6 +3032,20 @@ export default function App() {
             setShowWelcome(show)
             setShowWelcomeSetting(show)
           }}
+          unit={welcomeUnit}
+          onUnitChange={(format) => {
+            // Persists + broadcasts; the subscribe effect above updates
+            // welcomeUnit, so no local setState needed.
+            setLengthUnit(format)
+            // A small-scale unit implies a small model: re-frame the (still
+            // blank) scene closer so the first shape lands at a sensible
+            // size. Guarded on emptiness — choosing a unit must never move
+            // the camera over real work.
+            const scene = sceneRef.current
+            if (scene !== null && isSceneEmpty(scene)) {
+              viewportApi.current?.setHomeFraming(homeFramingScale(format))
+            }
+          }}
         />
       )}
 
@@ -2935,6 +3057,16 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onRun={(id) => menuActionRef.current(id)}
         extraEntries={paletteModelEntries}
+        gates={{
+          selection: selectedIds.length > 0 || selectedGuide !== null,
+          canGroup: menuGates?.canGroup ?? false,
+          canUngroup: menuGates?.canUngroup ?? false,
+          canMakeComponent: menuGates?.canMakeComponent ?? false,
+          canPlaceCopy: menuGates?.canPlaceCopy ?? false,
+          canExplode: menuGates?.canExplode ?? false,
+          canMakeUnique: menuGates?.canMakeUnique ?? false,
+          canBoolean: menuGates?.canBoolean ?? false,
+        }}
       />
 
       {/* Settings modal — web-only fallback (Tauri opens a real, separate OS

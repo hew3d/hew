@@ -32,6 +32,8 @@ The search field at the top of the tool rail opens the command palette, or press
 
 Press `↑`/`↓` to navigate, `Enter` to run, `Esc` to close. With an empty query the palette shows your recently used commands.
 
+Commands that need a particular selection — the booleans, Group, Make Component, and friends — are always listed but shown greyed out with a "needs a selection" note until the selection qualifies, the same way the Edit menu greys them.
+
 ## The contextual dock
 
 The floating bar at the bottom-center of the viewport follows your selection and offers the most likely next actions:

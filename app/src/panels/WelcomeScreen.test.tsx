@@ -21,6 +21,8 @@ function makeProps() {
     onOpenSample: vi.fn(),
     showOnStartup: true,
     onShowOnStartupChange: vi.fn(),
+    unit: 'm' as const,
+    onUnitChange: vi.fn(),
   }
 }
 
@@ -74,6 +76,17 @@ describe('WelcomeScreen', () => {
     expect(props.onClose).toHaveBeenCalledOnce()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(props.onClose).toHaveBeenCalledTimes(2)
+  })
+
+  it('the units dropdown lists every format flat and reports a choice', () => {
+    const props = makeProps()
+    render(<WelcomeScreen {...props} />)
+    const select = screen.getByRole('combobox', { name: /units/i })
+    expect(select).toHaveValue('m')
+    // One flat dropdown — all six formats, no system pre-step.
+    expect(select.querySelectorAll('option')).toHaveLength(6)
+    fireEvent.change(select, { target: { value: 'cm' } })
+    expect(props.onUnitChange).toHaveBeenCalledWith('cm')
   })
 
   it('the show-on-startup checkbox reflects and reports its value', () => {

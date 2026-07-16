@@ -184,6 +184,29 @@ export function subscribe(cb: (format: LengthFormat) => void): () => void {
   return () => subscribers.delete(cb)
 }
 
+/**
+ * How much closer than the meter-scale default the EMPTY-scene camera should
+ * start for a display format. A small-scale format (cm, mm, inches) implies
+ * a small model, so a blank document frames proportionally closer — the
+ * default meter framing renders a 4×10 cm part near-invisibly tiny. Meters
+ * and architectural feet keep the default. Only empty-scene framing reads
+ * this (Viewport mount + the welcome screen's unit choice); it never moves
+ * the camera over an existing model.
+ */
+const HOME_FRAMING_SCALE: Record<LengthFormat, number> = {
+  m: 1,
+  arch: 1,
+  cm: 0.1,
+  mm: 0.02,
+  frac_in: 0.1,
+  dec_in: 0.1,
+}
+
+/** The empty-scene framing scale for `format` (default: the current format). */
+export function homeFramingScale(format: LengthFormat = getLengthUnit()): number {
+  return HOME_FRAMING_SCALE[format]
+}
+
 // ---------------------------------------------------------------------------
 // Fraction helpers (imperial display)
 // ---------------------------------------------------------------------------

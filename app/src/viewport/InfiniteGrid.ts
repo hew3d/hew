@@ -68,10 +68,12 @@ const FRAGMENT_SHADER = `
     float dist = length(uCameraPos - vWorldPos);
 
     // Map camera distance to a cell size on a log10 scale, clamped to Hew's
-    // supported range [0.1m, 10m]. The 0.12
-    // constant is a tuned-by-eye mapping from camera distance to cell size,
-    // not derived from a spec value.
-    float raw = clamp(dist * 0.12, 0.1, 10.0);
+    // supported range [1mm, 10m] — the low end reaches millimetre cells so a
+    // camera framed for a small-scale model (cm/mm/inch display units start
+    // the empty scene zoomed in) still sees a usable grid instead of one
+    // giant 10cm cell. The 0.12 constant is a tuned-by-eye mapping from
+    // camera distance to cell size, not derived from a spec value.
+    float raw = clamp(dist * 0.12, 0.001, 10.0);
     float logRaw = log(raw) / log(10.0);
     float lo = pow(10.0, floor(logRaw));
     float hi = lo * 10.0;

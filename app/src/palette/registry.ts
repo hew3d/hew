@@ -8,13 +8,23 @@
  * selected palette result just calls `menuActionRef.current(entry.id)`, so
  * this module holds no handler logic of its own, only searchable metadata.
  *
- * Two sections for now: Tools (from `tools/toolRegistry.ts`, ALL 16 tools —
- * not just the rail's curated 10, since the palette's whole point is finding
- * things that aren't visible elsewhere) and Actions (hand-authored, covering
- * File/Edit/View/Camera/Window/Help). The spec's Components and Learn
- * sections are deferred: Components needs the tray's material/outliner
+ * Two sections for now: Tools (from `tools/toolRegistry.ts`, ALL tools —
+ * not just the rail's curated subset, since the palette's whole point is
+ * finding things that aren't visible elsewhere) and Actions (hand-authored,
+ * covering File/Edit/View/Camera/Window/Help). The spec's Components and
+ * Learn sections are deferred: Components needs the tray's material/outliner
  * data to exist first; Learn needs real help content Hew doesn't have yet —
  * both are net additions to this registry's shape later, not a rework.
+ *
+ * Completeness is enforced: registry.test.ts diffs this registry against the
+ * `case '…':` ids of App.tsx's menuActionRef switch (the canonical action
+ * id space), so a new action can't silently skip the palette — it must be
+ * registered here or explicitly excused in PALETTE_EXCLUDED_ACTION_IDS.
+ *
+ * Selection-gated entries (booleans, group/component verbs) carry a `gate`
+ * key naming the App-computed enablement flag; the palette shows them
+ * disabled rather than hiding them, matching how the menus present the same
+ * commands (visible, greyed out when the selection doesn't qualify).
  */
 
 import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry'
@@ -24,6 +34,20 @@ import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry
  * `extraEntries` — this module only defines the static Tools/Actions sets. */
 export type PaletteGroup = 'Tools' | 'Actions' | 'Model'
 
+/** The selection-gated enablement flags App.tsx computes (`menuGates` — the
+ * same flags that grey out the Edit menu items and drive the native menu's
+ * sync_menu_state). `selection` is the plain "something is selected" gate
+ * (Edit ▸ Delete). */
+export type PaletteGate =
+  | 'selection'
+  | 'canGroup'
+  | 'canUngroup'
+  | 'canMakeComponent'
+  | 'canPlaceCopy'
+  | 'canExplode'
+  | 'canMakeUnique'
+  | 'canBoolean'
+
 export interface PaletteEntry {
   /** Matches a `menuActionRef.current(id)` payload string in App.tsx. */
   id: string
@@ -32,6 +56,9 @@ export interface PaletteEntry {
   group: PaletteGroup
   /** Extra terms that should also match this entry (e.g. "extrude" -> Push/Pull). */
   synonyms?: string[]
+  /** Selection gate: when the named flag is false the entry renders
+   * disabled (still listed — discoverable, like a greyed menu item). */
+  gate?: PaletteGate
 }
 
 const TOOL_ACTION_ID: Record<ToolName, string> = {
@@ -124,8 +151,17 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'undo', label: 'Undo', description: 'Undo the last change.', group: 'Actions' },
   { id: 'redo', label: 'Redo', description: 'Redo the last undone change.', group: 'Actions' },
   { id: 'edit-select-all', label: 'Select All', description: 'Select every visible object, group, component, and sketch.', group: 'Actions', synonyms: ['select everything'] },
-  { id: 'edit-delete', label: 'Delete', description: 'Delete the current selection.', group: 'Actions', synonyms: ['remove', 'erase'] },
+  { id: 'edit-delete', label: 'Delete', description: 'Delete the current selection.', group: 'Actions', synonyms: ['remove', 'erase'], gate: 'selection' },
   { id: 'edit-delete-guides', label: 'Delete Guide Lines', description: 'Remove every construction guide.', group: 'Actions' },
+  { id: 'edit-group', label: 'Group', description: 'Group the selected objects so they move together.', group: 'Actions', synonyms: ['make group'], gate: 'canGroup' },
+  { id: 'edit-ungroup', label: 'Ungroup', description: 'Dissolve the selected group back into its members.', group: 'Actions', synonyms: ['dissolve group'], gate: 'canUngroup' },
+  { id: 'edit-make-component', label: 'Make Component', description: 'Turn the selection into a reusable component definition.', group: 'Actions', synonyms: ['create component', 'component'], gate: 'canMakeComponent' },
+  { id: 'edit-place-copy', label: 'Place Copy', description: 'Place another instance of the selected component.', group: 'Actions', synonyms: ['duplicate', 'instance', 'copy component'], gate: 'canPlaceCopy' },
+  { id: 'edit-explode', label: 'Explode', description: 'Break the selected component instance into plain objects.', group: 'Actions', synonyms: ['explode instance', 'break component'], gate: 'canExplode' },
+  { id: 'edit-make-unique', label: 'Make Unique', description: 'Give the selected instance its own definition, detached from its siblings.', group: 'Actions', synonyms: ['unique component'], gate: 'canMakeUnique' },
+  { id: 'edit-union', label: 'Union', description: 'Merge two selected solids into one (boolean add).', group: 'Actions', synonyms: ['boolean', 'merge', 'combine', 'add', 'join'], gate: 'canBoolean' },
+  { id: 'edit-subtract', label: 'Subtract', description: 'Cut the second selected solid out of the first (boolean difference).', group: 'Actions', synonyms: ['boolean', 'difference', 'cut', 'carve'], gate: 'canBoolean' },
+  { id: 'edit-intersect', label: 'Intersect', description: 'Keep only the volume the two selected solids share (boolean intersection).', group: 'Actions', synonyms: ['boolean', 'common', 'overlap'], gate: 'canBoolean' },
   { id: 'toggle-axes', label: 'Toggle Axes', description: 'Show or hide the world axes.', group: 'Actions' },
   { id: 'toggle-grid', label: 'Toggle Grid', description: 'Show or hide the ground grid.', group: 'Actions' },
   { id: 'toggle-guides', label: 'Toggle Guides', description: 'Show or hide construction guides.', group: 'Actions' },
@@ -145,6 +181,22 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'open-settings', label: 'Settings…', description: 'Open Hew Settings.', group: 'Actions', synonyms: ['preferences'] },
   { id: 'report-bug', label: 'Report Bug…', description: 'Assemble and save a bug-report bundle.', group: 'Actions' },
 ]
+
+/**
+ * Action ids the menuActionRef switch handles that are DELIBERATELY not in
+ * the palette, each with its reason. registry.test.ts enforces that every
+ * switch case is either registered above or excused here — additions to the
+ * switch fail the test until they pick a side, so the palette can't silently
+ * drift out of date again.
+ */
+export const PALETTE_EXCLUDED_ACTION_IDS: Record<string, string> = {
+  'open-palette': 'self-referential — the palette cannot usefully open itself',
+  'close': 'window lifecycle, desktop shells only — not a model action',
+  'enter-context': 'contextual-dock alias; needs a picked node, not a bare trigger',
+  'ungroup': 'contextual-dock alias of edit-ungroup',
+  'make-unique': 'contextual-dock alias of edit-make-unique',
+  'explode-instance': 'contextual-dock alias of edit-explode',
+}
 
 /** The full palette registry — tools first (spec ranks Tools above Actions
  * absent other signals), then hand-authored actions. */

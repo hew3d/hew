@@ -15,7 +15,7 @@ Choose a **System** (Metric or Imperial) and a **Format**:
 - Metric: **Meters**, **Centimeters**, or **Millimeters**
 - Imperial: **Architectural** (`5' 3-1/8"`), **Fractional inches** (`60-1/8"`), or **Decimal inches** (`60.125"`)
 
-This controls how every length is displayed and how bare typed numbers are interpreted. Geometry itself is always stored in meters, so switching formats never changes your model — and you can always type any unit explicitly regardless of the display setting ([full input reference](/learn/measurement-and-guides/)).
+This controls how every length is displayed and how bare typed numbers are interpreted. Geometry itself is always stored in meters, so switching formats never changes your model — and you can always type any unit explicitly regardless of the display setting ([full input reference](/learn/measurement-and-guides/)). The welcome screen offers the same choice as a single flat dropdown; both set the same persisted default.
 
 ## Theme
 

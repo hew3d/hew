@@ -6,6 +6,8 @@ order: 1
 
 Hew runs in two places: as a web app at [app.hew3d.com](https://app.hew3d.com), with nothing to install and no account required, and as a native desktop app for macOS, Windows, and Linux (see [Download](/download/)). Both are the same application; this guide works in either.
 
+On a fresh launch a welcome screen offers the ways in: start modeling in the blank document, open a file, or load a bundled sample. It also has a **Units** dropdown — pick the unit you think in, and it becomes the default for every length you type and read. Choosing a small unit (centimeters, millimeters, or inches) also starts the view zoomed in to match, so a palm-sized part doesn't begin as a speck on a meter-scale grid. This guide's organizer is centimeter work, so **cm** is a good pick — though every step below types its unit explicitly, so any setting works.
+
 Rather than draw one lonely box, you'll build something you could actually print: a little desk-organizer set — a tray holding a pen cup, a bin with a scooped front, and a phone stand. It touches the tools you'll use in almost every session, and it takes about ten minutes.
 
 ## The one idea that matters

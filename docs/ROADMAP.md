@@ -137,7 +137,8 @@ below.
 
 - Document outliner with click-to-select and double-click to enter an
   object's editing context, with the rest of the scene dimmed for focus
-- Tags for organizing and toggling visibility of groups of objects
+- Tags for organizing and toggling visibility of groups of objects,
+  deletable without touching the geometry that carries them
 - An Object Info panel for renaming, tagging, and checking an object's
   solid status
 

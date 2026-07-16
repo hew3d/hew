@@ -9,6 +9,7 @@ import {
   LENGTH_SYSTEM_OF,
   LENGTH_FORMATS_BY_SYSTEM,
   DEFAULT_FORMAT_FOR_SYSTEM,
+  homeFramingScale,
 } from './units'
 
 /** Every display format — explicit units must parse identically in all of them. */
@@ -572,5 +573,21 @@ describe('typedReadout', () => {
 
   it('never appends for the composite arch format (no single suffix)', () => {
     expect(typedReadout('5', 'arch')).toBe('5')
+  })
+})
+
+describe('homeFramingScale', () => {
+  it('keeps the default framing for meter-scale formats', () => {
+    expect(homeFramingScale('m')).toBe(1)
+    expect(homeFramingScale('arch')).toBe(1)
+  })
+
+  it('frames closer for small-scale formats', () => {
+    for (const f of ['cm', 'mm', 'frac_in', 'dec_in'] as const) {
+      expect(homeFramingScale(f)).toBeLessThan(1)
+      expect(homeFramingScale(f)).toBeGreaterThan(0)
+    }
+    // mm implies a smaller model than cm.
+    expect(homeFramingScale('mm')).toBeLessThan(homeFramingScale('cm'))
   })
 })

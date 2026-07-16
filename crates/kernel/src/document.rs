@@ -211,6 +211,10 @@ struct PendingSketchGesture {
     created: bool,
 }
 
+/// One node's tag-list transition inside [`DocAction::TagDeleted`]:
+/// `(node, tags before, tags after)`.
+type TagListTransition = (NodeId, Vec<Vec<String>>, Vec<Vec<String>>);
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -566,6 +570,20 @@ enum DocAction {
         component: ComponentId,
         prev_name: Option<String>,
         next_name: Option<String>,
+    },
+    /// `delete_tag` removed a tag path (and every registered tag nested under
+    /// it) from the document: unregistered from the tag metadata registry and
+    /// unassigned from every visible node that carried it. Geometry is never
+    /// touched. Undo restores the registry entries — including their
+    /// hidden-by-default flags, except for a path the user re-registered
+    /// after the delete, whose fresh (non-undoable) flag wins — and every
+    /// affected node's previous tag list; redo re-applies the stripped lists
+    /// and removes the entries again.
+    TagDeleted {
+        /// Registry entries removed: `(path, hidden flag)`, for exact restore.
+        registry: Vec<(Vec<String>, bool)>,
+        /// Per-node tag lists: `(node, tags before, tags after)`.
+        nodes: Vec<TagListTransition>,
     },
     /// `Document::ingest` merged an imported scene into this document.
     /// Undo hides every created node/object/group/instance/component (ids
@@ -2261,6 +2279,106 @@ impl Document {
         self.redo.clear();
         self.debug_validate();
         Ok(self.node_change(node))
+    }
+
+    /// Delete the tag `path` — and every registered tag nested under it —
+    /// from the whole document, recording one undoable
+    /// [`DocAction::TagDeleted`].
+    ///
+    /// Deleting a tag only touches metadata; geometry is NEVER deleted or
+    /// modified:
+    /// - the path, and any registered path nested under it, is removed from
+    ///   the tag registry (dropping its hidden-by-default flag — content that
+    ///   was hidden solely via this tag becomes visible, since tag-driven
+    ///   visibility is resolved from the registry);
+    /// - the path and its nested paths are unassigned from every visible
+    ///   node's tag list.
+    ///
+    /// Hidden (undone/deleted) node records keep their tag lists: they can
+    /// only resurface through undo, which is LIFO and therefore restores this
+    /// tag first.
+    ///
+    /// No-op (`Ok`, no undo entry) when the path is empty, or is neither
+    /// registered nor carried by any visible node — consistent with
+    /// [`Document::remove_node_tag`] on an absent path.
+    pub fn delete_tag(&mut self, path: &[String]) -> Result<DocChange, DocumentError> {
+        if path.is_empty() {
+            return Ok(DocChange::default());
+        }
+        let covers = |tag: &[String]| tag.len() >= path.len() && tag[..path.len()] == *path;
+
+        // Unregister the path and its registered descendants.
+        let registry: Vec<(Vec<String>, bool)> = self
+            .tag_meta
+            .iter()
+            .filter(|(p, _)| covers(p))
+            .map(|(p, &hidden)| (p.clone(), hidden))
+            .collect();
+        for (p, _) in &registry {
+            self.tag_meta.remove(p);
+        }
+
+        // Unassign the path (and nested paths) from every visible node.
+        let mut nodes: Vec<TagListTransition> = Vec::new();
+        let mut change = DocChange::default();
+        for (id, rec) in self.objects.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags.retain(|t| !covers(t));
+            nodes.push((NodeId::Object(id), prev, rec.tags.clone()));
+            change.objects_touched.push(id);
+        }
+        for (id, rec) in self.groups.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags.retain(|t| !covers(t));
+            nodes.push((NodeId::Group(id), prev, rec.tags.clone()));
+            change.groups_touched.push(id);
+        }
+        for (id, rec) in self.instances.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags.retain(|t| !covers(t));
+            nodes.push((NodeId::Instance(id), prev, rec.tags.clone()));
+            change.instances_touched.push(id);
+        }
+
+        if registry.is_empty() && nodes.is_empty() {
+            // Unknown tag — nothing changed, no undo entry.
+            return Ok(DocChange::default());
+        }
+        self.undo.push(DocAction::TagDeleted { registry, nodes });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// Write only the tag list of a node (no guards — undo/redo replay of
+    /// [`DocAction::TagDeleted`], which never changes names).
+    fn apply_node_tags(&mut self, node: NodeId, tags: Vec<Vec<String>>) {
+        match node {
+            NodeId::Object(id) => {
+                if let Some(rec) = self.objects.get_mut(id) {
+                    rec.tags = tags;
+                }
+            }
+            NodeId::Group(id) => {
+                if let Some(rec) = self.groups.get_mut(id) {
+                    rec.tags = tags;
+                }
+            }
+            NodeId::Instance(id) => {
+                if let Some(rec) = self.instances.get_mut(id) {
+                    rec.tags = tags;
+                }
+            }
+        }
     }
 
     /// Read name + tags of a live, visible node. Returns `Err` for stale/hidden.
@@ -5498,6 +5616,29 @@ impl Document {
                 self.components[component].name = prev_name.clone();
                 self.component_change(component)
             }
+            DocAction::TagDeleted { registry, nodes } => {
+                // Undo: re-register the removed entries (restoring their
+                // hidden flags) and restore every affected node's tag list.
+                // A path the user RE-registered after the delete keeps its
+                // current flag: `set_tag_hidden` is deliberately non-undoable
+                // view state, so a fresh post-delete registration must not
+                // be clobbered by the captured pre-delete value.
+                for (path, hidden) in registry.iter() {
+                    if !self.tag_meta.contains_key(path) {
+                        self.tag_meta.insert(path.clone(), *hidden);
+                    }
+                }
+                let mut change = DocChange::default();
+                for (node, prev_tags, _) in nodes.clone() {
+                    self.apply_node_tags(node, prev_tags);
+                    match node {
+                        NodeId::Object(id) => change.objects_touched.push(id),
+                        NodeId::Group(id) => change.groups_touched.push(id),
+                        NodeId::Instance(id) => change.instances_touched.push(id),
+                    }
+                }
+                change
+            }
             DocAction::Imported {
                 objects,
                 components,
@@ -6082,6 +6223,22 @@ impl Document {
                 let component = *component;
                 self.components[component].name = next_name.clone();
                 self.component_change(component)
+            }
+            DocAction::TagDeleted { registry, nodes } => {
+                // Redo: unregister the entries and strip the tag lists again.
+                for (path, _) in registry.iter() {
+                    self.tag_meta.remove(path);
+                }
+                let mut change = DocChange::default();
+                for (node, _, next_tags) in nodes.clone() {
+                    self.apply_node_tags(node, next_tags);
+                    match node {
+                        NodeId::Object(id) => change.objects_touched.push(id),
+                        NodeId::Group(id) => change.groups_touched.push(id),
+                        NodeId::Instance(id) => change.instances_touched.push(id),
+                    }
+                }
+                change
             }
             DocAction::Imported {
                 objects,

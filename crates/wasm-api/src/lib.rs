@@ -2440,6 +2440,19 @@ impl Scene {
         self.doc.set_tag_hidden(segments, hidden);
     }
 
+    /// Delete the tag `path` — and every registered tag nested under it —
+    /// from the whole document (undoable): unregisters it from the tag
+    /// metadata (dropping its hidden-by-default flag) and unassigns it from
+    /// every node that carries it. Geometry is never deleted or modified.
+    /// No-op (no undo entry) for an unknown path. `path` is `/`-joined like
+    /// [`Scene::node_tags`].
+    pub fn delete_tag(&mut self, path: String) -> Result<(), ApiError> {
+        let segments: Vec<String> = path.split('/').map(str::to_string).collect();
+        let change = self.doc.delete_tag(&segments).map_err(doc_err)?;
+        self.reconcile(&change);
+        Ok(())
+    }
+
     /// Whether a node is USER-hidden (persisted view state, manifest v6).
     ///
     /// `kind`: 0 = object, 1 = group, 2 = instance.
