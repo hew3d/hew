@@ -376,15 +376,6 @@ export interface HewTestHarness {
   // -------- components --------
 
   /**
-   * Fold the given nodes into a new component definition plus one
-   * identity-posed instance (Edit ▸ Make Component). Kinds are
-   * `'object' | 'group'` (instances refuse — nested definitions are
-   * deferred). Returns the new instance handle. The definition inherits a
-   * single source node's name and passes its tags to the instance.
-   */
-  makeComponent(nodes: { kind: string; id: string }[]): string
-
-  /**
    * Copy an instance to a sibling instance of the same definition, offset by
    * `(dx, dy, dz)` meters — `duplicate_node(2, id, affine)`, the instance arm
    * of MoveTool's Option-drag. Returns the new instance handle.
@@ -475,6 +466,31 @@ export interface HewTestHarness {
    * (undoable kernel `delete_tag` + tag-visibility resync).
    */
   deleteTag(path: string[]): void
+
+  // -------- components & instances --------
+
+  /**
+   * Fold objects into a shared component definition plus an identity-posed
+   * instance (Edit ▸ Make Component, without the selection side effect —
+   * the placement renders batched, not materialized). Returns the instance
+   * and definition handles as decimal strings.
+   */
+  makeComponent(objectIds: string[]): { instance: string; component: string }
+
+  /**
+   * Stamp another instance of `component`, translated by `(dx, dy, dz)`
+   * meters. Returns the new instance handle as a decimal string.
+   */
+  placeInstance(component: string, dx: number, dy: number, dz: number): string
+
+  // -------- camera --------
+
+  /** Frame all visible geometry (View ▸ Zoom Extents). */
+  zoomExtents(): void
+
+  /** The camera's current pose — the read complement of `setCamera`, for
+   * asserting framing (e.g. Zoom Extents re-targeting onto an instance). */
+  getCamera(): { position: Vec3; target: Vec3; fovDeg: number }
 }
 
 declare global {
@@ -939,12 +955,31 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     getGuideIds: () => query((s) => Array.from(s.guide_ids()).map(String)),
 
+    // Undo/redo route through the viewport's runUndo/runRedo — the shared
+    // choke point that fires post-history reconciliation (onHistoryChanged →
+    // tag visibility + pick/inference exclusion) — so a harness-driven undo
+    // behaves exactly like the menu, palette, and keyboard paths. runUndo is
+    // deliberately a silent no-op when there is nothing to undo, so the
+    // harness's documented throw-on-nothing contract is checked up front.
+    // Headless callers (no viewport) fall back to the bare kernel call.
     undo: () => {
-      act((s) => s.scene_undo().free())
+      const api = deps.getViewportApi()
+      if (api === null) {
+        act((s) => s.scene_undo().free())
+        return
+      }
+      if (!scene().can_scene_undo()) throw new Error('__hew_test: nothing to undo')
+      api.runUndo()
     },
 
     redo: () => {
-      act((s) => s.scene_redo().free())
+      const api = deps.getViewportApi()
+      if (api === null) {
+        act((s) => s.scene_redo().free())
+        return
+      }
+      if (!scene().can_scene_redo()) throw new Error('__hew_test: nothing to redo')
+      api.runRedo()
     },
 
     canUndo: () => query((s) => s.can_scene_undo()),
@@ -1028,13 +1063,6 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     // -------- components --------
 
-    makeComponent: (nodes) =>
-      act((s) => {
-        const kinds = new Uint8Array(nodes.map((n) => kindNum(n.kind)))
-        const ids = new BigUint64Array(nodes.map((n) => BigInt(n.id)))
-        return s.make_component(kinds, ids).toString()
-      }),
-
     copyInstance: (id, dx, dy, dz) => {
       const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
       return act((s) => s.duplicate_node(2, BigInt(id), affine).id.toString())
@@ -1087,6 +1115,38 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     toggleTagHidden: (path) => deps.toggleTagPath(path),
 
     deleteTag: (path) => deps.deleteTag(path),
+
+    // -------- components & instances --------
+
+    makeComponent: (objectIds) =>
+      act((s) => {
+        const kinds = new Uint8Array(objectIds.length) // all zeros = object
+        const ids = new BigUint64Array(objectIds.map((id) => BigInt(id)))
+        const instance = s.make_component(kinds, ids)
+        const component = s.instance_def(instance)
+        if (component === undefined) throw new Error('makeComponent: instance has no definition')
+        return { instance: instance.toString(), component: component.toString() }
+      }),
+
+    placeInstance: (component, dx, dy, dz) =>
+      act((s) => {
+        const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
+        return s.place_instance(BigInt(component), affine).toString()
+      }),
+
+    // -------- camera --------
+
+    zoomExtents: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.zoomExtents()
+    },
+
+    getCamera: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getCamera()
+    },
   }
 
   window.__hew_test = harness

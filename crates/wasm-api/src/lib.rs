@@ -1600,6 +1600,11 @@ impl Scene {
             .transform_sketch_island(sid, iid, &t)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformSketchIsland {
+            sketch,
+            island,
+            affine: *rows,
+        });
         Ok(())
     }
 
@@ -1843,6 +1848,10 @@ impl Scene {
             .transform_sketch(sketch_id(sketch), &t)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformSketch {
+            sketch,
+            affine: *rows,
+        });
         Ok(())
     }
 
@@ -1872,6 +1881,11 @@ impl Scene {
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::MoveSketchVertex {
+            sketch,
+            vertex,
+            p: [x, y, z],
+        });
         Ok(())
     }
 
@@ -2042,6 +2056,7 @@ impl Scene {
     pub fn ungroup(&mut self, group: u64) -> Result<(), ApiError> {
         let change = self.doc.ungroup(group_id(group)).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::Ungroup { group });
         Ok(())
     }
 
@@ -2072,6 +2087,7 @@ impl Scene {
     pub fn delete_sketch(&mut self, sketch: u64) -> Result<(), ApiError> {
         let change = self.doc.delete_sketch(sketch_id(sketch)).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteSketch { sketch });
         Ok(())
     }
 
@@ -2088,6 +2104,10 @@ impl Scene {
             .transform_group(group_id(group), &t)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformGroup {
+            group,
+            affine: *rows,
+        });
         Ok(())
     }
 
@@ -2217,6 +2237,10 @@ impl Scene {
             .collect::<Result<Vec<_>, _>>()?;
         let (_component, instance, change) = self.doc.make_component(&members).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::MakeComponent {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+        });
         Ok(instance.data().as_ffi())
     }
 
@@ -2230,6 +2254,13 @@ impl Scene {
             .place_instance(component_id(component), pose)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        // affine_transform validated the length, so this cannot fail.
+        let mut rec_affine = [0.0f64; 12];
+        rec_affine.copy_from_slice(affine);
+        recording::record(recording::RecordedCall::PlaceInstance {
+            component,
+            affine: rec_affine,
+        });
         Ok(instance.data().as_ffi())
     }
 
@@ -2242,6 +2273,13 @@ impl Scene {
             .transform_instance(instance_id(instance), &t)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        // affine_transform validated the length, so this cannot fail.
+        let mut rec_affine = [0.0f64; 12];
+        rec_affine.copy_from_slice(affine);
+        recording::record(recording::RecordedCall::TransformInstance {
+            instance,
+            affine: rec_affine,
+        });
         Ok(())
     }
 
@@ -2253,6 +2291,7 @@ impl Scene {
             .explode_instance(instance_id(instance))
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::ExplodeInstance { instance });
         Ok(created.iter().map(|o| o.data().as_ffi()).collect())
     }
 
@@ -2265,6 +2304,7 @@ impl Scene {
             .make_unique(instance_id(instance))
             .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::MakeUnique { instance });
         Ok(new_def.data().as_ffi())
     }
 
@@ -2353,8 +2393,12 @@ impl Scene {
         name: Option<String>,
     ) -> Result<(), ApiError> {
         let node = node_id(kind, id)?;
-        let change = self.doc.set_node_name(node, name).map_err(doc_err)?;
+        let change = self
+            .doc
+            .set_node_name(node, name.clone())
+            .map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetNodeName { kind, id, name });
         Ok(())
     }
 
@@ -2365,8 +2409,9 @@ impl Scene {
     /// `kind`: 0 = object, 1 = group, 2 = instance.
     pub fn add_node_tag(&mut self, kind: u8, id: u64, path: Vec<String>) -> Result<(), ApiError> {
         let node = node_id(kind, id)?;
-        let change = self.doc.add_node_tag(node, path).map_err(doc_err)?;
+        let change = self.doc.add_node_tag(node, path.clone()).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::AddNodeTag { kind, id, path });
         Ok(())
     }
 
@@ -2383,6 +2428,7 @@ impl Scene {
         let node = node_id(kind, id)?;
         let change = self.doc.remove_node_tag(node, &path).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::RemoveNodeTag { kind, id, path });
         Ok(())
     }
 
@@ -2438,6 +2484,7 @@ impl Scene {
     pub fn set_tag_hidden(&mut self, path: String, hidden: bool) {
         let segments: Vec<String> = path.split('/').map(str::to_string).collect();
         self.doc.set_tag_hidden(segments, hidden);
+        recording::record(recording::RecordedCall::SetTagHidden { path, hidden });
     }
 
     /// Delete the tag `path` — and every registered tag nested under it —
@@ -2450,6 +2497,7 @@ impl Scene {
         let segments: Vec<String> = path.split('/').map(str::to_string).collect();
         let change = self.doc.delete_tag(&segments).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteTag { path });
         Ok(())
     }
 
@@ -2473,6 +2521,7 @@ impl Scene {
     ) -> Result<(), ApiError> {
         let node = node_id(kind, id)?;
         self.doc.set_node_user_hidden(node, hidden);
+        recording::record(recording::RecordedCall::SetNodeUserHidden { kind, id, hidden });
         Ok(())
     }
 
@@ -2568,6 +2617,12 @@ impl Scene {
         self.reconcile(&change);
         match report {
             KernelOpReport::PushPull(inner) | KernelOpReport::ExtrudeSubFace(inner) => {
+                recording::record(recording::RecordedCall::PushPullInComponent {
+                    component,
+                    object,
+                    face,
+                    distance,
+                });
                 Ok(PushPullJs {
                     inner: Some(inner),
                     through: Vec::new(),
@@ -2989,7 +3044,14 @@ impl Scene {
             restore: None,
         };
         match self.apply_op(object, op)? {
-            KernelOpReport::FaceSplit(inner) => Ok(FaceSplitJs { inner }),
+            KernelOpReport::FaceSplit(inner) => {
+                recording::record(recording::RecordedCall::SplitFace {
+                    object,
+                    face,
+                    path: path.to_vec(),
+                });
+                Ok(FaceSplitJs { inner })
+            }
             other => Err(api_err(&other, &"unexpected report kind for split_face")),
         }
     }
@@ -3001,7 +3063,10 @@ impl Scene {
             edge: EdgeId::from(KeyData::from_ffi(edge)),
         };
         match self.apply_op(object, op)? {
-            KernelOpReport::FaceMerge(inner) => Ok(FaceMergeJs { inner }),
+            KernelOpReport::FaceMerge(inner) => {
+                recording::record(recording::RecordedCall::MergeFaces { object, edge });
+                Ok(FaceMergeJs { inner })
+            }
             other => Err(api_err(&other, &"unexpected report kind for merge_faces")),
         }
     }
@@ -3331,8 +3396,10 @@ impl Scene {
     /// Palette additions are not individually undoable — only face assignment
     /// via [`Scene::paint_face`] is.
     pub fn add_material(&mut self, name: String, r: u8, g: u8, b: u8, a: u8) -> u64 {
-        let mat = Material::solid(name, Rgba8::rgba(r, g, b, a));
-        self.doc.add_material(mat).data().as_ffi()
+        let mat = Material::solid(name.clone(), Rgba8::rgba(r, g, b, a));
+        let id = self.doc.add_material(mat).data().as_ffi();
+        recording::record(recording::RecordedCall::AddMaterial { name, r, g, b, a });
+        id
     }
 
     /// Add a textured material to the palette and return its handle.
@@ -3365,8 +3432,20 @@ impl Scene {
             format: fmt,
             world_size: [world_w, world_h],
         };
-        let mat = Material::textured(name, Rgba8::rgba(r, g, b, a), texture);
-        Ok(self.doc.add_material(mat).data().as_ffi())
+        let mat = Material::textured(name.clone(), Rgba8::rgba(r, g, b, a), texture);
+        let id = self.doc.add_material(mat).data().as_ffi();
+        recording::record(recording::RecordedCall::AddTextureMaterial {
+            name,
+            r,
+            g,
+            b,
+            a,
+            image: image.to_vec(),
+            format,
+            world_w,
+            world_h,
+        });
+        Ok(id)
     }
 
     /// Set an existing palette material's opacity (alpha, 0–255, 255 =
@@ -3383,6 +3462,7 @@ impl Scene {
         let mid = MaterialId::from(KeyData::from_ffi(material));
         let change = self.doc.set_material_alpha(mid, alpha).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetMaterialAlpha { material, alpha });
         Ok(())
     }
 
@@ -3440,6 +3520,11 @@ impl Scene {
         let mid = material_id_opt(material);
         let change = self.doc.paint_face(oid, fid, mid).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::PaintFace {
+            object,
+            face,
+            material,
+        });
         Ok(())
     }
 
@@ -3458,6 +3543,7 @@ impl Scene {
         let mid = material_id_opt(material);
         let change = self.doc.set_object_material(oid, mid).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetObjectMaterial { object, material });
         Ok(())
     }
 
@@ -3488,6 +3574,10 @@ impl Scene {
             guides_touched: vec![id],
             ..Default::default()
         });
+        recording::record(recording::RecordedCall::AddGuideLine {
+            origin: [ox, oy, oz],
+            dir: [dx, dy, dz],
+        });
         Ok(id.data().as_ffi())
     }
 
@@ -3504,6 +3594,7 @@ impl Scene {
             guides_touched: vec![id],
             ..Default::default()
         });
+        recording::record(recording::RecordedCall::AddGuidePoint { p: [x, y, z] });
         Ok(id.data().as_ffi())
     }
 
@@ -3515,6 +3606,7 @@ impl Scene {
     pub fn delete_guide(&mut self, guide: u64) -> Result<(), ApiError> {
         let change = self.doc.delete_guide(guide_id(guide)).map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteGuide { guide });
         Ok(())
     }
 
@@ -3524,6 +3616,7 @@ impl Scene {
     pub fn delete_all_guides(&mut self) -> Result<(), ApiError> {
         let change = self.doc.delete_all_guides().map_err(doc_err)?;
         self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteAllGuides);
         Ok(())
     }
 
@@ -3622,21 +3715,52 @@ impl Scene {
             }
         }
 
-        // ── 2. Parse COLLADA ──────────────────────────────────────────────────
-        let out = dae_import::import(dae_bytes, &image_map)
-            .map_err(|e| JsError::new(&format!("DAE: {e}")))?;
+        // ── 2. Parse + ingest + reconcile + record (shared with replay) ───────
+        let (report, warnings) = self
+            .import_dae_core(dae_bytes, &image_map)
+            .map_err(|e| JsError::new(&e.0))?;
 
-        // ── 3. Ingest into the document (additive) ────────────────────────────
+        // ── 3. Serialize the ImportReport to a plain JS object ────────────────
+        Ok(import_report_to_js(&report, &warnings))
+    }
+
+    /// [`Scene::import_dae`] minus the JS-value plumbing: parse, ingest
+    /// (additive), reconcile, and record. The replay arm re-issues imports
+    /// through this (no `JsValue`, so it also runs in native tests).
+    fn import_dae_core(
+        &mut self,
+        dae_bytes: &[u8],
+        image_map: &ImageMap,
+    ) -> Result<(kernel::ImportReport, Vec<String>), ApiError> {
+        let out =
+            dae_import::import(dae_bytes, image_map).map_err(|e| ApiError(format!("DAE: {e}")))?;
+
         let (report, change) = self
             .doc
             .ingest(out.scene, out.textures_missing)
-            .map_err(|e| JsError::new(&format!("DAE: {e}")))?;
+            .map_err(|e| ApiError(format!("DAE: {e}")))?;
 
-        // ── 4. Reconcile caches (additive — do NOT clear like `load`) ─────────
+        // Reconcile caches (additive — do NOT clear like `load`).
         self.reconcile(&change);
 
-        // ── 5. Serialize the ImportReport to a plain JS object ────────────────
-        Ok(import_report_to_js(&report, &out.warnings))
+        // Imports push DocAction::Imported and extend the saved document, so
+        // they are recorded like any other committed mutation — with the file
+        // (and image) bytes embedded, keeping the recording self-contained.
+        recording::record(recording::RecordedCall::ImportDae {
+            bytes: dae_bytes.to_vec(),
+            images: image_map
+                .iter()
+                .map(|(uri, (bytes, format))| recording::RecordedImage {
+                    uri: uri.clone(),
+                    bytes: bytes.clone(),
+                    format: match format {
+                        ImageFormat::Jpeg => 1,
+                        _ => 0,
+                    },
+                })
+                .collect(),
+        });
+        Ok((report, out.warnings))
     }
 
     /// Import glTF 2.0 / GLB bytes into the current document. Additive: existing
@@ -3649,18 +3773,32 @@ impl Scene {
     /// # Errors
     /// Throws a `"glTF: <message>"` `JsError` on parse failure.
     pub fn import_gltf(&mut self, gltf_bytes: &[u8]) -> Result<JsValue, JsError> {
-        let out =
-            gltf_import::import(gltf_bytes).map_err(|e| JsError::new(&format!("glTF: {e}")))?;
+        let (report, warnings) = self
+            .import_gltf_core(gltf_bytes)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(import_report_to_js(&report, &warnings))
+    }
+
+    /// [`Scene::import_gltf`] minus the JS-value plumbing (see
+    /// [`Scene::import_dae_core`]).
+    fn import_gltf_core(
+        &mut self,
+        gltf_bytes: &[u8],
+    ) -> Result<(kernel::ImportReport, Vec<String>), ApiError> {
+        let out = gltf_import::import(gltf_bytes).map_err(|e| ApiError(format!("glTF: {e}")))?;
 
         let (report, change) = self
             .doc
             .ingest(out.scene, out.missing)
-            .map_err(|e| JsError::new(&format!("glTF: {e}")))?;
+            .map_err(|e| ApiError(format!("glTF: {e}")))?;
 
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
 
-        Ok(import_report_to_js(&report, &out.warnings))
+        recording::record(recording::RecordedCall::ImportGltf {
+            bytes: gltf_bytes.to_vec(),
+        });
+        Ok((report, out.warnings))
     }
 
     /// Import SketchUp 2017 `.skp` bytes into the current document (
@@ -3678,17 +3816,32 @@ impl Scene {
     /// versions (anything but 2017) throw with the file's own version and
     /// "Save As ▸ SketchUp Version 2017" guidance baked into the message.
     pub fn import_skp(&mut self, skp_bytes: &[u8]) -> Result<JsValue, JsError> {
-        let out = skp_import::import(skp_bytes).map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+        let (report, warnings) = self
+            .import_skp_core(skp_bytes)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(import_report_to_js(&report, &warnings))
+    }
+
+    /// [`Scene::import_skp`] minus the JS-value plumbing (see
+    /// [`Scene::import_dae_core`]).
+    fn import_skp_core(
+        &mut self,
+        skp_bytes: &[u8],
+    ) -> Result<(kernel::ImportReport, Vec<String>), ApiError> {
+        let out = skp_import::import(skp_bytes).map_err(|e| ApiError(format!("SKP: {e}")))?;
 
         let (report, change) = self
             .doc
             .ingest(out.scene, out.textures_missing)
-            .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+            .map_err(|e| ApiError(format!("SKP: {e}")))?;
 
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
 
-        Ok(import_report_to_js(&report, &out.warnings))
+        recording::record(recording::RecordedCall::ImportSkp {
+            bytes: skp_bytes.to_vec(),
+        });
+        Ok((report, out.warnings))
     }
 
     // --------------------------------------------------------- persistence
@@ -3930,6 +4083,141 @@ impl Scene {
                     SceneRedo => {
                         self.scene_redo()?;
                     }
+                    TransformSketch { sketch, affine } => {
+                        self.transform_sketch(sketch, &affine)?;
+                    }
+                    TransformSketchIsland {
+                        sketch,
+                        island,
+                        affine,
+                    } => {
+                        self.transform_sketch_island(sketch, island, &affine)?;
+                    }
+                    MoveSketchVertex { sketch, vertex, p } => {
+                        self.move_sketch_vertex(sketch, vertex, p[0], p[1], p[2])?;
+                    }
+                    Ungroup { group } => {
+                        self.ungroup(group)?;
+                    }
+                    DeleteSketch { sketch } => {
+                        self.delete_sketch(sketch)?;
+                    }
+                    TransformGroup { group, affine } => {
+                        self.transform_group(group, &affine)?;
+                    }
+                    MakeComponent { kinds, ids } => {
+                        self.make_component(&kinds, &ids)?;
+                    }
+                    PlaceInstance { component, affine } => {
+                        self.place_instance(component, &affine)?;
+                    }
+                    TransformInstance { instance, affine } => {
+                        self.transform_instance(instance, &affine)?;
+                    }
+                    ExplodeInstance { instance } => {
+                        self.explode_instance(instance)?;
+                    }
+                    MakeUnique { instance } => {
+                        self.make_unique(instance)?;
+                    }
+                    PushPullInComponent {
+                        component,
+                        object,
+                        face,
+                        distance,
+                    } => {
+                        self.push_pull_in_component(component, object, face, distance)?;
+                    }
+                    SplitFace { object, face, path } => {
+                        self.split_face(object, face, &path)?;
+                    }
+                    MergeFaces { object, edge } => {
+                        self.merge_faces(object, edge)?;
+                    }
+                    SetNodeName { kind, id, name } => {
+                        self.set_node_name(kind, id, name)?;
+                    }
+                    AddNodeTag { kind, id, path } => {
+                        self.add_node_tag(kind, id, path)?;
+                    }
+                    RemoveNodeTag { kind, id, path } => {
+                        self.remove_node_tag(kind, id, path)?;
+                    }
+                    SetTagHidden { path, hidden } => {
+                        self.set_tag_hidden(path, hidden);
+                    }
+                    DeleteTag { path } => {
+                        self.delete_tag(path)?;
+                    }
+                    SetNodeUserHidden { kind, id, hidden } => {
+                        self.set_node_user_hidden(kind, id, hidden)?;
+                    }
+                    AddMaterial { name, r, g, b, a } => {
+                        self.add_material(name, r, g, b, a);
+                    }
+                    AddTextureMaterial {
+                        name,
+                        r,
+                        g,
+                        b,
+                        a,
+                        image,
+                        format,
+                        world_w,
+                        world_h,
+                    } => {
+                        self.add_texture_material(
+                            name, r, g, b, a, &image, format, world_w, world_h,
+                        )?;
+                    }
+                    SetMaterialAlpha { material, alpha } => {
+                        self.set_material_alpha(material, alpha)?;
+                    }
+                    PaintFace {
+                        object,
+                        face,
+                        material,
+                    } => {
+                        self.paint_face(object, face, material)?;
+                    }
+                    SetObjectMaterial { object, material } => {
+                        self.set_object_material(object, material)?;
+                    }
+                    AddGuideLine { origin, dir } => {
+                        self.add_guide_line(
+                            origin[0], origin[1], origin[2], dir[0], dir[1], dir[2],
+                        )?;
+                    }
+                    AddGuidePoint { p } => {
+                        self.add_guide_point(p[0], p[1], p[2])?;
+                    }
+                    DeleteGuide { guide } => {
+                        self.delete_guide(guide)?;
+                    }
+                    DeleteAllGuides => {
+                        self.delete_all_guides()?;
+                    }
+                    ImportDae { bytes, images } => {
+                        let mut image_map: ImageMap = ImageMap::new();
+                        for img in images {
+                            let format = if img.format == 1 {
+                                ImageFormat::Jpeg
+                            } else {
+                                ImageFormat::Png
+                            };
+                            image_map.insert(img.uri, (img.bytes, format));
+                        }
+                        self.import_dae_core(&bytes, &image_map)?;
+                    }
+                    ImportGltf { bytes } => {
+                        self.import_gltf_core(&bytes)?;
+                    }
+                    ImportSkp { bytes } => {
+                        self.import_skp_core(&bytes)?;
+                    }
+                    Load { bytes } => {
+                        self.load_core(&bytes)?;
+                    }
                 }
             }
             Ok(())
@@ -3956,8 +4244,13 @@ impl Scene {
     /// other typed error uses, so the UI's plain-language copy table can
     /// key on it.
     pub fn load(&mut self, bytes: &[u8]) -> Result<(), JsError> {
-        let new_doc =
-            Document::load(bytes).map_err(|e: LoadError| JsError::new(&api_err(&e, &e).0))?;
+        self.load_core(bytes).map_err(|e| JsError::new(&e.0))
+    }
+
+    /// [`Scene::load`] minus the JS-error plumbing: parse, swap, rebuild
+    /// caches, and record. The replay arm re-issues loads through this.
+    fn load_core(&mut self, bytes: &[u8]) -> Result<(), ApiError> {
+        let new_doc = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
 
         // Swap is committed only after successful parse.
         self.doc = new_doc;
@@ -3985,6 +4278,12 @@ impl Scene {
             }
         }
 
+        // A mid-session load replaces the entire saved document, so the
+        // recording embeds the bytes: everything after this call stays
+        // replayable from a fresh `Scene`.
+        recording::record(recording::RecordedCall::Load {
+            bytes: bytes.to_vec(),
+        });
         Ok(())
     }
 }
@@ -4830,6 +5129,217 @@ mod tests {
         let mut replayed = Scene::new();
         assert_eq!(replayed.replay(&json).unwrap(), golden);
         assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// The empirically-proven divergence class the recording audit closes:
+    /// `delete_tag` (and the other tag/metadata mutators) pushes onto the
+    /// SAME document undo stack as recorded ops but was invisible to session
+    /// recording, while `scene_undo` IS recorded — so a recorded session
+    /// containing a tag mutation plus an undo replayed a DIFFERENT action
+    /// off a differently-shaped stack: the real session's undo reverted the
+    /// tag delete; the replayed undo reverted the extrude, leaving zero
+    /// objects and a state-hash mismatch.
+    #[test]
+    fn record_then_replay_covers_tag_ops_and_their_undo() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 2.0).unwrap();
+        scene.add_node_tag(0, obj, vec!["A".to_string()]).unwrap();
+        scene.set_tag_hidden("A".to_string(), true);
+        scene.delete_tag("A".to_string()).unwrap();
+        // Undoes the TAG DELETE — not the extrude. If delete_tag were not
+        // recorded, the replayed undo would hit the extrude instead.
+        scene.scene_undo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            replayed.object_ids().len(),
+            scene.object_ids().len(),
+            "replay kept the extruded object — the recorded undo hit the tag delete"
+        );
+        assert_eq!(
+            final_hash, golden,
+            "replaying a tag-op session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// A broad structural/metadata session — naming, duplication, grouping,
+    /// component + instance lifecycle, materials, guides, persisted view
+    /// state — records and replays to the exact same state. Every op here
+    /// previously pushed the shared document undo stack (or mutated saved
+    /// state) while being invisible to recording, so the trailing undo
+    /// replayed off a differently-shaped stack.
+    #[test]
+    fn record_then_replay_covers_structural_and_metadata_ops() {
+        recording::reset();
+
+        const SHIFT_Y3: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 1.0, 0.0];
+        const SHIFT_X6: [f64; 12] = [1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        const SHIFT_HALF_X: [f64; 12] =
+            [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        const SHIFT_Y1: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0];
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 3.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+
+        // Naming, duplication, persisted user-hide.
+        scene.set_node_name(0, a, Some("Base".to_string())).unwrap();
+        let dup = scene.duplicate_node(0, b, &SHIFT_Y3).unwrap();
+        scene.set_node_user_hidden(0, dup.id(), true).unwrap();
+
+        // Group the originals, move the group, dissolve it.
+        let g = scene.group_nodes(&[0, 0], &[a, b]).unwrap();
+        scene.transform_group(g, &SHIFT_HALF_X).unwrap();
+        scene.ungroup(g).unwrap();
+
+        // Component + instance lifecycle.
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let placed = scene.place_instance(def, &SHIFT_X6).unwrap();
+        scene.transform_instance(placed, &SHIFT_Y1).unwrap();
+        scene.make_unique(placed).unwrap();
+        scene.explode_instance(placed).unwrap();
+
+        // Materials.
+        let m = scene.add_material("Red".to_string(), 255, 0, 0, 255);
+        scene.set_object_material(a, m).unwrap();
+        scene.set_material_alpha(m, 128).unwrap();
+
+        // Guides.
+        scene.add_guide_line(0.0, 0.0, 0.0, 1.0, 0.0, 0.0).unwrap();
+        let gp = scene.add_guide_point(1.0, 2.0, 3.0).unwrap();
+        scene.delete_guide(gp).unwrap();
+        scene.add_guide_point(4.0, 5.0, 6.0).unwrap();
+        scene.delete_all_guides().unwrap();
+
+        // An undo at the end exercises the (now identically-shaped) stack.
+        scene.scene_undo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        assert_eq!(
+            replayed.replay(&json).unwrap(),
+            golden,
+            "replaying a structural/metadata session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// The byte-embedding arms replay: a session containing a glTF import
+    /// (file bytes embedded in the recording) and a texture-material
+    /// addition (encoded image bytes embedded) reproduces object counts,
+    /// state hash, and saved bytes on replay. Drives `import_gltf_core`,
+    /// the exact body the public method and the replay arm share (the
+    /// JsValue report wrapper cannot run natively); the dae/skp arms use
+    /// the identical embed-and-reissue mechanism.
+    #[test]
+    fn record_then_replay_covers_byte_embedding_calls() {
+        recording::reset();
+
+        let glb: &[u8] = include_bytes!("../../gltf-import/tests/fixtures/box.glb");
+        // The palette stores encoded image bytes verbatim (no decode on
+        // add), so a PNG-magic-prefixed stub is a faithful payload.
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+        ];
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        scene.import_gltf_core(glb).unwrap();
+        let m = scene
+            .add_texture_material("Wood".to_string(), 200, 180, 150, 255, png, 0, 1.0, 1.0)
+            .unwrap();
+        scene.set_object_material(a, m).unwrap();
+        // An undo at the end: the import pushed DocAction::Imported onto the
+        // shared stack, so replay diverges if the embed-and-reissue is wrong.
+        scene.scene_undo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(
+            json.contains("\"method\":\"import_gltf\""),
+            "the import is in the call stream"
+        );
+        assert!(
+            json.contains("\"method\":\"add_texture_material\""),
+            "the texture addition is in the call stream"
+        );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            replayed.object_ids().len(),
+            scene.object_ids().len(),
+            "object counts match after replaying an import session"
+        );
+        assert_eq!(
+            final_hash, golden,
+            "replaying a byte-embedding session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// A mid-session File ▸ Open (`load`) replaces the whole document. The
+    /// recording embeds the `.hew` bytes so the session — including work
+    /// done AFTER the open — still replays from a fresh `Scene`.
+    #[test]
+    fn record_then_replay_covers_a_mid_session_load() {
+        recording::reset();
+
+        // A saved document to open mid-session.
+        let saved = {
+            let mut base = Scene::new();
+            let (s, r) = ground_unit_square(&mut base);
+            base.extrude_region(s, r, 2.0).unwrap();
+            base.save()
+        };
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+        assert!(scene.load(&saved).is_ok(), "mid-session open");
+        // Keep working in the loaded document.
+        let (s2, r2) = ground_unit_square_at(&mut scene, 3.0, 0.0);
+        scene.extrude_region(s2, r2, 1.0).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(
+            json.contains("\"method\":\"load\""),
+            "the open is in the call stream"
+        );
+
+        let mut replayed = Scene::new();
+        assert_eq!(
+            replayed.replay(&json).unwrap(),
+            golden,
+            "replaying a session that spans a File ▸ Open reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
     /// A degenerate analytic bracket is refused with a typed error and

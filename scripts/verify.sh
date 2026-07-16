@@ -18,11 +18,24 @@ cargo test --workspace
 echo "=== wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg ==="
 wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 
-echo "=== pnpm --dir app typecheck && pnpm --dir app test && pnpm --dir app build ==="
-pnpm --dir app typecheck && pnpm --dir app test && pnpm --dir app build
+# One command per line, no && lists: a && list's failure was observed once
+# being carried past under set -e (typecheck errors logged, gate still
+# printed "all green" — cause not reproduced). Separate simple commands
+# leave errexit nothing to misjudge, and each step gets its own header.
+echo "=== pnpm --dir app typecheck ==="
+pnpm --dir app typecheck
 
-echo "=== pnpm --dir site check && pnpm --dir site build ==="
-pnpm --dir site check && pnpm --dir site build
+echo "=== pnpm --dir app test ==="
+pnpm --dir app test
+
+echo "=== pnpm --dir app build ==="
+pnpm --dir app build
+
+echo "=== pnpm --dir site check ==="
+pnpm --dir site check
+
+echo "=== pnpm --dir site build ==="
+pnpm --dir site build
 
 # ---------------------------------------------------------------------------
 # Desktop shell (Tauri host crate).

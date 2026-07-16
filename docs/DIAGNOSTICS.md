@@ -183,6 +183,53 @@ literal internal handles from the recording session.
 | `duplicate_node` | `kind`, `id`, `affine[12]` | Move+copy of one node: a deep clone placed at the offset |
 | `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node cloned `count` times along the step, one undo step |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
+| `transform_sketch` | `sketch`, `affine[12]` | bake an affine into a free-standing sketch |
+| `transform_sketch_island` | `sketch`, `island`, `affine[12]` | rigidly move one sketch island |
+| `move_sketch_vertex` | `sketch`, `vertex`, `p[3]` | drag one sketch vertex |
+| `delete_sketch` | `sketch` | delete (hide) one free-standing sketch |
+| `duplicate_node` | `kind`, `id`, `affine[12]` | deep-clone a node at an offset (Move+Option copy) |
+| `group_nodes` | `kinds[]`, `ids[]` | group sibling nodes into a merge group |
+| `ungroup` | `group` | dissolve a group |
+| `transform_group` | `group`, `affine[12]` | bake an affine into a group's leaves |
+| `make_component` | `kinds[]`, `ids[]` | fold a selection into a shared definition + instance |
+| `place_instance` | `component`, `affine[12]` | stamp another instance of a definition |
+| `transform_instance` | `instance`, `affine[12]` | compose an affine into an instance's pose |
+| `explode_instance` | `instance` | bake an instance into independent world objects |
+| `make_unique` | `instance` | detach an instance onto a private definition copy |
+| `push_pull_in_component` | `component`, `object`, `face`, `distance` | push/pull a face inside a component definition |
+| `split_face` | `object`, `face`, `path[]` (xyz triples) | cut a face along a drawn path |
+| `merge_faces` | `object`, `edge` | dissolve the boundary between two coplanar faces |
+| `set_node_name` | `kind`, `id`, `name` (string or null) | rename a node / clear its name |
+| `add_node_tag` / `remove_node_tag` | `kind`, `id`, `path[]` (segments) | assign / unassign a tag path on a node |
+| `set_tag_hidden` | `path` (`/`-joined), `hidden` | set a tag's hidden-by-default flag (persisted view state) |
+| `delete_tag` | `path` (`/`-joined) | delete a tag — and its sub-tags — everywhere |
+| `set_node_user_hidden` | `kind`, `id`, `hidden` | set a node's persisted user-hidden flag |
+| `add_material` | `name`, `r`, `g`, `b`, `a` | add a solid-color palette material |
+| `add_texture_material` | `name`, `r`, `g`, `b`, `a`, `image[]`, `format` (0=PNG, 1=JPEG), `world_w`, `world_h` | add a textured material (embeds the encoded image bytes) |
+| `set_material_alpha` | `material`, `alpha` | set a palette material's opacity |
+| `paint_face` | `object`, `face`, `material` (`u64::MAX` = unpaint) | paint one face |
+| `set_object_material` | `object`, `material` (`u64::MAX` = clear) | set an object's base material |
+| `add_guide_line` | `origin[3]`, `dir[3]` | add a construction line |
+| `add_guide_point` | `p[3]` | add a construction point |
+| `delete_guide` | `guide` | delete one construction guide |
+| `delete_all_guides` | — | delete every visible guide in one undo step |
+| `import_dae` | `bytes[]`, `images[]` (`{uri, bytes[], format}` objects) | additive COLLADA import (embeds the file + images) |
+| `import_gltf` | `bytes[]` | additive glTF/GLB import (embeds the file) |
+| `import_skp` | `bytes[]` | additive `.skp` import (embeds the file) |
+| `load` | `bytes[]` | replace the whole document — a mid-session File ▸ Open/New (embeds the `.hew` bytes) |
+
+**Coverage rule** (ratified with the recording audit): every `Scene` method
+that pushes the document undo stack or mutates state included in
+`Document::save` records itself. Anything less makes `scene_undo` /
+`scene_redo` — which ARE recorded — replay against a differently-shaped
+stack and silently reproduce a different session. Session-only state that
+is neither undoable nor saved (inference hide sets, transient snap
+segments, guide/axis snappability, torture mode) is deliberately not
+recorded. Calls that carry file or image payloads (`import_*`, `load`,
+`add_texture_material`) embed the raw bytes so a recording stays
+self-contained and replayable from a fresh document; recordings that span
+imports, mid-session opens, or texture additions are correspondingly
+larger.
 
 Coverage grows over time under a deliberately **additive posture**
 (ratified with the true-curves work): adding a new `method` variant is a
@@ -194,27 +241,8 @@ would MISinterpret: renaming or re-typing an existing method's fields, or
 changing a field's meaning. No such change is planned; existing recorded
 fixtures stay valid as-is.
 
-Known residual gap: a number of committed, save-state-mutating commands are
-not yet in the recorded call set, so a session using them is not fully
-replayable:
-
-- free-sketch edits — `transform_sketch`, `transform_sketch_island`,
-  `move_sketch_vertex`, `delete_sketch`;
-- the remaining node-structural commands — `ungroup`, `transform_group`,
-  `make_component`, `place_instance`, `transform_instance`,
-  `explode_instance`, `make_unique`;
-- construction guides — `add_guide_line`, `add_guide_point`, `delete_guide`,
-  `delete_all_guides`;
-- materials and metadata — `add_material`, `paint_face`,
-  `set_object_material`, `set_material_alpha`, and the name/tag/visibility
-  setters;
-- `merge_faces` (the eraser's solid-edge commit).
-
-Imports (`import_dae`/`import_gltf`/`import_skp`) and `load` are out of
-scope by design: a recording replays from a fresh document. Everything
-above joins the set under the same additive posture as coverage grows. `u64` values (`golden_hash` and handle fields)
-can exceed a JSON number's safe integer range in some languages — see the
-note under Replay below.
+`u64` values (`golden_hash` and handle fields) can exceed a JSON number's
+safe integer range in some languages — see the note under Replay below.
 
 **Optional `input` array** — raw UI input that precedes kernel
 interpretation, present only when captured (omitted entirely when empty):

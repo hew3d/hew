@@ -76,4 +76,73 @@ describe('expandByVisibleObject', () => {
     const box = expandByVisibleObject(new THREE.Box3(), root)
     expect(box.isEmpty()).toBe(true)
   })
+
+  // ------------------------------------------------------------------
+  // Instanced batches: component placements live in the instanceMatrix
+  // attribute, NOT in matrixWorld — the geometry bbox alone covers only
+  // the definition at the origin. The traversal must use the OBJECT-level
+  // InstancedMesh bounds (three's stock computeBoundingBox unions the
+  // geometry bounds across every instance matrix; SceneRenderer's batch
+  // override additionally skips suppressed slots).
+  // ------------------------------------------------------------------
+
+  function instancedAt(positions: [number, number, number][]): THREE.InstancedMesh {
+    const im = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshBasicMaterial(),
+      positions.length,
+    )
+    const m = new THREE.Matrix4()
+    positions.forEach((p, i) => im.setMatrixAt(i, m.makeTranslation(p[0], p[1], p[2])))
+    return im
+  }
+
+  it('frames every placement of an InstancedMesh, not just the definition at origin', () => {
+    const root = new THREE.Group()
+    // One placement at the origin, one far away — a placed component
+    // instance must be framed by Zoom Extents.
+    root.add(instancedAt([[0, 0, 0], [100, 0, 0]]))
+
+    const box = expandByVisibleObject(new THREE.Box3(), root)
+    expect(box.min.x).toBeCloseTo(-0.5)
+    expect(box.max.x).toBeCloseTo(100.5) // NOT 0.5: the distant instance counts
+  })
+
+  it('the mixed case: a plain object plus a distant instance frames both', () => {
+    const root = new THREE.Group()
+    root.add(meshAt(0, 0, 0))
+    root.add(instancedAt([[50, 20, 0]]))
+
+    const box = expandByVisibleObject(new THREE.Box3(), root)
+    expect(box.min.x).toBeCloseTo(-0.5)
+    expect(box.max.x).toBeCloseTo(50.5)
+    expect(box.max.y).toBeCloseTo(20.5)
+  })
+
+  it('a hidden InstancedMesh batch contributes nothing', () => {
+    const root = new THREE.Group()
+    root.add(meshAt(0, 0, 0))
+    const im = instancedAt([[100, 0, 0]])
+    im.visible = false
+    root.add(im)
+
+    const box = expandByVisibleObject(new THREE.Box3(), root)
+    expect(box.max.x).toBeCloseTo(0.5)
+  })
+
+  it('honors an object-level computeBoundingBox override (the renderer skips suppressed slots)', () => {
+    const root = new THREE.Group()
+    const im = instancedAt([[0, 0, 0], [500, 0, 0]])
+    // SceneRenderer._buildBatch overrides computeBoundingBox to skip
+    // suppressed (hidden/materialized) slots; the traversal must consume
+    // the override's result rather than recompute from raw attributes.
+    im.computeBoundingBox = () => {
+      im.boundingBox ??= new THREE.Box3()
+      im.boundingBox.set(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5))
+    }
+    root.add(im)
+
+    const box = expandByVisibleObject(new THREE.Box3(), root)
+    expect(box.max.x).toBeCloseTo(0.5) // the suppressed far slot stays out
+  })
 })

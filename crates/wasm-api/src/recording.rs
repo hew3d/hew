@@ -194,6 +194,161 @@ pub enum RecordedCall {
     SceneUndo,
     /// `scene_redo()` — recorded only when it succeeded.
     SceneRedo,
+
+    // -------------------------------------------------------------------
+    // Coverage-audit variants: EVERY `Scene` method that pushes the
+    // document undo stack or mutates state included in `Document::save`
+    // records itself, so a recorded `scene_undo`/`scene_redo` replays
+    // against an identically-shaped undo stack and identical persisted
+    // state. (The proven divergence: a session's `delete_tag` + undo
+    // replayed as an undo of the *previous* op off a shorter stack.)
+    // All additive — the [`RecordedCall::SketchBeginCurveWith`] posture:
+    // old recordings replay unchanged; a recording that uses one of these
+    // fails to parse on older builds loudly, never silently divergent.
+    // Session-only state (inference hides, transient segments, snappable
+    // toggles, torture mode) is deliberately NOT recorded: it is neither
+    // undoable nor saved, so it cannot reshape the stack or the document.
+    // -------------------------------------------------------------------
+    /// `transform_sketch(sketch, affine)`.
+    TransformSketch { sketch: u64, affine: [f64; 12] },
+    /// `transform_sketch_island(sketch, island, affine)`.
+    TransformSketchIsland {
+        sketch: u64,
+        island: u64,
+        affine: [f64; 12],
+    },
+    /// `move_sketch_vertex(sketch, vertex, p)`.
+    MoveSketchVertex {
+        sketch: u64,
+        vertex: u64,
+        p: [f64; 3],
+    },
+    /// `ungroup(group)`.
+    Ungroup { group: u64 },
+    /// `delete_sketch(sketch)`.
+    DeleteSketch { sketch: u64 },
+    /// `transform_group(group, affine)`.
+    TransformGroup { group: u64, affine: [f64; 12] },
+    /// `make_component(kinds, ids)`.
+    MakeComponent { kinds: Vec<u8>, ids: Vec<u64> },
+    /// `place_instance(component, affine)`.
+    PlaceInstance { component: u64, affine: [f64; 12] },
+    /// `transform_instance(instance, affine)`.
+    TransformInstance { instance: u64, affine: [f64; 12] },
+    /// `explode_instance(instance)`.
+    ExplodeInstance { instance: u64 },
+    /// `make_unique(instance)`.
+    MakeUnique { instance: u64 },
+    /// `push_pull_in_component(component, object, face, distance)`.
+    PushPullInComponent {
+        component: u64,
+        object: u64,
+        face: u64,
+        distance: f64,
+    },
+    /// `split_face(object, face, path)` — `path` is xyz triples.
+    SplitFace {
+        object: u64,
+        face: u64,
+        path: Vec<f64>,
+    },
+    /// `merge_faces(object, edge)`.
+    MergeFaces { object: u64, edge: u64 },
+    /// `set_node_name(kind, id, name)`.
+    SetNodeName {
+        kind: u8,
+        id: u64,
+        name: Option<String>,
+    },
+    /// `add_node_tag(kind, id, path)`.
+    AddNodeTag {
+        kind: u8,
+        id: u64,
+        path: Vec<String>,
+    },
+    /// `remove_node_tag(kind, id, path)`.
+    RemoveNodeTag {
+        kind: u8,
+        id: u64,
+        path: Vec<String>,
+    },
+    /// `set_tag_hidden(path, hidden)` — not undoable, but persisted with
+    /// the document (manifest v5), so it must replay for the saved bytes
+    /// and state hash to match.
+    SetTagHidden { path: String, hidden: bool },
+    /// `delete_tag(path)`.
+    DeleteTag { path: String },
+    /// `set_node_user_hidden(kind, id, hidden)` — persisted view state
+    /// (manifest v6), same rationale as [`RecordedCall::SetTagHidden`].
+    SetNodeUserHidden { kind: u8, id: u64, hidden: bool },
+    /// `add_material(name, r, g, b, a)` — palette additions are not
+    /// undoable but are saved, and later recorded paint calls reference
+    /// the handle this call deterministically produces.
+    AddMaterial {
+        name: String,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    },
+    /// `add_texture_material(...)` — embeds the encoded image bytes, so a
+    /// recording with textures is self-contained (and correspondingly
+    /// larger).
+    #[allow(clippy::too_many_arguments)]
+    AddTextureMaterial {
+        name: String,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+        image: Vec<u8>,
+        format: u8,
+        world_w: f64,
+        world_h: f64,
+    },
+    /// `set_material_alpha(material, alpha)`.
+    SetMaterialAlpha { material: u64, alpha: u8 },
+    /// `paint_face(object, face, material)` — `u64::MAX` = unpaint.
+    PaintFace {
+        object: u64,
+        face: u64,
+        material: u64,
+    },
+    /// `set_object_material(object, material)` — `u64::MAX` = clear.
+    SetObjectMaterial { object: u64, material: u64 },
+    /// `add_guide_line(origin, dir)`.
+    AddGuideLine { origin: [f64; 3], dir: [f64; 3] },
+    /// `add_guide_point(p)`.
+    AddGuidePoint { p: [f64; 3] },
+    /// `delete_guide(guide)`.
+    DeleteGuide { guide: u64 },
+    /// `delete_all_guides()`.
+    DeleteAllGuides,
+    /// `import_dae(bytes, images)` — embeds the COLLADA file and its image
+    /// map, so a session with an import replays self-contained.
+    ImportDae {
+        bytes: Vec<u8>,
+        images: Vec<RecordedImage>,
+    },
+    /// `import_gltf(bytes)` — embeds the glTF/GLB file.
+    ImportGltf { bytes: Vec<u8> },
+    /// `import_skp(bytes)` — embeds the .skp file.
+    ImportSkp { bytes: Vec<u8> },
+    /// `load(bytes)` — a mid-session File ▸ Open/New replaces the whole
+    /// document; embedding the `.hew` bytes keeps everything after it
+    /// replayable from a fresh `Scene`.
+    Load { bytes: Vec<u8> },
+}
+
+/// One image of an [`RecordedCall::ImportDae`] call's image map.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecordedImage {
+    /// The URI key the COLLADA file references the image by.
+    pub uri: String,
+    /// The encoded image bytes.
+    pub bytes: Vec<u8>,
+    /// `0` = PNG, `1` = JPEG (the `import_dae` images convention).
+    pub format: u8,
 }
 
 /// A complete recorded session: the committed call stream plus the canonical

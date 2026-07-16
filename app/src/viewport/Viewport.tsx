@@ -301,6 +301,16 @@ export interface ViewportApi {
   captureFrame: () => { width: number; height: number; pixels: Uint8Array }
 
   /**
+   * The camera's current pose (position, orbit target, vertical FOV) —
+   * the read complement of `setCamera`, for tests that assert framing
+   * (e.g. that Zoom Extents re-targeted onto a placed instance).
+   */
+  getCamera: () => {
+    position: [number, number, number]
+    target: [number, number, number]
+    fovDeg: number
+  }
+  /**
    * Re-pose the camera at the default home view, `scale`× the meter-scale
    * distance (the welcome screen's unit choice re-frames a blank document —
    * see settings/units.ts homeFramingScale). Callers guard that the scene is
@@ -1726,6 +1736,18 @@ export default function Viewport({
       return { width, height, pixels }
     }
 
+    function getCamera(): {
+      position: [number, number, number]
+      target: [number, number, number]
+      fovDeg: number
+    } {
+      return {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+        fovDeg: camera.fov,
+      }
+    }
+
     function setHomeFraming(scale: number): void {
       // Re-pose the camera at the default 3/4 home view, `scale`× the
       // meter-scale distance (welcome-screen unit choice on a blank
@@ -1806,7 +1828,7 @@ export default function Viewport({
         const t = toolController.activeTool
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
     }
 
     // ------------------------------------------------------------------ tool factories

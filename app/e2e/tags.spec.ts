@@ -71,3 +71,42 @@ test('keyboard undo of a tag delete re-hides content hidden by the restored tag'
     () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) !== null,
   )
 })
+
+test('harness undo of a tag delete re-hides content hidden by the restored tag', async ({
+  page,
+}) => {
+  await setup(page)
+
+  // Same scenario as the keyboard spec above, driven through the HARNESS
+  // document-level undo/redo (`__hew_test.undo()/redo()`, what session/
+  // tools/hover-dock specs use). The harness must route through the same
+  // runUndo/runRedo choke point, or tag visibility and pick exclusion go
+  // stale in exactly the paths the E2E suite drives.
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    const id = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    h.addNodeTag('object', id, ['Roof'])
+    h.toggleTagHidden(['Roof'])
+  })
+  await page.waitForFunction(
+    () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) === null,
+  )
+
+  await page.evaluate(() => window.__hew_test!.deleteTag(['Roof']))
+  await page.waitForFunction(
+    () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) !== null,
+  )
+
+  // Harness undo restores the registry (hidden flag included): re-hidden.
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForFunction(
+    () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) === null,
+  )
+  expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
+
+  // Harness redo re-deletes the tag: visible and pickable again.
+  await page.evaluate(() => window.__hew_test!.redo())
+  await page.waitForFunction(
+    () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) !== null,
+  )
+})

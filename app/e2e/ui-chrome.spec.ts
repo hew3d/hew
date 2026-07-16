@@ -200,9 +200,16 @@ test('palette: the resting search field at the top of the tool rail opens it', a
   page,
 }) => {
   await page.getByRole('button', { name: 'Search tools, actions, help' }).click()
-  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  // The palette handles Escape via React onKeyDown INSIDE the dialog, and
+  // focuses its input one animation frame after opening — an Escape pressed
+  // before that focus lands goes nowhere and the palette stays open (hit
+  // deterministically on a cold page). Synchronize on the focus the
+  // component itself establishes before sending the key.
+  await expect(palette.getByRole('textbox', { name: 'Search' })).toBeFocused()
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('dialog', { name: 'Command palette' })).not.toBeVisible()
+  await expect(palette).not.toBeVisible()
 })
 
 test('palette: Ctrl+K opens it; running a tool entry activates the tool', async ({ page }) => {
