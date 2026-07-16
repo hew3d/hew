@@ -39,6 +39,7 @@ import { ArcTool } from '../tools/ArcTool'
 import { LineTool } from '../tools/LineTool'
 import { PushPullTool } from '../tools/PushPullTool'
 import { FollowMeTool } from '../tools/FollowMeTool'
+import { OffsetTool } from '../tools/OffsetTool'
 import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
@@ -1759,6 +1760,32 @@ export default function Viewport({
       )
     }
 
+    function makeOffsetTool(): OffsetTool {
+      const tool = new OffsetTool(
+        wasmScene,
+        previewGroup,
+        // Region offset: new sketch geometry — rebuild sketch lines/fills.
+        () => {
+          sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        // Face offset: an imprint on one object — targeted refresh.
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
+        },
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+      // Scope the tool to the current editing context, if any.
+      const ctx = activeContextRef.current
+      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
+        ? ctx[ctx.length - 1].id : null
+      tool.setActiveContext(ctxId)
+      return tool
+    }
+
     function makePaintTool(): PaintTool {
       return new PaintTool(
         wasmScene,
@@ -1936,6 +1963,10 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeFollowMeTool())
+        case 'Offset':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeOffsetTool())
           break
         case 'Paint': {
           cameraModeRef.current = false
@@ -2632,6 +2663,7 @@ export default function Viewport({
         if (ev.key === 'a' || ev.key === 'A') { switchToolRef.current?.('Arc'); return }
         if (ev.key === 'l' || ev.key === 'L') { switchToolRef.current?.('Line'); return }
         if (ev.key === 'p' || ev.key === 'P') { switchToolRef.current?.('Push/Pull'); return }
+        if (ev.key === 'f' || ev.key === 'F') { switchToolRef.current?.('Offset'); return }
         if (ev.key === 'm' || ev.key === 'M') { switchToolRef.current?.('Move'); return }
         if (ev.key === 'q' || ev.key === 'Q') { switchToolRef.current?.('Rotate'); return }
         if (ev.key === 's' || ev.key === 'S') { switchToolRef.current?.('Scale'); return }

@@ -80,6 +80,13 @@ below.
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
+- Offset: copy a sketch region's or solid face's boundary inward or outward
+  at a uniform distance, with a live preview and typed exact distances.
+  Straight edges offset to mitered parallels; drawn circles and arcs offset
+  to true concentric curves (exact center, radius ± the distance). A region
+  offsets all its loops (holes included) and both results stay extrudable; a
+  face offset imprints the inset loop for boss/recess work. A distance the
+  shape cannot absorb is refused typed — never a repaired result
 - True curves over the faceted carrier: a drawn circle or arc keeps its
   exact center and radius, extruded curved walls know the cylinder they
   approximate, render smoothly with the facet seams suppressed, and
@@ -244,10 +251,6 @@ below.
 
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
-- **Offset tool** — now unblocked: the true-curves analytic overlay it
-  depends on (durable curve metadata, whole-wall semantics, export
-  re-faceting) has shipped. (Follow Me, formerly tracked alongside it,
-  has shipped — see Modeling above)
 - **Non-uniform scale**, and moving/rotating/scaling multiple selected
   objects together
 - **Nested component definitions** (a component containing other

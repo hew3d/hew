@@ -19,7 +19,7 @@ The small chip row in the viewport's top-left corner offers an **Orbit** button 
 The left rail lists the everyday tools in three groups, each with its keyboard shortcut:
 
 - **Draw** — Select `Space`, Line `L`, Rectangle `R`, Circle `C`, Arc `A`
-- **Modify** — Push/Pull `P`, Move `M`, Rotate `Q`, Scale `S`
+- **Modify** — Push/Pull `P`, Offset `F`, Move `M`, Rotate `Q`, Scale `S`
 - **Inspect** — Tape Measure `T`, Paint `B`
 
 Six more tools don't have rail slots: **Protractor**, **Slice**, **Edit Vertex**, and the dedicated camera tools **Orbit** `O`, **Pan** `H`, and **Zoom** `Z`. Reach them from the **Tools** and **Camera** menus, or from the command palette.

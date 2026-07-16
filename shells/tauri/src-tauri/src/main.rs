@@ -1925,6 +1925,15 @@ fn main() {
                 None,
                 None,
             )?;
+
+            let tool_offset = check_item(
+                handle,
+                &mut checks,
+                "tool-offset",
+                "Offset",
+                None,
+                Some("F"),
+            )?;
             let tool_tape_measure = check_item(
                 handle,
                 &mut checks,
@@ -1959,6 +1968,7 @@ fn main() {
                 .item(&tool_scale)
                 .item(&tool_pushpull)
                 .item(&tool_follow_me)
+                .item(&tool_offset)
                 .separator()
                 .item(&tool_tape_measure)
                 .item(&tool_protractor)
@@ -2322,6 +2332,7 @@ fn main() {
                 "tool-scale" => "tool-scale",
                 "tool-pushpull" => "tool-pushpull",
                 "tool-follow-me" => "tool-follow-me",
+                "tool-offset" => "tool-offset",
                 "tool-tape-measure" => "tool-tape-measure",
                 "tool-protractor" => "tool-protractor",
                 "tool-slice" => "tool-slice",

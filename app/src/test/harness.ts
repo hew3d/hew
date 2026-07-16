@@ -208,6 +208,23 @@ export interface HewTestHarness {
   ): string
 
   /**
+   * Offset a sketch region's whole boundary (outer loop and holes) by a
+   * signed distance — negative shrinks the material, positive grows it.
+   * The Offset tool's sketch commit: `sketch_offset_region` inside a
+   * gesture bracket (one undo step). Returns the handles of the regions the
+   * offset created.
+   */
+  offsetRegion(sketch: string, region: string, distance: number): string[]
+
+  /**
+   * Offset a solid face's outer boundary by a signed distance (negative =
+   * into the face, the only direction that can land on it) and imprint the
+   * loop — the Offset tool's face commit (`offset_face`). Returns the new
+   * sub-face handle; push/pull it to boss/recess.
+   */
+  offsetFace(object: string, face: string, distance: number): string
+
+  /**
    * Draw a faceted 2-point arc in a new ground sketch. `a`/`b` are the
    * chord endpoints (z should be 0 — ground plane), `sagitta` is the signed
    * bulge distance from the chord midpoint (positive on the CCW side of a→b,
@@ -780,6 +797,25 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         )
         return sub.toString()
       }),
+
+    offsetRegion: (sketch, region, distance) =>
+      act((s) => {
+        const sid = BigInt(sketch)
+        s.sketch_begin_gesture(sid)
+        try {
+          const report = s.sketch_offset_region(sid, BigInt(region), distance)
+          try {
+            return Array.from(report.regions_created(), (r) => r.toString())
+          } finally {
+            report.free()
+          }
+        } finally {
+          s.sketch_end_gesture(sid)
+        }
+      }),
+
+    offsetFace: (object, face, distance) =>
+      act((s) => s.offset_face(BigInt(object), BigInt(face), distance).toString()),
 
     drawArc: (a, b, sagitta, close = false) =>
       act((s) => {

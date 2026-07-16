@@ -103,6 +103,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Line: 'draw-line',
   'Push/Pull': 'tool-pushpull',
   'Follow Me': 'tool-follow-me',
+  Offset: 'tool-offset',
   Paint: 'tool-paint',
   Move: 'tool-move',
   Rotate: 'tool-rotate',
@@ -1606,6 +1607,7 @@ export default function App() {
       case 'tool-line':      setActiveTool('Line'); break
       case 'tool-pushpull':  setActiveTool('Push/Pull'); break
       case 'tool-follow-me': setActiveTool('Follow Me'); break
+      case 'tool-offset':    setActiveTool('Offset'); break
       case 'tool-paint':     setActiveTool('Paint'); break
       case 'tool-move':      setActiveTool('Move'); break
       case 'tool-rotate':    setActiveTool('Rotate'); break
@@ -1891,6 +1893,7 @@ export default function App() {
         if (key === 'c') { ev.preventDefault(); setActiveTool('Circle'); return }
         if (key === 'a') { ev.preventDefault(); setActiveTool('Arc'); return }
         if (key === 'p') { ev.preventDefault(); setActiveTool('Push/Pull'); return }
+        if (key === 'f') { ev.preventDefault(); setActiveTool('Offset'); return }
         if (key === 'm') { ev.preventDefault(); setActiveTool('Move'); return }
         if (key === 'q') { ev.preventDefault(); setActiveTool('Rotate'); return }
         if (key === 's') { ev.preventDefault(); setActiveTool('Scale'); return }

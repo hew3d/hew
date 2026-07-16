@@ -1,6 +1,6 @@
 ---
 title: "Drawing"
-description: "The four profile tools, what changes when you draw on a face instead of the ground, and every way to type an exact dimension."
+description: "The four profile tools, offsetting a boundary, what changes when you draw on a face instead of the ground, and every way to type an exact dimension."
 order: 5
 ---
 
@@ -57,6 +57,20 @@ A two-point arc, like SketchUp's:
 ## Drawing on a face
 
 Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level you can draw on any object's face; once you've double-clicked into an object's editing context, drawing is scoped to that object.
+
+## Offset (`F`)
+
+Offset copies an existing boundary a set distance inward or outward — the quickest way to draw a border, a rim, or a wall of even thickness without measuring anything.
+
+1. Click a filled sketch region or a solid's face.
+2. Move the cursor inward or outward — a preview of the offset outline follows at the distance shown in the readout.
+3. Click to commit, or type an exact distance and press `Enter`.
+
+Every edge of the boundary moves by the same distance: straight edges stay parallel, and a drawn circle or arc offsets to a true concentric curve — same center, radius changed by exactly the offset — so the result snaps, displays, and exports like any freshly drawn curve. A region with a hole offsets both boundaries at once, keeping the band between them even.
+
+On a sketch region, the offset outline joins the same sketch, so both the original and the new region are ready to extrude — offset a circle outward and you have a ring to pull into a pipe wall. On a solid's face, offsetting inward carves the face the way drawing on it does, leaving an inset region to push or pull; only inward offsets fit on a face.
+
+If the distance is more than the shape can absorb — an inward offset past the middle, or an arc squeezed to nothing — the preview disappears and committing is refused with a message; nothing is committed halfway.
 
 ## Editing a sketch
 

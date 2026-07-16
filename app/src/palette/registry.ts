@@ -42,6 +42,7 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
   'Arc': 'tool-arc',
   'Push/Pull': 'tool-pushpull',
   'Follow Me': 'tool-follow-me',
+  'Offset': 'tool-offset',
   'Paint': 'tool-paint',
   'Move': 'tool-move',
   'Rotate': 'tool-rotate',
@@ -63,6 +64,7 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Arc': 'Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment.',
   'Push/Pull': 'Extrude a face into a solid, or reshape one.',
   'Follow Me': 'Sweep a profile along a path into a solid.',
+  'Offset': "Copy a face or profile's boundary inward or outward at a set distance.",
   'Paint': 'Apply the current material to a face or object.',
   'Move': 'Translate the selection, with inference snapping.',
   'Rotate': 'Rotate the selection around an inferred axis.',
@@ -94,6 +96,7 @@ export function toolActionId(name: string): string | undefined {
 const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
   'Push/Pull': ['extrude', 'pull', 'push'],
   'Follow Me': ['sweep', 'pipe', 'molding', 'lathe', 'revolve'],
+  'Offset': ['inset', 'outset', 'concentric'],
   'Rectangle': ['rect', 'box'],
   'Tape Measure': ['measure', 'distance', 'guide'],
   'Protractor': ['angle'],

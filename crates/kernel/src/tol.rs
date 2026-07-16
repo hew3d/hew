@@ -27,6 +27,26 @@ pub const NORMALIZE_MIN_LENGTH: f64 = 1e-12;
 /// same direction (dimensionless).
 pub const NORMAL_DIRECTION: f64 = 1e-9;
 
+/// Maximum ratio of an offset miter join's vertex displacement to the
+/// offset distance (dimensionless) — the classic 2D stroke miter limit,
+/// applied by `offset::offset_loop`.
+///
+/// A uniform boundary offset moves every EDGE by exactly `|d|`, but a miter
+/// VERTEX moves `d / sin(θ/2)` for interior angle θ: as a corner sharpens
+/// toward a needle, the join point runs away unboundedly (a 1° dart offsets
+/// its tip ~115·|d|; ~1e7·|d| is reachable), producing a loop that passes
+/// every simplicity/winding check while being geometrically absurd for a
+/// "uniform band" — so the offset REFUSES typed past this ratio rather than
+/// emit it (rule 4's posture: a typed refusal, never a silently wrong Ok).
+///
+/// 20 admits every corner with interior angle ≳ 5.7° (2·asin(1/20)): a 15°
+/// corner's ratio is 1/sin(7.5°) ≈ 7.7 and a 30° corner's ≈ 3.9, both
+/// comfortably inside — deliberately far more permissive than the
+/// stroke-rendering defaults (SVG miterlimit 4, PostScript 10), because a
+/// sharp hand-drawn dart is legitimate CAD geometry; only the needle regime
+/// whose miter dwarfs the requested distance is refused.
+pub const OFFSET_MITER_LIMIT: f64 = 20.0;
+
 /// Guard band for the inference index's pick-cone node test (dimensionless).
 ///
 /// The exact per-candidate test (`cone_test` in the inference crate) accepts

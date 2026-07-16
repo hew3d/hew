@@ -34,7 +34,7 @@ const KERNEL_ERROR_CODES = [
   // SketchError
   'PointOffPlane', 'DegenerateSegment', 'UnknownEdge', 'UnknownVertex',
   'UnknownRegion', 'WouldRetopologize', 'UnknownIsland', 'MalformedRegion',
-  'DegenerateCurve', 'RestoreConflicts',
+  'DegenerateCurve', 'RestoreConflicts', 'OffsetTooSmall', 'OffsetCollapsed',
   // ExtrudeError
   'DistanceTooSmall', 'DegenerateGeometry',
   // FollowMeError

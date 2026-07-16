@@ -200,6 +200,27 @@ describe('MenuBar', () => {
     expect(onSelectTool).toHaveBeenCalledWith('Push/Pull')
   })
 
+  // --- Rail ↔ menu parity ---
+
+  it('every registry tool is reachable from the Draw/Tools/Camera dropdowns (no rail↔menu drift)', () => {
+    // This menu bar is the ONLY menu on the web build and Windows/Linux
+    // Tauri, and its items are hand-written — a tool added to the registry
+    // (rail, palette, shortcuts) but not here would be invisible in the
+    // menus on those platforms. Same drift-pinning spirit as the palette's
+    // registry test.
+    render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={vi.fn()} />)
+    const seen = new Set<string>()
+    for (const menu of [/draw/i, /^tools$/i, /camera/i]) {
+      fireEvent.click(screen.getByRole('button', { name: menu }))
+      for (const tool of TOOLS) {
+        if (screen.queryByText(tool) !== null) seen.add(tool)
+      }
+    }
+    for (const tool of TOOLS) {
+      expect(seen.has(tool), `tool "${tool}" is missing from the web menu bar`).toBe(true)
+    }
+  })
+
   // --- Window menu: panel toggles ---
 
   it('shows a checkmark next to Model Info when showModelInfo=true', () => {

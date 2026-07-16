@@ -723,6 +723,12 @@ export function MenuBar({
               checked={activeTool === 'Follow Me'}
               onClick={withClose(() => onSelectTool?.('Follow Me'))}
             />
+            <CheckMenuItem
+              label="Offset"
+              shortcut={keyFor('Offset')}
+              checked={activeTool === 'Offset'}
+              onClick={withClose(() => onSelectTool?.('Offset'))}
+            />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem
               label="Tape Measure"

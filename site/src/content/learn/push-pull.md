@@ -40,7 +40,7 @@ The same refusal rule applies here: if changing the radius would bend a neighbor
 
 ## Recesses, bosses, and through-cuts
 
-Draw directly on a solid's face to split it into regions (see [Drawing](/learn/drawing/)), then push/pull the new region:
+Draw directly on a solid's face to split it into regions (see [Drawing](/learn/drawing/)) — or let the Offset tool inset the face's own boundary in one gesture — then push/pull the new region:
 
 - **Pull outward** → a boss or pad growing from the face.
 - **Push inward** → a recess or pocket.

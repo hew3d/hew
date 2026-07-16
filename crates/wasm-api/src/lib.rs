@@ -552,6 +552,51 @@ impl EdgeRemovedJs {
     }
 }
 
+/// What a region offset did (mirrors `kernel::RegionOffsetAdded`).
+#[wasm_bindgen]
+pub struct RegionOffsetJs {
+    inner: kernel::RegionOffsetAdded,
+}
+
+#[wasm_bindgen]
+impl RegionOffsetJs {
+    /// Handles of the offset loops' newly created sketch edges.
+    pub fn new_edges(&self) -> Vec<u64> {
+        self.inner
+            .new_edges
+            .iter()
+            .map(|e| e.data().as_ffi())
+            .collect()
+    }
+
+    /// Handles of curve chains minted for the offset loops' analytic runs.
+    pub fn new_curves(&self) -> Vec<u64> {
+        self.inner
+            .new_curves
+            .iter()
+            .map(|c| c.data().as_ffi())
+            .collect()
+    }
+
+    /// Handles of regions that came into existence.
+    pub fn regions_created(&self) -> Vec<u64> {
+        self.inner
+            .regions_created
+            .iter()
+            .map(|r| r.data().as_ffi())
+            .collect()
+    }
+
+    /// Now-dead handles of regions the insertion invalidated.
+    pub fn regions_removed(&self) -> Vec<u64> {
+        self.inner
+            .regions_removed
+            .iter()
+            .map(|r| r.data().as_ffi())
+            .collect()
+    }
+}
+
 /// What `push_pull` did. A normal translate carries a [`kernel::PushPullReport`]
 /// (`inner`); a **through-cut** ( — push past the opposite wall becomes a
 /// subtract) instead carries the resulting object handles in `through`, since
@@ -1264,6 +1309,69 @@ impl Scene {
         self.register_sketch(sid);
         recording::record(recording::RecordedCall::SketchRemoveEdge { sketch, edge });
         Ok(EdgeRemovedJs { inner: report })
+    }
+
+    /// The Offset tool's sketch commit: offsets `region`'s whole boundary
+    /// (outer loop and every hole) by `distance` — positive grows the
+    /// material, negative shrinks it — and inserts the offset loops as new
+    /// sketch geometry through the ordinary sticky rules, so both the
+    /// original and offset regions stay extrudable. Analytic arc runs come
+    /// back as true concentric curves (`kernel::Sketch::offset_region`).
+    /// Bracket with `sketch_begin_gesture`/`sketch_end_gesture` like any
+    /// other drawing commit so the offset is one undo step.
+    pub fn sketch_offset_region(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        distance: f64,
+    ) -> Result<RegionOffsetJs, ApiError> {
+        let sid = sketch_id(sketch);
+        let rid = SketchRegionId::from(KeyData::from_ffi(region));
+        let s = self
+            .doc
+            .sketch_mut(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let report = s
+            .offset_region(rid, distance)
+            .map_err(|e| api_err(&e, &e))?;
+        // Same rationale as `sketch_add_segment`: no `DocChange` here, so
+        // re-register with inference at the call site.
+        self.register_sketch(sid);
+        recording::record(recording::RecordedCall::SketchOffsetRegion {
+            sketch,
+            region,
+            distance,
+        });
+        Ok(RegionOffsetJs { inner: report })
+    }
+
+    /// Pure preview of [`Scene::sketch_offset_region`]: the offset loops the
+    /// commit would insert, without mutating anything. Encoded as
+    /// `[loopCount, n₀, x,y,z × n₀, n₁, x,y,z × n₁, …]` (the outer loop's
+    /// image first, then each hole's). Throws the same typed errors the
+    /// commit would (`OffsetTooSmall`, `OffsetCollapsed`, `UnknownRegion`),
+    /// so the tool can clamp or dim an invalid drag before committing.
+    pub fn sketch_offset_region_preview(
+        &self,
+        sketch: u64,
+        region: u64,
+        distance: f64,
+    ) -> Result<Vec<f64>, ApiError> {
+        let s = self
+            .doc
+            .sketch(sketch_id(sketch))
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let rid = SketchRegionId::from(KeyData::from_ffi(region));
+        let profile = s.profile(rid).map_err(|e| api_err(&e, &e))?;
+        let off = kernel::offset_profile(&profile, distance).map_err(|e| api_err(&e, &e))?;
+        let mut out: Vec<f64> = vec![(1 + off.holes.len()) as f64];
+        for lp in std::iter::once(&off.outer).chain(off.holes.iter()) {
+            out.push(lp.points.len() as f64);
+            for p in &lp.points {
+                out.extend([p.x, p.y, p.z]);
+            }
+        }
+        Ok(out)
     }
 
     /// Opens a curve bracket on `sketch`: segments added until
@@ -2678,6 +2786,69 @@ impl Scene {
         }
     }
 
+    /// The Offset tool's solid-face commit: offsets `face`'s outer boundary
+    /// by `distance` in the face plane (negative = into the face — the only
+    /// direction that can land on the face) and imprints the offset loop as
+    /// a coplanar sub-face, exactly like drawing on the face does. Boundary
+    /// arcs recovered from imprinted edge claims or stamped cylinder walls
+    /// offset analytically (`kernel::offset_face_boundary`); when the whole
+    /// loop is one circle the imprint carries its analytic identity, so a
+    /// later push-through yields a smooth cylinder. Returns the new sub-face
+    /// handle; push/pull it to boss/recess. Recorded in undo history.
+    pub fn offset_face(&mut self, object: u64, face: u64, distance: f64) -> Result<u64, ApiError> {
+        let lp = self.offset_face_loop(object, face, distance)?;
+        let mut loop_pts: Vec<f64> = Vec::with_capacity(lp.points.len() * 3);
+        for p in &lp.points {
+            loop_pts.extend([p.x, p.y, p.z]);
+        }
+        // A single-circle boundary keeps its analytic identity through the
+        // imprint; a mixed boundary imprints as plain edges.
+        let first = lp.curves.first().copied().flatten();
+        let uniform_circle = first.filter(|_| lp.curves.iter().all(|c| *c == first));
+        // Delegating to the imprint path records the literal loop
+        // (`RecordedCall::SplitFaceInner`), so replay needs no new variant.
+        self.split_face_inner_impl(object, face, &loop_pts, uniform_circle)
+    }
+
+    /// Pure preview of [`Scene::offset_face`]: the offset loop as xyz
+    /// triples, without mutating anything. Throws the commit's typed errors
+    /// (`OffsetTooSmall`, `OffsetCollapsed`, `UnknownFace`); note a loop
+    /// that computes fine but lies outside the face is only refused at
+    /// commit (`LoopNotStrictlyInside`), so the tool treats an outward drag
+    /// as guidance, not geometry.
+    pub fn offset_face_preview(
+        &self,
+        object: u64,
+        face: u64,
+        distance: f64,
+    ) -> Result<Vec<f64>, ApiError> {
+        let lp = self.offset_face_loop(object, face, distance)?;
+        let mut out: Vec<f64> = Vec::with_capacity(lp.points.len() * 3);
+        for p in &lp.points {
+            out.extend([p.x, p.y, p.z]);
+        }
+        Ok(out)
+    }
+
+    /// Shared boundary-offset computation for [`Scene::offset_face`] and its
+    /// preview, mapping kernel errors to boundary codes.
+    fn offset_face_loop(
+        &self,
+        object: u64,
+        face: u64,
+        distance: f64,
+    ) -> Result<kernel::OffsetLoop, ApiError> {
+        let obj = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        kernel::offset_face_boundary(obj, fid, distance).map_err(|e| match e {
+            kernel::FaceOffsetError::UnknownFace => stale("UnknownFace", "face"),
+            kernel::FaceOffsetError::Offset(inner) => api_err(&inner, &inner),
+        })
+    }
+
     /// Cut a face along `path` (xyz triples), recorded in undo history.
     pub fn split_face(
         &mut self,
@@ -3558,6 +3729,13 @@ impl Scene {
                         path_face,
                     } => {
                         self.follow_me_around_face(sketch, region, path_object, path_face)?;
+                    }
+                    SketchOffsetRegion {
+                        sketch,
+                        region,
+                        distance,
+                    } => {
+                        self.sketch_offset_region(sketch, region, distance)?;
                     }
                     Boolean { op, a, b } => {
                         self.boolean(op, a, b)?;

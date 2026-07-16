@@ -59,6 +59,10 @@ const DESCRIPTIONS: Record<string, string> = {
     'That circle or arc is too small to keep. Drag a larger radius, or type an exact one.',
   RestoreConflicts:
     'Undo needs to put the original outline back, but newer drawing is in its way. Erase the overlapping lines and undo again.',
+  OffsetTooSmall:
+    'That offset distance is too small to make a new boundary. Drag further, or type an exact distance.',
+  OffsetCollapsed:
+    "The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner.",
   SketchGestureAlreadyOpen:
     'The drawing tools got out of step. Press Escape and try again.',
   SketchGestureNotOpen:

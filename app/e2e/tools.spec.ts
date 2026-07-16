@@ -260,6 +260,102 @@ test('Push/Pull: kernel correctly rejects a push that would remove all material'
 })
 
 // ---------------------------------------------------------------------------
+// Offset — offsetRegion / offsetFace
+// ---------------------------------------------------------------------------
+
+test('Offset: inward region offset closes a nested region that extrudes; undo restores the hash', async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const rect = h.drawRectangle([0, 0, 0], [2, 2, 0])
+    const hashBefore = h.getStateHash()
+
+    // Inset the rectangle's boundary by 0.5 m — one new region (the inner
+    // square), gesture-bracketed as one undo step.
+    const created = h.offsetRegion(rect.sketch, rect.region, -0.5)
+    const hashAfter = h.getStateHash()
+
+    // The inner region extrudes into a solid, proving it closed.
+    h.extrudeRegion(rect.sketch, created[0], 1)
+    const count = h.getObjectCount()
+
+    // Unwind both steps: the offset is exactly one undo entry.
+    h.undo()
+    h.undo()
+    const hashUnwound = h.getStateHash()
+
+    return { created: created.length, hashBefore, hashAfter, count, hashUnwound }
+  })
+
+  expect(result.created).toBe(1)
+  expect(result.hashAfter).not.toBe(result.hashBefore)
+  expect(result.count).toBe(1)
+  expect(result.hashUnwound).toBe(result.hashBefore)
+})
+
+test('Offset: face offset imprints an inset loop that push/pulls into a recess', async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.drawBox([0, 0, 0], [2, 2, 0], 1)
+    const hashBox = h.getStateHash()
+    // Pick the top face by ray from above.
+    const top = h.pickFace([1, 1, 5], [0, 0, -1])
+    if (top === null) throw new Error('no top face')
+
+    const sub = h.offsetFace(top.object, top.face, -0.4)
+    const hashImprinted = h.getStateHash()
+
+    // The imprinted sub-face pushes inward — the boss/recess workflow.
+    h.pushPull(top.object, sub, -0.5)
+    const hashRecessed = h.getStateHash()
+    const count = h.getObjectCount()
+
+    // Each step is exactly one undo entry; two undos restore the plain box.
+    h.undo()
+    h.undo()
+    const hashUnwound = h.getStateHash()
+
+    return {
+      count,
+      err: h.getLastError(),
+      hashBox,
+      hashImprinted,
+      hashRecessed,
+      hashUnwound,
+    }
+  })
+
+  expect(result.err).toBeNull()
+  expect(result.count).toBe(1)
+  // The imprint and the recess each really mutated the document…
+  expect(result.hashImprinted).not.toBe(result.hashBox)
+  expect(result.hashRecessed).not.toBe(result.hashImprinted)
+  // …and undo walks back to the plain box exactly.
+  expect(result.hashUnwound).toBe(result.hashBox)
+})
+
+test('Offset: a collapsing distance is refused typed and mutates nothing', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const rect = h.drawRectangle([0, 0, 0], [2, 2, 0])
+    const hashBefore = h.getStateHash()
+    let code: string | null = null
+    try {
+      h.offsetRegion(rect.sketch, rect.region, -1.5) // past the inradius
+    } catch (e) {
+      code = e instanceof Error ? e.message : String(e)
+    }
+    return { code, unchanged: h.getStateHash() === hashBefore }
+  })
+
+  expect(result.code).toContain('OffsetCollapsed')
+  expect(result.unchanged).toBe(true)
+})
+
+// ---------------------------------------------------------------------------
 // Move — transform_object
 // ---------------------------------------------------------------------------
 

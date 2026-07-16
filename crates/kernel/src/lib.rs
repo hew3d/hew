@@ -27,6 +27,7 @@ pub mod ids;
 pub mod import;
 pub mod material;
 pub mod math;
+pub mod offset;
 pub mod ops;
 pub mod serialize;
 pub mod sketch;
@@ -48,6 +49,9 @@ pub use import::{
 };
 pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame};
 pub use math::{MathError, Plane, Point3, Vec3};
+pub use offset::{
+    FaceOffsetError, OffsetError, OffsetLoop, ProfileOffset, offset_face_boundary, offset_profile,
+};
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
@@ -57,9 +61,9 @@ pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,
 };
 pub use sketch::{
-    CurveGeom, EdgeRemoved, Profile, ProfileError, SegmentAdded, Sketch, SketchCurveId, SketchEdge,
-    SketchEdgeId, SketchError, SketchIsland, SketchIslandId, SketchRegion, SketchRegionId,
-    SketchVertex, SketchVertexId,
+    CurveGeom, EdgeRemoved, Profile, ProfileError, RegionOffsetAdded, SegmentAdded, Sketch,
+    SketchCurveId, SketchEdge, SketchEdgeId, SketchError, SketchIsland, SketchIslandId,
+    SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
 };
 pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};

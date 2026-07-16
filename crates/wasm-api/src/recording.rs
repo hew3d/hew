@@ -95,6 +95,17 @@ pub enum RecordedCall {
         path_object: u64,
         path_face: u64,
     },
+    /// `sketch_offset_region(sketch, region, distance)` — the Offset tool's
+    /// sketch commit: the region's whole boundary offset by a uniform
+    /// distance, inserted as new sketch geometry. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): recordings that never
+    /// offset replay on older builds unchanged; one that does fails to parse
+    /// there — loudly, never silently divergent.
+    SketchOffsetRegion {
+        sketch: u64,
+        region: u64,
+        distance: f64,
+    },
     /// `boolean(op, a, b)`.
     Boolean { op: u8, a: u64, b: u64 },
     /// `boolean_nodes(op, a_kind, a, b_kind, b)` — the node-operand boolean

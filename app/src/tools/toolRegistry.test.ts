@@ -16,7 +16,7 @@ describe('toolRegistry', () => {
 
   it('groups the 03_tool_rail.md tools plus Arc and Follow Me, 5/5/2 per group', () => {
     expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Arc'])
-    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Move', 'Rotate', 'Scale'])
+    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Move', 'Rotate', 'Scale'])
     expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Paint'])
   })
 

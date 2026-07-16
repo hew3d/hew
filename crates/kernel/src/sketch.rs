@@ -145,6 +145,23 @@ pub struct SegmentAdded {
     pub regions_removed: Vec<SketchRegionId>,
 }
 
+/// What [`Sketch::offset_region`] did, so tools and undo can react
+/// precisely. Region ids are diffed once over the whole insertion (not per
+/// segment), so a region that appeared and vanished mid-insertion is listed
+/// in neither field.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RegionOffsetAdded {
+    /// Edges created for the offset loops (fragments included, in insertion
+    /// order).
+    pub new_edges: Vec<SketchEdgeId>,
+    /// Curve chains minted for the offset loops' analytic arc runs.
+    pub new_curves: Vec<SketchCurveId>,
+    /// Regions that exist now but did not before the offset.
+    pub regions_created: Vec<SketchRegionId>,
+    /// Regions that existed before the offset but do not now.
+    pub regions_removed: Vec<SketchRegionId>,
+}
+
 /// What [`Sketch::remove_edge`] did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EdgeRemoved {
@@ -194,6 +211,16 @@ pub enum SketchError {
     /// outline was ([`Sketch::restore_edges`]). The sketch is untouched —
     /// erase the conflicting geometry and undo again.
     RestoreConflicts,
+    /// An [`Sketch::offset_region`] distance whose magnitude is not larger
+    /// than [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) (or not finite) —
+    /// the offset boundary would coincide with the original.
+    OffsetTooSmall,
+    /// The [`Sketch::offset_region`] distance collapses the region's
+    /// boundary: it exceeds what the shape can absorb (an inward offset past
+    /// the inradius, an arc radius driven to zero, a hole shrunk away) or
+    /// the offset loops cross themselves or each other. The sketch is
+    /// untouched — no silent repair (rule 4).
+    OffsetCollapsed,
 }
 
 impl std::fmt::Display for SketchError {
@@ -223,6 +250,12 @@ impl std::fmt::Display for SketchError {
                     f,
                     "the restored outline would cross geometry drawn since the extrusion"
                 )
+            }
+            SketchError::OffsetTooSmall => {
+                write!(f, "offset distance is too small to produce a boundary")
+            }
+            SketchError::OffsetCollapsed => {
+                write!(f, "the offset distance collapses the boundary")
             }
         }
     }
@@ -1101,6 +1134,100 @@ impl Sketch {
             }
         }
         Ok(true)
+    }
+
+    /// The Offset tool's sketch commit: computes the uniform offset of
+    /// `region`'s entire boundary (outer loop and every hole) by `distance`
+    /// — positive grows the material, negative shrinks it (see
+    /// [`crate::offset::offset_profile`] for the geometry contract) — and
+    /// inserts the offset loops into this sketch through the ordinary sticky
+    /// machinery, so they weld, split, and close regions exactly as drawn
+    /// geometry does. Both the original and the offset regions remain
+    /// extrudable.
+    ///
+    /// Analytic arc runs of the boundary come back as true curves: each
+    /// maximal run of offset edges claiming one circle is committed inside a
+    /// [`Sketch::begin_curve_with`] bracket carrying the concentric offset
+    /// circle, so the result selects as one curve and extrudes to a stamped
+    /// cylinder wall, exactly like a freshly drawn arc.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownRegion`] for a stale handle;
+    /// [`SketchError::MalformedRegion`] if the region cannot produce a
+    /// profile (a kernel bug surfaced typed); [`SketchError::OffsetTooSmall`]
+    /// and [`SketchError::OffsetCollapsed`] per
+    /// [`crate::offset::OffsetError`]. An offset loop that cannot insert
+    /// cleanly is also [`SketchError::OffsetCollapsed`]. On any error the
+    /// sketch is unchanged (strong guarantee).
+    pub fn offset_region(
+        &mut self,
+        region: SketchRegionId,
+        distance: f64,
+    ) -> Result<RegionOffsetAdded, SketchError> {
+        let profile = self.profile(region)?;
+        let off = crate::offset::offset_profile(&profile, distance).map_err(|e| match e {
+            crate::offset::OffsetError::OffsetTooSmall => SketchError::OffsetTooSmall,
+            crate::offset::OffsetError::OffsetCollapsed => SketchError::OffsetCollapsed,
+        })?;
+
+        // Insert on a clone; swap only when every loop lands (strong
+        // guarantee). Region identity is diffed once over the whole batch so
+        // transient mid-insertion regions appear in neither report list.
+        let mut s = self.clone();
+        let before: std::collections::BTreeSet<SketchRegionId> = s.regions.keys().collect();
+        let mut report = RegionOffsetAdded::default();
+        for lp in std::iter::once(&off.outer).chain(off.holes.iter()) {
+            s.insert_offset_loop(lp, &mut report)?;
+        }
+        let after: std::collections::BTreeSet<SketchRegionId> = s.regions.keys().collect();
+        report.regions_created = after.difference(&before).copied().collect();
+        report.regions_removed = before.difference(&after).copied().collect();
+
+        *self = s;
+        Ok(report)
+    }
+
+    /// Inserts one offset loop's edges, bracketing each maximal analytic arc
+    /// run in a curve chain carrying its offset circle. Called on the
+    /// offset's working clone; any sticky failure aborts the whole offset as
+    /// [`SketchError::OffsetCollapsed`].
+    fn insert_offset_loop(
+        &mut self,
+        lp: &crate::offset::OffsetLoop,
+        report: &mut RegionOffsetAdded,
+    ) -> Result<(), SketchError> {
+        let n = lp.points.len();
+        // Start at a run boundary so a curve bracket never wraps the seam;
+        // a uniform loop (a full circle, or all straight) has none and any
+        // start works.
+        let start = (0..n)
+            .find(|&k| lp.curves[(k + n - 1) % n] != lp.curves[k])
+            .unwrap_or(0);
+
+        let mut k = 0;
+        while k < n {
+            let geom = lp.curves[(start + k) % n];
+            let mut len = 1;
+            while k + len < n && lp.curves[(start + k + len) % n] == geom {
+                len += 1;
+            }
+            if let Some(g) = geom {
+                let cid = self
+                    .begin_curve_with(g)
+                    .map_err(|_| SketchError::OffsetCollapsed)?;
+                report.new_curves.push(cid);
+            }
+            for j in 0..len {
+                let i = (start + k + j) % n;
+                let seg = self
+                    .add_segment_inner(lp.points[i], lp.points[(i + 1) % n])
+                    .map_err(|_| SketchError::OffsetCollapsed)?;
+                report.new_edges.extend(seg.new_edges);
+            }
+            self.end_curve();
+            k += len;
+        }
+        Ok(())
     }
 }
 

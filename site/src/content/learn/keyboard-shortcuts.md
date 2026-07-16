@@ -16,6 +16,7 @@ Tool shortcuts are plain letters, the same on every platform, and match SketchUp
 | Circle | `C` |
 | Arc | `A` |
 | Push/Pull | `P` or `3` |
+| Offset | `F` |
 | Move | `M` or `4` |
 | Rotate | `Q` or `5` |
 | Scale | `S` or `6` |
