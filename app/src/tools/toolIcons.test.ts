@@ -50,4 +50,14 @@ describe('cursorFor', () => {
   it('falls back to the Select cursor for an unrecognized tool name', () => {
     expect(cursorFor('NotARealTool')).toBe(cursorFor('Select'))
   })
+
+  it('adds a haloed + badge with copyBadge (Move copy toggle), and only then', () => {
+    const plain = cursorFor('Move')
+    const badged = cursorFor('Move', true)
+    expect(badged).not.toBe(plain)
+    const decoded = decodeURIComponent(badged.slice('url("'.length, badged.indexOf('")')))
+    // The plus is stroke-drawn twice: a white halo under a dark stroke.
+    expect(decoded).toContain('M26 3v8M21.5 8.5h9')
+    expect(cursorFor('Move', false)).toBe(plain)
+  })
 })

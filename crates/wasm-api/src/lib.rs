@@ -140,6 +140,13 @@ pub fn end_gesture() {
     log::end_gesture()
 }
 
+/// Ceiling on [`Scene::duplicate_selection_array`]'s `count`, enforced at
+/// this trust boundary (recorded sessions are plain JSON replayed through
+/// that method verbatim, so a hand-edited count must fail typed instead of
+/// hanging the engine). The single source of truth: the UI reads it via
+/// [`Scene::max_array_count`], so the app-side cap cannot drift.
+pub const MAX_ARRAY_COUNT: u32 = 1000;
+
 // ------------------------------------------------------------------ errors
 
 /// Boundary error: stringly `"CODE: message"` per docs/DEVELOPMENT.md B3.
@@ -328,7 +335,7 @@ fn node_id(kind: u8, id: u64) -> Result<NodeId, ApiError> {
 /// nodes for selection, picking, and grouping without conflating the two
 /// handle spaces (object and group slotmaps reuse bit patterns).
 #[wasm_bindgen]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NodeJs {
     kind: String,
     id: u64,
@@ -1893,6 +1900,104 @@ impl Scene {
             affine: *rows,
         });
         Ok(node_js(new_node))
+    }
+
+    /// Deep-clone every node of a selection `count` times along `affine` —
+    /// the Move tool's **array copy** (a Move+copy commit, or its ×N / /N
+    /// refinement). Copy `k` of each node lands at `affine` composed `k`
+    /// times, so a pure translation yields evenly spaced copies continuing
+    /// along the same vector; a "/N" internal array is expressed by passing
+    /// the full offset divided by `count`. Placement per kind matches
+    /// [`Scene::duplicate_node`]: an Object/Group copy bakes fresh
+    /// independent geometry, an Instance copy shares its definition at the
+    /// composed pose. The whole array is **one undoable step**.
+    ///
+    /// `kinds`/`ids` are parallel arrays naming live sibling-or-not tree
+    /// nodes (kind `0` = object, `1` = group, `2` = instance, as in
+    /// [`Scene::group_nodes`]); `affine` is the same row-major 3×4 12-float
+    /// matrix as [`Scene::transform_object`]. Returns the clone roots in
+    /// creation order (every source's copy 1, then copy 2, …).
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad
+    ///   kind; or the same node is listed twice (`DuplicateMember`).
+    /// - `BadCount` — `count` is zero or exceeds [`MAX_ARRAY_COUNT`]. The cap
+    ///   is enforced HERE, at the trust boundary, because recorded sessions
+    ///   are plain JSON replayed through this method verbatim — a hand-edited
+    ///   or corrupted `count` must fail typed, not hang the engine cloning
+    ///   geometry.
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `EmptySelection` — nothing to duplicate.
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance` — a stale or hidden
+    ///   handle.
+    /// - `Transform` — a singular `affine`, or one that reflects a baked
+    ///   target.
+    ///
+    /// On error the document is untouched (partial clones are rolled back).
+    pub fn duplicate_selection_array(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affine: &[f64],
+        count: u32,
+    ) -> Result<Vec<NodeJs>, ApiError> {
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        if count > MAX_ARRAY_COUNT {
+            return Err(ApiError::new(
+                "BadCount",
+                &format!("count must be between 1 and {MAX_ARRAY_COUNT}"),
+            ));
+        }
+        let count_nz = std::num::NonZeroU32::new(count).ok_or_else(|| {
+            ApiError::new(
+                "BadCount",
+                &format!("count must be between 1 and {MAX_ARRAY_COUNT}"),
+            )
+        })?;
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let (roots, change) = self
+            .doc
+            .duplicate_nodes_array(&nodes, &t, count_nz)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DuplicateSelectionArray {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            affine: *rows,
+            count,
+        });
+        Ok(roots.into_iter().map(node_js).collect())
+    }
+
+    /// The ceiling [`Scene::duplicate_selection_array`] enforces on `count`
+    /// ([`MAX_ARRAY_COUNT`]). The UI reads its own pre-check limit from here
+    /// so the two caps cannot drift.
+    pub fn max_array_count(&self) -> u32 {
+        MAX_ARRAY_COUNT
+    }
+
+    /// A monotonic token identifying the document's undo-stack state: changes
+    /// on every committed mutation, every undo, and every redo — never on
+    /// view-state toggles (tag visibility, user-hide). An unchanged value
+    /// proves the last action a caller committed is still the top of the
+    /// undo stack, so a [`Scene::scene_undo`] will retract exactly it. This
+    /// is what the Move tool's array refinement checks before its retracting
+    /// undo; [`Scene::state_hash`] cannot stand in (content identity is not
+    /// history identity — see [`kernel::Document::history_generation`]).
+    pub fn history_generation(&self) -> u64 {
+        self.doc.history_generation()
     }
 
     /// Handles of all currently visible Objects in the scene (undone
@@ -3772,6 +3877,14 @@ impl Scene {
                     DeleteNode { kind, id } => {
                         self.delete_node(kind, id)?;
                     }
+                    DuplicateSelectionArray {
+                        kinds,
+                        ids,
+                        affine,
+                        count,
+                    } => {
+                        self.duplicate_selection_array(&kinds, &ids, &affine, count)?;
+                    }
                     SplitFaceInner {
                         object,
                         face,
@@ -4306,6 +4419,173 @@ mod tests {
             "replaying a group session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// The Move tool's array copy across the FFI: `duplicate_selection_array`
+    /// creates `count` copies in creation order as ONE scene-level undo step,
+    /// and rejects bad input with typed codes, the document untouched.
+    #[test]
+    fn duplicate_selection_array_is_one_undo_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+
+        // 3 copies at +2 m, +4 m, +6 m along X.
+        let step = [
+            1.0, 0.0, 0.0, 2.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let roots = scene
+            .duplicate_selection_array(&[0], &[o], &step, 3)
+            .unwrap();
+        assert_eq!(roots.len(), 3);
+        assert!(roots.iter().all(|n| n.kind == "object"));
+        assert_eq!(scene.object_ids().len(), 4, "source + three copies");
+
+        // ONE undo removes the whole array; ONE redo restores it.
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.object_ids(), vec![o]);
+        scene.scene_redo().unwrap();
+        assert_eq!(scene.object_ids().len(), 4);
+
+        // Typed rejections, document untouched.
+        let err = scene
+            .duplicate_selection_array(&[0], &[o], &step, 0)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+        let err = scene
+            .duplicate_selection_array(&[0, 0], &[o], &step, 1)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        let err = scene
+            .duplicate_selection_array(&[0], &[o], &step[..7], 1)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        let err = scene
+            .duplicate_selection_array(&[], &[], &step, 1)
+            .unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
+        assert_eq!(scene.object_ids().len(), 4, "refusals mutate nothing");
+    }
+
+    /// The count cap is enforced at the trust boundary: exactly
+    /// `MAX_ARRAY_COUNT` copies succeed, one more refuses typed with the
+    /// document untouched — and a hand-edited recording carrying an absurd
+    /// count fails its replay loudly instead of hanging the engine.
+    #[test]
+    fn duplicate_selection_array_bounds_count_at_the_boundary() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let step = [
+            1.0, 0.0, 0.0, 2.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+
+        // cap + 1 refuses typed, document untouched.
+        let err = scene
+            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT + 1)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+        assert_eq!(scene.object_ids().len(), 1, "refusal mutates nothing");
+        // No stray action was pushed: undoing once retracts the EXTRUDE.
+        scene.scene_undo().unwrap();
+        assert!(
+            scene.object_ids().is_empty(),
+            "refusal pushed no undo entry"
+        );
+        scene.scene_redo().unwrap();
+
+        // Exactly the cap succeeds.
+        let roots = scene
+            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT)
+            .unwrap();
+        assert_eq!(roots.len(), MAX_ARRAY_COUNT as usize);
+        assert_eq!(scene.object_ids().len(), 1 + MAX_ARRAY_COUNT as usize);
+
+        // A recording with an absurd count fails loudly on replay.
+        let rogue = format!(
+            r#"{{"version":{},"calls":[{{"method":"begin_ground_sketch"}},{{"method":"duplicate_selection_array","kinds":[0],"ids":[1],"affine":[1,0,0,2,0,1,0,0,0,0,1,0],"count":4000000}}],"golden_hash":0}}"#,
+            recording::RECORDING_FORMAT_VERSION
+        );
+        let err = Scene::new().replay(&rogue).unwrap_err();
+        assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+    }
+
+    /// `history_generation` crosses the FFI with the kernel's semantics: it
+    /// bumps on a committed mutation, on undo, and on redo — and stays put
+    /// across the non-undoable view-state toggles the eye icons drive.
+    #[test]
+    fn history_generation_crosses_the_ffi() {
+        let mut scene = Scene::new();
+        let g0 = scene.history_generation();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g1 = scene.history_generation();
+        assert!(g1 > g0, "a committed mutation bumps");
+
+        scene.scene_undo().unwrap();
+        let g2 = scene.history_generation();
+        assert!(g2 > g1, "undo bumps");
+        scene.scene_redo().unwrap();
+        let g3 = scene.history_generation();
+        assert!(g3 > g2, "redo bumps");
+
+        scene.set_node_user_hidden(0, o, true).unwrap();
+        scene.set_node_user_hidden(0, o, false).unwrap();
+        scene.set_tag_hidden("walls".to_string(), true);
+        assert_eq!(
+            scene.history_generation(),
+            g3,
+            "view-state toggles leave the generation untouched"
+        );
+    }
+
+    /// Copies are part of the replay contract: a session that Move+Option
+    /// copies one node and then array-copies a selection replays into a fresh
+    /// Scene to the exact golden state_hash (both calls are recorded — the
+    /// single-copy path used to be a silent recording gap).
+    #[test]
+    fn copy_and_array_copy_record_and_replay() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let mv = [
+            1.0, 0.0, 0.0, 3.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let copy = scene.duplicate_node(0, o, &mv).unwrap();
+        assert_eq!(copy.kind, "object");
+        let step = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 2.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        scene
+            .duplicate_selection_array(&[0, 0], &[o, copy.id], &step, 2)
+            .unwrap();
+        assert_eq!(scene.object_ids().len(), 6);
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"duplicate_node\""));
+        assert!(json.contains("\"method\":\"duplicate_selection_array\""));
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying a copy + array-copy session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
     /// Draw-on-face with an analytic circle, then push the disk THROUGH the

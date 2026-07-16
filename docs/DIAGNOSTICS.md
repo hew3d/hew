@@ -180,6 +180,8 @@ literal internal handles from the recording session.
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
+| `duplicate_node` | `kind`, `id`, `affine[12]` | Move+copy of one node: a deep clone placed at the offset |
+| `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node cloned `count` times along the step, one undo step |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 
 Coverage grows over time under a deliberately **additive posture**

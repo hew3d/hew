@@ -18,6 +18,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
+use std::num::NonZeroU32;
 
 // ----------------------------------------------------------------- helpers
 
@@ -3375,6 +3376,335 @@ fn duplicate_refuses_bad_placement_and_stale_node() {
         "refused duplicates pushed no undo entry"
     );
     assert!(!doc.can_undo());
+}
+
+// -------------------------------------------  duplicate_nodes_array (×N / /N)
+
+/// An external array (`×N`): N copies of the source at step, 2·step, …,
+/// N·step — the source untouched — and the WHOLE array is one undo step:
+/// a single undo removes every copy, a single redo restores them all.
+#[test]
+fn array_copy_places_evenly_spaced_copies_as_one_undo_step() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let original = doc.object(a).unwrap().clone();
+    let c0 = centroid(&original);
+    let step = Vec3::new(3.0, 0.0, 0.0);
+
+    let (roots, change) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &Transform::translation(step),
+            NonZeroU32::new(3).unwrap(),
+        )
+        .expect("array duplicate");
+    assert_eq!(roots.len(), 3, "three copies for count = 3");
+
+    let copies: Vec<ObjectId> = roots
+        .iter()
+        .map(|&r| match r {
+            NodeId::Object(id) => id,
+            _ => panic!("an object copy is an object"),
+        })
+        .collect();
+    for (k, &b) in copies.iter().enumerate() {
+        assert_ne!(a, b, "each copy is a distinct handle");
+        assert!(change.objects_touched.contains(&b));
+        let expected = c0 + step * ((k + 1) as f64);
+        assert!(
+            approx_pt(centroid(doc.object(b).unwrap()), expected),
+            "copy {} sits at {}·step",
+            k + 1,
+            k + 1
+        );
+    }
+    assert!(
+        objects_equivalent(doc.object(a).unwrap(), &original),
+        "the source is untouched"
+    );
+    assert_eq!(doc.visible_object_ids().len(), 4, "source + three copies");
+
+    // ONE undo removes the whole array; ONE redo restores it.
+    doc.undo().expect("undo the array");
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![a],
+        "a single undo removes every copy"
+    );
+    doc.redo().expect("redo the array");
+    let visible = doc.visible_object_ids();
+    assert_eq!(visible.len(), 4);
+    for (k, &b) in copies.iter().enumerate() {
+        assert!(visible.contains(&b), "redo restores every copy");
+        assert!(approx_pt(
+            centroid(doc.object(b).unwrap()),
+            c0 + step * ((k + 1) as f64)
+        ));
+    }
+}
+
+/// `count = 1` degenerates to exactly `duplicate_node`: one copy at the step
+/// offset, one undo step.
+#[test]
+fn array_copy_count_one_matches_single_duplicate() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let c0 = centroid(doc.object(a).unwrap());
+    let step = Vec3::new(0.0, 2.0, 0.0);
+
+    let (roots, _) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &Transform::translation(step),
+            NonZeroU32::new(1).unwrap(),
+        )
+        .expect("array duplicate of one");
+    assert_eq!(roots.len(), 1);
+    let b = match roots[0] {
+        NodeId::Object(id) => id,
+        _ => panic!("an object copy is an object"),
+    };
+    assert!(approx_pt(centroid(doc.object(b).unwrap()), c0 + step));
+
+    doc.undo().expect("undo the copy");
+    assert_eq!(doc.visible_object_ids(), vec![a]);
+}
+
+/// Array-copying an instance stamps N more instances of the SAME definition
+/// (geometry shared — never a fresh make_unique def), each at the composed
+/// pose; an object in the same call gets independent baked copies.
+#[test]
+fn array_copy_of_instances_shares_the_definition() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let free = extrude_box(&mut doc, 5.0, 5.0, 6.0, 6.0, 0.0, 1.0);
+    let step = Vec3::new(4.0, 0.0, 0.0);
+
+    let (roots, _) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Instance(inst), NodeId::Object(free)],
+            &Transform::translation(step),
+            NonZeroU32::new(2).unwrap(),
+        )
+        .expect("mixed array duplicate");
+    assert_eq!(roots.len(), 4, "two copies of each of two sources");
+
+    let mut new_instances = Vec::new();
+    let mut new_objects = Vec::new();
+    for r in roots {
+        match r {
+            NodeId::Instance(id) => new_instances.push(id),
+            NodeId::Object(id) => new_objects.push(id),
+            NodeId::Group(_) => panic!("no group sources were listed"),
+        }
+    }
+    assert_eq!(new_instances.len(), 2);
+    assert_eq!(new_objects.len(), 2);
+
+    for (k, &i2) in new_instances.iter().enumerate() {
+        assert_eq!(
+            doc.instance_def(i2),
+            Some(comp),
+            "each instance copy shares the source's definition"
+        );
+        let probe = Point3::new(0.3, 0.7, 0.2);
+        let expected = Transform::IDENTITY.then(&Transform::translation(step * ((k + 1) as f64)));
+        assert!(
+            doc.instance_pose(i2)
+                .unwrap()
+                .apply_point(probe)
+                .approx_eq(expected.apply_point(probe), 1e-9),
+            "copy {}'s pose composes the step {} times",
+            k + 1,
+            k + 1
+        );
+    }
+    assert_eq!(
+        doc.instances_of(comp).len(),
+        3,
+        "source + two shared-definition copies"
+    );
+    for &b in &new_objects {
+        assert!(doc.is_world_object(b), "object copies are independent");
+    }
+
+    // One undo drops all four copies at once.
+    doc.undo().expect("undo the array");
+    assert_eq!(doc.instances_of(comp), vec![inst]);
+    assert_eq!(doc.visible_object_ids(), vec![free]);
+}
+
+/// Empty selections, repeated nodes, stale handles, and singular/reflecting
+/// steps are refused — the document untouched, nothing pushed onto undo.
+#[test]
+fn array_copy_rejects_bad_input_without_touching_the_document() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let one = NonZeroU32::new(1).unwrap();
+    let t = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
+
+    assert_eq!(
+        doc.duplicate_nodes_array(&[], &t, one).map(|_| ()),
+        Err(DocumentError::EmptySelection)
+    );
+    assert_eq!(
+        doc.duplicate_nodes_array(&[NodeId::Object(a), NodeId::Object(a)], &t, one)
+            .map(|_| ()),
+        Err(DocumentError::DuplicateMember)
+    );
+    let bogus = ObjectId::default();
+    assert_eq!(
+        doc.duplicate_nodes_array(&[NodeId::Object(bogus)], &t, one)
+            .map(|_| ()),
+        Err(DocumentError::UnknownObject)
+    );
+    assert_eq!(
+        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(0.0), one)
+            .map(|_| ()),
+        Err(DocumentError::Transform(TransformError::Singular))
+    );
+    assert_eq!(
+        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(-1.0), one)
+            .map(|_| ()),
+        Err(DocumentError::Transform(TransformError::Reflection))
+    );
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![a],
+        "refused arrays leave the document untouched"
+    );
+
+    // No refused call left a stray action behind.
+    doc.undo().expect("undo the extrude");
+    assert!(doc.visible_object_ids().is_empty());
+    assert!(!doc.can_undo(), "refused arrays pushed no undo entry");
+}
+
+proptest! {
+    /// Placement math across random translations and counts: copy k of a box
+    /// sits at exactly k·step from the source (within tolerance), and one
+    /// undo/redo round-trip is an identity on the visible set.
+    #[test]
+    fn array_copy_spacing_is_k_times_step(
+        dx in -5.0f64..5.0,
+        dy in -5.0f64..5.0,
+        dz in -5.0f64..5.0,
+        count in 1u32..5,
+    ) {
+        // A ~zero step is a legal placement for duplication (copies stack in
+        // place), so no rejection band is needed.
+        let mut doc = Document::new();
+        let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+        let c0 = centroid(doc.object(a).unwrap());
+        let step = Vec3::new(dx, dy, dz);
+
+        let (roots, _) = doc
+            .duplicate_nodes_array(
+                &[NodeId::Object(a)],
+                &Transform::translation(step),
+                NonZeroU32::new(count).unwrap(),
+            )
+            .expect("array duplicate");
+        prop_assert_eq!(roots.len(), count as usize);
+        for (k, &r) in roots.iter().enumerate() {
+            let b = match r {
+                NodeId::Object(id) => id,
+                _ => panic!("an object copy is an object"),
+            };
+            let expected = c0 + step * ((k + 1) as f64);
+            prop_assert!(
+                approx_pt(centroid(doc.object(b).unwrap()), expected),
+                "copy {} of {} must sit at k·step", k + 1, count
+            );
+        }
+
+        let before: HashSet<ObjectId> = doc.visible_object_ids().into_iter().collect();
+        doc.undo().expect("undo the array");
+        prop_assert_eq!(doc.visible_object_ids(), vec![a]);
+        doc.redo().expect("redo the array");
+        let after: HashSet<ObjectId> = doc.visible_object_ids().into_iter().collect();
+        prop_assert_eq!(before, after, "undo/redo is an identity on the visible set");
+    }
+}
+
+// ------------------------------------------------------ history generation
+
+/// The history generation bumps on every recorded action, on undo, and on
+/// redo — and on NOTHING else: the non-undoable view-state setters
+/// (tag visibility, user-hide) leave it untouched even though they change
+/// what renders.
+#[test]
+fn history_generation_tracks_pushes_undo_and_redo_only() {
+    let mut doc = Document::new();
+    let g0 = doc.history_generation();
+
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let g1 = doc.history_generation();
+    assert!(g1 > g0, "a recorded action bumps the generation");
+
+    doc.undo().expect("undo the extrude");
+    let g2 = doc.history_generation();
+    assert!(g2 > g1, "undo bumps the generation");
+
+    doc.redo().expect("redo the extrude");
+    let g3 = doc.history_generation();
+    assert!(g3 > g2, "redo bumps the generation");
+
+    // View-state edits are deliberately not undoable and must not move the
+    // token — hiding things to declutter must not end an armed refinement.
+    doc.set_node_user_hidden(NodeId::Object(a), true);
+    doc.set_node_user_hidden(NodeId::Object(a), false);
+    doc.set_tag_hidden(vec!["walls".to_string()], true);
+    doc.set_tag_hidden(vec!["walls".to_string()], false);
+    assert_eq!(
+        doc.history_generation(),
+        g3,
+        "view-state toggles leave the generation untouched"
+    );
+}
+
+/// The guard failure the adversarial review reproduced: a net-zero pair of
+/// undoable edits (a tag added, then removed) restores `state_hash` exactly
+/// — content identity — while pushing two real actions, so the top of the
+/// undo stack is no longer the array commit and an undo would silently eat
+/// the tag edit instead. `history_generation` is the discriminator.
+#[test]
+fn net_zero_tag_pair_restores_the_hash_but_not_the_generation() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.duplicate_nodes_array(
+        &[NodeId::Object(a)],
+        &Transform::translation(Vec3::new(2.0, 0.0, 0.0)),
+        NonZeroU32::new(1).unwrap(),
+    )
+    .expect("copy commit");
+    let hash = doc.state_hash();
+    let generation = doc.history_generation();
+    let visible = doc.visible_object_ids();
+
+    let tag = vec!["walls".to_string()];
+    doc.add_node_tag(NodeId::Object(a), tag.clone())
+        .expect("add tag");
+    doc.remove_node_tag(NodeId::Object(a), &tag)
+        .expect("remove tag");
+
+    assert_eq!(doc.state_hash(), hash, "the content hash is restored");
+    assert_ne!(
+        doc.history_generation(),
+        generation,
+        "the history generation is not — two actions were pushed"
+    );
+
+    // Undoing now retracts the tag REMOVAL, not the array commit: the
+    // visible set is untouched, which is exactly why a hash-guarded caller
+    // must not fire this undo expecting to retract its copies.
+    doc.undo().expect("undo the tag removal");
+    assert_eq!(
+        doc.visible_object_ids(),
+        visible,
+        "the copies survive — the undo consumed the tag edit"
+    );
 }
 
 // ----------------------------------------------------------- torture mode

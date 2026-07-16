@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
   arrowToAxis,
+  editArrayBuffer,
   editNumericBuffer,
   editLengthBuffer,
   editDimsBuffer,
   isLengthInputKey,
+  parseArraySpec,
   parseDistance,
   parseDimensions,
   pointAlong,
@@ -347,6 +349,66 @@ describe('parseDimensions', () => {
     expect(parseDimensions('3,-4')).toBeNull()
     expect(parseDimensions('abc')).toBeNull()
     expect(parseDimensions('3,abc')).toBeNull()
+  })
+})
+
+describe('editArrayBuffer', () => {
+  it('accepts a mode token only into an empty buffer', () => {
+    expect(editArrayBuffer('', 'x')).toBe('x')
+    expect(editArrayBuffer('', 'X')).toBe('x')
+    expect(editArrayBuffer('', '*')).toBe('x')
+    expect(editArrayBuffer('', '/')).toBe('/')
+    expect(editArrayBuffer('x3', 'x')).toBe('x3')
+    expect(editArrayBuffer('x', '/')).toBe('x')
+  })
+
+  it('appends digits only after a mode token', () => {
+    expect(editArrayBuffer('x', '3')).toBe('x3')
+    expect(editArrayBuffer('x3', '0')).toBe('x30')
+    expect(editArrayBuffer('/', '2')).toBe('/2')
+    // A bare leading digit is a tool shortcut, not array input.
+    expect(editArrayBuffer('', '3')).toBe('')
+  })
+
+  it('Backspace deletes; other keys are ignored', () => {
+    expect(editArrayBuffer('x3', 'Backspace')).toBe('x')
+    expect(editArrayBuffer('x', 'Backspace')).toBe('')
+    expect(editArrayBuffer('', 'Backspace')).toBe('')
+    expect(editArrayBuffer('x3', '.')).toBe('x3')
+    expect(editArrayBuffer('x3', '-')).toBe('x3')
+    expect(editArrayBuffer('x3', 'm')).toBe('x3')
+    expect(editArrayBuffer('x3', 'Enter')).toBe('x3')
+  })
+})
+
+describe('parseArraySpec', () => {
+  it('parses external arrays: x3, X3, *3', () => {
+    expect(parseArraySpec('x3')).toEqual({ mode: 'multiply', count: 3 })
+    expect(parseArraySpec('X3')).toEqual({ mode: 'multiply', count: 3 })
+    expect(parseArraySpec('*12')).toEqual({ mode: 'multiply', count: 12 })
+  })
+
+  it('parses internal arrays: /2', () => {
+    expect(parseArraySpec('/2')).toEqual({ mode: 'divide', count: 2 })
+    expect(parseArraySpec('/10')).toEqual({ mode: 'divide', count: 10 })
+  })
+
+  it('accepts the N = 1 edge case', () => {
+    expect(parseArraySpec('x1')).toEqual({ mode: 'multiply', count: 1 })
+    expect(parseArraySpec('/1')).toEqual({ mode: 'divide', count: 1 })
+  })
+
+  it('rejects garbage: empty, bare mode, zero, non-numeric, trailing junk', () => {
+    expect(parseArraySpec('')).toBeNull()
+    expect(parseArraySpec('x')).toBeNull()
+    expect(parseArraySpec('/')).toBeNull()
+    expect(parseArraySpec('x0')).toBeNull()
+    expect(parseArraySpec('/0')).toBeNull()
+    expect(parseArraySpec('3')).toBeNull()
+    expect(parseArraySpec('abc')).toBeNull()
+    expect(parseArraySpec('x3x')).toBeNull()
+    expect(parseArraySpec('x3.5')).toBeNull()
+    expect(parseArraySpec('x-3')).toBeNull()
   })
 })
 

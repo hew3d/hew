@@ -122,8 +122,12 @@ function innerMarkup(svg: string): string {
  * the glyph is rendered twice at the same position: once underneath with a
  * thick white stroke (the halo) and once on top with a solid dark fill —
  * giving contrast against both light and dark backgrounds.
+ *
+ * With `copyBadge`, a small `+` is drawn in the top-right corner of the
+ * cursor canvas (the SketchUp convention for "this transform copies") —
+ * used by the Move tool while its durable copy toggle is on.
  */
-export function cursorFor(toolName: string): string {
+export function cursorFor(toolName: string, copyBadge = false): string {
   const icon = TOOL_ICON_SVG[toolName as ToolName] ?? TOOL_ICON_SVG['Select']
   const hotspot = CURSOR_HOTSPOT[toolName as ToolName] ?? CURSOR_HOTSPOT['Select']
   const glyph = innerMarkup(icon)
@@ -135,12 +139,23 @@ export function cursorFor(toolName: string): string {
   // no axis flip needed, just scale-down and re-center into the cursor canvas.
   const translate = offset + GLYPH_SIZE
 
+  // The badge is stroke-drawn (a plus is two strokes), so it carries its own
+  // white halo underneath instead of the glyph's paint-order trick.
+  const badge = copyBadge
+    ? `<g stroke-linecap="round" fill="none">` +
+      `<path d="M26 3v8M21.5 8.5h9" stroke="#fff" stroke-width="5"/>` +
+      `<path d="M26 3v8M21.5 8.5h9" stroke="#111" stroke-width="2.5"/>` +
+      `</g>`
+    : ''
+
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${CURSOR_SIZE}" height="${CURSOR_SIZE}" viewBox="0 0 ${CURSOR_SIZE} ${CURSOR_SIZE}">` +
     `<g transform="translate(${offset} ${translate}) scale(${scale})" ` +
     `fill="#111" stroke="#fff" stroke-width="${2.5 / scale}" stroke-linejoin="round" paint-order="stroke fill">` +
     glyph +
-    `</g></svg>`
+    `</g>` +
+    badge +
+    `</svg>`
 
   const hotspotX = Math.round(hotspot.x * CURSOR_SIZE)
   const hotspotY = Math.round(hotspot.y * CURSOR_SIZE)

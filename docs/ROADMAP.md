@@ -75,8 +75,12 @@ below.
   non-perpendicular or detached profiles, branching or disconnected
   selections, bends tighter than the profile, self-intersecting results
   — refuse typed with the document untouched (docs/design/follow-me.md)
-- Move and rotate with axis-locked inference snapping; Option/Alt-drag to
-  copy while moving
+- Move and rotate with axis-locked inference snapping; tapping Option/Alt
+  durably toggles Move between moving and copying (so an exact copy
+  distance can be typed), and a committed copy refines into an array:
+  typing `x3` places 3 copies at the same spacing along the vector, `/3`
+  places 3 copies dividing the distance — re-enter a different count while
+  the gesture is hot, one undo removes the whole array
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
@@ -255,8 +259,6 @@ below.
   objects together
 - **Nested component definitions** (a component containing other
   components)
-- **Array copy** — duplicate an object along a line a set number of times
-  in one step
 - **Layers and saved Scenes** (named camera bookmarks)
 - **Section planes** — non-destructive visual clipping, distinct from the
   existing destructive Slice tool

@@ -1236,8 +1236,27 @@ export default function Viewport({
       }
     }
 
+    /**
+     * Quietly close Move's armed ×N / /N window, if any. Explicit document
+     * commands — delete, undo, redo — are deliberate and must execute, but
+     * they end the refinement: without this, the window's keyboard capture
+     * outlives it (Delete silently no-ops, bare-letter tool shortcuts feed
+     * a stale VCB buffer until Esc). Only the ambiguous bare
+     * Delete/Backspace KEYSTROKE stays guarded upstream by capturingInput —
+     * see MoveTool.capturingInput / disarmArray.
+     */
+    function disarmActiveArrayWindow(): void {
+      const activeTool = toolController.activeTool
+      if ('disarmArray' in activeTool) {
+        (activeTool as { disarmArray(): void }).disarmArray()
+      }
+    }
+
     function runDelete(nodes: NodeRef[]): void {
       if (nodes.length === 0) return
+      // An explicit delete is deliberate and executes — but first disarm the
+      // array window so no hot state points at the deleted copies.
+      disarmActiveArrayWindow()
       // kind: 0=object, 1=group, 2=instance; 'sketch' has no NodeId — its own
       // dedicated delete_sketch call, mirroring delete_guide's shape.
       //
@@ -1434,6 +1453,10 @@ export default function Viewport({
 
     function runUndo(): void {
       if (wasmSceneRef.current.can_scene_undo()) {
+        // As explicit as menu delete: the undo executes AND ends the armed
+        // array window (the generation guard already prevented any
+        // wrong-action harm; this releases the window's keyboard capture).
+        disarmActiveArrayWindow()
         try {
           applyHistoryChange(wasmSceneRef.current.scene_undo())
         } catch (err) {
@@ -1444,6 +1467,8 @@ export default function Viewport({
 
     function runRedo(): void {
       if (wasmSceneRef.current.can_scene_redo()) {
+        // Mirror runUndo — see disarmActiveArrayWindow.
+        disarmActiveArrayWindow()
         try {
           applyHistoryChange(wasmSceneRef.current.scene_redo())
         } catch (err) {
@@ -1811,14 +1836,28 @@ export default function Viewport({
           // the lines follow (objects refresh via handleSceneRefresh; sketches
           // do not). Mirrors the boolean/undo refresh pairing.
           sceneRenderer.refreshAllSketches()
-          // Select the committed nodes — for an Option-copy these are the
-          // fresh clones, so a follow-up Alt-drag chains off the new copies.
+          // Select the committed nodes — for a copy these are the fresh
+          // clones, so a follow-up move chains off the new copies.
           if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
           else onSelectManyRef.current?.(nodes, false)
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
+        // Durable copy toggle → badge the Move cursor with a `+` (the same
+        // cursorFor pipeline the tool-switch cursor uses).
+        (on: boolean) => {
+          renderer.domElement.style.cursor = cursorFor('Move', on)
+        },
+        // ×N / /N array re-resolve: the previous copies were scene-undone
+        // before the new set landed, so a targeted refresh isn't enough —
+        // rebuild fully so the retracted meshes vanish too.
+        (nodes) => {
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
+          else onSelectManyRef.current?.(nodes, false)
+        },
       )
     }
 
@@ -2040,8 +2079,9 @@ export default function Viewport({
       onInferenceChangeRef.current?.(null)
       // Tool-aware cursor: derived from the same Material Symbols
       // icon as the toolbar button, so the active tool is readable from the
-      // pointer. The canvas owns its cursor — nothing else should set
-      // renderer.domElement.style.cursor outside this switch.
+      // pointer. The canvas owns its cursor — the only writers besides this
+      // switch are the shift-pan swap and MoveTool's copy-toggle badge
+      // (makeMoveTool), both routed through the same cursorFor pipeline.
       renderer.domElement.style.cursor = cursorFor(toolName)
       scheduleRender()
     }
@@ -2376,11 +2416,6 @@ export default function Viewport({
       lastRayRef.current = { ray, viewportH, fovY }
 
       const activeTool = toolController.activeTool
-      // Option/Alt held → Move commits as a copy; live-tracked so the
-      // readout and chaining follow the modifier.
-      if ('setCopyMode' in activeTool) {
-        (activeTool as { setCopyMode(on: boolean): void }).setCopyMode(ev.altKey)
-      }
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
         : null
@@ -2542,10 +2577,8 @@ export default function Viewport({
       if (activeTool instanceof PaintTool) {
         activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
       }
-      // Option/Alt held at the click → Move commits as a copy.
-      if ('setCopyMode' in activeTool) {
-        (activeTool as { setCopyMode(on: boolean): void }).setCopyMode(ev.altKey)
-      }
+      // (Move's copy mode is a durable Alt TOGGLE handled in MoveTool.onKey —
+      // no live Alt-modifier tracking here.)
 
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)

@@ -1,6 +1,6 @@
 ---
 title: "Move, Rotate, and Scale"
-description: "Select first, then Move, Rotate, or Scale with full snapping, axis locks, and typed values. Copying is a Move with Alt held."
+description: "Select first, then Move, Rotate, or Scale with full snapping, axis locks, and typed values. Copying is a Move with Alt tapped — and ×N multiplies it into an array."
 order: 8
 ---
 
@@ -27,7 +27,14 @@ A quick refresher, since every transform starts here:
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.
 
-**Copy instead of move:** hold `Option`/`Alt` while committing — the original stays put and a copy lands at the destination, with the readout prefixed "Copy ·". The copy becomes the new selection, so repeated Alt-moves chain copies one after another. This works on whatever you have selected: an object copies its geometry, a **group** copies its entire contents — nested groups and all, names, tags, and materials included — and a component instance copies as another instance of the same definition (the copies still update together; use Make Unique to break that). A copied group is fully independent of the original, and one undo removes the whole copy.
+**Copy instead of move:** tap `Option`/`Alt` — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Tap `Alt` again to go back to moving.
+
+**Array copy:** right after a copy commits, type a multiplier and press `Enter`:
+
+- `x3` (or `*3`) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `x5`, and five copies march off at 2 m intervals.
+- `/3` makes **3 copies dividing the distance** — place the last fence post first, then `/3` fills the run with evenly spaced posts between.
+
+The gesture stays live until you start something else, so if `x5` turns out wrong, just type `x8` or `/4` and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates.
 
 ## Rotate (`Q`)
 
@@ -50,7 +57,7 @@ Scaling is **uniform**, about the selection's bounding-box center. For an exact 
 
 ## What transforms apply to
 
-Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Multi-selections scale about the selection's overall bounding-box center. The one multi-selection caveat: an `Option`/`Alt` copy-move duplicates each solid but plain-moves any sketches in the selection (sketches have no copy support yet), and undoing a multi-copy takes one undo per copied node.
+Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Multi-selections scale about the selection's overall bounding-box center. The one multi-selection caveat: a copy-move duplicates each solid, group, and component but plain-moves any sketches in the selection (sketches have no copy support yet). All the copies of one commit — array copies included — undo as a single step.
 
 ## Deleting
 

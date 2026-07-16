@@ -19,16 +19,36 @@
  *   Shift (held) → lock to the axis the drag is currently moving along;
  *                  releasing Shift clears that lock (an arrow lock overrides it).
  *
- * Copy: holding Option/Alt during the move turns the commit into a
- * duplicate — the dragged result is a deep clone (`duplicate_node`) placed at the
- * offset, and the copy becomes the new selection so further Alt-drags chain
- * copies. Object/group copies are independent baked geometry; an instance copy
- * shares its definition at the offset pose.
+ * Copy: tapping Option/Alt toggles copy mode — a DURABLE toggle, not
+ * hold-to-copy, so an exact distance can be typed with the modifier long
+ * released (SketchUp's Ctrl/Option semantics). While on, the readout is
+ * prefixed "Copy ·", the cursor grows a `+` badge, and the commit becomes a
+ * duplicate: one `duplicate_selection_array` call (count 1, ONE undo step for
+ * the whole selection's copies), the clones becoming the new selection so
+ * follow-up moves chain copies. Object/group copies are independent baked
+ * geometry; an instance copy shares its definition at the offset pose.
+ * Tapping Alt again returns to plain Move. Holding Alt through a drag still
+ * works: the keydown on entry toggles copy on.
+ *
+ * Array copy (SketchUp's ×N / /N): immediately after a copy commits, typing
+ * `x3` (or `*3`) + Enter re-resolves the commit into 3 total copies at the
+ * same spacing continuing along the vector; `/3` + Enter into 3 copies
+ * evenly dividing the committed distance. While the gesture stays "hot" (no
+ * new action begun) a different `xN`/`/N` can be re-entered and the array
+ * re-resolves — implemented as one scene undo of the previous array commit
+ * plus a fresh `duplicate_selection_array`, so the final history holds ONE
+ * step for the whole array. The retracting undo is guarded by the document's
+ * HISTORY GENERATION (undo-stack identity, not a content hash): any recorded
+ * action, undo, or redo in between ends the window with a toast, while
+ * non-undoable view-state toggles (hide, tag visibility) leave it open. The
+ * armed window counts as capturing input so Delete/Backspace cannot destroy
+ * the just-made copies while the status bar invites "Type ×3…".
  *
  * Numeric VCB:
  *   Type digits / . / - while in 'base' stage → builds a buffer shown as the
  *   "Length" measurement.  Press Enter to commit that exact distance along
- *   the current direction (locked axis or cursor direction).
+ *   the current direction (locked axis or cursor direction) — identical in
+ *   move and copy modes.
  *
  * If nothing is selected, the tool shows a hint toast and remains idle.
  * On commit: one kernel transform call, then handleSceneRefresh + onDocumentChanged.
@@ -42,7 +62,14 @@ import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
-import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
+import {
+  arrowToAxis,
+  editArrayBuffer,
+  editLengthBuffer,
+  isLengthInputKey,
+  parseArraySpec,
+  pointAlong,
+} from './moveInput'
 import type { NodeRef } from '../panels/treeModel'
 import { nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
@@ -50,6 +77,7 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 export type OnMoveCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
+export type OnCopyModeChange = (on: boolean) => void
 
 /** Axis guide colours matching the world axis convention */
 const AXIS_COLOR: Record<0 | 1 | 2, number> = {
@@ -84,9 +112,17 @@ export class MoveTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
-    return this.stage.kind === 'idle'
-      ? 'Click a base point to start the move.'
-      : 'Click the destination — type an exact distance, arrow keys lock an axis, Alt moves a copy.'
+    if (this.stage.kind === 'idle') {
+      if (this.arrayHot !== null) {
+        return 'Type ×3 to make 3 copies, or /3 to divide the distance — Enter applies.'
+      }
+      return this.copyMode
+        ? 'Copy is on — click a base point to start the copy. Tap Alt to move instead.'
+        : 'Click a base point to start the move.'
+    }
+    return this.copyMode
+      ? 'Click where the copy lands — type an exact distance, arrow keys lock an axis, tap Alt to move instead.'
+      : 'Click the destination — type an exact distance, arrow keys lock an axis, tap Alt to place a copy.'
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -100,10 +136,29 @@ export class MoveTool implements Tool {
   private lockAxis: 0 | 1 | 2 | null = null
   /** True when the *current* axis lock was set by holding Shift (vs. an arrow). */
   private shiftAxisLock: boolean = false
-  /** True when Option/Alt is held — the move commits as a copy. */
+  /** Durable copy toggle (tap Option/Alt) — while true, commits duplicate. */
   private copyMode: boolean = false
   /** VCB buffer — raw string being typed by the user */
   private typed: string = ''
+  /**
+   * The just-committed copy gesture, kept "hot" for an ×N / /N array
+   * refinement. `sources` are the ORIGINAL duplicable nodes, `vector` the
+   * committed offset, and `historyGen` the document's history generation
+   * right after the commit — the undo-STACK identity that proves the
+   * re-resolve's scene undo will retract exactly our action. A content
+   * hash cannot stand in here: a net-zero pair of undoable edits restores
+   * the hash while burying our action two entries deep (the undo would
+   * silently eat the unrelated edit and a second array would stack on the
+   * first), while a non-undoable view-state toggle changes the hash
+   * without invalidating the window at all.
+   */
+  private arrayHot: {
+    sources: NodeRef[]
+    vector: [number, number, number]
+    historyGen: string
+  } | null = null
+  /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
+  private arrayTyped: string = ''
 
   /** THREE.js LineSegments for the axis guide drawn in the preview group */
   private guideLine: THREE.LineSegments | null = null
@@ -114,6 +169,15 @@ export class MoveTool implements Tool {
   private objectsGroup: THREE.Group | null = null
   /** THREE.js instances group from the SceneRenderer (read-only reference for cloning). */
   private instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null
+  /** Notifies the Viewport when the durable copy toggle flips (cursor badge). */
+  private onCopyModeChange: OnCopyModeChange
+  /**
+   * Commit callback for an ×N / /N array re-resolve. Unlike `onCommit`'s
+   * targeted refresh, this must trigger a FULL scene refresh: the re-resolve
+   * scene-undoes the previous copies (their meshes must vanish) before the
+   * new ones land. Defaults to `onCommit` for tests/callers that don't care.
+   */
+  private onArrayCommit: OnMoveCommit
 
   constructor(
     wasmScene: WasmScene,
@@ -124,6 +188,8 @@ export class MoveTool implements Tool {
     onToast: OnToast,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
     instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
+    onCopyModeChange: OnCopyModeChange = () => { /* no-op */ },
+    onArrayCommit: OnMoveCommit | null = null,
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -133,6 +199,8 @@ export class MoveTool implements Tool {
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
     this.instanceGroupGetter = instanceGroupGetter
+    this.onCopyModeChange = onCopyModeChange
+    this.onArrayCommit = onArrayCommit ?? onCommit
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
@@ -149,20 +217,35 @@ export class MoveTool implements Tool {
   }
 
   capturingInput(): boolean {
-    return this.stage.kind === 'base'
+    // The ARMED ×N / /N window captures even before anything is typed —
+    // deliberate semantics: while the status bar is inviting "Type ×3…",
+    // no single KEYSTROKE may destroy the just-made copies (App.tsx's
+    // Delete/Backspace handler defers to this exact check, and the copies
+    // ARE the current selection). Backspace edits the possibly-empty array
+    // buffer instead; Esc remains the way out, and any pointer action ends
+    // the window naturally. The cost — bare-letter tool shortcuts are
+    // swallowed until then — is the same trade every VCB entry makes.
+    //
+    // An EXPLICIT delete command (Edit ▸ Delete, the dock's Erase) is the
+    // deliberate counterpart: it executes — the Viewport's delete path
+    // first calls `disarmArray()` so the window closes cleanly, then
+    // deletes. Only the ambiguous bare keystroke is guarded here.
+    return this.stage.kind === 'base' || this.arrayHot !== null
   }
 
   /**
-   * Set by the Viewport from the pointer/key Alt modifier: while true, the
-   * next commit duplicates instead of moving. Live-tracked so releasing Alt
-   * mid-drag drops back to a plain move.
+   * Cleanly close the armed ×N / /N window without resolving it — called by
+   * the Viewport before an explicit delete command removes the selection
+   * (which is the just-made copies), so no hot state points at deleted
+   * nodes and a later Enter can't fire a wrong-action undo or a confusing
+   * toast. Quiet by design: the user asked for the delete; the window
+   * simply no longer exists.
    */
-  setCopyMode(on: boolean): void {
-    if (this.copyMode === on) return
-    this.copyMode = on
-    if (this.stage.kind === 'base') {
-      this._reportMeasurement(this.stage.base, this.stage.dest)
-    }
+  disarmArray(): void {
+    if (this.arrayHot === null && this.arrayTyped === '') return
+    this.arrayHot = null
+    this.arrayTyped = ''
+    this.onMeasurementCb('')
   }
 
   /**
@@ -230,6 +313,10 @@ export class MoveTool implements Tool {
         return
       }
 
+      // Starting a new gesture ends the ×N / /N refinement window.
+      this.arrayHot = null
+      this.arrayTyped = ''
+
       const previewMesh = this._buildPreview(nodes)
       const base: [number, number, number] = [snap.x, snap.y, snap.z]
       if (previewMesh !== null) {
@@ -261,11 +348,37 @@ export class MoveTool implements Tool {
       return
     }
 
-    if (this.stage.kind !== 'base') return
+    // ── Durable copy toggle: TAP Alt/Option to flip, any stage ──
+    // A toggle rather than hold-to-copy so an exact distance can be typed
+    // afterwards (macOS Option+digit would otherwise mangle the keystrokes).
+    // Modifier keys don't autorepeat everywhere, but guard anyway.
+    if (ev.key === 'Alt') {
+      if (!ev.repeat) {
+        ev.preventDefault() // keep the browser's Alt menu-focus behavior out
+        this.copyMode = !this.copyMode
+        this.onCopyModeChange(this.copyMode)
+        if (this.stage.kind === 'base') {
+          this._reportMeasurement(this.stage.base, this.stage.dest)
+        }
+      }
+      return
+    }
 
-    // Keep copy-mode in sync with the Alt modifier on this key event (the VCB
-    // path commits from here, so it must see whether Alt is held).
-    this.copyMode = ev.altKey
+    // ── Array-copy VCB (×N / /N), while a copy commit is "hot" ──
+    if (this.stage.kind === 'idle') {
+      if (this.arrayHot !== null) {
+        if (ev.key === 'Enter') {
+          this._resolveArray()
+          return
+        }
+        const next = editArrayBuffer(this.arrayTyped, ev.key)
+        if (next !== this.arrayTyped) {
+          this.arrayTyped = next
+          this.onMeasurementCb(this._arrayReadout())
+        }
+      }
+      return
+    }
 
     // ── Axis lock via arrow keys ──
     if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
@@ -361,6 +474,8 @@ export class MoveTool implements Tool {
     this.lockAxis = null
     this.shiftAxisLock = false
     this.typed = ''
+    this.arrayHot = null
+    this.arrayTyped = ''
     clearPreview(this.preview)
     this.guideLine = null   // clearPreview removed it
     this.onMeasurementCb('')
@@ -373,20 +488,27 @@ export class MoveTool implements Tool {
   private _commit(nodes: NodeRef[], tx: number, ty: number, tz: number): void {
     try {
       const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
-      if (
-        this.copyMode &&
-        nodes.some((n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance')
-      ) {
-        // Option/Alt: duplicate at the offset instead of moving. Each copy is
+      const copyables = nodes.filter(
+        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
+      )
+      if (this.copyMode && copyables.length > 0) {
+        // Copy mode: duplicate at the offset instead of moving. Each copy is
         // the same kind as its source; the copies become the selection so a
-        // follow-up Alt-drag chains off them. Sketches have no
-        // `duplicate_node` support — they fall through to a plain move, as
-        // they always have in single-selection copy mode.
+        // follow-up move chains off them. Sketches have no duplicate support
+        // — they fall through to a plain move, as they always have in copy
+        // mode.
         //
-        // Per-node kernel calls mean a mid-loop failure leaves the earlier
-        // copies committed in the document — the finally block refreshes and
-        // reselects whatever landed, so the viewport never renders a scene
-        // that diverges from the kernel (the error still surfaces as a toast).
+        // Order matters: sketches move FIRST, then all duplicable nodes clone
+        // in ONE `duplicate_selection_array` call (count 1) — the array
+        // action lands last on the undo stack, so an ×N / /N refinement can
+        // retract exactly it with one scene undo, and a single Cmd+Z after a
+        // multi-copy removes every clone at once.
+        //
+        // A mid-loop sketch failure leaves earlier sketch moves committed —
+        // the finally block refreshes and reselects whatever landed, so the
+        // viewport never renders a scene that diverges from the kernel (the
+        // error still surfaces as a toast). The duplicate call itself is
+        // atomic (strong guarantee).
         const committed: NodeRef[] = []
         try {
           for (const node of nodes) {
@@ -394,7 +516,7 @@ export class MoveTool implements Tool {
               continue // lines/curves are not movable/copyable (v1)
             }
             if (node.kind === 'sketch-island' && node.sketch !== undefined) {
-              // Islands MOVE under copy-drag like whole sketches do — sketch
+              // Islands MOVE under copy like whole sketches do — sketch
               // geometry has no duplicate path yet.
               this.wasmScene.transform_sketch_island(node.sketch, node.id, affineF64)
               committed.push(node)
@@ -403,13 +525,17 @@ export class MoveTool implements Tool {
             if (node.kind === 'sketch') {
               this.wasmScene.transform_sketch(node.id, affineF64)
               committed.push(node)
-            } else {
-              const created = this.wasmScene.duplicate_node(
-                nodeKindToNumber(node.kind), node.id, affineF64,
-              )
-              committed.push(nodeRefFromJs(created))
             }
           }
+          const created = this._duplicateArray(copyables, affineF64, 1)
+          committed.push(...created)
+          // The copy gesture is now "hot" for an ×N / /N array refinement.
+          this.arrayHot = {
+            sources: copyables,
+            vector: [tx, ty, tz],
+            historyGen: this.wasmScene.history_generation().toString(),
+          }
+          this.arrayTyped = ''
         } finally {
           if (committed.length > 0) {
             this.selection = committed
@@ -425,6 +551,106 @@ export class MoveTool implements Tool {
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
     }
+  }
+
+  /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs. */
+  private _duplicateArray(
+    nodes: readonly NodeRef[],
+    affineF64: Float64Array,
+    count: number,
+  ): NodeRef[] {
+    const created = this.wasmScene.duplicate_selection_array(
+      new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind))),
+      new BigUint64Array(nodes.map((n) => n.id)),
+      affineF64,
+      count,
+    )
+    return created.map(nodeRefFromJs)
+  }
+
+  /** The ×N / /N buffer as a readout, with the display glyph for `x`. */
+  private _arrayReadout(): string {
+    return this.arrayTyped.startsWith('x')
+      ? `×${this.arrayTyped.slice(1)}`
+      : this.arrayTyped
+  }
+
+  /**
+   * Resolve the typed ×N / /N array against the hot copy commit: one scene
+   * undo retracts the previous array commit (guarded by the HISTORY
+   * GENERATION, so the undo provably pops our own action and can never
+   * clobber an intervening one), then ONE `duplicate_selection_array` call
+   * places the whole array — leaving a single undo step for all N copies.
+   * The gesture stays hot afterwards so a different count can be re-entered.
+   */
+  private _resolveArray(): void {
+    const hot = this.arrayHot
+    const spec = parseArraySpec(this.arrayTyped)
+    this.arrayTyped = ''
+    this.onMeasurementCb('')
+    if (hot === null || spec === null) return
+
+    const cap = this.wasmScene.max_array_count()
+    if (spec.count > cap) {
+      this.onToast(`Array copy is limited to ${cap} copies`)
+      return
+    }
+
+    // History-identity guard: re-resolve only if the undo stack is exactly
+    // as our commit left it (top of stack = our action). The generation
+    // moves on every recorded action, undo, and redo — a mutation in
+    // between means the refinement window is over, and the user is told so
+    // rather than Enter silently doing nothing. View-state toggles (hide/
+    // tag visibility) don't move it, so decluttering the scene mid-gesture
+    // keeps the window open.
+    if (this.wasmScene.history_generation().toString() !== hot.historyGen) {
+      this.arrayHot = null
+      this.onToast('Array entry ended — the model changed since the copy')
+      return
+    }
+
+    const [tx, ty, tz] = hot.vector
+    const step: [number, number, number] =
+      spec.mode === 'divide'
+        ? [tx / spec.count, ty / spec.count, tz / spec.count]
+        : [tx, ty, tz]
+
+    // Retract the previous array commit (count 1 on the first refinement).
+    this.wasmScene.scene_undo().free()
+    let created: NodeRef[]
+    try {
+      created = this._duplicateArray(
+        hot.sources,
+        affineToFloat64(translationAffine(step[0], step[1], step[2])),
+        spec.count,
+      )
+    } catch (err) {
+      // Put the retracted copies back so a refused refinement never eats
+      // the committed copy. The undo+redo pair moved the history
+      // generation, so re-stamp the token — the state is the recorded one
+      // again and another count can be tried.
+      try {
+        this.wasmScene.scene_redo().free()
+        this.arrayHot = {
+          ...hot,
+          historyGen: this.wasmScene.history_generation().toString(),
+        }
+      } catch {
+        this.arrayHot = null
+      }
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return
+    }
+
+    this.arrayHot = {
+      sources: hot.sources,
+      vector: hot.vector,
+      historyGen: this.wasmScene.history_generation().toString(),
+    }
+    this.selection = created
+    this.onArrayCommit(created)
   }
 
   /**

@@ -23,7 +23,7 @@ Moving, rotating, or scaling a group transforms everything inside it together, a
 A component is shared geometry: one **definition**, any number of placed **instances**. Every instance has its own position, rotation, scale, and mirroring, but they all reference the same shape. Model one screw, place it eight times; fix the thread once, all eight update.
 
 - **Create a definition:** select an object and choose **Edit ▸ Make Component**. The selection becomes the definition's geometry, and what you had selected is replaced by the first instance.
-- **Place more instances:** select an instance and choose **Edit ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with `Option`/`Alt` held to drop copies where you want them ([Move](/learn/moving-and-transforming/)).
+- **Place more instances:** select an instance and choose **Edit ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with copy mode on (tap `Option`/`Alt`) to drop copies where you want them — and type `x5` right after a copy to place a whole row ([Move](/learn/moving-and-transforming/)).
 - **Edit the definition:** double-click any instance. Changes — push/pulls, added detail, paint — appear in every instance when you step out.
 
 ### Names and tags

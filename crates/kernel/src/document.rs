@@ -31,6 +31,7 @@
 //! the kernel knowing those concerns exist.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 
 use slotmap::SlotMap;
 use tracing::info;
@@ -452,6 +453,23 @@ enum DocAction {
         /// Every instance created by the clone.
         instances: Vec<InstanceId>,
     },
+    /// `duplicate_nodes_array` (the Move tool's ×N / /N array copy)
+    /// deep-cloned a selection `count` times along a step transform, as **one
+    /// action**. Undo hides every created entity and removes each clone root
+    /// from its parent's member list; redo unhides and re-appends the roots in
+    /// creation order. All handles stay stable (hide-not-delete), mirroring
+    /// [`DocAction::Duplicated`] element-wise.
+    DuplicatedArray {
+        /// Every clone root paired with the parent group it was appended to
+        /// (`None` at top level), in creation order.
+        roots: Vec<(NodeId, Option<GroupId>)>,
+        /// Every world object created across all clones.
+        objects: Vec<ObjectId>,
+        /// Every group created across all clones.
+        groups: Vec<GroupId>,
+        /// Every instance created across all clones.
+        instances: Vec<InstanceId>,
+    },
     /// `add_guide_line`/`add_guide_point` created a construction guide.
     /// Undo hides it; redo unhides. The `GuideId` stays stable.
     CreatedGuide { guide: GuideId },
@@ -813,6 +831,40 @@ impl std::fmt::Display for DocumentError {
 
 impl std::error::Error for DocumentError {}
 
+/// One side of the document undo/redo log, counting every push it has ever
+/// taken. `pushes` is monotonic — pops and clears never decrement it — so the
+/// two sides' counts sum to [`Document::history_generation`]: a token that
+/// changes on every recorded action, every undo, and every redo, but never on
+/// non-undoable view-state edits. The UI uses it as an undo-stack identity
+/// check (is the action I committed provably still on top?), which a content
+/// hash cannot answer: a net-zero pair of undoable edits restores the content
+/// hash while displacing the stack top.
+#[derive(Debug, Clone, Default)]
+struct ActionStack {
+    actions: Vec<DocAction>,
+    /// Total pushes ever accepted (monotonic).
+    pushes: u64,
+}
+
+impl ActionStack {
+    fn push(&mut self, action: DocAction) {
+        self.actions.push(action);
+        self.pushes += 1;
+    }
+    fn pop(&mut self) -> Option<DocAction> {
+        self.actions.pop()
+    }
+    fn clear(&mut self) {
+        self.actions.clear();
+    }
+    fn last(&self) -> Option<&DocAction> {
+        self.actions.last()
+    }
+    fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+}
+
 /// The authoritative model: the tree of Sketches and solid Objects plus the
 /// document-level undo/redo log. UI-free and I/O-free (DEVELOPMENT.md rule 1).
 #[derive(Debug, Clone, Default)]
@@ -862,8 +914,8 @@ pub struct Document {
     user_hidden_objects: BTreeSet<ObjectId>,
     user_hidden_groups: BTreeSet<GroupId>,
     user_hidden_instances: BTreeSet<InstanceId>,
-    undo: Vec<DocAction>,
-    redo: Vec<DocAction>,
+    undo: ActionStack,
+    redo: ActionStack,
     /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
     /// validator runs after **every** op even in release builds (where
     /// `check_invariants` / `debug_assert!` are compiled out), so a flaky op
@@ -4491,6 +4543,139 @@ impl Document {
         Ok((root, change))
     }
 
+    /// Deep-clone each of `nodes` `count` times along `step` — the kernel half
+    /// of the Move tool's **array copy** (the "×N" / "/N" refinement after a
+    /// Move+copy commit). Copy `k` (1-based) of each source is placed at `step`
+    /// composed `k` times, so a pure-translation step yields evenly spaced
+    /// copies continuing along the same vector; the caller expresses an
+    /// internal ("/N") array by passing `step = full_offset / N`. Every clone
+    /// follows [`Document::duplicate_node`]'s per-kind placement rules — an
+    /// Object/Group copy bakes fresh independent geometry, an Instance copy is
+    /// another instance of the **same definition** at the composed pose — and
+    /// lands under the **same parent** as its source.
+    ///
+    /// The whole array is recorded as one [`DocAction::DuplicatedArray`]: a
+    /// single undo hides every copy, a single redo restores them all.
+    ///
+    /// Returns the clone roots in creation order (every source's copy 1, then
+    /// every source's copy 2, …; each block in `nodes` order) plus what
+    /// changed.
+    ///
+    /// Each listed node is cloned independently, exactly like calling
+    /// [`Document::duplicate_node`] per node — listing a node alongside a
+    /// group that contains it clones that geometry twice. Listing the same
+    /// node twice is rejected instead (the UI's selection is a set).
+    ///
+    /// # Errors
+    /// - [`DocumentError::EmptySelection`] — `nodes` is empty.
+    /// - [`DocumentError::DuplicateMember`] — the same node listed twice.
+    /// - [`DocumentError::UnknownObject`] / `UnknownGroup` / `UnknownInstance`
+    ///   — a source node is stale or hidden.
+    /// - [`DocumentError::Transform`] — `step` is singular, or a composed
+    ///   placement reflects an Object/Group leaf (baking would invert winding,
+    ///   as in [`Document::duplicate_node`]).
+    ///
+    /// On `Err` the document is untouched (partial clones are rolled back).
+    pub fn duplicate_nodes_array(
+        &mut self,
+        nodes: &[NodeId],
+        step: &Transform,
+        count: NonZeroU32,
+    ) -> Result<(Vec<NodeId>, DocChange), DocumentError> {
+        info!(
+            target: "kernel::op",
+            op = "duplicate_nodes_array",
+            nodes = nodes.len(),
+            count = count.get(),
+        );
+        if nodes.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+        // Selections are small; a linear repeat scan stays deterministic and
+        // avoids requiring Ord on NodeId.
+        for (i, &n) in nodes.iter().enumerate() {
+            if nodes[..i].contains(&n) {
+                return Err(DocumentError::DuplicateMember);
+            }
+        }
+        for &n in nodes {
+            if !self.node_is_live(n) {
+                return Err(match n {
+                    NodeId::Object(_) => DocumentError::UnknownObject,
+                    NodeId::Group(_) => DocumentError::UnknownGroup,
+                    NodeId::Instance(_) => DocumentError::UnknownInstance,
+                });
+            }
+        }
+        // Validate invertibility up front; a reflecting placement is
+        // re-rejected by `apply_transform` per object leaf during the clone.
+        step.inverse().map_err(DocumentError::Transform)?;
+
+        let mut created = CreatedClone::default();
+        let mut roots: Vec<(NodeId, Option<GroupId>)> = Vec::new();
+        let mut placement = *step;
+        for k in 0..count.get() {
+            if k > 0 {
+                placement = placement.then(step);
+            }
+            for &node in nodes {
+                let parent = self.node_parent(node);
+                match self.clone_subtree(node, parent, &placement, &mut created) {
+                    Ok(root) => roots.push((root, parent)),
+                    Err(e) => {
+                        // Roll back every record inserted so far so the
+                        // document is untouched on error (strong guarantee).
+                        // Nothing outside `created` has been mutated yet —
+                        // roots are appended to parents only after the loop.
+                        for o in created.objects {
+                            self.objects.remove(o);
+                        }
+                        for g in created.groups {
+                            self.groups.remove(g);
+                        }
+                        for i in created.instances {
+                            self.instances.remove(i);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        // Append each clone root to its parent's member list in creation order
+        // (top-level nodes need no list — they derive from the slotmap,
+        // hidden-filtered).
+        for &(root, parent) in &roots {
+            if let Some(pg) = parent {
+                self.groups[pg].members.push(root);
+            }
+        }
+
+        self.undo.push(DocAction::DuplicatedArray {
+            roots: roots.clone(),
+            objects: created.objects.clone(),
+            groups: created.groups.clone(),
+            instances: created.instances.clone(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        let mut change = DocChange {
+            objects_touched: created.objects,
+            groups_touched: created.groups,
+            instances_touched: created.instances,
+            ..Default::default()
+        };
+        // Each distinct parent group is touched once (its member list grew).
+        for &(_, parent) in &roots {
+            if let Some(pg) = parent
+                && !change.groups_touched.contains(&pg)
+            {
+                change.groups_touched.push(pg);
+            }
+        }
+        Ok((roots.into_iter().map(|(root, _)| root).collect(), change))
+    }
+
     /// Recursively deep-clone `node` under `new_parent`, baking/composing
     /// `placement` per kind (see [`Document::duplicate_node`]). Newly created ids
     /// are pushed onto `created` as they are inserted, so the caller can roll back
@@ -4611,22 +4796,46 @@ impl Document {
         !self.redo.is_empty()
     }
 
+    /// A monotonic token identifying the current undo-stack state: it changes
+    /// on every recorded action, every undo, and every redo (including a
+    /// refused undo/redo, which pushes its action back), and on nothing else —
+    /// non-undoable view-state edits ([`Document::set_tag_hidden`],
+    /// [`Document::set_node_user_hidden`]) leave it untouched.
+    ///
+    /// An unchanged generation proves the action a caller committed is still
+    /// the top of the undo stack, so an [`Document::undo`] will retract
+    /// exactly it — the guard the Move tool's array-copy refinement needs. A
+    /// content hash ([`Document::state_hash`]) cannot stand in: a net-zero
+    /// pair of undoable edits (a tag added, then removed) restores the hash
+    /// while burying the caller's action two entries deep, and a view-state
+    /// toggle changes the hash without touching the stack at all.
+    pub fn history_generation(&self) -> u64 {
+        self.undo.pushes + self.redo.pushes
+    }
+
     /// The kernel op the next [`Document::undo`] would reverse, when the
-    /// pending document action is a per-object op (`None` otherwise or when
-    /// there is nothing to undo). Mirrors [`History::peek_undo`].
+    /// pending document action is a per-object op — on a world object
+    /// ([`DocAction::ObjectOp`]) or a definition member
+    /// ([`DocAction::DefObjectOp`]) — `None` otherwise or when there is
+    /// nothing to undo. Mirrors [`History::peek_undo`].
     pub fn peek_undo_object_op(&self) -> Option<&KernelOp> {
         match self.undo.last()? {
-            DocAction::ObjectOp { object } => self.objects.get(*object)?.history.peek_undo(),
+            DocAction::ObjectOp { object } | DocAction::DefObjectOp { object, .. } => {
+                self.objects.get(*object)?.history.peek_undo()
+            }
             _ => None,
         }
     }
 
     /// The kernel op the next [`Document::redo`] would replay, when the
-    /// pending document action is a per-object op. Mirrors
+    /// pending document action is a per-object op (world or definition
+    /// member, as in [`Document::peek_undo_object_op`]). Mirrors
     /// [`History::peek_redo`].
     pub fn peek_redo_object_op(&self) -> Option<&KernelOp> {
         match self.redo.last()? {
-            DocAction::ObjectOp { object } => self.objects.get(*object)?.history.peek_redo(),
+            DocAction::ObjectOp { object } | DocAction::DefObjectOp { object, .. } => {
+                self.objects.get(*object)?.history.peek_redo()
+            }
             _ => None,
         }
     }
@@ -5100,6 +5309,43 @@ impl Document {
                 change.groups_touched.extend(parent);
                 change
             }
+            DocAction::DuplicatedArray {
+                roots,
+                objects,
+                groups,
+                instances,
+            } => {
+                // Hide every clone and unlink each root from its parent —
+                // [`DocAction::Duplicated`]'s undo, element-wise.
+                for &o in objects {
+                    self.objects[o].hidden = true;
+                }
+                for &g in groups {
+                    self.groups[g].hidden = true;
+                }
+                for &i in instances {
+                    self.instances[i].hidden = true;
+                }
+                for &(root, parent) in roots {
+                    if let Some(pg) = parent {
+                        self.groups[pg].members.retain(|&n| n != root);
+                    }
+                }
+                let mut change = DocChange {
+                    objects_touched: objects.clone(),
+                    groups_touched: groups.clone(),
+                    instances_touched: instances.clone(),
+                    ..Default::default()
+                };
+                for &(_, parent) in roots {
+                    if let Some(pg) = parent
+                        && !change.groups_touched.contains(&pg)
+                    {
+                        change.groups_touched.push(pg);
+                    }
+                }
+                change
+            }
             &DocAction::CreatedGuide { guide } => {
                 if let Some(rec) = self.guides.get_mut(guide) {
                     rec.hidden = true;
@@ -5145,7 +5391,17 @@ impl Document {
             }
             &DocAction::DefObjectOp { component, object } => {
                 let rec = &mut self.objects[object];
-                rec.history.undo(&mut rec.object).map_err(map_history_err)?;
+                // Mirror the ObjectOp arm: the member object's History keeps
+                // its entry when a dispatch is refused, so push the document
+                // action back too — a bare `?` here dropped it from BOTH
+                // stacks, desyncing the two logs (the next undo panicked),
+                // breaking the strong exception guarantee, and mutating the
+                // stack top without moving `history_generation` (a pop is
+                // only counted through the push that reverses it).
+                if let Err(e) = rec.history.undo(&mut rec.object) {
+                    self.undo.push(action);
+                    return Err(map_history_err(e));
+                }
                 let instances_touched = self.instances_of(component);
                 DocChange {
                     objects_touched: vec![object],
@@ -5643,6 +5899,44 @@ impl Document {
                 change.groups_touched.extend(parent);
                 change
             }
+            DocAction::DuplicatedArray {
+                roots,
+                objects,
+                groups,
+                instances,
+            } => {
+                // Unhide every clone and re-append each root to its parent in
+                // creation order — [`DocAction::Duplicated`]'s redo,
+                // element-wise.
+                for &o in objects {
+                    self.objects[o].hidden = false;
+                }
+                for &g in groups {
+                    self.groups[g].hidden = false;
+                }
+                for &i in instances {
+                    self.instances[i].hidden = false;
+                }
+                for &(root, parent) in roots {
+                    if let Some(pg) = parent {
+                        self.groups[pg].members.push(root);
+                    }
+                }
+                let mut change = DocChange {
+                    objects_touched: objects.clone(),
+                    groups_touched: groups.clone(),
+                    instances_touched: instances.clone(),
+                    ..Default::default()
+                };
+                for &(_, parent) in roots {
+                    if let Some(pg) = parent
+                        && !change.groups_touched.contains(&pg)
+                    {
+                        change.groups_touched.push(pg);
+                    }
+                }
+                change
+            }
             &DocAction::CreatedGuide { guide } => {
                 if let Some(rec) = self.guides.get_mut(guide) {
                     rec.hidden = false;
@@ -5688,7 +5982,12 @@ impl Document {
             }
             &DocAction::DefObjectOp { component, object } => {
                 let rec = &mut self.objects[object];
-                rec.history.redo(&mut rec.object).map_err(map_history_err)?;
+                // Mirror undo (and the ObjectOp arm): keep the two logs
+                // aligned on a refused replay by pushing the action back.
+                if let Err(e) = rec.history.redo(&mut rec.object) {
+                    self.redo.push(action);
+                    return Err(map_history_err(e));
+                }
                 let instances_touched = self.instances_of(component);
                 DocChange {
                     objects_touched: vec![object],
@@ -6317,5 +6616,192 @@ fn map_history_err(e: HistoryError) -> DocumentError {
         HistoryError::NothingToUndo | HistoryError::NothingToRedo => {
             panic!("document/object history desync — kernel bug: {e}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tol;
+
+    /// Extrude the unit box from a ground-sketch rectangle.
+    fn extrude_unit_box(doc: &mut Document) -> ObjectId {
+        let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            .expect("ground plane");
+        let s = doc.add_sketch(plane);
+        {
+            let sk = doc.sketch_mut(s).expect("sketch is live");
+            let p = [
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ];
+            for k in 0..4 {
+                sk.add_segment(p[k], p[(k + 1) % 4]).expect("segment adds");
+            }
+        }
+        let region = doc
+            .sketch(s)
+            .expect("sketch is live")
+            .regions()
+            .keys()
+            .next()
+            .expect("rectangle closes one region");
+        doc.extrude_region(s, region, 1.0).expect("box extrudes").0
+    }
+
+    /// The unique face of `obj` whose plane normal matches `dir`, if any.
+    fn face_with_normal(obj: &Object, dir: Vec3) -> Option<FaceId> {
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().approx_eq(dir, tol::NORMAL_DIRECTION))
+            .map(|(id, _)| id)
+    }
+
+    /// Component-member wedge whose slanted cut face was pulled through
+    /// `apply_def_op` (recording a [`DocAction::DefObjectOp`] whose undo is
+    /// the `UnbuildPushPull` inverse). Returns `(component, member, wall)` —
+    /// the first wall the pull built.
+    fn def_wedge_with_pulled_cut_face(doc: &mut Document) -> (ComponentId, ObjectId, FaceId) {
+        let cube = extrude_unit_box(doc);
+        let plane = Plane::from_point_normal(Point3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 1.0))
+            .expect("slice plane");
+        let ((a, b), _) = doc.slice_node(cube, &plane).expect("slice the cube");
+        let n = Vec3::new(1.0, 0.0, 1.0).normalized().expect("unit normal");
+        // The wedge is the piece whose CUT face faces +n outward.
+        let wedge = [a, b]
+            .into_iter()
+            .find(|&id| face_with_normal(doc.object(id).expect("live piece"), n).is_some())
+            .expect("one piece owns the +n cut face");
+        let (comp, _inst, _) = doc
+            .make_component(&[NodeId::Object(wedge)])
+            .expect("fold the wedge into a definition");
+        let member = doc.def_members(comp).expect("live component")[0];
+        let cut = face_with_normal(doc.object(member).expect("member is live"), n)
+            .expect("member keeps the cut face");
+
+        let (report, _) = doc
+            .apply_def_op(
+                comp,
+                member,
+                KernelOp::PushPull {
+                    face: cut,
+                    distance: 0.3,
+                },
+            )
+            .expect("wedge cut-face pull builds walls");
+        let wall = match report {
+            KernelOpReport::PushPull(r) => r.created_faces[0],
+            other => panic!("expected a PushPull report, got {other:?}"),
+        };
+        (comp, member, wall)
+    }
+
+    /// Imprint an inset rectangle strictly inside `face` of `member`,
+    /// BYPASSING the per-object history — the op_specs unbuild-refusal
+    /// technique, lifted to a definition member. Models any path that
+    /// mutates geometry without a history record.
+    fn bypass_imprint(doc: &mut Document, member: ObjectId, face: FaceId) {
+        let rec = &mut doc.objects[member];
+        let corners: Vec<Point3> = rec
+            .object
+            .loop_positions(rec.object.faces()[face].outer_loop)
+            .collect();
+        let inv = 1.0 / corners.len() as f64;
+        let centroid = corners
+            .iter()
+            .fold(Point3::ORIGIN, |acc, &p| acc + p.to_vec() * inv);
+        let rect: Vec<Point3> = corners
+            .iter()
+            .map(|&p| centroid + (p - centroid) * 0.4)
+            .collect();
+        rec.object
+            .split_face_inner(face, &rect)
+            .expect("imprint a hole bypassing history");
+    }
+
+    /// A REFUSED DefObjectOp undo must push the popped action back — exactly
+    /// like the structurally-parallel ObjectOp arm — or the document log
+    /// desyncs from the member's History (the next undo panics), the strong
+    /// exception guarantee breaks (Err but the log mutated), and
+    /// `history_generation` misses a stack-top change. Red-checked against
+    /// the bare-`?` arm this replaces.
+    #[test]
+    fn refused_def_object_op_undo_pushes_the_action_back() {
+        let mut doc = Document::new();
+        let (_comp, member, wall) = def_wedge_with_pulled_cut_face(&mut doc);
+
+        // The recorded wall gains a hole with no history record, so the
+        // pending UnbuildPushPull inverse must refuse.
+        bypass_imprint(&mut doc, member, wall);
+        let holed = doc.object(member).expect("member is live").to_polygons();
+
+        let gen_before = doc.history_generation();
+        let err = doc.undo().expect_err("undo must refuse: wall is holed");
+        assert!(
+            matches!(err, DocumentError::InverseFailed(_)),
+            "typed refusal, got {err:?}"
+        );
+        // The action is STILL the pending step (pushed back, logs aligned).
+        assert!(doc.can_undo(), "the refused action stays on the stack");
+        assert!(
+            matches!(
+                doc.peek_undo_object_op(),
+                Some(KernelOp::UnbuildPushPull { .. })
+            ),
+            "the stack top is still the def op's recorded inverse"
+        );
+        assert!(
+            doc.history_generation() > gen_before,
+            "the push-back moves the history generation (stack-top identity)"
+        );
+        assert_eq!(
+            doc.object(member).expect("member is live").to_polygons(),
+            holed,
+            "a refused undo leaves the member byte-identical"
+        );
+
+        // A retry fails identically — never a desync panic.
+        let err2 = doc.undo().expect_err("still refused");
+        assert!(matches!(err2, DocumentError::InverseFailed(_)));
+    }
+
+    /// The mirrored redo arm: undo the def-op pull (walls unbuild cleanly),
+    /// bypass-imprint the CUT face, then redo — the proof-carrying replay
+    /// (DEVELOPMENT.md rule 9) refuses on the changed geometry, and the
+    /// refused action must return to the redo stack.
+    #[test]
+    fn refused_def_object_op_redo_pushes_the_action_back() {
+        let mut doc = Document::new();
+        let (_comp, member, _wall) = def_wedge_with_pulled_cut_face(&mut doc);
+
+        doc.undo().expect("clean unbuild of the pulled walls");
+        let n = Vec3::new(1.0, 0.0, 1.0).normalized().expect("unit normal");
+        let cut = face_with_normal(doc.object(member).expect("member is live"), n)
+            .expect("the cut face is back");
+        bypass_imprint(&mut doc, member, cut);
+        let holed = doc.object(member).expect("member is live").to_polygons();
+
+        let gen_before = doc.history_generation();
+        let err = doc
+            .redo()
+            .expect_err("redo must refuse: the recorded state diverged");
+        assert!(doc.can_redo(), "the refused action stays on the redo stack");
+        assert!(
+            doc.history_generation() > gen_before,
+            "the push-back moves the history generation"
+        );
+        assert_eq!(
+            doc.object(member).expect("member is live").to_polygons(),
+            holed,
+            "a refused redo leaves the member byte-identical, got {err:?}"
+        );
+
+        let err2 = doc.redo().expect_err("still refused");
+        assert!(
+            std::mem::discriminant(&err2) == std::mem::discriminant(&err),
+            "a retry fails identically ({err:?} vs {err2:?}) — never a desync panic"
+        );
     }
 }

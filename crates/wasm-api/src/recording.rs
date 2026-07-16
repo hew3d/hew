@@ -148,6 +148,16 @@ pub enum RecordedCall {
     },
     /// `delete_node(kind, id)`.
     DeleteNode { kind: u8, id: u64 },
+    /// `duplicate_selection_array(kinds, ids, affine, count)` — the Move
+    /// tool's array copy (a copy commit, or its ×N / /N refinement): every
+    /// listed node cloned `count` times along `affine`, one undo step.
+    /// Additive variant (same posture as [`RecordedCall::DuplicateNode`]).
+    DuplicateSelectionArray {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        affine: [f64; 12],
+        count: u32,
+    },
     /// `split_face_inner(object, face, loop_pts)` — imprint a closed loop on a
     /// solid face (draw-on-face). `curve`, when present, is the drawn circle's
     /// analytic identity `[center.x, center.y, center.z, radius]` and routes to

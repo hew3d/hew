@@ -1,6 +1,7 @@
 //! Document-level fuzz harness (DEVELOPMENT.md rule 3): random document ops —
 //! object edits, booleans, transforms, duplicate/delete, group/ungroup,
-//! components and instances, interleaved undo/redo — over a document seeded
+//! components, instances, and definition-member edits (`apply_def_op`),
+//! interleaved undo/redo — over a document seeded
 //! with sketch-extruded boxes, with torture mode on (the always-on validator
 //! panics at the offending op instead of committing a violation).
 //!
@@ -93,6 +94,21 @@ enum DocOp {
     ExplodeInstance {
         inst_sel: usize,
     },
+    /// Push/pull a face of a definition MEMBER via `apply_def_op` — the
+    /// shared-geometry edit path, recorded as `DocAction::DefObjectOp`.
+    /// Covers happy-path def-op do/undo/redo interleavings (previously
+    /// never fuzzed). The REFUSED-replay push-back is NOT reachable from
+    /// here: recorded-only sequences unwind in LIFO order, so a recorded
+    /// wall is always pristine again by the time its unbuild replays — the
+    /// refusal needs an unrecorded (bypass) edit and is pinned by the
+    /// `refused_def_object_op_*_pushes_the_action_back` unit specs in
+    /// `document.rs` instead.
+    DefOp {
+        comp_sel: usize,
+        member_sel: usize,
+        face_sel: usize,
+        distance: f64,
+    },
     Undo,
     Redo,
 }
@@ -133,6 +149,11 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
             DocOp::PlaceInstance { comp_sel, offset }
         }),
         1 => any::<usize>().prop_map(|inst_sel| DocOp::ExplodeInstance { inst_sel }),
+        1 => (any::<usize>(), any::<usize>(), any::<usize>(), distance()).prop_map(
+            |(comp_sel, member_sel, face_sel, distance)| DocOp::DefOp {
+                comp_sel, member_sel, face_sel, distance,
+            }
+        ),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
@@ -474,6 +495,32 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
                 return Ok(true);
             };
             let _ = doc.explode_instance(iid);
+        }
+        DocOp::DefOp {
+            comp_sel,
+            member_sel,
+            face_sel,
+            distance,
+        } => {
+            let Some(cid) = nth(&doc.component_ids(), *comp_sel) else {
+                return Ok(true);
+            };
+            let members = doc.def_members(cid).expect("live component resolves");
+            let Some(oid) = nth(&members, *member_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("member id resolves");
+            let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(true);
+            };
+            let _ = doc.apply_def_op(
+                cid,
+                oid,
+                KernelOp::PushPull {
+                    face,
+                    distance: *distance,
+                },
+            );
         }
         DocOp::Undo => {
             if doc.can_undo()
