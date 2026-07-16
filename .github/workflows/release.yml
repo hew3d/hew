@@ -11,9 +11,12 @@
 #   Updater    latest.json assembled from the per-platform .sig assets by a
 #              final job (NOT tauri-action's per-job merge, which loses
 #              updates when parallel matrix jobs race the read-modify-write)
+#   Notes      the release body gets a platform × architecture download
+#              table once all assets exist; it never overwrites a body that
+#              already carries one, so hand-edited draft notes survive
+#              re-runs
 #
-# Releases stay DRAFTS: pre-v0.1.0 nothing is downloadable by the public
-# (quiet window, O14). Publishing is a deliberate human act after smoke
+# Releases stay DRAFTS. Publishing is a deliberate human act after smoke
 # installs.
 #
 # Signing posture: the updater artifacts are minisign-signed via
@@ -65,7 +68,7 @@ jobs:
           release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$TAG" \
             -f name="Hew $TAG" \
-            -f body="Draft release. Artifacts are unsigned (pre-RR9); updater artifacts are minisign-signed." \
+            -f body="Build in progress — the download table is added when all artifacts have been uploaded." \
             -F draft=true \
             --jq '.id')"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
@@ -401,3 +404,106 @@ jobs:
             -H "Content-Type: application/json" \
             "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=latest.json" \
             --input latest.json
+
+  # Replace the placeholder body with a platform × architecture download
+  # table once every asset is up. Asset names are constructed from the same
+  # naming scheme the bundlers use and each one is checked against the real
+  # asset list, so a bundler rename fails the job instead of shipping dead
+  # links. A body that already contains a download table is left alone — a
+  # re-run of this single job must not clobber hand-edited draft notes.
+  # (Re-running the whole workflow still mints a fresh draft via
+  # create-release; that is the pre-existing deal for every job here.)
+  release-notes:
+    needs: [create-release, desktop, web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write the download table into the release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+          # The macOS bullet must not promise a signature the desktop job
+          # only produces when the Apple secrets exist.
+          APPLE_SIGNED: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        run: |
+          set -euo pipefail
+          # Capture the body first: `gh | grep -q` under pipefail can report
+          # SIGPIPE as failure on an early match, reading "table present" as
+          # "table absent" — exactly the clobber this guard exists to stop.
+          body="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.body')"
+          if grep -q '## Downloads' <<<"$body"; then
+            echo "::notice::Body already carries a download table — leaving it untouched."
+            exit 0
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+            --jq '.[].name' > assets.txt
+
+          need() {
+            grep -qxF "$1" assets.txt || {
+              echo "::error::Expected release asset '$1' is missing." >&2; exit 1; }
+          }
+
+          MAC="Hew_${VERSION}_universal.dmg";        need "$MAC"
+          WIN_X64="Hew_${VERSION}_x64-setup.exe";    need "$WIN_X64"
+          WIN_ARM="Hew_${VERSION}_arm64-setup.exe";  need "$WIN_ARM"
+          AI_X64="Hew_${VERSION}_amd64.AppImage";    need "$AI_X64"
+          AI_ARM="Hew_${VERSION}_aarch64.AppImage";  need "$AI_ARM"
+          DEB_X64="Hew_${VERSION}_amd64.deb";        need "$DEB_X64"
+          DEB_ARM="Hew_${VERSION}_arm64.deb";        need "$DEB_ARM"
+          RPM_X64="Hew-${VERSION}-1.x86_64.rpm";     need "$RPM_X64"
+          RPM_ARM="Hew-${VERSION}-1.aarch64.rpm";    need "$RPM_ARM"
+          WEB="hew-web-v${VERSION}.tar.gz";          need "$WEB"
+
+          url() { echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$1"; }
+
+          if [ "$APPLE_SIGNED" = "true" ]; then
+            MAC_NOTE="The macOS disk image is signed and notarized; one universal app"
+          else
+            MAC_NOTE="One universal macOS app"
+          fi
+
+          cat > body.md <<EOF
+          _Draft: replace this line with release highlights before publishing._
+
+          ## Downloads
+
+          The [download page](https://hew3d.com/download) picks the right build
+          for your system, or grab a file directly:
+
+          | Platform | x64 / Intel | ARM64 / Apple Silicon |
+          | --- | --- | --- |
+          | **macOS** — disk image | [universal .dmg][mac] | [universal .dmg][mac] |
+          | **Windows** — installer | [.exe][win-x64] | [.exe][win-arm64] |
+          | **Linux** — AppImage | [.AppImage][ai-x64] | [.AppImage][ai-arm64] |
+          | **Linux** — Debian/Ubuntu | [.deb][deb-x64] | [.deb][deb-arm64] |
+          | **Linux** — Fedora/openSUSE | [.rpm][rpm-x64] | [.rpm][rpm-arm64] |
+          | **Web** — self-hosting tarball | [.tar.gz][web] | [.tar.gz][web] |
+
+          - $MAC_NOTE
+            covers Apple Silicon and Intel.
+          - Windows installers are not code-signed yet, so SmartScreen may
+            warn on first run — choose **More info**, then **Run anyway**.
+          - On Linux, mark the AppImage executable (\`chmod +x\`) before
+            first run, or install the .deb/.rpm.
+          - Desktop builds update themselves; \`latest.json\` and the
+            \`.sig\` assets serve that built-in updater and are not meant
+            for manual download.
+          - Or skip installing entirely: Hew runs in the browser at
+            [app.hew3d.com](https://app.hew3d.com).
+
+          [mac]: $(url "$MAC")
+          [win-x64]: $(url "$WIN_X64")
+          [win-arm64]: $(url "$WIN_ARM")
+          [ai-x64]: $(url "$AI_X64")
+          [ai-arm64]: $(url "$AI_ARM")
+          [deb-x64]: $(url "$DEB_X64")
+          [deb-arm64]: $(url "$DEB_ARM")
+          [rpm-x64]: $(url "$RPM_X64")
+          [rpm-arm64]: $(url "$RPM_ARM")
+          [web]: $(url "$WEB")
+          EOF
+
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F body=@body.md > /dev/null
+          echo "::notice::Download table written to the release body."
