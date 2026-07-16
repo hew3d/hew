@@ -1,4 +1,4 @@
-//! Executable specs for export re-faceting (docs/design/true-curves.md
+//! Executable specs for export re-faceting (the true-curves design
 //! stage 6): a pristine stamped cylinder band re-facets from its analytic
 //! definition at the requested resolution; anything less than pristine
 //! falls back to stored facets; and the emitted triangle soup is manifold
@@ -579,7 +579,7 @@ fn unattributed_objects_are_unchanged_by_the_edge_split() {
     // dyadic coordinates and axis-aligned planes, so the bytes are
     // machine-stable. If a deliberate tessellation change ever breaks this,
     // regenerate the fixture with a dump of the new output and account for
-    // the change where the appendix of docs/design/true-curves.md records
+    // the change where the appendix of the true-curves design records
     // this spec.
     assert_eq!(mesh.groups.len(), 1);
     assert_eq!(mesh.groups[0].material, None);

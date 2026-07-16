@@ -51,7 +51,7 @@ pub struct Edge {
     /// or born on an extrusion cap, so a later push-through of that face can
     /// re-attribute the tunnel walls as [`SurfaceRef::Cylinder`] (the circle's
     /// identity would otherwise die at the imprint, leaving faceted tunnel
-    /// walls — docs/design/true-curves.md, "edge metadata is the on-ramp").
+    /// walls — the true-curves design, "edge metadata is the on-ramp").
     ///
     /// Obeys the same map-or-drop contract as [`SurfaceRef`]: mapped under a
     /// similarity (center as a point, radius by the uniform scale), dropped
@@ -88,7 +88,7 @@ pub struct Loop {
 
 /// The analytic surface a planar face is a chord facet of — durable
 /// metadata over the faceted carrier, never a substitute for the face's
-/// `plane` (docs/design/true-curves.md). A face carrying a `Cylinder`
+/// `plane` (the true-curves design). A face carrying a `Cylinder`
 /// asserts it approximates a patch of that infinite cylinder; angular and
 /// axial extent are derived from the face's own vertices, never stored.
 ///
@@ -149,7 +149,7 @@ impl SurfaceRef {
 /// by the merge reports and re-applied by the split ops' restore path, so an
 /// undone merge never re-derives attributes from the current parent — which
 /// would resurrect claims a face had legitimately lost (map-or-drop,
-/// docs/design/true-curves.md) or lose paint the dissolved face carried.
+/// the true-curves design) or lose paint the dissolved face carried.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FaceAttrs {
     /// The face's material (see [`Face::material`]).
@@ -348,7 +348,7 @@ impl Object {
     }
 
     /// The true circle centers derived from this object's analytic surface
-    /// references ([`SurfaceRef`], docs/design/true-curves.md): for each
+    /// references ([`SurfaceRef`], the true-curves design): for each
     /// distinct cylinder some faces claim, the axis points at the two axial
     /// extremes of the claiming faces' vertices — the exact centers of the
     /// extruded circle's bottom and top, wherever the caps ended up after
@@ -380,7 +380,7 @@ impl Object {
     /// top, wherever the caps ended up), with the angular range the claiming
     /// facets actually cover. This is the general form of
     /// [`Object::analytic_cap_centers`] and what quadrant/tangent inference
-    /// derives from (docs/design/true-curves.md).
+    /// derives from (the true-curves design).
     ///
     /// Deterministic like `analytic_cap_centers` (slot-order visit,
     /// first-appearance grouping via [`SurfaceRef::same_surface`]); two rims

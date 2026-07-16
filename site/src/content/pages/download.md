@@ -1,9 +1,9 @@
 ---
 title: "Download Hew"
-description: "Hew runs today as a web app at app.hew3d.com. Native desktop installers for macOS, Windows, and Linux are in development."
-intro: "Hew is pre-release software. The fastest way to use it right now is the web app — it runs the same Rust kernel, compiled to WebAssembly, as the eventual desktop builds, and reads and writes the same open .hew file format. Native installers for macOS, Windows, and Linux are actively being built and will appear on this page the moment they're ready."
+description: "Get the Hew desktop app for macOS, Windows, or Linux — free and open source — or run it in your browser."
+intro: "The desktop app is the full Hew experience: native file dialogs, .hew file associations, and automatic updates. It's free, open source, and available for every major platform. Grab the build for your system below."
 webCta:
   label: "Open the web app"
   href: "https://app.hew3d.com"
-  blurb: "Works in any modern browser with WebGL2 — Chrome, Edge, Firefox, and Safari. Nothing to install."
+  blurb: "Want to try Hew before installing anything — or you're away from your own machine? The web app runs the same Rust kernel, has the same tools, and reads and writes the same .hew files, entirely in your browser."
 ---

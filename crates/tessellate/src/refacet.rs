@@ -1,4 +1,4 @@
-//! Export re-faceting: true curves for STL (docs/design/true-curves.md §4.2,
+//! Export re-faceting: true curves for STL (the true-curves design §4.2,
 //! stage 6).
 //!
 //! The viewport renders the stored facets; export may do better. A stamped

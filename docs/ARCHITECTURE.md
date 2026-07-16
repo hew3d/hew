@@ -142,10 +142,9 @@ degenerate ("zero-thickness") solid Object, for two reasons:
 
 A Sketch is the larval form of a solid: extruding a region makes the
 drawn profile BECOME the solid's base face, so the geometry that bounded
-it leaves the sketch — really deleted, not hidden
-(docs/design/sketch-solid-model.md). Exactly the edges no surviving
-region needs go: an edge shared with a neighboring region stays so the
-neighbor remains closed, open chains stay, and an extrusion that empties
+it leaves the sketch — really deleted, not hidden. Exactly the edges no
+surviving region needs go: an edge shared with a neighboring region stays
+so the neighbor remains closed, open chains stay, and an extrusion that empties
 a sketch removes the sketch entity itself. Nothing invisible persists, so
 nothing can resurrect by side effect — deleting a solid deletes a solid,
 and the one road back to an outline is undo, which restores the sketch
@@ -177,9 +176,7 @@ carrier, propagated under a strict map-or-drop contract and held honest by
 the validator. Push/pull on a stamped wall facet acts on the *logical
 wall*: an exact radial offset of every facet claiming that cylinder,
 derived from the stored axis and radius rather than from any facet's
-plane, refusing typed where a neighbor would bend. This is the foundation
-of the true-curves plan; the architectural decision and staging live in
-`docs/design/true-curves.md`.
+plane, refusing typed where a neighbor would bend.
 
 ### 2.7 Groups and Components are the two ways to compose
 
@@ -301,8 +298,7 @@ the UI hands those to three.js, rendered on a WebGL2 baseline. Faces
 carrying an analytic surface reference shade with true per-vertex surface
 normals, and the facet seams interior to one curved wall are emitted as a
 separate soft-edge buffer the viewport suppresses — a drawn cylinder reads
-as one smooth wall while its cap rims stay crisp
-(`docs/design/true-curves.md`). WebGL2 is the
+as one smooth wall while its cap rims stay crisp. WebGL2 is the
 lowest common denominator reliably available across the three
 platform webviews Hew targets (WebView2 on Windows, WKWebView on macOS,
 WebKitGTK on Linux), and a SketchUp-class viewport — flat-shaded faces plus
@@ -343,8 +339,7 @@ teaching the kernel about any external format:
   each object re-facets its stamped cylinder walls from their analytic
   surface references at a user-chosen resolution — true curves for STL,
   manifold at any setting — falling back to stored facets for any wall
-  whose boundary is no longer fully analytic
-  (`docs/design/true-curves.md`).
+  whose boundary is no longer fully analytic.
 
 Every importer depends on the kernel and never the reverse, so the kernel's
 public surface has no knowledge of COLLADA, glTF, or `.skp` at all — it only

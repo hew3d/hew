@@ -1,5 +1,5 @@
 import { defineCollection } from 'astro:content';
-import { glob, file } from 'astro/loaders';
+import { glob } from 'astro/loaders';
 import { z } from 'astro/zod';
 
 const ctaSchema = z.object({
@@ -50,6 +50,7 @@ const pages = defineCollection({
       })
       .optional(),
     screenshot: z.string().optional(),
+    screenshotAlt: z.string().optional(),
     features: z
       .array(
         z.object({
@@ -89,17 +90,4 @@ const pages = defineCollection({
   }),
 });
 
-const releases = defineCollection({
-  loader: file('./src/data/releases.json'),
-  schema: z.object({
-    id: z.enum(['macos', 'windows', 'linux']),
-    label: z.string(),
-    available: z.boolean(),
-    version: z.string().optional(),
-    downloadUrl: z.string().optional(),
-    formats: z.array(z.string()).optional(),
-    note: z.string().optional(),
-  }),
-});
-
-export const collections = { blog, learn, faq, pages, releases };
+export const collections = { blog, learn, faq, pages };

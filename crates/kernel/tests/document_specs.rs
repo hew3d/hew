@@ -2219,7 +2219,7 @@ fn hole_interior_survives_and_stays_editable() {
 /// `sketch_mut` mutation — a scripting path) produce ordinary extrudable
 /// regions: redrawing a standing solid's base extrudes into a coincident
 /// second solid, like every other overlap (the standing-solid gate was
-/// dropped — docs/design/sketch-solid-model.md).
+/// dropped — the sketch-solid-model design).
 #[test]
 fn unbracketed_redraw_over_a_solid_extrudes() {
     let mut doc = Document::new();

@@ -52,7 +52,7 @@ import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from 
 
 import { segmentsPerTurn } from './arcMath'
 
-/** Floor of the adaptive facet count (docs/design/true-curves.md §6): small
+/** Floor of the adaptive facet count (the true-curves design §6): small
  * circles are regular 24-gons; larger radii adapt up via `segmentsPerTurn`
  * so the chord sagitta stays within the draw-time budget. The analytic
  * center/radius rides the curve chain regardless. */
@@ -449,7 +449,7 @@ export class CircleTool implements Tool {
         // The whole circle is ONE curve chain — clicking any facet later
         // selects (and deletes) the circle as a unit — and it carries the
         // exact analytic circle the facets approximate (durable
-        // center/radius — docs/design/true-curves.md).
+        // center/radius — the true-curves design).
         const radius = Math.hypot(rim[0] - center[0], rim[1] - center[1])
         this.wasmScene.sketch_begin_curve_with(sketch, center[0], center[1], 0, radius)
         try {
@@ -549,7 +549,7 @@ export class CircleTool implements Tool {
    * vertices, carrying the drawn circle's analytic identity (center + radius)
    * onto the solid so a later push-through of the imprinted disk shades smooth
    * and offsets its radius, rather than leaving faceted tunnel walls
-   * (docs/design/true-curves.md, playtest fix C3). The radius is measured to
+   * (the true-curves design, playtest fix C3). The radius is measured to
    * the loop's own first vertex, so it matches the imprinted points exactly
    * (the kernel refuses a claim that does not describe the loop).
    */

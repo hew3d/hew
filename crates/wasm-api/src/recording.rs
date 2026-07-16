@@ -94,7 +94,7 @@ pub enum RecordedCall {
     /// solid face (draw-on-face). `curve`, when present, is the drawn circle's
     /// analytic identity `[center.x, center.y, center.z, radius]` and routes to
     /// `split_face_inner_with_curve` so a later push-through stamps the tunnel
-    /// walls (docs/design/true-curves.md, playtest fix C3). Additive variant:
+    /// walls (the true-curves design, playtest fix C3). Additive variant:
     /// recordings that never imprint on a face replay on older builds
     /// unchanged; one that does fails to parse there (loudly, never silently
     /// divergent), the same posture as `SketchBeginCurveWith`.
@@ -109,7 +109,7 @@ pub enum RecordedCall {
     /// (translate, coplanar-aware, whole-wall radial offset, boss/recess, or
     /// through-cut), so recording the intent alone reproduces the result.
     /// Additive variant (same posture as the others); enables a draw-on-face
-    /// imprint to be pushed through in replay (docs/design/true-curves.md, C3).
+    /// imprint to be pushed through in replay (the true-curves design, C3).
     PushPull {
         object: u64,
         face: u64,

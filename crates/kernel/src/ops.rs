@@ -225,7 +225,7 @@ pub enum PushPullError {
     /// kind (a flat imprinted sub-face, or a raised one with generated walls).
     NotASubFace,
     /// Whole-wall push/pull on an attributed cylinder wall
-    /// (docs/design/true-curves.md §4.6): the offset would shrink the wall's
+    /// (the true-curves design §4.6): the offset would shrink the wall's
     /// radius to or below [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) — the
     /// cylinder would vanish into its own axis. Refused; the object is
     /// untouched.
@@ -529,7 +529,7 @@ impl Object {
         }
         // Analytic surface references map under similarities (rotation ×
         // uniform scale — the maps that keep a cylinder a cylinder) and DROP
-        // under anything else (map-or-drop, docs/design/true-curves.md).
+        // under anything else (map-or-drop, the true-curves design).
         let scale = transform.similarity_scale();
         for f in self.faces.values_mut() {
             // Non-singular by the check above, so apply_plane cannot fail.
@@ -649,7 +649,7 @@ impl Object {
         // We'll collect (outer_loop_indices, inner_loop_index_lists, plane,
         // surface) tuples for from_faces_with_holes. `surface` is the wall's
         // analytic cylinder when its profile edge came from a curve chain
-        // with geometry (docs/design/true-curves.md); caps carry None.
+        // with geometry (the true-curves design); caps carry None.
         #[allow(clippy::type_complexity)]
         let mut face_specs: Vec<(
             Vec<usize>,
@@ -802,7 +802,7 @@ impl Object {
         // "push a circular face through" is the imprinted disk sub-face, whose
         // edges the imprint stamps directly. Cap-edge stamping is therefore
         // omitted (it would serve no reachable case and carries a far-cap
-        // center trap) — docs/design/true-curves.md, playtest fix C3.
+        // center trap) — the true-curves design, playtest fix C3.
 
         // A valid Profile should always yield a valid solid; if the sweep
         // nonetheless produced invalid topology, return a typed error rather
@@ -823,7 +823,7 @@ impl Object {
     /// different operation: the whole curved wall expands. That lives on the
     /// curves branch. This branch has no surface references, so every facet is
     /// flat and takes the translate-and-build path below. At merge the two are
-    /// disjoint by `face.surface` presence — see docs/design/flat-face-pushpull.md.)
+    /// disjoint by `face.surface` presence — see the flat-face push/pull design.)
     ///
     /// Behavioral contract:
     /// The picked face takes one of two regimes, dispatched on whether it
@@ -869,7 +869,7 @@ impl Object {
     ///   *coplanar* sibling still works via `find_collapse_plans`.)
     ///
     /// **Attributed cylinder wall — whole-wall radial**
-    /// (docs/design/true-curves.md §4.6): a face carrying a
+    /// (the true-curves design §4.6): a face carrying a
     /// [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef) does not translate.
     /// Pushing any facet of a stamped wall acts on the **logical wall**: every
     /// face of this object claiming the same cylinder offsets radially so the
@@ -938,7 +938,7 @@ impl Object {
         // Attributed cylinder walls take the whole-wall path: the facet is a
         // chord of a logical wall, and push/pull on it means "offset the
         // wall's radius", never "translate this one facet"
-        // (docs/design/true-curves.md §4.6).
+        // (the true-curves design §4.6).
         if self.faces[face].surface.is_some() {
             return self.offset_cylinder_wall(face, distance, guards);
         }
@@ -1241,7 +1241,7 @@ impl Object {
             }
         }
         // The moved face left its plane: an analytic surface claim on it no
-        // longer holds (map-or-drop, docs/design/true-curves.md). Stretched
+        // longer holds (map-or-drop, the true-curves design). Stretched
         // transverse walls keep theirs — their planes are unchanged and they
         // still lie on the same (infinite) cylinder.
         if let Some(f) = obj.faces.get_mut(face) {
@@ -1342,7 +1342,7 @@ impl Object {
 
         // Defensive map-or-drop for `Edge::curve` on the recorded-inverse
         // path, mirroring every other push/pull-family mutator
-        // (docs/design/true-curves.md): the inverse translate moves the wall's
+        // (the true-curves design): the inverse translate moves the wall's
         // shared vertices, and any incident edge whose analytic circle claim
         // that move takes off its center must drop, never stay stale (a stale
         // claim panics `check_invariants` in debug / false-refuses in release).
@@ -1366,7 +1366,7 @@ impl Object {
     }
 
     /// The whole-wall half of [`Object::push_pull`]
-    /// (docs/design/true-curves.md §4.6): radially offsets the logical
+    /// (the true-curves design §4.6): radially offsets the logical
     /// cylinder wall `face` belongs to, changing its radius by `distance`
     /// along `face`'s outward normal.
     ///
@@ -1533,7 +1533,7 @@ impl Object {
         }
 
         // Interpenetration + engulfment guards (DEVELOPMENT.md rule 4;
-        // docs/design/true-curves.md §4.6, review follow-up F2). Best-effort
+        // the true-curves design §4.6, review follow-up F2). Best-effort
         // obstruction heuristics: they read geometry AROUND the swept volume,
         // so on history replay (GuardMode not Enforced, rule 9) they are
         // skipped — the recorded-state fingerprint supersedes them, and a
@@ -1727,7 +1727,7 @@ impl Object {
     /// [`Object::split_face_inner`] carrying the analytic circle the imprinted
     /// loop's edges are chord facets of, so a later push-through re-attributes
     /// the tunnel walls as [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef)
-    /// instead of losing the circle at the imprint (docs/design/true-curves.md,
+    /// instead of losing the circle at the imprint (the true-curves design,
     /// playtest fix C3). `curve` is stamped onto every edge of the new loop —
     /// correct because a drawn circle/arc imprint is a chain of chord facets
     /// of ONE circle. `None` behaves exactly like [`Object::split_face_inner`].
@@ -2183,7 +2183,7 @@ impl Object {
         // (stamp-wrong is worse than don't-stamp). A rectangle, a partial loop,
         // or a split fragment that dropped its claim fails (1) and also stamps
         // nothing. The axis is the sweep direction through the circle's center;
-        // angular/axial extent derive from the facets (docs/design/true-curves.md
+        // angular/axial extent derive from the facets (the true-curves design
         // §4.6, clause `extrude_sub_face`).
         let boss_surface: Option<crate::topo::SurfaceRef> = {
             let mut geom: Option<crate::sketch::CurveGeom> = None;
@@ -2434,7 +2434,7 @@ impl Object {
         // Refit the moved sub-face plane (translated; same normal).
         refit_face_plane(&mut obj, sub_face)?;
         // The raised sub-face left its chord plane: its inherited analytic
-        // surface claim drops (map-or-drop, docs/design/true-curves.md).
+        // surface claim drops (map-or-drop, the true-curves design).
         obj.faces[sub_face].surface = None;
 
         let shell = obj
@@ -2449,7 +2449,7 @@ impl Object {
         // Defensive map-or-drop: the raised sub-face is fresh geometry (its new
         // edges carry no claim and the base ring is unmoved), so this is a
         // no-op today, but every subset-moving op examines Edge::curve rather
-        // than leaving a claim unchecked (docs/design/true-curves.md §4.2).
+        // than leaving a claim unchecked (the true-curves design §4.2).
         obj.drop_stale_edge_curves();
 
         obj.check_invariants();
@@ -3381,7 +3381,7 @@ impl Object {
     pub fn push_pull_overshoots(&self, face: FaceId, distance: f64) -> bool {
         // Attributed cylinder walls never overshoot into a through-cut:
         // push/pull on them is a radial offset of the whole logical wall
-        // (docs/design/true-curves.md §4.6), and deep pushes refuse there
+        // (the true-curves design §4.6), and deep pushes refuse there
         // with a typed error instead of punching through.
         if self.faces.get(face).is_some_and(|f| f.surface.is_some()) {
             return false;

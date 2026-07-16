@@ -56,7 +56,7 @@ new_key_type! {
 /// The fewest facets a closed chord ring may have and still count as a
 /// "circle" for analytic stamping — the density floor below which a ring is
 /// a coarse polygon of secants, not a curve. Coupled to the draw tools'
-/// segments-per-turn floor (24, docs/design/true-curves.md §6: "24 becomes
+/// segments-per-turn floor (24, the true-curves design §6: "24 becomes
 /// the floor, adaptive by radius up to 96"), so every genuine tool-produced
 /// circle clears it while a triangle/hexagon/skip-connected coarse ring does
 /// not. The kernel legitimately owns "what density counts as a circle": an
@@ -69,7 +69,7 @@ pub(crate) const MIN_CIRCLE_SEGMENTS: usize = 24;
 /// the sketch plane; arc extent is derived from the chain's member edges,
 /// never stored. This is the durable form of what the drawing tool computed
 /// and, before this existed, immediately discarded — the foundation the
-/// true-curves plan builds on (docs/design/true-curves.md).
+/// true-curves plan builds on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveGeom {
     /// Circle center, on the sketch plane (within
@@ -295,7 +295,7 @@ impl Sketch {
     /// exact circle the facets approximate, as the drawing tool computed it.
     /// The geometry is durable — it survives edge splits (fragments keep the
     /// chain id), persists in the file format, and is what extrusion carries
-    /// onto the solid (docs/design/true-curves.md).
+    /// onto the solid (the true-curves design).
     ///
     /// # Errors
     /// [`SketchError::PointOffPlane`] (`which: 0`) if `geom.center` is
@@ -650,7 +650,7 @@ impl Sketch {
         // into an ellipse the metadata cannot describe. Dropping metadata is
         // not geometry repair: the facets are untouched; the chain merely
         // stops claiming an analytic ancestry it no longer has
-        // (docs/design/true-curves.md). Chain identity always survives.
+        // (the true-curves design). Chain identity always survives.
         let scale = in_plane_similarity_scale(transform, self.plane.normal());
         for geom in self.curves.values_mut() {
             *geom = match (*geom, scale) {
@@ -847,7 +847,7 @@ impl Sketch {
     /// The scaffolding edges only `region` needs: the edges on its boundary
     /// (outer or hole loops) that lie on NO other region's boundary.
     /// Extrusion deletes exactly these (Model D,
-    /// docs/design/sketch-solid-model.md §4D): the region became the
+    /// the sketch-solid-model design §4D): the region became the
     /// solid's base face, so its exclusive boundary leaves the sketch with
     /// it — while an edge shared with a surviving region stays (the
     /// neighbor must remain closed) and open chains are untouched. Pure
@@ -891,7 +891,7 @@ impl Sketch {
     /// boundary, so an edge shared by two consumed regions goes while an
     /// edge shared with a survivor stays. The load path uses this to honor
     /// a pre-v11 file's stored consumed index one final time
-    /// (docs/design/sketch-solid-model.md §6); ids not in this sketch are
+    /// (the sketch-solid-model design §6); ids not in this sketch are
     /// skipped. Pure query — no mutation.
     pub(crate) fn regions_scaffolding(
         &self,
@@ -1036,7 +1036,7 @@ impl Sketch {
 
         // Analytic attribution: for each boundary edge, the circle its curve
         // chain carries (when it carries one). This is what extrusion stamps
-        // onto side-wall faces (docs/design/true-curves.md).
+        // onto side-wall faces (the true-curves design).
         let edge_geom = |a: SketchVertexId, b: SketchVertexId| -> Option<CurveGeom> {
             self.edge_between(a, b)
                 .and_then(|eid| self.edges[eid].curve)

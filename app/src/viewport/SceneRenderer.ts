@@ -122,7 +122,7 @@ interface MemberGeometry {
  * (DoubleSide — culling off, so normal and reflected placements share one
  * bucket).
  *
- * Shading rule (docs/design/true-curves.md, review follow-up): only the 'F'
+ * Shading rule (the true-curves design, review follow-up): only the 'F'
  * bucket renders the tessellator's per-vertex analytic normals. The
  * InstancedMesh shader transforms normals by `mat3(instanceMatrix)` with a
  * squared-column-norm compensation that is only the true inverse-transpose
@@ -1089,7 +1089,7 @@ export class SceneRenderer {
    * Materials default to smooth shading (`flatShading` unset) — with the
    * flag on, three.js ignores the `normal` attribute and derives flat
    * normals in the shader, discarding the analytic smooth shading the
-   * tessellator emits (docs/design/true-curves.md stage 4). The kernel's
+   * tessellator emits (the true-curves design stage 4). The kernel's
    * tessellator duplicates vertices per face and, for planar (unattributed)
    * faces, writes the exact face-plane normal at every corner, so planar
    * faces still shade flat from the attribute alone; only attributed curved

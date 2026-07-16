@@ -1072,7 +1072,7 @@ fn unattributed_prism_has_no_center_candidates() {
 /// off a cylinder and the top "rim" is a circle of which nothing remains —
 /// its center is a fabricated point floating in the air above the slanted
 /// face. Only the intact bottom rim's center may snap
-/// (docs/design/true-curves.md, review follow-up: per-rim coverage gates
+/// (the true-curves design, review follow-up: per-rim coverage gates
 /// Center exactly like Quadrant/Tangent).
 #[test]
 fn slant_cut_rim_offers_no_phantom_center() {

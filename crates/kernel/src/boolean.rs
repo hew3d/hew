@@ -788,7 +788,7 @@ fn assemble(faces: Vec<OrientedFace>) -> Result<Object, BooleanError> {
             .map(|f| f.outer.iter().map(|&p| intern(p, &mut positions)).collect())
             .collect();
         // Result faces inherit their source face's material, UV frame, and
-        // analytic surface ( + ext. + docs/design/true-curves.md).
+        // analytic surface.
         let materials: Vec<FaceMaterial> = faces.iter().map(|f| f.material).collect();
         let uv_frames: Vec<Option<UvFrame>> = faces.iter().map(|f| f.uv_frame).collect();
         let surfaces: Vec<Option<SurfaceRef>> = faces.iter().map(|f| f.surface).collect();

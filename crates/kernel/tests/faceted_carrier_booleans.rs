@@ -1,4 +1,4 @@
-//! Evidence tests for docs/design/true-curves.md: the boolean engine's
+//! Evidence tests for the true-curves design: the boolean engine's
 //! faceted carrier already covers curved-solid workloads — N-gon prism
 //! ("faceted cylinder") booleans, mismatched facet counts, coplanar cap
 //! contact, and through-hole drilling all produce validated watertight

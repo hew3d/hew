@@ -98,7 +98,7 @@ pub enum TopologyError {
     /// parallel to the axis or farther from it than the radius, or a
     /// boundary vertex outside the cylinder. A stale claim is a validator
     /// failure, never a silent lie (map-or-drop —
-    /// docs/design/true-curves.md).
+    /// the true-curves design).
     FaceSurfaceMismatch {
         /// The offending face.
         face: FaceId,
@@ -107,7 +107,7 @@ pub enum TopologyError {
     /// disagrees with its geometry: a degenerate radius, or an endpoint not
     /// within tolerance of the claimed radius from the center (the edge is
     /// not a chord facet of that circle). A stale claim is a validator
-    /// failure, never a silent lie (map-or-drop — docs/design/true-curves.md).
+    /// failure, never a silent lie (map-or-drop — the true-curves design).
     EdgeCurveMismatch {
         /// The offending edge.
         edge: EdgeId,

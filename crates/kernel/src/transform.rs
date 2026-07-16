@@ -215,7 +215,7 @@ impl Transform {
     /// A similarity is exactly the class of maps that keep a circle a circle
     /// (of scaled radius), which is what lets analytic curve/surface
     /// metadata map through a transform instead of being dropped
-    /// (docs/design/true-curves.md). Checked as `Lᵀ·L ≈ s²·I` on the column
+    /// (the true-curves design). Checked as `Lᵀ·L ≈ s²·I` on the column
     /// vectors, within [`tol::NORMAL_DIRECTION`] relative (dimensionless).
     pub fn similarity_scale(&self) -> Option<f64> {
         let l = &self.linear;

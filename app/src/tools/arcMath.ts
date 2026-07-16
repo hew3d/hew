@@ -34,7 +34,7 @@ export type Vec2 = [number, number]
 export type Vec3 = [number, number, number]
 
 /**
- * Draw-time facet density (docs/design/true-curves.md §6, ratified): the
+ * Draw-time facet density (the true-curves design §6, ratified): the
  * chord-sagitta budget — the largest deviation a stored chord may have from
  * the true circle. Fixed at half a millimeter: about an FDM printer's
  * practical tolerance, and below silhouette visibility. The analytic
@@ -147,7 +147,7 @@ export function arcFromChord(a: Vec2, b: Vec2, s: number): ArcGeometry | null {
  * `radius` meters: the adaptive per-turn density scaled by the sweep
  * fraction — `ceil(|sweep| / 2π · segmentsPerTurn(radius))` — floored at 2
  * so even a sliver arc keeps a visible bulge vertex. An arc and a circle of
- * equal radius facet at equal density (docs/design/true-curves.md §6).
+ * equal radius facet at equal density (the true-curves design §6).
  */
 export function arcSegmentCount(sweep: number, radius: number): number {
   const turns = Math.abs(sweep) / (2 * Math.PI)

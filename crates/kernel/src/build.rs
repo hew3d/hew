@@ -413,7 +413,7 @@ impl Object {
     /// Drop any per-edge circle claim ([`crate::topo::Edge::curve`]) that no
     /// longer describes its (possibly moved) endpoints — the map-or-drop
     /// discipline for `Edge::curve`, mirroring how `Face::surface` is dropped
-    /// when a face leaves its chord plane (docs/design/true-curves.md §4.2).
+    /// when a face leaves its chord plane (the true-curves design §4.2).
     ///
     /// Call at the tail of every op that moves a SUBSET of vertices, BEFORE
     /// validation: a subset move can carry a claim's endpoints off its stored

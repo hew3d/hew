@@ -216,7 +216,7 @@ export class LineTool implements Tool {
    * - Anchored (ground or face): always include `anchor` (the last placed
    *   point) — the inference engine derives anchor-dependent candidates
    *   from it (a Tangent snap is "the rim point where the segment from the
-   *   anchor touches the circle", docs/design/true-curves.md). With an
+   *   anchor touches the circle", the true-curves design). With an
    *   axis locked, additionally include `lockAxis` so the snap collapses
    *   onto the locked line.
    * - Face-anchored: ALSO return the known face plane's `constraintPlane`

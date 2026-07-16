@@ -3,15 +3,29 @@
 </p>
 
 <p align="center">
-  A cross-platform 3D modeler that pairs SketchUp-style direct modeling
-  with a solids-first geometry kernel.
+  The intuitive, Open Source, cross-platform, solids-first 3D modeler,
+  pairing SketchUp-style direct modeling with watertight solid objects.
+  And it's free!
+</p>
+
+<p align="center">
+  <a href="https://hew3d.com/download">Download</a> ·
+  <a href="https://app.hew3d.com">Run in the browser</a> ·
+  <a href="https://hew3d.com/learn">User guide</a> ·
+  <a href="https://hew3d.com">hew3d.com</a>
+</p>
+
+<p align="center">
+  <img src="site/public/screenshots/hew-theater.jpg"
+       alt="The Hew desktop app showing a home-theater room model with framing, seating, and a tagged object tree"
+       width="720">
 </p>
 
 ---
 
-Hew keeps the interaction model that made SketchUp approachable — draw on
-faces, push/pull, pervasive inference snapping — and puts it on top of a
-stricter foundation:
+Hew keeps the interaction model that made SketchUp approachable — draw on faces,
+push/pull, pervasive inference snapping, even the same key bindings — and puts
+it on top of a stricter foundation:
 
 - **Extruding a closed profile creates a discrete Object.** Objects are
   watertight solids by construction and never weld together implicitly.
@@ -25,11 +39,16 @@ stricter foundation:
   JSON manifest plus binary geometry buffers. See
   [docs/HEW_FILE_FORMAT.md](docs/HEW_FILE_FORMAT.md).
 
-## Status
+## Get Hew
 
-Hew is pre-release. The core modeling experience is feature-complete and
-the project is in a hardening phase before a first packaged release. See
-[docs/ROADMAP.md](docs/ROADMAP.md) for what's shipped and what's planned.
+Native desktop apps for macOS, Windows, and Linux — the recommended way to
+use Hew — are on the [download page](https://hew3d.com/download) and the
+[releases page](https://github.com/hew3d/hew/releases); desktop builds
+update themselves in place. The same app also runs in any WebGL2-capable
+browser at [app.hew3d.com](https://app.hew3d.com), with nothing to install.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what's shipped and what's
+planned.
 
 ## Highlights
 
@@ -40,6 +59,7 @@ the project is in a hardening phase before a first packaged release. See
 - Boolean union, subtract, and intersect between solids
 - Materials with texturing, per-face painting, and translucency
 - Tags, an object tree, and per-Object solid/watertight reporting
+- SketchUp 2017 keyboard shortcuts
 - Import: SketchUp `.skp` (2017), COLLADA `.dae`, glTF — with names,
   hierarchy, materials, and tags preserved where the format carries them
 - Export: glTF, STL — see [docs/INTEROP.md](docs/INTEROP.md)
@@ -108,3 +128,6 @@ that lets you write and distribute closed-source plugins, as long as they
 interact with Hew solely through the documented Plugin API. The core stays
 copyleft, including over network use; the plugin ecosystem is open to
 commercial authors.
+
+SketchUp is a trademark of Trimble Inc. This project is independent of
+and not affiliated with Trimble in any possible way

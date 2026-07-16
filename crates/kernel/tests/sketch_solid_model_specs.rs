@@ -1,5 +1,5 @@
 //! Executable specs for the sketch–solid relationship (Model D,
-//! docs/design/sketch-solid-model.md): "consumption is becoming".
+//! the sketch-solid-model design): "consumption is becoming".
 //!
 //! One spec per catalogued failure mode Z1–Z11 of the retired footprint
 //! model, each asserting the NEW, correct behavior: extrusion deletes the
@@ -81,7 +81,7 @@ fn try_extrude_ground_rect(
 }
 
 // ------------- re-extrusion over a standing solid (interpenetration allowed)
-// The standing-solid gate was dropped (docs/design/sketch-solid-model.md):
+// The standing-solid gate was dropped (the sketch-solid-model design):
 // Hew's solids interpenetrate freely, so re-extruding occupied ground is
 // allowed exactly like every other overlap — never refused. These specs pin
 // the NEW behavior for the former gate scenarios: each now SUCCEEDS,

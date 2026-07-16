@@ -43,14 +43,14 @@ use crate::transform::Transform;
 /// after the UV-frame block (`u8` flag + 7×f64 — axis point, unit axis,
 /// radius — when present; absent in v1-v3 files → all `surface = None`).
 /// The extruded side walls of arc/circle profiles carry it
-/// (docs/design/true-curves.md).
+/// (the true-curves design).
 /// v4 → v5: per-face optional edge-curve claims ([`crate::topo::Edge::curve`])
 /// appended AFTER each face's hole loops — a `u8` "any" flag (0 = no edge of
 /// this face carries a circle, the common case, one byte; 1 = per-loop-edge
 /// arrays follow: for every outer edge then every hole edge, a `u8` flag +
 /// 4×f64 center xyz + radius when present). Absent in v1-v4 files → all
 /// `Edge::curve = None`. An imprinted circle awaiting its push-through
-/// persists its identity here (docs/design/true-curves.md, playtest fix C3).
+/// persists its identity here (the true-curves design, playtest fix C3).
 pub const GEOMETRY_FORMAT_VERSION: u32 = 5;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
@@ -118,18 +118,16 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 5;
 /// geometry (drawn before capture existed) simply have no entry. The field
 /// is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so v1-v9
 /// files still load (every chain identity-only) — back-compatible. Geometry
-/// buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 3). See
-/// docs/design/true-curves.md.
+/// buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 3).
 ///
 /// v11: removed the stored sketch–solid claim data — the top-level
 /// `consumed` pairs and the per-object `footprints` (v9/v10) and `source`
-/// (v8) fields. The re-extrusion refusal is derived live from visible
-/// solids' coplanar face contact (Model D,
-/// docs/design/sketch-solid-model.md), so nothing needs storing: v11
-/// writers emit none of these fields, and readers of any older version
-/// ignore them entirely. Geometry the older versions kept hidden under a
-/// standing solid loads visible. Geometry buffer unchanged
-/// (`GEOMETRY_FORMAT_VERSION` stays 4).
+/// (v8) fields. Re-extruding occupied ground is simply allowed (Model D,
+/// the sketch-solid-model design — solids interpenetrate freely), so
+/// nothing needs storing: v11 writers emit none of these fields, and
+/// readers of any older version ignore them entirely. Geometry the older
+/// versions kept hidden under a standing solid loads visible. Geometry
+/// buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 4).
 pub const MANIFEST_FORMAT_VERSION: u32 = 11;
 
 /// The manifest version at which the stored sketch–solid claim fields
@@ -1208,7 +1206,7 @@ pub(crate) struct Manifest {
     pub roots: Vec<NodeRefDto>,
     /// Pre-v11 stored consumed `(sketch, region)` dense-id pairs. Read so
     /// the loader can honor them one final time by deleting the consumed
-    /// scaffolding (docs/design/sketch-solid-model.md §6); NEVER written —
+    /// scaffolding (the sketch-solid-model design §6); NEVER written —
     /// a v11 document has nothing consumed to list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumed: Vec<[u32; 2]>,

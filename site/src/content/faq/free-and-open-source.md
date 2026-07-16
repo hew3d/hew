@@ -1,6 +1,6 @@
 ---
-question: "Is Hew free and open source?"
+question: "Is Hew free and Open Source?"
 order: 2
 ---
 
-Yes. Hew is pre-release software and free to use, and the entire project — modeling kernel included — is open source. You can find the source at [github.com/hew3d/hew](https://github.com/hew3d/hew). There's no paid tier, account requirement, or usage limit planned for the core modeler.
+Yes, Hew is AGPL 3.0, so fully Open Source and free.  You can find the source at [github.com/hew3d/hew](https://github.com/hew3d/hew). It will be *possible* to create proprietary plugins in the future, but Hew itself will always be completely free

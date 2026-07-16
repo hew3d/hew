@@ -431,7 +431,7 @@ impl MeshJs {
 
     /// Line-segment endpoints (xyz pairs) of the **soft** edges: interior
     /// seams between facets claiming the same analytic surface
-    /// (docs/design/true-curves.md stage 4). The viewport suppresses these
+    /// (the true-curves design stage 4). The viewport suppresses these
     /// — a cylinder reads as one smooth wall; exposed so alternative
     /// renderers or debug views can still draw them.
     pub fn soft_edge_positions(&self) -> Vec<f32> {
@@ -1283,7 +1283,7 @@ impl Scene {
     /// the exact circle (center `cx, cy, cz` on the sketch plane, `radius`
     /// in meters) whose facets the bracketed segments approximate. The
     /// geometry is durable — it persists in the file format and survives
-    /// sticky splits (docs/design/true-curves.md). Returns the curve handle.
+    /// sticky splits (the true-curves design). Returns the curve handle.
     pub fn sketch_begin_curve_with(
         &mut self,
         sketch: u64,
@@ -2246,7 +2246,7 @@ impl Scene {
 
     /// Export tessellation of one Object as a flat triangle soup
     /// (9 floats per triangle, CCW from outside, object-local meters) at a
-    /// chosen curve resolution — docs/design/true-curves.md stage 6.
+    /// chosen curve resolution — the true-curves design stage 6.
     ///
     /// `segments_per_turn == 0` exports the stored facets verbatim; any
     /// other value re-facets every pristine stamped cylinder wall at that
@@ -2482,7 +2482,7 @@ impl Scene {
     /// identity (`center`, `radius`), so pushing the imprinted face THROUGH
     /// the solid re-attributes the tunnel walls as a smooth cylinder instead
     /// of leaving faceted walls that refuse whole-wall push/pull
-    /// (docs/design/true-curves.md, playtest fix C3). The tool that drew the
+    /// (the true-curves design, playtest fix C3). The tool that drew the
     /// circle owns the truth — the kernel never fits a circle to `loop_pts`
     /// and refuses a claim that does not describe them.
     pub fn split_face_inner_with_curve(

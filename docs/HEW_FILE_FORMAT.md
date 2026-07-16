@@ -180,10 +180,9 @@ of the manifest:
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
 `objects[].footprints` (v9/v10). They stored the sketch–solid claim data of
-the footprint consumption model; the current model derives the re-extrusion
-refusal live from the visible solids' own coplanar faces
-(docs/design/sketch-solid-model.md), so there is nothing to store, and a
-v11 writer emits none of them.
+the footprint consumption model; the current model allows re-extruding
+occupied ground outright — solids interpenetrate freely — so there is
+nothing to store, and a v11 writer emits none of them.
 
 A v11 reader treats them differently on an older file:
 
@@ -434,10 +433,10 @@ optional `name`, and optional `tags` ().
 An object needs no stored relationship to the sketch it was extruded from:
 extrusion deletes the profile's scaffolding from the sketch (the outline
 became the solid's base face), and re-extruding occupied ground is simply
-allowed — Hew's solids interpenetrate freely, so no claim data is stored or
-derived (docs/design/sketch-solid-model.md). Older files' `footprints`
-(v9/v10) and `source` (v8) fields are ignored on load (see the
-retired-fields note in the compatibility section).
+allowed — Hew's solids interpenetrate freely, so no claim data is stored
+or derived. Older files' `footprints` (v9/v10) and `source` (v8) fields
+are ignored on load (see the retired-fields note in the compatibility
+section).
 
 Every object id appears in **exactly one** structural position: either a
 member of exactly one component definition (`components[].members`), or

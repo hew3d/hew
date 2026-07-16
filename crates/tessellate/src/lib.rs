@@ -5,7 +5,7 @@
 //! vertices are duplicated per face so each face keeps its own normal, and
 //! unique edges come out as line segments for the SketchUp-style display.
 //! Faces stamped with an analytic surface reference
-//! (docs/design/true-curves.md) are the exception: they shade with the
+//! (the true-curves design) are the exception: they shade with the
 //! true per-vertex surface normal, and the seams interior to one logical
 //! wall land in a separate, suppressed soft-edge buffer.
 //!
@@ -93,7 +93,7 @@ pub struct RenderMesh {
     pub edge_positions: Vec<f32>,
     /// Line-segment endpoints (xyz pairs) of the **soft** edges: interior
     /// seams between two facets claiming the same analytic surface
-    /// (`kernel::SurfaceRef`, docs/design/true-curves.md stage 4). The
+    /// (`kernel::SurfaceRef`, the true-curves design stage 4). The
     /// viewport suppresses these — a drawn cylinder reads as one smooth
     /// wall, not 24 pin-striped facets — while cap rims and the seams
     /// against unattributed faces stay hard. Derived at tessellation time
@@ -132,7 +132,7 @@ pub fn tessellate(
         let normal = face.plane.normal();
         let n = [normal.x as f32, normal.y as f32, normal.z as f32];
 
-        // Analytic smooth shading (docs/design/true-curves.md stage 4): a
+        // Analytic smooth shading (the true-curves design stage 4): a
         // chord facet of a stamped cylinder wall shades with the TRUE
         // surface normal at each vertex — the radial direction off the
         // axis, oriented to the same side the facet faces (outer walls

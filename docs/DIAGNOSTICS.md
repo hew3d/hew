@@ -170,7 +170,7 @@ literal internal handles from the recording session.
 | `extrude_region` | `sketch`, `region`, `distance` | extrude a closed profile into an Object |
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
-| `split_face_inner` | `object`, `face`, `loop_pts[]` (xyz triples), optional `curve[4]` (`[cx,cy,cz,radius]`) | imprint a closed loop on a solid face (draw-on-face); `curve` present ⇒ the loop is a circle carrying its analytic identity, so a later push-through stamps the tunnel walls (docs/design/true-curves.md, C3) |
+| `split_face_inner` | `object`, `face`, `loop_pts[]` (xyz triples), optional `curve[4]` (`[cx,cy,cz,radius]`) | imprint a closed loop on a solid face (draw-on-face); `curve` present ⇒ the loop is a circle carrying its analytic identity, so a later push-through stamps the tunnel walls |
 | `push_pull` | `object`, `face`, `distance` | push/pull a solid face; the kernel re-derives the routing (translate, whole-wall radial offset, boss/recess, or through-cut) on replay |
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |

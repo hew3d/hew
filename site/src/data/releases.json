@@ -1,20 +1,79 @@
-[
-  {
-    "id": "macos",
-    "label": "macOS",
-    "available": false,
-    "note": "A native desktop build is on the roadmap. Until it ships, the web app at app.hew3d.com runs fully in Safari/Chrome on macOS — same Rust kernel, same file format."
-  },
-  {
-    "id": "windows",
-    "label": "Windows",
-    "available": false,
-    "note": "A native desktop build is on the roadmap. Until it ships, the web app at app.hew3d.com runs fully in Edge/Chrome on Windows — same Rust kernel, same file format."
-  },
-  {
-    "id": "linux",
-    "label": "Linux",
-    "available": false,
-    "note": "A native desktop build is on the roadmap. Until it ships, the web app at app.hew3d.com runs fully in Chrome/Firefox on Linux — same Rust kernel, same file format."
-  }
-]
+{
+  "version": "0.1.0",
+  "repo": "hew3d/hew",
+  "platforms": [
+    {
+      "id": "macos",
+      "label": "macOS",
+      "requires": "macOS 11 or later — one universal app for Apple Silicon and Intel",
+      "primary": {
+        "label": "Download for macOS",
+        "asset": "Hew_{version}_universal.dmg",
+        "detail": ".dmg · universal"
+      },
+      "downloads": [
+        {
+          "format": "Disk image (.dmg)",
+          "variants": [
+            { "arch": "Universal", "asset": "Hew_{version}_universal.dmg" }
+          ]
+        }
+      ],
+      "note": "Signed with an Apple Developer ID and notarized."
+    },
+    {
+      "id": "windows",
+      "label": "Windows",
+      "requires": "Windows 10 or later",
+      "primary": {
+        "label": "Download for Windows",
+        "asset": "Hew_{version}_x64-setup.exe",
+        "detail": "installer · x64"
+      },
+      "downloads": [
+        {
+          "format": "Installer (.exe)",
+          "variants": [
+            { "arch": "x64", "asset": "Hew_{version}_x64-setup.exe" },
+            { "arch": "ARM64", "asset": "Hew_{version}_arm64-setup.exe" }
+          ]
+        }
+      ],
+      "note": "The installer isn't code-signed yet, so SmartScreen may warn on first run — choose “More info”, then “Run anyway”. Signing is planned as the project grows."
+    },
+    {
+      "id": "linux",
+      "label": "Linux",
+      "requires": "Needs WebKitGTK 4.1 — stock on Ubuntu 22.04+, Fedora 36+, and most current distros",
+      "primary": {
+        "label": "Download AppImage",
+        "asset": "Hew_{version}_amd64.AppImage",
+        "detail": "AppImage · x64"
+      },
+      "downloads": [
+        {
+          "format": "AppImage",
+          "variants": [
+            { "arch": "x64", "asset": "Hew_{version}_amd64.AppImage" },
+            { "arch": "ARM64", "asset": "Hew_{version}_aarch64.AppImage" }
+          ]
+        },
+        {
+          "format": "Debian / Ubuntu (.deb)",
+          "variants": [
+            { "arch": "x64", "asset": "Hew_{version}_amd64.deb" },
+            { "arch": "ARM64", "asset": "Hew_{version}_arm64.deb" }
+          ]
+        },
+        {
+          "format": "Fedora / openSUSE (.rpm)",
+          "variants": [
+            { "arch": "x64", "asset": "Hew-{version}-1.x86_64.rpm" },
+            { "arch": "ARM64", "asset": "Hew-{version}-1.aarch64.rpm" }
+          ]
+        }
+      ],
+      "note": "Mark the AppImage executable (chmod +x) before first run, or install the .deb/.rpm."
+    }
+  ]
+}

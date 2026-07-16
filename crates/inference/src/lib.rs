@@ -87,7 +87,7 @@ pub enum SnapKind {
     Endpoint,
     /// On the true center of a drawn circle or arc, derived from the
     /// solid's analytic surface references (`kernel::SurfaceRef`,
-    /// docs/design/true-curves.md) — the exact drawn center, not a facet
+    /// the true-curves design) — the exact drawn center, not a facet
     /// artifact. Ranked just below Endpoint: a real vertex at the same spot
     /// still wins, but a center beats everything derived (midpoints,
     /// intersections, edges, faces).
@@ -983,7 +983,7 @@ impl InferenceScene {
 
         // --- Analytic rims -> Center / Quadrant / Tangent candidates ---
         // Derived from the object's surface references
-        // (docs/design/true-curves.md): each claimed cylinder's two rim
+        // (the true-curves design): each claimed cylinder's two rim
         // circles yield a Center at the exact axis point, Quadrant points
         // over the covered angular range, and — when the placement
         // preserves circles — the rim itself for anchor-based tangent

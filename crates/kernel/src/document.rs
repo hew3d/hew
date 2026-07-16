@@ -22,7 +22,7 @@
 //!   the Object, never deleting it, so its [`ObjectId`] stays stable across
 //!   undo/redo and any later per-Object op keeps referring to a live handle.
 //!   Undo also restores the sketch scaffolding the extrusion deleted
-//!   (Model D, docs/design/sketch-solid-model.md).
+//!   (Model D, the sketch-solid-model design).
 //! - **A per-Object op** ([`DocAction::ObjectOp`]) — undo/redo delegate to that
 //!   Object's [`History`].
 //!
@@ -221,7 +221,7 @@ struct PendingSketchGesture {
 enum DocAction {
     /// `extrude_region` created an Object from a sketch region and DELETED
     /// the region's scaffolding from the sketch (Model D,
-    /// docs/design/sketch-solid-model.md: the sketch is the larval form of
+    /// the sketch-solid-model design: the sketch is the larval form of
     /// the solid — the extruded outline becomes the solid's base face and
     /// ceases to exist as sketch geometry). Undo hides the Object and
     /// RE-INSERTS the deleted scaffolding ([`Sketch::restore_edges`]) in
@@ -1161,7 +1161,7 @@ impl Document {
         // exactly as at extrusion), remove a sketch the deletion emptied,
         // and then discard the index — consumption is becoming, so nothing
         // about re-extrusion is stored in the file
-        // (docs/design/sketch-solid-model.md §6). Without this, every
+        // (the sketch-solid-model design §6). Without this, every
         // previously extruded outline would load back as live, drawable
         // geometry. The per-object `footprints` (v9/v10) and `source` (v8)
         // fields ARE ignored entirely: they carried the stored claims a
@@ -1592,7 +1592,7 @@ impl Document {
     /// The extrudable regions of `sketch`: simply its closed regions. Every
     /// closed region extrudes — Hew's solids interpenetrate freely, so
     /// re-extruding occupied ground is allowed like every other overlap
-    /// (docs/design/sketch-solid-model.md). `Err` if the sketch is stale.
+    /// (the sketch-solid-model design). `Err` if the sketch is stale.
     pub fn extrudable_regions(
         &self,
         sketch: SketchId,
@@ -2521,7 +2521,7 @@ impl Document {
     /// scaffolding from the sketch, and records both on the document undo
     /// log as one step.
     ///
-    /// Consumption is becoming (Model D, docs/design/sketch-solid-model.md):
+    /// Consumption is becoming (Model D, the sketch-solid-model design):
     /// the drawn profile is now the solid's base face, so the edges only
     /// this region needed leave the sketch — really deleted, not hidden.
     /// Edges shared with a surviving region stay (the neighbor remains
@@ -2534,7 +2534,7 @@ impl Document {
     ///
     /// Never refuses on account of a solid already standing there:
     /// interpenetration on re-extrude is allowed exactly as everywhere else
-    /// in Hew (docs/design/sketch-solid-model.md — the standing-solid gate
+    /// in Hew (the sketch-solid-model design — the standing-solid gate
     /// was dropped as inconsistent with the freely-interpenetrating-solids
     /// model).
     ///

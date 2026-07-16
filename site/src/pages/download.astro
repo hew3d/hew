@@ -1,8 +1,9 @@
 ---
-import { getEntry, getCollection } from 'astro:content';
+import { getEntry } from 'astro:content';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import Button from '../components/Button.astro';
 import DownloadCard from '../components/DownloadCard.astro';
+import releases from '../data/releases.json';
 
 const entry = await getEntry('pages', 'download');
 if (!entry) {
@@ -11,43 +12,69 @@ if (!entry) {
 
 const { title, description, intro, webCta } = entry.data;
 
-const releases = await getCollection('releases');
-const releaseOrder = ['macos', 'windows', 'linux'] as const;
-const releasesById = new Map(releases.map((r) => [r.data.id, r.data]));
-const orderedReleases = releaseOrder
-  .map((id) => releasesById.get(id))
-  .filter((release): release is NonNullable<typeof release> => Boolean(release));
+const { version, repo, platforms } = releases;
+const releaseUrl = `https://github.com/${repo}/releases/tag/v${version}`;
+const webTarballUrl = `https://github.com/${repo}/releases/download/v${version}/hew-web-v${version}.tar.gz`;
 ---
 
 <BaseLayout title={title} description={description ?? ''} noSiteName>
   <div class="container download-page">
     <header class="page-head">
-      <h1>{title}</h1>
+      <div class="title-row">
+        <h1>{title}</h1>
+        <a class="version-pill" href={releaseUrl}>v{version}</a>
+      </div>
       {intro && <p class="intro">{intro}</p>}
     </header>
 
-    {
-      webCta && (
-        <div class="web-callout">
-          <div class="web-callout-copy">
-            <p class="eyebrow">Available today</p>
-            <h2>{webCta.label}</h2>
-            {webCta.blurb && <p>{webCta.blurb}</p>}
-          </div>
-          <Button href={webCta.href} variant="primary" size="lg">
-            {webCta.label}
-          </Button>
-        </div>
-      )
-    }
-
     <div class="cards" id="download-cards">
       {
-        orderedReleases.map((release) => (
-          <DownloadCard release={release} />
+        platforms.map((platform) => (
+          <DownloadCard platform={platform} version={version} repo={repo} />
         ))
       }
     </div>
+
+    <p class="updater-line">
+      Desktop builds keep themselves current: the macOS app, Windows install,
+      and Linux AppImage check for new releases and update in place. (.deb and
+      .rpm installs pick up new versions from this page.)
+    </p>
+
+    {
+      webCta && (
+        <section class="web-callout" aria-labelledby="web-callout-title">
+          <div class="web-callout-copy">
+            <p class="eyebrow">No install needed</p>
+            <h2 id="web-callout-title">Hew in your browser</h2>
+            {webCta.blurb && <p>{webCta.blurb}</p>}
+          </div>
+          <Button href={webCta.href} variant="secondary" size="lg">
+            {webCta.label}
+          </Button>
+        </section>
+      )
+    }
+
+    <section class="more" aria-labelledby="more-title">
+      <h2 id="more-title">More ways to get Hew</h2>
+      <ul>
+        <li>
+          <a href={webTarballUrl}>Self-host the web app</a>{' '}
+          — a tarball of the static web build; unzip it behind any file
+          server.
+        </li>
+        <li>
+          <a href={`https://github.com/${repo}`}>Build from source</a>{' '}
+          — Hew is open source (AGPL-3.0 with a plugin exception); the
+          README covers setup.
+        </li>
+        <li>
+          <a href={`https://github.com/${repo}/releases`}>All releases</a>{' '}
+          — release notes and every download, on GitHub.
+        </li>
+      </ul>
+    </section>
   </div>
 </BaseLayout>
 
@@ -58,6 +85,10 @@ const orderedReleases = releaseOrder
       navigator.userAgent ||
       '';
     var ua = raw.toLowerCase();
+    // Phones and tablets get no highlight: iOS UAs contain "like Mac OS X"
+    // and Android UAs contain "linux", either of which would promote a
+    // desktop installer as "your system".
+    if (/iphone|ipad|android|mobile/.test(ua)) return;
     var id = null;
     if (ua.indexOf('mac') !== -1) id = 'macos';
     else if (ua.indexOf('win') !== -1) id = 'windows';
@@ -81,10 +112,45 @@ const orderedReleases = releaseOrder
     margin-bottom: var(--space-xl);
   }
 
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+  }
+
+  .version-pill {
+    font-family: var(--font-family-mono);
+    font-size: 0.875rem;
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-accent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+    border-radius: var(--radius-full);
+    padding: 0.15em 0.7em;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .version-pill:hover {
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  }
+
   .page-head .intro {
     margin-top: var(--space-sm);
     font-size: 1.0625rem;
     color: var(--color-text-muted);
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-lg);
+  }
+
+  .updater-line {
+    margin-top: var(--space-md);
+    color: var(--color-text-muted);
+    font-size: 0.9375rem;
   }
 
   .web-callout {
@@ -94,14 +160,14 @@ const orderedReleases = releaseOrder
     justify-content: space-between;
     gap: var(--space-lg);
     padding: var(--space-lg);
-    margin-bottom: var(--space-2xl);
-    border: 1.5px solid var(--color-accent);
+    margin-block: var(--space-2xl);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
-    background: color-mix(in srgb, var(--color-accent) 8%, var(--color-surface));
+    background: var(--color-surface);
   }
 
   .web-callout-copy {
-    max-width: 40ch;
+    max-width: 52ch;
   }
 
   .web-callout-copy .eyebrow {
@@ -113,10 +179,27 @@ const orderedReleases = releaseOrder
     color: var(--color-text-muted);
   }
 
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--space-lg);
+  .more h2 {
+    font-size: 1.125rem;
+    margin-bottom: var(--space-sm);
+  }
+
+  .more ul {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    padding-left: 0;
+    list-style: none;
+  }
+
+  .more li {
+    color: var(--color-text-muted);
+    font-size: 0.9375rem;
+  }
+
+  .more a {
+    color: var(--color-text);
+    font-weight: var(--font-weight-semibold);
   }
 
   @media (max-width: 56rem) {

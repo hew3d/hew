@@ -1,56 +1,93 @@
 ---
 import Button from './Button.astro';
 
-interface Release {
-  id: 'macos' | 'windows' | 'linux';
+interface Variant {
+  arch: string;
+  asset: string;
+}
+
+interface DownloadRow {
+  format: string;
+  variants: Variant[];
+}
+
+interface Platform {
+  // Only ever 'macos' | 'windows' | 'linux', but the JSON import types it
+  // as string; it is used solely as a DOM hook for the OS-detection script.
+  id: string;
   label: string;
-  available: boolean;
-  version?: string;
-  downloadUrl?: string;
-  formats?: string[];
+  requires?: string;
+  primary: { label: string; asset: string; detail?: string };
+  downloads: DownloadRow[];
   note?: string;
 }
 
 interface Props {
-  release: Release;
+  platform: Platform;
+  version: string;
+  repo: string;
 }
 
-const { release } = Astro.props;
+const { platform, version, repo } = Astro.props;
+
+const assetUrl = (asset: string) =>
+  `https://github.com/${repo}/releases/download/v${version}/${asset.replaceAll('{version}', version)}`;
+
+// The primary button already carries the single-variant case (macOS); only
+// render the full matrix when there is more than one file to offer.
+const showMatrix =
+  platform.downloads.length > 1 ||
+  platform.downloads.some((row) => row.variants.length > 1);
 ---
 
 <article
   class="download-card"
-  data-os={release.id}
-  id={`download-${release.id}`}
+  data-os={platform.id}
+  id={`download-${platform.id}`}
 >
   <div class="card-head">
-    <h3>{release.label}</h3>
-    <span class="detected-badge">Detected</span>
+    <h2>{platform.label}</h2>
+    <span class="detected-badge">Your system</span>
+  </div>
+
+  {platform.requires && <p class="requires">{platform.requires}</p>}
+
+  <div class="primary">
+    <Button href={assetUrl(platform.primary.asset)} variant="primary">
+      {platform.primary.label}
+    </Button>
+    {
+      platform.primary.detail && (
+        <span class="primary-detail">{platform.primary.detail}</span>
+      )
+    }
   </div>
 
   {
-    release.available ? (
-      <div class="body">
-        {release.version && <p class="version">Version {release.version}</p>}
-        {release.downloadUrl && (
-          <Button href={release.downloadUrl} variant="primary">
-            Download for {release.label}
-          </Button>
-        )}
-        {release.formats && release.formats.length > 0 && (
-          <p class="formats">{release.formats.join(' · ')}</p>
-        )}
-      </div>
-    ) : (
-      <div class="body">
-        <span class="badge-soon">Coming soon</span>
-        {release.note && <p class="note">{release.note}</p>}
-        <Button href="https://app.hew3d.com" variant="secondary">
-          Use Hew in your browser
-        </Button>
-      </div>
+    showMatrix && (
+      <dl class="matrix">
+        {platform.downloads.map((row) => (
+          <div class="matrix-row">
+            <dt>{row.format}</dt>
+            <dd>
+              {row.variants.map((v, i) => (
+                <>
+                  {i > 0 && (
+                    <span class="sep" aria-hidden="true">
+                      ·
+                    </span>
+                  )}
+                  <a href={assetUrl(v.asset)}>{v.arch}</a>
+                </>
+              ))}
+            </dd>
+          </div>
+        ))}
+      </dl>
     )
   }
+
+  {platform.note && <p class="note">{platform.note}</p>}
 </article>
 
 <style>
@@ -78,6 +115,10 @@ const { release } = Astro.props;
     gap: var(--space-xs);
   }
 
+  .card-head h2 {
+    font-size: 1.375rem;
+  }
+
   .detected-badge {
     display: none;
     font-size: 0.6875rem;
@@ -95,36 +136,68 @@ const { release } = Astro.props;
     display: inline-block;
   }
 
-  .body {
+  .requires {
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
+    min-height: 2.6em;
+  }
+
+  .primary {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
+    gap: var(--space-2xs);
+  }
+
+  .primary-detail {
+    font-family: var(--font-family-mono);
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+  }
+
+  .matrix {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    padding-top: var(--space-xs);
+    border-top: 1px solid var(--color-border);
+    font-size: 0.875rem;
+  }
+
+  .matrix-row {
+    display: flex;
+    justify-content: space-between;
     gap: var(--space-sm);
   }
 
-  .version {
-    font-weight: var(--font-weight-semibold);
-  }
-
-  .formats {
-    font-family: var(--font-family-mono);
-    font-size: 0.8125rem;
+  .matrix-row dt {
     color: var(--color-text-muted);
   }
 
-  .badge-soon {
-    display: inline-block;
-    font-size: 0.8125rem;
+  .matrix-row dd {
+    display: flex;
+    gap: var(--space-2xs);
+    white-space: nowrap;
+  }
+
+  .matrix-row a {
+    color: var(--color-text);
     font-weight: var(--font-weight-semibold);
-    color: var(--color-text-muted);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    padding: 0.3em 0.75em;
-    border-radius: var(--radius-full);
+    text-decoration-color: var(--color-border-strong);
+    text-underline-offset: 0.2em;
+  }
+
+  .matrix-row a:hover {
+    color: var(--color-accent);
+  }
+
+  .sep {
+    color: var(--color-border-strong);
   }
 
   .note {
+    margin-top: auto;
     color: var(--color-text-muted);
-    font-size: 0.9375rem;
+    font-size: 0.8125rem;
   }
 </style>

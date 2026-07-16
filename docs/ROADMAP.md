@@ -2,15 +2,14 @@
 
 ## Where Hew is
 
-Hew has reached a feature-complete MVP of its core modeling experience: draw,
-push/pull, combine, organize, and save or export a model start to finish, on
-desktop (macOS, Windows, Linux) and in the browser. Development is now in a
-hardening and polish phase — closing the sharp edges a newcomer hits in their
-first hour, rounding out import/export coverage, and building the reliability
-infrastructure needed to trust the app for real work. The near-term goal is a
-public early-access release aimed squarely at the 3D-printing and maker
-audience: model something in a familiar, SketchUp-like interaction style and
-export a file a slicer accepts as watertight, with no repair step.
+Hew is publicly released: the core modeling experience — draw, push/pull,
+combine, organize, and save or export a model start to finish — ships as
+native desktop apps for macOS, Windows, and Linux (with automatic updates)
+and as a browser app at app.hew3d.com. The release is aimed squarely at the
+3D-printing and maker audience: model something in a familiar,
+SketchUp-like interaction style and export a file a slicer accepts as
+watertight, with no repair step. Development continues on the planned work
+below.
 
 ## Shipped
 
@@ -27,7 +26,7 @@ export a file a slicer accepts as watertight, with no repair step.
   the outline becomes the solid's base face and leaves the sketch.
   Re-extruding occupied ground is allowed — Hew's solids interpenetrate
   freely, so a region over a standing solid extrudes into a coincident
-  second solid (docs/design/sketch-solid-model.md)
+  second solid
 - Push/pull through-cuts that punch holes or remove material, including
   splitting a solid into two when a cut fully severs it
 - Explicit boolean union, subtract, and intersect, with coplanar seams
@@ -50,7 +49,7 @@ export a file a slicer accepts as watertight, with no repair step.
   object unchanged — a wedge's slant face cannot be pushed in at all. (A pull
   whose walls would ram a distant part of a non-convex solid still refuses,
   since that is a real self-intersection.) Undo of a wall-building push is
-  exact, recorded as data (see docs/design/flat-face-pushpull.md)
+  exact, recorded as data
 - Move and rotate with axis-locked inference snapping; Option/Alt-drag to
   copy while moving
 - Delete for objects, groups, instances, and guides
@@ -208,21 +207,11 @@ export a file a slicer accepts as watertight, with no repair step.
 
 ### Near-term
 
-- **Whole-wall push/pull for analytic curved surfaces.** Flat-face
-  push/pull is done (see Shipped: translate-and-build for any planar face,
-  including oblique-neighbor and mixed coplanar+oblique boundaries). The
-  remaining case is a face that carries an analytic surface — a real
-  cylinder or arc wall — where pulling should expand the **entire** curved
-  part rather than bump one facet. That lives on the true-curves work: the
-  merge-time dispatch is `if face carries a SurfaceRef → whole-wall expand,
-  else → this branch's translate-and-build`, disjoint by face (see
-  docs/design/flat-face-pushpull.md). A full-face through-cut on an oblique
-  face now works too: the swept tool's walls meet the neighbors coplanarly
-  along their shared rim, which the boolean resolves rather than refusing as
-  tangent contact (it drops the redundant transversal seam that duplicated
-  the coplanar rim). Still out of scope on the flat path: pushing an outer
-  face edge into or past one of its own holes (the deferred P4 hole-edge
-  case, revisited with true circles)
+- **Flat-path push/pull into a face's own holes.** Both push/pull paths
+  are shipped (translate-and-build for any planar face, whole-wall radial
+  offset for analytic curved walls — see Shipped). The one flat-path case
+  still refused is pushing an outer face edge into or past one of its own
+  holes: the deferred P4 hole-edge case, revisited with true circles
 - **A short first-model guide** — rectangle, push/pull, a circle or arc
   detail, export to STL, slice
 
@@ -232,8 +221,7 @@ export a file a slicer accepts as watertight, with no repair step.
   engineering tools (via OpenCASCADE)
 - **Follow Me and Offset tools** — now unblocked: the true-curves
   analytic overlay they depend on (durable curve metadata, whole-wall
-  semantics, export re-faceting) has shipped; the architecture and its
-  history are in `docs/design/true-curves.md`
+  semantics, export re-faceting) has shipped
 - **Non-uniform scale**, and moving/rotating/scaling multiple selected
   objects together
 - **Nested component definitions** (a component containing other
@@ -265,10 +253,10 @@ export a file a slicer accepts as watertight, with no repair step.
   or a redo rebuilds them with fresh handles — the exact un-build is
   impossible, so undo/redo refuses typed with the object untouched rather
   than closing the step. Both fuzz harnesses tolerate exactly this
-  `UnbuildPushPull` signature via `is_known_inverse_guard_gap`
-  (docs/design/flat-face-pushpull.md). The fix extends wall matching (and
-  the shared collapse surgery) to subdivided and L-shaped prismatic walls,
-  which also lets a plain `push_pull(-d)` re-close the built step directly.
+  `UnbuildPushPull` signature via `is_known_inverse_guard_gap`. The fix
+  extends wall matching (and the shared collapse surgery) to subdivided
+  and L-shaped prismatic walls, which also lets a plain `push_pull(-d)`
+  re-close the built step directly.
 
 ## Non-goals
 

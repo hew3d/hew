@@ -129,7 +129,7 @@ export interface HewTestHarness {
    * Draw a regular N-gon approximation of a circle in a new ground sketch.
    * `center` is the XY centroid (Z ignored), `radius` in meters, `nSegments`
    * defaults to a fixed 24 for test determinism (CircleTool itself adapts
-   * the count to the radius — docs/design/true-curves.md §6; pass an
+   * the count to the radius — the true-curves design §6; pass an
    * explicit count to exercise other densities). Returns the sketch and the
    * one closed region that forms (the N-gon). Equivalent to CircleTool's
    * commit, including the analytic curve bracket.
@@ -139,7 +139,7 @@ export interface HewTestHarness {
   /**
    * Imprint a circle onto an existing solid face (draw-on-face), carrying the
    * circle's analytic identity so a later push-through of the imprinted disk
-   * shades smooth and offsets its radius (docs/design/true-curves.md, playtest
+   * shades smooth and offsets its radius (the true-curves design, playtest
    * fix C3). `center` must lie on the face plane; `radius` in meters. Mirrors
    * CircleTool face mode (`split_face_inner_with_curve`). Returns the new disk
    * sub-face handle — pick nothing, push it straight through with `pushPull`.
@@ -524,7 +524,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         s.sketch_begin_gesture(sketch)
         try {
           // One curve chain carrying the analytic circle, exactly as
-          // CircleTool commits (docs/design/true-curves.md).
+          // CircleTool commits (the true-curves design).
           s.sketch_begin_curve_with(sketch, center[0], center[1], center[2], radius)
           for (let i = 0; i < nSegments; i++) {
             const a = pts[i]

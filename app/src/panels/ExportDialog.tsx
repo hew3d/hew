@@ -8,7 +8,7 @@
  *
  * STL carries one per-format option: **curve resolution**. Drawn circles
  * and arcs keep their exact analytic definitions on the solid
- * (docs/design/true-curves.md), so STL export can re-facet cylinder walls
+ * (the true-curves design), so STL export can re-facet cylinder walls
  * at any chosen smoothness — the model's stored facets are the floor, not
  * the ceiling. "As modeled" exports the stored facets verbatim.
  *

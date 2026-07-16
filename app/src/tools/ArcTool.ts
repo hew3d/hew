@@ -698,7 +698,7 @@ export class ArcTool implements Tool {
    *  `curveSegments` of them are bracketed as ONE curve chain (the arc), so
    *  clicking any facet later selects the whole arc. When the arc's analytic
    *  circle is known it rides on the chain (durable center/radius —
-   *  docs/design/true-curves.md). */
+   *  the true-curves design). */
   private _commitGroundChain(
     verts: V3[],
     curveSegments: number,

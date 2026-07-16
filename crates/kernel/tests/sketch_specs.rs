@@ -491,7 +491,7 @@ fn valid_washer_profile_constructs() {
 // -------------------------------------------------------- curve geometry
 //
 // A curve chain opened with `begin_curve_with` carries the analytic circle
-// the drawing tool computed (docs/design/true-curves.md). The geometry is
+// the drawing tool computed (the true-curves design). The geometry is
 // durable across sticky splits, maps under similarity transforms, and DROPS
 // (identity kept) under anything that deforms the chain away from its circle
 // — the map-or-drop contract. Nothing here touches the facets themselves.

@@ -112,7 +112,7 @@ pub enum KernelOp {
         restore: Option<FaceAttrs>,
         /// The analytic circle the loop's edges are chord facets of, stamped
         /// onto the imprinted edges so a later push-through re-attributes the
-        /// tunnel walls (docs/design/true-curves.md, playtest fix C3). `None`
+        /// tunnel walls (the true-curves design, playtest fix C3). `None`
         /// for straight/unknown loops and for the undo-of-merge re-imprint
         /// (the dissolved edge's claim is not snapshotted — map-or-drop).
         curve: Option<CurveGeom>,

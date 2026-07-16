@@ -94,7 +94,7 @@ describe('arcFromChord — center and radius', () => {
   })
 })
 
-describe('segmentsPerTurn (docs/design/true-curves.md §6)', () => {
+describe('segmentsPerTurn (the true-curves design §6)', () => {
   it('small radii take the floor: 24 segments per turn', () => {
     expect(segmentsPerTurn(0.02)).toBe(MIN_SEGMENTS_PER_TURN)
     expect(segmentsPerTurn(0.05)).toBe(MIN_SEGMENTS_PER_TURN)

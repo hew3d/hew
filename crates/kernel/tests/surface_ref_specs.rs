@@ -1,5 +1,5 @@
 //! Executable specs for analytic surface references on solid faces
-//! (docs/design/true-curves.md, stage 2): extrusion stamps the side walls of
+//! (the true-curves design, stage 2): extrusion stamps the side walls of
 //! arc/circle profile edges with the cylinder they are chord facets of; the
 //! reference rides every op under the map-or-drop contract; it persists in
 //! geometry buffer v4; and the validator holds a present reference to the
@@ -509,7 +509,7 @@ fn surface_refs_round_trip_through_save_load() {
 }
 
 // ------------------------------------------------- whole-wall push/pull
-// docs/design/true-curves.md §4.6: push/pull on an attributed cylinder wall
+// the true-curves design §4.6: push/pull on an attributed cylinder wall
 // facet acts on the LOGICAL wall — a radial offset of every face claiming
 // the same cylinder — never a translate of the one facet. Refusals are
 // typed; the object is untouched on error.
@@ -1053,7 +1053,7 @@ proptest::proptest! {
 }
 
 // ---------------------------------------------- radial offset interpenetration
-// docs/design/true-curves.md §4.6 (review follow-up F2): the whole-wall
+// the true-curves design §4.6 (review follow-up F2): the whole-wall
 // radial offset re-validates only faces sharing a moved vertex, so without
 // dedicated guards a grown wall could pass straight through — or sweep
 // cleanly past — geometry it shares nothing with, and the result would be
@@ -1159,7 +1159,7 @@ fn wall_grow_with_clearance_still_succeeds() {
 }
 
 // ------------------------------------------------------------ analytic rims
-// docs/design/true-curves.md — the rim-circle query quadrant/tangent
+// the true-curves design — the rim-circle query quadrant/tangent
 // inference derives from: exact circles at the claiming faces' axial
 // extremes plus the angular range the facets actually cover.
 
@@ -1430,7 +1430,7 @@ fn slant_cut_rim_offers_no_center() {
 }
 
 // -------------------------------- imprint → push-through (playtest fix C3)
-// docs/design/true-curves.md, playtest fix C3: a circle drawn on a solid face
+// the true-curves design, playtest fix C3: a circle drawn on a solid face
 // carries its analytic identity onto the imprinted solid edges
 // (`Object::split_face_inner_with_curve` → `Edge::curve`), so pushing that
 // face THROUGH the solid re-attributes the tunnel walls as
@@ -1739,7 +1739,7 @@ fn undoing_a_boss_wall_push_keeps_edge_curve_claims_consistent() {
 }
 
 // -------------------------------------------- boss stamping (playtest Part A)
-// docs/design/true-curves.md §4.6, clause `extrude_sub_face`: the pull-UP
+// the true-curves design §4.6, clause `extrude_sub_face`: the pull-UP
 // mirror of the push-THROUGH tunnel stamping (C3). Bossing a sub-face raised
 // from an imprinted circle stamps its side walls `SurfaceRef::Cylinder`, so
 // the boss shades smooth and a wall push offsets its radius. A mixed/partial

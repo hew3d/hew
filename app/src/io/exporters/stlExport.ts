@@ -4,7 +4,7 @@
  * Sources geometry from the KERNEL, not the viewport: every object's export
  * tessellation comes from `Scene.object_export_triangles`, which re-facets
  * pristine stamped cylinder walls from their analytic definitions at the
- * requested resolution (docs/design/true-curves.md stage 6 — "true curves
+ * requested resolution (the true-curves design stage 6 — "true curves
  * for STL") and honestly falls back to stored facets where a wall is no
  * longer fully analytic. The kernel guarantees the soup is manifold at any
  * resolution. Instances are flattened by applying their poses here; STL has

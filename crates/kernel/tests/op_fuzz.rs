@@ -66,8 +66,8 @@ enum FuzzOp {
     /// Imprint a 24-gon CIRCLE carrying its analytic identity (`Edge::curve`)
     /// strictly inside the `face_sel`-th face, radius a fraction of the face's
     /// inradius. Exercises the map-or-drop paths: a later push_pull/extrude of
-    /// the imprinted face moves the claim off its circle (docs/design/true-
-    /// curves.md playtest fix C3 + the map-or-drop review follow-up).
+    /// the imprinted face moves the claim off its circle (the true-curves
+    /// design, playtest fix C3 + the map-or-drop review follow-up).
     ImprintCircle {
         face_sel: usize,
         radius_frac: f64,
@@ -536,7 +536,7 @@ fn same_geometry(a: &Snapshot, b: &Snapshot) -> Result<(), String> {
 /// (`InverseFailed(PushPull(NonManifoldResult))`) with the object untouched —
 /// the "undo fails typed, never corrupts" posture. The general fix
 /// (generalized step-wall recognition) is deferred (docs/ROADMAP.md,
-/// docs/design/flat-face-pushpull.md).
+/// the flat-face push/pull design).
 ///
 /// The two gaps this harness once tolerated — non-quad step walls and
 /// cross-inverse guard-regime mismatch — were retired by proof-carrying

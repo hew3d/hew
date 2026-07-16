@@ -2,15 +2,17 @@
 title: "Hew — a solids-first 3D modeler with SketchUp's feel"
 description: "Draw on faces, push and pull into solids, and export a watertight model every time. Hew is a free, open-source 3D modeler that keeps SketchUp's interaction model and fixes its two worst failure modes."
 hero:
-  eyebrow: "Now in early access"
+  eyebrow: "Free & open source — now available for desktop"
   title: "Model like SketchUp. Export like it's guaranteed to print."
   tagline: "Hew keeps the push/pull workflow and inference snapping that made SketchUp beloved — on a solids-first data model that never lets your model fall apart into a face soup."
   primaryCta:
-    label: "Try it in your browser"
-    href: "https://app.hew3d.com"
-  secondaryCta:
     label: "Download for desktop"
     href: "/download"
+  secondaryCta:
+    label: "Try it in your browser"
+    href: "https://app.hew3d.com"
+screenshot: "/screenshots/hew-theater.jpg"
+screenshotAlt: "The Hew desktop app on macOS, showing a home-theater room model with framing, theater seating, and a tagged object tree"
 features:
   - title: "Solids by default"
     body: "Extrude a closed 2D profile and Hew automatically creates a discrete, watertight Object — no menu to remember, no \"make group\" step. Every shape you pull off a sketch starts life as a real solid."
@@ -34,12 +36,12 @@ comparison:
     pain: "SketchUp models are collections of individual faces. Delete or flip one face by mistake and a \"solid\" silently becomes an open shell — which breaks 3D printing, CAD interop, and any tool downstream that assumes a closed volume."
     fix: "Hew Objects are watertight solids by construction. An operation that would open a shell is prevented or the Object is clearly flagged non-solid — so the STL you export is guaranteed manifold, not a hope."
 closingCta:
-  title: "Model in the browser today. No install required."
-  body: "Hew runs as a static web app — the same Rust kernel compiled to WASM, the same file format, the same tools. Desktop installers for macOS, Windows, and Linux are on the way."
+  title: "Get Hew on your desktop."
+  body: "Free, open-source desktop apps for macOS, Windows, and Linux, with automatic updates built in. Or run Hew in your browser — same Rust kernel, same tools, same .hew files — whenever you are away from your own machine."
   primaryCta:
+    label: "Download Hew"
+    href: "/download"
+  secondaryCta:
     label: "Try it in your browser"
     href: "https://app.hew3d.com"
-  secondaryCta:
-    label: "See what's coming to desktop"
-    href: "/download"
 ---

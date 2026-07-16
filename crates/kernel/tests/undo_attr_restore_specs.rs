@@ -3,7 +3,7 @@
 //! report's snapshot — never a fresh copy re-derived from the surviving
 //! face. Without the snapshot, undo resurrected analytic surface claims a
 //! face had legitimately lost under the map-or-drop contract
-//! (docs/design/true-curves.md) and lost paint the dissolved face carried.
+//! (the true-curves design) and lost paint the dissolved face carried.
 //! Both merge/split pairs are covered: the inner (imprint) pair and the
 //! outer (boundary-split) pair.
 

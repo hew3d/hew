@@ -140,7 +140,7 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
 
 /// Seeds one box by sketching a rectangle on the ground plane and extruding.
 /// Overlapping seed rectangles extrude directly — the standing-solid gate was
-/// dropped, so interpenetration is allowed everywhere (docs/design/sketch-solid-model.md).
+/// dropped, so interpenetration is allowed everywhere (the sketch-solid-model design).
 fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> ObjectId {
     let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
         .expect("unit normal");
