@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { CircleTool } from './CircleTool'
+import { makeSketchHandleCache } from './sketchGesture'
 import { segmentsPerTurn } from './arcMath'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -37,23 +38,24 @@ function makeWasmScene(opts: {
   faceNormal?: [number, number, number]
   addSegmentThrows?: boolean
   splitFaceThrows?: boolean
-  /** Make the FIRST `sketch_begin_gesture` call throw (stale cached handle),
-   *  as if the sketch's creating gesture had been undone since caching. */
-  beginGestureThrowsOnce?: boolean
+  /** Handles whose sketch has gone stale/hidden — `sketch_plane` reads
+   *  `undefined` for them, so `runSketchGesture`'s pre-check retargets a
+   *  fresh sketch (as after undoing the sketch's creating gesture). */
+  staleSketchHandles?: bigint[]
 } = {}): WasmScene {
   let sketchCounter = 41n
-  let beginGestureFailuresLeft = opts.beginGestureThrowsOnce ? 1 : 0
   return {
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
     }),
-    sketch_begin_gesture: vi.fn(() => {
-      if (beginGestureFailuresLeft > 0) {
-        beginGestureFailuresLeft -= 1
-        throw new Error('UnknownSketch: stale or hidden handle')
-      }
-    }),
+    // Every non-stale sketch lies on the ground plane (origin point, +Z).
+    sketch_plane: vi.fn((sketch: bigint) =>
+      (opts.staleSketchHandles ?? []).includes(sketch)
+        ? undefined
+        : new Float64Array([0, 0, 0, 0, 0, 1]),
+    ),
+    sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),
     sketch_begin_curve: vi.fn(() => 91n),
     sketch_begin_curve_with: vi.fn(() => 91n),
@@ -165,20 +167,27 @@ describe('CircleTool — ground mode', () => {
     expect(onCommit).not.toHaveBeenCalled()
   })
 
-  it('a stale cached sketch handle (begin_gesture throws once) recovers by minting a fresh sketch and retrying', () => {
-    const scene = makeWasmScene({ beginGestureThrowsOnce: true })
-    const { tool, onCommit, onToast } = makeTool(scene)
+  it('a stale cached sketch handle (sketch_plane reads undefined) is retargeted onto a fresh sketch before the gesture opens', () => {
+    const scene = makeWasmScene({ staleSketchHandles: [7n] })
+    const preview = new THREE.Group()
+    const onCommit = vi.fn()
+    const onToast = vi.fn()
+    // Seed the shared cache with a handle whose creating gesture was undone.
+    const cache = makeSketchHandleCache()
+    cache.set(7n)
+    const tool = new CircleTool(scene, preview, onCommit, onToast, vi.fn(), vi.fn(), cache)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim — commits
 
-    // begin_ground_sketch is called twice: once lazily, once on stale-handle retry.
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(2)
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(2)
-    // The retry used the SECOND (fresh) handle for the actual commit.
+    // The pre-check minted ONE fresh sketch up front; the stale handle never
+    // even opened a gesture (no failure-driven retry).
+    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(42n)
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 43n, regionsCreated: [] })
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(43n)
+    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 42n, regionsCreated: [] })
+    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(42n)
     expect(onToast).not.toHaveBeenCalled()
   })
 })

@@ -21,7 +21,9 @@ below.
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent
-  island — selected, deleted, and moved without touching anything else
+  island — selected, deleted, and transformed (moved, rotated, scaled;
+  out-of-plane rotations included, detaching the shape into its own
+  sketch when it shares one) without touching anything else
 - Push/pull to extrude a closed profile into a solid, with a live preview;
   the outline becomes the solid's base face and leaves the sketch.
   Re-extruding occupied ground is allowed — Hew's solids interpenetrate

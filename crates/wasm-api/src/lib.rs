@@ -1560,10 +1560,22 @@ impl Scene {
     }
 
     /// `transform_sketch_island`'s validation without the commit: `true` iff
-    /// the move would be accepted. Batch movers validate every island first
-    /// so one refusal aborts the whole gesture atomically. (Every island is
-    /// movable in principle — extrusion deletes its scaffolding rather than
-    /// hiding it, so no island secretly "backs" a solid.)
+    /// the move would be accepted AGAINST THE CURRENT STATE (mirrors
+    /// [`kernel::Document::validate_transform_sketch_island`], including the
+    /// out-of-plane arms). Batch movers validate every island first so one
+    /// refusal aborts the whole gesture atomically. (Every island is movable
+    /// in principle — extrusion deletes its scaffolding rather than hiding
+    /// it, so no island secretly "backs" a solid.)
+    ///
+    /// This probe promises SUCCESS-equivalence, not MECHANISM-equivalence:
+    /// the commit routes between its arms (in-plane bake / whole-sketch
+    /// bake / detach) against COMMIT-TIME state, so in a batch that commits
+    /// islands one by one, an earlier island's detach can reroute a later
+    /// island's out-of-plane commit from "detach" to a whole-sketch bake.
+    /// `true` still means "will succeed, soundly and undoably" — it does
+    /// not fix WHICH arm runs or which handles stay stable afterwards;
+    /// callers re-query handles after commits, as after any reshaping
+    /// mutation.
     pub fn can_transform_sketch_island(&self, sketch: u64, island: u64, affine: &[f64]) -> bool {
         let Ok(rows) = <&[f64; 12]>::try_from(affine) else {
             return false;
@@ -1571,18 +1583,22 @@ impl Scene {
         let t = Transform::from_affine(rows);
         let sid = sketch_id(sketch);
         let iid = kernel::SketchIslandId::from(KeyData::from_ffi(island));
-        if t.inverse().is_err() || t.determinant() < 0.0 {
-            return false;
-        }
-        let Some(s) = self.doc.sketch(sid) else {
-            return false;
-        };
-        s.validate_transform_island(iid, &t).is_ok()
+        self.doc
+            .validate_transform_sketch_island(sid, iid, &t)
+            .is_ok()
     }
 
-    /// Rigidly move ONE island of a free-standing sketch (per-shape Move;
-    /// undoable). In-plane only; a landing that would cross or merge other
-    /// islands' geometry is refused with a typed error, never welded.
+    /// Rigidly move ONE island of a free-standing sketch (per-shape Move /
+    /// Rotate / Scale; undoable). In-plane landings bake in place (a landing
+    /// that would cross or merge other islands' geometry is refused with a
+    /// typed error, never welded). An OUT-OF-PLANE transform — tipping a
+    /// drawn shape upright — bakes whole-sketch when the island is the
+    /// sketch's only one, and otherwise DETACHES the island into a new
+    /// sketch on the transformed plane (a sketch is planar; see
+    /// [`kernel::Document::transform_sketch_island`]). Curve chains keep
+    /// their analytic identity through every arm. After a detach the island
+    /// and its element handles are stale; re-query via `sketch_ids` /
+    /// `sketch_island_ids`, as after any reshaping mutation.
     pub fn transform_sketch_island(
         &mut self,
         sketch: u64,
@@ -1606,6 +1622,22 @@ impl Scene {
             affine: *rows,
         });
         Ok(())
+    }
+
+    /// A sketch's plane as `[px,py,pz, nx,ny,nz]` — a point on the plane
+    /// plus its unit normal, the same shape `face_plane` returns — or
+    /// `undefined` for a stale or hidden handle. Read-only. Lets a caller
+    /// holding a cached sketch handle check WHERE the sketch lies before
+    /// reusing it (the draw tools' shared ground-sketch cache: a
+    /// whole-sketch transform keeps the handle live while moving the sketch
+    /// off the ground plane, so handle liveness alone can't answer "will a
+    /// ground point still land on this sketch?").
+    pub fn sketch_plane(&self, sketch: u64) -> Option<Vec<f64>> {
+        let s = self.doc.sketch(sketch_id(sketch))?;
+        let plane = s.plane();
+        let p = plane.point();
+        let n = plane.normal();
+        Some(vec![p.x, p.y, p.z, n.x, n.y, n.z])
     }
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
@@ -5504,6 +5536,38 @@ mod tests {
     }
 
     #[test]
+    fn sketch_plane_tracks_transforms_and_is_undefined_for_stale_handles() {
+        let mut scene = Scene::new();
+        let (sketch, _region) = ground_unit_square(&mut scene);
+
+        let pn = scene.sketch_plane(sketch).expect("live sketch");
+        assert_eq!(pn.len(), 6);
+        // Ground: contains the origin, normal +Z.
+        assert!(pn[2].abs() < 1e-9);
+        assert!((pn[5] - 1.0).abs() < 1e-9 && pn[3].abs() < 1e-9 && pn[4].abs() < 1e-9);
+
+        // Stand the sketch upright (90 degrees about the X axis through the
+        // origin): the reported plane follows the bake.
+        #[rustfmt::skip]
+        let rot_x_90: [f64; 12] = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, -1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+        ];
+        scene.transform_sketch(sketch, &rot_x_90).unwrap();
+        let pn = scene.sketch_plane(sketch).expect("still live");
+        assert!(
+            pn[4].abs() > 0.99 && pn[3].abs() < 1e-9 && pn[5].abs() < 1e-9,
+            "upright plane's normal is +/-Y, got {pn:?}"
+        );
+
+        // A deleted (hidden) sketch reads as undefined, like any stale handle.
+        scene.delete_sketch(sketch).unwrap();
+        assert!(scene.sketch_plane(sketch).is_none());
+        assert!(scene.sketch_plane(u64::MAX).is_none());
+    }
+
+    #[test]
     fn set_hidden_excludes_object_from_pick_and_snap() {
         let mut scene = Scene::new();
         let (sketch, region) = ground_unit_square(&mut scene);
@@ -5837,6 +5901,80 @@ mod tests {
         let regions = scene.sketch_regions(s).unwrap();
         assert_eq!(regions.len(), 1);
         scene.extrude_region(s, regions[0], 1.0).unwrap();
+    }
+
+    /// Tipping an island out of its sketch plane commits instead of
+    /// refusing: sole island → whole-sketch bake (handle stable); island of
+    /// a shared sketch → detach into a new sketch. This is the Rotate-tool
+    /// "stand a drawn profile upright" path.
+    #[test]
+    fn island_rotates_out_of_plane_via_bake_or_detach() {
+        // Rotate 90 deg about the X axis through the origin (row-major 3x4).
+        let rot_x_90 = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, -1.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0,
+        ];
+
+        // Sole island: the sketch itself tips upright; no new sketch.
+        let mut scene = Scene::new();
+        let (s, _r) = ground_unit_square(&mut scene);
+        let islands = scene.sketch_island_ids(s);
+        assert_eq!(islands.len(), 1);
+        assert!(
+            scene.can_transform_sketch_island(s, islands[0], &rot_x_90),
+            "out-of-plane rotation validates"
+        );
+        scene
+            .transform_sketch_island(s, islands[0], &rot_x_90)
+            .unwrap();
+        assert_eq!(
+            scene.sketch_ids(),
+            vec![s],
+            "whole-sketch bake, same handle"
+        );
+        scene.scene_undo().unwrap();
+
+        // Shared sketch: a second island forces the detach arm.
+        let mut scene = Scene::new();
+        let (s, _r) = ground_unit_square(&mut scene);
+        for (a, b) in [
+            ([3.0, 0.0], [4.0, 0.0]),
+            ([4.0, 0.0], [4.0, 1.0]),
+            ([4.0, 1.0], [3.0, 1.0]),
+            ([3.0, 1.0], [3.0, 0.0]),
+        ] {
+            scene
+                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+        let islands = scene.sketch_island_ids(s);
+        assert_eq!(islands.len(), 2);
+        let target = *islands
+            .iter()
+            .find(|&&i| {
+                scene
+                    .sketch_island_lines(s, i)
+                    .unwrap()
+                    .iter()
+                    .step_by(3)
+                    .all(|&x| x < 2.0)
+            })
+            .expect("the unit square island");
+        assert!(scene.can_transform_sketch_island(s, target, &rot_x_90));
+        scene.transform_sketch_island(s, target, &rot_x_90).unwrap();
+        let ids = scene.sketch_ids();
+        assert_eq!(ids.len(), 2, "the island detached into its own sketch");
+        assert!(ids.contains(&s));
+        assert_eq!(
+            scene.sketch_island_ids(s).len(),
+            1,
+            "the source keeps only its other island"
+        );
+        // Undo restores the shared sketch and hides the detached one.
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.sketch_ids(), vec![s]);
+        assert_eq!(scene.sketch_island_ids(s).len(), 2);
     }
 
     #[test]

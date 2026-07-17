@@ -432,6 +432,15 @@ export interface HewTestHarness {
    * decimal strings — the raw material for a `followMeAlongEdges` path. */
   getSketchEdgeIds(sketch: string): string[]
 
+  /** Every live sketch handle, as decimal strings — lets a spec find the
+   * sketch a TOOL created (the tool's cached handle is internal). */
+  getSketchIds(): string[]
+
+  /** All of `sketch`'s edges as flat endpoint pairs
+   * `[ax,ay,az, bx,by,bz, ...]` — the geometry probe for asserting where a
+   * sketch's lines actually stand (e.g. upright after a rotate). */
+  getSketchLines(sketch: string): number[]
+
   /**
    * Follow Me along sketch edges (docs/design/follow-me.md): sweeps the
    * closed profile `region` of `sketch` along the chain the `edges` of
@@ -1030,6 +1039,10 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       ])
       act((s) => s.transform_sketch(BigInt(sketch), affine))
     },
+
+    getSketchIds: () => query((s) => Array.from(s.sketch_ids(), (id) => id.toString())),
+
+    getSketchLines: (sketch) => query((s) => Array.from(s.sketch_lines(BigInt(sketch)))),
 
     getSketchEdgeIds: (sketch) =>
       query((s) => {

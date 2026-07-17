@@ -308,6 +308,87 @@ test('Ctrl+G groups the selection and Ctrl+Shift+G ungroups, through the live ke
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(2)
 })
 
+// ---------------------------------------------------------------------------
+// Rotate: standing a drawn shape upright through the REAL gesture path.
+// This exact flow shipped broken twice while the harness-driven equivalents
+// stayed green (`rotateSketch` bypasses the tool's axis lock, VCB, and
+// selection plan), so it earns a permanent real-pointer seat: arrow-key axis
+// lock, two canvas clicks, typed degrees.
+// ---------------------------------------------------------------------------
+
+test('Rotate: X-locked 90° (arrow lock, two clicks, typed angle) stands a drawn rectangle upright, no error toast', async ({
+  page,
+}) => {
+  const ctx = await setup(page)
+
+  // A closed shape through the real Rectangle tool.
+  await page.keyboard.press('r')
+  await clickWorld(page, ctx, 0, 0, 0)
+  await page.mouse.move(px(ctx, 0.7, 0.7, 0).x, px(ctx, 0.7, 0.7, 0).y)
+  await page.keyboard.type('1,1')
+  await page.keyboard.press('Enter')
+
+  const ids0 = await page.evaluate(() => window.__hew_test!.getSketchIds())
+  expect(ids0).toHaveLength(1)
+  const sketch = ids0[0]
+
+  // Select the shape by clicking one of its EDGES — the shape-granularity
+  // path: the transform plan resolves the edge to the island it rides with.
+  await page.keyboard.press(' ')
+  await clickWorld(page, ctx, 0.5, 0, 0)
+  await page.waitForFunction(() => {
+    const sel = window.__hew_test!.getSelection()
+    return sel.length === 1 && sel[0].kind === 'sketch-edge'
+  })
+
+  // Rotate: lock the X axis with the arrow key (the tilt no ground hover
+  // could infer), pivot at the shape's corner, reference point off the
+  // axis, then the typed-VCB commit.
+  await page.keyboard.press('q')
+  await page.keyboard.press('ArrowRight')
+  await clickWorld(page, ctx, 0, 0, 0)
+  await clickWorld(page, ctx, 0, 1, 0)
+  await page.keyboard.type('90')
+  await page.keyboard.press('Enter')
+
+  // The island stood up: every endpoint left the ground into the x–z plane
+  // through the pivot. Wait on the geometry (commit → re-pull is async to
+  // the keydown), then assert the full shape.
+  await page.waitForFunction(
+    (s) => {
+      const lines = window.__hew_test!.getSketchLines(s)
+      return lines.length > 0 && lines.some((_, i) => i % 3 === 2 && Math.abs(lines[i]) > 0.5)
+    },
+    sketch,
+    { timeout: 10_000 },
+  )
+  const after = await page.evaluate(
+    (s) => ({
+      ids: window.__hew_test!.getSketchIds(),
+      lines: window.__hew_test!.getSketchLines(s),
+    }),
+    sketch,
+  )
+  // Sole island → whole-sketch bake: same sketch, no detach, all 4 edges.
+  expect(after.ids).toEqual([sketch])
+  expect(after.lines).toHaveLength(24)
+  let maxAbsY = 0
+  let minZ = Infinity
+  let maxZ = -Infinity
+  for (let i = 0; i < after.lines.length; i += 3) {
+    maxAbsY = Math.max(maxAbsY, Math.abs(after.lines[i + 1]))
+    minZ = Math.min(minZ, after.lines[i + 2])
+    maxZ = Math.max(maxZ, after.lines[i + 2])
+  }
+  expect(maxAbsY).toBeLessThan(1e-6) // upright in the y = 0 plane
+  expect(maxZ - minZ).toBeCloseTo(1, 5) // the full 1 m side now spans height
+
+  // And it committed cleanly — no error toast. [WouldRetopologize] is what
+  // this flow used to surface; [PointOffPlane] is its kernel-level cause.
+  await expect(page.getByText('[WouldRetopologize]')).toHaveCount(0)
+  await expect(page.getByText('[PointOffPlane]')).toHaveCount(0)
+})
+
 test('Ctrl+G with a single object selected is a no-op — the keyboard path honors the ≥2-sibling gate', async ({
   page,
 }) => {

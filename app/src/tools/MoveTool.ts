@@ -65,7 +65,11 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
-import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
+import {
+  commitSelectionTransform,
+  buildSelectionPreview,
+  planSketchTransforms,
+} from './transformSelection'
 import {
   arrowToAxis,
   editArrayBuffer,
@@ -569,21 +573,26 @@ export class MoveTool implements Tool {
         // atomic (strong guarantee).
         const committed: NodeRef[] = []
         try {
-          for (const node of nodes) {
-            if (node.kind === 'sketch-edge' || node.kind === 'sketch-curve') {
-              continue // lines/curves are not movable/copyable (v1)
-            }
-            if (node.kind === 'sketch-island' && node.sketch !== undefined) {
-              // Islands MOVE under copy like whole sketches do — sketch
-              // geometry has no duplicate path yet.
-              this.wasmScene.transform_sketch_island(node.sketch, node.id, affineF64)
-              committed.push(node)
-              continue
-            }
-            if (node.kind === 'sketch') {
-              this.wasmScene.transform_sketch(node.id, affineF64)
-              committed.push(node)
-            }
+          // Sketch geometry MOVES under copy (it has no duplicate path
+          // yet), through the same island/whole-sketch routing as a plain
+          // move — a selected edge or curve rides with its island.
+          const plan = planSketchTransforms(this.wasmScene, nodes)
+          for (const { sketch, island } of plan.islands) {
+            this.wasmScene.transform_sketch_island(sketch, island, affineF64)
+          }
+          for (const sketch of plan.sketches) {
+            this.wasmScene.transform_sketch(sketch, affineF64)
+          }
+          if (plan.islands.length > 0 || plan.sketches.length > 0) {
+            committed.push(
+              ...nodes.filter(
+                (n) =>
+                  n.kind === 'sketch' ||
+                  n.kind === 'sketch-island' ||
+                  n.kind === 'sketch-edge' ||
+                  n.kind === 'sketch-curve',
+              ),
+            )
           }
           const created = this._duplicateArray(copyables, affineF64, 1)
           committed.push(...created)

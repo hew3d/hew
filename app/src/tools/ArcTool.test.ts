@@ -6,6 +6,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { ArcTool } from './ArcTool'
+import { makeSketchHandleCache } from './sketchGesture'
 import { arcFromChord, arcSegmentCount } from './arcMath'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -51,26 +52,27 @@ function makeWasmScene(opts: {
   faceNormal?: [number, number, number]
   addSegmentThrows?: boolean
   splitFaceThrows?: boolean
-  /** Make the FIRST `sketch_begin_gesture` call throw (stale cached handle),
-   *  as if the sketch's creating gesture had been undone since caching. */
-  beginGestureThrowsOnce?: boolean
+  /** Handles whose sketch has gone stale/hidden — `sketch_plane` reads
+   *  `undefined` for them, so `runSketchGesture`'s pre-check retargets a
+   *  fresh sketch (as after undoing the sketch's creating gesture). */
+  staleSketchHandles?: bigint[]
 } = {}) {
   const segments: SegmentCall[] = []
   const splitPaths: Float64Array[] = []
   const innerLoops: Float64Array[] = []
   let sketchCounter = 41n
-  let beginGestureFailuresLeft = opts.beginGestureThrowsOnce ? 1 : 0
   const scene = {
     begin_ground_sketch: vi.fn(() => {
       sketchCounter += 1n
       return sketchCounter
     }),
-    sketch_begin_gesture: vi.fn(() => {
-      if (beginGestureFailuresLeft > 0) {
-        beginGestureFailuresLeft -= 1
-        throw new Error('UnknownSketch: stale or hidden handle')
-      }
-    }),
+    // Every non-stale sketch lies on the ground plane (origin point, +Z).
+    sketch_plane: vi.fn((sketch: bigint) =>
+      (opts.staleSketchHandles ?? []).includes(sketch)
+        ? undefined
+        : new Float64Array([0, 0, 0, 0, 0, 1]),
+    ),
+    sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),
     sketch_begin_curve: vi.fn(() => 91n),
     sketch_begin_curve_with: vi.fn(() => 91n),
@@ -155,9 +157,15 @@ describe('ArcTool — ground mode', () => {
     expect((scene as unknown as { sketch_end_gesture: ReturnType<typeof vi.fn> }).sketch_end_gesture).toHaveBeenCalledTimes(1)
   })
 
-  it('a stale cached sketch handle (begin_gesture throws once) recovers by minting a fresh sketch and retrying', () => {
-    const { scene, segments } = makeWasmScene({ beginGestureThrowsOnce: true })
-    const { tool, onCommit, onToast } = makeTool(scene)
+  it('a stale cached sketch handle (sketch_plane reads undefined) is retargeted onto a fresh sketch before the gesture opens', () => {
+    const { scene, segments } = makeWasmScene({ staleSketchHandles: [7n] })
+    const preview = new THREE.Group()
+    const onCommit = vi.fn()
+    const onToast = vi.fn()
+    // Seed the shared cache with a handle whose creating gesture was undone.
+    const cache = makeSketchHandleCache()
+    cache.set(7n)
+    const tool = new ArcTool(scene, preview, onCommit, onToast, vi.fn(), vi.fn(), cache)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)   // A
     tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY)   // B
@@ -165,9 +173,11 @@ describe('ArcTool — ground mode', () => {
 
     const beginGroundSketch = (scene as unknown as { begin_ground_sketch: ReturnType<typeof vi.fn> }).begin_ground_sketch
     const beginGesture = (scene as unknown as { sketch_begin_gesture: ReturnType<typeof vi.fn> }).sketch_begin_gesture
-    // Lazily created once, then re-minted once on the stale-handle retry.
-    expect(beginGroundSketch).toHaveBeenCalledTimes(2)
-    expect(beginGesture).toHaveBeenCalledTimes(2)
+    // The pre-check minted ONE fresh sketch up front; the stale handle never
+    // even opened a gesture (no failure-driven retry).
+    expect(beginGroundSketch).toHaveBeenCalledTimes(1)
+    expect(beginGesture).toHaveBeenCalledTimes(1)
+    expect(beginGesture).toHaveBeenCalledWith(42n)
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(segments.length).toBeGreaterThan(0)
     expect(onToast).not.toHaveBeenCalled()

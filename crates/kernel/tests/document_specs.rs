@@ -2400,6 +2400,411 @@ fn island_transform_is_undoable_and_scoped() {
     assert!(max_y(&doc, left) <= 1.0 + 1e-9);
 }
 
+/// A rotation about `axis` through `pivot` (Rodrigues, as the Rotate tool
+/// commits it).
+fn rotation_about(pivot: Point3, axis: Vec3, angle: f64) -> Transform {
+    let to_origin = Transform::translation(Vec3::new(-pivot.x, -pivot.y, -pivot.z));
+    let back = Transform::translation(Vec3::new(pivot.x, pivot.y, pivot.z));
+    to_origin
+        .then(&Transform::rotation(axis, angle).expect("unit axis"))
+        .then(&back)
+}
+
+/// Rotating a sketch's ONLY island out of its plane commits as a whole-
+/// sketch bake: the `SketchId` stays stable, the plane remaps with the
+/// geometry, no new sketch appears, and undo/redo round-trip exactly.
+/// (The Rotate-tool repro: draw one closed shape on the ground, lock an
+/// in-plane axis, rotate 90 degrees.)
+#[test]
+fn sole_island_rotates_out_of_plane_as_whole_sketch_bake() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    let island = doc
+        .sketch(s)
+        .expect("live")
+        .islands()
+        .keys()
+        .next()
+        .expect("one island");
+
+    let t = rotation_about(
+        Point3::ORIGIN,
+        Vec3::new(1.0, 0.0, 0.0),
+        std::f64::consts::FRAC_PI_2,
+    );
+    let change = doc
+        .transform_sketch_island(s, island, &t)
+        .expect("an out-of-plane rotation of a sole island bakes whole-sketch");
+    assert_eq!(change.sketches_touched, vec![s]);
+    assert_eq!(doc.sketch_ids().len(), 1, "no detach for a sole island");
+
+    let sk = doc.sketch(s).expect("sketch id is stable");
+    assert!(
+        sk.plane().normal().y.abs() > 0.99,
+        "ground plane tipped upright"
+    );
+    for v in sk.vertices().values() {
+        assert!(
+            v.position.y.abs() < 1e-9,
+            "rect now stands in the y=0 plane"
+        );
+    }
+    assert_eq!(sk.regions().len(), 1, "the closed region survives the bake");
+
+    doc.undo().expect("undo");
+    let sk = doc.sketch(s).expect("live");
+    assert!(sk.plane().normal().z > 0.99, "back on the ground");
+    for v in sk.vertices().values() {
+        assert!(v.position.z.abs() < 1e-9);
+    }
+    doc.redo().expect("redo");
+    assert!(doc.sketch(s).expect("live").plane().normal().y.abs() > 0.99);
+}
+
+/// Rotating one island of a SHARED sketch out of the plane cannot stay in
+/// that sketch (a sketch is planar), so it DETACHES: the island's geometry
+/// moves into a new sketch on the rotated plane, the other islands are
+/// untouched, and undo re-inserts the outline into the source sketch and
+/// hides the detached one.
+#[test]
+fn subset_island_out_of_plane_detaches_into_its_own_sketch() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    draw_rect(&mut doc, s, 3.0, 0.0, 4.0, 1.0);
+    let sk = doc.sketch(s).expect("live");
+    let left = sk
+        .islands()
+        .iter()
+        .find(|(_, isl)| {
+            let e = sk.edges()[isl.edges[0]];
+            sk.vertices()[e.from].position.x < 2.0
+        })
+        .map(|(id, _)| id)
+        .expect("left island");
+
+    let t = rotation_about(
+        Point3::ORIGIN,
+        Vec3::new(1.0, 0.0, 0.0),
+        std::f64::consts::FRAC_PI_2,
+    );
+    let change = doc
+        .transform_sketch_island(s, left, &t)
+        .expect("out-of-plane island rotation detaches");
+
+    let ids = doc.sketch_ids();
+    assert_eq!(ids.len(), 2, "the island now lives in its own sketch");
+    let detached = *ids.iter().find(|&&id| id != s).expect("new sketch id");
+    assert_eq!(change.sketches_touched, vec![s, detached]);
+
+    let src = doc.sketch(s).expect("source lives");
+    assert_eq!(src.edges().len(), 4, "only the right rect remains");
+    assert_eq!(src.islands().len(), 1);
+    assert_eq!(src.regions().len(), 1);
+    assert!(src.plane().normal().z > 0.99, "source plane untouched");
+
+    let det = doc.sketch(detached).expect("detached lives");
+    assert_eq!(det.edges().len(), 4);
+    assert_eq!(det.islands().len(), 1);
+    assert_eq!(det.regions().len(), 1, "the closed rect re-forms a region");
+    assert!(
+        det.plane().normal().y.abs() > 0.99,
+        "detached plane upright"
+    );
+    for v in det.vertices().values() {
+        assert!(v.position.y.abs() < 1e-9);
+    }
+
+    // Undo: outline back in the source, detached sketch hidden.
+    doc.undo().expect("undo the detach");
+    assert_eq!(doc.sketch_ids(), vec![s]);
+    let src = doc.sketch(s).expect("live");
+    assert_eq!(src.edges().len(), 8);
+    assert_eq!(src.islands().len(), 2);
+    assert_eq!(src.regions().len(), 2);
+    for v in src.vertices().values() {
+        assert!(v.position.z.abs() < 1e-9, "outline restored on the ground");
+    }
+
+    // Redo: detached again, same handles.
+    doc.redo().expect("redo the detach");
+    assert_eq!(doc.sketch_ids().len(), 2);
+    assert!(doc.sketch_ids().contains(&detached));
+    assert_eq!(doc.sketch(s).expect("live").edges().len(), 4);
+}
+
+/// The validate/commit contract is SUCCESS-equivalence, not MECHANISM-
+/// equivalence: [`Document::validate_transform_sketch_island`] promises the
+/// same Ok/Err the commit would produce against the state it observed,
+/// while the commit routes between its arms (in-plane bake / whole-sketch
+/// bake / detach) against COMMIT-TIME state. A batch that validates every
+/// island of one sketch and then commits them sequentially can therefore
+/// see a later commit take a different arm than validation observed: island
+/// A's detach leaves island B the sketch's sole one, so B's out-of-plane
+/// commit reroutes from "detach" to a whole-sketch bake. Both commits still
+/// succeed, the document stays sound, and undo restores the original state
+/// exactly. (Unreachable through the app's callers — full island coverage
+/// folds into one whole-sketch transform first — pinned here so the
+/// kernel-level behavior is deliberate, not accidental.)
+#[test]
+fn batch_commit_over_all_islands_may_reroute_after_earlier_detach() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    draw_rect(&mut doc, s, 3.0, 0.0, 4.0, 1.0);
+    let sk = doc.sketch(s).expect("live");
+    let left = sk
+        .islands()
+        .iter()
+        .find(|(_, isl)| {
+            let e = sk.edges()[isl.edges[0]];
+            sk.vertices()[e.from].position.x < 2.0
+        })
+        .map(|(id, _)| id)
+        .expect("left island");
+    let right = sk
+        .islands()
+        .iter()
+        .find(|(_, isl)| {
+            let e = sk.edges()[isl.edges[0]];
+            sk.vertices()[e.from].position.x > 2.0
+        })
+        .map(|(id, _)| id)
+        .expect("right island");
+
+    let t = rotation_about(
+        Point3::ORIGIN,
+        Vec3::new(1.0, 0.0, 0.0),
+        std::f64::consts::FRAC_PI_2,
+    );
+
+    // The batch pattern: validate EVERY island first — both accept. Both
+    // observe a two-island sketch, i.e. the detach arm.
+    doc.validate_transform_sketch_island(s, left, &t)
+        .expect("left validates");
+    doc.validate_transform_sketch_island(s, right, &t)
+        .expect("right validates");
+
+    // Commit A: two islands share the sketch, so LEFT detaches.
+    let change = doc
+        .transform_sketch_island(s, left, &t)
+        .expect("left commits");
+    assert_eq!(change.sketches_touched.len(), 2, "left took the detach arm");
+
+    // Commit B: the source is now sole-island, so the SAME transform
+    // reroutes to a whole-sketch bake — mechanism differs from what
+    // validation observed; success does not.
+    let change = doc
+        .transform_sketch_island(s, right, &t)
+        .expect("right commits despite the rerouted mechanism");
+    assert_eq!(
+        change.sketches_touched,
+        vec![s],
+        "right took the whole-sketch bake, no second detach"
+    );
+    assert_eq!(doc.sketch_ids().len(), 2);
+
+    // Sound end state: both rectangles stand upright in the y = 0 plane.
+    let src = doc.sketch(s).expect("live");
+    assert!(src.plane().normal().y.abs() > 0.99, "source tipped upright");
+    assert_eq!(src.islands().len(), 1);
+    assert_eq!(src.regions().len(), 1);
+    for v in src.vertices().values() {
+        assert!(v.position.y.abs() < 1e-9);
+    }
+
+    // Undo restores exactly: first the bake, then the detach.
+    doc.undo().expect("undo the whole-sketch bake");
+    doc.undo().expect("undo the detach");
+    assert_eq!(doc.sketch_ids(), vec![s], "detached sketch hidden again");
+    let src = doc.sketch(s).expect("live");
+    assert!(src.plane().normal().z > 0.99, "plane back on the ground");
+    assert_eq!(src.islands().len(), 2);
+    assert_eq!(src.edges().len(), 8);
+    assert_eq!(src.regions().len(), 2);
+    for v in src.vertices().values() {
+        assert!(v.position.z.abs() < 1e-9, "outlines back on the ground");
+    }
+}
+
+/// Points on `s`' ground circle of `radius` around `center` (closed ring of
+/// `n` chords), drawn as ONE curve chain carrying its analytic definition.
+fn draw_circle_curve(
+    doc: &mut Document,
+    s: kernel::SketchId,
+    center: Point3,
+    radius: f64,
+    n: usize,
+) {
+    let sk = doc.sketch_mut(s).expect("live");
+    sk.begin_curve_with(kernel::CurveGeom { center, radius })
+        .expect("analytic circle");
+    let pt = |i: usize| {
+        let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
+        Point3::new(
+            center.x + radius * a.cos(),
+            center.y + radius * a.sin(),
+            0.0,
+        )
+    };
+    for i in 0..n {
+        sk.add_segment(pt(i), pt(i + 1)).expect("chord");
+    }
+    sk.end_curve();
+}
+
+/// A drawn circle keeps its analytic identity through an out-of-plane
+/// rotation — in the detach arm the new sketch's chain carries the
+/// transformed [`kernel::CurveGeom`] — and a Follow Me along a straight
+/// path afterwards stamps the smooth tube the analytic profile promises.
+#[test]
+fn out_of_plane_rotation_keeps_curve_identity_and_follow_me_sweeps() {
+    let n = 12;
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    let center = Point3::new(0.0, 0.0, 0.0);
+    draw_circle_curve(&mut doc, s, center, 0.5, n);
+    // A second island shares the sketch, forcing the detach arm.
+    draw_rect(&mut doc, s, 3.0, 3.0, 4.0, 4.0);
+
+    let sk = doc.sketch(s).expect("live");
+    let circle_island = sk
+        .islands()
+        .iter()
+        .find(|(_, isl)| isl.edges.len() == n)
+        .map(|(id, _)| id)
+        .expect("circle island");
+
+    // Tip the circle upright: 90 degrees about the X axis through its center.
+    let t = rotation_about(
+        center,
+        Vec3::new(1.0, 0.0, 0.0),
+        std::f64::consts::FRAC_PI_2,
+    );
+    doc.transform_sketch_island(s, circle_island, &t)
+        .expect("detach the circle upright");
+    let detached = *doc
+        .sketch_ids()
+        .iter()
+        .find(|&&id| id != s)
+        .expect("detached sketch");
+
+    // The chain survived as ONE curve with its analytic definition mapped:
+    // same radius, center fixed (the axis passes through it).
+    let det = doc.sketch(detached).expect("live");
+    let curve_ids: Vec<kernel::SketchCurveId> = det
+        .edges()
+        .keys()
+        .filter_map(|e| det.edge_curve(e))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(curve_ids.len(), 1, "one chain in the detached sketch");
+    let geom = det
+        .curve_geom(curve_ids[0])
+        .expect("analytic identity kept");
+    assert!((geom.radius - 0.5).abs() < 1e-9);
+    assert!(geom.center.approx_eq(center, 1e-9));
+
+    // Follow Me along a straight ground path out of the circle's center:
+    // the upright profile sweeps into a smooth closed tube.
+    let region = only_region(&doc, detached);
+    let path = doc.add_sketch(ground());
+    doc.sketch_mut(path)
+        .expect("live")
+        .add_segment(center, Point3::new(0.0, 2.0, 0.0))
+        .expect("path segment");
+    let edges: Vec<SketchEdgeId> = doc.sketch(path).expect("live").edges().keys().collect();
+    let (id, _) = doc
+        .follow_me(
+            detached,
+            region,
+            &kernel::FollowMePath::SketchEdges {
+                sketch: path,
+                edges,
+            },
+        )
+        .expect("sweep the rotated circle");
+    let solid = doc.object(id).expect("live");
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(
+        solid.faces().len(),
+        n + 2,
+        "n walls + 2 caps: a stamped cylinder"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// Any pivot rotation of one island of a two-island sketch either
+    /// commits in-plane, detaches out-of-plane, or refuses typed — and on
+    /// success, undo restores the source sketch exactly (edge/island/region
+    /// counts and every vertex back on the ground plane) with no extra
+    /// sketches left visible.
+    #[test]
+    fn island_rotation_commits_or_refuses_and_undo_restores(
+        axis_pick in 0usize..3,
+        angle_deg in prop::sample::select(vec![30.0f64, 45.0, 90.0, -90.0, 137.0, 180.0]),
+        px in -1.0f64..1.0,
+        py in -1.0f64..1.0,
+    ) {
+        let axis = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ][axis_pick];
+        let mut doc = Document::new();
+        let s = doc.add_sketch(ground());
+        draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+        draw_rect(&mut doc, s, 3.0, 0.0, 4.0, 1.0);
+        let sk = doc.sketch(s).expect("live");
+        let left = sk
+            .islands()
+            .iter()
+            .find(|(_, isl)| {
+                let e = sk.edges()[isl.edges[0]];
+                sk.vertices()[e.from].position.x < 2.0
+            })
+            .map(|(id, _)| id)
+            .expect("left island");
+
+        let t = rotation_about(
+            Point3::new(px, py, 0.0),
+            axis,
+            angle_deg.to_radians(),
+        );
+        match doc.transform_sketch_island(s, left, &t) {
+            Ok(_) => {
+                // However it landed (in-plane bake or detach), the total
+                // visible geometry is conserved...
+                let total_edges: usize = doc
+                    .sketch_ids()
+                    .iter()
+                    .map(|&id| doc.sketch(id).expect("live").edges().len())
+                    .sum();
+                prop_assert_eq!(total_edges, 8);
+                // ...and undo is an identity on the source sketch.
+                doc.undo().expect("undo a committed rotation");
+                prop_assert_eq!(doc.sketch_ids(), vec![s]);
+                let sk = doc.sketch(s).expect("live");
+                prop_assert_eq!(sk.edges().len(), 8);
+                prop_assert_eq!(sk.islands().len(), 2);
+                prop_assert_eq!(sk.regions().len(), 2);
+                for v in sk.vertices().values() {
+                    prop_assert!(v.position.z.abs() < 1e-9);
+                }
+            }
+            Err(_) => {
+                // Typed refusal: the document is untouched.
+                prop_assert_eq!(doc.sketch_ids(), vec![s]);
+                prop_assert_eq!(doc.sketch(s).expect("live").edges().len(), 8);
+            }
+        }
+    }
+}
+
 /// A curve bracket never outlives its gesture: ending (or cancelling) the
 /// gesture force-closes it, so a tool that aborted mid-commit cannot leave
 /// the sketch silently tagging later, unrelated edges into a dead curve.

@@ -328,6 +328,22 @@ enum DocAction {
         forward: Transform,
         inverse: Transform,
     },
+    /// An OUT-OF-PLANE island transform detached the island into its own
+    /// new sketch (a sketch is planar; an island leaving the plane cannot
+    /// stay — see [`Document::transform_sketch_island`]). `removed` holds
+    /// the island's edges at their PRE-transform source positions, in the
+    /// [`DocAction::CreatedObject`] row shape and for the same reason: undo
+    /// re-inserts them into the source by merging with whatever it holds by
+    /// then ([`Sketch::restore_edges`]; later drawing in the way is a typed
+    /// [`SketchError::RestoreConflicts`] refusal that touches nothing) and
+    /// hides the detached sketch; redo re-removes them BY GEOMETRY
+    /// ([`Sketch::edge_at_positions`]) and unhides the detached sketch,
+    /// whose contents survive hiding bit-exactly (hide-not-delete).
+    DetachedSketchIsland {
+        source: SketchId,
+        detached: SketchId,
+        removed: Vec<(Point3, Point3, Option<SketchCurveId>)>,
+    },
     /// A move/rotate/scale applied to a whole mixed selection in one step
     /// (`transform_selection`: select-all → Move). Baked into every world
     /// leaf object and listed sketch; composed into every leaf instance's
@@ -3620,11 +3636,38 @@ impl Document {
     }
 
     /// Rigidly move ONE island of a free-standing sketch (the per-shape
-    /// Move). In-plane transforms only; landings that would cross or merge
-    /// with other islands' geometry are refused with a typed error (see
-    /// [`Sketch::apply_transform_island`]). Undoable via
-    /// [`DocAction::TransformSketchIsland`]; the island id is stable across
-    /// the move and its undo/redo.
+    /// Move / Rotate / Scale). Three arms, chosen by where `t` lands the
+    /// island:
+    ///
+    /// - **In-plane** (every vertex stays on the sketch plane): baked in
+    ///   place ([`Sketch::apply_transform_island`]). Landings that would
+    ///   cross or merge with other islands' geometry are refused with a
+    ///   typed error, never welded. Undoable via
+    ///   [`DocAction::TransformSketchIsland`]; every handle is stable.
+    /// - **Out-of-plane, sole island**: the island IS the sketch, so this
+    ///   is a whole-sketch bake — delegates to
+    ///   [`Document::transform_sketch`] (plane remaps, `SketchId` and all
+    ///   sketch-element handles stay stable).
+    /// - **Out-of-plane, shared sketch**: a sketch is planar, so the island
+    ///   cannot stay; it DETACHES into a new sketch on the transformed
+    ///   plane. The remaining islands are untouched; curve chains keep
+    ///   their identity and their analytic [`CurveGeom`] maps under the
+    ///   usual map-or-drop contract ([`Sketch::rebuild_island_transformed`]).
+    ///   The new sketch's element handles are fresh (a slotmap cannot mint
+    ///   keys into another sketch); callers re-query, as after any
+    ///   reshaping mutation. Undoable via
+    ///   [`DocAction::DetachedSketchIsland`]. The returned
+    ///   [`DocChange::sketches_touched`] lists `[source, detached]`.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale or hidden sketch.
+    /// - [`DocumentError::Sketch`] — stale island
+    ///   ([`SketchError::UnknownIsland`]), or an in-plane landing that would
+    ///   cross or merge other geometry ([`SketchError::WouldRetopologize`]).
+    /// - [`DocumentError::Transform`] — singular or orientation-flipping
+    ///   map.
+    ///
+    /// Every error leaves the document untouched (strong guarantee).
     pub fn transform_sketch_island(
         &mut self,
         sketch: SketchId,
@@ -3638,21 +3681,146 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        self.sketches[sketch]
-            .apply_transform_island(island, t)
+        match self.sketches[sketch].apply_transform_island(island, t) {
+            Ok(()) => {
+                self.undo.push(DocAction::TransformSketchIsland {
+                    sketch,
+                    island,
+                    forward: *t,
+                    inverse,
+                });
+                self.redo.clear();
+                self.debug_validate();
+
+                Ok(DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                })
+            }
+            Err(SketchError::PointOffPlane { .. }) => {
+                // The transform leaves the sketch plane. (apply_transform_
+                // island's strong guarantee: nothing has changed yet.)
+                if self.sketches[sketch].islands().len() == 1 {
+                    // The island IS the sketch: whole-sketch bake.
+                    return self.transform_sketch(sketch, t);
+                }
+                self.detach_transformed_island(sketch, island, t)
+            }
+            Err(e) => Err(DocumentError::Sketch(e)),
+        }
+    }
+
+    /// [`Document::transform_sketch_island`]'s acceptance, without the
+    /// commit: `Ok(())` iff the same call would succeed AGAINST THE CURRENT
+    /// STATE. Batch movers (the app's multi-island Move) validate EVERY
+    /// island first so one refusal aborts the whole gesture before anything
+    /// commits.
+    ///
+    /// The contract is SUCCESS-equivalence, not MECHANISM-equivalence: the
+    /// commit's routing between its three arms (in-plane bake / sole-island
+    /// whole-sketch bake / detach) is decided against COMMIT-TIME state, so
+    /// a validate-all-then-commit-sequentially batch over ALL islands of one
+    /// sketch can see a later commit take a different arm than validation
+    /// observed — an earlier island's detach can leave a later island the
+    /// sketch's sole one, rerouting its out-of-plane commit from "detach"
+    /// to a whole-sketch bake. The commit still succeeds, the document
+    /// stays sound, and undo restores exactly (pinned by
+    /// `batch_commit_over_all_islands_may_reroute_after_earlier_detach` in
+    /// `document_specs.rs`). Every real app caller folds full island
+    /// coverage into one whole-sketch transform first, so a surviving
+    /// sibling island always keeps the observed mechanism in practice.
+    pub fn validate_transform_sketch_island(
+        &self,
+        sketch: SketchId,
+        island: SketchIslandId,
+        t: &Transform,
+    ) -> Result<(), DocumentError> {
+        t.inverse().map_err(DocumentError::Transform)?;
+        if t.determinant() < 0.0 {
+            return Err(DocumentError::Transform(TransformError::Reflection));
+        }
+        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let s = &self.sketches[sketch];
+        match s.validate_transform_island(island, t) {
+            Ok(()) => Ok(()),
+            Err(SketchError::PointOffPlane { .. }) => {
+                // Out-of-plane arms: whole-sketch bake needs only the
+                // already-validated transform; detach additionally needs the
+                // island to replay onto the mapped plane.
+                let plane = t
+                    .apply_plane(&s.plane())
+                    .map_err(DocumentError::Transform)?;
+                if s.islands().len() == 1 {
+                    return Ok(());
+                }
+                s.rebuild_island_transformed(island, t, plane)
+                    .map(|_| ())
+                    .map_err(DocumentError::Sketch)
+            }
+            Err(e) => Err(DocumentError::Sketch(e)),
+        }
+    }
+
+    /// The out-of-plane detach arm of [`Document::transform_sketch_island`]:
+    /// rebuilds the island with `t` baked in as a NEW sketch on the mapped
+    /// plane, removes the island's edges from `source`, and records
+    /// [`DocAction::DetachedSketchIsland`]. The caller has already vetted
+    /// `t` (invertible, det > 0) and that `source` is live. The detached
+    /// sketch is built COMPLETELY before anything mutates, so every typed
+    /// failure leaves the document untouched.
+    fn detach_transformed_island(
+        &mut self,
+        source: SketchId,
+        island: SketchIslandId,
+        t: &Transform,
+    ) -> Result<DocChange, DocumentError> {
+        let src = &self.sketches[source];
+        let plane = t
+            .apply_plane(&src.plane())
+            .map_err(DocumentError::Transform)?;
+        let fresh = src
+            .rebuild_island_transformed(island, t, plane)
             .map_err(DocumentError::Sketch)?;
-        self.undo.push(DocAction::TransformSketchIsland {
-            sketch,
-            island,
-            forward: *t,
-            inverse,
+        // Undo rows: the island's edges at their PRE-transform positions
+        // with their source curve ids (curve slots outlive their edges, so
+        // a later undo re-links surviving analytic identity) — the
+        // extrusion-consumption shape, restored the same way.
+        let isl = &src.islands()[island];
+        let removed: Vec<(Point3, Point3, Option<SketchCurveId>)> = isl
+            .edges
+            .iter()
+            .map(|&eid| {
+                let e = src.edges()[eid];
+                (
+                    src.vertices()[e.from].position,
+                    src.vertices()[e.to].position,
+                    e.curve,
+                )
+            })
+            .collect();
+        let scaffolding: std::collections::BTreeSet<SketchEdgeId> =
+            isl.edges.iter().copied().collect();
+
+        // Nothing left can fail; commit.
+        self.sketches[source].remove_edges(&scaffolding);
+        let detached = self.sketches.insert(fresh);
+        self.undo.push(DocAction::DetachedSketchIsland {
+            source,
+            detached,
+            removed,
         });
         self.redo.clear();
         self.debug_validate();
 
         Ok(DocChange {
             objects_touched: Vec::new(),
-            sketches_touched: vec![sketch],
+            sketches_touched: vec![source, detached],
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
@@ -5064,6 +5232,94 @@ impl Document {
         })
     }
 
+    /// Undo one out-of-plane island detach: re-insert the island's outline
+    /// into the source sketch (merging with its current contents, exactly
+    /// like extrusion undo — [`Sketch::restore_edges`]) and hide the
+    /// detached sketch. On a re-insertion conflict the action returns to
+    /// the undo stack and the document is untouched
+    /// ([`SketchError::RestoreConflicts`]).
+    fn undo_detached_island(&mut self, action: DocAction) -> Result<DocChange, DocumentError> {
+        let DocAction::DetachedSketchIsland {
+            source,
+            detached,
+            removed,
+        } = action
+        else {
+            unreachable!("dispatched on DetachedSketchIsland");
+        };
+        if let Err(e) = self
+            .sketches
+            .get_mut(source)
+            .expect("sketch slots are never removed")
+            .restore_edges(&removed)
+        {
+            // Nothing changed; the step stays undoable after the caller
+            // clears the conflicting geometry.
+            self.undo.push(DocAction::DetachedSketchIsland {
+                source,
+                detached,
+                removed,
+            });
+            return Err(DocumentError::Sketch(e));
+        }
+        self.hidden_sketches.insert(detached);
+        self.redo.push(DocAction::DetachedSketchIsland {
+            source,
+            detached,
+            removed,
+        });
+        self.debug_validate();
+        Ok(DocChange {
+            objects_touched: Vec::new(),
+            sketches_touched: vec![source, detached],
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        })
+    }
+
+    /// Redo one out-of-plane island detach: re-remove the outline from the
+    /// source BY GEOMETRY ([`Sketch::edge_at_positions`] — undo restored it
+    /// with fresh edge ids, so ids would be stale where the row positions
+    /// are exact) and unhide the detached sketch, whose contents survived
+    /// hiding bit-exactly. Cannot conflict — nothing intervenes between an
+    /// undo and its redo (any new op clears the redo stack).
+    fn redo_detached_island(&mut self, action: DocAction) -> Result<DocChange, DocumentError> {
+        let DocAction::DetachedSketchIsland {
+            source,
+            detached,
+            removed,
+        } = action
+        else {
+            unreachable!("dispatched on DetachedSketchIsland");
+        };
+        let sk = self
+            .sketches
+            .get_mut(source)
+            .expect("sketch slots are never removed");
+        let scaffolding: std::collections::BTreeSet<SketchEdgeId> = removed
+            .iter()
+            .filter_map(|&(a, b, _)| sk.edge_at_positions(a, b))
+            .collect();
+        sk.remove_edges(&scaffolding);
+        self.hidden_sketches.remove(&detached);
+        self.undo.push(DocAction::DetachedSketchIsland {
+            source,
+            detached,
+            removed,
+        });
+        self.debug_validate();
+        Ok(DocChange {
+            objects_touched: Vec::new(),
+            sketches_touched: vec![source, detached],
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        })
+    }
+
     /// Reverses the most recent document action (LIFO across creations and
     /// per-Object ops alike) and returns what it touched.
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
@@ -5074,10 +5330,18 @@ impl Document {
         if matches!(action, DocAction::CreatedObject { .. }) {
             return self.undo_created_object(action);
         }
+        // Island-detach undo can fail the same way (it restores the same
+        // row shape); same dedicated-helper treatment.
+        if matches!(action, DocAction::DetachedSketchIsland { .. }) {
+            return self.undo_detached_island(action);
+        }
         let change = match &action {
-            // Dispatched to its dedicated helper before this match.
+            // Dispatched to their dedicated helpers before this match.
             DocAction::CreatedObject { .. } => {
                 unreachable!("CreatedObject is handled before the match")
+            }
+            DocAction::DetachedSketchIsland { .. } => {
+                unreachable!("DetachedSketchIsland is handled before the match")
             }
             &DocAction::ObjectOp { object } => {
                 let rec = &mut self.objects[object];
@@ -5702,10 +5966,16 @@ impl Document {
         if matches!(action, DocAction::CreatedObject { .. }) {
             return self.redo_created_object(action);
         }
+        if matches!(action, DocAction::DetachedSketchIsland { .. }) {
+            return self.redo_detached_island(action);
+        }
         let change = match &action {
-            // Dispatched to its dedicated helper before this match.
+            // Dispatched to their dedicated helpers before this match.
             DocAction::CreatedObject { .. } => {
                 unreachable!("CreatedObject is handled before the match")
+            }
+            DocAction::DetachedSketchIsland { .. } => {
+                unreachable!("DetachedSketchIsland is handled before the match")
             }
             &DocAction::ObjectOp { object } => {
                 let rec = &mut self.objects[object];

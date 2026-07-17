@@ -647,6 +647,98 @@ impl Sketch {
         Ok(())
     }
 
+    /// A NEW sketch holding this sketch's `island` with `t` baked in, on
+    /// `plane` (the source plane mapped through `t`; the caller computes it
+    /// because plane mapping errors are transform-typed, not sketch-typed).
+    /// This is the builder for the document layer's out-of-plane island
+    /// detach ([`Document::transform_sketch_island`]): a sketch is planar,
+    /// so an island leaving the plane moves to a sketch of its own. Pure —
+    /// `self` is untouched.
+    ///
+    /// The island's edges are replayed through the ordinary sticky machinery
+    /// on the fresh sketch, so regions and islands re-derive exactly as they
+    /// would for freshly drawn geometry (no hand-assembled topology). An
+    /// affine map preserves incidence and non-crossing, so a valid island
+    /// replays cleanly; anything the machinery still refuses (e.g. a
+    /// tolerance-collapsing scale merging vertices) surfaces as that
+    /// machinery's typed error, never a silent weld.
+    ///
+    /// Curve chains keep their identity: each source chain becomes one chain
+    /// in the new sketch. Analytic [`CurveGeom`] maps (center through the
+    /// point map, radius by the uniform factor) when `t` restricted to the
+    /// SOURCE plane is a similarity, and is dropped otherwise — the
+    /// map-or-drop contract of [`Sketch::apply_transform`]. A chain split
+    /// across islands by earlier partial deletion forks: the members inside
+    /// the island carry the mapped geometry into the new sketch (their
+    /// facets still lie on the mapped circle), and the members left behind
+    /// keep the source chain untouched.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownIsland`] for a stale island id; any typed
+    /// refusal of the replay ([`Sketch::add_segment`] /
+    /// [`Sketch::begin_curve_with`]) propagates with nothing built.
+    ///
+    /// [`Document::transform_sketch_island`]: crate::Document::transform_sketch_island
+    pub(crate) fn rebuild_island_transformed(
+        &self,
+        island: SketchIslandId,
+        t: &crate::Transform,
+        plane: Plane,
+    ) -> Result<Sketch, SketchError> {
+        let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
+        let scale = in_plane_similarity_scale(t, self.plane.normal());
+        let mut fresh = Sketch::on_plane(plane);
+        let mut emitted: std::collections::BTreeSet<SketchCurveId> =
+            std::collections::BTreeSet::new();
+
+        let endpoints = |eid: SketchEdgeId| {
+            let e = self.edges[eid];
+            (
+                t.apply_point(self.vertices[e.from].position),
+                t.apply_point(self.vertices[e.to].position),
+            )
+        };
+
+        for &eid in &isl.edges {
+            match self.edges[eid].curve {
+                None => {
+                    let (a, b) = endpoints(eid);
+                    fresh.add_segment(a, b)?;
+                }
+                Some(cid) => {
+                    if !emitted.insert(cid) {
+                        continue; // this chain already replayed with its first edge
+                    }
+                    // One bracket per source chain, so the fresh edges are
+                    // one selectable unit again.
+                    match (self.curves.get(cid).copied().flatten(), scale) {
+                        (Some(g), Some(sc)) => {
+                            fresh.begin_curve_with(CurveGeom {
+                                center: t.apply_point(g.center),
+                                radius: g.radius * sc,
+                            })?;
+                        }
+                        _ => {
+                            fresh.begin_curve();
+                        }
+                    }
+                    // Deterministic member order: the island's stored edge
+                    // order, filtered to this chain.
+                    for &member in isl
+                        .edges
+                        .iter()
+                        .filter(|&&m| self.edges[m].curve == Some(cid))
+                    {
+                        let (a, b) = endpoints(member);
+                        fresh.add_segment(a, b)?;
+                    }
+                    fresh.end_curve();
+                }
+            }
+        }
+        Ok(fresh)
+    }
+
     /// Current closed regions (read-only). Kept up to date by every mutation;
     /// never recomputed lazily.
     pub fn regions(&self) -> &SlotMap<SketchRegionId, SketchRegion> {

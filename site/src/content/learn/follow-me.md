@@ -20,7 +20,7 @@ You can also skip the preselection: activate Follow Me first, then click the pat
 
 The profile must sit **perpendicular to the path where the sweep starts** — square across it, like a slice of the result. Hew doesn't rotate the profile into place for you; the solid lands exactly where the profile is.
 
-The usual setup: draw the profile flat on the ground, select it, and stand it upright with [Rotate](/learn/moving-and-transforming/), placing it across the path's first segment. The path itself must start on the profile's plane (snapping makes this exact — start the path's first line on the standing profile).
+The usual setup: draw the profile flat on the ground, select it, and stand it upright with [Rotate](/learn/moving-and-transforming/), placing it across the path's first segment. If the profile shares the working sketch with other drawing — the path, say — standing it upright splits it into its own sketch and leaves the rest where it was. The path itself must start on the profile's plane (snapping makes this exact — start the path's first line on the standing profile, or Move the standing profile onto the path's first point).
 
 The profile doesn't have to be centered on the path — a molding offset from its spine is fine. Profiles with holes work too: the hole tunnels the whole length of the sweep.
 
