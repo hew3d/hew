@@ -83,7 +83,10 @@ below.
   typing `3x` (or `x3`) places 3 copies at the same spacing along the
   vector, `3/` (or `/3`) places 3 copies dividing the distance —
   re-enter a different count while the gesture is hot, one undo removes
-  the whole array
+  the whole array. Sketch selections copy too (an in-plane replay through
+  the sticky rules that keeps curve identity — a copied circle is a true
+  circle); sketch copies stay single (no ×N array) until a kernel-side
+  sketch duplicate op exists
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
@@ -120,7 +123,8 @@ below.
 - Construction guides — guide lines and points that participate in
   snapping and are saved with the model
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
-  offset) and Protractor (measure an angle, or drop an angular guide)
+  offset — sourced from an edge, a sketch line, a world axis, or another
+  guide line) and Protractor (measure an angle, or drop an angular guide)
 - Metric and imperial units, including SketchUp-style architectural
   (feet-inches-fractions) input, with typed numeric entry on every
   length-driven tool

@@ -1582,3 +1582,195 @@ fn definition_geometry_extracts_once_and_edits_propagate_to_all_placements() {
     assert_eq!(scene.resolve(&q_grown), scene.resolve_linear(&q_grown));
     assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
 }
+
+// ------------------------------------------------------- sketch curve rims
+//
+// A drawn (unextruded) circle or arc must snap at its exact center, covered
+// quadrants, and anchored tangents in EVERY context — ground sketch or
+// detached standing sketch — before any extrusion exists. These candidates
+// come from `Sketch::curve_rims` registered via `add_sketch_curves`;
+// historically Center/Quadrant existed only for solids' analytic rims, so a
+// bare drawn circle had no center point at all.
+
+/// Builds a sketch on `plane` with one `n`-gon circle chain (center on the
+/// plane) and returns it.
+fn sketch_with_circle(plane: Plane, center: Point3, radius: f64, n: usize) -> kernel::Sketch {
+    let mut s = kernel::Sketch::on_plane(plane);
+    s.begin_curve_with(kernel::CurveGeom { center, radius })
+        .unwrap();
+    let (u, v) = {
+        // Any in-plane frame works for authoring the facets; reuse the
+        // rim's own basis so the vertices land off the cardinals is not
+        // needed — n is chosen so no vertex sits on a quadrant point.
+        let normal = plane.normal();
+        let reference = if normal.z.abs() < 0.9 {
+            Vec3::new(0.0, 0.0, 1.0)
+        } else {
+            Vec3::new(1.0, 0.0, 0.0)
+        };
+        let u = normal.cross(reference).normalized().unwrap();
+        (u, normal.cross(u).normalized().unwrap())
+    };
+    for i in 0..n {
+        // Half-facet phase: no vertex lands on a cardinal, so Quadrant
+        // candidates aren't shadowed by an Endpoint at the same spot.
+        let a0 = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
+        let a1 = 2.0 * std::f64::consts::PI * (i as f64 + 1.5) / (n as f64);
+        let p0 = center + u * (radius * a0.cos()) + v * (radius * a0.sin());
+        let p1 = center + u * (radius * a1.cos()) + v * (radius * a1.sin());
+        s.add_segment(p0, p1).unwrap();
+    }
+    s.end_curve();
+    s
+}
+
+fn register_sketch_full(scene: &mut InferenceScene, id: SketchId, s: &kernel::Sketch) {
+    let segments: Vec<_> = s
+        .edges()
+        .iter()
+        .map(|(eid, e)| {
+            (
+                eid,
+                s.vertices()[e.from].position,
+                s.vertices()[e.to].position,
+            )
+        })
+        .collect();
+    scene.add_sketch(id, &segments);
+    scene.add_sketch_curves(id, &s.curve_rims());
+}
+
+#[test]
+fn sketch_circle_center_snaps_before_any_extrusion() {
+    let mut scene = InferenceScene::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let center = Point3::new(1.0, 2.0, 0.0);
+    // 24-gon (a multiple of 4): with the half-facet phase no vertex lands
+    // on ANY cardinal, so Quadrant candidates aren't shadowed by Endpoints.
+    let s = sketch_with_circle(plane, center, 0.5, 24);
+    register_sketch_full(&mut scene, SketchId::default(), &s);
+
+    // The exact center resolves as Center with no provenance (a sketch
+    // curve is not a SnapSource element — like a guide, source is None).
+    let cq = query(ray_at(Point3::new(1.0, 2.0, 3.0), center), NARROW);
+    let snap = scene.resolve(&cq).expect("drawn circle center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(snap.position.approx_eq(center, tol::POINT_MERGE));
+    assert_eq!(snap.source, None);
+    assert_eq!(snap.sketch_source, None);
+    assert_eq!(scene.resolve(&cq), scene.resolve_linear(&cq));
+
+    // A quadrant point resolves as Quadrant (exactly on the true circle).
+    let rims = s.curve_rims();
+    let q0 = rims[0].quadrant_points()[0];
+    let qq = query(ray_at(q0 + Vec3::new(0.0, 0.0, 3.0), q0), PIN);
+    let snap = scene.resolve(&qq).expect("drawn circle quadrant resolves");
+    assert_eq!(snap.kind, SnapKind::Quadrant);
+    assert!(snap.position.approx_eq(q0, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&qq), scene.resolve_linear(&qq));
+
+    // An anchored tangent resolves on the exact circle.
+    let rim = &rims[0];
+    let anchor = center + rim.basis_u * 1.5;
+    let alpha = (0.5f64 / 1.5).acos();
+    let tan = center + rim.basis_u * (0.5 * alpha.cos()) + rim.basis_v * (0.5 * alpha.sin());
+    let mut tq = query(ray_at(tan + Vec3::new(0.0, 0.0, 3.0), tan), PIN);
+    tq.anchor = Some(anchor);
+    let snap = scene.resolve(&tq).expect("drawn circle tangent resolves");
+    assert_eq!(snap.kind, SnapKind::Tangent);
+    assert!(snap.position.approx_eq(tan, tol::POINT_MERGE));
+
+    // Unregistering the sketch drops every curve candidate with it.
+    scene.remove_sketch(SketchId::default());
+    let gone = scene.resolve(&cq);
+    assert_ne!(
+        gone.map(|s| s.kind),
+        Some(SnapKind::Center),
+        "removed sketch must not keep offering its center"
+    );
+}
+
+#[test]
+fn standing_sketch_circle_center_snaps_too() {
+    // The detached-island case: a circle on an upright plane (normal +Y)
+    // offers its center exactly like a ground one.
+    let mut scene = InferenceScene::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 2.0, 0.0),
+        Point3::new(1.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 1.0),
+    ])
+    .unwrap();
+    let center = Point3::new(1.0, 2.0, 1.0);
+    let s = sketch_with_circle(plane, center, 0.05, 24);
+    register_sketch_full(&mut scene, SketchId::default(), &s);
+
+    let cq = query(ray_at(Point3::new(1.0, 5.0, 1.0), center), NARROW);
+    let snap = scene.resolve(&cq).expect("standing circle center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(snap.position.approx_eq(center, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&cq), scene.resolve_linear(&cq));
+}
+
+#[test]
+fn sketch_arc_offers_center_but_only_covered_quadrants() {
+    // Half of the circle deleted: the center stays, the deleted side's
+    // quadrant does not, and re-registration (replace semantics) reflects
+    // the trim — the same notch behavior a solid rim has.
+    let mut scene = InferenceScene::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    // Off the world origin so the origin/axis candidates cannot shadow it.
+    let center = Point3::new(2.0, 1.0, 0.0);
+    let mut s = sketch_with_circle(plane, center, 1.0, 24);
+    let rim_before = &s.curve_rims()[0];
+    let bv = rim_before.basis_v;
+
+    // Remove every facet on the -v side (frame angles in (-pi, 0)).
+    let curve = s
+        .edges()
+        .values()
+        .find_map(|e| e.curve)
+        .expect("circle chain");
+    for eid in s.curve_edges(curve) {
+        let e = s.edges()[eid];
+        let mid = kernel::Point3::new(
+            (s.vertices()[e.from].position.x + s.vertices()[e.to].position.x) * 0.5,
+            (s.vertices()[e.from].position.y + s.vertices()[e.to].position.y) * 0.5,
+            0.0,
+        );
+        let d = mid - center;
+        if d.dot(bv) < -1e-9 {
+            s.remove_edge(eid).unwrap();
+        }
+    }
+    register_sketch_full(&mut scene, SketchId::default(), &s);
+
+    // Center still snaps.
+    let cq = query(ray_at(Point3::new(0.0, 0.0, 3.0), center), NARROW);
+    let snap = scene.resolve(&cq).expect("arc center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+
+    // The +v quadrant survives; the -v one is gone (nothing at that spot —
+    // its facets were deleted, so no Endpoint/OnEdge rescue either).
+    let qplus = center + bv * 1.0;
+    let qminus = center - bv * 1.0;
+    let qp = query(ray_at(qplus + Vec3::new(0.0, 0.0, 3.0), qplus), PIN);
+    let snap = scene.resolve(&qp).expect("covered quadrant resolves");
+    assert_eq!(snap.kind, SnapKind::Quadrant);
+    let qm = query(ray_at(qminus + Vec3::new(0.0, 0.0, 3.0), qminus), PIN);
+    assert_eq!(
+        scene.resolve(&qm).map(|s| s.kind),
+        None,
+        "uncovered cardinal offers nothing"
+    );
+}

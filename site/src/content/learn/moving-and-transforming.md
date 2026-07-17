@@ -30,14 +30,14 @@ A quick refresher:
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.
 
-**Copy instead of move:** tap `Option`/`Alt` — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Tap `Alt` again to go back to moving.
+**Copy instead of move:** tap `Option`/`Alt` — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Sketch shapes copy too: the duplicate is redrawn through the same sticky rules as hand drawing, so a copied circle is a true circle — center snap and all — and if the copy lands on other lines they split each other exactly as drawn lines would. Tap `Alt` again to go back to moving.
 
 **Array copy:** right after a copy commits, type a multiplier and press `Enter`:
 
 - `3x` (or `x3`, or `*3` — either order works) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `5x`, and five copies march off at 2 m intervals.
 - `3/` (or `/3`) makes **3 copies dividing the distance** — place the last fence post first, then `3/` fills the run with evenly spaced posts between.
 
-The gesture stays live until you start something else, so if `5x` turns out wrong, just type `8x` or `4/` and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates.
+The gesture stays live until you start something else, so if `5x` turns out wrong, just type `8x` or `4/` and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates. Arrays apply to solids, groups, and components — a sketch copy stays a single copy, so the ×N window doesn't open after one.
 
 ## Rotate (`Q`)
 
@@ -60,7 +60,7 @@ Scaling is **uniform**, about the selection's bounding-box center. For an exact 
 
 ## What transforms apply to
 
-Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Multi-selections scale about the selection's overall bounding-box center. The one multi-selection caveat: a copy-move duplicates each solid, group, and component but plain-moves any sketches in the selection (sketches have no copy support yet). All the copies of one commit — array copies included — undo as a single step.
+Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Multi-selections scale about the selection's overall bounding-box center. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike; a sketch's copies arrive as one undo step per sketch, and a copy that would have to leave its sketch plane is refused rather than half-done. Object copies of one commit — array copies included — undo as a single step.
 
 Sketch geometry transforms at shape granularity. Whether you selected a filled shape, one of its lines, or a drawn arc or circle, the transform moves the whole connected shape as a rigid body — an open chain of lines included. Rotation isn't confined to the sketch plane: tipping a drawn profile upright (the [Follow Me](/learn/follow-me/) setup) rotates the shape out of the ground with the same gesture as any other rotation. If the shape is the only thing in its sketch, the whole sketch tips with it; if it shares the working sketch with other drawing, the shape splits off into its own sketch on the new plane and everything else stays where it was. An in-plane move that would land one shape on top of another is still refused rather than welded.
 

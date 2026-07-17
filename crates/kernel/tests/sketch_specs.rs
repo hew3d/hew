@@ -638,3 +638,155 @@ fn island_move_maps_only_the_moved_chain() {
     let b = s.curve_geom(bystander).expect("bystander untouched");
     assert!(b.center.approx_eq(pt(10.0, 0.0), 1e-12));
 }
+
+// -------------------------------------------------------- curve rims
+//
+// `Sketch::curve_rims` publishes each drawn curve's exact circle (with the
+// angular range its surviving edges cover) so inference can offer a sketch
+// circle/arc's true center and quadrant points BEFORE any extrusion exists —
+// the sketch-level analogue of `Object::analytic_rims`.
+
+#[test]
+fn curve_rims_full_circle_offers_center_and_all_quadrants() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(1.0, 2.0), 0.5, 24);
+
+    let rims = s.curve_rims();
+    assert_eq!(rims.len(), 1);
+    let rim = &rims[0];
+    assert_eq!(rim.curve, id);
+    assert!(rim.center.approx_eq(pt(1.0, 2.0), 1e-12));
+    assert_eq!(rim.radius, 0.5);
+    // Full circle: coverage is the whole turn, all four quadrants covered.
+    assert_eq!(rim.coverage, None);
+    let quads = rim.quadrant_points();
+    assert_eq!(quads.len(), 4);
+    for q in &quads {
+        assert!(((q.to_vec() - rim.center.to_vec()).length() - 0.5).abs() < 1e-12);
+        assert!(q.z.abs() < 1e-12);
+    }
+    // The rim's frame lies in the sketch plane.
+    assert!(rim.axis.dot(kernel::Vec3::new(0.0, 0.0, 1.0)).abs() > 1.0 - 1e-12);
+}
+
+#[test]
+fn curve_rims_arc_covers_only_its_swept_range() {
+    let mut s = xy_sketch();
+    // A half-turn arc from angle 0 to pi around the origin, radius 1.
+    let center = pt(0.0, 0.0);
+    s.begin_curve_with(kernel::CurveGeom {
+        center,
+        radius: 1.0,
+    })
+    .unwrap();
+    let n = 12;
+    let p = |i: usize| {
+        let a = std::f64::consts::PI * (i as f64) / (n as f64);
+        pt(a.cos(), a.sin())
+    };
+    for i in 0..n {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+
+    let rims = s.curve_rims();
+    assert_eq!(rims.len(), 1);
+    let rim = &rims[0];
+    assert!(rim.center.approx_eq(center, 1e-12));
+    // Covered: the swept half (world +Y side). Uncovered: the missing half
+    // (world −Y side). `covers` takes angles in the rim's own basis frame,
+    // so map the world directions through it rather than assuming
+    // basis_u == world X.
+    let frame_angle = |d: kernel::Vec3| d.dot(rim.basis_v).atan2(d.dot(rim.basis_u));
+    assert!(rim.covers(frame_angle(kernel::Vec3::new(0.0, 1.0, 0.0))));
+    assert!(!rim.covers(frame_angle(kernel::Vec3::new(0.0, -1.0, 0.0))));
+    // Cardinals +X, +Y, −X survive (arc endpoints inclusive); −Y does not.
+    assert_eq!(rim.quadrant_points().len(), 3);
+}
+
+#[test]
+fn curve_rims_skips_plain_lines_and_dead_curves() {
+    let mut s = xy_sketch();
+    // Plain segments never publish a rim.
+    s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
+    assert!(s.curve_rims().is_empty());
+
+    // A curve whose every edge has been deleted no longer publishes one.
+    let id = circle_chain(&mut s, pt(5.0, 5.0), 1.0, 24);
+    assert_eq!(s.curve_rims().len(), 1);
+    for eid in s.curve_edges(id) {
+        s.remove_edge(eid).unwrap();
+    }
+    assert!(s.curve_rims().is_empty());
+}
+
+#[test]
+fn curve_rims_trims_coverage_when_part_of_the_circle_is_deleted() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+
+    // Delete the facets crossing angle 3pi/2 (the -Y cardinal): edges whose
+    // midpoint angle falls in the bottom quarter turn.
+    for eid in s.curve_edges(id) {
+        let e = s.edges()[eid];
+        let a = s.vertices()[e.from].position;
+        let b = s.vertices()[e.to].position;
+        let mid_angle = ((a.y + b.y) * 0.5).atan2((a.x + b.x) * 0.5);
+        if mid_angle < -std::f64::consts::FRAC_PI_4
+            && mid_angle > -3.0 * std::f64::consts::FRAC_PI_4
+        {
+            s.remove_edge(eid).unwrap();
+        }
+    }
+
+    let rims = s.curve_rims();
+    assert_eq!(rims.len(), 1);
+    let rim = &rims[0];
+    // The center survives (an arc still exists) but the deleted cardinal is
+    // no longer covered while the opposite one still is (frame-mapped, as in
+    // the arc spec above).
+    let frame_angle = |d: kernel::Vec3| d.dot(rim.basis_v).atan2(d.dot(rim.basis_u));
+    assert!(rim.coverage.is_some());
+    assert!(!rim.covers(frame_angle(kernel::Vec3::new(0.0, -1.0, 0.0))));
+    assert!(rim.covers(frame_angle(kernel::Vec3::new(0.0, 1.0, 0.0))));
+    assert_eq!(rim.quadrant_points().len(), 3);
+}
+
+#[test]
+fn curve_rims_work_on_a_standing_plane() {
+    // An upright sketch (the y = 2 plane, normal +Y): a circle drawn there
+    // publishes its rim with the frame in that plane — the detached-sketch
+    // case the ground-only path would miss.
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 2.0, 0.0),
+        Point3::new(1.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 1.0),
+    ])
+    .unwrap();
+    let mut s = Sketch::on_plane(plane);
+    let center = Point3::new(1.0, 2.0, 1.0);
+    s.begin_curve_with(kernel::CurveGeom {
+        center,
+        radius: 0.25,
+    })
+    .unwrap();
+    let n = 24;
+    let p = |i: usize| {
+        let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+        Point3::new(1.0 + 0.25 * a.cos(), 2.0, 1.0 + 0.25 * a.sin())
+    };
+    for i in 0..n {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+
+    let rims = s.curve_rims();
+    assert_eq!(rims.len(), 1);
+    let rim = &rims[0];
+    assert!(rim.center.approx_eq(center, 1e-12));
+    assert_eq!(rim.coverage, None);
+    assert!(rim.axis.dot(kernel::Vec3::new(0.0, 1.0, 0.0)).abs() > 1.0 - 1e-12);
+    for q in rim.quadrant_points() {
+        assert!((q.y - 2.0).abs() < 1e-12); // stays in the standing plane
+    }
+}

@@ -27,8 +27,11 @@
  * the whole selection's copies), the clones becoming the new selection so
  * follow-up moves chain copies. Object/group copies are independent baked
  * geometry; an instance copy shares its definition at the offset pose.
- * Tapping Alt again returns to plain Move. Holding Alt through a drag still
- * works: the keydown on entry toggles copy on.
+ * Sketch selections copy too: each planned island replays into its sketch at
+ * the offset (`duplicateSketchSelection`) — one gesture per sketch, one undo
+ * step per sketch, curve identity preserved. Tapping Alt again returns to
+ * plain Move. Holding Alt through a drag still works: the keydown on entry
+ * toggles copy on.
  *
  * Array copy (SketchUp's N× / N÷): immediately after a copy commits, typing
  * `3x` (or `x3`, `*3` — both token orders are accepted) + Enter re-resolves
@@ -68,7 +71,7 @@ import { clearPreview } from './transformPreview'
 import {
   commitSelectionTransform,
   buildSelectionPreview,
-  planSketchTransforms,
+  duplicateSketchSelection,
 } from './transformSelection'
 import {
   arrowToAxis,
@@ -553,56 +556,61 @@ export class MoveTool implements Tool {
       const copyables = nodes.filter(
         (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
       )
-      if (this.copyMode && copyables.length > 0) {
+      const hasSketchNodes = nodes.some(
+        (n) =>
+          n.kind === 'sketch' ||
+          n.kind === 'sketch-island' ||
+          n.kind === 'sketch-edge' ||
+          n.kind === 'sketch-curve',
+      )
+      if (this.copyMode && (copyables.length > 0 || hasSketchNodes)) {
         // Copy mode: duplicate at the offset instead of moving. Each copy is
         // the same kind as its source; the copies become the selection so a
-        // follow-up move chains off them. Sketches have no duplicate support
-        // — they fall through to a plain move, as they always have in copy
-        // mode.
+        // follow-up move chains off them.
         //
-        // Order matters: sketches move FIRST, then all duplicable nodes clone
-        // in ONE `duplicate_selection_array` call (count 1) — the array
-        // action lands last on the undo stack, so an ×N / /N refinement can
-        // retract exactly it with one scene undo, and a single Cmd+Z after a
+        // Sketch geometry copies by replaying its islands into the same
+        // sketch at the offset (`duplicateSketchSelection`): one drawing
+        // gesture per sketch, so one undo removes that sketch's whole copy,
+        // and curve chains keep their analytic identity (a copied circle is
+        // a true circle). It goes FIRST, then all duplicable nodes clone in
+        // ONE `duplicate_selection_array` call (count 1) — the array action
+        // lands last on the undo stack, so an ×N / /N refinement can retract
+        // exactly it with one scene undo, and a single Cmd+Z after a
         // multi-copy removes every clone at once.
         //
-        // A mid-loop sketch failure leaves earlier sketch moves committed —
-        // the finally block refreshes and reselects whatever landed, so the
-        // viewport never renders a scene that diverges from the kernel (the
-        // error still surfaces as a toast). The duplicate call itself is
-        // atomic (strong guarantee).
+        // A failed sketch replay cancels its own gesture but leaves earlier
+        // sketches' copies committed — the finally block refreshes and
+        // reselects whatever landed, so the viewport never renders a scene
+        // that diverges from the kernel (the error still surfaces as a
+        // toast). The duplicate call itself is atomic (strong guarantee).
         const committed: NodeRef[] = []
         try {
-          // Sketch geometry MOVES under copy (it has no duplicate path
-          // yet), through the same island/whole-sketch routing as a plain
-          // move — a selected edge or curve rides with its island.
-          const plan = planSketchTransforms(this.wasmScene, nodes)
-          for (const { sketch, island } of plan.islands) {
-            this.wasmScene.transform_sketch_island(sketch, island, affineF64)
+          const sketchCopies = duplicateSketchSelection(this.wasmScene, nodes, [tx, ty, tz])
+          committed.push(...sketchCopies)
+          if (copyables.length > 0) {
+            const created = this._duplicateArray(copyables, affineF64, 1)
+            committed.push(...created)
+            // The copy gesture is now "hot" for an ×N / /N array refinement
+            // — but only when the copy was purely objects/groups/instances:
+            // the array retracts and re-issues exactly ONE
+            // duplicate_selection_array step, and sketch copies live in
+            // separate gesture steps it cannot retract, so arraying a mixed
+            // copy would multiply the objects while the sketch copies stayed
+            // at one. Sketch ×N arrays are out of scope until a kernel-side
+            // sketch duplicate op exists.
+            if (sketchCopies.length === 0) {
+              this.arrayHot = {
+                sources: copyables,
+                vector: [tx, ty, tz],
+                historyGen: this.wasmScene.history_generation().toString(),
+              }
+              this.arrayTyped = ''
+            } else {
+              this.arrayHot = null
+            }
+          } else {
+            this.arrayHot = null
           }
-          for (const sketch of plan.sketches) {
-            this.wasmScene.transform_sketch(sketch, affineF64)
-          }
-          if (plan.islands.length > 0 || plan.sketches.length > 0) {
-            committed.push(
-              ...nodes.filter(
-                (n) =>
-                  n.kind === 'sketch' ||
-                  n.kind === 'sketch-island' ||
-                  n.kind === 'sketch-edge' ||
-                  n.kind === 'sketch-curve',
-              ),
-            )
-          }
-          const created = this._duplicateArray(copyables, affineF64, 1)
-          committed.push(...created)
-          // The copy gesture is now "hot" for an ×N / /N array refinement.
-          this.arrayHot = {
-            sources: copyables,
-            vector: [tx, ty, tz],
-            historyGen: this.wasmScene.history_generation().toString(),
-          }
-          this.arrayTyped = ''
         } finally {
           if (committed.length > 0) {
             this.selection = committed

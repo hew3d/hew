@@ -44,8 +44,39 @@ function typeKeys(tool: MoveTool, text: string): void {
  */
 function makeWasmScene() {
   let nextId = 100n
+  let nextEdge = 500n
   const state = { hash: 1n, gen: 1n }
   const scene = {
+    // --- sketch replay surface (Move+Alt sketch copies). One sketch with
+    // two single-edge islands: 40 (edge 10) and 41 (edge 20); replayed
+    // edges get fresh ids >= 500 and land in island 77.
+    sketch_island_ids: vi.fn(() => [40n, 41n]),
+    sketch_island_edges: vi.fn((_s: bigint, island: bigint) =>
+      island === 40n ? [10n] : island === 41n ? [20n] : [],
+    ),
+    sketch_edge_island: vi.fn((_s: bigint, edge: bigint) =>
+      edge >= 500n ? 77n : edge === 10n ? 40n : 41n,
+    ),
+    sketch_edge_endpoints: vi.fn((_s: bigint, e: bigint) =>
+      e === 10n ? [0, 0, 0, 1, 0, 0] : e === 20n ? [5, 5, 0, 6, 5, 0] : undefined,
+    ),
+    sketch_edge_curve: vi.fn(() => undefined),
+    sketch_curve_geom: vi.fn(() => undefined),
+    sketch_plane: vi.fn(() => [0, 0, 0, 0, 0, 1]),
+    sketch_island_lines: vi.fn(() => new Float32Array(0)),
+    sketch_begin_gesture: vi.fn(),
+    sketch_end_gesture: vi.fn(() => { state.hash++; state.gen++ }),
+    sketch_cancel_gesture: vi.fn(),
+    sketch_begin_curve: vi.fn(() => 8n),
+    sketch_begin_curve_with: vi.fn(() => 8n),
+    sketch_end_curve: vi.fn(),
+    sketch_add_segment: vi.fn(() => {
+      const id = nextEdge++
+      return { new_edges: () => [id], free: () => { /* no-op */ } }
+    }),
+    transform_sketch: vi.fn(() => { state.hash++; state.gen++ }),
+    transform_sketch_island: vi.fn(() => { state.hash++; state.gen++ }),
+    can_transform_sketch_island: vi.fn(() => true),
     duplicate_selection_array: vi.fn(
       (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
         const out: { kind: string; id: bigint }[] = []
@@ -163,6 +194,66 @@ describe('MoveTool — durable Alt copy toggle', () => {
     tool.onKey(makeKeyEvent('Alt'))
     const last = onMeasurement.mock.calls.at(-1)?.[0] as string
     expect(last.startsWith('Copy ·')).toBe(true)
+  })
+})
+
+describe('MoveTool — sketch copy (playtest: "you can\'t Copy a Sketch")', () => {
+  it('Alt copy of a sketch island REPLAYS it at the offset instead of moving it', () => {
+    const t = makeTool([{ kind: 'sketch-island', id: 40n, sketch: 3n }])
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    // One gesture bracket, the island's edge re-drawn translated by +2 X.
+    expect(t.scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
+    expect(t.scene.sketch_add_segment).toHaveBeenCalledTimes(1)
+    expect(t.scene.sketch_add_segment).toHaveBeenCalledWith(3n, 2, 0, 0, 3, 0, 0)
+    expect(t.scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
+    // A COPY, not a move — and no object-duplicate call for a pure sketch
+    // selection.
+    expect(t.scene.transform_sketch_island).not.toHaveBeenCalled()
+    expect(t.scene.transform_sketch).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
+    // The new island becomes the committed selection.
+    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 77n, sketch: 3n }])
+    expect(t.onToast).not.toHaveBeenCalled()
+  })
+
+  it('a sketch copy does not arm the ×N array window (scoped out until a kernel duplicate op exists)', () => {
+    const t = makeTool([{ kind: 'sketch-island', id: 40n, sketch: 3n }])
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('a mixed selection duplicates objects AND replays sketches, without arming the array', () => {
+    const t = makeTool([
+      { kind: 'object', id: 1n },
+      { kind: 'sketch-island', id: 40n, sketch: 3n },
+    ])
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
+    expect(t.onCommit).toHaveBeenCalledWith([
+      { kind: 'sketch-island', id: 77n, sketch: 3n },
+      { kind: 'object', id: 100n },
+    ])
+
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
   })
 })
 

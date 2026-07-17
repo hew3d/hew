@@ -1148,6 +1148,12 @@ impl Scene {
         if let Some(vertices) = Self::live_sketch_vertices(&self.doc, id) {
             self.inference.add_sketch_vertices(id, &vertices);
         }
+        // Curve rims: a drawn circle/arc's exact center, quadrants, and
+        // tangents snap BEFORE any extrusion (the sketch-level analogue of
+        // a solid's analytic rims).
+        if let Some(s) = self.doc.sketch(id) {
+            self.inference.add_sketch_curves(id, &s.curve_rims());
+        }
     }
 
     /// Enumerates sketch `id`'s vertices as `(SketchVertexId, world position)`
@@ -4309,6 +4315,13 @@ impl Scene {
                 self.inference.add_guide(id, g);
             }
         }
+        // Register every sketch — segments, vertices, and curve rims. This
+        // was missing (only objects/instances/guides were registered), so a
+        // freshly loaded drawing offered no sketch snaps until its first
+        // mutation happened to re-register it.
+        for sid in self.doc.sketch_ids() {
+            self.register_sketch(sid);
+        }
 
         // A mid-session load replaces the entire saved document, so the
         // recording embeds the bytes: everything after this call stays
@@ -4374,6 +4387,113 @@ pub fn demo_mesh() -> DemoMesh {
 
 #[cfg(test)]
 mod tests {
+    /// Loading a document must re-register its SKETCHES with inference —
+    /// segments, vertices, and curve rims alike. This was silently missing
+    /// (objects, instances, and guides were registered; sketches were not),
+    /// so a freshly loaded drawing offered no sketch snaps until the first
+    /// mutation happened to touch it.
+    #[test]
+    fn load_registers_sketches_with_inference() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_begin_curve_with(sketch, 1.0, 1.0, 0.0, 0.1)
+            .unwrap();
+        let n = 24usize;
+        let p = |i: usize| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
+            (1.0 + 0.1 * a.cos(), 1.0 + 0.1 * a.sin())
+        };
+        for i in 0..n {
+            let (ax, ay) = p(i);
+            let (bx, by) = p(i + 1);
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_curve(sketch).unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+        let bytes = scene.save();
+
+        let mut loaded = Scene::new();
+        loaded.load_core(&bytes).unwrap();
+
+        // A facet vertex snaps as Endpoint…
+        let (vx, vy) = p(0);
+        let snap = loaded
+            .snap(vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .unwrap()
+            .expect("loaded sketch vertex snaps");
+        assert_eq!(snap.kind(), "endpoint");
+        // …and the drawn circle's exact center snaps as Center.
+        let snap = loaded
+            .snap(1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .unwrap()
+            .expect("loaded circle center snaps");
+        assert_eq!(snap.kind(), "center");
+    }
+
+    /// Move+Alt's sketch copy is a translated replay through the drawing
+    /// surface (one gesture, curve bracket re-opened with the shifted
+    /// analytic definition). Even when the copy OVERLAPS its source — so
+    /// the sticky rules split both circles at the crossings — both chains
+    /// stay true circles: each exact center still snaps as Center.
+    #[test]
+    fn replay_copied_circle_keeps_center_snaps_even_overlapping() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        let (cx, cy, r, n) = (1.0f64, 1.0f64, 0.1f64, 24usize);
+        // Draw the original circle inside a gesture, like CircleTool.
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_begin_curve_with(sketch, cx, cy, 0.0, r)
+            .unwrap();
+        let p = |i: usize| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
+            (cx + r * a.cos(), cy + r * a.sin())
+        };
+        for i in 0..n {
+            let (ax, ay) = p(i);
+            let (bx, by) = p(i + 1);
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_curve(sketch).unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+
+        // Replay-copy translated +0.08 X (overlapping), like duplicateSketchSelection.
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_begin_curve_with(sketch, cx + 0.08, cy, 0.0, r)
+            .unwrap();
+        for i in 0..n {
+            let (ax, ay) = p(i);
+            let (bx, by) = p(i + 1);
+            scene
+                .sketch_add_segment(sketch, ax + 0.08, ay, 0.0, bx + 0.08, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_curve(sketch).unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+
+        // Snap straight down at the copy's center.
+        let snap = scene
+            .snap(cx + 0.08, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .unwrap()
+            .expect("something snaps at the copy center");
+        assert_eq!(snap.kind(), "center");
+        assert!((snap.x() - (cx + 0.08)).abs() < 1e-12);
+        assert!((snap.y() - cy).abs() < 1e-12);
+        // And the original center still snaps too.
+        let snap0 = scene
+            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .unwrap()
+            .expect("original center snaps");
+        assert_eq!(snap0.kind(), "center");
+    }
+
     use super::*;
 
     #[test]

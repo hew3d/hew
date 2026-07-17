@@ -307,6 +307,13 @@ export interface HewTestHarness {
   /** Handles of all currently visible construction guides, as decimal strings. */
   getGuideIds(): string[]
 
+  /** `'line' | 'point'` for a guide handle, or undefined if stale/hidden. */
+  getGuideKind(id: string): string | undefined
+
+  /** A guide's geometry: `[ox,oy,oz, dx,dy,dz]` for a line (origin + unit
+   * direction), `[x,y,z]` for a point; undefined if stale/hidden. */
+  getGuideGeometry(id: string): number[] | undefined
+
   /**
    * Document-level undo (same kernel path as Cmd+Z). Calls `scene_undo()` and
    * reconciles the viewport. Throws if there is nothing to undo.
@@ -963,6 +970,14 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     getGuideIds: () => query((s) => Array.from(s.guide_ids()).map(String)),
+
+    getGuideKind: (id) => query((s) => s.guide_kind(BigInt(id))),
+
+    getGuideGeometry: (id) =>
+      query((s) => {
+        const g = s.guide_geometry(BigInt(id))
+        return g !== undefined ? Array.from(g) : undefined
+      }),
 
     // Undo/redo route through the viewport's runUndo/runRedo — the shared
     // choke point that fires post-history reconciliation (onHistoryChanged →

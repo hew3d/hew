@@ -570,21 +570,7 @@ impl AnalyticRim {
     /// covered range, within an angular tolerance derived from
     /// [`crate::tol::POINT_MERGE`] at this radius.
     pub fn covers(&self, angle: f64) -> bool {
-        let Some(intervals) = &self.coverage else {
-            return true;
-        };
-        let eps = crate::tol::POINT_MERGE / self.radius;
-        let tau = 2.0 * std::f64::consts::PI;
-        let mut a = angle;
-        while a >= std::f64::consts::PI {
-            a -= tau;
-        }
-        while a < -std::f64::consts::PI {
-            a += tau;
-        }
-        intervals.iter().any(|&[s, e]| {
-            (a >= s - eps && a <= e + eps) || (a + tau >= s - eps && a + tau <= e + eps)
-        })
+        coverage_covers(&self.coverage, self.radius, angle)
     }
 
     /// The rim's quadrant points — the covered subset of the four points at
@@ -603,12 +589,39 @@ impl AnalyticRim {
     }
 }
 
+/// Whether `angle` (radians) falls inside `coverage` (the
+/// [`AnalyticRim::coverage`] representation: `None` = full circle, else
+/// disjoint `[start, end]` intervals with `start` in `[-pi, pi)`), within an
+/// angular tolerance derived from [`crate::tol::POINT_MERGE`] at `radius`.
+/// Shared by [`AnalyticRim::covers`] and the sketch-level curve rims
+/// ([`crate::sketch::SketchCurveRim`]), which carry the same representation.
+pub(crate) fn coverage_covers(coverage: &Option<Vec<[f64; 2]>>, radius: f64, angle: f64) -> bool {
+    let Some(intervals) = coverage else {
+        return true;
+    };
+    let eps = crate::tol::POINT_MERGE / radius;
+    let tau = 2.0 * std::f64::consts::PI;
+    let mut a = angle;
+    while a >= std::f64::consts::PI {
+        a -= tau;
+    }
+    while a < -std::f64::consts::PI {
+        a += tau;
+    }
+    intervals
+        .iter()
+        .any(|&[s, e]| (a >= s - eps && a <= e + eps) || (a + tau >= s - eps && a + tau <= e + eps))
+}
+
 /// Merge raw per-facet angular intervals into disjoint coverage, `None` for
 /// a (numerically) full circle. Intervals arrive unwrapped around arbitrary
 /// anchors; normalize each start into `[-pi, pi)`, sort, and merge with an
 /// angular epsilon derived from [`crate::tol::POINT_MERGE`] at `radius` (two
 /// facets sharing a vertex must merge into one arc).
-fn merge_angular_intervals(intervals: &[[f64; 2]], radius: f64) -> Option<Vec<[f64; 2]>> {
+pub(crate) fn merge_angular_intervals(
+    intervals: &[[f64; 2]],
+    radius: f64,
+) -> Option<Vec<[f64; 2]>> {
     if intervals.is_empty() {
         return Some(Vec::new());
     }

@@ -79,6 +79,61 @@ pub struct CurveGeom {
     pub radius: f64,
 }
 
+/// The exact circle of one drawn curve chain with the angular range its
+/// surviving edges cover — the sketch-level analogue of
+/// [`crate::topo::AnalyticRim`], produced by [`Sketch::curve_rims`] so the
+/// inference engine can offer a drawn (unextruded) circle or arc's true
+/// center, quadrant points, and tangents as snap candidates. World space
+/// (sketch geometry is authored in world coordinates); the circle lies in
+/// the sketch plane, whose normal is `axis`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchCurveRim {
+    /// The curve chain this rim describes.
+    pub curve: SketchCurveId,
+    /// The exact drawn center, on the sketch plane.
+    pub center: Point3,
+    /// Unit circle-plane normal (the sketch plane normal).
+    pub axis: Vec3,
+    /// The exact drawn radius (> [`tol::POINT_MERGE`](crate::tol::POINT_MERGE)).
+    pub radius: f64,
+    /// First basis vector of the angular frame (unit, perpendicular to
+    /// `axis`); angle 0 lies along it.
+    pub basis_u: Vec3,
+    /// Second basis vector (unit, completing the frame via
+    /// [`crate::geom2d::plane_axes`] handedness).
+    pub basis_v: Vec3,
+    /// Merged angular coverage in the (basis_u, basis_v) frame — same
+    /// representation as [`crate::topo::AnalyticRim::coverage`]: `None` =
+    /// the full circle; otherwise disjoint `[start, end]` intervals with
+    /// `start` normalized into `[-pi, pi)` and `end > start`.
+    pub coverage: Option<Vec<[f64; 2]>>,
+}
+
+impl SketchCurveRim {
+    /// Whether `angle` (radians, in the rim's basis frame) falls inside the
+    /// covered range, within an angular tolerance derived from
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) at this radius — the
+    /// same test as [`crate::topo::AnalyticRim::covers`].
+    pub fn covers(&self, angle: f64) -> bool {
+        crate::topo::coverage_covers(&self.coverage, self.radius, angle)
+    }
+
+    /// The rim's quadrant points — the covered subset of the four points at
+    /// angles 0, pi/2, pi, 3pi/2 in the basis frame, on the exact circle.
+    pub fn quadrant_points(&self) -> Vec<Point3> {
+        [0.0f64, 0.5, 1.0, 1.5]
+            .into_iter()
+            .map(|q| q * std::f64::consts::PI)
+            .filter(|&q| self.covers(q))
+            .map(|q| {
+                self.center
+                    + self.basis_u * (self.radius * q.cos())
+                    + self.basis_v * (self.radius * q.sin())
+            })
+            .collect()
+    }
+}
+
 /// A connected component of a sketch's edges: what the user perceives as one
 /// independent drawn shape. Derived (never serialized) and recomputed on
 /// every edge-set mutation with identity reuse, exactly like regions — the
@@ -426,6 +481,77 @@ impl Sketch {
     /// structural (file-load) reconstruction.
     pub(crate) fn insert_curve_raw(&mut self, geom: Option<CurveGeom>) -> SketchCurveId {
         self.curves.insert(geom)
+    }
+
+    /// The exact circles of this sketch's drawn curves, one rim per curve
+    /// chain that carries an analytic definition ([`CurveGeom`]) and still
+    /// has at least one live edge — the sketch-level analogue of
+    /// [`Object::analytic_rims`](crate::topo::Object::analytic_rims), so a
+    /// drawn (unextruded) circle or arc offers its true center and quadrant
+    /// points to inference before any extrusion exists.
+    ///
+    /// Coverage comes from the surviving member edges: each edge's chord
+    /// spans the short way between its endpoint angles (a facet subtends
+    /// less than a half turn by construction), merged exactly like a solid
+    /// rim's boundary edges — so deleting part of a circle trims the covered
+    /// arc, and a curve whose surviving edges yield no coverage (all
+    /// endpoints angle-degenerate) is omitted entirely, matching the
+    /// vacant-rim gate ([`crate::topo::AnalyticRim::has_coverage`]).
+    ///
+    /// Deterministic: curves in slotmap order, basis via
+    /// [`plane_axes`] on the sketch plane normal.
+    pub fn curve_rims(&self) -> Vec<SketchCurveRim> {
+        let axis = self.plane.normal();
+        let (u, v) = plane_axes(axis);
+        let mut out = Vec::new();
+        for (cid, geom) in &self.curves {
+            let Some(geom) = *geom else { continue };
+            let mut intervals: Vec<[f64; 2]> = Vec::new();
+            let mut live = false;
+            for (_, e) in self.edges.iter().filter(|(_, e)| e.curve == Some(cid)) {
+                live = true;
+                // Endpoint angle in the (u, v) frame; `None` for a point
+                // radially degenerate at the center (cannot happen for a
+                // genuine facet of a curve with radius > POINT_MERGE, but a
+                // guard beats a garbage atan2).
+                let angle_of = |vid: SketchVertexId| -> Option<f64> {
+                    let d = self.vertices[vid].position - geom.center;
+                    let radial = d - axis * d.dot(axis);
+                    if radial.length() <= tol::NORMALIZE_MIN_LENGTH {
+                        None
+                    } else {
+                        Some(radial.dot(v).atan2(radial.dot(u)))
+                    }
+                };
+                if let (Some(a), Some(b)) = (angle_of(e.from), angle_of(e.to)) {
+                    let mut offset = b - a;
+                    while offset > std::f64::consts::PI {
+                        offset -= 2.0 * std::f64::consts::PI;
+                    }
+                    while offset <= -std::f64::consts::PI {
+                        offset += 2.0 * std::f64::consts::PI;
+                    }
+                    intervals.push([a.min(a + offset), a.max(a + offset)]);
+                }
+            }
+            if !live {
+                continue;
+            }
+            let coverage = crate::topo::merge_angular_intervals(&intervals, geom.radius);
+            if matches!(&coverage, Some(iv) if iv.is_empty()) {
+                continue; // vacant rim: no surviving arc, no candidates
+            }
+            out.push(SketchCurveRim {
+                curve: cid,
+                center: geom.center,
+                axis,
+                radius: geom.radius,
+                basis_u: u,
+                basis_v: v,
+                coverage,
+            });
+        }
+        out
     }
 
     /// Current islands — connected components of the edge graph (read-only).

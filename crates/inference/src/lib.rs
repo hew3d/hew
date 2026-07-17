@@ -63,7 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
     AnalyticRim, EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3,
-    SketchEdgeId, SketchId, SketchVertexId, Transform, Vec3, VertexId, tol,
+    SketchCurveRim, SketchEdgeId, SketchId, SketchVertexId, Transform, Vec3, VertexId, tol,
 };
 
 mod index;
@@ -616,6 +616,16 @@ pub struct InferenceScene {
     /// `SketchVertexId` so the per-vertex edit tool (Phase D) can pick an exact
     /// vertex to drag. Registered/cleared alongside `sketch_segments`.
     sketch_vertices: Vec<(SketchId, SketchVertexId, Point3)>,
+    /// Committed sketch *curve rims* (drawn circles/arcs carrying an
+    /// analytic [`kernel::CurveGeom`]), keyed by `SketchId` like
+    /// `sketch_segments`: each offers its exact center, covered quadrant
+    /// points, and anchor-based tangents — the sketch-level analogue of
+    /// `centers`/`quadrants`/`rims`, resolved on the same linear walk, but
+    /// with no provenance (sketch curves aren't `SnapSource` elements; like
+    /// guides they snap with `source: None`). Registered/cleared alongside
+    /// `sketch_segments`, so a drawn circle's true center snaps BEFORE any
+    /// extrusion exists.
+    sketch_rims: Vec<(SketchId, SketchCurveRim)>,
     /// Transient (in-progress) segments — e.g. the line tool's current
     /// rubber-band chain — published every frame and never persisted. Cleared
     /// wholesale by [`InferenceScene::clear_transient`], not per-id.
@@ -698,6 +708,7 @@ impl Default for InferenceScene {
             guides: Vec::new(),
             sketch_segments: Vec::new(),
             sketch_vertices: Vec::new(),
+            sketch_rims: Vec::new(),
             transient_segments: Vec::new(),
             guides_enabled: true,
             axes_enabled: true,
@@ -1178,6 +1189,19 @@ impl InferenceScene {
             .extend(vertices.iter().map(|&(vid, p)| (id, vid, p)));
     }
 
+    /// Registers (or re-registers) the committed *curve rims* of sketch `id`
+    /// — the exact circles of its drawn curves ([`kernel::Sketch::curve_rims`])
+    /// — as Center/Quadrant/Tangent candidates, so an unextruded circle or
+    /// arc snaps at its true center exactly like a solid's rim. Replace
+    /// semantics like [`InferenceScene::add_sketch_vertices`]: drops any
+    /// prior rims for `id` first. Callers register rims, vertices, and
+    /// segments together on every sketch mutation.
+    pub fn add_sketch_curves(&mut self, id: SketchId, rims: &[SketchCurveRim]) {
+        self.sketch_rims.retain(|(sid, _)| *sid != id);
+        self.sketch_rims
+            .extend(rims.iter().map(|r| (id, r.clone())));
+    }
+
     /// Drops all candidates registered for sketch `id`. Unknown ids are a
     /// no-op — removal must be idempotent (mirroring
     /// [`InferenceScene::remove_object`]) so callers can remove-then-add
@@ -1185,6 +1209,7 @@ impl InferenceScene {
     pub fn remove_sketch(&mut self, id: SketchId) {
         self.sketch_segments.retain(|(sid, _, _)| *sid != id);
         self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
+        self.sketch_rims.retain(|(sid, _)| *sid != id);
     }
 
     /// Publishes one transient (in-progress) segment as a snap candidate —
@@ -1390,6 +1415,22 @@ impl InferenceScene {
             }
         }
 
+        // --- Sketch-curve candidates: a drawn (unextruded) circle or arc
+        //     offers its exact center and covered quadrant points, so
+        //     Center/Quadrant snapping exists BEFORE any extrusion. No
+        //     provenance — like guides and axes, sketch curves aren't
+        //     `SnapSource` elements. Linear walk, like `centers`. ---
+        for (_, rim) in &self.sketch_rims {
+            if let Some((ang, depth)) = cone_test(origin, dir, rim.center, aperture) {
+                candidates.push((SnapKind::Center, ang, depth, rim.center, None, None));
+            }
+            for q in rim.quadrant_points() {
+                if let Some((ang, depth)) = cone_test(origin, dir, q, aperture) {
+                    candidates.push((SnapKind::Quadrant, ang, depth, q, None, None));
+                }
+            }
+        }
+
         // --- Tangent candidates: for each rim circle, the two points where
         //     a segment from the tool's anchor touches the exact circle —
         //     computed per query (they depend on the anchor), offered only
@@ -1398,15 +1439,12 @@ impl InferenceScene {
         //     like centers. ---
         if let Some(anchor) = query.anchor {
             for rim in self.rims.iter().chain(placed_rims.iter()) {
-                let d = anchor - rim.center;
-                let in_plane = d - rim.axis * d.dot(rim.axis);
-                let dist = in_plane.length();
-                if dist <= rim.radius + tol::POINT_MERGE {
+                let Some(angles) =
+                    tangent_angles(anchor, rim.center, rim.axis, rim.radius, rim.u, rim.v)
+                else {
                     continue; // anchor inside or on the circle: no tangent
-                }
-                let phi = in_plane.dot(rim.v).atan2(in_plane.dot(rim.u));
-                let alpha = (rim.radius / dist).acos();
-                for angle in [phi + alpha, phi - alpha] {
+                };
+                for angle in angles {
                     if !rim.covers(angle) {
                         continue;
                     }
@@ -1420,6 +1458,31 @@ impl InferenceScene {
                             Some(Provenance::Object(rim.source)),
                             None,
                         ));
+                    }
+                }
+            }
+            // Sketch-curve rims tangent-snap identically, just with no
+            // provenance (see the sketch-curve Center/Quadrant walk above).
+            for (_, rim) in &self.sketch_rims {
+                let Some(angles) = tangent_angles(
+                    anchor,
+                    rim.center,
+                    rim.axis,
+                    rim.radius,
+                    rim.basis_u,
+                    rim.basis_v,
+                ) else {
+                    continue;
+                };
+                for angle in angles {
+                    if !rim.covers(angle) {
+                        continue;
+                    }
+                    let pos = rim.center
+                        + rim.basis_u * (rim.radius * angle.cos())
+                        + rim.basis_v * (rim.radius * angle.sin());
+                    if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                        candidates.push((SnapKind::Tangent, ang, depth, pos, None, None));
                     }
                 }
             }
@@ -1943,6 +2006,30 @@ fn cone_test(origin: Point3, dir: Vec3, point: Point3, aperture: f64) -> Option<
     } else {
         None
     }
+}
+
+/// The two angles (in the rim's `u`/`v` frame) where a segment from
+/// `anchor` is tangent to the circle `(center, axis, radius)`, or `None`
+/// when the anchor's in-plane projection lies inside or on the circle (no
+/// tangent exists). Shared by the object-rim and sketch-curve tangent
+/// walks so both resolve the identical geometry.
+fn tangent_angles(
+    anchor: Point3,
+    center: Point3,
+    axis: Vec3,
+    radius: f64,
+    u: Vec3,
+    v: Vec3,
+) -> Option<[f64; 2]> {
+    let d = anchor - center;
+    let in_plane = d - axis * d.dot(axis);
+    let dist = in_plane.length();
+    if dist <= radius + tol::POINT_MERGE {
+        return None;
+    }
+    let phi = in_plane.dot(v).atan2(in_plane.dot(u));
+    let alpha = (radius / dist).acos();
+    Some([phi + alpha, phi - alpha])
 }
 
 /// Returns the midpoint of a segment.

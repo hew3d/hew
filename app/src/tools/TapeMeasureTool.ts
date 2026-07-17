@@ -10,6 +10,9 @@
  *        mode. Remembers the edge's two endpoints (via
  *        `wasmScene.edge_endpoints` / `sketch_edge_endpoints`) and the
  *        picked point on it.
+ *      - On a world axis or an existing guide line ('on-axis'/'on-guide'
+ *        snaps, which carry the analytic line's direction) → the same
+ *        PARALLEL-GUIDE mode, sourced from the infinite analytic line.
  *      - Anywhere else → MEASURE mode. Remembers the picked point as P0.
  *   2. Pointer move previews:
  *      - Parallel mode: a dashed guide line through (edgePoint + offset)
@@ -233,20 +236,39 @@ export class TapeMeasureTool implements Tool {
   // ── Private helpers ─────────────────────────────────────────────────────
 
   /**
-   * Resolve a snap to an edge's endpoints + the picked point on it, or null
-   * if the snap isn't on a live world-Object edge or committed sketch edge.
+   * Resolve a snap to a reference line (a point on it + its unit direction),
+   * or null if the snap carries no line to be parallel to.
    *
-   * Only `elementKind === 'edge'` / `'sketch-edge'` snaps carry an edge
-   * handle directly (on-edge, midpoint); an `endpoint` snap is a vertex, not
-   * an edge, so it intentionally falls through to measure mode here (a
-   * simplification — SketchUp lets you start a parallel guide from a
-   * vertex-snapped point on an edge too, but distinguishing "vertex that
-   * happens to sit on an edge" needs more inference-engine plumbing than
-   * this slice adds).
+   * Three sources qualify:
+   * - a live world-Object edge (`elementKind === 'edge'`),
+   * - a committed sketch edge (`elementKind === 'sketch-edge'`),
+   * - a world axis or existing guide line (`kind === 'on-axis'` /
+   *   `'on-guide'`): these carry no element handle at all — the kernel
+   *   resolves them ANALYTICALLY (an infinite line, camera-independent) and
+   *   hands back the on-line point plus the line's direction on the snap
+   *   itself, which is everything parallel mode needs. Note the rendered
+   *   axis geometry is irrelevant here: its per-frame clipped extent is a
+   *   draw concern, never what the snap resolves against.
+   *
+   * An `endpoint` snap is a vertex, not a line, so it intentionally falls
+   * through to measure mode (a simplification — SketchUp lets you start a
+   * parallel guide from a vertex-snapped point on an edge too, but
+   * distinguishing "vertex that happens to sit on an edge" needs more
+   * inference-engine plumbing than this slice adds).
    */
   private _tryResolveEdge(
     snap: Snap,
   ): { edgePoint: [number, number, number]; edgeDir: [number, number, number] } | null {
+    if ((snap.kind === 'on-axis' || snap.kind === 'on-guide') && snap.direction !== undefined) {
+      const [dx, dy, dz] = snap.direction
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (len < 1e-9) return null // degenerate direction — fall back
+      return {
+        edgePoint: [snap.x, snap.y, snap.z],
+        edgeDir: [dx / len, dy / len, dz / len],
+      }
+    }
+
     let endpoints: Float64Array | number[] | undefined
     if (snap.elementKind === 'edge' && snap.object !== undefined && snap.element !== undefined) {
       endpoints = this.wasmScene.edge_endpoints(snap.object, snap.element)

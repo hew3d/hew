@@ -13,7 +13,10 @@ import { defineConfig, devices } from '@playwright/test'
  * out of the default set to keep CI lean; add it when a regression warrants it.
  */
 
-const PORT = 4173
+// Overridable so concurrent checkouts don't collide: with the default port
+// and `reuseExistingServer`, a second worktree's E2E run silently reuses the
+// FIRST worktree's vite — and tests its code instead of this checkout's.
+const PORT = Number(process.env.HEW_E2E_PORT ?? 4173)
 const HOST = '127.0.0.1'
 const baseURL = `http://${HOST}:${PORT}`
 const isCI = !!process.env.CI

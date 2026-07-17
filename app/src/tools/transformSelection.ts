@@ -134,6 +134,145 @@ export function commitSelectionTransform(
   }
 }
 
+/**
+ * Duplicate a selection's sketch geometry at an offset — Move+Alt's copy
+ * path for sketches, which have no kernel duplicate op. The copy is a
+ * REPLAY: each source island's edges are re-drawn into the SAME sketch
+ * through the ordinary sticky machinery (`sketch_add_segment`), translated
+ * by `delta`, inside one drawing gesture per sketch so a single undo
+ * removes that sketch's whole copy. Curve chains replay inside a
+ * `sketch_begin_curve_with` bracket carrying the translated analytic
+ * definition, so a copied circle is a true circle (center snap and all) —
+ * the same replay-with-identity approach as the kernel's own
+ * `rebuild_island_transformed`, aimed at the source sketch instead of a
+ * detach target.
+ *
+ * Granularity mirrors `planSketchTransforms`: a selected edge/curve copies
+ * the island it rides with; islands covering every island of their sketch
+ * (or a whole-sketch selection) copy the whole sketch.
+ *
+ * `delta` must lie in each target sketch's plane — a translated replay
+ * cannot leave it (points would come off the plane edge by edge). Checked
+ * up front for every planned sketch, before anything mutates; an
+ * out-of-plane copy throws with nothing committed. A failure mid-replay
+ * cancels that sketch's gesture (snapshot restore), so no sketch is ever
+ * left half-copied; earlier sketches' committed gestures stay, exactly like
+ * the plain-move loop's semantics.
+ *
+ * Returns the copies as `sketch-island` NodeRefs (post-gesture island ids,
+ * merged islands deduped) so the caller can reselect them.
+ */
+export function duplicateSketchSelection(
+  wasmScene: WasmScene,
+  selection: readonly NodeRef[],
+  delta: [number, number, number],
+): NodeRef[] {
+  const { sketches, islands } = planSketchTransforms(wasmScene, selection)
+
+  // Per-sketch edge sets to replay: whole sketches take every island.
+  const edgesBySketch = new Map<bigint, bigint[]>()
+  for (const sketch of sketches) {
+    const all: bigint[] = []
+    for (const island of wasmScene.sketch_island_ids(sketch)) {
+      all.push(...wasmScene.sketch_island_edges(sketch, island))
+    }
+    edgesBySketch.set(sketch, all)
+  }
+  for (const { sketch, island } of islands) {
+    const list = edgesBySketch.get(sketch) ?? []
+    list.push(...wasmScene.sketch_island_edges(sketch, island))
+    edgesBySketch.set(sketch, list)
+  }
+
+  // Validate every target plane BEFORE any mutation: the offset must keep
+  // the copy on its sketch plane (kernel PLANE_DIST is 1e-9 m).
+  for (const sketch of edgesBySketch.keys()) {
+    const plane = wasmScene.sketch_plane(sketch)
+    if (plane === undefined) continue // stale — the replay loop will skip it
+    const off = delta[0] * plane[3] + delta[1] * plane[4] + delta[2] * plane[5]
+    if (Math.abs(off) > 1e-9) {
+      throw new Error('PointOffPlane: a sketch copy must stay in its sketch plane')
+    }
+  }
+
+  const committed: NodeRef[] = []
+  for (const [sketch, edges] of edgesBySketch) {
+    if (edges.length === 0) continue
+    // Snapshot geometry and curve grouping up front — the replay's sticky
+    // splits may invalidate source edge handles mid-loop otherwise.
+    interface Seg { a: [number, number, number]; b: [number, number, number] }
+    const plain: Seg[] = []
+    const curves = new Map<string, { geom: number[] | undefined; segs: Seg[] }>()
+    for (const edge of edges) {
+      const ends = wasmScene.sketch_edge_endpoints(sketch, edge)
+      if (ends === undefined) continue // stale handle — nothing to copy
+      const seg: Seg = {
+        a: [ends[0] + delta[0], ends[1] + delta[1], ends[2] + delta[2]],
+        b: [ends[3] + delta[0], ends[4] + delta[1], ends[5] + delta[2]],
+      }
+      const curve = wasmScene.sketch_edge_curve(sketch, edge)
+      if (curve === undefined) {
+        plain.push(seg)
+      } else {
+        const key = curve.toString()
+        const entry = curves.get(key) ?? {
+          geom: wasmScene.sketch_curve_geom(sketch, curve) as number[] | undefined,
+          segs: [],
+        }
+        entry.segs.push(seg)
+        curves.set(key, entry)
+      }
+    }
+    if (plain.length === 0 && curves.size === 0) continue
+
+    wasmScene.sketch_begin_gesture(sketch)
+    const newEdges: bigint[] = []
+    try {
+      const add = (s: Seg): void => {
+        const report = wasmScene.sketch_add_segment(
+          sketch, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2],
+        )
+        newEdges.push(...report.new_edges())
+        report.free()
+      }
+      for (const { geom, segs } of curves.values()) {
+        if (geom !== undefined) {
+          // Translation preserves the circle exactly: center shifts, radius
+          // stays — the copy is a true curve, not just facets.
+          wasmScene.sketch_begin_curve_with(
+            sketch,
+            geom[0] + delta[0],
+            geom[1] + delta[1],
+            geom[2] + delta[2],
+            geom[3],
+          )
+        } else {
+          wasmScene.sketch_begin_curve(sketch) // identity-only chain
+        }
+        for (const s of segs) add(s)
+        wasmScene.sketch_end_curve(sketch)
+      }
+      for (const s of plain) add(s)
+      wasmScene.sketch_end_gesture(sketch)
+    } catch (err) {
+      wasmScene.sketch_cancel_gesture() // snapshot restore — nothing landed
+      throw err
+    }
+
+    // Map the replayed edges to their (possibly merged) islands.
+    const seen = new Set<string>()
+    for (const edge of newEdges) {
+      const island = wasmScene.sketch_edge_island(sketch, edge)
+      if (island === undefined) continue // split away later in the replay
+      const key = island.toString()
+      if (seen.has(key)) continue
+      seen.add(key)
+      committed.push({ kind: 'sketch-island', id: island, sketch })
+    }
+  }
+  return committed
+}
+
 /** The ghost preview for one node — the shape all three transform tools share. */
 export function buildNodePreview(
   wasmScene: WasmScene,

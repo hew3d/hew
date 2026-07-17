@@ -62,8 +62,8 @@ pub use serialize::{
 };
 pub use sketch::{
     CurveGeom, EdgeRemoved, Profile, ProfileError, RegionOffsetAdded, SegmentAdded, Sketch,
-    SketchCurveId, SketchEdge, SketchEdgeId, SketchError, SketchIsland, SketchIslandId,
-    SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
+    SketchCurveId, SketchCurveRim, SketchEdge, SketchEdgeId, SketchError, SketchIsland,
+    SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
 };
 pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};

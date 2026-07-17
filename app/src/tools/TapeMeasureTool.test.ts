@@ -109,3 +109,87 @@ describe('TapeMeasureTool — parallel-guide mode entry', () => {
     expect(guidePoints.length).toBe(1)
   })
 })
+
+describe('TapeMeasureTool — parallel guides from axes and guide lines (playtest: guide off an axis)', () => {
+  it('an on-axis snap enters parallel mode and commits a guide parallel to the axis', () => {
+    const { scene, guideLines, guidePoints } = makeWasmScene()
+    const { tool, onGuideCreated } = makeTool(scene)
+
+    // The kernel resolves the axis ANALYTICALLY: the snap carries the
+    // on-line point and the axis direction, no element handle at all.
+    tool.onPointerDown(
+      makeSnap({ x: 2, y: 0, z: 0, kind: 'on-axis', direction: [1, 0, 0] }),
+      RAY,
+    )
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 0 }), RAY) // pull off the axis
+    tool.onPointerDown(makeSnap({ x: 2, y: 1, z: 0 }), RAY) // commit
+
+    expect(guideLines.length).toBe(1)
+    expect(guidePoints.length).toBe(0)
+    expect(onGuideCreated).toHaveBeenCalledTimes(1)
+    const [ox, oy, oz, dx, dy, dz] = guideLines[0]
+    expect([dx, dy, dz]).toEqual([1, 0, 0]) // parallel to the red axis
+    expect([ox, oy, oz]).toEqual([2, 1, 0]) // through the pulled-to point
+  })
+
+  it('a typed exact offset commits the axis-parallel guide at that distance', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(
+      makeSnap({ x: 0.05, y: 0, z: 0, kind: 'on-axis', direction: [1, 0, 0] }),
+      RAY,
+    )
+    tool.onPointerMove(makeSnap({ x: 0.05, y: 0.005, z: 0 }), RAY) // cm-scale pull
+    const key = (k: string) => ({ key: k, preventDefault: () => { /* no-op */ } }) as unknown as KeyboardEvent
+    for (const k of ['0', '.', '0', '2']) tool.onKey(key(k))
+    tool.onKey(key('Enter'))
+
+    expect(guideLines.length).toBe(1)
+    const [ox, oy, oz, dx, dy, dz] = guideLines[0]
+    expect([dx, dy, dz]).toEqual([1, 0, 0])
+    expect(ox).toBeCloseTo(0.05, 12)
+    expect(oy).toBeCloseTo(0.02, 12) // exactly 2 cm off the axis
+    expect(oz).toBeCloseTo(0, 12)
+  })
+
+  it('an on-guide snap sources a parallel guide from the existing guide line', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(
+      makeSnap({ x: 1, y: 2, z: 0, kind: 'on-guide', direction: [0, 1, 0] }),
+      RAY,
+    )
+    tool.onPointerMove(makeSnap({ x: 1.5, y: 2, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 0 }), RAY)
+
+    expect(guideLines.length).toBe(1)
+    const [ox, , , dx, dy, dz] = guideLines[0]
+    expect([dx, dy, dz]).toEqual([0, 1, 0])
+    expect(ox).toBeCloseTo(1.5, 12)
+  })
+
+  it('an on-axis snap WITHOUT a direction falls back to measure mode (no throw)', () => {
+    const { scene, guideLines, guidePoints } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 2, y: 0, z: 0, kind: 'on-axis' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 3, y: 1, z: 0, kind: 'ground' }), RAY)
+
+    expect(guideLines.length).toBe(0)
+    expect(guidePoints.length).toBe(1) // measure ended in empty space → point
+  })
+
+  it('the measure flow still drops a guide point in empty space', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onGuideCreated } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 1, z: 0, kind: 'ground' }), RAY)
+
+    expect(guidePoints).toEqual([[2, 1, 0]])
+    expect(onGuideCreated).toHaveBeenCalledTimes(1)
+  })
+})
