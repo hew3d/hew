@@ -39,6 +39,18 @@ const HARD_SNAP_KINDS = new Set([
   'on-axis',
 ])
 
+/**
+ * Minimum inward (negative) live-drag distance, in meters, that counts as a
+ * deliberate "push inward" when committing a typed push/pull. A real inward
+ * drag moves the cursor by many pixels — millimeters or more of world
+ * distance — so this sits far below any intentional pull yet far above the
+ * ~1e-15 m floating-point wobble a still cursor picks up from the camera
+ * projection. Its sole job is to stop that wobble from flipping the extrude
+ * direction when the user typed a distance without dragging (see
+ * `_commitFromTyped`).
+ */
+const MIN_INWARD_DRAG_M = 1e-9
+
 export type PushPullTarget =
   | { kind: 'region'; sketchHandle: bigint; regionHandle: bigint; normal: [number, number, number] }
   | { kind: 'face'; objectHandle: bigint; faceHandle: bigint; normal: [number, number, number] }
@@ -263,16 +275,39 @@ export class PushPullTool implements Tool {
 
   /**
    * Commit from the typed VCB buffer. `dist` is a signed distance in meters,
-   * already converted from the display unit. The sign matches the current
-   * drag direction (the last live-projected `distance` on the active stage),
-   * so typing a positive number continues pushing/pulling the way the cursor
-   * was already dragging; typing while dragging the opposite way flips it.
+   * already converted from the display unit — and `editLengthBuffer` keeps a
+   * leading `-` as a sign, so `dist` is negative exactly when the user typed
+   * one (e.g. `-0.5` → recess by 0.5).
+   *
+   * The typed value always supplies the MAGNITUDE. The DIRECTION follows a
+   * fixed precedence, most deliberate signal first:
+   *
+   *   1. An explicit typed sign wins outright. A negative `dist` is the user
+   *      spelling out "recess / push inward" — the single most deliberate
+   *      signal there is — so it beats both the live drag and the outward
+   *      default. Typing `-0.5` goes inward even mid-outward-drag.
+   *   2. Otherwise (an unsigned, positive magnitude) the direction comes from
+   *      the live drag, but only once the drag clears [`MIN_INWARD_DRAG_M`].
+   *      Below that threshold the drag supplies no direction: with no
+   *      meaningful drag — the user clicked a face or ground region and typed
+   *      an exact distance — the ray-projected `distance` is essentially zero,
+   *      and its raw sign can flip negative on nothing more than the ~1e-15 m
+   *      low-bit wobble of the camera projection matrix (which varies per page
+   *      load). So below the threshold we extrude OUTWARD along the face
+   *      normal — the unambiguous intent of "type a distance and commit".
+   *
+   * The four cases: `0.5`+no-drag → out; `-0.5`+no-drag → in (recess);
+   * `0.5`+inward-drag → in; `-0.5`+anything → in (explicit sign wins).
    */
   private _commitFromTyped(dist: number): void {
     if (this.stage.kind !== 'dragging') return
     const { target, distance } = this.stage
 
-    const sign = distance < 0 ? -1 : 1
+    // Inward when the user typed an explicit `-` (dist < 0), OR when a genuine
+    // inward drag cleared the noise threshold; outward otherwise. The explicit
+    // typed sign wins over the drag — a negative `dist` forces inward no matter
+    // which way the live drag was pointing.
+    const sign = dist < 0 || distance < -MIN_INWARD_DRAG_M ? -1 : 1
     const signed = Math.abs(dist) * sign
 
     this.stage = { kind: 'idle' }

@@ -48,6 +48,8 @@ Draw directly on a solid's face to split it into regions (see [Drawing](/learn/d
 - **Push inward** → a recess or pocket.
 - **Push all the way through** → a hole. When the cut passes fully through the solid, Hew removes the swept material entirely. If the cut severs the object into disconnected pieces, each piece becomes its own independent, solid Object.
 
+You can type the depth instead of dragging to choose the direction: a plain number grows the boss outward, and a leading minus (`-6mm`) cuts the recess inward.
+
 ![A bracket-shaped model with a rectangular notch cut from its upright](/docs/bracket-scene.png)
 
 ## Inside components
