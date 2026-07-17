@@ -47,7 +47,7 @@ use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError};
 use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
 use crate::sketch::{
-    Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
+    CurveGeom, Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
     SketchVertexId,
 };
 use crate::topo::{Object, WatertightState};
@@ -658,6 +658,11 @@ pub enum FollowMePath {
         face: FaceId,
     },
 }
+
+/// A resolved Follow Me path: the ordered polyline, whether it closes, and
+/// each walked segment's analytic [`CurveGeom`] attribution in the same
+/// order (the wrap segment last; empty when nothing is attributed).
+type ResolvedFollowMePath = (Vec<Point3>, bool, Vec<Option<CurveGeom>>);
 
 /// The entities a mutation touched, so the caller (the shim) can reconcile its
 /// own derived state (inference candidates, render caches) precisely.
@@ -2981,21 +2986,25 @@ impl Document {
             .region_scaffolding(region)
             .map_err(DocumentError::Sketch)?;
 
-        let (points, closed) = self.resolve_follow_me_path(path)?;
-        let object =
-            Object::from_follow_me(&profile, &points, closed).map_err(DocumentError::FollowMe)?;
+        let (points, closed, curves) = self.resolve_follow_me_path(path)?;
+        let object = Object::from_follow_me(&profile, &points, closed, &curves)
+            .map_err(DocumentError::FollowMe)?;
 
         // Everything that can fail has succeeded; commit.
         Ok(self.commit_region_object(sketch, &scaffolding, object))
     }
 
     /// Resolves a [`FollowMePath`] into the polyline
-    /// [`Object::from_follow_me`] consumes: ordered points plus whether the
-    /// path closes. Pure query; the source entities are untouched.
+    /// [`Object::from_follow_me`] consumes: ordered points, whether the
+    /// path closes, and each segment's analytic curve attribution (the
+    /// [`CurveGeom`] its sketch edge was drawn from — what lets the sweep
+    /// measure perpendicularity against the drawn curve rather than its
+    /// facet chords; empty for a face loop, whose rim edges carry no curve
+    /// claims). Pure query; the source entities are untouched.
     fn resolve_follow_me_path(
         &self,
         path: &FollowMePath,
-    ) -> Result<(Vec<Point3>, bool), DocumentError> {
+    ) -> Result<ResolvedFollowMePath, DocumentError> {
         match path {
             FollowMePath::SketchEdges { sketch, edges } => {
                 if self.hidden_sketches.contains(sketch) {
@@ -3019,7 +3028,7 @@ impl Document {
                     .get(*face)
                     .ok_or(DocumentError::UnknownFace)?;
                 let points: Vec<Point3> = rec.object.loop_positions(f.outer_loop).collect();
-                Ok((points, true))
+                Ok((points, true, Vec::new()))
             }
         }
     }
@@ -7076,15 +7085,16 @@ fn made_component_change(
 }
 
 /// Orders a set of sketch edges into one connected chain of positions — the
-/// path half of Follow Me's eligibility (docs/design/follow-me.md §2).
-/// Duplicate ids are collapsed. Deterministic: an open chain starts at the
-/// smaller of its two end vertex ids; a closed chain starts at its smallest
-/// member vertex id and steps first onto that vertex's smaller-id incident
-/// edge.
+/// path half of Follow Me's eligibility (docs/design/follow-me.md §2) —
+/// plus each walked segment's analytic [`CurveGeom`] attribution, in the
+/// same order (the wrap segment last for a closed chain). Duplicate ids are
+/// collapsed. Deterministic: an open chain starts at the smaller of its two
+/// end vertex ids; a closed chain starts at its smallest member vertex id
+/// and steps first onto that vertex's smaller-id incident edge.
 fn chain_sketch_edges(
     sketch: &Sketch,
     edges: &[SketchEdgeId],
-) -> Result<(Vec<Point3>, bool), FollowMeError> {
+) -> Result<ResolvedFollowMePath, FollowMeError> {
     let unique: BTreeSet<SketchEdgeId> = edges.iter().copied().collect();
     if unique.is_empty() {
         return Err(FollowMeError::EmptyPath);
@@ -7124,11 +7134,13 @@ fn chain_sketch_edges(
         ends[0]
     };
     let mut points: Vec<Point3> = vec![sketch.vertices()[start].position];
+    let mut curves: Vec<Option<CurveGeom>> = Vec::new();
     let mut visited: BTreeSet<SketchEdgeId> = BTreeSet::new();
     let mut at = start;
     while let Some(&next_edge) = incident[&at].iter().find(|e| !visited.contains(e)) {
         visited.insert(next_edge);
         let e = sketch.edges()[next_edge];
+        curves.push(e.curve.and_then(|cid| sketch.curve_geom(cid)));
         at = if e.from == at { e.to } else { e.from };
         if closed && at == start {
             break;
@@ -7138,7 +7150,7 @@ fn chain_sketch_edges(
     if visited.len() != unique.len() {
         return Err(FollowMeError::PathDisconnected);
     }
-    Ok((points, closed))
+    Ok((points, closed, curves))
 }
 
 /// Map a per-Object [`HistoryError`] onto a [`DocumentError`]. Empty-stack cases

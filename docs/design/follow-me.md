@@ -52,6 +52,32 @@ anywhere else (e.g. at a path corner, on a non-miter plane) is *not*
 identity — which is why the anchoring rules below refuse those
 configurations instead of nudging geometry to fit (rule 4).
 
+Two generalizations of that identity argument carry the curve-path
+anchoring in §2 (both used only for curve-attributed segments; the proofs
+are tolerance-free, the final transported-ring check below still verifies
+the landing):
+
+- **Tilted station 0 over a split segment.** When the seam splits one
+  segment in two collinear halves, station 0 need not be perpendicular to
+  that segment — ANY station-0 plane not parallel to it closes exactly.
+  Writing the loop as `C = T_back ∘ K ∘ T_fwd` (K the mitered chain
+  between the first and last interior stations, `T_fwd`/`T_back` the
+  transports leaving/re-entering station 0, both along the SAME split
+  segment direction d), the classic perpendicular-station identity gives
+  `K = (T'_back)⁻¹ ∘ (T'_fwd)⁻¹` for the perpendicular reference station;
+  substituting, `C` becomes a composition of three projections all along
+  d, from station 0 back to itself — the identity. This is what lets a
+  radial profile plane cross a circle's facet mid-run at up to half a
+  facet angle off the chord.
+- **Seam at a joint whose miter plane IS the profile plane.** A seam
+  placed exactly at a path vertex closes iff station 0 is that joint's
+  miter (bisector) plane — for two facets of the same drawn circle the
+  bisector is the analytic tangent at the vertex, so a radial profile
+  plane through a facet vertex is exactly the miter plane. This is the
+  natural lathe seam (the profile snapped to a drawn rim vertex). At a
+  *polyline* corner the bisector is perpendicular to neither segment, so
+  the profile-perpendicularity rule still refuses corners (unchanged).
+
 ## 2. Eligibility
 
 **Profile.** A closed region of a visible sketch (`SketchRegionId`),
@@ -78,14 +104,24 @@ The path's sketch (or the source solid) is never consumed or modified.
 **Anchoring.** The profile plane must be *perpendicular to the path where
 the sweep starts* — Hew does not re-orient the profile (SketchUp rotates
 it silently; we refuse instead, so the committed solid is always exactly
-where the drawn profile is):
+where the drawn profile is). What "perpendicular" is measured against
+depends on the segment: a plain segment is its own direction, but a
+segment carrying `CurveGeom` (a drawn circle/arc facet — path resolution
+carries the attribution per segment) is measured against the DRAWN curve,
+because a facet chord deviates from the true tangent by half a facet
+angle (7.5° at the 24-facet floor — orders beyond any tolerance), which
+made radially-placed profiles on drawn circles, i.e. lathes, structurally
+impossible under the chord rule:
 
 - **Open path:** the profile plane's normal must be parallel to the first
   segment's direction (within `tol::NORMAL_DIRECTION`) and the first path
   vertex must lie on the profile plane (within `tol::PLANE_DIST`). If the
   *last* vertex satisfies this instead, the path is traversed in reverse.
-- **Closed path:** the profile plane must be perpendicular to some
-  segment's direction and cross that segment strictly between its
+  For a curve-attributed end segment the normal is instead measured
+  against the analytic tangent at the end vertex (the chord's component
+  perpendicular to the radial there).
+- **Closed path, plain segment:** the profile plane must be perpendicular
+  to some segment's direction and cross that segment strictly between its
   endpoints (by more than `tol::POINT_MERGE` at each end). The path is
   rotated to start at that crossing, splitting the segment in two
   collinear halves whose shared station is the profile plane itself. A
@@ -93,6 +129,42 @@ where the drawn profile is):
   seam would have to sit on a non-miter plane, where the returning ring
   provably does not match the profile (see §1) — welding it would be
   silent repair.
+- **Closed path, curve-attributed segment:** the profile plane must be
+  *radial* to the segment's circle — its normal in the curve's plane
+  (within `tol::NORMAL_DIRECTION`) and the plane passing through the
+  circle's center (within `tol::PLANE_DIST`); that is precisely
+  "perpendicular to the drawn curve where it crosses it". The seam sits
+  either at a strict-interior chord crossing (the split-segment arm — the
+  station-0 plane tilts from the chord by up to half a facet angle, sound
+  by the tilted-station identity in §1) or exactly at a facet VERTEX
+  shared by two facets of the same curve (same center and radius within
+  `tol::POINT_MERGE`), where the tangent is the chord bisector and the
+  profile plane is the joint's own miter plane (§1) — the natural seam
+  for a profile snapped onto a drawn rim vertex. Snap-exact placement is
+  what makes these tolerances reachable by hand: the drawn circle's own
+  vertices, axis ("on axis") points, and axis-locked rotations produce
+  exactly radial planes; free-hand placement does not, and refuses.
+
+**Nearest-anchor selection.** A profile plane is generally perpendicular to
+the path at *more than one* place: a radial plane through a full circle
+crosses it at TWO antipodal points, a rectangle's profile plane crosses both
+of a parallel pair, and so on. All such crossings are gathered, then the seam
+is anchored at the one **nearest the profile** — the crossing point closest
+to the profile's outer-ring centroid — because the profile physically sits at
+its own seam. (Path vertices are numbered by sketch-vertex id, unrelated to
+where the profile was placed, so "the first perpendicular segment in path
+order" is the wrong side about half the time: the mitered transport then
+carries the ring from the far side and the advance check refuses a sound
+lathe as `PathTooTight`.) Equidistant candidates — a profile centered on the
+axis, which the advance check refuses anyway — break to the lowest path index,
+keeping the choice deterministic (§7). This is what makes "anywhere on the
+rim works" hold for the whole rim, both halves, not just the half the path
+happens to number first.
+
+Face-boundary paths carry no curve attribution (cap rims carry no
+`CurveGeom` claims — §4), so a face loop always uses the plain-segment
+rule; molding around a cylinder's lid keeps chord semantics (a scoped
+gap, §8).
 
 The profile may sit anywhere on its plane relative to the path (the ring
 is carried rigidly; a molding offset from its spine is legitimate).
@@ -182,8 +254,8 @@ is carried rigidly; a molding offset from its spine is legitimate).
 | `PathBranches` | A path vertex is incident to more than two selected edges. |
 | `PathDisconnected` | The selected edges form more than one chain. |
 | `PathSegmentTooShort` | Consecutive path points within `tol::POINT_MERGE`. |
-| `ProfileNotPerpendicular` | No path end (open) or segment (closed) is perpendicular to the profile plane — including a closed sweep whose transported ring fails to land back on the profile (the seam does not close). |
-| `PathDetachedFromProfile` | Perpendicularity holds but the path does not start on / cross the profile plane (incl. the closed-path corner case). |
+| `ProfileNotPerpendicular` | No path end (open) or segment (closed) is perpendicular to the profile plane — for curve-attributed segments, perpendicular to the DRAWN curve (a radial plane); includes a closed sweep whose transported ring fails to land back on the profile (the seam does not close). |
+| `PathDetachedFromProfile` | Perpendicularity holds but the path does not start on / cross the profile plane (incl. the closed-path polyline-corner case). |
 | `PathReverses` | Adjacent segments double back — exactly (no miter plane exists) or beyond `tol::FOLLOW_ME_MITER_LIMIT` (no usefully bounded miter exists). |
 | `PathTooTight` | A ring vertex fails the advance check (bend tighter than the profile; lathe profile touching the axis). |
 | `SweepSelfIntersects` | The built solid's faces improperly contact (global check). |
@@ -231,7 +303,23 @@ there. No per-Object `History` entry is involved (the op is object
   torsion behavior would need their own treatment.
 - Toroidal surface identity (no `SurfaceRef::Torus`); path-arc walls stay
   faceted.
+- Analytic-tangent anchoring on FACE-boundary paths: face rims carry no
+  `CurveGeom` (§4), so molding around a cylinder's lid measures
+  perpendicularity against the rim's chords. Deriving rim curve identity
+  from the adjacent wall's `SurfaceRef::Cylinder` would close this;
+  deferred until it bites.
 - Round/butt join styles; automatic weld of a lathe profile touching its
   axis (refused via `PathTooTight`).
 - Live drag-along-path preview (idiom b): the shipped interaction is
-  preselect path → activate Follow Me → click the profile region.
+  preselect path → activate Follow Me → click the profile region. In the
+  tool, one click on a sketch edge (or a single-edge preselection) picks
+  up the edge's whole connected island; at the profile stage a solid-face
+  click re-picks the PATH instead of committing (faces are never profiles
+  in this release, so the intent is unambiguous), but **only while the path
+  is a leftover preselection** — the stale-selection-from-placing-the-
+  profile case that would otherwise swallow the click silently. Once the
+  path was picked deliberately in the tool, a stray face graze is ignored
+  rather than silently swapping the swept face out from under the next
+  profile click; Esc steps back to re-pick. The tool tracks this provenance
+  (preselection vs in-tool) per path, and a recovered face becomes an
+  in-tool pick so a further graze cannot re-target it.

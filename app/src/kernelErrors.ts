@@ -97,7 +97,7 @@ const DESCRIPTIONS: Record<string, string> = {
   PathSegmentTooShort:
     'Part of the path is too short to follow. Redraw the path without tiny segments.',
   ProfileNotPerpendicular:
-    'The profile must sit square across the path where the sweep starts. Draw the profile on a surface perpendicular to the path.',
+    "The profile must sit square across the path where the sweep starts. Draw the profile on a surface perpendicular to the path — on a drawn circle, square to the rim, its surface in line with the circle's center.",
   PathDetachedFromProfile:
     "The path doesn't start on the profile's surface. Start the path at the profile — or, on a loop, cross the profile partway along a straight run, not at a corner.",
   PathReverses:

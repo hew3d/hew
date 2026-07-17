@@ -102,6 +102,39 @@ describe('FollowMeTool — path from preselection', () => {
     expect(tool.statusHint()).toContain('path') // reset after commit
   })
 
+  it('expands a single preselected edge to its whole connected island (the one-click promise)', () => {
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ regionPick, islandEdges: [1n, 2n] })
+    // A Select click on one line of an L yields exactly this selection.
+    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const { tool, onCommit } = makeTool(scene, selection)
+
+    expect(tool.statusHint()).toContain('Click the profile')
+    tool.onPointerDown(null, RAY)
+
+    const call = (scene.follow_me_along_edges as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[2]).toBe(9n)
+    // BOTH island edges swept, not just the selected one.
+    expect(Array.from(call[3] as BigUint64Array)).toEqual([1n, 2n])
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
+  it('honors an explicit multi-edge preselection as picked (deliberate partial path)', () => {
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ regionPick, islandEdges: [1n, 2n, 3n, 4n] })
+    const selection: NodeRef[] = [
+      { kind: 'sketch-edge', id: 1n, sketch: 9n },
+      { kind: 'sketch-edge', id: 2n, sketch: 9n },
+    ]
+    const { tool } = makeTool(scene, selection)
+
+    tool.onPointerDown(null, RAY)
+
+    const call = (scene.follow_me_along_edges as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(call[3] as BigUint64Array)).toEqual([1n, 2n])
+    expect(scene.sketch_edge_island).not.toHaveBeenCalled()
+  })
+
   it('ignores a preselection spanning two sketches (starts at pick-path)', () => {
     const scene = makeWasmScene()
     const selection: NodeRef[] = [
@@ -147,7 +180,79 @@ describe('FollowMeTool — in-tool path picking', () => {
     const scene = makeWasmScene()
     const { tool } = makeTool(scene)
     tool.onPointerDown(null, RAY)
-    expect(tool.statusHint()).toContain('path')
+    expect(tool.statusHint()).toContain('Click the path to follow')
+  })
+
+  it('a solid-face click at the profile stage RE-PICKS the path (stale-preselection recovery)', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    // The maintainer trap: an edge of the profile's own outline was left
+    // selected from placing it, so the tool silently starts at
+    // pick-profile with that edge as the path.
+    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const { tool, onCommit, onToast } = makeTool(scene, selection)
+    expect(tool.statusHint()).toContain('Click the profile')
+
+    // "Click the box's top face": no region there — before the fix a dead
+    // no-op; now the face becomes the path.
+    ;(scene.pick_sketch_region as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined)
+    tool.onPointerDown(null, RAY)
+    expect(tool.statusHint()).toContain('Click the profile')
+    expect(onToast).not.toHaveBeenCalled()
+
+    // The profile click now sweeps around the FACE, not the stale edges.
+    tool.onPointerDown(null, RAY)
+    expect(scene.follow_me_around_face).toHaveBeenCalledWith(20n, 21n, 30n, 31n)
+    expect(scene.follow_me_along_edges).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
+  it('a stray face click does NOT replace a path picked in-tool (no silent face substitution)', () => {
+    const edgePick = makeEdgePick(9n, 1n)
+    const facePick = makeFacePick(30n, 31n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ edgePick, facePick, regionPick, islandEdges: [1n, 2n] })
+    // No preselection: the user picks the path deliberately in the tool.
+    const { tool, onCommit, onToast } = makeTool(scene)
+    tool.onPointerDown(null, RAY) // step 2: pick the edge island as the path
+    expect(tool.statusHint()).toContain('Click the profile')
+    // The in-tool hint drops the "solid-face click follows that face" promise.
+    expect(tool.statusHint()).not.toContain('follows that face')
+
+    // A profile click that grazes an unrelated solid face: no region there,
+    // a face IS under the cursor — but the path was chosen deliberately, so
+    // the face must not hijack it. The face is never even consulted.
+    ;(scene.pick_sketch_region as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined)
+    tool.onPointerDown(null, RAY)
+    expect(scene.pick_face).not.toHaveBeenCalled()
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(onToast).not.toHaveBeenCalled()
+    expect(tool.statusHint()).toContain('Click the profile')
+
+    // The next, better-aimed profile click commits against the ORIGINAL
+    // edge path — never the grazed face.
+    tool.onPointerDown(null, RAY)
+    expect(scene.follow_me_around_face).not.toHaveBeenCalled()
+    const call = (scene.follow_me_along_edges as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(call[3] as BigUint64Array)).toEqual([1n, 2n])
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
+  it('a sketch-edge near-miss at the profile stage stays a no-op (an edge must not steal the path)', () => {
+    const edgePick = makeEdgePick(9n, 1n)
+    const scene = makeWasmScene({ edgePick, islandEdges: [1n, 2n] })
+    const { tool, onCommit } = makeTool(scene, [{ kind: 'sketch-edge', id: 7n, sketch: 9n }])
+    expect(tool.statusHint()).toContain('Click the profile')
+
+    // Region miss, no face, but an edge within the pick cone (a near-miss
+    // of a small profile's interior lands here constantly): nothing may
+    // happen — edges are never consulted at this stage, so the picked
+    // path survives for the next, better-aimed click.
+    tool.onPointerDown(null, RAY)
+    expect(scene.pick_sketch_edge).not.toHaveBeenCalled()
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(tool.statusHint()).toContain('Click the profile')
   })
 })
 

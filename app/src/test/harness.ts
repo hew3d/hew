@@ -448,6 +448,11 @@ export interface HewTestHarness {
    * sketch's lines actually stand (e.g. upright after a rotate). */
   getSketchLines(sketch: string): number[]
 
+  /** `sketch`'s islands (connected components) with their member edges, as
+   * decimal strings — the probe for asserting what one path click should
+   * pick up (Follow Me grabs the clicked edge's whole island). */
+  getSketchIslands(sketch: string): { island: string; edges: string[] }[]
+
   /**
    * Follow Me along sketch edges (docs/design/follow-me.md): sweeps the
    * closed profile `region` of `sketch` along the chain the `edges` of
@@ -1069,6 +1074,14 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         }
         return out
       }),
+
+    getSketchIslands: (sketch) =>
+      query((s) =>
+        Array.from(s.sketch_island_ids(BigInt(sketch)), (island) => ({
+          island: island.toString(),
+          edges: Array.from(s.sketch_island_edges(BigInt(sketch), island), (e) => e.toString()),
+        })),
+      ),
 
     followMeAlongEdges: (sketch, region, pathSketch, edges) =>
       act((s) =>

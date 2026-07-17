@@ -8,13 +8,15 @@ Follow Me sweeps a closed profile along a path and answers with a new watertight
 
 ## The gesture
 
-1. Select the path with the Select tool — a drawn line, curve, or any connected run of sketch edges.
+1. Select the path with the Select tool — a drawn line, curve, or any connected run of sketch edges. One click on one line is enough: Follow Me takes the whole connected run it belongs to.
 2. Activate Follow Me (tool rail, or search "sweep" in the palette).
 3. Click the profile — a closed sketch region sitting square across the path's end.
 
 The sweep commits immediately: the profile is carried along the path, turning each corner with a clean miter, and the result is an ordinary solid — watertight badge, push/pull on its flat ends, booleans, export, all as usual.
 
 You can also skip the preselection: activate Follow Me first, then click the path (clicking one line picks up the whole connected shape it belongs to), then click the profile. `Esc` steps back a stage.
+
+Whatever is selected when you activate the tool becomes the path — including a selection left over from placing the profile. If the wrong thing is highlighted, click the face you meant to follow (a face click at the profile step re-targets the path) or press `Esc` and pick the path again.
 
 ## Setting up the profile
 
@@ -26,13 +28,17 @@ The profile doesn't have to be centered on the path — a molding offset from it
 
 ## Closed paths
 
-A path that closes into a loop — a circle, a rectangle, any drawn ring — sweeps into a closed ring solid with no end caps: a frame, a gasket, a faceted torus. Sweep a profile around a drawn circle and you have a lathe: bottle rims, wheels, round handles.
+A path that closes into a loop — a circle, a rectangle, any drawn ring — sweeps into a closed ring solid with no end caps: a frame, a gasket, a torus. Sweep a profile around a drawn circle and you have a lathe: bottle rims, wheels, round handles.
 
-For a closed loop, place the profile across the *middle* of one of the loop's straight runs, not at a corner — a profile at a corner has no clean seam to close on, and Hew refuses rather than guess.
+For a loop of straight lines — a rectangle, any drawn ring of lines — place the profile across the *middle* of one of the runs, not at a corner: a profile at a corner has no clean seam to close on, and Hew refuses rather than guess.
+
+A drawn circle is measured as the true curve it is: stand the profile square across the rim, its face looking along the circle — in line with the circle's center. Let the snaps make that exact: draw the circle from its center out along a drawing axis, stand the profile upright with the rotation locked to that axis, and set it on the rim. Anywhere on the rim works, including the drawn points of the circle itself.
 
 ## Running around a face
 
 Instead of a drawn path, you can click a **face of a solid**: the sweep runs around that face's outer boundary — crown molding around a tabletop's edge, a lip around a lid. The result is a separate new solid; the original object is untouched. To make it one piece, union them; to carve it away instead (a chamfer or a groove), subtract it ([Combining solids](/learn/combining-solids/)).
+
+The profile stands square across the boundary: its face cuts one of the boundary's edges partway along the run — not at a corner, and not lying flat along the edge itself. Stand it up beside the solid, then Move it against the edge; the midpoint and edge snaps put it exactly on the rim.
 
 ## What Follow Me refuses
 

@@ -5844,6 +5844,54 @@ fn follow_me_around_a_face_loop_leaves_the_solid_untouched() {
     assert_eq!(loaded.state_hash(), doc.state_hash());
 }
 
+/// A drawn (curve-attributed) circle path accepts a RADIAL profile — the
+/// lathe (docs/design/follow-me.md §2): path resolution carries each
+/// edge's [`kernel::CurveGeom`] to the sweep, which measures
+/// perpendicularity against the drawn circle rather than its facet chords
+/// (a chord is half a facet angle off the true tangent, so lathes were
+/// structurally impossible without the attribution).
+#[test]
+fn follow_me_lathe_on_a_drawn_circle_path() {
+    let mut doc = Document::new();
+    let gs = doc.add_sketch(ground());
+    draw_circle_curve(&mut doc, gs, Point3::ORIGIN, 2.0, 24);
+
+    // Radial profile: a square on the y = 0 plane — its normal is the
+    // circle's analytic tangent at the (2, 0, 0) rim vertex, and the plane
+    // contains the circle's axis. Clear of the axis (no self-touch).
+    let ps =
+        doc.add_sketch(Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 1.0, 0.0)).unwrap());
+    {
+        let sk = doc.sketch_mut(ps).expect("live");
+        let p = [
+            Point3::new(1.7, 0.0, -0.25),
+            Point3::new(2.3, 0.0, -0.25),
+            Point3::new(2.3, 0.0, 0.25),
+            Point3::new(1.7, 0.0, 0.25),
+        ];
+        for k in 0..4 {
+            sk.add_segment(p[k], p[(k + 1) % 4])
+                .expect("profile segment");
+        }
+    }
+    let region = only_region(&doc, ps);
+    let edges: Vec<SketchEdgeId> = doc.sketch(gs).expect("live").edges().keys().collect();
+
+    let (id, _) = doc
+        .follow_me(
+            ps,
+            region,
+            &kernel::FollowMePath::SketchEdges { sketch: gs, edges },
+        )
+        .expect("radial profile sweeps around the drawn circle");
+    let ring = doc.object(id).expect("lathe ring is live");
+    assert_eq!(ring.watertight(), WatertightState::Watertight);
+    // Seam at the rim vertex the profile plane passes through: no split,
+    // 24 segments x 4 profile edges, genus 1.
+    assert_eq!(ring.faces().len(), 96);
+    assert!(doc.object_solid(id));
+}
+
 #[test]
 fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
     let mut doc = Document::new();

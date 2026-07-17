@@ -292,6 +292,7 @@ proptest! {
             &profile,
             &[Point3::ORIGIN, Point3::new(0.0, 0.0, d)],
             false,
+            &[],
         )
         .unwrap();
         swept.validate().unwrap();
@@ -317,7 +318,7 @@ proptest! {
             Point3::new(len1, 0.0, 0.0),
             Point3::new(len1, len2, 0.0),
         ];
-        let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+        let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
         solid.validate().unwrap();
         prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
         // 2 caps + 4 walls per segment.
@@ -348,7 +349,7 @@ fn follow_me_closed_rectangle_ring_is_genus_one() {
         Point3::new(2.0, 2.0, 0.0),
         Point3::new(-2.0, 2.0, 0.0),
     ];
-    let solid = Object::from_follow_me(&profile, &path, true).unwrap();
+    let solid = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
     solid.validate().unwrap();
     assert_eq!(solid.watertight(), WatertightState::Watertight);
     assert_eq!(solid.faces().len(), 20);
@@ -397,7 +398,7 @@ fn follow_me_lathe_loop_volume_follows_pappus() {
         vec![],
     )
     .unwrap();
-    let solid = Object::from_follow_me(&profile, &path, true).unwrap();
+    let solid = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
     solid.validate().unwrap();
     assert_eq!(solid.watertight(), WatertightState::Watertight);
     // 24 path vertices + the anchor split = 25 segments x 4 profile edges.
@@ -413,6 +414,296 @@ fn follow_me_lathe_loop_volume_follows_pappus() {
     );
 }
 
+// ---- analytic-tangent perpendicularity on drawn-curve paths (design §2) ----
+
+/// A drawn 24-facet circle PATH in the ground plane, as the tools produce
+/// one: uniform facets, a vertex on +X, every segment attributed with the
+/// exact [`kernel::CurveGeom`]. Returns the polyline and the per-segment
+/// attribution (wrap segment last).
+fn circle_path(radius: f64, n: usize) -> (Vec<Point3>, Vec<Option<kernel::CurveGeom>>) {
+    let geom = kernel::CurveGeom {
+        center: Point3::ORIGIN,
+        radius,
+    };
+    let pts = (0..n)
+        .map(|i| {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+        })
+        .collect();
+    (pts, vec![Some(geom); n])
+}
+
+/// A 0.6 x 0.5 rectangular lathe profile on the RADIAL plane at angle `phi`
+/// around the +Z axis: plane normal = the circle's analytic tangent at
+/// angle `phi`, profile centered at radial distance 2 (matching the Pappus
+/// spec's profile at phi = 0).
+fn radial_profile(phi: f64) -> Profile {
+    let radial = Vec3::new(phi.cos(), phi.sin(), 0.0);
+    let up = Vec3::new(0.0, 0.0, 1.0);
+    let corner = |u: f64, w: f64| Point3::ORIGIN + radial * (2.0 + u) + up * w;
+    Profile::new(
+        Plane::from_polygon(&[corner(-0.3, -0.25), corner(0.3, -0.25), corner(0.3, 0.25)]).unwrap(),
+        vec![
+            corner(-0.3, -0.25),
+            corner(0.3, -0.25),
+            corner(0.3, 0.25),
+            corner(-0.3, 0.25),
+        ],
+        vec![],
+    )
+    .unwrap()
+}
+
+/// The lathe that was structurally impossible under chord perpendicularity:
+/// on a curve-attributed circle path, a radially-placed profile (its plane
+/// containing the circle's axis — the only orientation perpendicular to the
+/// drawn curve) is accepted at ANY station: a facet vertex (the natural
+/// snap target — the seam is that joint's miter plane), the mid-facet
+/// crossing, and an arbitrary off-midpoint crossing. Every seam closes
+/// into a watertight genus-1 ring with an exact faceted-Pappus volume;
+/// the vertex-anchored ring is the smallest (its stations are the radial
+/// vertex planes) and the mid-facet ring the largest, bounding the
+/// arbitrary station between them.
+#[test]
+fn follow_me_lathe_accepts_radial_profiles_on_a_drawn_circle() {
+    let n = 24usize;
+    let step = std::f64::consts::TAU / n as f64;
+    let (path, curves) = circle_path(2.0, n);
+    let area = 0.6 * 0.5;
+    let x_bar = 2.0;
+
+    // Station 1: seam at a facet VERTEX (angle 0 — a quadrant point). No
+    // split: 24 segments x 4 walls. Faceted Pappus per oblique prism: each
+    // slab between consecutive RADIAL vertex planes displaces a point at
+    // radius x by the chord 2 x sin(step/2), inclined at step/2 to the
+    // base normal — volume = area * 24 * 2 sin(step/2) cos(step/2) * x_bar.
+    let at_vertex = Object::from_follow_me(&radial_profile(0.0), &path, true, &curves).unwrap();
+    at_vertex.validate().unwrap();
+    assert_eq!(at_vertex.watertight(), WatertightState::Watertight);
+    assert_eq!(at_vertex.faces().len(), 96);
+    assert_eq!(euler_poincare(&at_vertex), 0);
+    let vol_vertex = signed_volume(&at_vertex);
+    let expected_vertex = 48.0 * (step / 2.0).sin() * (step / 2.0).cos() * x_bar * area;
+    assert!(
+        (vol_vertex - expected_vertex).abs() <= VOLUME_TOL,
+        "vertex-seam volume {vol_vertex}, expected {expected_vertex}"
+    );
+
+    // Station 2: seam at a facet MIDPOINT (the plane crosses the chord at
+    // its center). Split: 25 segments. Pappus with the centroid's orbit at
+    // the APOTHEM — the same volume the unattributed Pappus spec pins.
+    let at_mid = Object::from_follow_me(&radial_profile(step / 2.0), &path, true, &curves).unwrap();
+    at_mid.validate().unwrap();
+    assert_eq!(at_mid.watertight(), WatertightState::Watertight);
+    assert_eq!(at_mid.faces().len(), 100);
+    assert_eq!(euler_poincare(&at_mid), 0);
+    let vol_mid = signed_volume(&at_mid);
+    let expected_mid = 48.0 * (step / 2.0).tan() * x_bar * area;
+    assert!(
+        (vol_mid - expected_mid).abs() <= VOLUME_TOL,
+        "mid-facet volume {vol_mid}, expected {expected_mid}"
+    );
+
+    // Station 3: an ARBITRARY angle, crossing a chord strictly inside and
+    // off-center. Same ring topology; volume strictly between the two
+    // exact stations above.
+    let at_odd = Object::from_follow_me(&radial_profile(0.3 * step), &path, true, &curves).unwrap();
+    at_odd.validate().unwrap();
+    assert_eq!(at_odd.watertight(), WatertightState::Watertight);
+    assert_eq!(at_odd.faces().len(), 100);
+    assert_eq!(euler_poincare(&at_odd), 0);
+    let vol_odd = signed_volume(&at_odd);
+    assert!(
+        vol_odd > vol_vertex - VOLUME_TOL && vol_odd < vol_mid + VOLUME_TOL,
+        "arbitrary-station volume {vol_odd} outside [{vol_vertex}, {vol_mid}]"
+    );
+}
+
+/// The antipodal trap that a first-in-path-order anchor search fell into. A
+/// radial profile plane through a full circle's center is perpendicular to
+/// the drawn curve at TWO antipodal crossings; the seam must be anchored at
+/// the one NEAREST the profile, not the first the path happens to number.
+/// Placed at angle PI, the profile's plane also passes through the vertex at
+/// angle 0 (path index 0) — the old search seamed there, carried the ring
+/// from the far side, and fired `PathTooTight`. The near-anchor rule seams
+/// at the angle-PI vertex (index 12) and the ring closes watertight, matching
+/// the angle-0 vertex seam exactly by symmetry.
+#[test]
+fn follow_me_lathe_anchors_at_the_near_crossing_not_the_antipode() {
+    let n = 24usize;
+    let step = std::f64::consts::TAU / n as f64;
+    let (path, curves) = circle_path(2.0, n);
+    let solid = Object::from_follow_me(&radial_profile(std::f64::consts::PI), &path, true, &curves)
+        .expect("a radial profile antipodal to path-index 0 must still sweep");
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(solid.faces().len(), 96); // vertex seam: 24 segments x 4 walls
+    assert_eq!(euler_poincare(&solid), 0);
+    let area = 0.6 * 0.5;
+    let x_bar = 2.0;
+    let expected = 48.0 * (step / 2.0).sin() * (step / 2.0).cos() * x_bar * area;
+    let volume = signed_volume(&solid);
+    assert!(
+        (volume - expected).abs() <= VOLUME_TOL,
+        "antipodal vertex-seam volume {volume}, expected {expected}"
+    );
+}
+
+/// Full lathe coverage: the identical radial profile must sweep at EVERY
+/// station around the drawn circle, both halves, not just the half whose
+/// crossings the path numbers first. Stepping the placement angle every half
+/// facet (48 stations), each build is watertight and genus-1, and its
+/// faceted-Pappus volume falls in the exact `[vertex-seam, mid-facet-seam]`
+/// band the single-station spec pins. Before the near-anchor fix the far
+/// half refused `PathTooTight`.
+#[test]
+fn follow_me_lathe_accepts_radial_profiles_all_the_way_around() {
+    let n = 24usize;
+    let step = std::f64::consts::TAU / n as f64;
+    let (path, curves) = circle_path(2.0, n);
+    let area = 0.6 * 0.5;
+    let x_bar = 2.0;
+    let vol_vertex = 48.0 * (step / 2.0).sin() * (step / 2.0).cos() * x_bar * area;
+    let vol_mid = 48.0 * (step / 2.0).tan() * x_bar * area;
+
+    for h in 0..(2 * n) {
+        let phi = h as f64 * step / 2.0;
+        let solid = Object::from_follow_me(&radial_profile(phi), &path, true, &curves)
+            .unwrap_or_else(|e| panic!("station h={h} (phi={phi}) refused: {e:?}"));
+        solid.validate().unwrap();
+        assert_eq!(
+            solid.watertight(),
+            WatertightState::Watertight,
+            "station h={h} (phi={phi}) not watertight"
+        );
+        assert_eq!(
+            euler_poincare(&solid),
+            0,
+            "station h={h} (phi={phi}) not genus-1"
+        );
+        let volume = signed_volume(&solid);
+        assert!(
+            volume > vol_vertex - VOLUME_TOL && volume < vol_mid + VOLUME_TOL,
+            "station h={h} (phi={phi}): volume {volume} outside [{vol_vertex}, {vol_mid}]"
+        );
+    }
+}
+
+proptest! {
+    /// The same guarantee over a random placement angle: a radial profile
+    /// anywhere on a drawn circle's rim sweeps to a watertight genus-1 ring.
+    #[test]
+    fn follow_me_lathe_accepts_any_radial_placement_angle(
+        phi in 0.0f64..std::f64::consts::TAU,
+    ) {
+        let n = 24usize;
+        let (path, curves) = circle_path(2.0, n);
+        let solid = Object::from_follow_me(&radial_profile(phi), &path, true, &curves)
+            .expect("a radial profile must sweep at every placement angle");
+        solid.validate().unwrap();
+        prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(euler_poincare(&solid), 0);
+    }
+}
+
+/// Attribution is the gate: the SAME 24-gon ring without curve attribution
+/// keeps the polyline semantics — a radial profile plane is perpendicular
+/// to no chord, and the sweep refuses rather than guessing.
+#[test]
+fn follow_me_unattributed_facet_ring_keeps_chord_perpendicularity() {
+    let (path, _) = circle_path(2.0, 24);
+    let err = Object::from_follow_me(&radial_profile(0.0), &path, true, &[]).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+}
+
+/// The analytic rule is exactly "radial plane": on an attributed circle a
+/// profile plane parallel to the path plane, or one offset off the
+/// circle's center, is perpendicular to the drawn curve nowhere and
+/// refuses typed.
+#[test]
+fn follow_me_attributed_circle_refuses_non_radial_planes() {
+    let (path, curves) = circle_path(2.0, 24);
+
+    // Parallel to the path plane (normal +z): never perpendicular.
+    let flat = Profile::new(
+        Plane::from_polygon(&[
+            Point3::new(1.0, 0.0, 1.0),
+            Point3::new(2.0, 0.0, 1.0),
+            Point3::new(2.0, 1.0, 1.0),
+        ])
+        .unwrap(),
+        vec![
+            Point3::new(1.0, 0.0, 1.0),
+            Point3::new(2.0, 0.0, 1.0),
+            Point3::new(2.0, 1.0, 1.0),
+            Point3::new(1.0, 1.0, 1.0),
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        Object::from_follow_me(&flat, &path, true, &curves).unwrap_err(),
+        kernel::FollowMeError::ProfileNotPerpendicular
+    );
+
+    // In the path plane's directions but OFF the center: a chord-crossing
+    // plane that is radial to no point of the drawn circle.
+    let offset = Profile::new(
+        Plane::from_polygon(&[
+            Point3::new(1.7, 0.05, -0.25),
+            Point3::new(2.3, 0.05, -0.25),
+            Point3::new(2.3, 0.05, 0.25),
+        ])
+        .unwrap(),
+        vec![
+            Point3::new(1.7, 0.05, -0.25),
+            Point3::new(2.3, 0.05, -0.25),
+            Point3::new(2.3, 0.05, 0.25),
+            Point3::new(1.7, 0.05, 0.25),
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        Object::from_follow_me(&offset, &path, true, &curves).unwrap_err(),
+        kernel::FollowMeError::ProfileNotPerpendicular
+    );
+}
+
+/// An OPEN attributed path measures its end the same way: the profile must
+/// sit perpendicular to the drawn curve's tangent at the end vertex, where
+/// the chord rule (half a facet angle off) refuses. The unattributed same
+/// setup keeps refusing — polyline semantics unchanged.
+#[test]
+fn follow_me_open_arc_end_uses_the_analytic_tangent() {
+    // A quarter arc from (2,0,0) to (0,2,0) about the origin, 6 uniform
+    // facets, attributed. Tangent at the (2,0,0) end is +y — the profile
+    // plane there is y = 0.
+    let n = 6usize;
+    let geom = kernel::CurveGeom {
+        center: Point3::ORIGIN,
+        radius: 2.0,
+    };
+    let path: Vec<Point3> = (0..=n)
+        .map(|i| {
+            let a = i as f64 / n as f64 * std::f64::consts::FRAC_PI_2;
+            Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)
+        })
+        .collect();
+    let curves = vec![Some(geom); n];
+    let profile = radial_profile(0.0);
+
+    let solid = Object::from_follow_me(&profile, &path, false, &curves).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    // 2 caps + 6 segments x 4 walls.
+    assert_eq!(solid.faces().len(), 26);
+
+    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+}
+
 #[test]
 fn follow_me_straight_sweep_of_a_circle_is_a_stamped_cylinder() {
     // The true-curves overlay (design docs/design/follow-me.md section 4):
@@ -420,7 +711,7 @@ fn follow_me_straight_sweep_of_a_circle_is_a_stamped_cylinder() {
     // wall says so.
     let profile = circle_profile_yz(0.0, 0.0, 0.5);
     let path = [Point3::ORIGIN, Point3::new(2.0, 0.0, 0.0)];
-    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
     solid.validate().unwrap();
     assert_eq!(solid.watertight(), WatertightState::Watertight);
     assert_eq!(solid.faces().len(), 26);
@@ -458,7 +749,7 @@ fn follow_me_collinear_joints_sweep_like_one_segment() {
         Point3::new(1.5, 0.0, 0.0),
         Point3::new(4.0, 0.0, 0.0),
     ];
-    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
     solid.validate().unwrap();
     assert_eq!(solid.watertight(), WatertightState::Watertight);
     assert_eq!(solid.faces().len(), 10, "2 caps + 2 segments x 4 walls");
@@ -470,7 +761,7 @@ fn follow_me_collinear_joints_sweep_like_one_segment() {
     );
 
     let circle = circle_profile_yz(0.0, 0.5, 0.3);
-    let tube = Object::from_follow_me(&circle, &path, false).unwrap();
+    let tube = Object::from_follow_me(&circle, &path, false, &[]).unwrap();
     tube.validate().unwrap();
     let expected_cyl = kernel::SurfaceRef::Cylinder {
         axis_point: Point3::new(0.0, 0.0, 0.5),
@@ -503,7 +794,7 @@ fn follow_me_bent_sweep_stamps_cylinders_per_segment() {
         Point3::new(2.0, 0.0, 0.0),
         Point3::new(2.0, 2.0, 0.0),
     ];
-    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
     solid.validate().unwrap();
     assert_eq!(solid.watertight(), WatertightState::Watertight);
     assert_eq!(solid.faces().len(), 50);
@@ -550,7 +841,7 @@ proptest! {
             };
             pts.push(last + step);
         }
-        let solid = Object::from_follow_me(&profile, &pts, false).unwrap();
+        let solid = Object::from_follow_me(&profile, &pts, false, &[]).unwrap();
         solid.validate().unwrap();
         prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
         prop_assert_eq!(solid.faces().len(), 2 + 4 * (pts.len() - 1));
@@ -566,7 +857,7 @@ fn follow_me_refuses_parallel_profile() {
     let profile = rect_profile(1.0, 1.0);
     let path = [Point3::ORIGIN, Point3::new(0.0, 5.0, 0.0)];
     // Path along +y, profile normal +z: not perpendicular to the plane.
-    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
     assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
 }
 
@@ -575,7 +866,7 @@ fn follow_me_refuses_detached_path() {
     // Perpendicular but starting off the profile plane.
     let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
     let path = [Point3::new(0.5, 0.0, 0.0), Point3::new(3.0, 0.0, 0.0)];
-    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
     assert_eq!(err, kernel::FollowMeError::PathDetachedFromProfile);
 }
 
@@ -587,7 +878,7 @@ fn follow_me_refuses_reversing_path() {
         Point3::new(2.0, 0.0, 0.0),
         Point3::new(0.5, 0.0, 0.0),
     ];
-    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
     assert_eq!(err, kernel::FollowMeError::PathReverses);
 }
 
@@ -610,8 +901,9 @@ fn follow_me_miter_limit_refuses_near_reversals_and_admits_ordinary_bends() {
     };
 
     for eps in [1e-3, 1e-4, 1e-5, 1e-6] {
-        let err = Object::from_follow_me(&profile, &bend_path(std::f64::consts::PI - eps), false)
-            .unwrap_err();
+        let err =
+            Object::from_follow_me(&profile, &bend_path(std::f64::consts::PI - eps), false, &[])
+                .unwrap_err();
         assert_eq!(
             err,
             kernel::FollowMeError::PathReverses,
@@ -620,7 +912,7 @@ fn follow_me_miter_limit_refuses_near_reversals_and_admits_ordinary_bends() {
     }
 
     for turn_deg in [45.0f64, 90.0, 150.0] {
-        let solid = Object::from_follow_me(&profile, &bend_path(turn_deg.to_radians()), false)
+        let solid = Object::from_follow_me(&profile, &bend_path(turn_deg.to_radians()), false, &[])
             .unwrap_or_else(|e| panic!("a {turn_deg} degree bend must sweep, got {e:?}"));
         solid.validate().unwrap();
         assert_eq!(solid.watertight(), WatertightState::Watertight);
@@ -663,7 +955,7 @@ fn follow_me_chained_sharp_joints_do_not_compound_the_miter() {
         let last = *pts.last().unwrap();
         pts.push(last + if i % 2 == 0 { d_a } else { d_b });
     }
-    let solid = Object::from_follow_me(&profile, &pts, false).unwrap();
+    let solid = Object::from_follow_me(&profile, &pts, false, &[]).unwrap();
     solid.validate().unwrap();
     assert_eq!(solid.watertight(), WatertightState::Watertight);
     assert_eq!(solid.faces().len(), 2 + 5 * 4);
@@ -698,7 +990,7 @@ fn follow_me_refuses_bend_tighter_than_profile() {
         Point3::new(0.4, 0.0, 0.0),
         Point3::new(0.4, 0.4, 0.0),
     ];
-    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
     assert_eq!(err, kernel::FollowMeError::PathTooTight);
 }
 
@@ -733,7 +1025,7 @@ fn follow_me_refuses_lathe_profile_touching_the_axis() {
         vec![],
     )
     .unwrap();
-    let err = Object::from_follow_me(&profile, &path, true).unwrap_err();
+    let err = Object::from_follow_me(&profile, &path, true, &[]).unwrap_err();
     assert_eq!(err, kernel::FollowMeError::PathTooTight);
 }
 
@@ -749,7 +1041,7 @@ fn follow_me_refuses_closed_seam_at_a_corner() {
         Point3::new(2.0, 2.0, 0.0),
         Point3::new(0.0, 2.0, 0.0),
     ];
-    let err = Object::from_follow_me(&profile, &path, true).unwrap_err();
+    let err = Object::from_follow_me(&profile, &path, true, &[]).unwrap_err();
     assert_eq!(err, kernel::FollowMeError::PathDetachedFromProfile);
 }
 
@@ -767,7 +1059,7 @@ fn follow_me_refuses_self_intersecting_sweep() {
         Point3::new(0.0, 1.0, 0.0),
         Point3::new(3.0, 1.0, 0.0),
     ];
-    let err = Object::from_follow_me(&profile, &path, false).unwrap_err();
+    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
     assert_eq!(err, kernel::FollowMeError::SweepSelfIntersects);
 }
 
@@ -775,11 +1067,11 @@ fn follow_me_refuses_self_intersecting_sweep() {
 fn follow_me_refuses_degenerate_paths() {
     let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
     assert_eq!(
-        Object::from_follow_me(&profile, &[], false).unwrap_err(),
+        Object::from_follow_me(&profile, &[], false, &[]).unwrap_err(),
         kernel::FollowMeError::EmptyPath
     );
     assert_eq!(
-        Object::from_follow_me(&profile, &[Point3::ORIGIN], false).unwrap_err(),
+        Object::from_follow_me(&profile, &[Point3::ORIGIN], false, &[]).unwrap_err(),
         kernel::FollowMeError::EmptyPath
     );
     assert_eq!(
@@ -790,6 +1082,7 @@ fn follow_me_refuses_degenerate_paths() {
                 Point3::new(tol::POINT_MERGE / 2.0, 0.0, 0.0)
             ],
             false,
+            &[],
         )
         .unwrap_err(),
         kernel::FollowMeError::PathSegmentTooShort
@@ -821,7 +1114,7 @@ fn follow_me_sweeps_holes_into_tunnels() {
         Point3::new(4.0, 0.0, 0.0),
         Point3::new(4.0, 4.0, 0.0),
     ];
-    let solid = Object::from_follow_me(&profile, &path, false).unwrap();
+    let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
     solid.validate().unwrap();
     assert_eq!(solid.watertight(), WatertightState::Watertight);
     // 2 annulus caps + 2 segments x (4 outer + 4 hole) walls.

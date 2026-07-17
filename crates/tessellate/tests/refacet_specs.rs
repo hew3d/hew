@@ -728,7 +728,7 @@ fn swept_tube(radius: f64, n: usize, path: &[Point3]) -> Object {
     let s = circle_sketch(Point3::new(0.0, 0.0, 0.0), radius, n);
     let region = s.regions().keys().next().unwrap();
     let profile = s.profile(region).unwrap();
-    Object::from_follow_me(&profile, path, false).unwrap()
+    Object::from_follow_me(&profile, path, false, &[]).unwrap()
 }
 
 #[test]
@@ -802,6 +802,7 @@ fn bent_sweep_walls_deliberately_export_at_stored_facets() {
             Point3::new(2.0, 2.0, 0.0),
         ],
         false,
+        &[],
     )
     .unwrap();
 
@@ -847,6 +848,7 @@ fn open_arc_sweep_rows_demote_rather_than_orphan_their_seam() {
             Point3::new(0.0, 0.0, 1.0),
         ],
         false,
+        &[],
     )
     .unwrap();
 

@@ -931,6 +931,27 @@ impl Object {
     /// (the path is rotated to start there, splitting the segment in two
     /// collinear halves). The profile is never re-oriented (rule 4).
     ///
+    /// `path_curves` carries the path's per-segment analytic attribution —
+    /// one entry per segment (`path.len() - 1` open, `path.len()` closed
+    /// with the wrap segment last), or empty for an unattributed path. For
+    /// a segment carrying a [`CurveGeom`](crate::sketch::CurveGeom),
+    /// perpendicularity is measured against the DRAWN curve, not the facet
+    /// chord: a chord deviates from the true tangent by half a facet angle
+    /// (7.5° at the 24-facet floor — orders beyond any tolerance), which
+    /// made radially-placed profiles on drawn circles (lathes)
+    /// structurally impossible. A closed path accepts a profile plane that
+    /// is *radial* to the crossed segment's circle (normal in the curve's
+    /// plane, passing through its center), either crossing a facet
+    /// mid-run — the station-0 plane then tilts from the chord by up to
+    /// half a facet angle, sound because the wrap halves stay collinear so
+    /// the seam transport still composes to the identity (design §1) — or
+    /// passing through a facet VERTEX shared by two facets of the same
+    /// curve, where the tangent is the chord bisector and the profile
+    /// plane is exactly that joint's miter plane (the natural lathe seam).
+    /// An open path measures its attributed end segment against the
+    /// analytic tangent at the end vertex. Unattributed segments keep the
+    /// chord rule unchanged.
+    ///
     /// True-curves overlay (design §4): a profile edge carrying a
     /// [`CurveGeom`](crate::sketch::CurveGeom) sweeps, along each segment, a
     /// wall lying exactly on a right circular cylinder (axis = the segment
@@ -955,6 +976,7 @@ impl Object {
         profile: &Profile,
         path: &[Point3],
         closed: bool,
+        path_curves: &[Option<crate::sketch::CurveGeom>],
     ) -> Result<Object, FollowMeError> {
         let plane = profile.plane();
         let n = plane.normal();
@@ -966,6 +988,13 @@ impl Object {
         // Consecutive path points must be distinct (including a closed
         // path's wrap-around pair).
         let raw_segs = if closed { path.len() } else { path.len() - 1 };
+        debug_assert!(
+            path_curves.is_empty() || path_curves.len() == raw_segs,
+            "path_curves must be empty or carry one entry per path segment"
+        );
+        let seg_curve = |k: usize| -> Option<crate::sketch::CurveGeom> {
+            path_curves.get(k).copied().flatten()
+        };
         for i in 0..raw_segs {
             if path[i].approx_eq(path[(i + 1) % path.len()], tol::POINT_MERGE) {
                 return Err(FollowMeError::PathSegmentTooShort);
@@ -980,7 +1009,43 @@ impl Object {
         // reversed if needed so the first segment leaves along +n.
         let pts: Vec<Point3> = if closed {
             let m = path.len();
-            let mut anchor: Option<(usize, Point3)> = None;
+            /// Where the seam sits on the rotated path.
+            enum Anchor {
+                /// Split segment `k` at this crossing point: the seam sits
+                /// mid-run and the two collinear halves share the profile
+                /// plane as their joint's station.
+                Split(usize, Point3),
+                /// Start at path vertex `k` — a facet vertex of a drawn
+                /// curve whose tangent (the chord bisector) is the profile
+                /// normal, so the profile plane IS that joint's miter
+                /// plane and the seam closes exactly (design §1).
+                Vertex(usize),
+            }
+            impl Anchor {
+                /// The path segment/vertex index this seam sits at — the
+                /// stable tiebreak when two candidates are equidistant.
+                fn index(&self) -> usize {
+                    match self {
+                        Anchor::Split(k, _) | Anchor::Vertex(k) => *k,
+                    }
+                }
+            }
+            // The profile's location on its own plane: the mean of its outer
+            // ring vertices. The seam is anchored at the crossing NEAREST
+            // this point (see the selection below), because the profile sits
+            // right at its own seam.
+            let profile_centroid = {
+                let outer = profile.outer();
+                let mut acc = Vec3::ZERO;
+                for p in outer {
+                    acc = acc + p.to_vec();
+                }
+                Point3::ORIGIN + acc / outer.len() as f64
+            };
+            // Every perpendicular/strictly-crossed candidate and its seam
+            // point, gathered in path order — the nearest to the profile is
+            // chosen after the scan, not the first one found.
+            let mut candidates: Vec<(Anchor, Point3)> = Vec::new();
             let mut any_perp = false;
             for k in 0..m {
                 let a = path[k];
@@ -988,12 +1053,66 @@ impl Object {
                 let dir = (b - a)
                     .normalized()
                     .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+                let sd_a = plane.signed_distance(a);
+                let sd_b = plane.signed_distance(b);
+                if let Some(g) = seg_curve(k) {
+                    // Curve-attributed facet (design §2): perpendicularity
+                    // is measured against the DRAWN curve, not this chord —
+                    // a chord deviates from the true tangent by half a
+                    // facet angle, which made radial profiles (lathes)
+                    // structurally impossible. The profile plane is
+                    // perpendicular to the circle somewhere iff it is
+                    // RADIAL: its normal lies in the curve's plane and it
+                    // passes through the center.
+                    let Ok(curve_normal) = dir.cross(a - g.center).normalized() else {
+                        continue; // degenerate attribution: chord through the center
+                    };
+                    if n.dot(curve_normal).abs() > tol::NORMAL_DIRECTION
+                        || plane.signed_distance(g.center).abs() > tol::PLANE_DIST
+                    {
+                        continue;
+                    }
+                    any_perp = true;
+                    if sd_a.abs() <= tol::POINT_MERGE {
+                        // The plane passes through this facet's start
+                        // vertex. When the incoming facet belongs to the
+                        // same curve, the vertex tangent is the chord
+                        // bisector — the joint's miter normal — and the
+                        // radial profile plane through the vertex is
+                        // exactly that miter plane: a seam that closes
+                        // identically. This is the natural lathe seam (the
+                        // profile snapped onto a drawn rim vertex).
+                        let prev = (k + m - 1) % m;
+                        let same_curve = seg_curve(prev).is_some_and(|gp| {
+                            gp.center.approx_eq(g.center, tol::POINT_MERGE)
+                                && (gp.radius - g.radius).abs() <= tol::POINT_MERGE
+                        });
+                        if same_curve {
+                            let d_prev = (a - path[prev])
+                                .normalized()
+                                .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+                            if let Ok(bisector) = (d_prev + dir).normalized()
+                                && n.dot(bisector).abs() >= 1.0 - tol::NORMAL_DIRECTION
+                            {
+                                candidates.push((Anchor::Vertex(k), a));
+                            }
+                        }
+                    } else if sd_b.abs() > tol::POINT_MERGE && sd_a * sd_b < 0.0 {
+                        // A radial plane crossing the facet mid-run: split
+                        // there. Station 0 tilts from the chord by up to
+                        // half a facet angle — sound, because the wrap
+                        // halves stay collinear so the seam transport
+                        // still composes to the identity (design §1).
+                        let t = sd_a / (sd_a - sd_b);
+                        let q = a + (b - a) * t;
+                        candidates.push((Anchor::Split(k, q), q));
+                    }
+                    continue;
+                }
                 if n.dot(dir).abs() < 1.0 - tol::NORMAL_DIRECTION {
                     continue;
                 }
                 any_perp = true;
-                let sd_a = plane.signed_distance(a);
-                let sd_b = plane.signed_distance(b);
                 // Strict interior crossing only: a profile plane through a
                 // path corner is refused — the seam would sit on a
                 // non-miter plane, where the returning ring provably does
@@ -1005,21 +1124,51 @@ impl Object {
                     continue;
                 }
                 let t = sd_a / (sd_a - sd_b);
-                anchor = Some((k, a + (b - a) * t));
-                break;
+                let q = a + (b - a) * t;
+                candidates.push((Anchor::Split(k, q), q));
             }
-            let Some((k, q)) = anchor else {
+            // Seam at the candidate NEAREST the profile. A radial profile
+            // plane through a full circle's center is perpendicular to the
+            // drawn curve at TWO antipodal crossings, and the path's vertex
+            // numbering (sketch-vertex-id order) is unrelated to where the
+            // profile was placed; anchoring at the first-in-path-order
+            // crossing therefore seams on the far side of the circle about
+            // half the time, whereupon the mitered transport carries the
+            // ring from the wrong side and the advance check spuriously
+            // refuses `PathTooTight`. Minimizing the distance from the seam
+            // point to the profile centroid puts the seam where the profile
+            // actually sits (design §2). Equidistant candidates (a profile
+            // centered on the axis — which the advance check refuses anyway)
+            // break to the lowest path index, keeping the choice
+            // deterministic (bit-for-bit reproducibility, §7).
+            let anchor = candidates
+                .into_iter()
+                .min_by(|(anchor_a, pt_a), (anchor_b, pt_b)| {
+                    let da = (*pt_a - profile_centroid).length_squared();
+                    let db = (*pt_b - profile_centroid).length_squared();
+                    da.partial_cmp(&db)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| anchor_a.index().cmp(&anchor_b.index()))
+                })
+                .map(|(anchor, _)| anchor);
+            let Some(anchor) = anchor else {
                 return Err(if any_perp {
                     FollowMeError::PathDetachedFromProfile
                 } else {
                     FollowMeError::ProfileNotPerpendicular
                 });
             };
-            let mut rotated = Vec::with_capacity(m + 1);
-            rotated.push(q);
-            for i in 1..=m {
-                rotated.push(path[(k + i) % m]);
-            }
+            let mut rotated = match anchor {
+                Anchor::Split(k, q) => {
+                    let mut r = Vec::with_capacity(m + 1);
+                    r.push(q);
+                    for i in 1..=m {
+                        r.push(path[(k + i) % m]);
+                    }
+                    r
+                }
+                Anchor::Vertex(k) => (0..m).map(|i| path[(k + i) % m]).collect(),
+            };
             if n.dot(rotated[1] - rotated[0]) < 0.0 {
                 let tail: Vec<Point3> = rotated[1..].iter().rev().copied().collect();
                 rotated.truncate(1);
@@ -1033,8 +1182,25 @@ impl Object {
             let last = (path[path.len() - 1] - path[path.len() - 2])
                 .normalized()
                 .map_err(|_| FollowMeError::PathSegmentTooShort)?;
-            let perp_first = n.dot(first).abs() >= 1.0 - tol::NORMAL_DIRECTION;
-            let perp_last = n.dot(last).abs() >= 1.0 - tol::NORMAL_DIRECTION;
+            // An attributed end segment measures perpendicularity against
+            // the drawn curve's tangent at the end vertex (the chord's
+            // component perpendicular to the radial there), the open-path
+            // analogue of the closed-path radial rule above; a plain
+            // segment keeps the chord test.
+            let end_perp = |end: Point3, chord: Vec3, g: Option<crate::sketch::CurveGeom>| {
+                let Some(g) = g else {
+                    return n.dot(chord).abs() >= 1.0 - tol::NORMAL_DIRECTION;
+                };
+                let Ok(radial) = (end - g.center).normalized() else {
+                    return false;
+                };
+                let Ok(tangent) = (chord - radial * chord.dot(radial)).normalized() else {
+                    return false;
+                };
+                n.dot(tangent).abs() >= 1.0 - tol::NORMAL_DIRECTION
+            };
+            let perp_first = end_perp(path[0], first, seg_curve(0));
+            let perp_last = end_perp(path[path.len() - 1], last, seg_curve(raw_segs - 1));
             let on_first = plane.signed_distance(path[0]).abs() <= tol::PLANE_DIST;
             let on_last = plane.signed_distance(path[path.len() - 1]).abs() <= tol::PLANE_DIST;
             if perp_first && on_first {
