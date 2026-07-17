@@ -1630,6 +1630,50 @@ impl Scene {
         Ok(())
     }
 
+    /// Copy a SET of islands of a free-standing sketch onto ONE NEW sketch
+    /// with the affine baked in, leaving the SOURCE untouched, and return the
+    /// new sketch's handle. This is Move+Alt's OUT-OF-PLANE sketch copy: an
+    /// in-plane copy replays into the source sketch (the UI's gesture-replay
+    /// path), but a sketch is planar, so islands copied off its plane land on
+    /// a sketch of their own — on the transformed plane. Passing every island
+    /// of the sketch copies it whole; passing a subset copies just those.
+    /// Keeping a sketch's islands together on one call is what preserves a
+    /// region's HOLES (a hole boundary is its own island). Curve chains keep
+    /// their analytic identity (a copied circle is a true circle,
+    /// center-snappable). See [`kernel::Document::copy_sketch_islands`].
+    ///
+    /// Undoable as a single step regardless of island count: `scene_undo`
+    /// hides the copy, `scene_redo` unhides it (the returned handle stays
+    /// valid across both). The new sketch's island/element handles are fresh;
+    /// re-query via `sketch_island_ids`, as after any reshaping mutation.
+    pub fn copy_sketch_islands(
+        &mut self,
+        sketch: u64,
+        islands: &[u64],
+        affine: &[f64],
+    ) -> Result<u64, ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let sid = sketch_id(sketch);
+        let iids: Vec<kernel::SketchIslandId> = islands
+            .iter()
+            .map(|&i| kernel::SketchIslandId::from(KeyData::from_ffi(i)))
+            .collect();
+        let (copy, change) = self
+            .doc
+            .copy_sketch_islands(sid, &iids, &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::CopySketchIslands {
+            sketch,
+            islands: islands.to_vec(),
+            affine: *rows,
+        });
+        Ok(copy.data().as_ffi())
+    }
+
     /// A sketch's plane as `[px,py,pz, nx,ny,nz]` — a point on the plane
     /// plus its unit normal, the same shape `face_plane` returns — or
     /// `undefined` for a stale or hidden handle. Read-only. Lets a caller
@@ -4131,6 +4175,13 @@ impl Scene {
                     } => {
                         self.transform_sketch_island(sketch, island, &affine)?;
                     }
+                    CopySketchIslands {
+                        sketch,
+                        islands,
+                        affine,
+                    } => {
+                        self.copy_sketch_islands(sketch, &islands, &affine)?;
+                    }
                     MoveSketchVertex { sketch, vertex, p } => {
                         self.move_sketch_vertex(sketch, vertex, p[0], p[1], p[2])?;
                     }
@@ -5968,6 +6019,53 @@ mod tests {
             4,
             "exactly the visible shape moved"
         );
+    }
+
+    /// Move+Alt's out-of-plane sketch copy across the FFI: copying a ground
+    /// island straight up Z lands a NEW sketch on the lifted plane, leaves
+    /// the source in place, and is ONE undo step that hides just the copy.
+    #[test]
+    fn copy_sketch_island_out_of_plane_lands_a_new_sketch_and_undoes() {
+        let mut scene = Scene::new();
+        let (s, _r) = ground_unit_square(&mut scene);
+        let islands = scene.sketch_island_ids(s);
+        assert_eq!(islands.len(), 1);
+
+        let up = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.1,
+        ];
+        let copy = scene.copy_sketch_islands(s, &islands, &up).unwrap();
+        assert_ne!(copy, s, "the copy is its own sketch");
+
+        // Both sketches are live; the source is unchanged on the ground.
+        let ids = scene.sketch_ids();
+        assert!(ids.contains(&s) && ids.contains(&copy));
+        assert_eq!(scene.sketch_island_edges(s, islands[0]).len(), 4);
+        let src_plane = scene.sketch_plane(s).unwrap();
+        assert!(
+            src_plane[2].abs() < 1e-9,
+            "source origin still on the ground"
+        );
+        let copy_plane = scene.sketch_plane(copy).unwrap();
+        assert!(
+            (copy_plane[2] - 0.1).abs() < 1e-9,
+            "copy plane lifted to z=0.1"
+        );
+
+        // ONE undo step removes only the copy; the source stays.
+        scene.scene_undo().unwrap();
+        let ids = scene.sketch_ids();
+        assert!(
+            ids.contains(&s) && !ids.contains(&copy),
+            "only the copy is gone"
+        );
+        assert_eq!(scene.sketch_island_edges(s, islands[0]).len(), 4);
+
+        // Redo brings the copy back with the same handle.
+        scene.scene_redo().unwrap();
+        assert!(scene.sketch_ids().contains(&copy));
     }
 
     /// Deleting the wall an extruded solid's base shared with a live square

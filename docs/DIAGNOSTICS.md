@@ -185,6 +185,7 @@ literal internal handles from the recording session.
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 | `transform_sketch` | `sketch`, `affine[12]` | bake an affine into a free-standing sketch |
 | `transform_sketch_island` | `sketch`, `island`, `affine[12]` | rigidly move one sketch island |
+| `copy_sketch_islands` | `sketch`, `islands[]`, `affine[12]` | copy a sketch's islands onto one new sketch off-plane (Move+Alt off the plane), one undo step |
 | `move_sketch_vertex` | `sketch`, `vertex`, `p[3]` | drag one sketch vertex |
 | `delete_sketch` | `sketch` | delete (hide) one free-standing sketch |
 | `duplicate_node` | `kind`, `id`, `affine[12]` | deep-clone a node at an offset (Move+Option copy) |

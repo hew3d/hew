@@ -774,18 +774,38 @@ impl Sketch {
     }
 
     /// A NEW sketch holding this sketch's `island` with `t` baked in, on
+    /// `plane`. The single-island case of [`Sketch::rebuild_islands_transformed`],
+    /// which the out-of-plane island detach
+    /// ([`Document::transform_sketch_island`]) uses: a sketch is planar, so an
+    /// island leaving the plane moves to a sketch of its own.
+    ///
+    /// [`Document::transform_sketch_island`]: crate::Document::transform_sketch_island
+    pub(crate) fn rebuild_island_transformed(
+        &self,
+        island: SketchIslandId,
+        t: &crate::Transform,
+        plane: Plane,
+    ) -> Result<Sketch, SketchError> {
+        self.rebuild_islands_transformed(&[island], t, plane)
+    }
+
+    /// A NEW sketch holding this sketch's `islands` with `t` baked in, on
     /// `plane` (the source plane mapped through `t`; the caller computes it
     /// because plane mapping errors are transform-typed, not sketch-typed).
-    /// This is the builder for the document layer's out-of-plane island
-    /// detach ([`Document::transform_sketch_island`]): a sketch is planar,
-    /// so an island leaving the plane moves to a sketch of its own. Pure —
-    /// `self` is untouched.
+    /// This is the builder for the document layer's out-of-plane sketch COPY
+    /// ([`Document::copy_sketch_islands`]) and, in its single-island form, the
+    /// island DETACH ([`Document::transform_sketch_island`]). Pure — `self` is
+    /// untouched.
     ///
-    /// The island's edges are replayed through the ordinary sticky machinery
-    /// on the fresh sketch, so regions and islands re-derive exactly as they
-    /// would for freshly drawn geometry (no hand-assembled topology). An
-    /// affine map preserves incidence and non-crossing, so a valid island
-    /// replays cleanly; anything the machinery still refuses (e.g. a
+    /// Every listed island's edges are replayed through the ordinary sticky
+    /// machinery ONTO ONE fresh sketch, so regions and islands re-derive
+    /// exactly as they would for freshly drawn geometry (no hand-assembled
+    /// topology). Keeping the whole set together is what preserves a region's
+    /// HOLES: a hole loop is a separate connected component (its own island),
+    /// so a donut's outer and inner boundaries must land on the SAME sketch or
+    /// the ring would re-derive as a plain solid and the hole would be lost.
+    /// An affine map preserves incidence and non-crossing, so a valid island
+    /// set replays cleanly; anything the machinery still refuses (e.g. a
     /// tolerance-collapsing scale merging vertices) surfaces as that
     /// machinery's typed error, never a silent weld.
     ///
@@ -795,25 +815,28 @@ impl Sketch {
     /// SOURCE plane is a similarity, and is dropped otherwise — the
     /// map-or-drop contract of [`Sketch::apply_transform`]. A chain split
     /// across islands by earlier partial deletion forks: the members inside
-    /// the island carry the mapped geometry into the new sketch (their
+    /// each island carry the mapped geometry into the new sketch (their
     /// facets still lie on the mapped circle), and the members left behind
     /// keep the source chain untouched.
     ///
     /// # Errors
-    /// [`SketchError::UnknownIsland`] for a stale island id; any typed
+    /// [`SketchError::UnknownIsland`] for any stale island id; any typed
     /// refusal of the replay ([`Sketch::add_segment`] /
     /// [`Sketch::begin_curve_with`]) propagates with nothing built.
     ///
     /// [`Document::transform_sketch_island`]: crate::Document::transform_sketch_island
-    pub(crate) fn rebuild_island_transformed(
+    /// [`Document::copy_sketch_islands`]: crate::Document::copy_sketch_islands
+    pub(crate) fn rebuild_islands_transformed(
         &self,
-        island: SketchIslandId,
+        islands: &[SketchIslandId],
         t: &crate::Transform,
         plane: Plane,
     ) -> Result<Sketch, SketchError> {
-        let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
         let scale = in_plane_similarity_scale(t, self.plane.normal());
         let mut fresh = Sketch::on_plane(plane);
+        // One shared chain-emitted set across every island: a curve chain is
+        // one connected component, so it lives in exactly one island, but the
+        // set also makes the loop robust to a duplicate island id in the list.
         let mut emitted: std::collections::BTreeSet<SketchCurveId> =
             std::collections::BTreeSet::new();
 
@@ -825,40 +848,43 @@ impl Sketch {
             )
         };
 
-        for &eid in &isl.edges {
-            match self.edges[eid].curve {
-                None => {
-                    let (a, b) = endpoints(eid);
-                    fresh.add_segment(a, b)?;
-                }
-                Some(cid) => {
-                    if !emitted.insert(cid) {
-                        continue; // this chain already replayed with its first edge
-                    }
-                    // One bracket per source chain, so the fresh edges are
-                    // one selectable unit again.
-                    match (self.curves.get(cid).copied().flatten(), scale) {
-                        (Some(g), Some(sc)) => {
-                            fresh.begin_curve_with(CurveGeom {
-                                center: t.apply_point(g.center),
-                                radius: g.radius * sc,
-                            })?;
-                        }
-                        _ => {
-                            fresh.begin_curve();
-                        }
-                    }
-                    // Deterministic member order: the island's stored edge
-                    // order, filtered to this chain.
-                    for &member in isl
-                        .edges
-                        .iter()
-                        .filter(|&&m| self.edges[m].curve == Some(cid))
-                    {
-                        let (a, b) = endpoints(member);
+        for &island in islands {
+            let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
+            for &eid in &isl.edges {
+                match self.edges[eid].curve {
+                    None => {
+                        let (a, b) = endpoints(eid);
                         fresh.add_segment(a, b)?;
                     }
-                    fresh.end_curve();
+                    Some(cid) => {
+                        if !emitted.insert(cid) {
+                            continue; // this chain already replayed with its first edge
+                        }
+                        // One bracket per source chain, so the fresh edges are
+                        // one selectable unit again.
+                        match (self.curves.get(cid).copied().flatten(), scale) {
+                            (Some(g), Some(sc)) => {
+                                fresh.begin_curve_with(CurveGeom {
+                                    center: t.apply_point(g.center),
+                                    radius: g.radius * sc,
+                                })?;
+                            }
+                            _ => {
+                                fresh.begin_curve();
+                            }
+                        }
+                        // Deterministic member order: the island's stored edge
+                        // order, filtered to this chain.
+                        for &member in isl
+                            .edges
+                            .iter()
+                            .filter(|&&m| self.edges[m].curve == Some(cid))
+                        {
+                            let (a, b) = endpoints(member);
+                            fresh.add_segment(a, b)?;
+                        }
+                        fresh.end_curve();
+                    }
                 }
             }
         }

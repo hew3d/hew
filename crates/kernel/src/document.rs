@@ -344,6 +344,16 @@ enum DocAction {
         detached: SketchId,
         removed: Vec<(Point3, Point3, Option<SketchCurveId>)>,
     },
+    /// An OUT-OF-PLANE sketch COPY (Move+Alt off the sketch plane) built a
+    /// NEW sketch holding one or more of the source's islands with the
+    /// transform baked in, leaving the SOURCE untouched — the detach's twin
+    /// without the source removal (see [`Document::copy_sketch_islands`]).
+    /// Undo hides the copy; redo unhides it. The copy's contents survive
+    /// hiding bit-exactly (hide-not-delete), so the `SketchId` is
+    /// handle-stable across undo/redo. Unlike
+    /// [`DocAction::DetachedSketchIsland`] there is no source outline to
+    /// restore: undo is a pure visibility flip that can never fail.
+    CopiedSketchIslands { copy: SketchId },
     /// A move/rotate/scale applied to a whole mixed selection in one step
     /// (`transform_selection`: select-all → Move). Baked into every world
     /// leaf object and listed sketch; composed into every leaf instance's
@@ -3828,6 +3838,81 @@ impl Document {
         })
     }
 
+    /// Copy a SET of islands of a free-standing sketch onto ONE NEW sketch
+    /// with `t` baked in, leaving the SOURCE untouched. This is the
+    /// out-of-plane arm of Move+Alt's sketch copy: an in-plane copy replays
+    /// into the source sketch (the UI's gesture-replay path), but a sketch is
+    /// planar, so islands copied off its plane land on a sketch of their own —
+    /// on the transformed plane. It is [`Document::detach_transformed_island`]
+    /// WITHOUT the source removal, generalized to many islands: the same
+    /// [`Sketch::rebuild_islands_transformed`] replay, so regions re-derive as
+    /// for freshly drawn geometry and curve chains keep their identity and
+    /// analytic [`CurveGeom`] (a copied circle is a true circle,
+    /// center-snappable).
+    ///
+    /// All of `islands` land on ONE sketch, which is what preserves a region's
+    /// HOLES: a hole boundary is a separate island, so copying a donut's outer
+    /// and inner loops must keep them together or the ring would re-derive as
+    /// a plain solid. A caller copying a WHOLE sketch passes every island; a
+    /// subset copies just those (dropping a hole then is the user's selection,
+    /// not silent repair). `t` need not be out-of-plane — the copy is
+    /// agnostic; the caller routes in-plane copies elsewhere.
+    ///
+    /// Recorded as [`DocAction::CopiedSketchIslands`]: undo hides the copy,
+    /// redo unhides it (its contents survive hiding bit-exactly, so the
+    /// returned `SketchId` stays valid across undo/redo). One call is ONE undo
+    /// step regardless of island count. Returns the new sketch id and a
+    /// [`DocChange`] whose `sketches_touched` is `[copy]`.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale or hidden source.
+    /// - [`DocumentError::Sketch`] — any stale island
+    ///   ([`SketchError::UnknownIsland`]), or a replay the sticky machinery
+    ///   refuses (e.g. a tolerance-collapsing scale).
+    /// - [`DocumentError::Transform`] — singular or orientation-flipping map.
+    ///
+    /// The copy is built completely before anything mutates, so every error
+    /// leaves the document untouched (strong guarantee).
+    pub fn copy_sketch_islands(
+        &mut self,
+        source: SketchId,
+        islands: &[SketchIslandId],
+        t: &Transform,
+    ) -> Result<(SketchId, DocChange), DocumentError> {
+        t.inverse().map_err(DocumentError::Transform)?;
+        if t.determinant() < 0.0 {
+            return Err(DocumentError::Transform(TransformError::Reflection));
+        }
+        if !self.sketches.contains_key(source) || self.hidden_sketches.contains(&source) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let src = &self.sketches[source];
+        let plane = t
+            .apply_plane(&src.plane())
+            .map_err(DocumentError::Transform)?;
+        let fresh = src
+            .rebuild_islands_transformed(islands, t, plane)
+            .map_err(DocumentError::Sketch)?;
+
+        // Nothing left can fail; commit. The source is not touched.
+        let copy = self.sketches.insert(fresh);
+        self.undo.push(DocAction::CopiedSketchIslands { copy });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok((
+            copy,
+            DocChange {
+                objects_touched: Vec::new(),
+                sketches_touched: vec![copy],
+                groups_touched: Vec::new(),
+                instances_touched: Vec::new(),
+                components_touched: Vec::new(),
+                guides_touched: Vec::new(),
+            },
+        ))
+    }
+
     /// Drags one vertex of a free-standing sketch to `new_pos` (Phase D
     /// per-vertex edit). Topology-preserving — see [`Sketch::move_vertex`]:
     /// the vertex moves and its incident edges stretch, but nothing splits,
@@ -5343,6 +5428,19 @@ impl Document {
             DocAction::DetachedSketchIsland { .. } => {
                 unreachable!("DetachedSketchIsland is handled before the match")
             }
+            &DocAction::CopiedSketchIslands { copy } => {
+                // Undo a copy: hide the new sketch (its contents survive
+                // hiding bit-exactly). The source was never touched.
+                self.hidden_sketches.insert(copy);
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![copy],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             &DocAction::ObjectOp { object } => {
                 let rec = &mut self.objects[object];
                 // The object-level History keeps its entry when a dispatch is
@@ -5976,6 +6074,19 @@ impl Document {
             }
             DocAction::DetachedSketchIsland { .. } => {
                 unreachable!("DetachedSketchIsland is handled before the match")
+            }
+            &DocAction::CopiedSketchIslands { copy } => {
+                // Redo a copy: unhide the new sketch again (its contents
+                // survived hiding bit-exactly). The source stays untouched.
+                self.hidden_sketches.remove(&copy);
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![copy],
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
             }
             &DocAction::ObjectOp { object } => {
                 let rec = &mut self.objects[object];

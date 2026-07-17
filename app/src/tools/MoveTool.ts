@@ -578,11 +578,14 @@ export class MoveTool implements Tool {
         // exactly it with one scene undo, and a single Cmd+Z after a
         // multi-copy removes every clone at once.
         //
-        // A failed sketch replay cancels its own gesture but leaves earlier
-        // sketches' copies committed — the finally block refreshes and
-        // reselects whatever landed, so the viewport never renders a scene
-        // that diverges from the kernel (the error still surfaces as a
-        // toast). The duplicate call itself is atomic (strong guarantee).
+        // `duplicateSketchSelection` is atomic: a refused replay retracts
+        // every gesture it had already recorded, so a throw from it means no
+        // sketch copy landed and there is nothing of its to reselect. The
+        // finally block covers the OTHER order — the sketch copies committed
+        // and `_duplicateArray` then threw (atomic in its own right,
+        // kernel-side) — where whatever did land still has to become the
+        // selection so the viewport never renders a scene that diverges from
+        // the kernel. Either way the error surfaces as a toast.
         const committed: NodeRef[] = []
         try {
           const sketchCopies = duplicateSketchSelection(this.wasmScene, nodes, [tx, ty, tz])

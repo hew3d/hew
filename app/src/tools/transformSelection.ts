@@ -24,6 +24,7 @@ import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import { nodeKindToNumber, collectLeafIds, nodeRefFromJs } from '../panels/treeModel'
+import { translationAffine, affineToFloat64 } from './transformMath'
 import {
   buildPreviewClone,
   buildMultiPreviewClone,
@@ -136,31 +137,77 @@ export function commitSelectionTransform(
 
 /**
  * Duplicate a selection's sketch geometry at an offset — Move+Alt's copy
- * path for sketches, which have no kernel duplicate op. The copy is a
- * REPLAY: each source island's edges are re-drawn into the SAME sketch
- * through the ordinary sticky machinery (`sketch_add_segment`), translated
- * by `delta`, inside one drawing gesture per sketch so a single undo
- * removes that sketch's whole copy. Curve chains replay inside a
- * `sketch_begin_curve_with` bracket carrying the translated analytic
- * definition, so a copied circle is a true circle (center snap and all) —
- * the same replay-with-identity approach as the kernel's own
- * `rebuild_island_transformed`, aimed at the source sketch instead of a
- * detach target.
+ * path for sketches, which have no single kernel duplicate op. The delta
+ * splits the work per target sketch, because a sketch is PLANAR:
+ *
+ * - **In-plane delta** (stays on the sketch plane) → REPLAY: each source
+ *   island's edges are re-drawn into the SAME sketch through the ordinary
+ *   sticky machinery (`sketch_add_segment`), translated by `delta`, inside
+ *   one drawing gesture per sketch so a single undo removes that sketch's
+ *   whole copy. Curve chains replay inside a `sketch_begin_curve_with`
+ *   bracket carrying the translated analytic definition, so a copied circle
+ *   is a true circle (center snap and all).
+ * - **Out-of-plane delta** (leaves the plane — e.g. a ground shape copied up
+ *   the Z axis) → NEW-SKETCH copy: a translated replay cannot leave the
+ *   plane (points would come off it edge by edge), so a source sketch's
+ *   planned islands are copied TOGETHER via `copy_sketch_islands` onto ONE
+ *   new sketch on the translated plane, leaving the source untouched. This
+ *   reuses the kernel's detach/rebuild machinery — the same
+ *   replay-with-identity a MOVE off the plane already takes, minus the
+ *   source removal — so the copy keeps curve identity too. Keeping a
+ *   sketch's islands together is what preserves a region's HOLES (a hole
+ *   boundary is its own island): copying a donut's outer and inner loops
+ *   onto separate sketches would silently drop the hole.
  *
  * Granularity mirrors `planSketchTransforms`: a selected edge/curve copies
  * the island it rides with; islands covering every island of their sketch
- * (or a whole-sketch selection) copy the whole sketch.
+ * (or a whole-sketch selection) copy the whole sketch. Each in-plane sketch
+ * is one undo step; each out-of-plane SOURCE SKETCH is one undo step
+ * (regardless of how many of its islands are copied). Islands on different
+ * source sketches each land on their own new sketch.
  *
- * `delta` must lie in each target sketch's plane — a translated replay
- * cannot leave it (points would come off the plane edge by edge). Checked
- * up front for every planned sketch, before anything mutates; an
- * out-of-plane copy throws with nothing committed. A failure mid-replay
- * cancels that sketch's gesture (snapshot restore), so no sketch is ever
- * left half-copied; earlier sketches' committed gestures stay, exactly like
- * the plain-move loop's semantics.
+ * FAILURE SEMANTICS — the call is atomic: on any throw the document is left
+ * exactly as it was found, including copies earlier iterations had already
+ * committed. Getting there takes real work for the in-plane replay, because
+ * a sketch replay cannot be rolled back by abandoning it. `sketch_add_segment`
+ * mutates the live sketch IMMEDIATELY (in the kernel each add is its own
+ * committed clone-validate-swap); the gesture bracket only groups those
+ * already-applied edits into one undo step at `sketch_end_gesture`.
+ * `sketch_cancel_gesture` is therefore NOT a rollback — it drops the pending
+ * undo record and LEAVES the mutations (kernel
+ * `Document::cancel_sketch_gesture`: "Any mutations made inside the abandoned
+ * bracket stay in the sketch but out of the undo log; cancel-before-mutate is
+ * the caller's contract"). Cancelling a replay that had already added an edge
+ * would strand a half-copy that Ctrl+Z cannot reach. So recovery runs in two
+ * steps:
  *
- * Returns the copies as `sketch-island` NodeRefs (post-gesture island ids,
- * merged islands deduped) so the caller can reselect them.
+ * 1. ALWAYS close the bracket with `sketch_end_gesture`, including when the
+ *    replay threw — the pattern every other sketch tool follows
+ *    (`runSketchGesture`, OffsetTool). It diffs against the pre-gesture
+ *    snapshot and records ONE undo step for whatever actually landed, or
+ *    nothing at all if the sketch is unchanged. That alone keeps any partial
+ *    within reach of a single Ctrl+Z.
+ * 2. Then RETRACT those steps, so a refused copy is invisible rather than
+ *    merely undoable. Each in-plane gesture's retracting `scene_undo` is
+ *    guarded by `history_generation`: the step is only counted when the
+ *    generation moved by exactly one across the bracket, which proves the
+ *    step is ours and sits on top of the stack. An unguarded undo after a
+ *    no-op gesture would pop an unrelated action instead — the
+ *    wrong-action-undo bug this repo has already fixed once.
+ *
+ * The out-of-plane arm needs no such dance: `copy_sketch_islands` is atomic
+ * kernel-side (it builds the new sketch fully before mutating and throws with
+ * nothing recorded), so a successful call is provably exactly one undo step
+ * on top of the stack and is counted directly.
+ *
+ * Atomicity is also what the caller assumes: MoveTool reselects only the
+ * copies it receives as a return value, so a throw has to mean nothing
+ * landed — anything else leaves unselected copies sitting in the document
+ * behind a toast saying the copy failed.
+ *
+ * Returns the copies as `sketch-island` NodeRefs (in-plane: post-gesture
+ * island ids on the source sketch, merged islands deduped; out-of-plane: the
+ * island(s) of each new copy sketch) so the caller can reselect them.
  */
 export function duplicateSketchSelection(
   wasmScene: WasmScene,
@@ -169,106 +216,165 @@ export function duplicateSketchSelection(
 ): NodeRef[] {
   const { sketches, islands } = planSketchTransforms(wasmScene, selection)
 
-  // Per-sketch edge sets to replay: whole sketches take every island.
-  const edgesBySketch = new Map<bigint, bigint[]>()
+  // Islands to copy, per sketch: whole-sketch selections take every island.
+  const islandsBySketch = new Map<bigint, bigint[]>()
   for (const sketch of sketches) {
-    const all: bigint[] = []
-    for (const island of wasmScene.sketch_island_ids(sketch)) {
-      all.push(...wasmScene.sketch_island_edges(sketch, island))
-    }
-    edgesBySketch.set(sketch, all)
+    islandsBySketch.set(sketch, [...wasmScene.sketch_island_ids(sketch)])
   }
   for (const { sketch, island } of islands) {
-    const list = edgesBySketch.get(sketch) ?? []
-    list.push(...wasmScene.sketch_island_edges(sketch, island))
-    edgesBySketch.set(sketch, list)
+    const list = islandsBySketch.get(sketch) ?? []
+    list.push(island)
+    islandsBySketch.set(sketch, list)
   }
 
-  // Validate every target plane BEFORE any mutation: the offset must keep
-  // the copy on its sketch plane (kernel PLANE_DIST is 1e-9 m).
-  for (const sketch of edgesBySketch.keys()) {
+  // Route each target sketch by whether `delta` leaves its plane (kernel
+  // PLANE_DIST is 1e-9 m): in-plane sketches replay into themselves; an
+  // out-of-plane delta detach-copies each sketch's islands onto ONE new
+  // sketch on the translated plane. The out-of-plane path keeps a source
+  // sketch's islands TOGETHER (one copy sketch per source, not per island):
+  // a region's hole boundary is its own island, so splitting a donut's outer
+  // and inner loops onto separate sketches would silently drop the hole.
+  const inPlaneEdges = new Map<bigint, bigint[]>()
+  const outOfPlaneBySketch = new Map<bigint, bigint[]>()
+  for (const [sketch, islandIds] of islandsBySketch) {
     const plane = wasmScene.sketch_plane(sketch)
-    if (plane === undefined) continue // stale — the replay loop will skip it
+    if (plane === undefined) continue // stale — skip like any pruned selection
     const off = delta[0] * plane[3] + delta[1] * plane[4] + delta[2] * plane[5]
     if (Math.abs(off) > 1e-9) {
-      throw new Error('PointOffPlane: a sketch copy must stay in its sketch plane')
+      outOfPlaneBySketch.set(sketch, islandIds)
+    } else {
+      const all: bigint[] = []
+      for (const island of islandIds) {
+        all.push(...wasmScene.sketch_island_edges(sketch, island))
+      }
+      inPlaneEdges.set(sketch, all)
     }
   }
 
   const committed: NodeRef[] = []
-  for (const [sketch, edges] of edgesBySketch) {
-    if (edges.length === 0) continue
-    // Snapshot geometry and curve grouping up front — the replay's sticky
-    // splits may invalidate source edge handles mid-loop otherwise.
-    interface Seg { a: [number, number, number]; b: [number, number, number] }
-    const plain: Seg[] = []
-    const curves = new Map<string, { geom: number[] | undefined; segs: Seg[] }>()
-    for (const edge of edges) {
-      const ends = wasmScene.sketch_edge_endpoints(sketch, edge)
-      if (ends === undefined) continue // stale handle — nothing to copy
-      const seg: Seg = {
-        a: [ends[0] + delta[0], ends[1] + delta[1], ends[2] + delta[2]],
-        b: [ends[3] + delta[0], ends[4] + delta[1], ends[5] + delta[2]],
-      }
-      const curve = wasmScene.sketch_edge_curve(sketch, edge)
-      if (curve === undefined) {
-        plain.push(seg)
-      } else {
-        const key = curve.toString()
-        const entry = curves.get(key) ?? {
-          geom: wasmScene.sketch_curve_geom(sketch, curve) as number[] | undefined,
-          segs: [],
+  // Undo steps this call has pushed, newest last — the retraction stack for a
+  // mid-copy failure. Only provably-ours steps are counted (see the guards).
+  let recorded = 0
+  try {
+    for (const [sketch, edges] of inPlaneEdges) {
+      if (edges.length === 0) continue
+      // Snapshot geometry and curve grouping up front — the replay's sticky
+      // splits may invalidate source edge handles mid-loop otherwise.
+      interface Seg { a: [number, number, number]; b: [number, number, number] }
+      const plain: Seg[] = []
+      const curves = new Map<string, { geom: number[] | undefined; segs: Seg[] }>()
+      for (const edge of edges) {
+        const ends = wasmScene.sketch_edge_endpoints(sketch, edge)
+        if (ends === undefined) continue // stale handle — nothing to copy
+        const seg: Seg = {
+          a: [ends[0] + delta[0], ends[1] + delta[1], ends[2] + delta[2]],
+          b: [ends[3] + delta[0], ends[4] + delta[1], ends[5] + delta[2]],
         }
-        entry.segs.push(seg)
-        curves.set(key, entry)
-      }
-    }
-    if (plain.length === 0 && curves.size === 0) continue
-
-    wasmScene.sketch_begin_gesture(sketch)
-    const newEdges: bigint[] = []
-    try {
-      const add = (s: Seg): void => {
-        const report = wasmScene.sketch_add_segment(
-          sketch, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2],
-        )
-        newEdges.push(...report.new_edges())
-        report.free()
-      }
-      for (const { geom, segs } of curves.values()) {
-        if (geom !== undefined) {
-          // Translation preserves the circle exactly: center shifts, radius
-          // stays — the copy is a true curve, not just facets.
-          wasmScene.sketch_begin_curve_with(
-            sketch,
-            geom[0] + delta[0],
-            geom[1] + delta[1],
-            geom[2] + delta[2],
-            geom[3],
-          )
+        const curve = wasmScene.sketch_edge_curve(sketch, edge)
+        if (curve === undefined) {
+          plain.push(seg)
         } else {
-          wasmScene.sketch_begin_curve(sketch) // identity-only chain
+          const key = curve.toString()
+          const entry = curves.get(key) ?? {
+            geom: wasmScene.sketch_curve_geom(sketch, curve) as number[] | undefined,
+            segs: [],
+          }
+          entry.segs.push(seg)
+          curves.set(key, entry)
         }
-        for (const s of segs) add(s)
-        wasmScene.sketch_end_curve(sketch)
       }
-      for (const s of plain) add(s)
-      wasmScene.sketch_end_gesture(sketch)
-    } catch (err) {
-      wasmScene.sketch_cancel_gesture() // snapshot restore — nothing landed
-      throw err
+      if (plain.length === 0 && curves.size === 0) continue
+
+      const genBefore = wasmScene.history_generation()
+      wasmScene.sketch_begin_gesture(sketch)
+      const newEdges: bigint[] = []
+      try {
+        const add = (s: Seg): void => {
+          const report = wasmScene.sketch_add_segment(
+            sketch, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2],
+          )
+          newEdges.push(...report.new_edges())
+          report.free()
+        }
+        for (const { geom, segs } of curves.values()) {
+          if (geom !== undefined) {
+            // Translation preserves the circle exactly: center shifts, radius
+            // stays — the copy is a true curve, not just facets.
+            wasmScene.sketch_begin_curve_with(
+              sketch,
+              geom[0] + delta[0],
+              geom[1] + delta[1],
+              geom[2] + delta[2],
+              geom[3],
+            )
+          } else {
+            wasmScene.sketch_begin_curve(sketch) // identity-only chain
+          }
+          for (const s of segs) add(s)
+          wasmScene.sketch_end_curve(sketch)
+        }
+        for (const s of plain) add(s)
+      } finally {
+        // ALWAYS close the bracket — never `sketch_cancel_gesture`. Every add
+        // above has already mutated the live sketch, and `sketch_end_gesture`
+        // is what turns whatever landed into ONE undo step (an unchanged
+        // sketch records nothing, so this is safe whether the replay finished,
+        // partially applied, or threw on its first call). Cancelling would
+        // drop the record and keep the geometry.
+        wasmScene.sketch_end_gesture(sketch)
+        // Exactly +1 proves this gesture recorded exactly one step AND that it
+        // is the stack top — nothing else in this loop pushes, every other
+        // call being a pure query. On any other delta ownership is unproven,
+        // so the step is left for Ctrl+Z rather than risk retracting
+        // someone else's.
+        if (wasmScene.history_generation() === genBefore + 1n) recorded += 1
+      }
+
+      // Map the replayed edges to their (possibly merged) islands.
+      const seen = new Set<string>()
+      for (const edge of newEdges) {
+        const island = wasmScene.sketch_edge_island(sketch, edge)
+        if (island === undefined) continue // split away later in the replay
+        const key = island.toString()
+        if (seen.has(key)) continue
+        seen.add(key)
+        committed.push({ kind: 'sketch-island', id: island, sketch })
+      }
     }
 
-    // Map the replayed edges to their (possibly merged) islands.
-    const seen = new Set<string>()
-    for (const edge of newEdges) {
-      const island = wasmScene.sketch_edge_island(sketch, edge)
-      if (island === undefined) continue // split away later in the replay
-      const key = island.toString()
-      if (seen.has(key)) continue
-      seen.add(key)
-      committed.push({ kind: 'sketch-island', id: island, sketch })
+    // Out-of-plane copies: each SOURCE sketch's islands land TOGETHER on one
+    // new sketch on the translated plane via the kernel's detach/rebuild
+    // machinery, source left untouched. All of a sketch's islands go in one
+    // call so regions (and their holes) re-derive correctly. Every call is
+    // atomic and, on success, exactly one undo step on top of the stack —
+    // counted directly (no gesture bracket to diff, no history-generation
+    // guard needed).
+    const affine = affineToFloat64(translationAffine(delta[0], delta[1], delta[2]))
+    for (const [sketch, islandIds] of outOfPlaneBySketch) {
+      if (islandIds.length === 0) continue
+      const copySketch = wasmScene.copy_sketch_islands(
+        sketch,
+        new BigUint64Array(islandIds),
+        affine,
+      )
+      recorded += 1
+      for (const copyIsland of wasmScene.sketch_island_ids(copySketch)) {
+        committed.push({ kind: 'sketch-island', id: copyIsland, sketch: copySketch })
+      }
     }
+  } catch (err) {
+    // Retract every step this call recorded, newest first: Move+Alt is ONE
+    // user action, so a refused copy puts the document back as it found it.
+    try {
+      for (let i = 0; i < recorded; i += 1) wasmScene.scene_undo().free()
+    } catch {
+      // A refused retraction would be a kernel bug (undo is never turned away
+      // by a heuristic — DEVELOPMENT.md rule 9). Falling back to "the partial
+      // stays, as one undo step per sketch" keeps the floor that matters: no
+      // geometry is ever stranded outside the undo log. The replay's own
+      // error is the one worth reporting, so it still propagates below.
+    }
+    throw err
   }
   return committed
 }

@@ -217,6 +217,15 @@ pub enum RecordedCall {
         island: u64,
         affine: [f64; 12],
     },
+    /// `copy_sketch_islands(sketch, islands, affine)` — additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): the returned copy
+    /// handle is deterministic (the next minted `SketchId`), so replay
+    /// re-derives it without recording it.
+    CopySketchIslands {
+        sketch: u64,
+        islands: Vec<u64>,
+        affine: [f64; 12],
+    },
     /// `move_sketch_vertex(sketch, vertex, p)`.
     MoveSketchVertex {
         sketch: u64,

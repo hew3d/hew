@@ -2735,6 +2735,208 @@ fn out_of_plane_rotation_keeps_curve_identity_and_follow_me_sweeps() {
     );
 }
 
+/// Copying ONE island of a sketch OFF its plane (Move+Alt up the Z axis)
+/// lands the copy on a NEW sketch on the translated plane while leaving the
+/// SOURCE exactly as it was — the detach's twin without the source removal.
+/// Undo hides the copy and restores nothing (the source was never touched);
+/// redo unhides the copy with its handle stable.
+#[test]
+fn copy_island_out_of_plane_lands_on_new_sketch_and_leaves_source() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    let island = doc
+        .sketch(s)
+        .expect("live")
+        .islands()
+        .keys()
+        .next()
+        .unwrap();
+
+    // Copy straight up the Z axis by 0.1 m — the maintainer's exact gesture.
+    let up = Transform::translation(Vec3::new(0.0, 0.0, 0.1));
+    let (copy, change) = doc
+        .copy_sketch_islands(s, &[island], &up)
+        .expect("out-of-plane copy builds a new sketch");
+    assert_eq!(change.sketches_touched, vec![copy]);
+    assert_ne!(copy, s, "the copy is its own sketch");
+
+    // Source untouched: same plane, same geometry, still on the ground.
+    let src = doc.sketch(s).expect("source lives");
+    assert_eq!(src.edges().len(), 4, "source keeps its rectangle");
+    assert_eq!(src.islands().len(), 1);
+    assert_eq!(src.regions().len(), 1);
+    assert!(src.plane().normal().z > 0.99, "source plane untouched");
+    for v in src.vertices().values() {
+        assert!(v.position.z.abs() < 1e-9, "source stays on the ground");
+    }
+
+    // Copy: same rectangle, lifted +0.1 in Z, on a parallel plane at z=0.1.
+    let cp = doc.sketch(copy).expect("copy lives");
+    assert_eq!(cp.edges().len(), 4);
+    assert_eq!(cp.islands().len(), 1);
+    assert_eq!(cp.regions().len(), 1, "the closed rect re-forms a region");
+    assert!(cp.plane().normal().z.abs() > 0.99, "copy plane still level");
+    for v in cp.vertices().values() {
+        assert!((v.position.z - 0.1).abs() < 1e-9, "copy lifted to z=0.1");
+    }
+
+    // Undo: the copy vanishes, the source is still exactly as drawn.
+    doc.undo().expect("undo the copy");
+    assert_eq!(
+        doc.sketch_ids(),
+        vec![s],
+        "copy hidden, only source visible"
+    );
+    let src = doc.sketch(s).expect("live");
+    assert_eq!(src.edges().len(), 4, "source unchanged by undo");
+    assert_eq!(src.regions().len(), 1);
+
+    // Redo: the copy is back with the same handle.
+    doc.redo().expect("redo the copy");
+    assert_eq!(doc.sketch_ids().len(), 2);
+    assert!(doc.sketch_ids().contains(&copy), "same copy handle");
+    assert_eq!(doc.sketch(copy).expect("live").edges().len(), 4);
+}
+
+/// A drawn circle copied off its plane keeps its analytic identity: the new
+/// sketch's chain carries the translated [`kernel::CurveGeom`] (center
+/// shifted by the delta, radius unchanged), so the copy is a true circle
+/// with a snappable center — not just facets.
+#[test]
+fn copy_island_out_of_plane_keeps_curve_identity() {
+    let n = 16;
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    let center = Point3::new(0.0, 0.0, 0.0);
+    draw_circle_curve(&mut doc, s, center, 0.5, n);
+    let island = doc
+        .sketch(s)
+        .expect("live")
+        .islands()
+        .keys()
+        .next()
+        .unwrap();
+
+    let up = Transform::translation(Vec3::new(0.0, 0.0, 0.1));
+    let (copy, _) = doc
+        .copy_sketch_islands(s, &[island], &up)
+        .expect("copy the circle upward");
+
+    let cp = doc.sketch(copy).expect("live");
+    let curve_ids: Vec<kernel::SketchCurveId> = cp
+        .edges()
+        .keys()
+        .filter_map(|e| cp.edge_curve(e))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(curve_ids.len(), 1, "one chain in the copy");
+    let geom = cp.curve_geom(curve_ids[0]).expect("analytic identity kept");
+    assert!((geom.radius - 0.5).abs() < 1e-9, "radius preserved");
+    assert!(
+        geom.center.approx_eq(Point3::new(0.0, 0.0, 0.1), 1e-9),
+        "center shifted by the delta"
+    );
+
+    // The source circle is still a true circle, unmoved.
+    let src = doc.sketch(s).expect("live");
+    let src_curve = src
+        .edges()
+        .keys()
+        .find_map(|e| src.edge_curve(e))
+        .expect("source chain intact");
+    let sg = src.curve_geom(src_curve).expect("source analytic kept");
+    assert!(sg.center.approx_eq(center, 1e-9), "source center unmoved");
+}
+
+/// [`Document::copy_sketch_islands`] keeps the strong exception guarantee: a
+/// reflection (determinant < 0) is refused typed with nothing created and
+/// the source untouched, and a stale island id likewise touches nothing.
+#[test]
+fn copy_island_refusal_leaves_document_untouched() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    let island = doc
+        .sketch(s)
+        .expect("live")
+        .islands()
+        .keys()
+        .next()
+        .unwrap();
+
+    // A reflection is refused; no sketch is minted.
+    let reflect = Transform::from_affine(&[
+        -1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.2, //
+    ]);
+    assert!(matches!(
+        doc.copy_sketch_islands(s, &[island], &reflect),
+        Err(DocumentError::Transform(TransformError::Reflection))
+    ));
+    assert_eq!(doc.sketch_ids(), vec![s], "no copy sketch created");
+
+    // A stale island id anywhere in the set is refused typed, touching nothing.
+    let bogus = kernel::SketchIslandId::default();
+    let up = Transform::translation(Vec3::new(0.0, 0.0, 0.1));
+    assert!(doc.copy_sketch_islands(s, &[island, bogus], &up).is_err());
+    assert_eq!(doc.sketch_ids(), vec![s], "a stale member mints nothing");
+    assert_eq!(doc.sketch(s).expect("live").edges().len(), 4);
+}
+
+/// A WHOLE-sketch out-of-plane copy of a region-WITH-HOLE keeps the hole:
+/// the ring's outer boundary and the hole boundary are separate islands, so
+/// they must land on ONE copy sketch (regression — copying island-by-island
+/// split them onto two sketches and the ring silently became a plain solid).
+/// One call, one undo step, source untouched.
+#[test]
+fn whole_sketch_copy_out_of_plane_preserves_a_region_hole() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    // A donut: 4x4 outer boundary and a 2x2 inner boundary. This yields a
+    // ring region (outer with one hole) plus the inner square region, across
+    // two separate islands.
+    draw_rect(&mut doc, s, 0.0, 0.0, 4.0, 4.0);
+    draw_rect(&mut doc, s, 1.0, 1.0, 3.0, 3.0);
+    let src = doc.sketch(s).expect("live");
+    assert_eq!(src.islands().len(), 2, "outer + inner are separate islands");
+    let source_has_hole = src.regions().values().any(|r| !r.holes.is_empty());
+    assert!(source_has_hole, "source ring carries the hole");
+    let all_islands: Vec<kernel::SketchIslandId> = src.islands().keys().collect();
+
+    // Copy the WHOLE sketch (every island) up the Z axis in ONE call.
+    let up = Transform::translation(Vec3::new(0.0, 0.0, 0.5));
+    let (copy, change) = doc
+        .copy_sketch_islands(s, &all_islands, &up)
+        .expect("whole-sketch out-of-plane copy");
+    assert_eq!(change.sketches_touched, vec![copy]);
+
+    // ONE copy sketch, and the ring's hole survived on it.
+    assert_eq!(
+        doc.sketch_ids().len(),
+        2,
+        "one copy sketch, not one-per-island"
+    );
+    let cp = doc.sketch(copy).expect("copy lives");
+    assert_eq!(cp.islands().len(), 2, "both boundaries on the copy");
+    assert!(
+        cp.regions().values().any(|r| !r.holes.is_empty()),
+        "the copied ring keeps its hole"
+    );
+    for v in cp.vertices().values() {
+        assert!((v.position.z - 0.5).abs() < 1e-9, "copy lifted to z=0.5");
+    }
+
+    // ONE undo removes the whole copy; the source is exactly as drawn.
+    doc.undo().expect("undo the copy");
+    assert_eq!(doc.sketch_ids(), vec![s]);
+    let src = doc.sketch(s).expect("live");
+    assert_eq!(src.islands().len(), 2);
+    assert!(src.regions().values().any(|r| !r.holes.is_empty()));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(24))]
 
@@ -4379,6 +4581,91 @@ fn unchanged_gesture_records_nothing() {
     assert!(
         doc.sketch(s).is_none(),
         "creation folded into the real gesture"
+    );
+}
+
+/// The gesture bracket is NOT a transaction, and the difference is what a UI
+/// caller replaying geometry into a sketch has to be written against.
+///
+/// [`Sketch::add_segment`] mutates the live sketch the moment it is called;
+/// the bracket only decides what the UNDO LOG gets when it closes. So the two
+/// ways to leave a bracket are not variations on a theme:
+///
+/// - [`Document::cancel_sketch_gesture`] is a cancel-BEFORE-mutate primitive.
+///   It drops the pending snapshot and LEAVES everything the bracket already
+///   added, with no undo entry — geometry stranded where undo cannot reach.
+/// - [`Document::end_sketch_gesture`] is the recovery: it diffs against the
+///   snapshot and records whatever actually landed as ONE undo step.
+///
+/// Pinned as executable spec because the prose contract alone was enough for
+/// a caller to cancel a half-applied replay and strand its geometry. The
+/// generation assertions are the premise of the UI's retraction guard (only
+/// retract a step you can prove is yours and on top).
+#[test]
+fn cancel_after_a_mutation_strands_it_while_end_records_it() {
+    let seg = |doc: &mut Document, s: kernel::SketchId| {
+        doc.sketch_mut(s)
+            .expect("sketch is live")
+            .add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0))
+            .expect("segment lands");
+    };
+
+    // CANCEL after an add: the segment stays live, and nothing can undo it.
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    let gen0 = doc.history_generation();
+    doc.begin_sketch_gesture(s).expect("begin");
+    seg(&mut doc, s);
+    assert!(doc.cancel_sketch_gesture(), "a gesture was open");
+    assert_eq!(
+        doc.sketch(s).expect("sketch is live").edges().len(),
+        1,
+        "cancel does NOT restore the snapshot — the add stays"
+    );
+    assert!(
+        !doc.can_undo(),
+        "and it is outside the undo log entirely: stranded geometry"
+    );
+    assert_eq!(
+        doc.history_generation(),
+        gen0,
+        "a cancelled gesture records nothing, so the generation cannot move"
+    );
+
+    // END after the same add: it becomes exactly one undo step, and one undo
+    // takes it back out.
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    let gen0 = doc.history_generation();
+    doc.begin_sketch_gesture(s).expect("begin");
+    seg(&mut doc, s);
+    doc.end_sketch_gesture(s).expect("end");
+    assert_eq!(
+        doc.history_generation(),
+        gen0 + 1,
+        "a recording gesture moves the generation by exactly one"
+    );
+    assert!(doc.can_undo(), "the partial is reachable from the undo log");
+    doc.undo().expect("undo the partial");
+    assert!(
+        doc.sketch(s).is_none(),
+        "one undo removes the whole partial (creation folded in)"
+    );
+
+    // A NO-OP gesture records nothing and must not move the generation — a
+    // caller guarding on it would otherwise retract an unrelated action.
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(s).expect("begin");
+    draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
+    doc.end_sketch_gesture(s).expect("end");
+    let gen1 = doc.history_generation();
+    doc.begin_sketch_gesture(s).expect("begin no-op");
+    doc.end_sketch_gesture(s).expect("end no-op");
+    assert_eq!(
+        doc.history_generation(),
+        gen1,
+        "an unchanged gesture is undo-invisible AND history-invisible"
     );
 }
 

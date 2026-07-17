@@ -83,10 +83,13 @@ below.
   typing `3x` (or `x3`) places 3 copies at the same spacing along the
   vector, `3/` (or `/3`) places 3 copies dividing the distance —
   re-enter a different count while the gesture is hot, one undo removes
-  the whole array. Sketch selections copy too (an in-plane replay through
-  the sticky rules that keeps curve identity — a copied circle is a true
-  circle); sketch copies stay single (no ×N array) until a kernel-side
-  sketch duplicate op exists
+  the whole array. Sketch selections copy too, keeping curve identity (a
+  copied circle is a true circle): an in-plane offset replays through the
+  sticky rules into the same sketch, while an out-of-plane offset (copying
+  a shape up off its plane) lands the copy on a new sketch on the
+  translated plane, source untouched — so a profile can be copied up rather
+  than moving the only one you have. Sketch copies stay single (no ×N
+  array) until a kernel-side sketch duplicate op exists
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know

@@ -394,6 +394,185 @@ test('Move+Alt on a drawn circle copies it 8 cm along X: two true circles, one u
   expect(nearest).toBeLessThan(1e-6)
 })
 
+test('Move+Alt copies a drawn circle UP the Z axis: a second sketch on the lifted plane, source stays, one undo', async ({
+  page,
+}) => {
+  const ctx = await setup(page)
+
+  // A 10 cm circle on the ground through the real Circle tool.
+  await page.keyboard.press('c')
+  await clickWorld(page, ctx, 1, 1, 0)
+  await page.mouse.move(px(ctx, 1.31, 1.4, 0).x, px(ctx, 1.31, 1.4, 0).y)
+  await page.keyboard.type('0.1')
+  await page.keyboard.press('Enter')
+
+  const sketch = (await page.evaluate(() => window.__hew_test!.getSketchIds()))[0]
+  const before = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  const ring = uniquePoints(before)
+  const center = mean(ring)
+
+  // Select the circle by clicking its rim.
+  await page.keyboard.press(' ')
+  const rim = ring[0]
+  await clickWorld(page, ctx, rim[0], rim[1], rim[2])
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+
+  // Move tool: base at the rim, tap Alt (durable copy), lock Z (ArrowUp),
+  // type an exact 50 cm height, Enter. Out-of-plane, so the copy detaches
+  // onto its OWN new sketch on the lifted plane — the source is untouched.
+  await page.keyboard.press('m')
+  await clickWorld(page, ctx, rim[0], rim[1], rim[2])
+  await page.keyboard.press('Alt')
+  await expect(page.getByText(/Copy ·/)).toBeVisible()
+  await page.keyboard.press('ArrowUp')
+  // Nudge the cursor toward the +Z projection so the typed height takes the
+  // upward sign (a downward drag would copy below the ground).
+  await page.mouse.move(px(ctx, rim[0], rim[1], 0.5).x, px(ctx, rim[0], rim[1], 0.5).y)
+  await page.keyboard.type('0.5')
+  await page.keyboard.press('Enter')
+
+  // A SECOND sketch appeared; the source sketch is unchanged (still on the
+  // ground, still exactly the drawn ring).
+  await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 2, null, {
+    timeout: 10_000,
+  })
+  const ids = await page.evaluate(() => window.__hew_test!.getSketchIds())
+  const copySketch = ids.find((id) => id !== sketch)!
+  const sourceAfter = uniquePoints(
+    await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch),
+  )
+  expect(sourceAfter).toHaveLength(ring.length)
+  expect(
+    sourceAfter.every((p) => ring.some((q) => Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 1e-7)),
+  ).toBe(true)
+
+  // The copy is the same circle lifted +50 cm: its own ring on the z=0.5
+  // plane, same radius around the lifted center.
+  const copyRing = uniquePoints(
+    await page.evaluate((s) => window.__hew_test!.getSketchLines(s), copySketch),
+  )
+  expect(copyRing.length).toBe(ring.length)
+  const copyCenter = mean(copyRing)
+  expect(copyCenter[2]).toBeCloseTo(0.5, 5) // it really lifted off the ground
+  for (const p of copyRing) {
+    expect(Math.hypot(p[0] - copyCenter[0], p[1] - copyCenter[1])).toBeCloseTo(0.1, 5)
+    expect(p[2]).toBeCloseTo(0.5, 5)
+  }
+
+  // ONE undo removes just the copy (the new sketch is gone); the source
+  // stays. Redo brings the copy back.
+  await page.keyboard.press('Control+z')
+  await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 1, null, {
+    timeout: 10_000,
+  })
+  const afterUndo = uniquePoints(
+    await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch),
+  )
+  expect(afterUndo).toHaveLength(ring.length) // source untouched by the undo
+  await page.keyboard.press('Control+Shift+Z')
+  await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 2, null, {
+    timeout: 10_000,
+  })
+
+  // The copy is a TRUE circle, not just facets: hover its lifted center and
+  // the Center inference cue must appear there (only analytic curve rims
+  // register a snappable center).
+  const cCenter: [number, number, number] = [center[0], center[1], 0.5]
+  const close: CameraParams = {
+    position: { x: cCenter[0] + 0.9, y: cCenter[1] - 1.3, z: cCenter[2] + 0.7 },
+    target: { x: cCenter[0], y: cCenter[1], z: cCenter[2] },
+    up: { x: 0, y: 0, z: 1 },
+    fovDeg: 45,
+    near: 0.1,
+    far: 1000,
+  }
+  const cctx = await pinCamera(page, close)
+  await page.keyboard.press('m')
+  const cpx = px(cctx, cCenter[0], cCenter[1], cCenter[2])
+  await hoverUntilCue(page, cpx, 'Center')
+})
+
+test('Move+Alt copies a donut (region + hole) up the Z axis onto ONE new sketch, both boundaries together', async ({
+  page,
+}) => {
+  await setup(page)
+  // Look straight down so the two nested rectangles are far apart in pixels:
+  // the inner rectangle's first corner must not snap to an outer corner.
+  const ctx = await pinCamera(page, {
+    position: { x: 0.8, y: 0.8, z: 6 },
+    target: { x: 0.8, y: 0.8, z: 0 },
+    up: { x: 0, y: 1, z: 0 },
+    fovDeg: 45,
+    near: 0.1,
+    far: 1000,
+  })
+
+  // A donut on the ground: an outer rectangle and, strictly inside it, an
+  // inner rectangle (a ring region with a hole, plus the inner square). The
+  // outer and inner boundaries are SEPARATE islands. The inner corner is off
+  // the outer's diagonal and axes so nothing snaps it to an outer feature.
+  await page.keyboard.press('r')
+  await clickWorld(page, ctx, 0, 0, 0)
+  await page.mouse.move(px(ctx, 1.4, 1.4, 0).x, px(ctx, 1.4, 1.4, 0).y)
+  await page.keyboard.type('1.6,1.6')
+  await page.keyboard.press('Enter')
+
+  await page.keyboard.press('r')
+  await clickWorld(page, ctx, 0.5, 0.7, 0)
+  await page.mouse.move(px(ctx, 1.0, 1.1, 0).x, px(ctx, 1.0, 1.1, 0).y)
+  await page.keyboard.type('0.6,0.5')
+  await page.keyboard.press('Enter')
+
+  const sketch = (await page.evaluate(() => window.__hew_test!.getSketchIds()))[0]
+  const source = uniquePoints(
+    await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch),
+  )
+  expect(source).toHaveLength(8) // 4 outer + 4 inner corners, one sketch
+
+  // Select the WHOLE sketch (both islands) and copy it up the Z axis.
+  await page.keyboard.press(' ')
+  await page.keyboard.press('Control+a')
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length >= 1)
+
+  await page.keyboard.press('m')
+  await clickWorld(page, ctx, 0, 0, 0)
+  await page.keyboard.press('Alt')
+  await expect(page.getByText(/Copy ·/)).toBeVisible()
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.type('0.5')
+  await page.keyboard.press('Enter')
+
+  // Exactly ONE new sketch — NOT one-per-island (the regression split the
+  // outer and inner boundaries onto two sketches, losing the ring's hole).
+  await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 2, null, {
+    timeout: 10_000,
+  })
+  const copySketch = (await page.evaluate(() => window.__hew_test!.getSketchIds())).find(
+    (id) => id !== sketch,
+  )!
+
+  // That one copy sketch carries BOTH boundaries (8 corners), all lifted to
+  // z=0.5 — the outer ring and its hole boundary land together, so the ring
+  // re-derives with its hole intact.
+  const copy = uniquePoints(
+    await page.evaluate((s) => window.__hew_test!.getSketchLines(s), copySketch),
+  )
+  expect(copy).toHaveLength(8)
+  for (const p of copy) expect(p[2]).toBeCloseTo(0.5, 5)
+  // The source is untouched on the ground.
+  const sourceAfter = uniquePoints(
+    await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch),
+  )
+  expect(sourceAfter).toHaveLength(8)
+  for (const p of sourceAfter) expect(p[2]).toBeCloseTo(0, 6)
+
+  // One undo removes the whole copy (one step for the whole sketch).
+  await page.keyboard.press('Control+z')
+  await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 1, null, {
+    timeout: 10_000,
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Finding 3 — Tape Measure drags a parallel guide off a world axis
 // ---------------------------------------------------------------------------
