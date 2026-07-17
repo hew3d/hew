@@ -34,10 +34,10 @@ A quick refresher:
 
 **Array copy:** right after a copy commits, type a multiplier and press `Enter`:
 
-- `x3` (or `*3`) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `x5`, and five copies march off at 2 m intervals.
-- `/3` makes **3 copies dividing the distance** — place the last fence post first, then `/3` fills the run with evenly spaced posts between.
+- `3x` (or `x3`, or `*3` — either order works) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `5x`, and five copies march off at 2 m intervals.
+- `3/` (or `/3`) makes **3 copies dividing the distance** — place the last fence post first, then `3/` fills the run with evenly spaced posts between.
 
-The gesture stays live until you start something else, so if `x5` turns out wrong, just type `x8` or `/4` and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates.
+The gesture stays live until you start something else, so if `5x` turns out wrong, just type `8x` or `4/` and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates.
 
 ## Rotate (`Q`)
 

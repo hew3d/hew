@@ -46,9 +46,19 @@ function squareBoundary(z: number): Float32Array {
   return new Float32Array([0, 0, z, 2, 0, z, 2, 2, z, 0, 2, z])
 }
 
+function makeEdgePick(sketch: bigint, edge: bigint) {
+  return {
+    sketch: () => sketch,
+    edge: () => edge,
+    free: vi.fn(),
+  }
+}
+
 function makeWasmScene(opts: {
   facePick?: ReturnType<typeof makeFacePick>
   regionPick?: ReturnType<typeof makeRegionPick>
+  edgePick?: ReturnType<typeof makeEdgePick>
+  edgeEndpoints?: Float64Array
 } = {}): WasmScene {
   const offsetReport = {
     new_edges: () => new BigUint64Array([]),
@@ -60,6 +70,9 @@ function makeWasmScene(opts: {
   return {
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
+    pick_sketch_edge: vi.fn(() => opts.edgePick),
+    sketch_edge_endpoints: vi.fn(() => opts.edgeEndpoints),
+    sketch_regions: vi.fn(() => BigUint64Array.from([7n])),
     face_boundary: vi.fn(() => squareBoundary(1)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
     region_boundary: vi.fn(() => squareBoundary(0)),
@@ -184,6 +197,91 @@ describe('OffsetTool — Path B (sketch region)', () => {
     tool.onPointerDown(null, rayAt(1, 1))
 
     expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(false)
+  })
+})
+
+describe('OffsetTool — Path B, click ON a boundary edge (edge fallback)', () => {
+  // The maintainer's repro: F, click a 5 cm square's edge — nothing. The
+  // region pick is interior-only, so a click landing on the visible edge
+  // line (which is exactly where Offset invites you to click) always
+  // missed. The fallback resolves the picked edge to the region whose
+  // outer boundary contains it — one click on an edge OR the interior
+  // must pick the region.
+  it('one click on a region edge starts the drag on that region', () => {
+    const scene = makeWasmScene({
+      edgePick: makeEdgePick(9n, 33n),
+      // The bottom edge of squareBoundary(0).
+      edgeEndpoints: new Float64Array([0, 0, 0, 2, 0, 0]),
+    })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(null, rayAt(1, 0)) // ON the edge — region pick misses
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    tool.onPointerDown(null, rayAt(1, 0.5))
+
+    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
+    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(9n)
+    expect(call[1]).toBe(7n)
+    expect(call[2]).toBeCloseTo(-0.5)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('reversed endpoint order still resolves the owning region', () => {
+    const scene = makeWasmScene({
+      edgePick: makeEdgePick(9n, 33n),
+      edgeEndpoints: new Float64Array([2, 0, 0, 0, 0, 0]),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(1, 0))
+    expect(tool.capturingInput()).toBe(true)
+  })
+
+  it('the wrap-around boundary segment (last vertex back to first) matches too', () => {
+    const scene = makeWasmScene({
+      edgePick: makeEdgePick(9n, 34n),
+      // squareBoundary(0) closes (0,2) -> (0,0).
+      edgeEndpoints: new Float64Array([0, 2, 0, 0, 0, 0]),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(0, 1))
+    expect(tool.capturingInput()).toBe(true)
+  })
+
+  it('an edge on no region boundary leaves the tool idle', () => {
+    const scene = makeWasmScene({
+      edgePick: makeEdgePick(9n, 35n),
+      edgeEndpoints: new Float64Array([5, 5, 0, 6, 5, 0]), // a stray line
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(5.5, 5))
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.sketch_offset_region).not.toHaveBeenCalled()
+  })
+
+  it('a stale edge (endpoints gone) leaves the tool idle instead of throwing', () => {
+    const scene = makeWasmScene({
+      edgePick: makeEdgePick(9n, 36n),
+      edgeEndpoints: undefined,
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(1, 0))
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('stays out of editing contexts (region offset is a top-level act)', () => {
+    const scene = makeWasmScene({
+      edgePick: makeEdgePick(9n, 33n),
+      edgeEndpoints: new Float64Array([0, 0, 0, 2, 0, 0]),
+    })
+    const { tool } = makeTool(scene)
+    tool.setActiveContext(1n)
+    tool.onPointerDown(null, rayAt(1, 0))
+    expect(scene.pick_sketch_edge).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
   })
 })

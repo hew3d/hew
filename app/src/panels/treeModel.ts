@@ -462,3 +462,78 @@ export function nextSelection(
   const exists = current.some((n) => nodeEq(n, node))
   return exists ? current.filter((n) => !nodeEq(n, node)) : [...current, node]
 }
+
+/** The slice of the wasm `Scene` that `pruneDeadSelection` reads. Sub-entity
+ * probes follow the kernel's own contracts: `sketch_edge_endpoints` returns
+ * undefined for a stale edge, while the curve/island queries throw typed
+ * errors — the prune treats a throw as "dead". */
+export interface SelectionLivenessView {
+  object_ids(): ArrayLike<bigint>
+  group_ids(): ArrayLike<bigint>
+  instance_ids(): ArrayLike<bigint>
+  sketch_ids(): ArrayLike<bigint>
+  sketch_edge_endpoints(sketch: bigint, edge: bigint): Float64Array | undefined
+  sketch_curve_chain(sketch: bigint, edge: bigint): ArrayLike<bigint>
+  sketch_island_edges(sketch: bigint, island: bigint): ArrayLike<bigint>
+}
+
+/**
+ * Drop selection entries whose nodes the document no longer holds — the
+ * reconcile that keeps the APP selection honest after any mutation that can
+ * kill nodes (undo/redo above all, but also deletes, booleans consuming
+ * their operands, extrusions consuming sketches…). Object Info and the
+ * contextual dock render from this selection, so a stale entry shows a
+ * phantom "N selected" and arms tools with dead handles.
+ *
+ * Handles are generational (DEVELOPMENT.md): a dead handle can never alias
+ * a live node, so membership tests against the live id lists are exact.
+ * Returns the ORIGINAL array when every entry is alive, so a state setter
+ * can hand the result straight back without a render churn.
+ */
+export function pruneDeadSelection(
+  scene: SelectionLivenessView,
+  selected: NodeRef[],
+): NodeRef[] {
+  if (selected.length === 0) return selected
+
+  // Lazily built: most selections are structural nodes only.
+  let objects: Set<bigint> | null = null
+  let groups: Set<bigint> | null = null
+  let instances: Set<bigint> | null = null
+  let sketches: Set<bigint> | null = null
+  const sketchSet = (): Set<bigint> =>
+    (sketches ??= new Set(Array.from(scene.sketch_ids())))
+
+  const alive = (n: NodeRef): boolean => {
+    switch (n.kind) {
+      case 'object':
+        return (objects ??= new Set(Array.from(scene.object_ids()))).has(n.id)
+      case 'group':
+        return (groups ??= new Set(Array.from(scene.group_ids()))).has(n.id)
+      case 'instance':
+        return (instances ??= new Set(Array.from(scene.instance_ids()))).has(n.id)
+      case 'sketch':
+        return sketchSet().has(n.id)
+      case 'sketch-edge':
+        if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
+        return scene.sketch_edge_endpoints(n.sketch, n.id) !== undefined
+      case 'sketch-curve':
+        if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
+        try {
+          return scene.sketch_curve_chain(n.sketch, n.id).length > 0
+        } catch {
+          return false
+        }
+      case 'sketch-island':
+        if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
+        try {
+          return scene.sketch_island_edges(n.sketch, n.id).length > 0
+        } catch {
+          return false
+        }
+    }
+  }
+
+  const kept = selected.filter(alive)
+  return kept.length === selected.length ? selected : kept
+}

@@ -353,60 +353,92 @@ describe('parseDimensions', () => {
 })
 
 describe('editArrayBuffer', () => {
-  it('accepts a mode token only into an empty buffer', () => {
+  it('accepts a mode token into an empty buffer (leading form: xN, /N)', () => {
     expect(editArrayBuffer('', 'x')).toBe('x')
     expect(editArrayBuffer('', 'X')).toBe('x')
     expect(editArrayBuffer('', '*')).toBe('x')
     expect(editArrayBuffer('', '/')).toBe('/')
-    expect(editArrayBuffer('x3', 'x')).toBe('x3')
-    expect(editArrayBuffer('x', '/')).toBe('x')
   })
 
-  it('appends digits only after a mode token', () => {
+  it('accepts a mode token after digits (SketchUp trailing form: Nx, N/)', () => {
+    expect(editArrayBuffer('5', 'x')).toBe('5x')
+    expect(editArrayBuffer('5', 'X')).toBe('5x')
+    expect(editArrayBuffer('5', '*')).toBe('5x')
+    expect(editArrayBuffer('12', '/')).toBe('12/')
+  })
+
+  it('rejects a second mode token in either form', () => {
+    expect(editArrayBuffer('x3', 'x')).toBe('x3')
+    expect(editArrayBuffer('x', '/')).toBe('x')
+    expect(editArrayBuffer('5x', 'x')).toBe('5x')
+    expect(editArrayBuffer('5x', '/')).toBe('5x')
+    expect(editArrayBuffer('5/', '*')).toBe('5/')
+  })
+
+  it('appends digits into a leading form and starts/extends a trailing form', () => {
     expect(editArrayBuffer('x', '3')).toBe('x3')
     expect(editArrayBuffer('x3', '0')).toBe('x30')
     expect(editArrayBuffer('/', '2')).toBe('/2')
-    // A bare leading digit is a tool shortcut, not array input.
-    expect(editArrayBuffer('', '3')).toBe('')
+    // A leading digit begins the SketchUp-style trailing form.
+    expect(editArrayBuffer('', '3')).toBe('3')
+    expect(editArrayBuffer('3', '0')).toBe('30')
+    // …but a completed trailing form takes no more digits.
+    expect(editArrayBuffer('5x', '3')).toBe('5x')
+    expect(editArrayBuffer('5/', '3')).toBe('5/')
   })
 
   it('Backspace deletes; other keys are ignored', () => {
     expect(editArrayBuffer('x3', 'Backspace')).toBe('x')
     expect(editArrayBuffer('x', 'Backspace')).toBe('')
+    expect(editArrayBuffer('5x', 'Backspace')).toBe('5')
     expect(editArrayBuffer('', 'Backspace')).toBe('')
     expect(editArrayBuffer('x3', '.')).toBe('x3')
     expect(editArrayBuffer('x3', '-')).toBe('x3')
     expect(editArrayBuffer('x3', 'm')).toBe('x3')
     expect(editArrayBuffer('x3', 'Enter')).toBe('x3')
+    expect(editArrayBuffer('5', 'm')).toBe('5')
   })
 })
 
 describe('parseArraySpec', () => {
-  it('parses external arrays: x3, X3, *3', () => {
+  it('parses external arrays, leading form: x3, X3, *3', () => {
     expect(parseArraySpec('x3')).toEqual({ mode: 'multiply', count: 3 })
     expect(parseArraySpec('X3')).toEqual({ mode: 'multiply', count: 3 })
     expect(parseArraySpec('*12')).toEqual({ mode: 'multiply', count: 12 })
   })
 
-  it('parses internal arrays: /2', () => {
+  it('parses external arrays, SketchUp trailing form: 3x, 3X, 3*', () => {
+    expect(parseArraySpec('3x')).toEqual({ mode: 'multiply', count: 3 })
+    expect(parseArraySpec('3X')).toEqual({ mode: 'multiply', count: 3 })
+    expect(parseArraySpec('12*')).toEqual({ mode: 'multiply', count: 12 })
+  })
+
+  it('parses internal arrays in both orders: /2, 2/', () => {
     expect(parseArraySpec('/2')).toEqual({ mode: 'divide', count: 2 })
     expect(parseArraySpec('/10')).toEqual({ mode: 'divide', count: 10 })
+    expect(parseArraySpec('2/')).toEqual({ mode: 'divide', count: 2 })
+    expect(parseArraySpec('10/')).toEqual({ mode: 'divide', count: 10 })
   })
 
   it('accepts the N = 1 edge case', () => {
     expect(parseArraySpec('x1')).toEqual({ mode: 'multiply', count: 1 })
     expect(parseArraySpec('/1')).toEqual({ mode: 'divide', count: 1 })
+    expect(parseArraySpec('1x')).toEqual({ mode: 'multiply', count: 1 })
+    expect(parseArraySpec('1/')).toEqual({ mode: 'divide', count: 1 })
   })
 
-  it('rejects garbage: empty, bare mode, zero, non-numeric, trailing junk', () => {
+  it('rejects garbage: empty, bare mode, bare digits, zero, non-numeric, junk', () => {
     expect(parseArraySpec('')).toBeNull()
     expect(parseArraySpec('x')).toBeNull()
     expect(parseArraySpec('/')).toBeNull()
     expect(parseArraySpec('x0')).toBeNull()
     expect(parseArraySpec('/0')).toBeNull()
+    expect(parseArraySpec('0x')).toBeNull()
+    expect(parseArraySpec('0/')).toBeNull()
     expect(parseArraySpec('3')).toBeNull()
     expect(parseArraySpec('abc')).toBeNull()
     expect(parseArraySpec('x3x')).toBeNull()
+    expect(parseArraySpec('3x3')).toBeNull()
     expect(parseArraySpec('x3.5')).toBeNull()
     expect(parseArraySpec('x-3')).toBeNull()
   })

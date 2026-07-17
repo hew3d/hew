@@ -78,9 +78,10 @@ below.
 - Move and rotate with axis-locked inference snapping; tapping Option/Alt
   durably toggles Move between moving and copying (so an exact copy
   distance can be typed), and a committed copy refines into an array:
-  typing `x3` places 3 copies at the same spacing along the vector, `/3`
-  places 3 copies dividing the distance — re-enter a different count while
-  the gesture is hot, one undo removes the whole array
+  typing `3x` (or `x3`) places 3 copies at the same spacing along the
+  vector, `3/` (or `/3`) places 3 copies dividing the distance —
+  re-enter a different count while the gesture is hot, one undo removes
+  the whole array
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know

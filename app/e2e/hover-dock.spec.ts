@@ -91,23 +91,28 @@ async function setupHoverRig(page: Page) {
     )
   }
 
-  /** Re-pin the rig camera after an operation that reframes it. Drawing a
-   * sketch into a visibly empty document triggers the first-sketch
-   * auto-zoom (App.handleDocumentChanged schedules a Zoom Extents on the
-   * next animation frame), which would silently invalidate `pixelFor`'s
-   * projections. Wait out the scheduled reframe, then restore the pose.
-   * (The rig's very first draw at the origin doesn't need this: the
-   * reframe keeps the view direction and re-targets the sketch center,
-   * which IS the pinned camera's target, so center-of-view projections
-   * stay exact.) */
-  async function repinCamera(): Promise<void> {
+  /** Assert the pinned camera has NOT been reframed behind the rig's back.
+   * Drawing a sketch — even the first one into an empty document — must
+   * leave the camera alone (the first-sketch auto-zoom was removed by
+   * maintainer decision: the welcome unit choice sets the initial framing),
+   * so `pixelFor`'s projections stay valid without any re-pinning. */
+  async function expectCameraStillPinned(): Promise<void> {
+    // Two frames: were a reframe still scheduled (the old behavior queued
+    // it on the next animation frame), it would have landed by now.
     await page.evaluate(
       () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
     )
-    await page.evaluate((cam) => window.__hew_test!.setCamera(cam), CAMERA)
+    const cam = await page.evaluate(() => window.__hew_test!.getCamera())
+    // Sub-millimeter slack: the setCamera→getCamera round-trip carries a
+    // little controls noise, while the removed auto-zoom moved the camera
+    // by whole meters (re-targeting the sketch center).
+    for (let i = 0; i < 3; i++) {
+      expect(cam.position[i]).toBeCloseTo(CAMERA.position[i], 3)
+      expect(cam.target[i]).toBeCloseTo(CAMERA.target[i], 3)
+    }
   }
 
-  return { pixelFor, moveTo, expectDockContext, dockContextNow, repinCamera }
+  return { pixelFor, moveTo, expectDockContext, dockContextNow, expectCameraStillPinned }
 }
 
 test.beforeEach(async ({ page }) => {
@@ -142,7 +147,7 @@ test('hover dock updates immediately after undo even with NO further pointer mov
 })
 
 test('hover dock keeps toggling between ground and sketches after an undo (no wedge beyond mechanism a)', async ({ page }) => {
-  const { pixelFor, moveTo, expectDockContext, repinCamera } = await setupHoverRig(page)
+  const { pixelFor, moveTo, expectDockContext, expectCameraStillPinned } = await setupHoverRig(page)
 
   await page.evaluate(() => window.__hew_test!.drawRectangle([-1, -1, 0], [1, 1, 0]))
 
@@ -160,11 +165,11 @@ test('hover dock keeps toggling between ground and sketches after an undo (no we
   await expectDockContext('empty')
 
   // Draw a second sketch elsewhere and confirm hover toggling still works.
-  // The undo left the document visibly empty, so this draw fires the
-  // first-sketch auto-zoom and reframes the camera off-center — re-pin the
-  // rig pose before projecting any more world points.
+  // The undo left the document visibly empty, and this draw used to fire
+  // the (since-removed) first-sketch auto-zoom — the camera must now stay
+  // exactly where the rig pinned it, keeping every projection valid.
   await page.evaluate(() => window.__hew_test!.drawRectangle([2, -4, 0], [4, -2, 0]))
-  await repinCamera()
+  await expectCameraStillPinned()
   await moveTo(centerB)
   await expectDockContext('sketch')
 

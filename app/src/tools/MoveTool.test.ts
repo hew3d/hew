@@ -177,11 +177,39 @@ describe('MoveTool — ×N / /N array copy', () => {
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
   }
 
-  it('teaches the refinement in the status hint after a copy commits', () => {
+  it('teaches the refinement in the status hint after a copy commits (SketchUp 3x form first)', () => {
     const t = makeTool()
     commitOneCopy(t)
-    expect(t.tool.statusHint()).toContain('×3')
-    expect(t.tool.statusHint()).toContain('/3')
+    expect(t.tool.statusHint()).toContain('3x')
+    expect(t.tool.statusHint()).toContain('3/')
+  })
+
+  it('the SketchUp trailing form 3x + Enter resolves exactly like x3', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, '3x')
+    // The trailing form's leading digit is buffer input, and it reads back
+    // with the display glyph: "3×".
+    expect(t.onMeasurement).toHaveBeenLastCalledWith('3×')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    const [, ids, affine, count] = t.scene.duplicate_selection_array.mock.calls[1]
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n])
+    expect(translationOf(affine as Float64Array)).toEqual([2, 0, 0])
+    expect(count).toBe(3)
+  })
+
+  it('the trailing divide form 4/ + Enter divides the committed distance', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, '4/')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const call = t.scene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(translationOf(call[2] as Float64Array)).toEqual([0.5, 0, 0])
+    expect(call[3]).toBe(4)
   })
 
   it('x3 + Enter re-resolves into 3 copies at the SAME spacing (one undo retracts the single copy first)', () => {
@@ -281,6 +309,53 @@ describe('MoveTool — ×N / /N array copy', () => {
     // Esc remains the way out of the window.
     t.tool.onKey(makeKeyEvent('Escape'))
     expect(t.tool.capturingInput()).toBe(false)
+  })
+
+  it('the armed window captures only its buffer keys — Space and letters fall through (per-key capture)', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    // Armed: the buffer needs digits, mode tokens, Backspace, Enter — plus
+    // the bare Delete keystroke guard over the just-made copies.
+    for (const key of ['0', '9', 'x', 'X', '*', '/', 'Backspace', 'Delete', 'Enter']) {
+      expect(t.tool.capturesKey(key), `armed must capture ${JSON.stringify(key)}`).toBe(true)
+    }
+    // Space must NEVER be captured (it always resets to Select — the
+    // Viewport's fall-through does the switch and the switch cancels the
+    // tool, quietly ending the window). Tab and letter shortcuts fall
+    // through to their global meanings too.
+    for (const key of [' ', 'Tab', 'm', 'q', 'r', 'Escape']) {
+      expect(t.tool.capturesKey(key), `armed must not capture ${JSON.stringify(key)}`).toBe(false)
+    }
+  })
+
+  it('a mid-gesture VCB still captures the whole keyboard (Space is length grammar)', () => {
+    const t = makeTool()
+    beginGestureLockedX(t.tool)
+    // "5' 3" needs the space; unit suffixes need letters.
+    for (const key of [' ', '5', 'm', 'c', 'Backspace', 'Enter']) {
+      expect(t.tool.capturesKey(key)).toBe(true)
+    }
+  })
+
+  it('Space exit is quiet: the tool-switch cancel disarms without undoing the copies', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+    typeKeys(t.tool, '5') // even with a partial buffer typed
+    expect(t.tool.capturesKey(' ')).toBe(false)
+
+    // What the Viewport does on the fall-through: switch tools, which
+    // cancels the outgoing MoveTool.
+    t.tool.cancel()
+
+    expect(t.tool.capturingInput()).toBe(false)
+    // The committed copy is untouched — no retraction, no toast.
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.onToast).not.toHaveBeenCalled()
+    // A stray Enter afterwards is inert.
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
   })
 
   it('garbage input resolves to nothing and a new gesture ends the window', () => {
@@ -448,5 +523,39 @@ describe('MoveTool — auto-select on click', () => {
     expect(acquire).not.toHaveBeenCalled()
     expect(onToast).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+describe('MoveTool — live selection sync (setSelection)', () => {
+  it('setSelection replaces the cached targets so the next gesture commits against live handles', () => {
+    // The maintainer's repro tail: after Undo killed the two array copies,
+    // MoveTool's cached targets still pointed at the dead clones and the
+    // next 8cm copy failed with UnknownObject. The Viewport pushes every
+    // app-selection change (undo pruning included) into the active tool.
+    const t = makeTool([
+      { kind: 'object', id: 101n },
+      { kind: 'object', id: 102n },
+      { kind: 'object', id: 103n },
+    ])
+    t.tool.setSelection([{ kind: 'object', id: 1n }])
+
+    t.tool.onKey(makeKeyEvent('Alt')) // copy mode
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    const [, ids] = t.scene.duplicate_selection_array.mock.calls[0]
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n])
+    expect(t.onToast).not.toHaveBeenCalled()
+  })
+
+  it('an emptied selection falls back to the auto-acquire path instead of a dead-handle commit', () => {
+    const t = makeTool([{ kind: 'object', id: 101n }])
+    t.tool.setSelection([])
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    // No acquirer injected: the tool hints and stays idle — no kernel call.
+    expect(t.onToast).toHaveBeenCalledWith('Click an object to move it')
+    expect(t.tool.capturingInput()).toBe(false)
   })
 })

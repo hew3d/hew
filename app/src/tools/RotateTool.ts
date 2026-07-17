@@ -162,6 +162,12 @@ export class RotateTool implements Tool {
   setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
     this.acquireSelection = acquire
   }
+  /** Keep the cached targets in step with the app selection (Tool.
+   * setSelection; see MoveTool) — the next gesture starts from live
+   * handles after an undo/redo prune. */
+  setSelection(nodes: NodeRef[]): void {
+    this.selection = nodes
+  }
 
   /** Axis locked by Shift/arrow (unit). Overrides inference; null = infer. */
   private lockedNormal: Vec3 | null = null

@@ -32,7 +32,7 @@ When you're done navigating, press `Space` to return to the Select tool (or the 
 
 - The viewport's top-left chips jump straight to **Top**, **Iso**, or **Front**.
 - **Camera ▸ Standard Views** offers all seven: Top, Bottom, Front, Back, Left, Right, and Iso. All are also in the command palette ("Standard View: …").
-- **Camera ▸ Zoom Extents** (palette: "zoom to fit") frames every visible thing in the model — solids and sketches alike (guides don't count) — the fastest way back when you've orbited into a corner. Hew also zooms to fit on its own twice: when a model is opened, and when the first shape is drawn into an empty document, so a small model gets a sensibly scaled view from the start.
+- **Camera ▸ Zoom Extents** (palette: "zoom to fit") frames every visible thing in the model — solids and sketches alike (guides don't count) — the fastest way back when you've orbited into a corner. Hew also zooms to fit on its own when a model is opened, and a small unit chosen on the welcome screen starts the blank view zoomed in to match.
 
 ## Controlling what you see
 

@@ -62,7 +62,7 @@ Point any drawing tool at a solid's face and it works there instead of on the gr
 
 Offset copies an existing boundary a set distance inward or outward — the quickest way to draw a border, a rim, or a wall of even thickness without measuring anything.
 
-1. Click a filled sketch region or a solid's face.
+1. Click a filled sketch region — its interior or right on its boundary edge, both work — or a solid's face.
 2. Move the cursor inward or outward — a preview of the offset outline follows at the distance shown in the readout.
 3. Click to commit, or type an exact distance and press `Enter`.
 

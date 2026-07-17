@@ -17,9 +17,8 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canBoolean as canBooleanHelper, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, type NodeRef } from './panels/treeModel'
+import { nextSelection, canBoolean as canBooleanHelper, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
-import { isSceneVisiblyEmpty, isLoneVisibleSketchScene, type HiddenLeafIds } from './sceneVisibility'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness } from './test/harness'
@@ -540,50 +539,30 @@ export default function App() {
     return path.slice(0, trimIndex)
   }, [])
 
-  // Whether the viewport was VISIBLY empty after the PREVIOUS document (or
-  // visibility) change — the pre-state for the first-sketch zoom below. The
-  // edge is defined on visible emptiness, not kernel emptiness: a document
-  // whose only solid is eye/tag-hidden renders a blank viewport, and a small
-  // rectangle drawn into that blank view must reframe too (sceneVisibility.ts).
-  // Starts true (a fresh window holds a blank document) and re-seeds itself
-  // on every document change here AND on every hidden-set push
-  // (pushUnionHidden), so loads, news, deletes, undos, and hides all keep it
-  // honest without extra wiring.
-  const prevSceneEmptyRef = useRef(true)
-  // The hidden leaf-id union (eye hides ∪ tag hides) as last pushed by
-  // pushUnionHidden — what the visible-emptiness checks subtract.
-  const hiddenLeafIdsRef = useRef<HiddenLeafIds>({ objects: new Set(), instances: new Set() })
-
   // Bump the tree's revision; trim stale context path entries; mark dirty.
   // Every scene mutation flows through here via Viewport's handleSceneRefresh.
+  // (The first-sketch auto-zoom that used to fire here was removed by
+  // maintainer decision: the welcome screen's unit choice already sets a
+  // sensible initial framing, and yanking the camera on the first draw was
+  // more irritating than helpful. Zoom Extents still covers sketches.)
   const handleDocumentChanged = useCallback(() => {
     setDocRev((r) => r + 1)
-    // First entity committed into a visibly empty document: when it's a lone
-    // visible sketch, zoom to fit so the drawn shape — not the default
-    // meter-scale framing — sets the view's scope (a 4×10 cm rectangle is
-    // near-invisible at the default distance). Fires only on the
-    // visibly-empty→sketch-only edge, so it never yanks the camera during
-    // normal work (it can't re-fire while anything is visible); loads are
-    // excluded (suppressDirtyRef) and frame themselves in applyLoadedBytes.
-    {
-      const scene = sceneRef.current
-      if (scene !== null) {
-        const wasEmpty = prevSceneEmptyRef.current
-        const hidden = hiddenLeafIdsRef.current
-        prevSceneEmptyRef.current = isSceneVisiblyEmpty(scene, hidden)
-        if (
-          wasEmpty &&
-          !suppressDirtyRef.current &&
-          isLoneVisibleSketchScene(scene, hidden)
-        ) {
-          requestAnimationFrame(() => viewportApi.current?.zoomExtents())
-        }
-      }
-    }
     setActiveContext((ctx) => {
       const scene = sceneRef.current
       if (scene === null) return ctx
       return trimContextPath(scene, ctx)
+    })
+    // Prune dead handles out of the selection. Undo/redo is the headline
+    // case (the maintainer's repro: undo an array copy and Object Info kept
+    // saying "3 selected" while the dock sat in Multi mode), but every
+    // mutation that can kill nodes funnels through here — deletes, booleans
+    // consuming operands, extrusions consuming sketches — so they all
+    // reconcile at this one choke point. pruneDeadSelection returns the
+    // same array when nothing died, so this setState is a no-op then.
+    setSelectedIds((sel) => {
+      const scene = sceneRef.current
+      if (scene === null) return sel
+      return pruneDeadSelection(scene, sel)
     })
     // Mark the document dirty on any mutation — but NOT during programmatic
     // loads (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
@@ -1940,7 +1919,9 @@ export default function App() {
 
       // A tool mid-measurement-entry (VCB typed buffer) owns the keyboard:
       // letters may be unit suffixes ("1cm", "5' 2-1/4\""), not tool switches.
-      const toolIsTyping = viewportApi.current?.isCapturingInput?.() ?? false
+      // Per-key: a tool may own only some keys (Move's armed array window
+      // takes digits/x/*// but never Space — Space always resets to Select).
+      const toolIsTyping = viewportApi.current?.isCapturingInput?.(ev.key) ?? false
 
       if (!isMod && !isTyping && !toolIsTyping) {
         // Space → Select (no modifier required; guard against typing contexts).
@@ -2080,7 +2061,7 @@ export default function App() {
       // is a tool mid-VCB entry (e.g. typing a Move distance), where Backspace
       // must edit the typed buffer instead; the Viewport routes the key to that
       // tool and reports it here via isCapturingInput so we don't also delete.
-      if (!(viewportApi.current?.isCapturingInput?.() ?? false)) {
+      if (!(viewportApi.current?.isCapturingInput?.(ev.key) ?? false)) {
         menuActionRef.current('edit-delete')
       }
     }
@@ -2300,12 +2281,6 @@ export default function App() {
       // be unable to click past a hidden solid's edges/faces.
       viewportApi.current?.setHidden(objIds, instIds)
       scene.set_hidden(new BigUint64Array(objIds), new BigUint64Array(instIds))
-      // (3) Mirror the union for the visible-emptiness checks, and re-seed
-      // the first-sketch-zoom pre-state: hiding is not a document mutation,
-      // so without this a hide-everything → draw-rectangle sequence would
-      // read a stale "not empty" pre-state and skip the reframe.
-      hiddenLeafIdsRef.current = { objects: new Set(objIds), instances: new Set(instIds) }
-      prevSceneEmptyRef.current = isSceneVisiblyEmpty(scene, hiddenLeafIdsRef.current)
     },
     // state?.scene changes on every render; we capture it fresh via the closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps

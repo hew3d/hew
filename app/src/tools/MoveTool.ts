@@ -30,10 +30,11 @@
  * Tapping Alt again returns to plain Move. Holding Alt through a drag still
  * works: the keydown on entry toggles copy on.
  *
- * Array copy (SketchUp's ×N / /N): immediately after a copy commits, typing
- * `x3` (or `*3`) + Enter re-resolves the commit into 3 total copies at the
- * same spacing continuing along the vector; `/3` + Enter into 3 copies
- * evenly dividing the committed distance. While the gesture stays "hot" (no
+ * Array copy (SketchUp's N× / N÷): immediately after a copy commits, typing
+ * `3x` (or `x3`, `*3` — both token orders are accepted) + Enter re-resolves
+ * the commit into 3 total copies at the same spacing continuing along the
+ * vector; `3/` (or `/3`) + Enter into 3 copies evenly dividing the
+ * committed distance. While the gesture stays "hot" (no
  * new action begun) a different `xN`/`/N` can be re-entered and the array
  * re-resolves — implemented as one scene undo of the previous array commit
  * plus a fresh `duplicate_selection_array`, so the final history holds ONE
@@ -117,7 +118,7 @@ export class MoveTool implements Tool {
   statusHint(): string {
     if (this.stage.kind === 'idle') {
       if (this.arrayHot !== null) {
-        return 'Type ×3 to make 3 copies, or /3 to divide the distance — Enter applies.'
+        return 'Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies.'
       }
       if (this.selection.length === 0) {
         return 'Click the object you want to move.'
@@ -181,6 +182,17 @@ export class MoveTool implements Tool {
   setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
     this.acquireSelection = acquire
   }
+  /**
+   * Keep the cached targets in step with the app selection (Tool.
+   * setSelection) — the Viewport pushes every change, including the
+   * undo/redo prune, so the next gesture always starts from live handles
+   * instead of committing against dead ones. An in-flight gesture keeps
+   * the nodes it started with (its stage holds its own copy); the armed
+   * array window is untouched — undo already disarms it explicitly.
+   */
+  setSelection(nodes: NodeRef[]): void {
+    this.selection = nodes
+  }
   /** THREE.js object group from the SceneRenderer (read-only reference for cloning). */
   private objectsGroup: THREE.Group | null = null
   /** THREE.js instances group from the SceneRenderer (read-only reference for cloning). */
@@ -234,19 +246,40 @@ export class MoveTool implements Tool {
 
   capturingInput(): boolean {
     // The ARMED ×N / /N window captures even before anything is typed —
-    // deliberate semantics: while the status bar is inviting "Type ×3…",
+    // deliberate semantics: while the status bar is inviting "Type 3x…",
     // no single KEYSTROKE may destroy the just-made copies (App.tsx's
-    // Delete/Backspace handler defers to this exact check, and the copies
-    // ARE the current selection). Backspace edits the possibly-empty array
-    // buffer instead; Esc remains the way out, and any pointer action ends
-    // the window naturally. The cost — bare-letter tool shortcuts are
-    // swallowed until then — is the same trade every VCB entry makes.
+    // Delete/Backspace handler defers to this check, refined per key by
+    // `capturesKey` below, and the copies ARE the current selection).
+    // Backspace edits the possibly-empty array buffer instead; Esc remains
+    // the way out, and any pointer action ends the window naturally.
     //
     // An EXPLICIT delete command (Edit ▸ Delete, the dock's Erase) is the
     // deliberate counterpart: it executes — the Viewport's delete path
     // first calls `disarmArray()` so the window closes cleanly, then
     // deletes. Only the ambiguous bare keystroke is guarded here.
     return this.stage.kind === 'base' || this.arrayHot !== null
+  }
+
+  /**
+   * Per-key refinement of the capture (see Tool.capturesKey). A live
+   * two-click gesture keeps the whole keyboard — its length VCB legitimately
+   * eats letters (unit suffixes) and Space ("5' 3"). The ARMED array window
+   * takes only what its buffer needs — digits, the x/X/* and / mode tokens,
+   * Backspace, Enter — plus the bare Delete keystroke, which stays guarded
+   * so no single keypress can destroy the just-made copies. Everything else
+   * falls through to its global meaning; in particular Space is NEVER
+   * captured — it performs its normal reset-to-Select, and the tool switch
+   * cancels this tool, quietly ending the window like the other explicit
+   * exits.
+   */
+  capturesKey(key: string): boolean {
+    if (this.stage.kind === 'base') return true
+    if (this.arrayHot === null) return false
+    return (
+      (key >= '0' && key <= '9') ||
+      key === 'x' || key === 'X' || key === '*' || key === '/' ||
+      key === 'Backspace' || key === 'Delete' || key === 'Enter'
+    )
   }
 
   /**
@@ -593,11 +626,10 @@ export class MoveTool implements Tool {
     return created.map(nodeRefFromJs)
   }
 
-  /** The ×N / /N buffer as a readout, with the display glyph for `x`. */
+  /** The array buffer as a readout, with the display glyph for `x` (the
+   * buffer holds at most one, leading `x5` or trailing `5x`). */
   private _arrayReadout(): string {
-    return this.arrayTyped.startsWith('x')
-      ? `×${this.arrayTyped.slice(1)}`
-      : this.arrayTyped
+    return this.arrayTyped.replace('x', '×')
   }
 
   /**

@@ -114,3 +114,71 @@ export function loopToSegmentPairs(loop: ArrayLike<number>): Float32Array {
   }
   return out
 }
+
+/**
+ * Vertex-match tolerance for `boundaryContainsEdge`. Region boundaries
+ * cross the wasm boundary as f32 while edge endpoints stay f64, so
+ * identical kernel vertices can differ by the f32 round-trip error of
+ * their magnitude — which is RELATIVE (≤ 0.5 ulp ≈ 6e-8 · |coord| per
+ * component), not a fixed distance: at 500 m from the origin it already
+ * exceeds 1e-5 m. The per-comparison tolerance is therefore the larger of
+ * a small absolute floor (near-origin coordinates, where the relative
+ * term vanishes) and a magnitude-proportional term with headroom over the
+ * worst per-component ulp. Both stay orders of magnitude below the
+ * kernel's vertex-merge spacing at any magnitude a sketch can plausibly
+ * reach, so distinct vertices never alias. UI-side pick plumbing only —
+ * kernel comparisons keep using `kernel::tol` (DEVELOPMENT.md rule 6).
+ */
+const BOUNDARY_VERTEX_TOL_ABS = 1e-5
+/** f32 unit roundoff (2^-24): |fround(x) − x| ≤ F32_UNIT_ROUNDOFF · |x|. */
+const F32_UNIT_ROUNDOFF = 2 ** -24
+/** Headroom over the per-component 0.5-ulp bound (three components sum in
+ * the squared distance, plus slack for upstream arithmetic on the way to
+ * the boundary buffer). */
+const BOUNDARY_VERTEX_TOL_REL = 8 * F32_UNIT_ROUNDOFF
+
+/**
+ * True when the segment `endpoints` (`[ax,ay,az, bx,by,bz]`, f64) appears as
+ * a pair of CONSECUTIVE vertices — in either direction, including the
+ * implicit closing segment — of the `boundary` loop (flat `[x,y,z, …]`, f32,
+ * implicit closure). This is how a picked sketch edge is resolved to the
+ * region whose outer boundary carries it (the Offset tool's edge-click
+ * fallback: the region pick itself is interior-only).
+ */
+export function boundaryContainsEdge(
+  boundary: ArrayLike<number>,
+  endpoints: ArrayLike<number>,
+): boolean {
+  const n = Math.floor(boundary.length / 3)
+  if (n < 2 || endpoints.length < 6) return false
+
+  const near = (i: number, px: number, py: number, pz: number): boolean => {
+    const dx = boundary[i * 3] - px
+    const dy = boundary[i * 3 + 1] - py
+    const dz = boundary[i * 3 + 2] - pz
+    // Magnitude-aware tolerance: the f32 round-trip error grows with the
+    // largest coordinate involved in THIS comparison (see the constants'
+    // doc comment), so scale the relative term by it.
+    const maxAbs = Math.max(
+      Math.abs(boundary[i * 3]), Math.abs(boundary[i * 3 + 1]), Math.abs(boundary[i * 3 + 2]),
+      Math.abs(px), Math.abs(py), Math.abs(pz),
+    )
+    const tol = Math.max(BOUNDARY_VERTEX_TOL_ABS, BOUNDARY_VERTEX_TOL_REL * maxAbs)
+    return dx * dx + dy * dy + dz * dz <= tol * tol
+  }
+
+  const [ax, ay, az, bx, by, bz] = [
+    endpoints[0], endpoints[1], endpoints[2],
+    endpoints[3], endpoints[4], endpoints[5],
+  ]
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n // implicit closure: last vertex pairs with first
+    if (
+      (near(i, ax, ay, az) && near(j, bx, by, bz)) ||
+      (near(i, bx, by, bz) && near(j, ax, ay, az))
+    ) {
+      return true
+    }
+  }
+  return false
+}

@@ -26,6 +26,7 @@ import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
+import { DEPTH_BIAS } from './depthPolicy'
 
 /** Last canvas size seen, so freshly-built lines start at the right width. */
 const lastRes = new THREE.Vector2(1, 1)
@@ -39,12 +40,17 @@ const lastRes = new THREE.Vector2(1, 1)
 const registry = new Set<LineMaterial>()
 
 /** Shared style for draw-tool rubber-band previews: a bright, readable blue
- * that reads on both the dark and light ground, drawn on top (no depth test). */
+ * that reads on both the dark and light ground. Depth-tested (a rubber-band
+ * hides behind nearer geometry like any linework), with the PREVIEW depth
+ * bias so a band running along committed sketch lines, object edges, or the
+ * ground plane resolves ties deterministically instead of by a world-space
+ * z-lift (see depthPolicy.ts — previews used to float +1mm off the ground). */
 export const PREVIEW_LINE_STYLE = {
   color: 0x4d90ff,
   widthPx: 2.5,
   depthTest: true,
   renderOrder: 997,
+  depthBias: DEPTH_BIAS.PREVIEW,
 } as const
 
 export interface FatSegmentsOpts {
@@ -60,6 +66,16 @@ export interface FatSegmentsOpts {
   /** Force `transparent` (e.g. for a material whose opacity is animated later,
    * like the sketch-isolation fade). Defaults to true when opacity<1 or dashed. */
   transparent?: boolean
+  /**
+   * Rung on the depth-bias ladder (`DEPTH_BIAS` in depthPolicy.ts), applied
+   * as `polygonOffset` factor *and* units. Fat lines rasterize as triangle
+   * strips, so unlike native `GL_LINES` they can be depth-biased — this is
+   * how coincident linework (a sketch line over an object edge, a preview
+   * over a sketch line) resolves depth ties deterministically instead of
+   * shimmering on every repaint. Omitted → no offset (bias 0, the native-line
+   * reference level).
+   */
+  depthBias?: number
 }
 
 /**
@@ -79,6 +95,9 @@ export function makeFatSegments(positions: ArrayLike<number>, opts: FatSegmentsO
     transparent: opts.transparent ?? ((opts.opacity ?? 1) < 1 || (opts.dashed ?? false)),
     opacity: opts.opacity ?? 1,
     depthTest: opts.depthTest ?? true,
+    polygonOffset: opts.depthBias !== undefined,
+    polygonOffsetFactor: opts.depthBias ?? 0,
+    polygonOffsetUnits: opts.depthBias ?? 0,
   })
   mat.resolution.copy(lastRes)
   registry.add(mat)

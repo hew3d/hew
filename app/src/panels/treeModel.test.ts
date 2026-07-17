@@ -20,6 +20,7 @@ import {
   buildTreeIndexMap,
   nodeKey,
   structuralSelection,
+  pruneDeadSelection,
   type NodeRef,
 } from './treeModel'
 
@@ -577,5 +578,80 @@ describe('buildTreeIndexMap', () => {
 
   it('returns an empty map for an empty document', () => {
     expect(buildTreeIndexMap([], () => []).size).toBe(0)
+  })
+})
+
+describe('pruneDeadSelection — drop handles the document no longer holds', () => {
+  /** Minimal liveness view over plain arrays; sketch sub-entity queries
+   * throw on a dead sketch like the kernel's typed errors do. */
+  function view(opts: {
+    objects?: bigint[]
+    groups?: bigint[]
+    instances?: bigint[]
+    sketches?: bigint[]
+    edges?: Record<string, bigint[]>       // sketch id -> live edge ids
+    islands?: Record<string, bigint[]>     // sketch id -> live island ids
+  }) {
+    const sketches = opts.sketches ?? []
+    return {
+      object_ids: () => opts.objects ?? [],
+      group_ids: () => opts.groups ?? [],
+      instance_ids: () => opts.instances ?? [],
+      sketch_ids: () => sketches,
+      sketch_edge_endpoints: (s: bigint, e: bigint) =>
+        (opts.edges?.[s.toString()] ?? []).includes(e) ? new Float64Array(6) : undefined,
+      sketch_curve_chain: (s: bigint, e: bigint) => {
+        if (!sketches.includes(s)) throw new Error('UnknownSketch')
+        const live = opts.edges?.[s.toString()] ?? []
+        if (!live.includes(e)) throw new Error('UnknownEdge')
+        return BigUint64Array.from([e])
+      },
+      sketch_island_edges: (s: bigint, i: bigint) => {
+        if (!sketches.includes(s)) throw new Error('UnknownSketch')
+        const live = opts.islands?.[s.toString()] ?? []
+        if (!live.includes(i)) throw new Error('UnknownIsland')
+        return BigUint64Array.from([1n])
+      },
+    }
+  }
+
+  const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
+  const grp = (id: bigint): NodeRef => ({ kind: 'group', id })
+  const inst = (id: bigint): NodeRef => ({ kind: 'instance', id })
+  const sk = (id: bigint): NodeRef => ({ kind: 'sketch', id })
+
+  it('keeps live nodes of every structural kind and drops dead ones', () => {
+    const v = view({ objects: [1n], groups: [2n], instances: [3n], sketches: [4n] })
+    const sel = [obj(1n), obj(9n), grp(2n), grp(8n), inst(3n), inst(7n), sk(4n), sk(6n)]
+    expect(pruneDeadSelection(v, sel)).toEqual([obj(1n), grp(2n), inst(3n), sk(4n)])
+  })
+
+  it('returns the SAME array when nothing died (no render churn)', () => {
+    const v = view({ objects: [1n, 2n] })
+    const sel = [obj(1n), obj(2n)]
+    expect(pruneDeadSelection(v, sel)).toBe(sel)
+  })
+
+  it('prunes sketch-scoped kinds: dead edges, curves, and islands go; live ones stay', () => {
+    const v = view({ sketches: [4n], edges: { '4': [10n] }, islands: { '4': [20n] } })
+    const sel: NodeRef[] = [
+      { kind: 'sketch-edge', id: 10n, sketch: 4n },
+      { kind: 'sketch-edge', id: 11n, sketch: 4n },   // dead edge
+      { kind: 'sketch-edge', id: 10n, sketch: 5n },   // dead sketch
+      { kind: 'sketch-curve', id: 10n, sketch: 4n },
+      { kind: 'sketch-curve', id: 12n, sketch: 4n },  // dead (throws)
+      { kind: 'sketch-island', id: 20n, sketch: 4n },
+      { kind: 'sketch-island', id: 21n, sketch: 4n }, // dead (throws)
+    ]
+    expect(pruneDeadSelection(v, sel)).toEqual([
+      { kind: 'sketch-edge', id: 10n, sketch: 4n },
+      { kind: 'sketch-curve', id: 10n, sketch: 4n },
+      { kind: 'sketch-island', id: 20n, sketch: 4n },
+    ])
+  })
+
+  it('an empty selection passes through untouched', () => {
+    const sel: NodeRef[] = []
+    expect(pruneDeadSelection(view({}), sel)).toBe(sel)
   })
 })

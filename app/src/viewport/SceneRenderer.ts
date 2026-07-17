@@ -21,6 +21,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { makeFatSegments, disposeFatSegments } from './fatLine'
+import { DEPTH_BIAS } from './depthPolicy'
 import { srgbColorsToLinear } from './colorSpace'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
@@ -1103,7 +1104,10 @@ export class SceneRenderer {
    * mirrored slots — so batches pass `flatShading: true` for every bucket
    * except 'F' (see `BucketTag` for the full derivation).
    *
-   * Every face material carries `polygonOffset(1, 1)`: the edge overlay
+   * Every face material carries `polygonOffset(DEPTH_BIAS.FACE)` — the
+   * back rung of the viewport-wide depth-bias ladder (see depthPolicy.ts
+   * for the whole ordering: axes, previews, fills, sketch lines, edges,
+   * faces). The edge overlay
    * (`LineSegments` over the exact same vertices) is exactly coplanar with
    * the faces, so edge and face fragments land within one depth-buffer
    * quantum of each other and the depth test resolves the tie by rounding
@@ -1140,8 +1144,8 @@ export class SceneRenderer {
             flatShading,
             side,
             polygonOffset: true,
-            polygonOffsetFactor: 1,
-            polygonOffsetUnits: 1,
+            polygonOffsetFactor: DEPTH_BIAS.FACE,
+            polygonOffsetUnits: DEPTH_BIAS.FACE,
           }),
         )
       } else {
@@ -1192,8 +1196,8 @@ export class SceneRenderer {
           opacity: baseOpacity,
           depthWrite: baseOpacity >= 1,
           polygonOffset: true,
-          polygonOffsetFactor: 1,
-          polygonOffsetUnits: 1,
+          polygonOffsetFactor: DEPTH_BIAS.FACE,
+          polygonOffsetUnits: DEPTH_BIAS.FACE,
         })
         m.userData.baseOpacity = baseOpacity
         // Which palette entry this material renders — the hook that lets
@@ -1214,8 +1218,8 @@ export class SceneRenderer {
           flatShading,
           side,
           polygonOffset: true,
-          polygonOffsetFactor: 1,
-          polygonOffsetUnits: 1,
+          polygonOffsetFactor: DEPTH_BIAS.FACE,
+          polygonOffsetUnits: DEPTH_BIAS.FACE,
         }),
       )
     }
@@ -1224,6 +1228,13 @@ export class SceneRenderer {
   }
 
   private _refreshObject(objectId: bigint): void {
+    // Capture selectedness BEFORE the removal below: _removeObjectGroup
+    // prunes the id from selectedObjectIds (correct for a real deletion),
+    // which used to defeat the re-apply at the bottom of this method — a
+    // transform/push-pull/undo rebuild of a selected object silently lost
+    // its outline while the app-level selection (Outliner) kept it.
+    const wasSelected = this.selectedObjectIds.includes(objectId)
+
     // Always remove the old group and rebuild — tessellation cache means this
     // is cheap (docs/DEVELOPMENT.md B4: cache invalidated on mutation).
     if (this.objectGroups.has(objectId)) {
@@ -1282,8 +1293,11 @@ export class SceneRenderer {
       this.objectsGroup.add(group)
       this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, group })
 
-      // Re-apply selection highlight if this object is selected
-      if (this.selectedObjectIds.includes(objectId)) {
+      // Re-apply the selection highlight to the rebuilt nodes, and put the
+      // id back into the renderer's selected list (the removal above pruned
+      // it) so a later setSelected([]) still restores the normal colors.
+      if (wasSelected) {
+        this.selectedObjectIds.push(objectId)
         this._applyObjectColors(objectId, true)
       }
     } finally {
@@ -1345,6 +1359,11 @@ export class SceneRenderer {
         color: SKETCH_LINE_COLOR,
         widthPx: SKETCH_LINE_WIDTH_PX,
         transparent: true,
+        // Sketch lines are coincident with the object edges they were
+        // consumed into (and with each other across sketches); bias them one
+        // rung in front of native edges so the tie is deterministic
+        // (depthPolicy.ts).
+        depthBias: DEPTH_BIAS.SKETCH_LINE,
       })
       this.sketchGroup.add(this.sketchLines)
     }
@@ -1381,8 +1400,10 @@ export class SceneRenderer {
       // freehand polyline sketch) produced overlapping/absent triangles, so its
       // fill "only sometimes" appeared (Refinement pass). Newell's method gives
       // the polygon normal (works on the ground OR on a face), we project into
-      // that plane, ear-clip via THREE.ShapeUtils, then emit triangles from the
-      // original 3D verts lifted slightly along the normal to avoid z-fighting.
+      // that plane, ear-clip via THREE.ShapeUtils, then emit triangles at the
+      // original 3D verts — exactly in the region's plane. (A former +1mm lift
+      // along the normal, there to dodge z-fighting, made ground fills visibly
+      // float at cm scale; the REGION_FILL depth bias below replaces it.)
       const normal = new THREE.Vector3()
       for (let i = 0; i < n; i++) {
         const cur = verts3[i]
@@ -1402,12 +1423,11 @@ export class SceneRenderer {
       const pts2 = verts3.map((p) => new THREE.Vector2(p.dot(u), p.dot(v)))
       const tris = THREE.ShapeUtils.triangulateShape(pts2, [])
 
-      const lift = normal.clone().multiplyScalar(0.001)
       const positions: number[] = []
       for (const tri of tris) {
         for (const idx of tri) {
           const p = verts3[idx]
-          positions.push(p.x + lift.x, p.y + lift.y, p.z + lift.z)
+          positions.push(p.x, p.y, p.z)
         }
       }
       if (positions.length === 0) continue
@@ -1420,6 +1440,12 @@ export class SceneRenderer {
         opacity: SKETCH_REGION_OPACITY,
         side: THREE.DoubleSide,
         depthWrite: false,
+        // No depth write (a translucent film never occludes), but it still
+        // depth-TESTS — bias it in front of the coincident native edge lines
+        // and its host face so the test never ties (depthPolicy.ts).
+        polygonOffset: true,
+        polygonOffsetFactor: DEPTH_BIAS.REGION_FILL,
+        polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
       })
       const mesh = new THREE.Mesh(geo, mat)
       this.sketchGroup.add(mesh)

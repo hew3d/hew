@@ -803,6 +803,74 @@ describe('group drag preview + scale pivot include leaf INSTANCES, not just obje
   })
 })
 
+describe('SceneRenderer — selection highlight survives object rebuilds', () => {
+  const EDGE_SELECTED = 0xffaa00
+  const EDGE_NORMAL = 0x1a1a1a
+
+  /** The edge-lines material color of the named object group. */
+  function edgeColorOf(root: THREE.Group, name: string): number {
+    const group = root.getObjectByName(name)
+    if (group === undefined) throw new Error(`no group named ${name}`)
+    const edges = group.children[1] as THREE.LineSegments
+    return (edges.material as THREE.LineBasicMaterial).color.getHex()
+  }
+
+  it('a selected object keeps its orange edges across a targeted refresh (transform-commit path)', () => {
+    // The maintainer's repro: rotate a selected cube 90° — the commit's
+    // targeted refresh rebuilt the object's scene nodes and the outline
+    // vanished while the Outliner still showed it selected. The rebuild
+    // must re-apply the highlight to the fresh nodes.
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSelected([1n])
+    expect(edgeColorOf(renderer.objectsGroup, 'Object_1')).toBe(EDGE_SELECTED)
+
+    renderer.refreshTouched({ objectIds: [1n] })
+    expect(edgeColorOf(renderer.objectsGroup, 'Object_1')).toBe(EDGE_SELECTED)
+  })
+
+  it('a selected object keeps its orange edges across a full refresh (boolean/undo path)', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSelected([1n])
+
+    renderer.refresh()
+    expect(edgeColorOf(renderer.objectsGroup, 'Object_1')).toBe(EDGE_SELECTED)
+  })
+
+  it('deselecting after a rebuild restores the normal edge color (selection list bookkeeping)', () => {
+    // Guards the fix's bookkeeping: the rebuilt object must be BACK in the
+    // renderer's selected list, or a later setSelected([]) would skip the
+    // restore and strand the orange edges.
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSelected([1n])
+    renderer.refreshTouched({ objectIds: [1n] })
+
+    renderer.setSelected([])
+    expect(edgeColorOf(renderer.objectsGroup, 'Object_1')).toBe(EDGE_NORMAL)
+  })
+
+  it('a deleted object drops cleanly out of the selection list (no resurrection)', () => {
+    const objects: Record<string, boolean> = { '1': true, '2': true }
+    const scene = makeScene({ objects })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSelected([1n, 2n])
+
+    delete objects['2']
+    renderer.refresh()
+    expect(renderer.objectsGroup.getObjectByName('Object_2')).toBeUndefined()
+    // The survivor keeps its highlight; the dead id is gone from the list.
+    expect(edgeColorOf(renderer.objectsGroup, 'Object_1')).toBe(EDGE_SELECTED)
+    renderer.setSelected([])
+    expect(edgeColorOf(renderer.objectsGroup, 'Object_1')).toBe(EDGE_NORMAL)
+  })
+})
+
 describe('SceneRenderer — instance-aware bounds for zoom-extents (RR17)', () => {
   it('batch edge geometry bounds follow the instance poses, not the definition-space soup', () => {
     // One placement far from the origin. The edge geometry's own position

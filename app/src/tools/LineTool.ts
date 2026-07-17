@@ -750,28 +750,23 @@ export class LineTool implements Tool {
   /** Draw a rubber-band line from a 2D ground-plane anchor to the cursor. */
   private _drawRubberBandGround(anchor: [number, number], cursor: [number, number]): void {
     this._clearPreview()
-    this._drawRubberBandSegment([anchor[0], anchor[1], 0], [cursor[0], cursor[1], 0], /* liftZ */ true)
+    this._drawRubberBandSegment([anchor[0], anchor[1], 0], [cursor[0], cursor[1], 0])
   }
 
   /** Draw a rubber-band line from the last placed point to the cursor (face mode). */
   private _drawRubberBandFace(last: V3, cursor: V3): void {
     this._clearPreview()
-    this._drawRubberBandSegment(last, cursor, /* liftZ */ false)
+    this._drawRubberBandSegment(last, cursor)
   }
 
   /**
-   * Emit a LineSegments preview for a single segment.
-   *
-   * @param liftZ  When true, bump z by +0.001 to avoid z-fighting with the
-   *               ground plane (ground mode). False in face mode.
+   * Emit a LineSegments preview for a single segment. Endpoints are used
+   * exactly as given — the preview's depth bias (PREVIEW_LINE_STYLE,
+   * depthPolicy.ts) settles coincidence with the ground/committed lines, so
+   * no z-lift.
    */
-  private _drawRubberBandSegment(a: V3, b: V3, liftZ: boolean): void {
+  private _drawRubberBandSegment(a: V3, b: V3): void {
     const pts = new Float32Array([...a, ...b])
-    if (liftZ) {
-      pts[2] += 0.001
-      pts[5] += 0.001
-    }
-
     this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
   }
 

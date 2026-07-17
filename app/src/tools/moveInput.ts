@@ -271,15 +271,20 @@ export function parseDimensions(buf: string): [number, number] | null {
 }
 
 /**
- * Immutably edit the array-copy VCB buffer (the "×N / /N" refinement typed
+ * Immutably edit the array-copy VCB buffer (the "N× / N÷" refinement typed
  * right after a Move+copy commit).
  *
- * Grammar: one leading mode token — `x`/`X`/`*` (multiply: N total copies at
- * the committed spacing) or `/` (divide: N copies splitting the committed
- * distance) — followed by digits. Rules:
- * - A mode token is accepted only into an empty buffer (no second mode).
- * - Digits are appended only after a mode token (a bare leading digit is a
- *   tool-shortcut key, not array input — the caller lets it fall through).
+ * Grammar: digits plus ONE mode token — `x`/`X`/`*` (multiply: N total
+ * copies at the committed spacing) or `/` (divide: N copies splitting the
+ * committed distance) — in EITHER order, matching SketchUp: the trailing
+ * form `5x` / `5/` and the leading form `x5` / `/5` are both accepted.
+ * Rules:
+ * - A mode token is accepted into an empty buffer (leading form) or after
+ *   digits (trailing form); a second mode token is rejected.
+ * - Digits start or extend the number: a bare leading digit begins the
+ *   trailing form, and digits keep appending after a leading mode token —
+ *   but not after a trailing one (`5x3` is malformed).
+ * - `x`/`X`/`*` all normalize to `x` in the buffer.
  * - `Backspace` removes the last character.
  * - Any other key is ignored (buffer returned unchanged).
  */
@@ -289,13 +294,17 @@ export function editArrayBuffer(buf: string, key: string): string {
   }
 
   if (key === 'x' || key === 'X' || key === '*' || key === '/') {
-    if (buf !== '') return buf // one mode token only
-    return key === '/' ? '/' : 'x'
+    const token = key === '/' ? '/' : 'x'
+    if (buf === '') return token                 // leading form: xN / /N
+    if (/^\d+$/.test(buf)) return buf + token    // trailing form: Nx / N/
+    return buf // one mode token only
   }
 
   if (key >= '0' && key <= '9') {
-    if (buf === '') return buf // digits only after a mode token
-    return buf + key
+    // Empty or digits-only buffer: (start of) the trailing form. A leading
+    // mode token takes digits after it. A COMPLETED trailing form does not.
+    if (buf === '' || /^\d+$/.test(buf) || /^[x/]\d*$/.test(buf)) return buf + key
+    return buf
   }
 
   return buf
@@ -303,21 +312,23 @@ export function editArrayBuffer(buf: string, key: string): string {
 
 /**
  * Parse the array-copy buffer to a spec, or null when it is empty or
- * malformed (`x`, `/0`, `x0`, junk). `multiply` = external array (`xN`:
- * N total copies at the committed spacing, continuing along the vector);
- * `divide` = internal array (`/N`: N copies evenly dividing the committed
- * distance). Over-large counts parse — the caller checks them against the
- * kernel's cap (`Scene.max_array_count()`, the single source of truth) and
- * refuses with feedback, so they aren't silently ignored.
+ * malformed (`x`, `3`, `/0`, `x0`, junk). Both token orders parse (`x5` and
+ * `5x`, `/5` and `5/`). `multiply` = external array (N total copies at the
+ * committed spacing, continuing along the vector); `divide` = internal
+ * array (N copies evenly dividing the committed distance). Over-large
+ * counts parse — the caller checks them against the kernel's cap
+ * (`Scene.max_array_count()`, the single source of truth) and refuses with
+ * feedback, so they aren't silently ignored.
  */
 export function parseArraySpec(
   buf: string,
 ): { mode: 'multiply' | 'divide'; count: number } | null {
-  const m = /^([xX*/])(\d+)$/.exec(buf)
+  const m = /^([xX*/])(\d+)$/.exec(buf) ?? /^(\d+)([xX*/])$/.exec(buf)
   if (m === null) return null
-  const count = parseInt(m[2], 10)
+  const [digits, mode] = /\d/.test(m[1]) ? [m[1], m[2]] : [m[2], m[1]]
+  const count = parseInt(digits, 10)
   if (!Number.isFinite(count) || count < 1) return null
-  return { mode: m[1] === '/' ? 'divide' : 'multiply', count }
+  return { mode: mode === '/' ? 'divide' : 'multiply', count }
 }
 
 /**

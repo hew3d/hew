@@ -21,8 +21,8 @@
  *
  * Colors are set once at construction and again on every theme change via
  * `setColors()` — cheap uniform writes, no geometry/shader rebuild needed
- * (unlike the origin-axis lines, which stay static vertex-color geometry
- * and do rebuild on theme change, in `Viewport.tsx`).
+ * (unlike the origin-axis lines, which do rebuild on theme change, in
+ * `Viewport.tsx`).
  */
 import * as THREE from 'three'
 
@@ -137,9 +137,9 @@ export class InfiniteGrid {
     this.mesh = new THREE.Mesh(geometry, this.material)
     this.mesh.name = 'InfiniteGrid'
     // First in the opaque pass (see the material comment above): the model
-    // overdraws it, and the transparent overlays just above the ground
-    // (sketch region fills, sketch edges, axes, tool previews at z≈0.001)
-    // blend over it later in the transparent pass.
+    // overdraws it, and the ground-plane overlays (sketch region fills,
+    // sketch edges, axes, tool previews — all geometrically AT z=0, ordered
+    // by the depth-bias ladder in depthPolicy.ts) draw over it later.
     this.mesh.renderOrder = -1
     // Defensive: a 600x600 plane's bounding sphere should always intersect
     // the frustum near the origin, but skip the computed-bounds culling test

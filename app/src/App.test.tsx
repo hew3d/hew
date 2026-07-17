@@ -811,3 +811,43 @@ describe('App — welcome screen', () => {
     expect(rectangleItem?.textContent).not.toContain('✓')
   })
 })
+
+describe('App — document changes prune dead handles from the selection', () => {
+  // The maintainer's repro: copy a cube, 3x the copy into an array, Undo —
+  // Object Info still said "3 selected" and the dock stayed in Multi mode
+  // (both read the app selection) while the Outliner (which re-reads the
+  // document) correctly showed one object. handleDocumentChanged is the
+  // choke point every mutation funnels through (undo/redo included), so the
+  // prune lives there and covers every path that can kill selected nodes.
+  const originalObjectIds = mockScene.object_ids
+
+  afterEach(() => {
+    mockScene.object_ids = originalObjectIds
+    delete (mockScene as Record<string, unknown>).scene_undo
+  })
+
+  it('a selection over removed objects shrinks to the survivors after undo', async () => {
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: {
+        selectObjects(ids: string[]): void
+        getSelection(): { kind: string; id: string }[]
+        undo(): void
+      }
+    }).__hew_test
+    expect(harness).toBeDefined()
+
+    // Three live objects, all selected (the post-array state).
+    mockScene.object_ids = () => BigUint64Array.from([1n, 2n, 3n])
+    act(() => harness.selectObjects(['1', '2', '3']))
+    expect(harness.getSelection()).toHaveLength(3)
+
+    // Undo removes two of them (the harness's headless arm reconciles via
+    // handleDocumentChanged, the same choke point every entry drives).
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => { /* no-op */ } })
+    mockScene.object_ids = () => BigUint64Array.from([1n])
+    act(() => harness.undo())
+
+    expect(harness.getSelection()).toEqual([{ kind: 'object', id: '1' }])
+  })
+})

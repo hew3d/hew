@@ -4,6 +4,7 @@
  */
 
 import type { Ray } from '../viewport/math'
+import type { NodeRef } from '../panels/treeModel'
 
 /** Snap result shape — mirrors SnapJs from wasm-api, but pure TypeScript */
 export interface Snap {
@@ -65,6 +66,19 @@ export interface Tool {
   capturingInput?(): boolean
 
   /**
+   * (optional) Per-key refinement of `capturingInput`: whether THIS key
+   * belongs to the tool's input capture. Lets a tool capture only the keys
+   * its buffer actually needs (e.g. Move's armed ×N / /N window takes
+   * digits and mode tokens but must never eat Space, which always resets
+   * to Select) while a full VCB gesture still captures the whole keyboard.
+   * Consulted by the Viewport's key routing and by App-level shortcut
+   * gates via `ViewportApi.isCapturingInput(key)`; when absent, the plain
+   * `capturingInput()` verdict applies to every key. Feature-detected with
+   * `'capturesKey' in tool`.
+   */
+  capturesKey?(key: string): boolean
+
+  /**
    * (optional) Called on a double-click BEFORE the Viewport's default
    * "enter context" gesture. Return `true` if the tool consumed the
    * double-click (e.g. LineTool ending a chain) so the Viewport skips
@@ -82,6 +96,17 @@ export interface Tool {
    * `notifyLoaded`. Feature-detected with `'onDocumentReset' in tool`.
    */
   onDocumentReset?(): void
+
+  /**
+   * (optional) The app selection changed while this tool is active. Tools
+   * that snapshot the selection at creation (Move/Rotate/Scale) implement
+   * this so the NEXT gesture starts from live handles — without it, an
+   * undo that killed selected nodes left the tool committing against dead
+   * handles (UnknownObject). The Viewport pushes every selection change
+   * (clicks, Outliner, undo/redo pruning) into the active tool.
+   * Feature-detected with `'setSelection' in tool`.
+   */
+  setSelection?(nodes: NodeRef[]): void
 
   /**
    * (optional) One live "what do I do next" line for the status bar,

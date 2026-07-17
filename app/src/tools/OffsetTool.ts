@@ -6,7 +6,11 @@
  * Gesture:
  *   1. Idle: hover; first click picks the target under the cursor —
  *      an object face (Path A, `pick_face`) or a sketch region (Path B,
- *      `pick_sketch_region`), the same two-path pick Push/Pull uses.
+ *      `pick_sketch_region`), the same two-path pick Push/Pull uses. A
+ *      click landing ON a region's boundary edge (the region pick is
+ *      interior-only) falls back to the edge pick and resolves the edge
+ *      to its owning region, so one click on an edge OR the interior
+ *      starts the gesture.
  *   2. Drag: the cursor's position on the target plane sets a SIGNED
  *      distance — negative inside the boundary (inset), positive outside
  *      (outset). The kernel computes the true offset loop each move
@@ -35,7 +39,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
-import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs } from './offsetMath'
+import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs, boundaryContainsEdge } from './offsetMath'
 
 /** Snap kinds whose point is a deliberate reference for the offset distance
  * (mirrors PushPull's set). `on-face` is excluded: it fires continuously
@@ -251,27 +255,78 @@ export class OffsetTool implements Tool {
       ray.origin[0], ray.origin[1], ray.origin[2],
       ray.direction[0], ray.direction[1], ray.direction[2],
     )
-    if (regionPick === undefined) return
-    try {
-      const sketchHandle = regionPick.sketch()
-      const regionHandle = regionPick.region()
-      try {
-        const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
-        if (boundary.length < 9) return
-        // All sketches are ground-plane today (see PushPullTool); anchor the
-        // plane at the boundary's first vertex so a future non-ground sketch
-        // still measures in its own plane once the normal is queried.
-        this._beginDrag(
-          { kind: 'region', sketchHandle, regionHandle },
-          boundary,
-          [boundary[0], boundary[1], boundary[2]],
-          [0, 0, 1],
-        )
-      } catch {
-        // Stale region — stay idle.
+    if (regionPick === undefined) {
+      // The region pick is interior-only, so a click landing ON the visible
+      // boundary line — exactly where Offset invites clicking — always
+      // missed (maintainer playtest: "the first click is always swallowed").
+      // Fall back to the edge pick (which has the proper pixel tolerance)
+      // and resolve the edge to the region whose boundary carries it.
+      const viaEdge = this._pickRegionViaEdge(ray)
+      if (viaEdge !== null) {
+        this._beginRegionDrag(viaEdge.sketchHandle, viaEdge.regionHandle)
       }
+      return
+    }
+    try {
+      this._beginRegionDrag(regionPick.sketch(), regionPick.region())
     } finally {
       regionPick.free()
+    }
+  }
+
+  /** Start the drag on a picked sketch region (both region-pick arms). */
+  private _beginRegionDrag(sketchHandle: bigint, regionHandle: bigint): void {
+    try {
+      const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
+      if (boundary.length < 9) return
+      // All sketches are ground-plane today (see PushPullTool); anchor the
+      // plane at the boundary's first vertex so a future non-ground sketch
+      // still measures in its own plane once the normal is queried.
+      this._beginDrag(
+        { kind: 'region', sketchHandle, regionHandle },
+        boundary,
+        [boundary[0], boundary[1], boundary[2]],
+        [0, 0, 1],
+      )
+    } catch {
+      // Stale region — stay idle.
+    }
+  }
+
+  /**
+   * Resolve a click that landed on a sketch EDGE to the region whose outer
+   * boundary contains that edge. Returns the first matching region in the
+   * kernel's (deterministic) region order — for the common case, a lone
+   * closed profile, that is the only one; for a shared boundary edge either
+   * neighbor is a reasonable pick and an interior click disambiguates.
+   * Null when nothing usable is under the cursor (open-line edge, stale
+   * handles, no sketch at all).
+   */
+  private _pickRegionViaEdge(
+    ray: Ray,
+  ): { sketchHandle: bigint; regionHandle: bigint } | null {
+    const edgePick = this.wasmScene.pick_sketch_edge(
+      ray.origin[0], ray.origin[1], ray.origin[2],
+      ray.direction[0], ray.direction[1], ray.direction[2],
+    )
+    if (edgePick === undefined) return null
+    try {
+      const sketchHandle = edgePick.sketch()
+      const endpoints = this.wasmScene.sketch_edge_endpoints(sketchHandle, edgePick.edge())
+      if (endpoints === undefined) return null
+      try {
+        for (const regionHandle of Array.from(this.wasmScene.sketch_regions(sketchHandle))) {
+          const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
+          if (boundaryContainsEdge(boundary, endpoints)) {
+            return { sketchHandle, regionHandle }
+          }
+        }
+      } catch {
+        // A region vanished between the queries — treat as a miss.
+      }
+      return null
+    } finally {
+      edgePick.free()
     }
   }
 

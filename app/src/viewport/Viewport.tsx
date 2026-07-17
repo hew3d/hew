@@ -24,6 +24,7 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
+import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
 import { SnapService } from './snapService'
@@ -241,6 +242,12 @@ export type StandardView = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right
  * real problem — would force a horizontal up, so orbiting from a top view pivots
  * around the wrong axis. Nudging the eye a touch off the pole lets every view
  * keep world-up +Z, so orbit always pivots around Z (natural in a Z-up world).
+ *
+ * The same constant also floors FREE orbit via the OrbitControls polar-angle
+ * clamp (see the controls setup): near-pole poses are ill-conditioned (basis
+ * roll amplifies position jitter into whole-frame shimmer), and the safe
+ * margin for the baked views and for orbiting must be one value so they
+ * can't drift apart.
  */
 const POLE_TILT = 0.001
 
@@ -306,8 +313,10 @@ export interface ViewportApi {
    * True while the active tool is capturing raw keyboard input (mid-VCB entry),
    * so the global Delete/Backspace handler must not steal the key (Backspace
    * edits the typed buffer). False for non-capturing tools (e.g. Select).
+   * Pass the pending key to honor a tool's per-key capture (Tool.capturesKey)
+   * — Move's armed array window owns its buffer keys but never Space.
    */
-  isCapturingInput: () => boolean
+  isCapturingInput: (key?: string) => boolean
   /** Trigger scene undo (same as Cmd/Ctrl+Z keyboard shortcut). */
   runUndo: () => void
   /** Trigger scene redo (same as Shift+Cmd/Ctrl+Z keyboard shortcut). */
@@ -485,27 +494,181 @@ function buildAxisLine(
     transparent: dashed,
     opacity: dashed ? 0.75 : 1,
     depthTest: true,
+    // Axes are geometrically coincident with ground-sketch lines and any
+    // object edge drawn along them (a box on the origin shares its vertical
+    // edge with +Z); the bias — not a world-space lift — is what resolves
+    // those depth ties deterministically. See depthPolicy.ts.
+    polygonOffset: true,
+    polygonOffsetFactor: DEPTH_BIAS.AXES,
+    polygonOffsetUnits: DEPTH_BIAS.AXES,
   })
   const line = new Line2(geo, mat)
   if (dashed) line.computeLineDistances()
   line.renderOrder = 1 // draw over the grid plane
+  // Metadata for the per-frame camera-plane clamp (`clampOriginAxes`): the
+  // half's nominal far endpoint (`from` is always the origin) and the last
+  // written clamp params so unclamped frames cost nothing.
+  line.userData.axisEnd = to
+  line.userData.clampT = [0, 1]
+  // The clamp rewrites endpoints in place; skip the stale computed bounds
+  // rather than recomputing them per frame (the axes are essentially always
+  // in view anyway — they span the whole world).
+  line.frustumCulled = false
   return line
 }
+
+/**
+ * Clip every axis half's rendered segment to a slightly enlarged view
+ * frustum, in float64 — called once per rendered frame (camera changes only
+ * reach the GPU through a render).
+ *
+ * Why: each half is a single 150 m fat-line segment, and `LineMaterial`
+ * handles extreme segments badly in two distinct ways, both measured by the
+ * line-stability probes (`edge-stability.spec.ts`):
+ *
+ *  1. Whenever a half extends behind the camera (orbit low over the ground
+ *     and -Y is behind you; look down at a model and +Z is), the vertex
+ *     shader trims the segment at the near plane — and that trim is
+ *     catastrophically noisy in float32: the trimmed endpoint lands at
+ *     w ≈ near, where the perspective division amplifies the rounding noise
+ *     of the 150 m-magnitude view-space coordinates ~100×, so the whole
+ *     on-screen quad wobbles by a few tenths of a pixel per repaint. During
+ *     an orbit's damping tail that reads as the axis shimmering — worst
+ *     where it overlays high-contrast coincident linework (the blue +Z axis
+ *     sharing a cube's vertical edge). Measured: ~600 hard pixel flips per
+ *     sub-pixel repaint at a 34 m pose, all tracing trimmed halves; 0 on
+ *     untrimmed ones.
+ *
+ *  2. Even with the near-plane case handled, an endpoint that projects far
+ *     outside the viewport (tens of thousands of pixels, for a half receding
+ *     toward the camera plane) makes the rasterizer interpolate depth and
+ *     dash-distance across a gigantic quad of which the screen shows a tiny
+ *     parameter sliver — imprecisely enough that the depth-bias ladder
+ *     (depthPolicy.ts, a few depth quanta) drowns: an axis over a coincident
+ *     model edge stayed nondeterministic (~200 hard flips) until the bias
+ *     was cranked to hundreds of quanta, which is no longer a hairline.
+ *
+ * Fix for both: clip each half here, in float64, to a modestly enlarged view
+ * frustum (near plane at a distance-scaled margin, side planes pushed out
+ * FRUSTUM_SLACK×), every rendered frame. The shader then never trims, and
+ * every endpoint it sees projects within ~1.5 screens, so its float32
+ * interpolation is exact to well under one depth quantum and the ladder's
+ * single-digit biases resolve ties deterministically. The clipped-away
+ * portions are off-screen by construction; the dash phase stays anchored at
+ * the origin because the distance attributes are rewritten to the clipped
+ * parameter range.
+ */
+const FRUSTUM_SLACK = 1.5
+function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera): void {
+  // View transform in float64: three stores matrix elements and camera pose
+  // as JS numbers, so composing the two matrix-vector products here (rather
+  // than in the f32 vertex shader) is what buys the precision. Recompute the
+  // inverse from the camera's current pose — `camera.matrixWorldInverse` is
+  // only refreshed by `renderer.render`, i.e. it still holds LAST frame's
+  // pose here, and a stale view would misclip the very frame captured right
+  // after a programmatic `setCamera` jump.
+  camera.updateMatrixWorld()
+  const m = _axisView.copy(camera.matrixWorld).invert().elements
+  // View-space position of the world origin (the shared start of every half).
+  const ax = m[12]
+  const ay = m[13]
+  const az = m[14]
+  // Near margin: comfortably past the near plane, growing with camera
+  // distance so the float noise floor (ulps of camera/axis coordinate
+  // magnitudes) stays orders of magnitude below one depth/pixel quantum at
+  // every scale.
+  const margin = Math.max(4 * camera.near, 0.02 * camera.position.length())
+  const tanV = Math.tan((camera.fov * Math.PI) / 360) * FRUSTUM_SLACK
+  const tanH = tanV * camera.aspect
+
+  for (const child of group.children) {
+    if (!(child instanceof Line2)) continue
+    const end = child.userData.axisEnd as [number, number, number]
+    // View-space direction origin→end (rotation part only — `end` is a
+    // position but the origin's translation cancels in the difference).
+    const bx = m[0] * end[0] + m[4] * end[1] + m[8] * end[2]
+    const by = m[1] * end[0] + m[5] * end[1] + m[9] * end[2]
+    const bz = m[2] * end[0] + m[6] * end[1] + m[10] * end[2]
+
+    // Clip the parameter range [t0, t1] of origin→end against five planes,
+    // each linear in t (view space: camera at 0 looking down -z, so the
+    // depth in front is -z):
+    //   depth:  -z(t) ≥ margin
+    //   sides:  |x(t)| ≤ tanH·(-z(t)),  |y(t)| ≤ tanV·(-z(t))
+    let t0 = 0
+    let t1 = 1
+    // Each constraint as g(t) = c + d·t ≥ 0.
+    const planes: Array<[number, number]> = [
+      [-az - margin, -bz],
+      [-az * tanH - ax, -bz * tanH - bx],
+      [-az * tanH + ax, -bz * tanH + bx],
+      [-az * tanV - ay, -bz * tanV - by],
+      [-az * tanV + ay, -bz * tanV + by],
+    ]
+    for (const [c, d] of planes) {
+      if (d === 0) {
+        if (c < 0) t0 = t1 = 0 // wholly outside this plane — degenerate
+      } else {
+        const tc = -c / d
+        if (d > 0) {
+          if (tc > t0) t0 = tc
+        } else if (tc < t1) {
+          t1 = tc
+        }
+      }
+    }
+    if (t0 >= t1) t0 = t1 = 0 // no visible span — collapse (nothing drawn)
+
+    const cached = child.userData.clampT as [number, number]
+    if (cached[0] === t0 && cached[1] === t1) continue
+    cached[0] = t0
+    cached[1] = t1
+
+    // Rewrite the single segment instance in place (instanceStart/End share
+    // one interleaved buffer: [sx,sy,sz,ex,ey,ez]).
+    const geo = child.geometry
+    const posAttr = geo.attributes.instanceStart as THREE.InterleavedBufferAttribute
+    const arr = posAttr.data.array as Float32Array
+    arr[0] = end[0] * t0
+    arr[1] = end[1] * t0
+    arr[2] = end[2] * t0
+    arr[3] = end[0] * t1
+    arr[4] = end[1] * t1
+    arr[5] = end[2] * t1
+    posAttr.data.needsUpdate = true
+
+    // Keep dashes world-anchored at the origin: distances are the clamped
+    // parameter range scaled by the half's full length.
+    const distAttr = geo.attributes.instanceDistanceStart as THREE.InterleavedBufferAttribute | undefined
+    if (distAttr !== undefined) {
+      const len = Math.hypot(end[0], end[1], end[2])
+      const darr = distAttr.data.array as Float32Array
+      darr[0] = t0 * len
+      darr[1] = t1 * len
+      distAttr.data.needsUpdate = true
+    }
+  }
+}
+const _axisView = new THREE.Matrix4()
 
 function buildOriginAxes(theme: 'light' | 'dark'): THREE.Group {
   const group = new THREE.Group()
   group.name = 'OriginAxes'
 
   const L = 150
-  const E = 0.002 // tiny lift off Z=0 so the ground-plane axes don't z-fight the grid
+  // Exactly at Z=0 — the axes must be geometrically coplanar with the ground
+  // grid and ground sketches at every zoom (a former +0.002 world-space lift
+  // read as the axes floating above a cm-scale sketch). The grid is a
+  // non-depth-writing backdrop, so there is nothing to z-fight; coincident
+  // lines are settled by the depth-bias ladder instead (depthPolicy.ts).
   const { x: xc, y: yc, z: zc } = ORIGIN_AXIS_COLORS[theme]
 
   // X (red): solid +X, dashed -X
-  group.add(buildAxisLine([0, 0, E], [L, 0, E], xc, false))
-  group.add(buildAxisLine([0, 0, E], [-L, 0, E], xc, true))
+  group.add(buildAxisLine([0, 0, 0], [L, 0, 0], xc, false))
+  group.add(buildAxisLine([0, 0, 0], [-L, 0, 0], xc, true))
   // Y (green): solid +Y, dashed -Y
-  group.add(buildAxisLine([0, 0, E], [0, L, E], yc, false))
-  group.add(buildAxisLine([0, 0, E], [0, -L, E], yc, true))
+  group.add(buildAxisLine([0, 0, 0], [0, L, 0], yc, false))
+  group.add(buildAxisLine([0, 0, 0], [0, -L, 0], yc, true))
   // Z (blue): solid +Z, dashed -Z (below ground)
   group.add(buildAxisLine([0, 0, 0], [0, 0, L], zc, false))
   group.add(buildAxisLine([0, 0, 0], [0, 0, -L], zc, true))
@@ -1794,6 +1957,11 @@ export default function Viewport({
     }
 
     function captureFrame(): { width: number; height: number; pixels: Uint8Array } {
+      // Mirror the per-frame camera-dependent updates of the animation loop
+      // (this renders out-of-band, without going through it) so a captured
+      // frame is exactly what the loop would put on screen for this pose.
+      infiniteGrid.update(camera.position)
+      clampOriginAxes(originAxes, camera)
       renderer.render(threeScene, camera)
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
@@ -1891,8 +2059,14 @@ export default function Viewport({
     }
 
     if (apiRefRef.current !== undefined) {
-      const isCapturingInput = (): boolean => {
+      const isCapturingInput = (key?: string): boolean => {
         const t = toolController.activeTool
+        // With a key, honor a tool's per-key capture (Tool.capturesKey) so
+        // App-level shortcut gates (Space→Select, Delete/Backspace) agree
+        // with the Viewport's own routing about which keys the tool owns.
+        if (key !== undefined && 'capturesKey' in t) {
+          return (t as { capturesKey(key: string): boolean }).capturesKey(key)
+        }
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
       apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
@@ -2308,6 +2482,7 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeFollowMeTool())
+          break
         case 'Offset':
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
@@ -2407,6 +2582,20 @@ export default function Viewport({
     controls.minDistance = 0.1
     controls.maxDistance = 50
     controls.enablePan = true
+    // Free orbit must not reach the ±Z poles. Exactly at a pole the view
+    // basis is gimbal-degenerate (look ∥ up), and even NEAR one it is
+    // ill-conditioned: with world-up +Z, screen roll tracks the azimuth of
+    // the camera's tiny lateral offset, so at a polar angle of ~1e-6 rad
+    // (OrbitControls' own makeSafe floor) sub-µm position jitter re-rolls
+    // the whole frame on every damping-tail repaint — severe whole-viewport
+    // shimmer. The Top/Bottom standard views already embody the safe margin
+    // (their baked eyes sit POLE_TILT off the pole — see STANDARD_VIEWS);
+    // clamp free orbit to the polar angle of that very pose, atan(POLE_TILT),
+    // so the two margins share one constant and cannot drift apart (and so
+    // controls.update() leaves the Top/Bottom framing itself untouched).
+    // ≈0.057° — imperceptible.
+    controls.minPolarAngle = Math.atan(POLE_TILT)
+    controls.maxPolarAngle = Math.PI - Math.atan(POLE_TILT)
 
     // Camera-drag notifications: tell the parent while a pointer-drag
     // navigation is in flight so it can fade the contextual dock out of the
@@ -2496,6 +2685,10 @@ export default function Viewport({
         // Feed the shader grid the camera's current position so it can pick
         // the right cell-size decade per fragment.
         infiniteGrid.update(camera.position)
+        // Re-clip the axis halves to the enlarged frustum (float64 — see
+        // clampOriginAxes; the fat-line shader's own handling of extreme
+        // segments is what shimmered).
+        clampOriginAxes(originAxes, camera)
         // Fat-line resolutions (sketch edges, tool-preview rubber-bands) are
         // NOT refreshed here: LineMaterial's resolution uniform depends only
         // on the canvas size, so it's set at mount and on resize (see the
@@ -3010,12 +3203,16 @@ export default function Viewport({
       // non-modifier keys to it BEFORE the tool-switch shortcuts so that digit
       // keys feed the VCB rather than switching tools. Esc is intentionally
       // allowed through so cancel always works (the tool handles it too).
+      // A tool with per-key capture (Tool.capturesKey) narrows this to the
+      // keys its buffer actually needs — Move's armed ×N / /N window must
+      // never eat Space (always reset-to-Select) or the letter shortcuts.
       if (!isMod && ev.key !== 'Escape') {
         const activeTool = toolController.activeTool
-        if (
-          'capturingInput' in activeTool &&
-          (activeTool as { capturingInput(): boolean }).capturingInput()
-        ) {
+        const captures = 'capturesKey' in activeTool
+          ? (activeTool as { capturesKey(key: string): boolean }).capturesKey(ev.key)
+          : 'capturingInput' in activeTool &&
+            (activeTool as { capturingInput(): boolean }).capturingInput()
+        if (captures) {
           activeTool.onKey(ev)
           ev.preventDefault()
           scheduleRender()
@@ -3302,6 +3499,15 @@ export default function Viewport({
 
   useEffect(() => {
     selectedIdsRef.current = selectedIds
+    // Push the live selection into the active tool (Tool.setSelection):
+    // tools that snapshot the selection at creation (Move/Rotate/Scale)
+    // must not keep committing against handles an undo/redo has since
+    // killed — the app-level prune flows through here like any other
+    // selection change.
+    const activeToolForSelection = toolControllerRef.current?.activeTool
+    if (activeToolForSelection !== undefined && 'setSelection' in activeToolForSelection) {
+      (activeToolForSelection as { setSelection(nodes: NodeRef[]): void }).setSelection([...selectedIds])
+    }
     // Collect leaf object ids, instance ids, and sketch ids for highlighting.
     // Groups recurse via collectLeafIds/group_members so a group selection
     // (e.g. an imported component's outermost group) highlights every leaf

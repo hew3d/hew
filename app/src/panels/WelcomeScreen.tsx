@@ -289,11 +289,6 @@ const WELCOME_CSS = `
   outline: 2px solid var(--accent-border);
   outline-offset: 1px;
 }
-.hw-welcome__units-hint {
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--text-muted);
-}
 
 /* ---- Footer ----------------------------------------------------------- */
 .hw-welcome__footer {
@@ -499,9 +494,6 @@ export function WelcomeScreen({
                 </option>
               ))}
             </select>
-            <span className="hw-welcome__units-hint">
-              Sets the default. A small unit also starts the view zoomed in.
-            </span>
           </div>
 
           <div className="hw-welcome__footer">

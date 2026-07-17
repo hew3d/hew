@@ -615,7 +615,7 @@ export class CircleTool implements Tool {
    */
   private _drawRubberBandGround(verts: V3[]): void {
     this._clearPreview()
-    this._drawRubberBandVerts(verts, /* liftZ */ true)
+    this._drawRubberBandVerts(verts)
   }
 
   /**
@@ -624,17 +624,18 @@ export class CircleTool implements Tool {
    */
   private _drawRubberBandFace(verts: V3[]): void {
     this._clearPreview()
-    this._drawRubberBandVerts(verts, /* liftZ */ false)
+    this._drawRubberBandVerts(verts)
   }
 
   /**
-   * Emit a LineSegments preview for a closed N-vertex loop.
+   * Emit a LineSegments preview for a closed N-vertex loop. Vertices are used
+   * exactly as given — the preview's depth bias (PREVIEW_LINE_STYLE,
+   * depthPolicy.ts) settles coincidence with the ground/committed lines, so
+   * no z-lift.
    *
    * @param verts  N world-space xyz vertices in order.
-   * @param liftZ  When true, bump each z by +0.001 to avoid z-fighting with
-   *               the ground plane (ground mode). False in face mode.
    */
-  private _drawRubberBandVerts(verts: V3[], liftZ: boolean): void {
+  private _drawRubberBandVerts(verts: V3[]): void {
     const n = verts.length
     const pts = new Float32Array(n * 2 * 3)
     for (let i = 0; i < n; i++) {
@@ -644,10 +645,6 @@ export class CircleTool implements Tool {
       pts[base + 0] = a[0]; pts[base + 1] = a[1]; pts[base + 2] = a[2]
       pts[base + 3] = b[0]; pts[base + 4] = b[1]; pts[base + 5] = b[2]
     }
-    if (liftZ) {
-      for (let i = 2; i < pts.length; i += 3) pts[i] += 0.001
-    }
-
     this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
   }
 

@@ -587,7 +587,7 @@ export class ArcTool implements Tool {
       const cursor: [number, number] = [snap.x, snap.y]
       this._lastGroundCursor = cursor
       this._clearPreview()
-      this._drawSegments([[a[0], a[1], 0], [cursor[0], cursor[1], 0]], /* liftZ */ true)
+      this._drawSegments([[a[0], a[1], 0], [cursor[0], cursor[1], 0]])
       this.onMeasurementCb(this._measurementText(formatLength(Math.hypot(cursor[0] - a[0], cursor[1] - a[1]))))
       return
     }
@@ -603,12 +603,12 @@ export class ArcTool implements Tool {
     if (verts === null) {
       // Flat bulge — fall back to showing the bare chord.
       this._clearPreview()
-      this._drawSegments([[a[0], a[1], 0], [b[0], b[1], 0]], /* liftZ */ true)
+      this._drawSegments([[a[0], a[1], 0], [b[0], b[1], 0]])
       this.onMeasurementCb(this._measurementText(''))
       return
     }
     this._clearPreview()
-    this._drawSegments(verts, /* liftZ */ true)
+    this._drawSegments(verts)
     this._reportRadius(a, b, s as number)
   }
 
@@ -838,7 +838,7 @@ export class ArcTool implements Tool {
       const { a } = this.faceStage
       this._lastFaceCursor = cursor
       this._clearPreview()
-      this._drawSegments([a, cursor], /* liftZ */ false)
+      this._drawSegments([a, cursor])
       this.onMeasurementCb(this._measurementText(formatLength(segmentLength(a, cursor))))
       return
     }
@@ -851,13 +851,13 @@ export class ArcTool implements Tool {
     const verts = this._facePolyline(a, b, normal, cursor)
     this._clearPreview()
     if (verts === null || s === null) {
-      this._drawSegments([a, b], /* liftZ */ false)
+      this._drawSegments([a, b])
       this.onMeasurementCb(this._measurementText(''))
       return
     }
     // Preview the arc plus any completion-mode closing edges; the radius
     // readout still derives from the bare arc vertices.
-    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, normal, s))), /* liftZ */ false)
+    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, normal, s))))
     this._reportRadiusFromChain(verts)
   }
 
@@ -1034,13 +1034,13 @@ export class ArcTool implements Tool {
   // ------------------------------------------------------------------ preview
 
   /**
-   * Emit a fat-line preview for an open polyline.
+   * Emit a fat-line preview for an open polyline. Vertices are used exactly
+   * as given — the preview's depth bias (PREVIEW_LINE_STYLE, depthPolicy.ts)
+   * settles coincidence with the ground/committed lines, so no z-lift.
    *
    * @param verts  Ordered world-space vertices (>= 2).
-   * @param liftZ  When true, bump each z by +0.001 to avoid z-fighting with
-   *               the ground plane (ground mode). False in face mode.
    */
-  private _drawSegments(verts: V3[], liftZ: boolean): void {
+  private _drawSegments(verts: V3[]): void {
     const nSegs = verts.length - 1
     if (nSegs < 1) return
     const pts = new Float32Array(nSegs * 2 * 3)
@@ -1051,10 +1051,6 @@ export class ArcTool implements Tool {
       pts[base + 0] = a[0]; pts[base + 1] = a[1]; pts[base + 2] = a[2]
       pts[base + 3] = b[0]; pts[base + 4] = b[1]; pts[base + 5] = b[2]
     }
-    if (liftZ) {
-      for (let i = 2; i < pts.length; i += 3) pts[i] += 0.001
-    }
-
     this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
   }
 

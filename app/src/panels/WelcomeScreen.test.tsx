@@ -87,6 +87,10 @@ describe('WelcomeScreen', () => {
     expect(select.querySelectorAll('option')).toHaveLength(6)
     fireEvent.change(select, { target: { value: 'cm' } })
     expect(props.onUnitChange).toHaveBeenCalledWith('cm')
+    // Just the labeled dropdown — no explanatory copy beside it (why you'd
+    // set units for a new model is self-evident; maintainer playtest).
+    expect(screen.queryByText(/sets the default/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/zoomed in/i)).not.toBeInTheDocument()
   })
 
   it('the show-on-startup checkbox reflects and reports its value', () => {

@@ -558,7 +558,7 @@ export class RectangleTool implements Tool {
   private _drawRubberBandGround(a: [number, number], b: [number, number]): void {
     this._clearPreview()
     const corners = rectangleCorners(a, b)
-    this._drawRubberBandCorners(corners, /* liftZ */ true)
+    this._drawRubberBandCorners(corners)
   }
 
   /**
@@ -567,17 +567,18 @@ export class RectangleTool implements Tool {
    */
   private _drawRubberBandFace(corners: [V3, V3, V3, V3]): void {
     this._clearPreview()
-    this._drawRubberBandCorners(corners, /* liftZ */ false)
+    this._drawRubberBandCorners(corners)
   }
 
   /**
-   * Emit a LineSegments preview for a closed 4-corner loop.
+   * Emit a LineSegments preview for a closed 4-corner loop. Corners are used
+   * exactly as given — the preview's depth bias (PREVIEW_LINE_STYLE,
+   * depthPolicy.ts) settles coincidence with the ground/committed lines, so
+   * no z-lift.
    *
    * @param corners  Four world-space xyz corners in order.
-   * @param liftZ    When true, bump each z by +0.001 to avoid z-fighting with
-   *                 the ground plane (ground mode). False in face mode.
    */
-  private _drawRubberBandCorners(corners: readonly [V3, V3, V3, V3], liftZ: boolean): void {
+  private _drawRubberBandCorners(corners: readonly [V3, V3, V3, V3]): void {
     const [c0, c1, c2, c3] = corners
     const pts = new Float32Array([
       ...c0, ...c1,
@@ -585,10 +586,6 @@ export class RectangleTool implements Tool {
       ...c2, ...c3,
       ...c3, ...c0,
     ])
-    if (liftZ) {
-      for (let i = 2; i < pts.length; i += 3) pts[i] += 0.001
-    }
-
     this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
   }
 
