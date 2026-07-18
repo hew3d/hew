@@ -5973,3 +5973,131 @@ fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
         DocumentError::UnknownSketch
     ));
 }
+
+/// The maintainer's `follow-me-2.hew`: a thin tabletop solid (0.1 x 0.2 x
+/// 0.015 m) with a rectangle profile and a 24-facet circle profile standing
+/// perpendicular to its top rim. Grounds the SOLID-FACE Follow Me path
+/// (`follow_me_around_face`, docs/design/follow-me.md §2) in the real file.
+///
+/// Swept around the tabletop's TOP face — the flat face the "crown molding
+/// around a tabletop" is meant to run around — BOTH profiles yield a
+/// watertight molding, deterministically, with the tabletop left as a
+/// separate untouched object. Swept around a face the profile is NOT square
+/// across, the op refuses TYPED and touches nothing: a side face parallel to
+/// the profile plane (`ProfileNotPerpendicular`) or one thinner than the
+/// profile is tall (`PathTooTight`). Which FACE is the path is the whole
+/// story — only the intended flat face is valid; picking a side face is a
+/// correct refusal, never a silent success or a broken solid (rule 4).
+#[test]
+fn follow_me_molding_around_the_maintainer_tabletop() {
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/follow-me-2.hew"
+    ))
+    .expect("read fixture");
+    let doc = Document::load(&bytes).expect("load fixture");
+
+    // The tabletop is the only world object; pick its axis-aligned faces.
+    let cube = *doc.visible_object_ids().first().expect("one object");
+    let obj = doc.object(cube).expect("object live");
+    let face_with = |pick: fn(Vec3) -> bool| -> FaceId {
+        obj.faces()
+            .iter()
+            .find(|(_, f)| pick(f.plane.normal()))
+            .map(|(id, _)| id)
+            .expect("a face with that normal")
+    };
+    let top = face_with(|n| n.z > 0.9); // the tabletop surface
+    let side_parallel = face_with(|n| n.y.abs() > 0.9); // profile plane parallel to it
+    let side_thin = face_with(|n| n.x.abs() > 0.9); // only 0.015 m thick
+
+    // The two upright profiles (plane normal along y): a rectangle (4 verts)
+    // and a drawn circle (24 facet verts). The third sketch is a flat ground
+    // rectangle (normal +z) — not a valid upright profile, skipped.
+    let mut rect: Option<(SketchId, SketchRegionId)> = None;
+    let mut circle: Option<(SketchId, SketchRegionId)> = None;
+    for sid in doc.sketch_ids() {
+        let s = doc.sketch(sid).expect("sketch live");
+        if s.plane().normal().y.abs() < 0.9 {
+            continue;
+        }
+        let region = s.regions().keys().next().expect("one region");
+        match s.profile(region).expect("profile").outer().len() {
+            4 => rect = Some((sid, region)),
+            _ => circle = Some((sid, region)),
+        }
+    }
+    let (rect_sketch, rect_region) = rect.expect("rectangle profile");
+    let (circle_sketch, circle_region) = circle.expect("circle profile");
+
+    let hash_before = doc.state_hash();
+
+    // A molding around the TOP face for each profile: watertight, solid, and
+    // the tabletop is a separate untouched object (6 faces, still visible).
+    // Closed 4-corner loop, anchor-split: 5 segments x profile edges (rect 4
+    // -> 20 walls; circle 24 -> 120 walls).
+    for (label, sketch, region, walls) in [
+        ("rectangle", rect_sketch, rect_region, 20usize),
+        ("circle", circle_sketch, circle_region, 120usize),
+    ] {
+        let mut d = doc.clone();
+        let (id, _) = d
+            .follow_me(
+                sketch,
+                region,
+                &kernel::FollowMePath::FaceLoop {
+                    object: cube,
+                    face: top,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{label} molding around the top face: {e:?}"));
+        let ring = d.object(id).expect("molding live");
+        assert_eq!(
+            ring.watertight(),
+            WatertightState::Watertight,
+            "{label} molding watertight"
+        );
+        assert_eq!(ring.faces().len(), walls, "{label} molding wall count");
+        assert!(d.object_solid(id), "{label} molding solid");
+        assert_eq!(
+            d.object(cube).expect("tabletop live").faces().len(),
+            6,
+            "{label}: tabletop untouched"
+        );
+        assert!(
+            d.visible_object_ids().contains(&cube),
+            "{label}: tabletop still visible"
+        );
+    }
+
+    // Swept around a face the profile is NOT square across, the op refuses
+    // TYPED and leaves the document byte-for-byte untouched (state hash).
+    for (label, face, expected) in [
+        (
+            "parallel side",
+            side_parallel,
+            kernel::FollowMeError::ProfileNotPerpendicular,
+        ),
+        ("thin side", side_thin, kernel::FollowMeError::PathTooTight),
+    ] {
+        for (sketch, region) in [(rect_sketch, rect_region), (circle_sketch, circle_region)] {
+            let mut d = doc.clone();
+            let err = d
+                .follow_me(
+                    sketch,
+                    region,
+                    &kernel::FollowMePath::FaceLoop { object: cube, face },
+                )
+                .expect_err(&format!("{label} must refuse"));
+            assert!(
+                matches!(err, DocumentError::FollowMe(e) if e == expected),
+                "{label}: expected {expected:?}, got {err:?}"
+            );
+            assert_eq!(
+                d.state_hash(),
+                hash_before,
+                "{label}: document untouched on refusal"
+            );
+        }
+    }
+}

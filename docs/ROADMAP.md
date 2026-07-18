@@ -309,6 +309,16 @@ below.
   and L-shaped prismatic walls, which also lets a plain `push_pull(-d)`
   re-close the built step directly.
 
+- **Axis-snap ranking when a world axis is viewed edge-on.** All three world
+  axes share one snap kind, and the pick breaks ties by screen-angle, so from
+  a camera aligned with an axis the far half of that axis (e.g. the
+  underground −Z) can win the pick cone over the near half and flip the sign
+  of a typed, axis-locked Move. It is deterministic and surfaces only from
+  specific axis-aligned viewpoints. The fix is a ranking refinement (prefer
+  the axis half toward the camera / the anchored side); deferred as too niche
+  to hold an early release. An investigation branch characterizing the
+  degeneracies exists.
+
 ## Non-goals
 
 - **Silent geometry repair.** An operation that would produce invalid

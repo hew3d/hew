@@ -16,11 +16,11 @@ function makeEdgePick(sketch: bigint, edge: bigint) {
   return { sketch: () => sketch, edge: () => edge, free: vi.fn() }
 }
 
-function makeFacePick(object: bigint, face: bigint) {
+function makeFacePick(object: bigint, face: bigint, instance: bigint | undefined = undefined) {
   return {
     object: () => object,
     face: () => face,
-    instance: () => undefined,
+    instance: () => instance,
     free: vi.fn(),
   }
 }
@@ -35,6 +35,9 @@ function makeWasmScene(opts: {
   regionPick?: ReturnType<typeof makeRegionPick>
   islandEdges?: bigint[]
   commitError?: string
+  /** Parent node of the picked face's object; `undefined` = plain, top-level
+   *  (the followable default). A defined parent = a grouped, ineligible face. */
+  faceParent?: bigint
 } = {}): WasmScene {
   const follow = () => {
     if (opts.commitError !== undefined) throw new Error(opts.commitError)
@@ -49,6 +52,9 @@ function makeWasmScene(opts: {
     sketch_curve_edges: vi.fn(() => new BigUint64Array([])),
     sketch_edge_endpoints: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0])),
     face_boundary: vi.fn(() => new Float32Array([0, 0, 1, 1, 0, 1, 1, 1, 1])),
+    // The shared `defaultFaceEligible` fallback (no injected predicate in these
+    // unit tests) reads node_parent to reject grouped faces.
+    node_parent: vi.fn(() => opts.faceParent),
     follow_me_along_edges: vi.fn(follow),
     follow_me_around_face: vi.fn(follow),
   } as unknown as WasmScene
@@ -176,11 +182,219 @@ describe('FollowMeTool — in-tool path picking', () => {
     expect(onCommit).toHaveBeenCalledWith(77n)
   })
 
-  it('a click over nothing stays in pick-path', () => {
+  it('a click over nothing stays in pick-path AND says what to aim at (no silent no-op)', () => {
     const scene = makeWasmScene()
-    const { tool } = makeTool(scene)
+    const { tool, onToast } = makeTool(scene)
     tool.onPointerDown(null, RAY)
     expect(tool.statusHint()).toContain('Click the path to follow')
+    // A path-stage miss is never silent — a solid face can't be preselected,
+    // so the tool must say to click the flat face directly.
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/flat face/i)
+    // The code slot is empty — this is guidance, not a typed kernel refusal.
+    expect(onToast.mock.calls[0][1]).toBeUndefined()
+  })
+
+  it('repeated empty clicks do not stack identical miss toasts, but a fresh target re-arms', () => {
+    const scene = makeWasmScene()
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(null, RAY) // miss → 1 toast
+    tool.onPointerDown(null, RAY) // still nothing → suppressed
+    expect(onToast).toHaveBeenCalledTimes(1)
+
+    // A real face appears under the cursor (hover) — the miss is stale, so the
+    // NEXT genuine miss speaks up again.
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValueOnce(makeFacePick(30n, 31n))
+    tool.onPointerMove(null, RAY)
+    tool.onPointerDown(null, RAY) // nothing again → toast fires a second time
+    expect(onToast).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('FollowMeTool — hover preview of the path target', () => {
+  it('hovering a solid face at pick-path previews the face loop that will be swept', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const scene = makeWasmScene({ facePick })
+    const { tool, preview } = makeTool(scene)
+
+    expect(preview.children.length).toBe(0)
+    tool.onPointerMove(null, RAY)
+    // The face-boundary loop is drawn as a hover preview before any click.
+    expect(preview.children.length).toBe(1)
+    expect(scene.face_boundary).toHaveBeenCalledWith(30n, 31n)
+  })
+
+  it('the hover preview clears when the cursor moves off all geometry', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(30n, 31n) })
+    const { tool, preview } = makeTool(scene)
+    tool.onPointerMove(null, RAY)
+    expect(preview.children.length).toBe(1)
+    // Nothing under the cursor now.
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined)
+    tool.onPointerMove(null, RAY)
+    expect(preview.children.length).toBe(0)
+  })
+
+  it('picking the path replaces the hover preview with the persistent path highlight', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const scene = makeWasmScene({ facePick })
+    const { tool, preview } = makeTool(scene)
+    tool.onPointerMove(null, RAY) // hover preview
+    tool.onPointerDown(null, RAY) // commit to that face as the path
+    // Exactly one highlight remains — the picked path, not a leftover hover.
+    expect(preview.children.length).toBe(1)
+    expect(tool.statusHint()).toContain('profile')
+  })
+
+  it('an INSTANCED face is never previewed as a target (frame guard)', () => {
+    // face_boundary/follow_me_around_face take only (object, face), so an
+    // instanced (definition-local) face would draw the loop in the wrong place.
+    const scene = makeWasmScene({ facePick: makeFacePick(30n, 31n, 99n) })
+    const { tool, preview } = makeTool(scene)
+    tool.onPointerMove(null, RAY)
+    expect(preview.children.length).toBe(0)
+    expect(scene.face_boundary).not.toHaveBeenCalled()
+  })
+})
+
+describe('FollowMeTool — face frame guard (only plain top-level faces sweep)', () => {
+  it('an INSTANCED face refuses with component guidance and locks no path', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(30n, 31n, 99n) })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(null, RAY) // click the instanced face at the path stage
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/component/i)
+    expect(onToast.mock.calls[0][1]).toBeUndefined() // guidance, not a kernel code
+    // No path was locked — still choosing the path, nothing swept.
+    expect(tool.statusHint()).toContain('Click the path to follow')
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(scene.follow_me_around_face).not.toHaveBeenCalled()
+  })
+
+  it('a GROUPED face refuses with group guidance and locks no path', () => {
+    // Plain instance, but the object hangs under a group parent.
+    const scene = makeWasmScene({ facePick: makeFacePick(30n, 31n), faceParent: 88n })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(null, RAY)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/inside a group/i)
+    expect(tool.statusHint()).toContain('Click the path to follow')
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('an in-context face refuses (Follow Me runs at the top level)', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(30n, 31n) })
+    const { tool, onToast } = makeTool(scene)
+    tool.setContextScoped(true) // e.g. a group/instance/object is being edited
+
+    tool.onPointerDown(null, RAY)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/top level|step out/i)
+    expect(tool.statusHint()).toContain('Click the path to follow')
+  })
+
+  it('the stale-preselection face recovery is frame-gated too (an instanced face is refused)', () => {
+    const facePick = makeFacePick(30n, 31n, 99n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    // A leftover single-edge preselection → the tool starts at pick-profile.
+    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const { tool, onCommit, onToast } = makeTool(scene, selection)
+
+    // "Click the box's top face", but it's a component instance → refused, and
+    // the stale preselection is NOT swapped for a wrong-frame face.
+    ;(scene.pick_sketch_region as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined)
+    tool.onPointerDown(null, RAY)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/component/i)
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(scene.follow_me_around_face).not.toHaveBeenCalled()
+  })
+
+  it('repeated ineligible-face clicks during stale-preselection recovery do not stack toasts', () => {
+    const facePick = makeFacePick(30n, 31n, 99n) // instanced → ineligible
+    const scene = makeWasmScene({ facePick }) // no regionPick → every region pick misses
+    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const { tool, onCommit, onToast } = makeTool(scene, selection)
+
+    // Three clicks that each miss the region and land on the same instanced
+    // face: the refusal speaks once, then stays quiet — the same anti-spam
+    // dedup the path stage uses, not a fresh toast per click.
+    tool.onPointerDown(null, RAY)
+    tool.onPointerDown(null, RAY)
+    tool.onPointerDown(null, RAY)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/component/i)
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(scene.follow_me_around_face).not.toHaveBeenCalled()
+  })
+
+  it('a plain, top-level face still sweeps (the maintainer tabletop path)', () => {
+    const facePick = makeFacePick(30n, 31n) // instance undefined, no group parent
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(null, RAY) // pick the plain face as the path
+    expect(tool.statusHint()).toContain('profile')
+    tool.onPointerDown(null, RAY) // profile → commit
+    expect(scene.follow_me_around_face).toHaveBeenCalledWith(20n, 21n, 30n, 31n)
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+})
+
+describe('FollowMeTool — face-path refusals get face-specific copy', () => {
+  it('a parallel face refusal names the FACE, not the profile placement', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({
+      facePick,
+      regionPick,
+      commitError: 'ProfileNotPerpendicular: no perpendicular segment',
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(null, RAY) // pick the face path
+    tool.onPointerDown(null, RAY) // profile → refused
+
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/face is parallel to the profile/i)
+    expect(onToast.mock.calls[0][1]).toBe('ProfileNotPerpendicular')
+  })
+
+  it('a too-thin face refusal names the FACE thickness', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({
+      facePick,
+      regionPick,
+      commitError: 'PathTooTight: advance check failed',
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(null, RAY)
+    tool.onPointerDown(null, RAY)
+
+    expect(onToast.mock.calls[0][0]).toMatch(/thinner than the profile is deep/i)
+    expect(onToast.mock.calls[0][1]).toBe('PathTooTight')
+  })
+
+  it('an EDGE-path refusal keeps the generic drawn-path copy (face wording is face-only)', () => {
+    const edgePick = makeEdgePick(9n, 1n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({
+      edgePick,
+      regionPick,
+      islandEdges: [1n],
+      commitError: 'ProfileNotPerpendicular: no perpendicular segment',
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(null, RAY) // pick edge island path
+    tool.onPointerDown(null, RAY) // profile → refused
+
+    // Not the face wording — the shared kernelErrors copy for a drawn path.
+    expect(onToast.mock.calls[0][0]).not.toMatch(/face is parallel/i)
+    expect(onToast.mock.calls[0][1]).toBe('ProfileNotPerpendicular')
   })
 
   it('a solid-face click at the profile stage RE-PICKS the path (stale-preselection recovery)', () => {

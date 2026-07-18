@@ -97,7 +97,11 @@ matching Hew's explicit-combination model).
 - a **solid face boundary**: the outer loop of one face of a visible world
   object (crown molding around a tabletop). Always a closed path. The
   solid itself is untouched — the sweep produces a separate Object the
-  user may union or subtract explicitly.
+  user may union or subtract explicitly. Unlike a sketch path, a face path
+  is **clicked directly** and cannot be preselected — a face is not a
+  selectable entity a Select click leaves behind, and selecting the whole
+  solid contributes no path — so the flat face whose rim the molding follows
+  is picked in the tool by pointing at it (§8).
 
 The path's sketch (or the source solid) is never consumed or modified.
 
@@ -310,6 +314,17 @@ there. No per-Object `History` entry is involved (the op is object
   deferred until it bites.
 - Round/butt join styles; automatic weld of a lathe profile touching its
   axis (refused via `PathTooTight`).
+- **Face paths on non-plain objects.** `follow_me_around_face` takes only
+  `(object, face)` and is coordinate-correct only for a plain,
+  identity-placed, top-level world object. A face on a component INSTANCE is
+  stored in definition-local space (its world pose lives on the placement),
+  and there is no `follow_me_in_component` surface (cf.
+  `push_pull_in_component`), so molding a face of a component/group — or of
+  anything reached inside an editing context — is out of scope for now. The
+  tool gates the face branch to that plain-top-level set (the same
+  `defaultFaceEligible` policy every face tool uses) and refuses an
+  instanced/grouped/in-context face with copy rather than sweeping it in the
+  wrong frame. Revisit if an in-component molding kernel/wasm surface lands.
 - Live drag-along-path preview (idiom b): the shipped interaction is
   preselect path → activate Follow Me → click the profile region. In the
   tool, one click on a sketch edge (or a single-edge preselection) picks
@@ -323,3 +338,31 @@ there. No per-Object `History` entry is involved (the op is object
   profile click; Esc steps back to re-pick. The tool tracks this provenance
   (preselection vs in-tool) per path, and a recovered face becomes an
   in-tool pick so a further graze cannot re-target it.
+
+### Picking a solid-face path directly (tool)
+
+A face cannot be preselected (§2), so the path stage of the tool makes the
+flat face **directly and discoverably** pickable, and never fails silently:
+
+- **Hover preview.** While choosing the path, the loop under the cursor —
+  the face's boundary (or a sketch edge's whole island) — is highlighted
+  *before* the click, so the face that will be swept is visible up front.
+  This is what makes "which face becomes the path" a deliberate choice
+  rather than "whatever the ray happened to hit behind the standing
+  profile," the failure the maintainer saw. (A drawn sketch region occludes
+  the cursor for the *snap* engine, but the tool's face pick is a direct
+  ray, so aim the click at a clear part of the flat face, not through the
+  profile that overlaps it.)
+- **No silent miss.** A path-stage click that resolves to no followable
+  geometry surfaces guidance ("Click the flat face to run the profile
+  around it…") instead of doing nothing — repeated empty clicks collapse to
+  one message until a real target appears under the cursor again.
+- **Face-worded refusals.** The kernel's eligibility errors are the same
+  whatever the path source, but two of them read differently when the path
+  is a *face the user just clicked*: the profile is already placed and it is
+  the FACE that is wrong, so `ProfileNotPerpendicular` is re-worded to "that
+  face is parallel to the profile" and `PathTooTight` to "that face is
+  thinner than the profile is deep." The profile is **never** silently
+  reoriented to fit the face (rule 4; profile re-orientation is scoped out
+  above) — a wrong face is named, not worked around. Refusals from a drawn
+  (sketch) path keep the generic perpendicularity copy.

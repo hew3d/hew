@@ -2136,7 +2136,7 @@ export default function Viewport({
     }
 
     function makeFollowMeTool(): FollowMeTool {
-      return new FollowMeTool(
+      const tool = new FollowMeTool(
         wasmScene,
         previewGroup,
         // A sweep births one new object and consumes its profile sketch's
@@ -2151,6 +2151,18 @@ export default function Viewport({
         // The path may be preselected (SketchUp's primary Follow Me idiom).
         [...selectedIdsRef.current],
       )
+      // Put Follow Me's FACE path on the same face-eligibility system as every
+      // other face tool: `face_boundary`/`follow_me_around_face` are
+      // coordinate-correct only for a plain, top-level, non-instanced object,
+      // and there is no `follow_me_in_component` surface, so no component
+      // context is wired (an instanced/in-context face is refused, not swept).
+      const ctx = activeContextRef.current
+      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
+        ? ctx[ctx.length - 1].id : null
+      tool.setActiveContext(ctxId)
+      tool.setFaceEligibility(faceDrawEligible)
+      tool.setContextScoped(ctx.length > 0)
+      return tool
     }
 
     function makeOffsetTool(): OffsetTool {

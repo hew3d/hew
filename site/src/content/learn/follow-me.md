@@ -36,9 +36,13 @@ A drawn circle is measured as the true curve it is: stand the profile square acr
 
 ## Running around a face
 
-Instead of a drawn path, you can click a **face of a solid**: the sweep runs around that face's outer boundary — crown molding around a tabletop's edge, a lip around a lid. The result is a separate new solid; the original object is untouched. To make it one piece, union them; to carve it away instead (a chamfer or a groove), subtract it ([Combining solids](/learn/combining-solids/)).
+Instead of a drawn path, run the sweep around a **face of a solid**: click the flat face whose rim you want the molding to follow — a tabletop's top for crown molding around its edge, a lid's top for a lip. The sweep runs around *that* face's outer boundary, and the result is a separate new solid; the original is untouched. To make it one piece, union them; to carve it away (a chamfer or a groove), subtract it ([Combining solids](/learn/combining-solids/)).
 
-The profile stands square across the boundary: its face cuts one of the boundary's edges partway along the run — not at a corner, and not lying flat along the edge itself. Stand it up beside the solid, then Move it against the edge; the midpoint and edge snaps put it exactly on the rim.
+Click the face itself, squarely. Unlike a drawn path, a solid's face can't be preselected — selecting the whole object gives Follow Me no path — so with the tool active you point at the face and click it directly. Hover it first: the rim that will be swept lights up before you click, so you can see which face you're about to pick. Aim at a clear part of the flat face, not *through* the standing profile — the profile sits in front of whatever's behind it, and a click that reaches past it picks the face beyond. If a click lands on nothing followable, the tool says so ("Click the flat face to run the profile around it") rather than sitting silent.
+
+The profile stands square across that face's boundary — its plane cutting one of the face's edges partway along the run, not at a corner and not flat along the edge. Stand it up beside the solid and Move it onto the rim; the midpoint and edge snaps land it exactly, and it can hang off the edge for a molding that sits proud. Because the profile must be perpendicular to the rim it wraps, a face parallel to the profile is refused ("that face is parallel to the profile"), and so is one thinner than the profile is deep ("that face is thinner than the profile is deep") — Hew names the wrong face instead of quietly rotating the profile to fit it. Pick the face the profile stands across.
+
+The face has to belong to a **plain object** — not a component instance or a grouped object, whose faces sit in their own frame. Follow Me says so if you click one; explode the instance or ungroup it first, then follow the face.
 
 ## What Follow Me refuses
 
