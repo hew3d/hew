@@ -41,17 +41,25 @@ const ORG_CAM = { position: [42, 28, 22], target: [12, 6.5, 2.0], up: [0, 0, 1],
 
 const browser = await chromium.launch()
 
-/** Fresh page with the app booted, in dark mode, welcome dialog suppressed. */
-async function freshPage() {
+/** Fresh page with the app booted, in dark mode, welcome dialog suppressed
+ * (pass `{ welcome: true }` to keep the welcome overlay up, as on a first
+ * launch). */
+async function freshPage({ welcome = false } = {}) {
   const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 2 })
-  await page.addInitScript(() => {
+  await page.addInitScript((showWelcome) => {
     // Seed before any app module loads: dark theme + no welcome overlay.
     localStorage.setItem('hew.settings.theme', 'dark')
-    localStorage.setItem('hew.settings.showWelcome', 'false')
-  })
+    localStorage.setItem('hew.settings.showWelcome', String(showWelcome))
+  }, welcome)
   await page.goto(BASE)
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 30_000 })
   await page.waitForTimeout(400)
+  // A GPU-less environment (headless capture on CI or a VM) surfaces the
+  // software-GL notice; dismiss it so it never lands in a published shot.
+  // dispatchEvent, not click(): the welcome overlay may cover the button.
+  // No-op on a hardware-accelerated machine.
+  const dismiss = page.getByRole('button', { name: 'Dismiss the graphics-acceleration notice' })
+  if (await dismiss.count()) await dismiss.dispatchEvent('click')
   return page
 }
 
@@ -63,6 +71,18 @@ async function shot(page, name, opts = {}) {
   await settle(page)
   await page.screenshot({ path: `${OUT}/${name}.png`, ...opts })
   console.log(`captured ${name}.png`)
+}
+
+// ---------------------------------------------------------------------------
+// 0. Welcome screen, as on a first launch, with Centimeters chosen in the
+//    Units dropdown — the state the getting-started chapter asks for.
+// ---------------------------------------------------------------------------
+{
+  const page = await freshPage({ welcome: true })
+  await page.getByRole('dialog', { name: 'Welcome to Hew' }).waitFor()
+  await page.getByRole('combobox', { name: 'Units' }).selectOption('cm')
+  await shot(page, 'welcome-screen')
+  await page.close()
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +258,7 @@ async function shot(page, name, opts = {}) {
   }, CAM)
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
   await settle(page, 200)
-  await page.getByText('Group', { exact: true }).click()
+  await page.getByTestId('menu-bar').getByText('Group', { exact: true }).click()
   await settle(page, 400)
   // Rename the group in Entity Info (name input's placeholder is the default label).
   const nameInput = page.getByPlaceholder(/^Group /)
@@ -445,7 +465,7 @@ async function shot(page, name, opts = {}) {
   await settle(page, 150)
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
   await settle(page, 200)
-  await page.getByText('Group', { exact: true }).click()
+  await page.getByTestId('menu-bar').getByText('Group', { exact: true }).click()
   await settle(page, 400)
   const groupName = page.getByPlaceholder(/^Group /)
   await groupName.fill('Desk organizer')

@@ -6,15 +6,21 @@ order: 1
 
 Hew runs in two places: as a web app at [app.hew3d.com](https://app.hew3d.com), with nothing to install and no account required, and as a native desktop app for macOS, Windows, and Linux (see [Download](/download/)). Both are the same application; this guide works in either.
 
-On a fresh launch a welcome screen offers the ways in: start modeling in the blank document, open a file, or load a bundled sample. It also has a **Units** dropdown — pick the unit you think in, and it becomes the default for every length you type and read. Choosing a small unit (centimeters, millimeters, or inches) also starts the view zoomed in to match, so a palm-sized part doesn't begin as a speck on a meter-scale grid. This guide's organizer is centimeter work, so **cm** is a good pick — though every step below types its unit explicitly, so any setting works.
-
 Rather than draw one lonely box, you'll build something you could actually print: a little desk-organizer set — a tray holding a pen cup, a bin with a scooped front, and a phone stand. It touches the tools you'll use in almost every session, and it takes about ten minutes.
 
 ## The one idea that matters
 
 Hew feels like SketchUp, but it is built around a single rule: **every closed shape you push/pull becomes a discrete, watertight solid — an Object — and Objects never fuse just because they touch.** The four parts of the organizer will sit on the tray, share edges, even overlap, and stay four separate things. When you *do* want two solids to become one, you say so. Watch for that idea; the whole app follows from it.
 
-## 1. Draw the tray
+## 1. Choose centimeters on the welcome screen
+
+On a fresh launch a welcome screen offers the ways in: start modeling in the blank document, open a file, or load a bundled sample. Before moving on, set the **Units** dropdown. This guide works in centimeters, so choose **Centimeters** — the unit you pick becomes the default for every length you type and read, and a small unit (centimeters, millimeters, or inches) also starts the view zoomed in to match, so a palm-sized part doesn't begin as a speck on a meter-scale grid. Every step below types its unit explicitly, so any setting works — but with centimeters the readouts will match what you see here. Click **Start modeling** to head into the blank document.
+
+![The welcome screen on a fresh launch: sample models, an Open card, and the Units dropdown set to Centimeters](/docs/welcome-screen.png)
+
+(Turned the welcome screen off earlier? The same choice lives in [Settings](/learn/settings/).)
+
+## 2. Draw the tray
 
 Pick the **Rectangle** tool — click it in the tool rail on the left, or press `R`. The status bar along the bottom always spells out what the current tool wants next.
 
@@ -28,7 +34,7 @@ The closed rectangle fills in as a **sketch region** — you'll see it as a Sket
 
 **Type the size instead of eyeballing it.** You don't click into that measurement box — Hew is listening whenever a tool is active. After the first corner, just type `24cm,14cm` (or `9.5",5.5"`, or `0.24m,0.14m`) and press `Enter`; your keystrokes land in the box and set the exact size. [Precision, measurement, and guides](/learn/measurement-and-guides/) lists every accepted format.
 
-## 2. Push/pull it into a solid
+## 3. Push/pull it into a solid
 
 Switch to **Push/Pull** (`P`):
 
@@ -42,20 +48,20 @@ That's your tray. The moment you commit, Hew turns the sketch into a real Object
 
 ### Look around while you work
 
-Navigation is always available, whatever tool is active. Drag the **middle mouse button** to orbit, drag the **right mouse button** to pan, and scroll to zoom toward the cursor. No mouse wheel? Press `O`, `H`, or `Z` for Orbit, Pan, and Zoom and drag with the left button. The **Top / Iso / Front** buttons above the viewport jump to standard views, and **Camera ▸ Zoom Extents** frames everything. There's more in [Viewing your model](/learn/viewing/).
+Navigation is always available, whatever tool is active. Drag the **middle mouse button** to orbit, drag the **right mouse button** to pan, and scroll to zoom toward the cursor. No mouse wheel? Press `O`, `H`, or `Z` for Orbit, Pan, and Zoom and drag with the left button. The **Top / Iso / Front** buttons above the viewport jump to standard views, and **Camera ▸ Zoom Extents** frames everything visible. There's more in [Viewing your model](/learn/viewing/).
 
-## 3. The pen cup
+## 4. The pen cup
 
 Two new moves here: drawing a circle, and hollowing a solid by pushing a face *inward*.
 
 1. Pick the **Circle** tool (`C`), click a center point on the ground beside the tray, type `3cm`, and press `Enter`. What you type is the **radius**, so this makes a 6 cm-wide disk.
 2. With **Push/Pull** (`P`), click the disk and pull it up to `9cm`. You now have a solid cylinder.
-3. Hollow it. Drawing works directly on a solid's face: with the **Circle** tool (`C`), click the center of the cylinder's top face and type `2.4cm`; then take **Push/Pull** (`P`) and push that inner disk *down* `7.5cm`. Pushing a face inward carves a recess, leaving a 1.5 cm floor — the cup is now a cup.
+3. Hollow it. Drawing works directly on a solid's face: with the **Circle** tool (`C`), click the center of the cylinder's top face and type `2.4cm`; then take **Push/Pull** (`P`) and push that inner disk *down* `7.5cm`. Pushing a face inward carves a recess, leaving a 1.5 cm floor — the cup is now a cup. Typing works here too, and the sign picks the direction: a leading minus (`-7.5cm`) carves inward no matter which way you nudged the cursor.
 4. Switch to **Select** (`Space`) and simply **drag** the cup onto the tray — dragging an object moves it, snapping all the way. (Pressing `M` for **Move** and clicking two points works too.) Because it's its own Object, it rests on the tray without merging into it.
 
 ![The tray with the hollowed pen cup resting on it; the Outliner lists two objects, both solid](/docs/organizer-cup.png)
 
-## 4. The bin with a scooped front
+## 5. The bin with a scooped front
 
 The bin starts as a hollow box, then gets its front scooped. The scoop is the one place in this build where you *explicitly* combine two solids.
 
@@ -70,7 +76,7 @@ The bin starts as a hollow box, then gets its front scooped. The scoop is the on
 
 Rotating the *cylinder* onto its side instead — so the bin never has to move — is quicker once you're comfortable, but a cylinder's curved wall gives the Rotate tool no flat face to aim at, so you'd first press an arrow key (`→` / `←` / `↑`) to lock the X / Y / Z axis. Rotating the box is the gentler way in. Subtract is one of three booleans (with Union and Intersect); [Combining and splitting solids](/learn/combining-solids/) covers when to reach for each, and when — as with the hollowing — Push/Pull already does the job.
 
-## 5. The phone stand
+## 6. The phone stand
 
 The stand is a wedge: a tall back, a slope for the phone to lean on, and a `1cm` lip at the front so it can't slide off. Drawing that sloped profile freehand is fiddly — the easy way starts from a plain rectangle, and introduces two tools you'll use constantly: guide lines, and editing a sketch after the fact.
 
@@ -88,7 +94,7 @@ The stand is a wedge: a tall back, a slope for the phone to lean on, and a `1cm`
 
 Four parts, four Objects. They touch and overlap on the tray, and the status bar still reads four solids: nothing merged on its own.
 
-## 6. Paint the parts
+## 7. Paint the parts
 
 Expand **Materials** in the right-hand tray. Click **Add color**, pick a wood tone, and name it *Oak*; add a few more — a teal, a terracotta, a slate.
 
@@ -98,7 +104,7 @@ To paint a whole part, click the swatch you want — that picks up the **Paint**
 
 Materials are per-document and they survive modeling: paint follows the geometry through push/pull, slicing, and booleans. See [Materials](/learn/materials/) for textures and opacity.
 
-## 7. Name it, group it, tag it
+## 8. Name it, group it, tag it
 
 A model with four "Object N" rows is already worth tidying.
 
@@ -110,7 +116,7 @@ A model with four "Object N" rows is already worth tidying.
 
 [Organizing your model](/learn/organizing/) goes deeper on the Outliner, tags, and visibility.
 
-## 8. Save, then export to print
+## 9. Save, then export to print
 
 Save the Hew document with `⌘S` / `Ctrl+S` (or **File ▸ Save**). The native format is **`.hew`** — an open container that keeps geometry, names, groups, materials, and tags together, and saves byte-for-byte identically each time. Hew also autosaves a recovery snapshot every 12 seconds, so a crash won't cost you the session ([Files, saving, and recovery](/learn/files-and-saving/)).
 
@@ -127,3 +133,4 @@ You've drawn, measured, pushed, hollowed, subtracted, rotated, edited a sketch, 
 - [Core concepts](/learn/core-concepts/) explains the ideas that make Hew diverge from SketchUp as models get complicated.
 - [The Hew interface](/learn/interface/) tours every panel and control.
 - [Drawing](/learn/drawing/) and [Push/Pull](/learn/push-pull/) are the full drawing-and-modeling reference.
+- [Follow Me](/learn/follow-me/) sweeps a profile along a path — pipes, moldings, picture frames, even spheres and goblets — and the **Offset** tool ([Drawing](/learn/drawing/#offset-f)) outlines borders and even-thickness walls without measuring.
