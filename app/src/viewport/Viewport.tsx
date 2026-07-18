@@ -57,6 +57,7 @@ import type { Snap } from '../tools/types'
 import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
+import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
 import { getLengthUnit, homeFramingScale } from '../settings/units'
@@ -1052,96 +1053,37 @@ export default function Viewport({
     // ------------------------------------------------------------------ snap + tool
     const snapService = new SnapService(wasmScene)
 
-    // Resolve a raw pick (leaf object id + optional instance id) to a
-    // context-aware NodeRef, then lift the selection to the parent.
-    function handleSelect(
-      pickedObjectId: bigint | null,
-      pickedInstanceId?: bigint,
-      pickedSketchId?: bigint,
-      pickedSketchEdgeId?: bigint,
-      pickedSketchRegionId?: bigint,
-    ): void {
+    // Scratch vector reused for the camera-forward axis (avoids per-pick alloc).
+    const cameraForwardV = new THREE.Vector3()
+
+    /** Everything the shared selection resolver needs from this Viewport: the
+     * scene pickers, the active editing context, an object→node resolver
+     * (context-scoped + hidden-filtered), and the live camera forward/far for
+     * the axial depth bound. Rebuilt per pick so it always reads live state. */
+    function selectionDeps(): ResolveDeps {
+      camera.getWorldDirection(cameraForwardV)
+      return {
+        scene: wasmScene as unknown as SelectScene,
+        context: activeContextRef.current,
+        resolveObject: (objectId, instanceId) => {
+          if (instanceId !== undefined && hiddenInstanceIdsRef.current.has(instanceId)) return null
+          if (hiddenObjectIdsRef.current.has(objectId)) return null
+          return resolvePickToSelectable(wasmScene, objectId, activeContextRef.current, instanceId)
+        },
+        cameraForward: [cameraForwardV.x, cameraForwardV.y, cameraForwardV.z],
+        cameraFar: camera.far,
+      }
+    }
+
+    // The Select click: resolve the snap+ray to a selectable node through the
+    // SAME shared resolver the drag-move arm uses (`pickTransformableUnderCursor`),
+    // so click, drag, and hover agree by construction. `null` means nothing
+    // selectable is under the cursor — clear (context-scoped: `additive` is
+    // false inside a context, so an in-context miss deselects without exiting).
+    function handleSelect(snap: Snap | null, ray: Ray): void {
       const additive = selectAdditiveRef.current && activeContextRef.current.length === 0
-      const ctx = activeContextRef.current
-
-      if (pickedObjectId === null) {
-        // A sketch hit: free-standing sketches are top-level-only (
-        // sketches have no group/instance nesting), so any active context
-        // is simply out of scope for them, like a plain miss.
-        if (pickedSketchId !== undefined && ctx.length === 0) {
-          // An edge pick selects the drawn CURVE it belongs to (an arc's or
-          // circle's facets act as one), else that single line. An interior
-          // pick selects the ISLAND — the connected shape under the cursor,
-          // never unrelated geometry meters away.
-          if (pickedSketchEdgeId !== undefined) {
-            // A drawn curve selects as the RUN between junctions with other
-            // geometry (SketchUp splits an arc where a line crosses it). The
-            // NodeRef's id is the chain's smallest edge — a stable canonical
-            // representative, so re-clicking any facet of the same run
-            // produces an identical ref.
-            const chain = wasmScene.sketch_curve_chain(pickedSketchId, pickedSketchEdgeId)
-            if (chain.length > 1) {
-              onSelectRef.current?.(
-                { kind: 'sketch-curve', id: chain[0], sketch: pickedSketchId },
-                additive,
-              )
-            } else {
-              onSelectRef.current?.(
-                { kind: 'sketch-edge', id: pickedSketchEdgeId, sketch: pickedSketchId },
-                additive,
-              )
-            }
-          } else if (pickedSketchRegionId !== undefined) {
-            const island = wasmScene.sketch_region_island(pickedSketchId, pickedSketchRegionId)
-            if (island !== undefined) {
-              onSelectRef.current?.(
-                { kind: 'sketch-island', id: island, sketch: pickedSketchId },
-                additive,
-              )
-            } else {
-              onSelectRef.current?.({ kind: 'sketch', id: pickedSketchId }, additive)
-            }
-          } else {
-            onSelectRef.current?.({ kind: 'sketch', id: pickedSketchId }, additive)
-          }
-          scheduleRender()
-          return
-        }
-        // Miss: if we're inside a context at top-level, exit; otherwise clear.
-        if (!additive && ctx.length > 0 && ctx[ctx.length - 1].kind !== 'object') {
-          // Click outside while inside a group → deselect but don't exit
-          // (SketchUp style: click outside within group deselects)
-        }
-        onSelectRef.current?.(null, additive)
-        scheduleRender()
-        return
-      }
-
-      // Filter out picks against hidden objects/instances so hidden geometry
-      // is non-selectable. The kernel pick_face() raycasts through all scene
-      // geometry regardless of three.js visibility, so we filter here.
-      if (pickedInstanceId !== undefined && hiddenInstanceIdsRef.current.has(pickedInstanceId)) {
-        onSelectRef.current?.(null, additive)
-        scheduleRender()
-        return
-      }
-      if (hiddenObjectIdsRef.current.has(pickedObjectId)) {
-        onSelectRef.current?.(null, additive)
-        scheduleRender()
-        return
-      }
-
-      const resolved = resolvePickToSelectable(wasmScene, pickedObjectId, ctx, pickedInstanceId)
-
-      // If click was outside the current group/instance context, treat as deselect
-      if (resolved === null && ctx.length > 0 && ctx[ctx.length - 1].kind !== 'object') {
-        onSelectRef.current?.(null, false)
-        scheduleRender()
-        return
-      }
-
-      // At top level, clicking something while not in context always just selects
-      onSelectRef.current?.(resolved, additive)
+      const ref = resolveSelectableRef(snap, ray, selectionDeps())
+      onSelectRef.current?.(ref, additive)
       scheduleRender()
     }
 
@@ -1334,47 +1276,19 @@ export default function Viewport({
     }
 
     /**
-     * The transformable node under `ray`, resolved through the active
-     * editing context exactly like a Select click — an object pick resolves
-     * to its selectable ancestor (outermost group / the instance / itself),
-     * a miss falls back to a free-standing sketch island (top level only).
-     * Hidden geometry is filtered the same way `handleSelect` filters it.
+     * The transformable node under `ray` — the drag-move arm and the transform
+     * tools' auto-select. Reduces to the SAME shared resolver the Select click
+     * uses (`resolveSelectableRef` via `selectionDeps`), so hover, click, and
+     * drag can never diverge: a region's fill drags the region (never the solid
+     * behind it), a sketch edge drags the shape the click selects (the
+     * transform layer lifts it to its island), a solid drags its selectable
+     * ancestor, and a provenance-less/out-of-context snap resolves what is
+     * actually under the ray — a far-plane-bounded, context-scoped solid.
      * Null when nothing movable is under the cursor.
      */
     function pickTransformableUnderCursor(ray: Ray): NodeRef | null {
-      const pick = wasmScene.pick_face(
-        ray.origin[0], ray.origin[1], ray.origin[2],
-        ray.direction[0], ray.direction[1], ray.direction[2],
-      )
-      if (pick !== undefined) {
-        try {
-          const objectId = pick.object()
-          const instanceId = pick.instance()
-          if (instanceId !== undefined && hiddenInstanceIdsRef.current.has(instanceId)) return null
-          if (hiddenObjectIdsRef.current.has(objectId)) return null
-          return resolvePickToSelectable(wasmScene, objectId, activeContextRef.current, instanceId)
-        } finally {
-          pick.free()
-        }
-      }
-      // Free-standing sketches are top-level-only (see handleSelect).
-      if (activeContextRef.current.length !== 0) return null
-      const regionPick = wasmScene.pick_sketch_region(
-        ray.origin[0], ray.origin[1], ray.origin[2],
-        ray.direction[0], ray.direction[1], ray.direction[2],
-      )
-      if (regionPick !== undefined) {
-        try {
-          const sketchId = regionPick.sketch()
-          const island = wasmScene.sketch_region_island(sketchId, regionPick.region())
-          return island !== undefined
-            ? { kind: 'sketch-island', id: island, sketch: sketchId }
-            : { kind: 'sketch', id: sketchId }
-        } finally {
-          regionPick.free()
-        }
-      }
-      return null
+      const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov)
+      return resolveSelectableRef(snap, ray, selectionDeps())
     }
 
     /**

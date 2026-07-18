@@ -69,9 +69,11 @@ function snapJsToSnap(s: SnapJs): Snap {
       kind: s.kind(),
       direction: dir !== undefined ? [dir[0], dir[1], dir[2]] : undefined,
       object: s.object(),
+      instance: s.instance(),
       element: elem,
       elementKind: elemKind,
       sketch: s.sketch(),
+      sketchRegion: s.sketch_region(),
     }
   } finally {
     s.free()

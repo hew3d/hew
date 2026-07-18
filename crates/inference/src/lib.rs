@@ -63,7 +63,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
     AnalyticRim, EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3,
-    SketchCurveRim, SketchEdgeId, SketchId, SketchVertexId, Transform, Vec3, VertexId, tol,
+    SketchCurveRim, SketchEdgeId, SketchId, SketchRegionId, SketchVertexId, Transform, Vec3,
+    VertexId, tol,
 };
 
 mod index;
@@ -168,27 +169,44 @@ pub struct Snap {
     /// Mutually exclusive with `source`. Lets tools use a sketch edge as a
     /// reference (Tape Measure parallel guides) without object plumbing.
     pub sketch_source: Option<(SketchId, SketchEdgeId)>,
+    /// Committed sketch-region provenance: which region an `OnFace` snap
+    /// derives from, when the cursor is on a drawn region's fill rather than a
+    /// solid's face. Mutually exclusive with `source`/`sketch_source`. Lets a
+    /// tool resolve a click on a region's fill to that exact region — so the
+    /// Select tool's click can match the occlusion-aware hover cue (interior
+    /// fill → that region; nearer region beats a solid behind it).
+    pub sketch_region_source: Option<(SketchId, SketchRegionId)>,
     /// The inference direction for directional snaps (axis / parallel /
     /// perpendicular), for drawing the dashed guide line.
     pub direction: Option<Vec3>,
 }
 
-/// Internal candidate provenance: an Object element or a committed sketch
-/// edge. Split back into [`Snap::source`] / [`Snap::sketch_source`] when the
-/// winning candidate becomes a snap.
+/// Internal candidate provenance: an Object element, a committed sketch edge,
+/// or a committed sketch region. Split back into the [`Snap`] provenance
+/// fields when the winning candidate becomes a snap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provenance {
     Object(SnapSource),
     SketchEdge(SketchId, SketchEdgeId),
+    SketchRegion(SketchId, SketchRegionId),
 }
 
+/// The three mutually-exclusive [`Snap`] provenance fields.
+type SplitProvenance = (
+    Option<SnapSource>,
+    Option<(SketchId, SketchEdgeId)>,
+    Option<(SketchId, SketchRegionId)>,
+);
+
 impl Provenance {
-    /// Split into the two public [`Snap`] provenance fields.
-    fn split(this: Option<Provenance>) -> (Option<SnapSource>, Option<(SketchId, SketchEdgeId)>) {
+    /// Split into the public [`Snap`] provenance fields (object, sketch edge,
+    /// sketch region) — exactly one is `Some` for a real candidate.
+    fn split(this: Option<Provenance>) -> SplitProvenance {
         match this {
-            Some(Provenance::Object(s)) => (Some(s), None),
-            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid))),
-            None => (None, None),
+            Some(Provenance::Object(s)) => (Some(s), None, None),
+            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None),
+            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid))),
+            None => (None, None, None),
         }
     }
 }
@@ -326,6 +344,30 @@ pub struct SceneFace {
     pub holes: Vec<Vec<Point3>>,
     /// Where it came from.
     pub source: SnapSource,
+}
+
+/// A snappable/occluding planar face from a committed sketch region (a drawn
+/// but not-yet-extruded shape's closed loop), in world space. Unlike
+/// [`SceneFace`] it carries no [`SnapSource`] (a sketch region isn't a
+/// selectable Object element, so it snaps with `source: None`), but it does
+/// carry its [`SketchRegionId`] so an `OnFace` snap on the fill resolves to
+/// this exact region. Registering these makes a drawn region a first-class
+/// hoverable face: the cursor snaps to it ([`SnapKind::OnFace`]) and it
+/// occludes geometry behind it, instead of the ray passing through to the
+/// ground/box beneath, matching how a solid's face behaves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchRegionFace {
+    /// Which region this is (within its owning sketch): the provenance an
+    /// `OnFace` snap carries, so a click on the fill resolves to this exact
+    /// region.
+    pub region: SketchRegionId,
+    /// The region's supporting plane.
+    pub plane: Plane,
+    /// Outer boundary in cycle order (ray-polygon containment tests against it).
+    pub boundary: Vec<Point3>,
+    /// Inner loops (holes) in cycle order; empty for a hole-free region. A ray
+    /// through a hole is NOT on the face (mirrors [`SceneFace::holes`]).
+    pub holes: Vec<Vec<Point3>>,
 }
 
 /// A definition-space snap point: one member vertex, stored once and shared
@@ -626,6 +668,15 @@ pub struct InferenceScene {
     /// `sketch_segments`, so a drawn circle's true center snaps BEFORE any
     /// extrusion exists.
     sketch_rims: Vec<(SketchId, SketchCurveRim)>,
+    /// Committed sketch *region faces* (closed regions of drawn shapes), keyed
+    /// by `SketchId` like `sketch_segments`. Each registers a hoverable,
+    /// occluding face so the cursor snaps to a drawn region ([`SnapKind::OnFace`])
+    /// and the region hides geometry behind it — exactly like a solid's face —
+    /// instead of the ray passing through to the ground/box beneath. No
+    /// `SnapSource` provenance (sketch regions aren't Object elements; like
+    /// guides they snap with `source: None`). Registered/cleared alongside
+    /// `sketch_segments`; few per scene, so linear-walked, never indexed.
+    sketch_faces: Vec<(SketchId, SketchRegionFace)>,
     /// Transient (in-progress) segments — e.g. the line tool's current
     /// rubber-band chain — published every frame and never persisted. Cleared
     /// wholesale by [`InferenceScene::clear_transient`], not per-id.
@@ -709,6 +760,7 @@ impl Default for InferenceScene {
             sketch_segments: Vec::new(),
             sketch_vertices: Vec::new(),
             sketch_rims: Vec::new(),
+            sketch_faces: Vec::new(),
             transient_segments: Vec::new(),
             guides_enabled: true,
             axes_enabled: true,
@@ -1202,6 +1254,20 @@ impl InferenceScene {
             .extend(rims.iter().map(|r| (id, r.clone())));
     }
 
+    /// Registers (or re-registers) the committed *region faces* of sketch `id`
+    /// — its closed drawn loops ([`kernel::Sketch::regions`]) — as hoverable,
+    /// occluding faces, so an unextruded rectangle/circle snaps on its fill
+    /// ([`SnapKind::OnFace`]) and hides geometry behind it exactly like a
+    /// solid's face, instead of the ray passing through. Replace semantics
+    /// like [`InferenceScene::add_sketch`]: drops any prior faces for `id`
+    /// first. Callers register faces, rims, vertices, and segments together on
+    /// every sketch mutation. See [`SketchRegionFace`].
+    pub fn add_sketch_faces(&mut self, id: SketchId, faces: &[SketchRegionFace]) {
+        self.sketch_faces.retain(|(sid, _)| *sid != id);
+        self.sketch_faces
+            .extend(faces.iter().map(|f| (id, f.clone())));
+    }
+
     /// Drops all candidates registered for sketch `id`. Unknown ids are a
     /// no-op — removal must be idempotent (mirroring
     /// [`InferenceScene::remove_object`]) so callers can remove-then-add
@@ -1210,6 +1276,7 @@ impl InferenceScene {
         self.sketch_segments.retain(|(sid, _, _)| *sid != id);
         self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
         self.sketch_rims.retain(|(sid, _)| *sid != id);
+        self.sketch_faces.retain(|(sid, _)| *sid != id);
     }
 
     /// Publishes one transient (in-progress) segment as a snap candidate —
@@ -1576,6 +1643,35 @@ impl InferenceScene {
             }
         }
 
+        // --- Sketch region faces: OnFace, carrying sketch-region provenance ---
+        // A drawn (unextruded) region is a first-class hoverable face: the
+        // cursor snaps on its fill exactly like a solid's face, and the
+        // occlusion cull below (which now counts these too) stops the ray
+        // passing through it to the ground/box behind. It has no Object
+        // `source`, but it DOES carry `SketchRegion` provenance so a click on
+        // the fill can resolve to this exact region — letting the Select
+        // tool's click match this occlusion-aware hover (interior fill → the
+        // region; a nearer region beats a solid behind it).
+        for (sid, face) in &self.sketch_faces {
+            if let Some((pos, ang, depth)) = face_cone_hit(
+                origin,
+                dir,
+                &face.plane,
+                &face.boundary,
+                &face.holes,
+                aperture,
+            ) {
+                candidates.push((
+                    SnapKind::OnFace,
+                    ang,
+                    depth,
+                    pos,
+                    Some(Provenance::SketchRegion(*sid, face.region)),
+                    None,
+                ));
+            }
+        }
+
         // --- World-origin and world-axis candidates ---
         // The origin snaps as a strong Endpoint; the three world axes snap as
         // OnAxis (weakest meaningful kind, so object geometry still wins).
@@ -1724,12 +1820,13 @@ impl InferenceScene {
                 if let Some((kind, _ang, _depth, pos, prov, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
-                    let (source, sketch_source) = Provenance::split(*prov);
+                    let (source, sketch_source, sketch_region_source) = Provenance::split(*prov);
                     Some(Snap {
                         position: projected,
                         kind: *kind,
                         source,
                         sketch_source,
+                        sketch_region_source,
                         direction: Some(lock_dir),
                     })
                 } else {
@@ -1741,6 +1838,7 @@ impl InferenceScene {
                         kind: SnapKind::OnAxis,
                         source: None,
                         sketch_source: None,
+                        sketch_region_source: None,
                         direction: Some(lock_dir),
                     })
                 }
@@ -1749,12 +1847,13 @@ impl InferenceScene {
                 // No lock (or lock with no anchor): return the top-ranked
                 // candidate that is actually visible (see the occlusion cull above).
                 winner.map(|(kind, _ang, _depth, pos, prov, snap_dir)| {
-                    let (source, sketch_source) = Provenance::split(prov);
+                    let (source, sketch_source, sketch_region_source) = Provenance::split(prov);
                     Snap {
                         position: pos,
                         kind,
                         source,
                         sketch_source,
+                        sketch_region_source,
                         direction: snap_dir,
                     }
                 })
@@ -1771,7 +1870,11 @@ impl InferenceScene {
     /// wins. The drawing snap prefers endpoints/edges, so it is the wrong tool
     /// for "what surface is under the cursor"; this is the right one. Returns
     /// the face's [`SnapSource`], or `None` if the ray hits no face.
-    pub fn pick_face(&self, ray: &PickRay) -> Option<SnapSource> {
+    /// Returns the picked face's [`SnapSource`] and the ray-distance (depth)
+    /// to the hit, so a caller can reject a hit beyond its render far plane —
+    /// the raw world-ray otherwise "sees" solids the user cannot (a drag must
+    /// never move an object off-screen).
+    pub fn pick_face(&self, ray: &PickRay) -> Option<(SnapSource, f64)> {
         let index = self.spatial_index();
         self.pick_face_impl(ray, Some(&index))
     }
@@ -1781,7 +1884,7 @@ impl InferenceScene {
     /// [`resolve_linear`](Self::resolve_linear) (DEVELOPMENT.md rule 3). Not
     /// part of the supported API.
     #[doc(hidden)]
-    pub fn pick_face_linear(&self, ray: &PickRay) -> Option<SnapSource> {
+    pub fn pick_face_linear(&self, ray: &PickRay) -> Option<(SnapSource, f64)> {
         self.pick_face_impl(ray, None)
     }
 
@@ -1789,7 +1892,11 @@ impl InferenceScene {
     /// is scanned in ascending order with the same strict `<` depth
     /// comparison, so equal-depth ties resolve to the lowest candidate
     /// index on both paths.
-    fn pick_face_impl(&self, ray: &PickRay, index: Option<&SceneIndex>) -> Option<SnapSource> {
+    fn pick_face_impl(
+        &self,
+        ray: &PickRay,
+        index: Option<&SceneIndex>,
+    ) -> Option<(SnapSource, f64)> {
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
         let face_ids: Vec<usize> = match index {
@@ -1821,7 +1928,7 @@ impl InferenceScene {
                 best = Some((depth, face.source));
             }
         }
-        best.map(|(_, source)| source)
+        best.map(|(depth, source)| (source, depth))
     }
 
     /// Every `(placement, member-local)` candidate pair of one class, in
@@ -1862,23 +1969,36 @@ impl InferenceScene {
         };
         let near_threshold = dist * (1.0 - tol::OCCLUSION_REL);
         // The exact hole-aware test, shared verbatim by the indexed and
-        // linear paths. The counter feeds `occlusion_face_tests` — the
-        // introspection the perf-sanity spec uses to prove the index prunes.
-        let occludes = |face: &SceneFace| {
+        // linear paths and by every face kind (world, placed, sketch region).
+        // The counter feeds `occlusion_face_tests` — the introspection the
+        // perf-sanity spec uses to prove the index prunes.
+        let face_occludes = |plane: &Plane, boundary: &[Point3], holes: &[Vec<Point3>]| {
             self.occlusion_tests.set(self.occlusion_tests.get() + 1);
             // `face_cone_hit` ignores its aperture arg for faces (pure
             // ray-polygon containment); 0.0 is fine.
-            face_cone_hit(origin, dir, &face.plane, &face.boundary, &face.holes, 0.0)
+            face_cone_hit(origin, dir, plane, boundary, holes, 0.0)
                 .is_some_and(|(_pos, _ang, depth)| depth < near_threshold)
         };
+        let occludes = |face: &SceneFace| face_occludes(&face.plane, &face.boundary, &face.holes);
         // A placed face materializes on demand and skips singular poses,
         // exactly like the candidate paths (`DefMember::face_at`).
         let occludes_placed = |pi: usize, li: usize| {
             let pl = &self.placements[pi];
             self.def_members[&pl.member]
                 .face_at(li, pl)
-                .is_some_and(|face| occludes(&face))
+                .is_some_and(|face| face_occludes(&face.plane, &face.boundary, &face.holes))
         };
+        // Sketch region faces occlude just like solid faces (a drawn region
+        // hides what's behind it). Few per scene, so always a linear walk —
+        // they're not in the spatial index (mirroring the candidate paths).
+        let sketch_occludes = || {
+            self.sketch_faces
+                .iter()
+                .any(|(_sid, f)| face_occludes(&f.plane, &f.boundary, &f.holes))
+        };
+        // Sketch faces are linear-walked in both branches (they carry no index
+        // membership); the boolean is order-independent, so testing them last
+        // preserves the index's early-out on the common no-occlusion path.
         match index {
             // Early-out walks: only subtrees whose boxes the ray enters
             // nearer than the threshold can hold an occluder, and each walk
@@ -1894,6 +2014,7 @@ impl InferenceScene {
                         near_threshold,
                         occludes_placed,
                     )
+                    || sketch_occludes()
             }
             None => {
                 self.faces.iter().any(occludes)
@@ -1901,6 +2022,7 @@ impl InferenceScene {
                         .all_placed(|m| m.faces.len())
                         .into_iter()
                         .any(|(pi, li)| occludes_placed(pi, li))
+                    || sketch_occludes()
             }
         }
     }
@@ -2746,7 +2868,7 @@ mod tests {
         scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
 
         // Straight down through the centre of the inner rectangle.
-        let through_hole = scene
+        let (through_hole, hole_depth) = scene
             .pick_face(&PickRay {
                 origin: Point3::new(0.5, 0.5, 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),
@@ -2757,9 +2879,10 @@ mod tests {
             ElementRef::Face(sub_face),
             "a ray through the hole picks the sub-face, not the parent"
         );
+        assert!(hole_depth > 0.0, "the hit is in front of the ray origin");
 
         // Through the annular ring (clear of the hole): still the parent.
-        let through_ring = scene
+        let (through_ring, _depth) = scene
             .pick_face(&PickRay {
                 origin: Point3::new(0.1, 0.1, 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3421,6 +3544,101 @@ mod tests {
             Some((sid, y5_edge)),
         );
         assert_eq!(scene.pick_sketch_edge(&ray_at(50.0, 50.0), 0.05), None);
+    }
+
+    /// FIX A: a registered sketch region face is a first-class hoverable face
+    /// — an interior ray snaps `OnFace` on it, and it occludes stronger
+    /// candidates behind it (an `Endpoint` beyond the face) exactly like a
+    /// solid's face, so the cursor no longer "passes through" a drawn region.
+    #[test]
+    fn sketch_region_face_snaps_on_face_and_occludes() {
+        let mut scene = InferenceScene::new();
+        let sid = SketchId::default();
+        // A sketch segment with one endpoint BEHIND the region centre (0,0,0)
+        // and one well outside its projection (3,0,0). Both are Endpoints (the
+        // strongest kind) that would win outright but for occlusion. Register
+        // it FIRST — `add_sketch` clears the sketch's faces (replace
+        // semantics), matching production order where faces are added last.
+        scene.add_sketch(
+            sid,
+            &[(
+                SketchEdgeId::default(),
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(3.0, 0.0, 0.0),
+            )],
+        );
+        // A unit square region on the plane z = 1 (normal +z).
+        let rid = SketchRegionId::default();
+        let plane =
+            Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        scene.add_sketch_faces(
+            sid,
+            &[SketchRegionFace {
+                region: rid,
+                plane,
+                boundary: vec![
+                    Point3::new(-1.0, -1.0, 1.0),
+                    Point3::new(1.0, -1.0, 1.0),
+                    Point3::new(1.0, 1.0, 1.0),
+                    Point3::new(-1.0, 1.0, 1.0),
+                ],
+                holes: vec![],
+            }],
+        );
+
+        // A ray straight down through the region's centre: the face occludes
+        // the endpoint behind it, so the region's OnFace wins.
+        let over_fill = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(0.0, 0.0, 5.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.05,
+                constraint_plane: None,
+            })
+            .expect("a snap over the region fill");
+        assert_eq!(over_fill.kind, SnapKind::OnFace);
+        assert!(
+            over_fill
+                .position
+                .approx_eq(Point3::new(0.0, 0.0, 1.0), tol::POINT_MERGE),
+            "snap landed at {:?}, expected the region plane z=1",
+            over_fill.position
+        );
+        assert!(
+            over_fill.source.is_none(),
+            "a sketch region carries no Object provenance (source: None)"
+        );
+        assert_eq!(
+            over_fill.sketch_region_source,
+            Some((sid, rid)),
+            "the OnFace snap carries the region's (sketch, region) provenance"
+        );
+
+        // A ray aimed at the (3,0,0) endpoint crosses z=1 at x=2.4 — OUTSIDE
+        // the square — so the region neither snaps nor occludes there: the
+        // endpoint still wins, proving occlusion is bounded to the polygon.
+        let past_edge = scene
+            .resolve(&SnapQuery {
+                ray: PickRay {
+                    origin: Point3::new(0.0, 0.0, 5.0),
+                    direction: Vec3::new(3.0, 0.0, -5.0),
+                },
+                anchor: None,
+                lock: None,
+                aperture: 0.05,
+                constraint_plane: None,
+            })
+            .expect("a snap past the region edge");
+        assert_eq!(past_edge.kind, SnapKind::Endpoint);
+        assert!(
+            past_edge
+                .position
+                .approx_eq(Point3::new(3.0, 0.0, 0.0), tol::POINT_MERGE)
+        );
     }
 
     /// `pick_sketch` returns the id of the sketch whose edge the ray passes

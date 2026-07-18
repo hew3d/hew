@@ -453,6 +453,10 @@ export interface HewTestHarness {
    * pick up (Follow Me grabs the clicked edge's whole island). */
   getSketchIslands(sketch: string): { island: string; edges: string[] }[]
 
+  /** How many closed regions `sketch` currently holds — for asserting that
+   * deleting a shared partition edge merges the two regions it divided. */
+  getSketchRegionCount(sketch: string): number
+
   /**
    * Follow Me along sketch edges (docs/design/follow-me.md): sweeps the
    * closed profile `region` of `sketch` along the chain the `edges` of
@@ -1082,6 +1086,8 @@ export function installTestHarness(deps: HarnessDeps): () => void {
           edges: Array.from(s.sketch_island_edges(BigInt(sketch), island), (e) => e.toString()),
         })),
       ),
+
+    getSketchRegionCount: (sketch) => query((s) => s.sketch_regions(BigInt(sketch)).length),
 
     followMeAlongEdges: (sketch, region, pathSketch, edges) =>
       act((s) =>

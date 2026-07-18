@@ -14,11 +14,19 @@ export interface Snap {
   kind: string
   direction?: [number, number, number]
   object?: bigint
+  /** Placing component instance handle, when the snap came from instanced
+   *  geometry (pairs with `object`). */
+  instance?: bigint
   element?: bigint
   elementKind?: string
   /** Owning sketch handle when the snap derives from a committed sketch
-   *  edge (`elementKind === 'sketch-edge'`; `element` is the edge). */
+   *  edge (`elementKind === 'sketch-edge'`; `element` is the edge) OR a drawn
+   *  region's fill (`elementKind === 'sketch-region'`; `sketchRegion` is the
+   *  region). */
   sketch?: bigint
+  /** Region handle when the snap is on a drawn sketch region's fill
+   *  (`elementKind === 'sketch-region'`). */
+  sketchRegion?: bigint
 }
 
 /**

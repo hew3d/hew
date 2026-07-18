@@ -25,7 +25,9 @@ mod log;
 mod recording;
 
 use dae_import::ImageMap;
-use inference::{Axis, ElementRef, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery};
+use inference::{
+    Axis, ElementRef, InferenceScene, PickRay, SketchRegionFace, SnapKind, SnapLock, SnapQuery,
+};
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
     BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId, Guide,
@@ -753,6 +755,7 @@ pub struct FacePickJs {
     object: u64,
     face: u64,
     instance: Option<u64>,
+    depth: f64,
 }
 
 #[wasm_bindgen]
@@ -772,6 +775,14 @@ impl FacePickJs {
     /// geometry; `undefined` for a world object.
     pub fn instance(&self) -> Option<u64> {
         self.instance
+    }
+
+    /// Ray-distance (meters) from the ray origin to the hit. Lets a caller
+    /// reject a solid beyond its render far plane — the raw world-ray pick
+    /// otherwise reaches solids the user cannot see (a drag must never move
+    /// off-screen geometry).
+    pub fn depth(&self) -> f64 {
+        self.depth
     }
 }
 
@@ -930,7 +941,8 @@ impl SnapJs {
             .or_else(|| self.snap.sketch_source.map(|(_, e)| e.data().as_ffi()))
     }
 
-    /// "vertex" | "edge" | "face" | "sketch-edge" for interpreting `element`.
+    /// "vertex" | "edge" | "face" | "sketch-edge" | "sketch-region" for
+    /// interpreting `element` / `sketch_region`.
     pub fn element_kind(&self) -> Option<String> {
         self.snap
             .source
@@ -943,12 +955,36 @@ impl SnapJs {
                 .to_string()
             })
             .or_else(|| self.snap.sketch_source.map(|_| "sketch-edge".to_string()))
+            .or_else(|| {
+                self.snap
+                    .sketch_region_source
+                    .map(|_| "sketch-region".to_string())
+            })
     }
 
-    /// The owning sketch handle when this snap derives from a committed
-    /// sketch edge (`element_kind` == "sketch-edge"); `undefined` otherwise.
+    /// The owning sketch handle when this snap derives from a committed sketch
+    /// EDGE (`element_kind` == "sketch-edge", `element` is the edge) or a sketch
+    /// REGION fill (`element_kind` == "sketch-region", `sketch_region` is the
+    /// region); `undefined` otherwise.
     pub fn sketch(&self) -> Option<u64> {
-        self.snap.sketch_source.map(|(s, _)| s.data().as_ffi())
+        self.snap
+            .sketch_source
+            .map(|(s, _)| s.data().as_ffi())
+            .or_else(|| {
+                self.snap
+                    .sketch_region_source
+                    .map(|(s, _)| s.data().as_ffi())
+            })
+    }
+
+    /// The region handle when this snap is on a drawn sketch region's fill
+    /// (`element_kind` == "sketch-region"); `undefined` otherwise. Lets the
+    /// Select tool's click resolve a region-fill snap to the exact region the
+    /// occlusion-aware hover cue is already showing.
+    pub fn sketch_region(&self) -> Option<u64> {
+        self.snap
+            .sketch_region_source
+            .map(|(_, r)| r.data().as_ffi())
     }
 
     /// Inference direction (xyz) for directional snaps, for guide lines.
@@ -1151,9 +1187,42 @@ impl Scene {
         // Curve rims: a drawn circle/arc's exact center, quadrants, and
         // tangents snap BEFORE any extrusion (the sketch-level analogue of
         // a solid's analytic rims).
+        //
+        // Region faces: each closed region registers as a hoverable, occluding
+        // face, so the cursor snaps on a drawn region's fill (OnFace) and it
+        // hides geometry behind it exactly like a solid's face — instead of the
+        // ray passing through to the ground/box beneath.
         if let Some(s) = self.doc.sketch(id) {
             self.inference.add_sketch_curves(id, &s.curve_rims());
+            self.inference
+                .add_sketch_faces(id, &Self::live_sketch_faces(s));
         }
+    }
+
+    /// Builds inference face candidates for sketch `s`'s closed regions in
+    /// world space — the outer boundary and every hole, on the sketch plane
+    /// (see [`inference::InferenceScene::add_sketch_faces`]). Region iteration
+    /// is `SlotMap` slot order, which is deterministic (DEVELOPMENT.md §7), so
+    /// the registered face order — and thus any OnFace tie-break — is
+    /// reproducible.
+    fn live_sketch_faces(s: &kernel::Sketch) -> Vec<SketchRegionFace> {
+        let plane = s.plane();
+        s.regions()
+            .iter()
+            .map(|(rid, r)| {
+                let pos = |vid: &kernel::SketchVertexId| s.vertices()[*vid].position;
+                SketchRegionFace {
+                    region: rid,
+                    plane,
+                    boundary: r.outer.iter().map(pos).collect(),
+                    holes: r
+                        .holes
+                        .iter()
+                        .map(|h| h.iter().map(pos).collect())
+                        .collect(),
+                }
+            })
+            .collect()
     }
 
     /// Enumerates sketch `id`'s vertices as `(SketchVertexId, world position)`
@@ -3281,12 +3350,13 @@ impl Scene {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
-        let source = self.inference.pick_face(&ray)?;
+        let (source, depth) = self.inference.pick_face(&ray)?;
         match source.element {
             ElementRef::Face(f) => Some(FacePickJs {
                 object: source.object.data().as_ffi(),
                 face: f.data().as_ffi(),
                 instance: source.instance.map(|i| i.data().as_ffi()),
+                depth,
             }),
             // pick_face only ever yields faces; anything else is a bug.
             _ => None,
@@ -4662,6 +4732,239 @@ mod tests {
             inner.region(),
             inner_area_pick.region(),
             "a point between the squares picks the outer ring, not the inner"
+        );
+    }
+
+    /// FIX A, against the maintainer's real file (`follow-me-2.hew`): hovering
+    /// the fill of a standing sketch region resolves to an `OnFace` snap ON the
+    /// region's plane, instead of the ray passing through to the ground/box
+    /// behind it. Before the fix a sketch region registered no face, so this
+    /// same hover snapped to whatever lay beneath (an `Endpoint`/`OnFace` at
+    /// y≈0), never the perpendicular shape.
+    #[test]
+    fn standing_sketch_region_is_a_hoverable_face() {
+        use inference::{PickRay, SnapKind, SnapQuery};
+        let bytes = include_bytes!("../tests/fixtures/follow-me-2.hew");
+        let mut scene = Scene::new();
+        scene.load_core(bytes).expect("load");
+
+        // The standing rectangle (sketch id 1) lies on the plane y≈0.14442,
+        // spanning x∈[0.10,0.12], z∈[-0.005,0.035]. Hover its centre from the
+        // +Y side, close enough that its own edges fall outside the aperture
+        // cone (the maintainer's zoom) — so only a face candidate can win.
+        let q = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(0.11, 0.30, 0.015),
+                direction: kernel::Vec3::new(0.0, -1.0, 0.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.05,
+            constraint_plane: None,
+        };
+        let snap = scene.inference.resolve(&q).expect("a snap over the fill");
+        assert_eq!(
+            snap.kind,
+            SnapKind::OnFace,
+            "hovering the fill must snap ON the region's face, not through it"
+        );
+        // The snap lands on the rectangle's plane (y≈0.14442), NOT on geometry
+        // behind it (y≈0): the region occludes what's beneath, like a solid.
+        assert!(
+            (snap.position.y - 0.14441909951924115).abs() < 1e-9,
+            "snap landed at y={}, expected the region plane y≈0.14442",
+            snap.position.y
+        );
+
+        // Both standing regions are registered as pickable regions (the
+        // circle, sketch id 2, resolves through the same primitive Follow Me
+        // and Select use).
+        let circ = scene
+            .pick_sketch_region(0.10, -1.0, 0.015, 0.0, 1.0, 0.0)
+            .expect("the circle's fill resolves to its region");
+        assert_eq!(circ.sketch(), scene.doc.sketch_ids()[1].data().as_ffi());
+    }
+
+    /// FINDING 1 (shared partition edge stays selectable): a rectangle split
+    /// by a partition into two adjacent regions has region-interior on BOTH
+    /// sides of the partition line — so the earlier region-before-edge chain
+    /// made the partition permanently unselectable (region always Some).
+    /// The occlusion-aware `resolve` the hover cue uses ranks the edge ABOVE
+    /// the region fill, so a click ON the partition resolves to the EDGE,
+    /// keeping the "draw a partition, delete it to merge" workflow working.
+    #[test]
+    fn finding1_shared_partition_edge_resolves_to_the_edge() {
+        use inference::{PickRay, SnapKind, SnapQuery};
+        let mut scene = Scene::new();
+        let s = scene.begin_ground_sketch();
+        // A 2×1 outer rectangle plus a partition at x=1 → two 1×1 regions
+        // sharing that edge.
+        for (a, b) in [
+            ([0.0, 0.0], [2.0, 0.0]),
+            ([2.0, 0.0], [2.0, 1.0]),
+            ([2.0, 1.0], [0.0, 1.0]),
+            ([0.0, 1.0], [0.0, 0.0]),
+            ([1.0, 0.0], [1.0, 1.0]),
+        ] {
+            scene
+                .sketch_add_segment(s, a[0], a[1], 0.0, b[0], b[1], 0.0)
+                .unwrap();
+        }
+        assert_eq!(
+            scene.sketch_regions(s).unwrap().len(),
+            2,
+            "the partition splits the rectangle into two regions"
+        );
+
+        // A point ON the partition line (not its midpoint/endpoint): both a
+        // region AND an edge are under the ray — the coordinator's repro.
+        let (ox, oy, oz, dx, dy, dz) = (1.0, 0.3, 5.0, 0.0, 0.0, -1.0);
+        assert!(
+            scene.pick_sketch_region(ox, oy, oz, dx, dy, dz).is_some(),
+            "region-interior on both sides of the partition"
+        );
+        assert!(
+            scene.pick_sketch_edge(ox, oy, oz, dx, dy, dz).is_some(),
+            "the partition edge is also under the ray"
+        );
+
+        // The hover-consistent resolve ranks OnEdge above OnFace, so the click
+        // (which now routes through resolve) selects the partition EDGE.
+        let q = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(ox, oy, oz),
+                direction: kernel::Vec3::new(dx, dy, dz),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.01,
+            constraint_plane: None,
+        };
+        let snap = scene
+            .inference
+            .resolve(&q)
+            .expect("a snap on the partition");
+        assert_eq!(
+            snap.kind,
+            SnapKind::OnEdge,
+            "the partition edge wins over the region fill"
+        );
+        assert!(
+            snap.sketch_source.is_some(),
+            "and carries the sketch-edge provenance the Select tool selects"
+        );
+    }
+
+    /// FINDING 2 (a region in front of a solid): `pick_face` walks only solid
+    /// faces, so with a sketch region nearer than a solid along the ray it
+    /// returns the SOLID — while the occlusion-aware `resolve` the hover cue
+    /// uses returns the nearer REGION. Routing the Select click through
+    /// `resolve` makes the click match the cue and select the region.
+    #[test]
+    fn finding2_region_in_front_of_solid_resolves_to_the_region() {
+        use inference::{PickRay, SnapKind, SnapQuery};
+        let mut scene = Scene::new();
+        // A solid box on the ground (a face somewhere along z ≤ 1).
+        let s1 = scene.begin_ground_sketch();
+        draw_rect(&mut scene, s1, 0.0, 0.0, 2.0, 2.0);
+        let r1 = scene.sketch_regions(s1).unwrap()[0];
+        let box_obj = scene.extrude_region(s1, r1, 1.0).unwrap();
+
+        // A sketch region lifted to z = 2 — in FRONT of the box along a
+        // downward ray.
+        let s2 = scene.begin_ground_sketch();
+        draw_rect(&mut scene, s2, 0.5, 0.5, 1.5, 1.5);
+        scene
+            .transform_sketch(
+                s2,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0],
+            )
+            .unwrap();
+        let r2 = scene.sketch_regions(s2).unwrap()[0];
+
+        let (ox, oy, oz, dx, dy, dz) = (1.0, 1.0, 5.0, 0.0, 0.0, -1.0);
+        // pick_face is blind to sketch regions → returns the solid behind.
+        let pf = scene
+            .pick_face(ox, oy, oz, dx, dy, dz)
+            .expect("pick_face hits the solid");
+        assert_eq!(
+            pf.object(),
+            box_obj,
+            "pick_face returns the solid, not the region"
+        );
+
+        // The occlusion-aware resolve returns the nearer region.
+        let q = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(ox, oy, oz),
+                direction: kernel::Vec3::new(dx, dy, dz),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.05,
+            constraint_plane: None,
+        };
+        let snap = scene.inference.resolve(&q).expect("a snap over the region");
+        assert_eq!(snap.kind, SnapKind::OnFace);
+        let (sk, rg) = snap
+            .sketch_region_source
+            .expect("the region's provenance, not the solid's");
+        assert_eq!(sk.data().as_ffi(), s2);
+        assert_eq!(rg.data().as_ffi(), r2);
+        assert!(
+            snap.source.is_none(),
+            "a region snap has no Object source — the solid did not win"
+        );
+    }
+
+    /// A provenance-less snap must not clear a solid selection: the world
+    /// ORIGIN (like a guide point or axis) registers as an Endpoint — the
+    /// STRONGEST kind — so `resolve` returns it, carrying NO selectable
+    /// provenance, even over a solid's face. `pick_face` still finds the solid
+    /// under the ray, which is what the Select tool's fallback selects (so a
+    /// dead-centre click on a pit whose top face sits on the origin selects the
+    /// pit rather than clearing).
+    #[test]
+    fn origin_over_a_solid_snaps_provenance_less_yet_pick_face_finds_the_object() {
+        use inference::{PickRay, SnapKind, SnapQuery};
+        let mut scene = Scene::new();
+        // A rectangle spanning the origin, extruded into a pit — its top face
+        // lies on z = 0 through the origin, unoccluded from above.
+        let s = scene.begin_ground_sketch();
+        draw_rect(&mut scene, s, -1.0, -1.0, 1.0, 1.0);
+        let r = scene.sketch_regions(s).unwrap()[0];
+        let pit = scene.extrude_region(s, r, -1.0).unwrap();
+
+        let (ox, oy, oz, dx, dy, dz) = (0.0, 0.0, 5.0, 0.0, 0.0, -1.0);
+        let q = SnapQuery {
+            ray: PickRay {
+                origin: Point3::new(ox, oy, oz),
+                direction: kernel::Vec3::new(dx, dy, dz),
+            },
+            anchor: None,
+            lock: None,
+            aperture: 0.05,
+            constraint_plane: None,
+        };
+        let snap = scene.inference.resolve(&q).expect("a snap at the origin");
+        assert_eq!(snap.kind, SnapKind::Endpoint, "the origin wins on kind");
+        assert!(
+            snap.source.is_none()
+                && snap.sketch_source.is_none()
+                && snap.sketch_region_source.is_none(),
+            "the origin snap carries no selectable provenance"
+        );
+
+        // The Select fallback's target: the solid actually under the ray.
+        let pf = scene
+            .pick_face(ox, oy, oz, dx, dy, dz)
+            .expect("pick_face hits the pit");
+        assert_eq!(pf.object(), pit);
+        // The reported depth (ray origin z=5 to the pit's top face at z=0) lets
+        // the drag arm reject a hit beyond its render far plane.
+        assert!(
+            (pf.depth() - 5.0).abs() < 1e-9,
+            "pick_face reports the ray-distance to the hit"
         );
     }
 

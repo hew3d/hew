@@ -153,15 +153,20 @@ fn pick_face_returns_the_nearest_face_through_the_ray() {
     // and the bottom face (z=0, t=3). pick_face must return the nearer (top),
     // regardless of the snap-priority model (which resolve would apply).
     let ray = ray_at(Point3::new(0.5, 0.5, 3.0), Point3::new(0.5, 0.5, 1.0));
-    let source = scene.pick_face(&ray).expect("ray crosses the cube faces");
+    let (source, depth) = scene.pick_face(&ray).expect("ray crosses the cube faces");
     match source.element {
         ElementRef::Face(_) => {}
         other => panic!("expected a face, got {other:?}"),
     }
+    // The reported depth is the distance to the NEARER (top, z=1) face, ~2.
+    assert!(
+        (depth - 2.0).abs() < 1e-9,
+        "depth is the nearest-hit distance"
+    );
     // It is a top-face pick: re-querying from below must instead pick the
     // bottom face (different element), proving "nearest" is honored.
     let from_below = ray_at(Point3::new(0.5, 0.5, -3.0), Point3::new(0.5, 0.5, 0.0));
-    let below = scene
+    let (below, _below_depth) = scene
         .pick_face(&from_below)
         .expect("ray crosses from below");
     assert_ne!(source.element, below.element);
