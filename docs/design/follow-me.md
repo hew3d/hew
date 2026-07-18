@@ -197,14 +197,45 @@ is carried rigidly; a molding offset from its spine is legitimate).
   ring vertex must advance along its segment: for each segment `k` and
   vertex `j`, `(v[k+1][j] − v[k][j]) · d[k] > tol::POINT_MERGE`. A path
   that bends tighter than the profile is wide fails this exactly at the
-  vertex that would be dragged backward — refused, nothing built. (This is
-  also what refuses a lathe profile touching its own axis of revolution:
-  the on-axis vertex never advances.)
+  vertex that would be dragged backward — refused, nothing built. Its one
+  exemption is a **pole** on a circular path (§9): an on-axis vertex is
+  fixed by the revolution and legitimately does not advance, so it is
+  skipped here rather than read as the self-touch it once was. On any
+  non-circular path an on-axis-like vertex is NOT fixed and still refuses.
 - **Global self-intersection.** After construction, every face pair of the
   result is checked for improper contact with the same primitive flat-face
   push/pull uses (`faces_improperly_contact`): contact anywhere other than
   legitimately shared vertices/edges — a U-shaped sweep whose legs
   interpenetrate, an end cap grazing a wall — refuses the whole operation.
+  This check classifies contacts at shared elements **exactly**, which the
+  closed-lathe seam needs: when the radial profile plane crosses a facet a
+  hair before a rim vertex (a few microradians — where a vertex seam would
+  *not* close, since its station-0 plane is that many microradians off the
+  miter plane, so the split-segment arm is the only sound seam), the split
+  leaves a full wrap facet and a sub-facet **sliver**. The sliver is
+  legitimate geometry, but its two seam walls over one profile edge are
+  near-collinear and meet at their shared rim vertex, so the guard's
+  segment/segment and segment/plane solves are ill-conditioned there and
+  reconstruct that shared vertex displaced by ~1e-7 — orders past
+  `tol::POINT_MERGE`. Left unhandled, that displaced point reads as a
+  non-shared contact and refuses a sound lathe as `SweepSelfIntersects` at a
+  thin band of placement angles either side of every rim vertex. The guard
+  therefore takes the contact from the **exact** shared element rather than
+  the ill-conditioned reconstruction — but strictly gated on **genuine
+  topological sharing**, never mere geometric proximity, because this is a
+  safety-critical guard that must not mask a real interpenetration: two
+  coplanar segments short-circuit to their meeting point only when it is a
+  confirmed shared vertex of the two faces, and a transversal edge snaps to an
+  on-plane endpoint only when that endpoint is a confirmed shared vertex.
+  Endpoints that merely fall within tolerance of each other, or of the plane,
+  but are **not** shared, fall through to the honest crossing solve — so a
+  real crossing whose carrier lines meet up to `POINT_MERGE / NORMAL_DIRECTION`
+  away, or a piercing whose near-plane endpoint sits outside the other face
+  with the crossing in its interior, is still caught. The sliver's rim vertex
+  genuinely *is* a shared vertex of its two seam walls, so the gated bypass
+  still fires for it. This is robustness in classifying a contact that is
+  already there, not geometry repair (rule 4): no vertex is welded, moved, or
+  dropped, and the sliver is committed exactly as built.
 - **Structural backstop.** The built object must pass the full topology
   validator and be watertight; any failure refuses with the document
   untouched. The operation constructs into a fresh Object and commits only
@@ -261,9 +292,10 @@ is carried rigidly; a molding offset from its spine is legitimate).
 | `ProfileNotPerpendicular` | No path end (open) or segment (closed) is perpendicular to the profile plane — for curve-attributed segments, perpendicular to the DRAWN curve (a radial plane); includes a closed sweep whose transported ring fails to land back on the profile (the seam does not close). |
 | `PathDetachedFromProfile` | Perpendicularity holds but the path does not start on / cross the profile plane (incl. the closed-path polyline-corner case). |
 | `PathReverses` | Adjacent segments double back — exactly (no miter plane exists) or beyond `tol::FOLLOW_ME_MITER_LIMIT` (no usefully bounded miter exists). |
-| `PathTooTight` | A ring vertex fails the advance check (bend tighter than the profile; lathe profile touching the axis). |
+| `PathTooTight` | A ring vertex fails the advance check (bend tighter than the profile). Also a lathe profile touching the axis on a NON-circular path — the on-axis vertex never advances. On a recognized circle path the axis-touching case instead closes a pole (§9), not this error. |
+| `ProfileCrossesAxis` | The profile crosses the revolution axis of a drawn-circle path in a way that cannot be revolved into one faithful solid (§9.2): only an axis-centered analytic circle (the sphere) splits losslessly. An asymmetric or multi-lobe crossing is refused — revolve a one-sided profile instead. |
 | `SweepSelfIntersects` | The built solid's faces improperly contact (global check). |
-| `SweepDegenerate` | Construction or validation failed (backstop, mirrors `ExtrudeError::DegenerateGeometry`). |
+| `SweepDegenerate` | Construction or validation failed (backstop, mirrors `ExtrudeError::DegenerateGeometry`); also a pole solid that assembled disconnected (§9.4). |
 
 Document-level handle errors (`UnknownSketch`, `UnknownObject`,
 `UnknownFace`, `Sketch(UnknownRegion)`) reuse the existing variants.
@@ -312,8 +344,13 @@ there. No per-Object `History` entry is involved (the op is object
   perpendicularity against the rim's chords. Deriving rim curve identity
   from the adjacent wall's `SurfaceRef::Cylinder` would close this;
   deferred until it bites.
-- Round/butt join styles; automatic weld of a lathe profile touching its
-  axis (refused via `PathTooTight`).
+- Round/butt join styles.
+- Pole closure (§9) on a NON-circular closed path: an on-axis vertex there
+  is not fixed by any revolution and still refuses `PathTooTight` (no
+  silent weld). A profile that crosses the axis but is not an axis-centered
+  analytic circle (asymmetric, multi-lobe, off-center, holed) is refused
+  `ProfileCrossesAxis` rather than split — only the drawn-circle sphere
+  revolves losslessly (§9.2).
 - **Face paths on non-plain objects.** `follow_me_around_face` takes only
   `(object, face)` and is coordinate-correct only for a plain,
   identity-placed, top-level world object. A face on a component INSTANCE is
@@ -366,3 +403,194 @@ flat face **directly and discoverably** pickable, and never fails silently:
   reoriented to fit the face (rule 4; profile re-orientation is scoped out
   above) — a wrong face is named, not worked around. Refusals from a drawn
   (sketch) path keep the generic perpendicularity copy.
+
+## 9. Pole closure — spheres, goblets, cones
+
+A radial profile swept around a **drawn circle** path is a lathe (§2): the
+mitered transport is a revolution about the circle's axis (proof below). The
+base case in §1–§3 keeps the profile clear of that axis and makes a solid of
+revolution with a hole down the middle — a torus, a wheel, a ring (genus 1).
+This section covers what happens when the profile *reaches* the axis: it
+closes a **pole**, and the result is a solid with no central hole — a sphere,
+a goblet, a cone (genus 0). It is how SketchUp makes a sphere: draw a circle
+(the path), draw a perpendicular circle through the axis (the profile),
+Follow Me the profile around the path.
+
+### 9.1 The axis, and why the transport is a revolution
+
+Pole closure is only well-defined when the path is a **circle** — every
+segment carrying the same analytic `CurveGeom` (one center `C`, one radius,
+within `tol::POINT_MERGE`), closed and planar. The **axis** is then the line
+through `C` along the path plane's normal.
+
+The key fact the whole feature rests on: for a circle path, the miter plane
+at every path vertex **contains the axis**. The bisector of two chords
+meeting at a circle vertex is the tangent there (the chords make equal angles
+with it), so the miter normal is the tangent — perpendicular to the radial —
+and the plane through the vertex with that normal contains both the axis
+direction and the center. Consequently:
+
+- The station-to-station transport (project along the incoming chord onto the
+  next miter plane) carries a radial profile as a **pure rotation about the
+  axis**: every point at radial distance `ρ` traces the path's regular
+  N-gon of circumradius `ρ`. (This is what the faceted-Pappus lathe volume
+  specs already pin.)
+- A point **on the axis** (`ρ = 0`) lies on every miter plane, so the
+  projection leaves it fixed. On-axis vertices are therefore **fixed across
+  every station** to floating-point residue (~1e-16, far inside
+  `tol::POINT_MERGE`) — they are poles.
+
+On a **non-circular** closed path the miter planes do not contain any single
+line, an "on-axis" vertex is dragged station to station, and the advance
+check refuses it exactly as before (§3). Pole closure never engages there.
+
+### 9.2 Touch vs. cross, and the double cover
+
+A profile relates to the axis (a line in the radial profile plane) in three
+ways:
+
+- **Clear** — entirely on one side, not reaching the axis. Unchanged: a
+  torus/tube (§1).
+- **Touching** — on one side, with part of its boundary *on* the axis. That
+  on-axis boundary is a segment (or a single tangent vertex); its endpoints
+  are poles. A goblet, a cone, a bead: revolve the one-sided region and the
+  axis boundary collapses to the pole line. No split needed.
+- **Crossing** — area on **both** sides of the axis. This is the sphere's
+  profile: a full circle centered on the axis crosses it at the two poles.
+
+The crossing case has a trap. A solid of revolution is generated by revolving
+the profile region **on one side** of the axis, 360°. A full circle revolved
+naively traces the sphere **twice** — the near half and the far half each
+generate the whole surface — yielding two coincident shells, which is not a
+watertight solid. The resolution is geometric: **split the crossing profile at
+the axis and revolve one half.** The half's on-axis boundary is the diameter
+segment (its two ends the poles); its outer boundary traces the surface once.
+Splitting a crossing profile reduces it to the *touching* case, so there is
+exactly one pole mechanism.
+
+But splitting is only sound when it is **faithful** — when discarding one half
+loses nothing and the revolved half is a single shell. Two ways it is not:
+
+- **Asymmetric crossing.** If the two halves differ (a lopsided, egg-shaped
+  silhouette), clipping to one side silently *drops the geometry the user drew
+  on the other side*. The result is a valid watertight solid built from the
+  wrong profile — no error, no signal.
+- **Multi-lobe crossing.** If the boundary crosses the axis more than twice (a
+  dominant lobe plus a notch dipping across — a plausible baluster
+  silhouette), the clipped half has several disjoint on-axis contact segments.
+  Suppressing them (§9.3) *severs the revolve into two disjoint watertight
+  shells packed into one Object* — `validate()` and `watertight()` check only
+  local half-edge consistency, so they certify it as sound. This is precisely
+  the silent-invalid-solid outcome this feature exists to avoid (rule 4).
+
+So a crossing profile is split **only** when it is an **analytic circle
+centered on the axis** — the exact, deterministic criterion for a lossless,
+single-crossing, mirror-symmetric split (the sphere). A circle centered on the
+axis crosses at exactly two points and its two halves are mirror images, so
+discarding one is lossless and the revolve is one shell. **Every other
+crossing** — asymmetric, multi-lobe, an off-center circle, a holed profile —
+is refused typed (`ProfileCrossesAxis`), document untouched: revolve a
+one-sided profile instead.
+
+The circle test (`outer_is_axis_centered_circle`) does **not trust the
+`CurveGeom` attribution**. The public Sketch API stamps every segment added
+under an open curve bracket with that bracket's circle, on the circle or not
+(no positional check), so a mislabeled profile — real facets plus a detour out
+to an off-circle lump — reports one center and radius for every edge while not
+being a circle. The test therefore re-verifies the geometry against the claim,
+exactly as `cylinder_claim_holds` re-verifies a `SurfaceRef` (map-or-drop): the
+attribution must be consistent, its center on the axis, AND every boundary
+vertex must sit at the radius from that center (within `tol::PLANE_DIST`).
+Geometry that does not match the claimed circle is not a faithful circle and is
+refused. This is phase-independent — an off-phase circle's facet vertices
+genuinely lie on the circle, which is why vertex-**on**-circle is the right
+test where vertex-mirror-symmetry (which the off-phase fixture fails) was not.
+
+`split_profile_for_pole` returns `Ok(None)` for a non-crossing profile,
+`Ok(Some(half))` for the faithful circle (a Sutherland–Hodgman clip to the
+`+radial` half inserting the two poles; attribution dropped so the split walls
+export as honest facets), and `Err(ProfileCrossesAxis)` otherwise. The split
+runs **before anchoring** on purpose: it moves the profile centroid off the
+axis, which the nearest-anchor rule (§2) needs to seam on the near path
+crossing rather than the antipode.
+
+### 9.3 The pole fan — topology
+
+With the profile one-sided (touching), the sweep assembles as in §1 with
+three local changes at on-axis ring vertices:
+
+- **Collapse.** Each on-axis vertex is one **shared** position (station 0's
+  fixed pole), reused at every station, instead of one copy per station.
+  Off-axis vertices keep their per-station copies and weld the closed seam as
+  usual.
+- **Fan.** A wall quad `[s·a, s·b, s′·b, s′·a]` with **one** on-axis corner
+  degenerates to a **triangle** fanning to that pole (the duplicated pole
+  corner drops out). Around a pole the N such triangles form a closed
+  triangle fan — a disk in the surface — so the pole is a manifold vertex.
+- **Suppress.** A wall **both** of whose profile-edge endpoints are on the
+  axis (the diameter/axis segment) collapses to fewer than three vertices and
+  is dropped: it is interior to the solid (the axis runs through the
+  material), not a boundary face.
+
+Manifoldness holds because no directed edge repeats: a pole-fan edge
+`pole → s·v` twins the neighbouring fan's `s·v → pole`, and the fan's far
+edge `s·v → s′·v` twins the adjacent latitude quad. The result passes the
+same validator, watertight check, and global self-intersection test every
+sweep does; the sphere's two pole vertices give it the Euler characteristic
+`V − E + F = 2` of a genus-0 shell.
+
+**Backstop — single connected component.** The faithful-split gate (§9.2)
+refuses every crossing that is not a lossless sphere up front, so it never
+reaches assembly. As defense in depth, independent of that gate, a pole solid
+is verified to be a **single connected component** (`face_components().len()
+== 1`) after it is built; a disconnected result is refused typed
+(`SweepDegenerate`), never emitted. This matters because `validate()` and
+`watertight()` check only local half-edge consistency — they certify two
+disjoint shells as a watertight Object (see the validate() note in §9.5) — so
+connectivity is the check that actually enforces "one pole solid, not two."
+
+### 9.4 Determinism and refusals
+
+Determinism (rule 7) is preserved end to end: axis recovery, the faithful-
+circle test, the split's clip, pole indexing, and fan assembly are all
+order-fixed with no hash-order dependence, so the same input rebuilds
+bit-for-bit. What refuses, typed and with the document untouched:
+
+- A profile that **crosses** the axis but is not an axis-centered analytic
+  circle — asymmetric, multi-lobe, off-center, or holed (§9.2) —
+  `ProfileCrossesAxis`. Revolve a one-sided profile instead.
+- An on-axis profile on a **non-circular** closed path (§9.1) —
+  `PathTooTight` (the would-be pole is not fixed by any revolution).
+- A **genuinely too-tight** non-pole bend (profile wider than the path's
+  inner radius of curvature) — `PathTooTight`, unchanged.
+- A profile **not radial** to the drawn circle — `ProfileNotPerpendicular`,
+  unchanged (an unattributed facet ring is a polyline; a radial plane is
+  perpendicular to no chord, so a sphere attempt on an unrecognized circle
+  refuses rather than guessing).
+- A pole solid that would be **disconnected** — `SweepDegenerate` (the
+  connectivity backstop; unreachable through the faithful-split gate today,
+  kept as insurance).
+
+### 9.5 Persistence and API
+
+The pole solid serializes as an ordinary Object (its split walls carry no
+surface stamps), and the kernel entry point is the existing
+`Object::from_follow_me` / `Document::follow_me` — pole closure is handled
+entirely inside the sweep from the profile, path, and per-segment curve
+attribution it already receives. **No file-format or wasm-api signature
+change.** One additive `FollowMeError` variant (`ProfileCrossesAxis`) is
+introduced for the faithful-split refusal; it surfaces at the boundary as the
+usual `CODE: message` (the code derived from the variant name), needing no
+wasm-api code change.
+
+**A validate() gap, flagged.** An Object is definitionally one watertight
+solid, yet `validate()` certifies two disjoint shells as `Watertight` — it
+never checks single-connectedness. Broadening `validate()` to require one
+component was assessed against the full suite and **rejected**: legitimate
+operations produce multi-shell Objects (a boolean union of two disjoint
+solids keeps both volumes in one Object; contact-test fixtures are
+multi-component by construction). The pole path therefore carries its own
+connectivity backstop (above) rather than force a general check that would
+reject those. Whether Objects *should* be single-component in general — and
+where the multi-shell cases ought to split — is a broader kernel question for
+the maintainer, noted here rather than decided by this feature.

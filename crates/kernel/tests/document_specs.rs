@@ -5892,6 +5892,111 @@ fn follow_me_lathe_on_a_drawn_circle_path() {
     assert!(doc.object_solid(id));
 }
 
+/// The SketchUp sphere end to end through the document (pole closure, design
+/// §9): a drawn circle path on the ground and a second drawn circle standing
+/// upright THROUGH the axis as the profile — the maintainer's
+/// perpendicular-circles construction. Follow Me splits the crossing profile
+/// at the axis and revolves one half into a single watertight sphere.
+#[test]
+fn follow_me_makes_a_sphere_from_perpendicular_circles() {
+    let mut doc = Document::new();
+    let gs = doc.add_sketch(ground());
+    draw_circle_curve(&mut doc, gs, Point3::ORIGIN, 0.1, 32);
+
+    // Upright profile circle on the x = 0 plane, centered on the z axis at
+    // z = 0.1 (radius 0.1): it crosses the axis at (0,0,0) and (0,0,0.2).
+    let ps =
+        doc.add_sketch(Plane::from_point_normal(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0)).unwrap());
+    {
+        let sk = doc.sketch_mut(ps).expect("live");
+        let center = Point3::new(0.0, 0.0, 0.1);
+        sk.begin_curve_with(kernel::CurveGeom {
+            center,
+            radius: 0.1,
+        })
+        .unwrap();
+        let n = 32;
+        let pt = |i: usize| {
+            let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
+            Point3::new(0.0, 0.1 * a.cos(), 0.1 + 0.1 * a.sin())
+        };
+        for i in 0..n {
+            sk.add_segment(pt(i), pt(i + 1)).unwrap();
+        }
+        sk.end_curve();
+    }
+    let region = only_region(&doc, ps);
+    let edges: Vec<SketchEdgeId> = doc.sketch(gs).expect("live").edges().keys().collect();
+
+    let (id, _) = doc
+        .follow_me(
+            ps,
+            region,
+            &kernel::FollowMePath::SketchEdges { sketch: gs, edges },
+        )
+        .expect("perpendicular circles sweep into a sphere");
+    let sphere = doc.object(id).expect("sphere is live");
+    assert_eq!(sphere.watertight(), WatertightState::Watertight);
+    assert!(doc.object_solid(id));
+    let center = Point3::new(0.0, 0.0, 0.1);
+    for v in sphere.vertices().values() {
+        let d = (v.position - center).length();
+        assert!((d - 0.1).abs() < 1e-3, "vertex off the sphere: {d}");
+    }
+}
+
+/// The maintainer's actual file (perpendicular-circles-2.hew): loading it and
+/// running Follow Me — path = the ground circle, profile = the upright circle
+/// — now yields a sphere where it once refused PathTooTight. Both circles are
+/// 32 facets, off phase, so the axis crossings fall mid-facet (the general
+/// split path).
+#[test]
+fn follow_me_makes_a_sphere_from_the_maintainer_fixture() {
+    let bytes = std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/perpendicular-circles-2.hew"),
+    )
+    .expect("fixture reads");
+    let mut doc = Document::load(&bytes).expect("fixture loads");
+    let sketches = doc.sketch_ids();
+    // Path = the ground circle (plane normal +z); profile = the upright one.
+    let path_sketch = *sketches
+        .iter()
+        .find(|&&s| {
+            doc.sketch(s)
+                .unwrap()
+                .plane()
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), 1e-6)
+        })
+        .expect("ground circle path");
+    let profile_sketch = *sketches
+        .iter()
+        .find(|&&s| s != path_sketch)
+        .expect("upright profile");
+    let region = only_region(&doc, profile_sketch);
+    let edges: Vec<SketchEdgeId> = doc.sketch(path_sketch).unwrap().edges().keys().collect();
+
+    let (id, _) = doc
+        .follow_me(
+            profile_sketch,
+            region,
+            &kernel::FollowMePath::SketchEdges {
+                sketch: path_sketch,
+                edges,
+            },
+        )
+        .expect("the maintainer's construction now yields a sphere");
+    let sphere = doc.object(id).expect("sphere is live");
+    assert_eq!(sphere.watertight(), WatertightState::Watertight);
+    assert!(doc.object_solid(id));
+    let center = Point3::new(0.0, 0.0, 0.1);
+    for v in sphere.vertices().values() {
+        let d = (v.position - center).length();
+        assert!((d - 0.1).abs() < 2e-3, "vertex off the sphere: {d}");
+    }
+}
+
 #[test]
 fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
     let mut doc = Document::new();

@@ -71,12 +71,17 @@ below.
   face's outer boundary — into a new watertight solid, mitered at every
   path corner. The profile must sit perpendicular across the path (Hew
   never re-orients it); closed loops weld their seam exactly (frames,
-  faceted-lathe shapes); a drawn circle swept along a straight run stays
-  a true stamped cylinder, while walls around a path's turns keep honest
-  facets (no toroidal surface identity yet). Ineligible sweeps —
-  non-perpendicular or detached profiles, branching or disconnected
-  selections, bends tighter than the profile, self-intersecting results
-  — refuse typed with the document untouched (docs/design/follow-me.md)
+  faceted-lathe rings). A radial profile that reaches the axis of a drawn
+  circle path closes a pole rather than refusing — the SketchUp sphere
+  (a circle profile crossing the axis splits and revolves one half),
+  goblets, and cones, each a single watertight genus-0 solid. A drawn
+  circle swept along a straight run stays a true stamped cylinder, while
+  walls around a path's turns keep honest facets (no toroidal surface
+  identity yet). Ineligible sweeps — non-perpendicular or detached
+  profiles, branching or disconnected selections, bends tighter than the
+  profile, an on-axis profile on a non-circular path, self-intersecting
+  results — refuse typed with the document untouched
+  (docs/design/follow-me.md)
 - Move and rotate with axis-locked inference snapping; tapping Option/Alt
   durably toggles Move between moving and copying (so an exact copy
   distance can be typed), and a committed copy refines into an array:

@@ -242,8 +242,15 @@ pub enum FollowMeError {
     /// The path bends tighter than the profile is wide: a ring vertex fails
     /// to advance along its segment (the sweep would locally fold into
     /// itself). Also raised for a lathe profile touching its own axis of
-    /// revolution — the on-axis vertex never advances.
+    /// revolution on a NON-circular path — the on-axis vertex never advances.
     PathTooTight,
+    /// The profile CROSSES the revolution axis of a drawn-circle path in a way
+    /// that cannot be revolved into one faithful solid (design §9.2): only an
+    /// analytic circle centered on the axis (the sphere) splits losslessly.
+    /// An asymmetric silhouette would silently drop the geometry drawn on the
+    /// discarded side; a multi-lobe crossing would sever into disjoint shells.
+    /// Refused rather than split — revolve a one-sided profile instead.
+    ProfileCrossesAxis,
     /// The built solid's faces make improper contact away from their
     /// legitimately shared elements (e.g. a U-shaped sweep whose legs
     /// interpenetrate). Refused whole; nothing is committed.
@@ -487,6 +494,10 @@ impl std::fmt::Display for FollowMeError {
             }
             FollowMeError::PathTooTight => {
                 "path bends tighter than the profile is wide; the sweep would fold into itself"
+            }
+            FollowMeError::ProfileCrossesAxis => {
+                "profile crosses the lathe axis and cannot be revolved into one solid; \
+                 revolve a one-sided profile instead"
             }
             FollowMeError::SweepSelfIntersects => "swept solid would intersect itself",
             FollowMeError::SweepDegenerate => "sweep produced degenerate or invalid geometry",
@@ -1001,6 +1012,33 @@ impl Object {
             }
         }
 
+        // ---- pole closure (design §9) -----------------------------------
+        // When the path is a drawn CIRCLE, transporting a radial profile
+        // around it is a revolution about the circle's axis, so a profile
+        // vertex that lands on the axis is a POLE — fixed by the revolution —
+        // and the sweep closes into a single watertight shell (a sphere, a
+        // goblet) rather than firing the historical PathTooTight. A profile
+        // that CROSSES the axis is split to the half on one side first, so
+        // the revolution single-covers instead of tracing the surface twice.
+        // The split runs BEFORE anchoring on purpose: it moves the profile
+        // centroid off the axis, which the nearest-anchor rule (§2) needs to
+        // seam on the near side. A non-circular path recovers no axis, so its
+        // would-be pole is not fixed and still refuses (unchanged).
+        let split_owned;
+        let (profile, pole_axis): (&Profile, Option<PoleAxis>) =
+            match circular_path_axis(path, path_curves, closed) {
+                Some(axis) if profile_plane_contains_axis(plane, &axis) => {
+                    match split_profile_for_pole(profile, &axis)? {
+                        Some(half) => {
+                            split_owned = half;
+                            (&split_owned, Some(axis))
+                        }
+                        None => (profile, Some(axis)),
+                    }
+                }
+                _ => (profile, None),
+            };
+
         // ---- anchor: fix station 0 to the profile plane (design §2) -----
         // `pts` is the working path: an open path oriented to leave the
         // profile plane from its matching end; a closed path rotated to
@@ -1272,6 +1310,19 @@ impl Object {
             base.extend_from_slice(hole);
         }
 
+        // Ring vertices on the revolution axis are POLES (design §9): the
+        // revolution fixes them, so they collapse to one shared vertex across
+        // every station, their pole-adjacent walls fan to triangles, and a
+        // wall whose whole edge is on the axis (the profile's axis boundary)
+        // is interior and suppressed. Poles arise only on a circular path.
+        let on_axis: Vec<bool> = match &pole_axis {
+            Some(axis) => (0..ring_size)
+                .map(|j| axis.distance(base[j]) <= tol::POINT_MERGE)
+                .collect(),
+            None => vec![false; ring_size],
+        };
+        let has_poles = on_axis.iter().any(|&p| p);
+
         struct WallEdge {
             a: usize,
             b: usize,
@@ -1353,6 +1404,12 @@ impl Object {
             let next = &stations[(s + 1) % m];
             let prev = &stations[s];
             for j in 0..ring_size {
+                // A pole is fixed by the revolution — it legitimately does not
+                // advance (design §9); the advance check would otherwise read
+                // it as the lathe self-touch it used to refuse.
+                if on_axis[j] {
+                    continue;
+                }
                 if (next[j] - prev[j]).dot(dirs[s]) <= tol::POINT_MERGE {
                     return Err(FollowMeError::PathTooTight);
                 }
@@ -1360,12 +1417,6 @@ impl Object {
         }
 
         // ---- assemble faces ---------------------------------------------
-        let mut positions: Vec<Point3> = Vec::with_capacity(m * ring_size);
-        for st in &stations {
-            positions.extend_from_slice(&st[..ring_size]);
-        }
-        let idx = |s: usize, j: usize| s * ring_size + j;
-
         #[allow(clippy::type_complexity)]
         let mut face_specs: Vec<(
             Vec<usize>,
@@ -1374,65 +1425,152 @@ impl Object {
             Option<crate::topo::SurfaceRef>,
         )> = Vec::new();
 
-        if !closed {
-            // Caps, from_extrusion's shape: near cap on the profile plane
-            // wound to face against the sweep, far cap wound along it.
-            let hole_starts: Vec<usize> = {
-                let mut starts = Vec::with_capacity(holes.len());
-                let mut acc = n_outer;
-                for h in holes {
-                    starts.push(acc);
-                    acc += h.len();
+        let positions: Vec<Point3> = if has_poles {
+            // Pole-aware closed assembly (design §9). On-axis vertices are
+            // one shared position each (station 0's, since a pole is fixed);
+            // off-axis vertices keep their per-station copies. A wall quad
+            // with an on-axis corner collapses — one shared corner degenerates
+            // it to a triangle fanning to the pole, two collapse it away (the
+            // profile's axis boundary — interior to the solid). No caps: a
+            // closed path never carries them.
+            let mut positions: Vec<Point3> = Vec::new();
+            let mut pole_gid: Vec<Option<usize>> = vec![None; ring_size];
+            for j in 0..ring_size {
+                if on_axis[j] {
+                    pole_gid[j] = Some(positions.len());
+                    positions.push(stations[0][j]);
                 }
-                starts
-            };
-            let near_outer: Vec<usize> = (0..n_outer).rev().collect();
-            let near_inners: Vec<Vec<usize>> = holes
-                .iter()
-                .enumerate()
-                .map(|(i, h)| (0..h.len()).rev().map(|k| hole_starts[i] + k).collect())
-                .collect();
-            let near_pts: Vec<Point3> = near_outer.iter().map(|&j| positions[j]).collect();
-            let near_plane =
-                Plane::from_polygon(&near_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
-            face_specs.push((near_outer, near_inners, near_plane, None));
-
-            let far = m - 1;
-            let far_outer: Vec<usize> = (0..n_outer).map(|j| idx(far, j)).collect();
-            let far_inners: Vec<Vec<usize>> = holes
-                .iter()
-                .enumerate()
-                .map(|(i, h)| (0..h.len()).map(|k| idx(far, hole_starts[i] + k)).collect())
-                .collect();
-            let far_pts: Vec<Point3> = far_outer.iter().map(|&j| positions[j]).collect();
-            let far_plane =
-                Plane::from_polygon(&far_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
-            face_specs.push((far_outer, far_inners, far_plane, None));
-        }
-
-        for s in 0..seg_count {
-            let s_next = (s + 1) % m;
-            for we in &wall_edges {
-                let quad = vec![
-                    idx(s, we.a),
-                    idx(s, we.b),
-                    idx(s_next, we.b),
-                    idx(s_next, we.a),
-                ];
-                let quad_pts: Vec<Point3> = quad.iter().map(|&j| positions[j]).collect();
-                let wall_plane =
-                    Plane::from_polygon(&quad_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
-                let surface = we.curve.and_then(|(center_idx, radius)| {
-                    let surface = crate::topo::SurfaceRef::Cylinder {
-                        axis_point: stations[s][center_idx],
-                        axis: dirs[s],
-                        radius,
-                    };
-                    cylinder_claim_holds(&quad_pts, &wall_plane, &surface).then_some(surface)
-                });
-                face_specs.push((quad, vec![], wall_plane, surface));
             }
-        }
+            let mut off_gid: Vec<Vec<Option<usize>>> = vec![vec![None; ring_size]; m];
+            for (s, block) in off_gid.iter_mut().enumerate() {
+                for (j, slot) in block.iter_mut().enumerate() {
+                    if !on_axis[j] {
+                        *slot = Some(positions.len());
+                        positions.push(stations[s][j]);
+                    }
+                }
+            }
+            let gidx = |s: usize, j: usize| -> usize {
+                if on_axis[j] {
+                    pole_gid[j].expect("every on-axis vertex has a pole index")
+                } else {
+                    off_gid[s % m][j].expect("every off-axis vertex has a station index")
+                }
+            };
+
+            for s in 0..seg_count {
+                let s_next = (s + 1) % m;
+                for we in &wall_edges {
+                    let quad = [
+                        gidx(s, we.a),
+                        gidx(s, we.b),
+                        gidx(s_next, we.b),
+                        gidx(s_next, we.a),
+                    ];
+                    // Drop corners a collapsed pole duplicated (consecutive and
+                    // wrap-around), leaving a quad, a pole-fan triangle, or —
+                    // for a fully on-axis wall — fewer than three vertices.
+                    let mut ring: Vec<usize> = Vec::with_capacity(4);
+                    for &g in &quad {
+                        if ring.last() != Some(&g) {
+                            ring.push(g);
+                        }
+                    }
+                    if ring.len() > 1 && ring.first() == ring.last() {
+                        ring.pop();
+                    }
+                    if ring.len() < 3 {
+                        continue; // fully on-axis wall: interior, suppressed.
+                    }
+                    let ring_pts: Vec<Point3> = ring.iter().map(|&g| positions[g]).collect();
+                    let wall_plane = Plane::from_polygon(&ring_pts)
+                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    // Cylinder stamps apply only to a full, un-collapsed quad.
+                    let surface = if ring.len() == 4 {
+                        we.curve.and_then(|(center_idx, radius)| {
+                            let surface = crate::topo::SurfaceRef::Cylinder {
+                                axis_point: stations[s][center_idx],
+                                axis: dirs[s],
+                                radius,
+                            };
+                            cylinder_claim_holds(&ring_pts, &wall_plane, &surface)
+                                .then_some(surface)
+                        })
+                    } else {
+                        None
+                    };
+                    face_specs.push((ring, vec![], wall_plane, surface));
+                }
+            }
+            positions
+        } else {
+            let mut positions: Vec<Point3> = Vec::with_capacity(m * ring_size);
+            for st in &stations {
+                positions.extend_from_slice(&st[..ring_size]);
+            }
+            let idx = |s: usize, j: usize| s * ring_size + j;
+
+            if !closed {
+                // Caps, from_extrusion's shape: near cap on the profile plane
+                // wound to face against the sweep, far cap wound along it.
+                let hole_starts: Vec<usize> = {
+                    let mut starts = Vec::with_capacity(holes.len());
+                    let mut acc = n_outer;
+                    for h in holes {
+                        starts.push(acc);
+                        acc += h.len();
+                    }
+                    starts
+                };
+                let near_outer: Vec<usize> = (0..n_outer).rev().collect();
+                let near_inners: Vec<Vec<usize>> = holes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| (0..h.len()).rev().map(|k| hole_starts[i] + k).collect())
+                    .collect();
+                let near_pts: Vec<Point3> = near_outer.iter().map(|&j| positions[j]).collect();
+                let near_plane =
+                    Plane::from_polygon(&near_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+                face_specs.push((near_outer, near_inners, near_plane, None));
+
+                let far = m - 1;
+                let far_outer: Vec<usize> = (0..n_outer).map(|j| idx(far, j)).collect();
+                let far_inners: Vec<Vec<usize>> = holes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| (0..h.len()).map(|k| idx(far, hole_starts[i] + k)).collect())
+                    .collect();
+                let far_pts: Vec<Point3> = far_outer.iter().map(|&j| positions[j]).collect();
+                let far_plane =
+                    Plane::from_polygon(&far_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+                face_specs.push((far_outer, far_inners, far_plane, None));
+            }
+
+            for s in 0..seg_count {
+                let s_next = (s + 1) % m;
+                for we in &wall_edges {
+                    let quad = vec![
+                        idx(s, we.a),
+                        idx(s, we.b),
+                        idx(s_next, we.b),
+                        idx(s_next, we.a),
+                    ];
+                    let quad_pts: Vec<Point3> = quad.iter().map(|&j| positions[j]).collect();
+                    let wall_plane = Plane::from_polygon(&quad_pts)
+                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let surface = we.curve.and_then(|(center_idx, radius)| {
+                        let surface = crate::topo::SurfaceRef::Cylinder {
+                            axis_point: stations[s][center_idx],
+                            axis: dirs[s],
+                            radius,
+                        };
+                        cylinder_claim_holds(&quad_pts, &wall_plane, &surface).then_some(surface)
+                    });
+                    face_specs.push((quad, vec![], wall_plane, surface));
+                }
+            }
+            positions
+        };
 
         // The construction winds outward for a sweep leaving station 0
         // ALONG the profile normal; an open path may leave against it (a
@@ -1463,6 +1601,17 @@ impl Object {
         let obj = Object::from_faces_with_holes(&positions, &face_specs);
         obj.validate().map_err(|_| FollowMeError::SweepDegenerate)?;
         if obj.watertight() != crate::topo::WatertightState::Watertight {
+            return Err(FollowMeError::SweepDegenerate);
+        }
+
+        // Pole backstop (design §9.4): an Object is one watertight solid, but
+        // `validate`/`watertight` only check LOCAL half-edge consistency —
+        // they certify two disjoint shells as watertight. Suppressing on-axis
+        // walls could, if an up-front check ever missed a case, sever a pole
+        // solid into disconnected shells packed into one Object. Refuse that
+        // typed rather than emit it (rule 4), independent of the faithful-split
+        // gate above.
+        if has_poles && obj.face_components().len() != 1 {
             return Err(FollowMeError::SweepDegenerate);
         }
 
@@ -5274,6 +5423,201 @@ fn validate_sweep_result(
     Ok(())
 }
 
+/// The axis of revolution recovered from a drawn-circle Follow Me path
+/// (docs/design/follow-me.md §9): the line through the circle's `center`
+/// along `dir` (the path plane normal). Transporting a radial profile around
+/// such a path is a revolution about this axis, so a profile vertex on the
+/// axis is a POLE — the miter transport fixes it across every station.
+#[derive(Clone, Copy)]
+struct PoleAxis {
+    center: Point3,
+    dir: Vec3,
+}
+
+impl PoleAxis {
+    /// Perpendicular distance from `p` to the axis line.
+    fn distance(&self, p: Point3) -> f64 {
+        let d = p - self.center;
+        (d - self.dir * d.dot(self.dir)).length()
+    }
+}
+
+/// Recovers the revolution axis when `path` is a single drawn CIRCLE — every
+/// segment carrying the SAME analytic [`CurveGeom`] (one center and radius,
+/// within tolerance), closed and planar. Only then is the miter transport a
+/// clean revolution about the circle's center axis, where an on-axis profile
+/// vertex closes a manifold pole; on any other closed loop the would-be pole
+/// is carried off the axis and the sweep still refuses (design §9). Returns
+/// `None` for an open, unattributed, or multi-circle path.
+fn circular_path_axis(
+    path: &[Point3],
+    path_curves: &[Option<crate::sketch::CurveGeom>],
+    closed: bool,
+) -> Option<PoleAxis> {
+    if !closed || path.len() < 3 || path_curves.len() != path.len() {
+        return None;
+    }
+    let first = path_curves[0]?;
+    if !first.radius.is_finite() || first.radius <= tol::POINT_MERGE {
+        return None;
+    }
+    for c in path_curves {
+        let g = (*c)?;
+        if !g.center.approx_eq(first.center, tol::POINT_MERGE)
+            || (g.radius - first.radius).abs() > tol::POINT_MERGE
+        {
+            return None;
+        }
+    }
+    let dir = Plane::from_polygon(path).ok()?.normal();
+    Some(PoleAxis {
+        center: first.center,
+        dir,
+    })
+}
+
+/// Whether `plane` contains the revolution `axis` line: the profile is radial
+/// (its normal perpendicular to the axis, the axis point on the plane). Only
+/// a radial profile can reach the axis to form a pole (design §9).
+fn profile_plane_contains_axis(plane: Plane, axis: &PoleAxis) -> bool {
+    plane.normal().dot(axis.dir).abs() <= tol::NORMAL_DIRECTION
+        && plane.signed_distance(axis.center).abs() <= tol::PLANE_DIST
+}
+
+/// Whether `profile`'s outer boundary is a single analytic circle centered on
+/// the revolution `axis` (design §9.2). This is the exact, deterministic test
+/// for "splitting the crossing profile is FAITHFUL": a circle centered on the
+/// axis is mirror-symmetric about it and crosses it at exactly two points, so
+/// revolving one half is lossless (the discarded half is the mirror) and the
+/// result is a single sphere.
+///
+/// The attribution is **not trusted**: the public Sketch API stamps every
+/// segment added under an open curve bracket with that bracket's `CurveGeom`,
+/// on the circle or not, so a mislabeled profile (real facets plus a detour
+/// out to an off-circle lump) reports one center and radius for every edge
+/// while not being a circle at all. So this re-verifies the geometry against
+/// the claim, exactly as [`cylinder_claim_holds`] re-verifies a `SurfaceRef`
+/// (map-or-drop): the attribution must be consistent, its center on the axis,
+/// AND every boundary vertex must sit AT the radius from that center. This is
+/// phase-independent — an off-phase circle's facet vertices genuinely lie on
+/// the circle, so it passes, which is why vertex-ON-circle is the right test
+/// where vertex-mirror-symmetry was not.
+fn outer_is_axis_centered_circle(profile: &Profile, axis: &PoleAxis) -> bool {
+    let outer = profile.outer();
+    let m = outer.len();
+    if m < 3 {
+        return false;
+    }
+    let Some(g0) = profile.outer_curve(0) else {
+        return false;
+    };
+    if !g0.radius.is_finite()
+        || g0.radius <= tol::POINT_MERGE
+        || axis.distance(g0.center) > tol::POINT_MERGE
+    {
+        return false;
+    }
+    let attribution_consistent = (0..m).all(|k| {
+        matches!(profile.outer_curve(k), Some(g)
+            if g.center.approx_eq(g0.center, tol::POINT_MERGE)
+                && (g.radius - g0.radius).abs() <= tol::POINT_MERGE)
+    });
+    let vertices_on_circle = outer
+        .iter()
+        .all(|&p| ((p - g0.center).length() - g0.radius).abs() <= tol::PLANE_DIST);
+    attribution_consistent && vertices_on_circle
+}
+
+/// Splits a profile that CROSSES the revolution axis into the one-sided half
+/// whose diameter lies on the axis (design §9), so the sweep revolves ONE side
+/// 360° (a single shell) instead of both (a double cover). Returns:
+/// - `Ok(None)` when the profile does not cross — entirely on one side, or only
+///   touching the axis — so no split is needed (the pole assembly handles a
+///   touching profile; a clear-of-axis one makes a torus).
+/// - `Ok(Some(half))` when the crossing is FAITHFUL to split: the outer
+///   boundary is an analytic circle centered on the axis, so the two halves
+///   are mirror images and discarding one is lossless (the sphere). The kept
+///   half is CCW about the profile normal, attribution dropped (its split
+///   walls export as honest facets).
+/// - `Err(ProfileCrossesAxis)` for any OTHER crossing — an asymmetric
+///   silhouette (revolving one half would silently drop the geometry the user
+///   drew on the other), a multi-lobe crossing (whose split would sever into
+///   disjoint shells), an off-center circle, or a holed profile. Refused
+///   typed, document untouched — never split, truncated, or disconnected
+///   (rule 4, upholding §9.2's own promise).
+fn split_profile_for_pole(
+    profile: &Profile,
+    axis: &PoleAxis,
+) -> Result<Option<Profile>, FollowMeError> {
+    let plane = profile.plane();
+    let n = plane.normal();
+    let Ok(radial) = axis.dir.cross(n).normalized() else {
+        return Ok(None); // axis parallel to the profile normal: not radial.
+    };
+    let outer = profile.outer();
+    let radial_of = |p: Point3| (p - axis.center).dot(radial);
+    let mut min_r = f64::INFINITY;
+    let mut max_r = f64::NEG_INFINITY;
+    for &p in outer {
+        let v = radial_of(p);
+        min_r = min_r.min(v);
+        max_r = max_r.max(v);
+    }
+    // Not a crossing: entirely on one side, or merely touching the axis.
+    if min_r >= -tol::POINT_MERGE || max_r <= tol::POINT_MERGE {
+        return Ok(None);
+    }
+    // A crossing may be split ONLY when doing so is faithful — a lossless,
+    // single-shell revolve of one mirror-image half. The exact criterion is an
+    // axis-centered analytic circle (the sphere). Anything else is refused,
+    // never split (a dropped lobe / disjoint shells are worse than a clean
+    // refusal, rule 4).
+    if !profile.holes().is_empty() || !outer_is_axis_centered_circle(profile, axis) {
+        return Err(FollowMeError::ProfileCrossesAxis);
+    }
+    // Sutherland–Hodgman clip to the +radial half-plane, inserting the two
+    // axis crossings as poles. A circle centered on the axis is symmetric, so
+    // the +radial half is a deterministic, lossless choice (rule 7).
+    let m = outer.len();
+    let mut half: Vec<Point3> = Vec::with_capacity(m + 2);
+    for k in 0..m {
+        let cur = outer[k];
+        let nxt = outer[(k + 1) % m];
+        let sc = radial_of(cur);
+        let sn = radial_of(nxt);
+        let cur_in = sc >= -tol::POINT_MERGE;
+        let nxt_in = sn >= -tol::POINT_MERGE;
+        if nxt_in {
+            if !cur_in {
+                half.push(cur + (nxt - cur) * (sc / (sc - sn)));
+            }
+            half.push(nxt);
+        } else if cur_in {
+            half.push(cur + (nxt - cur) * (sc / (sc - sn)));
+        }
+    }
+    half.dedup_by(|a, b| a.approx_eq(*b, tol::POINT_MERGE));
+    while half.len() >= 2 && half[0].approx_eq(half[half.len() - 1], tol::POINT_MERGE) {
+        half.pop();
+    }
+    if half.len() < 3 {
+        return Err(FollowMeError::ProfileCrossesAxis);
+    }
+    // Orient CCW about the plane normal, then validate as a fresh profile; a
+    // degenerate clip is refused typed, never a silently repaired region.
+    let mut twice_area = Vec3::ZERO;
+    for k in 0..half.len() {
+        twice_area =
+            twice_area + (half[k] - axis.center).cross(half[(k + 1) % half.len()] - axis.center);
+    }
+    if twice_area.dot(n) < 0.0 {
+        half.reverse();
+    }
+    Profile::new(plane, half, vec![])
+        .map(Some)
+        .map_err(|_| FollowMeError::ProfileCrossesAxis)
+}
+
 /// Whether a swept wall quad genuinely lies on the cylinder it is about to
 /// claim, by the validator's own predicates tightened to "vertices AT the
 /// radius" (a chord facet's corners sit exactly on the cylinder, not merely
@@ -5435,7 +5779,8 @@ fn boundary_pokes_face(
                         let r = obj.vertices[obj.half_edges[yh].origin].position;
                         let s =
                             obj.vertices[obj.half_edges[obj.half_edges[yh].next].origin].position;
-                        for c in coplanar_segment_contacts(p, q, r, s, y_normal) {
+                        for c in coplanar_segment_contacts(p, q, r, s, y_normal, is_shared_contact)
+                        {
                             if !is_shared_contact(c) {
                                 return true;
                             }
@@ -5452,9 +5797,30 @@ fn boundary_pokes_face(
                     }
                 }
             } else {
-                // Transversal crossing: the single, exact plane-crossing
-                // point is the only place the segment can touch y.
-                let c = p + (q - p) * (sdp / (sdp - sdq));
+                // Transversal crossing: the single plane-crossing point is
+                // the only place the segment can touch y. When one endpoint is
+                // a GENUINELY SHARED vertex lying on y's plane, take that exact
+                // endpoint rather than reconstructing the crossing by
+                // interpolation — the reconstruction is ill-conditioned when
+                // the far endpoint is only just off-plane, so it lands ~1e-7
+                // off the shared vertex (past POINT_MERGE) and reads as a
+                // non-shared contact. A razor-thin sliver facet across a
+                // closed-lathe seam has a Newell-fitted plane good to only
+                // ~1e-9, so a neighbour wall's edge emanating from their shared
+                // rim vertex trips exactly this. The snap is gated on
+                // `is_shared_contact`, NOT mere plane proximity: a non-shared
+                // endpoint within PLANE_DIST must fall through to the
+                // interpolated crossing, or a real piercing whose near-plane
+                // endpoint sits OUTSIDE y (with the crossing dead in y's
+                // interior) would be masked. A genuine transversal keeps both
+                // endpoints clearly off-plane, so neither snap fires anyway.
+                let c = if sdp.abs() <= tol::PLANE_DIST && is_shared_contact(p) {
+                    p
+                } else if sdq.abs() <= tol::PLANE_DIST && is_shared_contact(q) {
+                    q
+                } else {
+                    p + (q - p) * (sdp / (sdp - sdq))
+                };
                 if in_y_interior(c) && !is_shared_contact(c) {
                     return true;
                 }
@@ -5471,8 +5837,17 @@ fn boundary_pokes_face(
 ///
 /// Used by [`boundary_pokes_face`]'s coplanar branch, which must whitelist
 /// each contact against the faces' shared vertices/edges — so this returns
-/// the actual contact locations rather than a boolean.
-fn coplanar_segment_contacts(p: Point3, q: Point3, r: Point3, s: Point3, n: Vec3) -> Vec<Point3> {
+/// the actual contact locations rather than a boolean. `is_shared` reports
+/// whether a point is a genuinely shared topological element of the two
+/// faces; it gates the near-collinear shared-endpoint short-circuit below.
+fn coplanar_segment_contacts(
+    p: Point3,
+    q: Point3,
+    r: Point3,
+    s: Point3,
+    n: Vec3,
+    is_shared: impl Fn(Point3) -> bool,
+) -> Vec<Point3> {
     let d1 = q - p;
     let d2 = s - r;
     let (Ok(u1), Ok(u2)) = (d1.normalized(), d2.normalized()) else {
@@ -5496,6 +5871,31 @@ fn coplanar_segment_contacts(p: Point3, q: Point3, r: Point3, s: Point3, n: Vec3
             return Vec::new();
         }
         return vec![p + u1 * lo, p + u1 * hi];
+    }
+    // Non-parallel. If the segments meet at a GENUINELY SHARED endpoint, that
+    // endpoint is their unique intersection (two non-collinear segments have no
+    // other common point) — return it EXACTLY rather than through the crossing
+    // solve below. Two boundary segments that share a vertex and are
+    // near-collinear (consecutive sweep walls across a closed-lathe seam whose
+    // split fell a hair before a drawn rim vertex, leaving a sub-facet sliver)
+    // drive `denom` — the in-plane sine of their tiny opening angle — toward
+    // zero, so the solve is ill-conditioned and reconstructs their shared
+    // vertex displaced by ~1e-8: orders past POINT_MERGE, whereupon
+    // `boundary_pokes_face` misreads the shared vertex as a non-shared contact
+    // and refuses a sound sweep as `SweepSelfIntersects`.
+    //
+    // The short-circuit is gated on `is_shared`, NOT on mere POINT_MERGE
+    // proximity between the endpoints: two DISTINCT vertices that merely happen
+    // to fall within POINT_MERGE of each other are not a shared element, and
+    // their carrier lines can cross as far as ~POINT_MERGE / NORMAL_DIRECTION
+    // away — returning the bare near-coincident endpoint there would record the
+    // contact in the wrong place and MASK a genuine crossing/overlap. Only a
+    // confirmed shared vertex short-circuits; everything else falls through to
+    // the honest crossing solve.
+    for (e1, e2) in [(p, r), (p, s), (q, r), (q, s)] {
+        if e1.approx_eq(e2, tol::POINT_MERGE) && is_shared(e1) {
+            return vec![e1];
+        }
     }
     // Proper (or endpoint-touching) intersection: solve p + t·u1 = r + v·u2
     // by crossing both sides against each direction.
@@ -7039,6 +7439,86 @@ mod tests {
         let faces: Vec<FaceId> = obj.faces().keys().collect();
         assert!(!faces_improperly_contact(&obj, faces[0], faces[1]));
         assert!(!faces_improperly_contact(&obj, faces[1], faces[0]));
+    }
+
+    /// Adversarial-review regression (HOLE 1): the transversal on-plane
+    /// endpoint bypass must NOT fire on mere plane proximity — only on a
+    /// GENUINELY SHARED vertex. An edge runs from (-1, 5) [within PLANE_DIST
+    /// of the z = 0 plane but OUTSIDE the 10×10 square] to (20, 5) [just
+    /// below], piercing the square dead-center at (5, 5, 0). The near-plane
+    /// endpoint is not a shared vertex, so it must fall through to the
+    /// interpolated crossing; snapping to it would place the "contact" outside
+    /// the square and MASK the piercing. Tested on `boundary_pokes_face`
+    /// directly so the safety-critical primitive is correct in isolation, not
+    /// rescued by the symmetric wrapper.
+    #[test]
+    fn boundary_pokes_face_catches_piercing_from_a_non_shared_near_plane_endpoint() {
+        let obj = Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(10.0, 0.0, 0.0),
+                Point3::new(10.0, 10.0, 0.0),
+                Point3::new(0.0, 10.0, 0.0),
+                Point3::new(-1.0, 5.0, 6e-10),
+                Point3::new(20.0, 5.0, -1.5e-9),
+                Point3::new(10.0, 5.0, 10.0),
+            ],
+            &[vec![0, 1, 2, 3], vec![4, 5, 6]],
+        )
+        .expect("z=0 square plus a piercing triangle");
+        let square = obj
+            .faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z.abs() > 0.5)
+            .map(|(id, _)| id)
+            .expect("the square face");
+        let tri = obj
+            .faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().y.abs() > 0.5)
+            .map(|(id, _)| id)
+            .expect("the piercing triangle face");
+        // The faces share no vertex or edge: no element is whitelisted.
+        assert!(
+            boundary_pokes_face(&obj, tri, square, &[], &[]),
+            "an edge piercing the square interior must register even though \
+             its near-plane endpoint lies OUTSIDE the square"
+        );
+    }
+
+    /// Adversarial-review regression (HOLE 2): the coplanar shared-endpoint
+    /// short-circuit must NOT fire on mere POINT_MERGE proximity between two
+    /// DISTINCT vertices — only on a genuinely shared one. Two coplanar
+    /// segments whose left ends sit 9e-10 apart (within POINT_MERGE, but not a
+    /// shared vertex) cross at x = 0.75; returning the bare near-coincident
+    /// endpoint would record the contact at x = 0 and mask the crossing. With
+    /// `is_shared` false the honest crossing at 0.75 must be reported; with the
+    /// endpoint genuinely shared (the lathe-seam case) it snaps to that exact
+    /// endpoint and reports no spurious crossing.
+    #[test]
+    fn coplanar_segment_contacts_only_snaps_a_genuinely_shared_endpoint() {
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let p = Point3::new(0.0, 0.0, 0.0);
+        let q = Point3::new(20.0, 0.0, 0.0);
+        let r = Point3::new(0.0, 9e-10, 0.0);
+        let s = Point3::new(20.0, -2.31e-8, 0.0);
+
+        let honest = coplanar_segment_contacts(p, q, r, s, n, |_| false);
+        assert_eq!(honest.len(), 1, "one crossing expected, got {honest:?}");
+        assert!(
+            honest[0].approx_eq(Point3::new(0.75, 0.0, 0.0), 1e-6),
+            "distinct near-coincident endpoints must report the true crossing \
+             at x=0.75, got {:?}",
+            honest[0]
+        );
+
+        let shared =
+            coplanar_segment_contacts(p, q, r, s, n, |pt| pt.approx_eq(p, tol::POINT_MERGE));
+        assert_eq!(
+            shared,
+            vec![p],
+            "a genuinely shared endpoint returns exactly itself, no spurious crossing"
+        );
     }
 
     // ------------------------------------------------------ material

@@ -455,6 +455,327 @@ fn radial_profile(phi: f64) -> Profile {
     .unwrap()
 }
 
+// ---- pole closure: spheres, goblets, cones (design §9) ----
+
+/// A FULL circle profile on the x = 0 plane, drawn the way the tools draw one
+/// (a curve bracket carrying the analytic [`CurveGeom`]), centered on the z
+/// axis at height `cz`, radius `r`, `n >= 24` facets, phase-offset by `phase`
+/// facets. It straddles the axis — crossing it at the two poles `(0, 0, cz ±
+/// r)` — the sphere setup the maintainer's perpendicular-circles construction
+/// produces. The attribution is what makes the crossing a FAITHFUL (lossless,
+/// symmetric) split: an axis-centered analytic circle (design §9.2).
+fn axis_circle_profile(cz: f64, r: f64, n: usize, phase: f64) -> Profile {
+    let mut sketch = kernel::Sketch::on_plane(yz_plane());
+    sketch
+        .begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(0.0, 0.0, cz),
+            radius: r,
+        })
+        .unwrap();
+    let pt = |i: usize| {
+        let a = ((i % n) as f64 + phase) / n as f64 * std::f64::consts::TAU;
+        Point3::new(0.0, r * a.cos(), cz + r * a.sin())
+    };
+    for i in 0..n {
+        sketch.add_segment(pt(i), pt((i + 1) % n)).unwrap();
+    }
+    sketch.end_curve();
+    let region = sketch
+        .regions()
+        .keys()
+        .next()
+        .expect("circle closes one region");
+    sketch.profile(region).unwrap()
+}
+
+/// A circular path on the ground (z = 0) about the origin, radius `radius`,
+/// `n` facets phase-offset by `phase`, every segment carrying the analytic
+/// [`CurveGeom`] a drawn circle does — the path pole closure requires.
+fn attributed_ground_circle(
+    radius: f64,
+    n: usize,
+    phase: f64,
+) -> (Vec<Point3>, Vec<Option<kernel::CurveGeom>>) {
+    let geom = kernel::CurveGeom {
+        center: Point3::ORIGIN,
+        radius,
+    };
+    let pts = (0..n)
+        .map(|i| {
+            let a = (i as f64 + phase) / n as f64 * std::f64::consts::TAU;
+            Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+        })
+        .collect();
+    (pts, vec![Some(geom); n])
+}
+
+/// The SketchUp sphere: a full circle profile revolved around a drawn circle
+/// path it crosses on the axis. Pole closure splits the profile at the axis
+/// and revolves one half — a single watertight, genus-0 shell (never the
+/// double-covered pair a naive full revolve would trace). With a vertex on
+/// the axis crossing, every swept vertex lands EXACTLY on the sphere (the
+/// revolution preserves distance from the on-axis center).
+#[test]
+fn follow_me_sphere_from_full_circle_crossing_the_axis() {
+    let (r, cz, n) = (1.0, 1.0, 24usize);
+    let profile = axis_circle_profile(cz, r, n, 0.0);
+    let (path, curves) = attributed_ground_circle(1.0, n, 0.0);
+
+    let sphere = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    sphere.validate().unwrap();
+    assert_eq!(sphere.watertight(), WatertightState::Watertight);
+    // One shell, genus 0: V - E + F = 2(S - G) = 2.
+    assert_eq!(euler_poincare(&sphere), 2);
+
+    let center = Point3::new(0.0, 0.0, cz);
+    for v in sphere.vertices().values() {
+        let d = (v.position - center).length();
+        assert!(
+            (d - r).abs() < 1e-6,
+            "vertex off the sphere: dist {d}, r {r}"
+        );
+    }
+    let zmin = sphere
+        .vertices()
+        .values()
+        .map(|v| v.position.z)
+        .fold(f64::MAX, f64::min);
+    let zmax = sphere
+        .vertices()
+        .values()
+        .map(|v| v.position.z)
+        .fold(f64::MIN, f64::max);
+    assert!((zmin - (cz - r)).abs() < 1e-6, "bottom pole at {zmin}");
+    assert!((zmax - (cz + r)).abs() < 1e-6, "top pole at {zmax}");
+
+    // Outward-wound, and the faceted-inscribed volume approaches the true
+    // sphere from below (4/3 pi r^3).
+    let vol = signed_volume(&sphere);
+    let true_vol = 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
+    assert!(
+        vol > 0.95 * true_vol && vol <= true_vol + VOLUME_TOL,
+        "sphere volume {vol}, true {true_vol}"
+    );
+}
+
+/// The maintainer's actual geometry: neither the path facets nor the profile
+/// facets align a vertex with the axis crossing (perpendicular-circles-2.hew,
+/// r = 0.1, both circles 32 facets, off phase). The split inserts both poles
+/// mid-facet and the sweep still closes one watertight genus-0 sphere.
+#[test]
+fn follow_me_sphere_closes_off_phase_like_the_maintainer_file() {
+    let (r, cz, n) = (0.1, 0.1, 32usize);
+    let profile = axis_circle_profile(cz, r, n, 0.37);
+    let (path, curves) = attributed_ground_circle(0.1, n, 0.21);
+
+    let sphere = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    sphere.validate().unwrap();
+    assert_eq!(sphere.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&sphere), 2);
+    let vol = signed_volume(&sphere);
+    let true_vol = 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
+    assert!(
+        vol > 0.9 * true_vol && vol <= true_vol + VOLUME_TOL,
+        "off-phase sphere volume {vol}, true {true_vol}"
+    );
+}
+
+/// Determinism (DEVELOPMENT.md rule 7): the sphere rebuilds bit-for-bit
+/// identically — same vertex count, same positions to the last bit, same
+/// face count.
+#[test]
+fn follow_me_sphere_is_deterministic() {
+    let (r, cz, n) = (1.0, 1.0, 24usize);
+    let profile = axis_circle_profile(cz, r, n, 0.0);
+    let (path, curves) = attributed_ground_circle(1.0, n, 0.0);
+    let a = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    let b = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    let pos = |o: &Object| {
+        o.vertices()
+            .values()
+            .map(|v| {
+                (
+                    v.position.x.to_bits(),
+                    v.position.y.to_bits(),
+                    v.position.z.to_bits(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pos(&a), pos(&b));
+    assert_eq!(a.faces().len(), b.faces().len());
+}
+
+/// A single-profile revolve touching the axis (no crossing, so no split): a
+/// right-triangle profile whose two axis vertices become poles and whose
+/// on-axis edge is suppressed — a cone. Watertight, genus 0, with the
+/// faceted-inscribed volume of a cone.
+#[test]
+fn follow_me_cone_revolve_touching_the_axis() {
+    let (base_r, height, n) = (1.0, 2.0, 24usize);
+    let profile = Profile::new(
+        yz_plane(),
+        vec![
+            Point3::new(0.0, 0.0, 0.0),    // bottom pole (on axis)
+            Point3::new(0.0, base_r, 0.0), // base rim
+            Point3::new(0.0, 0.0, height), // apex (on axis)
+        ],
+        vec![],
+    )
+    .unwrap();
+    let (path, curves) = attributed_ground_circle(1.0, n, 0.0);
+
+    let cone = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    cone.validate().unwrap();
+    assert_eq!(cone.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&cone), 2);
+    let vol = signed_volume(&cone);
+    let true_vol = std::f64::consts::PI * base_r * base_r * height / 3.0;
+    assert!(
+        vol > 0.95 * true_vol && vol <= true_vol + VOLUME_TOL,
+        "cone volume {vol}, true {true_vol}"
+    );
+}
+
+/// Pole closure is gated on a recognized circle path: the identical sphere
+/// profile on a path WITHOUT analytic attribution refuses, exactly as any
+/// radial profile on an unattributed facet ring does (a polyline is
+/// perpendicular to no chord). No silent guess at a circle.
+#[test]
+fn follow_me_sphere_refuses_without_circle_attribution() {
+    let (r, cz, n) = (1.0, 1.0, 24usize);
+    let profile = axis_circle_profile(cz, r, n, 0.0);
+    let (path, _) = attributed_ground_circle(1.0, n, 0.0);
+    let err = Object::from_follow_me(&profile, &path, true, &[]).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+}
+
+proptest! {
+    /// Any full circle profile crossing the axis of any drawn circle path
+    /// closes a single watertight, genus-0, outward-wound sphere — never a
+    /// double cover — across radius and facet count (both vertex-aligned and
+    /// mid-facet axis crossings).
+    #[test]
+    fn follow_me_sphere_closes_for_any_radius_and_facets(
+        r in 0.05f64..3.0,
+        n in 3usize..40, // holds at every facet count a circle can have
+    ) {
+        let cz = r + 0.5;
+        let profile = axis_circle_profile(cz, r, n, 0.0);
+        let (path, curves) = attributed_ground_circle(r, n, 0.0);
+        let sphere = Object::from_follow_me(&profile, &path, true, &curves)
+            .expect("a full circle crossing the axis closes a sphere");
+        sphere.validate().unwrap();
+        prop_assert_eq!(sphere.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(euler_poincare(&sphere), 2);
+        prop_assert_eq!(sphere.split_connected_components().len(), 1); // one shell, not two
+        prop_assert!(signed_volume(&sphere) > 0.0);
+    }
+}
+
+/// A profile that crosses the axis but is NOT an axis-centered circle is
+/// refused, never split — the fix for the adversarial findings (design §9.2).
+/// Splitting such a profile would silently drop or disconnect the geometry the
+/// user drew, worse than a clean typed refusal (rule 4).
+#[test]
+fn follow_me_asymmetric_axis_crossing_refuses_typed() {
+    // A lopsided (egg-like) silhouette crossing the axis once: one lobe is
+    // large, the sliver on the other side would simply vanish under a
+    // majority-side clip. Refused, document untouched.
+    let profile = Profile::new(
+        yz_plane(),
+        vec![
+            Point3::new(0.0, -0.2, 0.0),
+            Point3::new(0.0, 3.0, 0.5),
+            Point3::new(0.0, 3.0, 3.0),
+            Point3::new(0.0, -0.2, 3.5),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let (path, curves) = attributed_ground_circle(1.0, 24, 0.0);
+    let err = Object::from_follow_me(&profile, &path, true, &curves).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileCrossesAxis);
+}
+
+/// A profile that crosses the axis MORE than once (a dominant lobe plus a
+/// notch dipping to the other side — the reviewer's exact refuter). The old
+/// min/max gate let it through and its suppressed connecting walls severed it
+/// into TWO disjoint watertight shells inside ONE Object (euler 4, two
+/// components) — a silently invalid solid. It is now refused typed, and the
+/// document is untouched. The connectivity backstop (§9.4) is the independent
+/// second line: were any crossing ever mis-admitted, a disconnected result is
+/// caught and refused rather than emitted.
+#[test]
+fn follow_me_multi_lobe_axis_crossing_refuses_and_never_disconnects() {
+    let profile = Profile::new(
+        yz_plane(),
+        vec![
+            Point3::new(0.0, -0.1, 0.0),
+            Point3::new(0.0, 5.0, -1.0),
+            Point3::new(0.0, 5.0, 4.0),
+            Point3::new(0.0, 0.1, 3.0),
+            Point3::new(0.0, -0.1, 2.0),
+            Point3::new(0.0, 0.1, 1.0),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let (path, curves) = attributed_ground_circle(1.0, 24, 0.0);
+    let err = Object::from_follow_me(&profile, &path, true, &curves).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileCrossesAxis);
+}
+
+/// The faithful-split gate must NOT trust the circle ATTRIBUTION: the public
+/// Sketch API stamps every segment added under an open curve bracket with that
+/// bracket's `CurveGeom`, on the circle or not (no positional check). A
+/// mislabeled profile — a genuine axis-centered circle attribution on a
+/// boundary that detours out to an OFF-circle lump — reports one center/radius
+/// for every edge yet is not a circle. Trusting the attribution would split it
+/// into a silently WRONG solid (volume far from the sphere). The gate
+/// re-verifies every boundary vertex lies AT the radius (map-or-drop, as
+/// cylinder stamping re-verifies its `SurfaceRef`), so it refuses typed.
+#[test]
+fn follow_me_mislabeled_circle_crossing_refuses_typed() {
+    let (cz, r, n) = (1.0, 1.0, 24usize);
+    let mut sketch = kernel::Sketch::on_plane(yz_plane());
+    sketch
+        .begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(0.0, 0.0, cz),
+            radius: r,
+        })
+        .unwrap();
+    let pt = |i: usize| {
+        let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
+        Point3::new(0.0, r * a.cos(), cz + r * a.sin())
+    };
+    // A genuine axis-centered circle EXCEPT facet 0, which detours out to an
+    // off-circle lump and back — every segment attributed to the open bracket.
+    for i in 0..n {
+        let (from, to) = (pt(i), pt((i + 1) % n));
+        if i == 0 {
+            let lump = Point3::new(0.0, 3.0, cz); // radial 3, far off the r = 1 circle
+            sketch.add_segment(from, lump).unwrap();
+            sketch.add_segment(lump, to).unwrap();
+        } else {
+            sketch.add_segment(from, to).unwrap();
+        }
+    }
+    sketch.end_curve();
+    let region = sketch.regions().keys().next().expect("closes one region");
+    let profile = sketch.profile(region).unwrap();
+    // The trap: attribution IS uniform across every boundary edge, lump
+    // included — exactly what a claim-trusting gate would wave through.
+    assert!(
+        (0..profile.outer().len()).all(|k| profile.outer_curve(k).is_some()),
+        "every edge is attributed to the circle bracket"
+    );
+
+    let (path, curves) = attributed_ground_circle(1.0, n, 0.0);
+    let err = Object::from_follow_me(&profile, &path, true, &curves).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileCrossesAxis);
+}
+
 /// The lathe that was structurally impossible under chord perpendicularity:
 /// on a curve-attributed circle path, a radially-placed profile (its plane
 /// containing the circle's axis — the only orientation perpendicular to the
@@ -604,6 +925,52 @@ proptest! {
         solid.validate().unwrap();
         prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
         prop_assert_eq!(euler_poincare(&solid), 0);
+    }
+}
+
+/// Deterministic regression for the closed-lathe seam flake that made
+/// `follow_me_lathe_accepts_any_radial_placement_angle` intermittently red
+/// (~2.6% of runs, reliably at high `PROPTEST_CASES`). When the radial
+/// profile plane crosses a facet a HAIR before a drawn rim vertex (a few
+/// microradians), the near-anchor rule splits that facet at the crossing —
+/// exact closure forces the split, because a vertex seam a few microradians
+/// off the miter plane provably would not close (design §1) — leaving a full
+/// wrap facet and a sub-facet SLIVER. The sliver is legitimate geometry, but
+/// its near-collinear seam walls once drove the global self-intersection
+/// guard's exact predicates ill-conditioned (their shared rim vertex
+/// reconstructed ~1e-7 off, past `POINT_MERGE`), so a sound lathe refused
+/// `SweepSelfIntersects` across a thin band of angles either side of every
+/// rim vertex. The two pinned angles are the shrunk failures two independent
+/// proptest runs reported; the swept band steps across the rest. Each must
+/// now sweep to a watertight genus-1 ring, exercising the fix without relying
+/// on proptest luck.
+#[test]
+fn follow_me_lathe_accepts_a_radial_seam_a_hair_off_a_rim_vertex() {
+    let n = 24usize;
+    let (path, curves) = circle_path(2.0, n);
+    let step = std::f64::consts::TAU / n as f64;
+
+    let mut phis = vec![1.3089725229526878f64, 3.92698012551821f64];
+    // The old bad band ran roughly 2.5e-6..3.5e-5 rad off a rim vertex; step
+    // finely across both sides of vertex 5 to cover it densely.
+    for k in 1..=80 {
+        let d = k as f64 * 5e-7;
+        phis.push(5.0 * step - d);
+        phis.push(5.0 * step + d);
+    }
+
+    for phi in phis {
+        let solid = Object::from_follow_me(&radial_profile(phi), &path, true, &curves)
+            .unwrap_or_else(|e| {
+                panic!("radial profile a hair off a rim vertex (phi={phi}): {e:?}")
+            });
+        solid.validate().unwrap();
+        assert_eq!(
+            solid.watertight(),
+            WatertightState::Watertight,
+            "phi={phi} not watertight"
+        );
+        assert_eq!(euler_poincare(&solid), 0, "phi={phi} not genus-1");
     }
 }
 
@@ -996,9 +1363,12 @@ fn follow_me_refuses_bend_tighter_than_profile() {
 
 #[test]
 fn follow_me_refuses_lathe_profile_touching_the_axis() {
-    // A revolve whose profile touches the axis of revolution: the on-axis
-    // ring vertex never advances. Refused typed (design scoped gap), not
-    // welded.
+    // A profile touching the axis of revolution on a NON-circular path (here
+    // an UNATTRIBUTED facet ring, treated as a polyline): pole closure needs
+    // a recognized circle path (design §9), so the would-be pole is not fixed
+    // by any revolution — the on-axis vertex never advances and it refuses
+    // typed, exactly as before. (Give this same ring analytic attribution and
+    // it closes a sphere — see follow_me_sphere_*.)
     let n = 24usize;
     let step = std::f64::consts::TAU / n as f64;
     let path: Vec<Point3> = (0..n)

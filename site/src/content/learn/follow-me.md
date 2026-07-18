@@ -34,6 +34,16 @@ For a loop of straight lines — a rectangle, any drawn ring of lines — place 
 
 A drawn circle is measured as the true curve it is: stand the profile square across the rim, its face looking along the circle — in line with the circle's center. Let the snaps make that exact: draw the circle from its center out along a drawing axis, stand the profile upright with the rotation locked to that axis, and set it on the rim. Anywhere on the rim works, including the drawn points of the circle itself.
 
+## Spheres and other poles
+
+Let the profile reach the circle's axis — the center line the lathe turns about — and the sweep closes a **pole** instead of leaving a hole down the middle: a sphere, a goblet, a cone, each a single watertight solid.
+
+The sphere is the headline case. Draw a circle for the path. Draw a second circle the same size standing upright *through* the axis — its own center on the path circle's center — so it crosses the axis at a top and a bottom point. Follow Me the upright circle around the path: Hew revolves one half of it and closes both crossings into poles, giving you a clean sphere. (Draw the path circle from its center, then draw the profile circle from that same center with the rotation locked upright, and the two points snap exact.)
+
+A profile that only touches the axis — a goblet's outline resting on the center line, a cone's slant running up to a tip — closes the same way, a pole wherever the outline meets the axis.
+
+Poles need a **drawn circle** path. On a straight-line loop, or any ring Hew doesn't read as a true circle, a profile reaching the center has no clean revolution to close on and refuses — keep it clear of the axis there.
+
 ## Running around a face
 
 Instead of a drawn path, run the sweep around a **face of a solid**: click the flat face whose rim you want the molding to follow — a tabletop's top for crown molding around its edge, a lid's top for a lip. The sweep runs around *that* face's outer boundary, and the result is a separate new solid; the original is untouched. To make it one piece, union them; to carve it away (a chamfer or a groove), subtract it ([Combining solids](/learn/combining-solids/)).
@@ -53,7 +63,7 @@ Follow Me never commits a broken solid. It refuses, with the model untouched, wh
 - the path doubles back on itself — or turns nearly all the way around — at a corner: there is no clean way to miter a hairpin;
 - the path bends tighter than the profile is wide — the sweep would fold into itself;
 - the swept shape would run into itself further along the path;
-- a lathe profile touches its own axis of revolution — keep it clear of the center.
+- a profile reaches the lathe axis on a path that *isn't* a drawn circle — only a true circle revolves cleanly into a pole (see [Spheres and other poles](#spheres-and-other-poles)); elsewhere, keep the profile clear of the center.
 
 Each refusal says what to change. Adjust the profile or path and click again — the picked path stays selected.
 
