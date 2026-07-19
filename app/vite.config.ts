@@ -1,8 +1,20 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import { readFileSync } from 'node:fs'
+
+// The app version's single source of truth is package.json; inject it at build
+// time so exports (STL/3MF) and bug-report bundles carry the real version. The
+// consumers declare `__HEW_VERSION__` and fall back to '0.0.0' when this define
+// is absent (a bare `tsc`/vitest run without the config's define step).
+const appVersion = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+).version as string
 
 export default defineConfig({
+  define: {
+    __HEW_VERSION__: JSON.stringify(appVersion),
+  },
   server: {
     // Under `tauri dev` the shell's webview loads the FIXED devUrl from
     // tauri.conf.json (http://localhost:5173). If another dev server —

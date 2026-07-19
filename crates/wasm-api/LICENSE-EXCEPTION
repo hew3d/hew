@@ -1,0 +1,87 @@
+HEW PLUGIN API EXCEPTION
+
+Version 1.0, 6 July 2026
+
+Copyright (C) 2026 Kurt Granroth
+
+Everyone is permitted to copy and distribute verbatim copies of this
+license document, but changing it is not allowed.
+
+This Exception is an additional permission under section 7 of the GNU
+Affero General Public License, version 3 ("AGPLv3"). It applies to a
+given work (such as Hew) whose license notice states that the work is
+governed by AGPLv3 together with this Exception.
+
+When you convey a copy of, or provide remote network access to, a work
+governed by AGPLv3 together with this Exception, you may at your option
+rely on this Exception. Terms not defined here have the meanings given
+in AGPLv3.
+
+
+0. Definitions.
+
+"Hew" means any work governed by AGPLv3 together with this Exception.
+
+The "Plugin API" means, for a given version of Hew, the application
+programming interfaces, extension points, inter-process interfaces,
+and scripting interfaces that that version of Hew documents and
+publishes for the purpose of extending Hew, together with the data
+formats those interfaces define, and any interface definitions, stubs,
+type declarations, and software development kit materials that the Hew
+project designates as part of the Plugin API.
+
+A "Plugin" means a work that is designed to extend the functionality
+of Hew through the Plugin API; that is not itself a version of Hew,
+modified or unmodified; that does not incorporate source code or
+object code of Hew other than materials designated as part of the
+Plugin API; and whose interaction with Hew occurs solely through the
+Plugin API.
+
+
+1. Grant of Additional Permission.
+
+You have permission to combine Hew with any Plugin, regardless of the
+license terms of that Plugin, and to convey the resulting combination,
+and to provide users remote network access to the resulting
+combination. Doing so does not cause the Plugin to be governed by
+AGPLv3, does not make the Plugin part of the Corresponding Source of
+Hew, and does not require the source code of the Plugin to be conveyed
+or otherwise made available. A Plugin may be distributed under any
+terms, including proprietary ones.
+
+
+2. Limits of This Exception.
+
+This Exception does not alter your obligations under AGPLv3 with
+respect to Hew itself. In particular, if you convey Hew or a modified
+version of Hew, or provide users remote network access to Hew or a
+modified version of Hew — whether or not combined with Plugins — the
+Corresponding Source of Hew, including any modifications to Hew, must
+be made available as AGPLv3 requires.
+
+A work is not a Plugin for the purposes of this Exception, and this
+Exception grants no permission with respect to it, if that work:
+
+  a) incorporates or adapts source code or object code of Hew, other
+     than materials designated as part of the Plugin API; or
+
+  b) links, statically or dynamically, against libraries or components
+     of Hew other than through the Plugin API; or
+
+  c) interacts with Hew through interfaces other than the Plugin API.
+
+
+3. Relationship to AGPLv3.
+
+This Exception is an additional permission as described in section 7
+of AGPLv3. As provided there, when you convey a copy of Hew you may at
+your option remove this Exception from that copy. Removing this
+Exception from a work you convey does not remove it from copies
+conveyed by others, and does not affect any Plugin's reliance on this
+Exception in connection with copies of Hew that retain it.
+
+Nothing in this Exception requires the Hew project to publish or
+maintain any particular Plugin API, nor limits its ability to change
+the Plugin API between versions of Hew. The scope of the Plugin API
+for a given version of Hew is fixed by what that version documents and
+designates.
