@@ -266,7 +266,7 @@ enum DocAction {
         b: ObjectId,
     },
     /// `boolean_nodes` combined two tree nodes (each a plain Object or a
-    /// whole Group; docs/design/group-ops.md) into a result of one Object per
+    /// whole Group; the group-ops design) into a result of one Object per
     /// connected volume — several arriving inside a fresh result group. Undo
     /// hides the result (objects + container group) and unhides exactly
     /// `hidden_operands`; redo reverses. Pure visibility flipping, all
@@ -635,7 +635,7 @@ enum DocAction {
     },
 }
 
-/// A Follow Me path source (docs/design/follow-me.md §2): either a chain of
+/// A Follow Me path source (the follow-me design §2): either a chain of
 /// sketch edges or a solid face's outer boundary loop. Resolved by
 /// [`Document::follow_me`]; the path source is never consumed or modified.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -750,7 +750,7 @@ pub enum DocumentError {
     /// instance. A boolean consumes its operand, and an instance's geometry is
     /// *shared* — consuming it would either mutate every sibling instance or
     /// hide an implicit Make Unique inside another verb (the exact implicit
-    /// magic Hew refuses; docs/design/group-ops.md §2.2). Explode the
+    /// magic Hew refuses; the group-ops design §2.2). Explode the
     /// instance (or Make Unique, then Explode) first.
     BooleanOperandHasInstance,
     /// A leaf object under a [`Document::boolean_nodes`] operand is not a
@@ -2951,7 +2951,7 @@ impl Document {
         Ok(self.commit_region_object(sketch, &scaffolding, object))
     }
 
-    /// Follow Me (docs/design/follow-me.md): sweeps the closed profile
+    /// Follow Me (the follow-me design): sweeps the closed profile
     /// `region` of `sketch` along `path` into a new watertight world Object
     /// via [`Object::from_follow_me`]. Commits exactly like
     /// [`Document::extrude_region`]: the profile region's exclusive
@@ -3211,7 +3211,7 @@ impl Document {
 
     /// Explicitly combines two **tree nodes** — each a plain solid Object or a
     /// whole Group, mixed freely — consuming both operands
-    /// (docs/design/group-ops.md §2). Subtract is `a − b`.
+    /// (the group-ops design §2). Subtract is `a − b`.
     ///
     /// Each operand is first *composed*: its leaf solids (in tree order) are
     /// folded with the boolean engine's Union — the user explicitly asked for
@@ -3391,7 +3391,7 @@ impl Document {
             });
         }
         // Instances are refused, never implicitly made unique
-        // (docs/design/group-ops.md §2.2) — as the operand itself or anywhere
+        // (the group-ops design §2.2) — as the operand itself or anywhere
         // in its subtree.
         if matches!(node, NodeId::Instance(_)) || !self.leaf_instances_under(node).is_empty() {
             return Err(DocumentError::BooleanOperandHasInstance);
@@ -7085,7 +7085,7 @@ fn made_component_change(
 }
 
 /// Orders a set of sketch edges into one connected chain of positions — the
-/// path half of Follow Me's eligibility (docs/design/follow-me.md §2) —
+/// path half of Follow Me's eligibility (the follow-me design §2) —
 /// plus each walked segment's analytic [`CurveGeom`] attribution, in the
 /// same order (the wrap segment last for a closed chain). Duplicate ids are
 /// collapsed. Deterministic: an open chain starts at the smaller of its two

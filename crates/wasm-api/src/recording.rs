@@ -109,7 +109,7 @@ pub enum RecordedCall {
     /// `boolean(op, a, b)`.
     Boolean { op: u8, a: u64, b: u64 },
     /// `boolean_nodes(op, a_kind, a, b_kind, b)` — the node-operand boolean
-    /// (plain solids or whole groups; docs/design/group-ops.md) the UI routes
+    /// (plain solids or whole groups; the group-ops design) the UI routes
     /// every boolean command through. Additive variant (the
     /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings replay
     /// unchanged; a recording that uses it fails to parse on older builds —

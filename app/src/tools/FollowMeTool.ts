@@ -1,5 +1,5 @@
 /**
- * FollowMeTool — sweep a profile region along a path (docs/design/follow-me.md).
+ * FollowMeTool — sweep a profile region along a path (the follow-me design).
  *
  * Gesture (SketchUp's preselect-the-path idiom):
  *   1. Activate with the path already selected (sketch edges, a drawn

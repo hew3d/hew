@@ -81,7 +81,6 @@ below.
   profiles, branching or disconnected selections, bends tighter than the
   profile, an on-axis profile on a non-circular path, self-intersecting
   results — refuse typed with the document untouched
-  (docs/design/follow-me.md)
 - Move and rotate with axis-locked inference snapping; tapping Option/Alt
   durably toggles Move between moving and copying (so an exact copy
   distance can be typed), and a committed copy refines into an array:

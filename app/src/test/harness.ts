@@ -94,7 +94,7 @@ export interface HewTestHarness {
   boolean(op: number, a: string, b: string): string
   /**
    * Combine two tree nodes — plain solids or whole groups (`boolean_nodes`,
-   * docs/design/group-ops.md). `op` is 0=union, 1=subtract (a−b), 2=intersect;
+   * the group-ops design). `op` is 0=union, 1=subtract (a−b), 2=intersect;
    * `a`/`b` are `{kind, id}` refs with kind `'object' | 'group'`. Returns the
    * result root: a single object, or a result group of disjoint pieces.
    */
@@ -458,7 +458,7 @@ export interface HewTestHarness {
   getSketchRegionCount(sketch: string): number
 
   /**
-   * Follow Me along sketch edges (docs/design/follow-me.md): sweeps the
+   * Follow Me along sketch edges (the follow-me design): sweeps the
    * closed profile `region` of `sketch` along the chain the `edges` of
    * `pathSketch` form. Returns the new object handle. Equivalent to
    * FollowMeTool's edge-path commit (`follow_me_along_edges`).

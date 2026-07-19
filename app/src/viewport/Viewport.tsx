@@ -1476,7 +1476,7 @@ export default function Viewport({
     function runBoolean(op: number, a: NodeRef, b: NodeRef): NodeRef | null {
       // Operands are plain solids or whole groups; the kernel composes group
       // operands and owns every eligibility rule (boolean_nodes,
-      // docs/design/group-ops.md). kind: 0=object, 1=group — the same
+      // the group-ops design). kind: 0=object, 1=group — the same
       // mapping as runGroup; instances are refused typed by the kernel.
       const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
       let result: NodeRef

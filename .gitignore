@@ -20,3 +20,6 @@ app/playwright/.cache/
 .DS_Store
 *.swp
 crates/skp-import/target/
+
+# Internal design documents — never published
+docs/design/

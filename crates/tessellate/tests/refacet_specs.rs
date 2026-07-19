@@ -722,7 +722,7 @@ fn d_profile_interior_seams_soften_but_side_seams_stay_hard() {
 // --------------------------------------------------- follow me sweeps
 
 /// A circle profile swept along a straight path drawn in several collinear
-/// strokes (docs/design/follow-me.md section 4): one true cylinder built as
+/// strokes (the follow-me design section 4): one true cylinder built as
 /// stacked wall rows sharing interior rims.
 fn swept_tube(radius: f64, n: usize, path: &[Point3]) -> Object {
     let s = circle_sketch(Point3::new(0.0, 0.0, 0.0), radius, n);
@@ -769,7 +769,7 @@ fn collinear_sweep_rows_refacet_as_one_band() {
 fn bent_sweep_walls_deliberately_export_at_stored_facets() {
     // Around a path turn the miter rims are elliptical sections — outside
     // the band machinery's analytic-cap legitimacy. The whole wall demotes
-    // to stored facets DELIBERATELY (docs/design/follow-me.md section 4);
+    // to stored facets DELIBERATELY (the follow-me design section 4);
     // this pin makes any accidental future engagement (or a crack) loud.
     let mut s = kernel::Sketch::on_plane(
         Plane::from_polygon(&[

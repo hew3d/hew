@@ -1808,7 +1808,7 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
-    /// Follow Me along a chain of sketch edges (docs/design/follow-me.md):
+    /// Follow Me along a chain of sketch edges (the follow-me design):
     /// sweeps the closed profile `region` of `sketch` along the path the
     /// `path_edges` of `path_sketch` form (a single connected chain, open or
     /// closed, in any order) into a new watertight Object and returns its
@@ -1897,7 +1897,7 @@ impl Scene {
     }
 
     /// Explicit combine of two **tree nodes** — each a plain solid or a whole
-    /// group, mixed freely (docs/design/group-ops.md). `op` is 0 = union,
+    /// group, mixed freely (the group-ops design). `op` is 0 = union,
     /// 1 = subtract (`a - b`), 2 = intersect; `a_kind`/`b_kind` use the
     /// `duplicate_node` convention (0 = object, 1 = group; instances are
     /// refused typed by the kernel). Each operand's solids are composed

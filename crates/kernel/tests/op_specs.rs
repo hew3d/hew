@@ -1073,7 +1073,7 @@ fn follow_me_open_arc_end_uses_the_analytic_tangent() {
 
 #[test]
 fn follow_me_straight_sweep_of_a_circle_is_a_stamped_cylinder() {
-    // The true-curves overlay (design docs/design/follow-me.md section 4):
+    // The true-curves overlay (the follow-me design section 4):
     // a straight path sweeping a drawn circle IS a cylinder, and every
     // wall says so.
     let profile = circle_profile_yz(0.0, 0.0, 0.5);

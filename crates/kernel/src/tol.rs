@@ -99,5 +99,5 @@ pub const OCCLUSION_REL: f64 = 1e-6;
 /// every ordinary bend with wide margin (a 90° turn stretches 1.41×, 135°
 /// stretches 2.61×, even 150° only 3.86×) while refusing joints within
 /// ~14° of a full reversal, where no usefully bounded miter exists
-/// (docs/design/follow-me.md §3).
+/// (the follow-me design §3).
 pub const FOLLOW_ME_MITER_LIMIT: f64 = 8.0;

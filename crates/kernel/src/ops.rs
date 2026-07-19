@@ -196,7 +196,7 @@ pub enum ExtrudeError {
 /// Typed failures of Follow Me — sweeping a closed [`Profile`] along a path
 /// ([`Object::from_follow_me`]) and the document-level path resolution that
 /// feeds it ([`Document::follow_me`](crate::Document::follow_me)). Every
-/// variant leaves the document untouched (docs/design/follow-me.md §5).
+/// variant leaves the document untouched (the follow-me design §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowMeError {
     /// No path edges were given, or the path has no usable segments (fewer
@@ -228,7 +228,7 @@ pub enum FollowMeError {
     /// perpendicular segment is not crossed strictly between its endpoints
     /// (a profile plane through a path *corner* is refused — the seam would
     /// sit on a non-miter plane where the ring provably cannot close;
-    /// docs/design/follow-me.md §2).
+    /// the follow-me design §2).
     PathDetachedFromProfile,
     /// Adjacent path segments double back on each other — exactly
     /// (directions summing below
@@ -915,7 +915,7 @@ impl Object {
         Ok(obj)
     }
 
-    /// Follow Me — the birth of a *swept* solid (docs/design/follow-me.md):
+    /// Follow Me — the birth of a *swept* solid (the follow-me design):
     /// carries a closed [`Profile`] along a polyline `path` into a discrete
     /// watertight Object, mitering the profile at every path joint. This is
     /// [`Object::from_extrusion`]'s general sibling: a one-segment path
@@ -3989,7 +3989,7 @@ impl Object {
     /// Object carrying every **cavity** shell (negative signed volume) it
     /// contains — the shell-assignment primitive behind
     /// [`Document::boolean_nodes`](crate::Document::boolean_nodes)
-    /// (docs/design/group-ops.md §2.3).
+    /// (the group-ops design §2.3).
     ///
     /// Unlike [`Object::split_connected_components`], which emits one Object
     /// per component unconditionally, this never strands a cavity as its own
@@ -5424,7 +5424,7 @@ fn validate_sweep_result(
 }
 
 /// The axis of revolution recovered from a drawn-circle Follow Me path
-/// (docs/design/follow-me.md §9): the line through the circle's `center`
+/// (the follow-me design §9): the line through the circle's `center`
 /// along `dir` (the path plane normal). Transporting a radial profile around
 /// such a path is a revolution about this axis, so a profile vertex on the
 /// axis is a POLE — the miter transport fixes it across every station.

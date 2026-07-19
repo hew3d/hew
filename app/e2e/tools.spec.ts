@@ -758,7 +758,7 @@ test('VCB: imperial architectural format (arch)', async ({ page }) => {
 })
 
 // ---------------------------------------------------------------------------
-// Follow Me — sweep a profile along a path (docs/design/follow-me.md)
+// Follow Me — sweep a profile along a path (the follow-me design)
 // ---------------------------------------------------------------------------
 
 test('Follow Me: profile swept along an L path becomes a solid; undo/redo round-trips', async ({

@@ -4748,7 +4748,7 @@ fn gesture_bracket_misuse_errors_loudly() {
     ));
 }
 
-// ══════════════════════════════════ group ops (docs/design/group-ops.md) ═════
+// ══════════════════════════════════ group ops (the group-ops design) ═════
 
 // -------------------------------------------- group duplication hardening
 
@@ -4858,7 +4858,7 @@ fn duplicate_nested_group_clones_structure_instances_and_attributes() {
 }
 
 proptest! {
-    /// Property (docs/design/group-ops.md §1): duplicating a group undoes to
+    /// Property (the group-ops design §1): duplicating a group undoes to
     /// the exact prior document, and redoes to the exact copied document,
     /// under arbitrary translations.
     #[test]
@@ -5605,7 +5605,7 @@ fn boolean_nodes_dissolves_seams_between_flush_group_members() {
 }
 
 proptest! {
-    /// Property (docs/design/group-ops.md §3): unioning a group of disjoint
+    /// Property (the group-ops design §3): unioning a group of disjoint
     /// boxes with a plain box that bridges them is the SAME volume algebra as
     /// unioning the same solids sequentially with the object-level boolean —
     /// same watertightness, same connectivity, same enclosed volume.
@@ -5657,7 +5657,7 @@ proptest! {
         );
     }
 
-    /// Property (docs/design/group-ops.md §3): a severing group subtract
+    /// Property (the group-ops design §3): a severing group subtract
     /// always yields all-watertight, positive-volume pieces in a result
     /// group, and every boolean_nodes op undoes (and redoes) to the EXACT
     /// prior document state.
@@ -5845,7 +5845,7 @@ fn follow_me_around_a_face_loop_leaves_the_solid_untouched() {
 }
 
 /// A drawn (curve-attributed) circle path accepts a RADIAL profile — the
-/// lathe (docs/design/follow-me.md §2): path resolution carries each
+/// lathe (the follow-me design §2): path resolution carries each
 /// edge's [`kernel::CurveGeom`] to the sweep, which measures
 /// perpendicularity against the drawn circle rather than its facet chords
 /// (a chord is half a facet angle off the true tangent, so lathes were
@@ -6082,7 +6082,7 @@ fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
 /// The maintainer's `follow-me-2.hew`: a thin tabletop solid (0.1 x 0.2 x
 /// 0.015 m) with a rectangle profile and a 24-facet circle profile standing
 /// perpendicular to its top rim. Grounds the SOLID-FACE Follow Me path
-/// (`follow_me_around_face`, docs/design/follow-me.md §2) in the real file.
+/// (`follow_me_around_face`, the follow-me design §2) in the real file.
 ///
 /// Swept around the tabletop's TOP face — the flat face the "crown molding
 /// around a tabletop" is meant to run around — BOTH profiles yield a

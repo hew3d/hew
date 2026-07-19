@@ -7,7 +7,7 @@ import { resolve } from 'node:path'
  *
  * The file is a thin tabletop solid (0.1 x 0.2 x 0.015 m) with a circle and a
  * rectangle profile standing perpendicular to its top rim — the "crown
- * molding around a tabletop" scenario (docs/design/follow-me.md §2, the
+ * molding around a tabletop" scenario (the follow-me design §2, the
  * guide's "Running around a face"). The playtest report was that the SOLID
  * path was flaky where the sketch-edge path worked; the root cause was never
  * the kernel sweep — it produces a correct watertight molding around the
