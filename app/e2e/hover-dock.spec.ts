@@ -30,11 +30,17 @@ declare global {
   }
 }
 
-// Top-down camera over the ground plane (where free-standing sketches live) —
-// makes world (x, y, 0) -> screen pixel arithmetic simple and keeps every
-// point of interest comfortably inside the frustum (see comment at each use).
+// Near-top-down camera over the ground plane (where free-standing sketches
+// live) — makes world (x, y, 0) -> screen pixel arithmetic simple and keeps
+// every point of interest comfortably inside the frustum (see comment at each
+// use). Tilted a hair off straight-down on purpose: a perfectly polar pose
+// sits on OrbitControls' pole, where free orbit's clamp (minPolarAngle =
+// atan(POLE_TILT), Viewport.tsx) would rotate it ~0.001 rad off-axis on the
+// next update — moving position.y by ~0.015 and failing the pin below. This
+// tilt keeps the pose well inside the clamp, and pixelFor projects from the
+// same pose, so the world→pixel arithmetic stays exact.
 const CAMERA = {
-  position: [0, 0, 15] as [number, number, number],
+  position: [0, -0.1, 15] as [number, number, number],
   target: [0, 0, 0] as [number, number, number],
   up: [0, 1, 0] as [number, number, number],
   fovDeg: 50,
