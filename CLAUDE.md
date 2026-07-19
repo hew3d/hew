@@ -19,6 +19,8 @@ Start with these documents — they are the source of truth:
 
 - Build all crates: `cargo build --workspace`
 - Verify (run before every commit): `scripts/verify.sh`
+- Full pre-push gate (verify + replay + chromium E2E, mirrors blocking CI):
+  `scripts/verify-full.sh`
 - WASM build: `wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg`
 - UI dev server: `pnpm --dir app dev`
 - Desktop shell dev: `pnpm --dir shells/tauri dev`

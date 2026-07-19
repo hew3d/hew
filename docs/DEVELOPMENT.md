@@ -40,15 +40,30 @@ imports the kernel bindings from `app/src/wasm/pkg`, which is generated, not
 checked in. Re-run it whenever you change a kernel crate the bindings
 depend on (`kernel`, `inference`, `tessellate`, `wasm-api`).
 
-Before sending a change, run the full verification script:
+Before every commit, run the fast verification script:
 
 ```sh
 scripts/verify.sh
 ```
 
-This is the same gate CI runs: Rust formatting and Clippy (with warnings
-denied), the whole Rust test suite, a release WASM build, and the app's
-type-check/test/build steps. See for the full breakdown.
+It covers Rust formatting and Clippy (with warnings denied), the whole Rust
+test suite, a release WASM build, the app's type-check/test/build steps, and
+the Tauri host crate's fmt/clippy. It is deliberately dependency-light and
+fast, so it does **not** run the browser- and runner-heavy CI lanes — the
+replay gate and the Playwright E2E suite. A green `verify.sh` is therefore
+necessary but not sufficient for a green CI run.
+
+Before **pushing**, run the comprehensive gate:
+
+```sh
+scripts/verify-full.sh
+```
+
+It runs `verify.sh` and then the remaining *blocking* CI lanes (the golden
+state-hash replay gate and the chromium E2E smoke), in CI's order, so a green
+run predicts a green CI run. It does not run the non-blocking webkit/visual
+lanes, nor the Desktop E2E workflow (tauri-driver cannot drive the macOS
+WKWebView); see the header of `scripts/verify-full.sh` for the full rationale.
 
 ## 2. Repository layout
 
@@ -70,7 +85,7 @@ shells/web/           static web build
 tools/                replay runner and development tooling
 site/                 the hew3d.com website (Astro)
 docs/                 architecture, file format spec, roadmap, this guide
-scripts/              verify.sh, the pre-merge verification gate
+scripts/              verify.sh (per-commit gate), verify-full.sh (pre-push)
 brand/                logo, mark, and icon assets
 ```
 
