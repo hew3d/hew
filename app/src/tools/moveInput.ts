@@ -21,6 +21,27 @@ export function arrowToAxis(key: string): 0 | 1 | 2 | null {
   return null
 }
 
+/** SketchUp-style axis-lock color names, indexed by world axis (0=X, 1=Y,
+ *  2=Z) — the same mapping `arrowToAxis` encodes as key→axis. Shared by
+ *  every tool's arrow-lock status hint (MoveTool's mid-gesture lock, the
+ *  draw tools' idle plane lock — the sketch-planes design §5.2). */
+export const AXIS_LOCK_COLOR_NAMES: readonly [string, string, string] = ['red', 'green', 'blue']
+
+/**
+ * Next idle-lock axis given the arrow key just pressed and the CURRENTLY
+ * locked axis (or `null` for unlocked): the same arrow pressed again, or
+ * ArrowDown, clears the lock; a different arrow sets it. `null` for any key
+ * that isn't one of the four arrows (the caller gates on that already, but
+ * this makes the "no-op" case explicit rather than silently clearing).
+ * Used by the draw tools' idle plane lock (design §5.2) — mirrors
+ * `arrowToAxis`'s key→axis mapping, not MoveTool's mid-gesture lock (which
+ * keeps its own field and Shift-lock interplay).
+ */
+export function nextIdlePlaneLock(current: 0 | 1 | 2 | null, key: string): 0 | 1 | 2 | null {
+  const requested = arrowToAxis(key)
+  return requested === null || requested === current ? null : requested
+}
+
 /**
  * Immutably edit a numeric string buffer.
  *

@@ -87,7 +87,7 @@ describe('LogPanel', () => {
   })
 
   it('copies the log entries to the clipboard when Copy is clicked', () => {
-    const writeText = vi.fn(() => Promise.resolve())
+    const writeText = vi.fn((_text: string) => Promise.resolve())
     vi.stubGlobal('navigator', { clipboard: { writeText } })
     LogStore.log.error('tool', '[DegenerateContact] combining needs real overlap')
     render(<LogPanel />)

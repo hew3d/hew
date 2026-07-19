@@ -38,10 +38,16 @@ function makeWasmScene(opts: {
   pick?: ReturnType<typeof makePick>
   lines?: Float64Array
   moveThrows?: boolean
+  /** `sketch_plane` result for the picked vertex's sketch —
+   *  `[px,py,pz,nx,ny,nz]` (default: ground, normal +Z). `undefined`
+   *  simulates a stale handle. */
+  sketchPlane?: [number, number, number, number, number, number] | undefined
 } = {}): WasmScene {
+  const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
     pick_sketch_vertex: vi.fn(() => opts.pick),
     sketch_lines: vi.fn(() => opts.lines ?? new Float64Array([])),
+    sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     move_sketch_vertex: vi.fn(() => {
       if (opts.moveThrows) throw new Error('WouldRetopologize: the move would cross or merge sketch geometry')
     }),
@@ -75,6 +81,76 @@ describe('EditVertexTool — pick & grab', () => {
     const { tool, preview } = makeTool(scene)
     tool.onPointerDown(makeSnap({ x: 5, y: 5, z: 0 }), RAY)
     expect(preview.children).toHaveLength(0)
+  })
+
+  it('a stale sketch handle (sketch_plane undefined) is treated as a pick miss', () => {
+    const scene = makeWasmScene({ pick: makePick(7n, 9n, [1, 1, 0]), sketchPlane: undefined })
+    const { tool, preview } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY)
+    expect(scene.sketch_plane).toHaveBeenCalledWith(7n)
+    expect(preview.children).toHaveLength(0)
+  })
+})
+
+// Sketches on any plane (Phase 1, the sketch-planes design §3): the
+// drag's destination snap must stay on the picked vertex's own sketch plane
+// (queried once at pick time), not resolve to ground and get refused by the
+// kernel with PointOffPlane.
+describe('EditVertexTool — snapConstraint', () => {
+  it('idle: returns null (no plane to offer)', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    expect(tool.snapConstraint()).toBeNull()
+  })
+
+  it('after picking a vertex on a rotated sketch, returns that sketch\'s plane', () => {
+    const scene = makeWasmScene({
+      pick: makePick(7n, 9n, [1, 1, 0]),
+      sketchPlane: [0, 0, 0, 1, 0, 0], // vertical sketch, normal +X
+    })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY)
+
+    expect(tool.snapConstraint()).toEqual({
+      constraintPlane: { point: [0, 0, 0], normal: [1, 0, 0] },
+    })
+  })
+
+  it('resets to null after commit/cancel', () => {
+    const scene = makeWasmScene({ pick: makePick(7n, 9n, [1, 1, 0]) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY)
+    expect(tool.snapConstraint()).not.toBeNull()
+    tool.cancel()
+    expect(tool.snapConstraint()).toBeNull()
+  })
+})
+
+describe('EditVertexTool — drag on a rotated sketch', () => {
+  it('an on-plane destination commits move_sketch_vertex through the rotated plane', () => {
+    // A vertical sketch (normal +X) — the vertex and its destination both
+    // lie at x = 0, so a naive ground ([0,0,1]) constraint would have
+    // refused nothing here (z is free either way); the meaningful check is
+    // that snapConstraint reports the sketch's OWN plane, not [0,0,1], so a
+    // caller doing on-plane snapping stays on x = 0 rather than z = 0.
+    const lines = new Float64Array([0, 1, 1, 0, 1, 0])
+    const scene = makeWasmScene({
+      pick: makePick(7n, 9n, [0, 1, 1]),
+      lines,
+      sketchPlane: [0, 0, 0, 1, 0, 0],
+    })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 1 }), RAY) // grab
+    expect(tool.snapConstraint()).toEqual({
+      constraintPlane: { point: [0, 0, 0], normal: [1, 0, 0] },
+    })
+    tool.onPointerDown(makeSnap({ x: 0, y: 1.5, z: 1.5 }), RAY) // place, on-plane (x=0)
+
+    expect(scene.move_sketch_vertex).toHaveBeenCalledWith(7n, 9n, 0, 1.5, 1.5)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
   })
 })
 

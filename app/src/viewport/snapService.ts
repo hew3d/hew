@@ -1,17 +1,19 @@
 /**
- * Snap service — calls Scene.snap() with ground-plane fallback.
+ * Snap service — calls Scene.snap() with ground/constraint-plane fallback.
  *
  * Architecture: snap-first with fallback.
  *
  * 1. Attempt Scene.snap() — kernel inference.
  * 2. If snap() returns undefined (no snap candidate), fall back to
- *    intersectGroundPlane(ray).
+ *    ray∩constraintPlane when a constraint plane was supplied (kind
+ *    'plane'), else intersectGroundPlane(ray) (kind 'ground').
  * 3. If snap() throws unexpectedly, log a warning and fall back.
  */
 
 import type { Scene, SnapJs } from '../wasm/pkg/wasm_api.js'
 import type { Snap } from '../tools/types'
 import { intersectGroundPlane, pixelRadiusToAperture, type Ray } from './math'
+import { rayPlaneIntersect } from './geoHelpers'
 
 /** Pixel radius to *acquire* a snap candidate. */
 export const SNAP_RADIUS_PX = 8
@@ -122,11 +124,13 @@ export class SnapService {
   /**
    * Resolve a snap for the given ray and viewport dimensions.
    *
-   * Returns a Snap (from kernel or ground-plane fallback), or null if neither
-   * produced a valid intersection.
+   * Returns a Snap (from kernel or ground/constraint-plane fallback), or null
+   * if neither produced a valid intersection.
    *
-   * The returned Snap has kind "ground" when it's a pure fallback (no kernel
-   * snap available). All other kind strings come from the kernel.
+   * The returned Snap has kind "ground" when it's a pure fallback with no
+   * constraint plane, or "plane" when it's a pure fallback onto a supplied
+   * `constraintPlane` (no kernel snap available either way). All other kind
+   * strings come from the kernel.
    *
    * **Magnetic hysteresis:** discrete inference points (endpoint/midpoint/…,
    * see `STICKY_KINDS`) are *acquired* within `SNAP_RADIUS_PX` but only
@@ -176,7 +180,18 @@ export class SnapService {
       return { snap: acquired, fromKernel: true }
     }
 
-    // 4. Ground-plane fallback.
+    // 4. Fallback: ray∩constraintPlane when one was supplied (an anchored
+    //    non-ground gesture — sketches on any plane, Phase 1), else ray∩ground.
+    if (constraintPlane !== undefined) {
+      const p = rayPlaneIntersect(ray.origin, ray.direction, constraintPlane.point, constraintPlane.normal)
+      if (p !== null) {
+        this.lastSnap = { x: p[0], y: p[1], z: p[2], kind: 'plane' }
+        return { snap: this.lastSnap, fromKernel: false }
+      }
+      this.lastSnap = null
+      return { snap: null, fromKernel: false }
+    }
+
     const pt = intersectGroundPlane(ray)
     if (pt !== null) {
       this.lastSnap = { x: pt.x, y: pt.y, z: pt.z, kind: 'ground' }

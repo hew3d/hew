@@ -30,6 +30,10 @@ function makeWasmScene() {
     add_guide_point: vi.fn((x: number, y: number, z: number) => {
       guidePoints.push([x, y, z])
     }),
+    // No committed sketches under the cursor in these fixtures (plane-lock /
+    // sketch-hover-adopt is covered separately in TapeMeasureTool.plane.test.ts).
+    pick_sketch: vi.fn(() => undefined),
+    sketch_plane: vi.fn(() => undefined),
   }
   return { scene: scene as unknown as WasmScene, guideLines, guidePoints }
 }

@@ -9,6 +9,7 @@
     "build": "node scripts/build-wasm.mjs && tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "e2e": "playwright test",
     "e2e:visual": "playwright test --project=visual",

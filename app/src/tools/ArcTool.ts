@@ -1,7 +1,7 @@
 /**
  * ArcTool — SketchUp-style 2-point arc, drawn as a faceted polyline chain
  *. Mirrors CircleTool: no kernel change, the arc decomposes into N
- * chained `sketch_add_segment` calls (ground mode) or one `split_face` call
+ * chained `sketch_add_segment` calls (plane mode) or one `split_face` call
  * with the polyline path (face mode — the arc is an OPEN chain, so it uses
  * LineTool's boundary-to-boundary `split_face`, not CircleTool's closed-loop
  * `split_face_inner`).
@@ -17,9 +17,29 @@
  * Mode selection mirrors CircleTool/LineTool exactly: decided per pointer
  * event by what's under the cursor — face mode when an ELIGIBLE Object face
  * is there (see `faceDraw.ts` for the shared plain-object policy; the
- * entered object only, inside a context), ground mode otherwise. All three
- * points lie in the sketch plane — Z=0, or the picked face's plane via
- * `snapConstraint`.
+ * entered object only, inside a context), plane mode otherwise.
+ *
+ * Plane mode (sketches on any plane — design doc §1/§4): the drawing plane
+ * is resolved once, at the FIRST click of a gesture (endpoint A), and
+ * frozen for the rest of the gesture:
+ *   - A top-level hover over a committed sketch whose plane is non-ground
+ *     (`pick_sketch` + `planeFromSketch`) adopts THAT sketch's plane —
+ *     SKETCH MODE — and the arc's segments land in that one sketch
+ *     (`SketchTarget.existing`).
+ *   - Otherwise the plane is the ground plane — PLANE MODE, today's
+ *     behavior — segments land in the shared per-plane cached sketch
+ *     (`SketchTarget.plane`; `begin_ground_sketch()` on a cache miss).
+ *   On the ground plane every point is computed by the EXACT legacy 2D
+ *   chord/sagitta math (z = 0, world X/Y basis) — bit-identical committed
+ *   coordinates. On any other plane, the arc is built in the plane's own
+ *   in-plane basis (`facePlaneBasis`/`arcPolylineOnPlane` — the same
+ *   toolbox face mode already proved on arbitrary planes), and the cursor
+ *   is the snap (already plane-constrained via `snapConstraint`) or, absent
+ *   one, ray∩plane.
+ *
+ * Face mode (an eligible Object face is under the cursor): all three points
+ * lie in the picked face's plane via `snapConstraint`; commits imprint the
+ * face (`split_face`/`split_face_inner`) instead of drawing into a sketch.
  *
  * Degenerate guards (constants in arcMath.ts — no inline epsilons):
  *   - zero/short chord (B on A): the B click is ignored.
@@ -59,12 +79,12 @@
  * close): pressing Alt mid-gesture cycles open → pie → segment. `open`
  * commits the bare arc as today. `pie` closes it to the arc center with two
  * radii; `segment` closes it with the chord — both commit a closed profile,
- * so a region (ground) or a face imprint (face mode, via `split_face_inner`
- * like CircleTool) appears immediately and push/pull works. The live preview
- * draws the closing edges and the radius readout names the mode. The mode
- * persists across commits until the tool is switched (tools are recreated on
- * every switch, so a fresh Arc tool always starts `open`) or the document is
- * replaced (`onDocumentReset`).
+ * so a region (plane mode) or a face imprint (face mode, via
+ * `split_face_inner` like CircleTool) appears immediately and push/pull
+ * works. The live preview draws the closing edges and the radius readout
+ * names the mode. The mode persists across commits until the tool is
+ * switched (tools are recreated on every switch, so a fresh Arc tool always
+ * starts `open`) or the document is replaced (`onDocumentReset`).
  */
 
 import * as THREE from 'three'
@@ -72,13 +92,14 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { facePlaneBasis } from '../viewport/geoHelpers'
+import { facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween } from './lineInput'
-import { editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
-import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
+import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
+import { groundDrawPlane, planeFromSketch, pointOnPlane, axisDrawPlane, drawPlaneCue, isGroundPlane, SketchPickCache, type DrawPlane } from './drawPlane'
 import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
 import {
   ARC_MIN_CHORD_M,
@@ -115,11 +136,12 @@ const COMPLETION_LABEL: Record<ArcCompletion, string> = {
   segment: 'Segment',
 }
 
-/** Ground gesture: idle → endpoint A placed → chord (A,B) placed. */
-type GroundStage =
+/** Plane gesture: idle → endpoint A placed (chord) → chord (A,B) placed
+ *  (bulge), on a frozen `DrawPlane`/`SketchTarget`. */
+type PlaneStage =
   | { kind: 'idle' }
-  | { kind: 'chord'; a: [number, number] }
-  | { kind: 'bulge'; a: [number, number]; b: [number, number] }
+  | { kind: 'chord'; plane: DrawPlane; target: SketchTarget; a: V3 }
+  | { kind: 'bulge'; plane: DrawPlane; target: SketchTarget; a: V3; b: V3 }
 
 /** Face gesture: same stages, on a locked face plane. */
 type FaceStage =
@@ -143,47 +165,33 @@ type FaceStage =
       b: V3
     }
 
-/**
- * Intersect a ray with an arbitrary plane defined by a point and unit normal.
- * Returns the intersection point, or null if the ray is nearly parallel to
- * the plane (|dot(dir, normal)| < 1e-10).
- */
-function intersectPlane(
-  rayOrigin: [number, number, number],
-  rayDir: [number, number, number],
-  planePoint: V3,
-  normal: V3,
-): V3 | null {
-  const denom = rayDir[0] * normal[0] + rayDir[1] * normal[1] + rayDir[2] * normal[2]
-  if (Math.abs(denom) < 1e-10) return null
-  const wx = planePoint[0] - rayOrigin[0]
-  const wy = planePoint[1] - rayOrigin[1]
-  const wz = planePoint[2] - rayOrigin[2]
-  const t = (wx * normal[0] + wy * normal[1] + wz * normal[2]) / denom
-  if (t < 0) return null
-  return [
-    rayOrigin[0] + t * rayDir[0],
-    rayOrigin[1] + t * rayDir[1],
-    rayOrigin[2] + t * rayDir[2],
-  ]
-}
+/** The arc chain a commit needs: the polyline (arc facets plus any
+ *  completion-mode closing vertices), how many of the LEADING vertices
+ *  belong to the arc's own curve chain (closing edges stay plain lines),
+ *  and the arc's analytic circle (center + radius) to ride on the curve
+ *  chain, if resolvable. */
+type ArcChain = { chain: V3[]; curveSegments: number; geom: { center: V3; radius: number } | null }
+
 
 export class ArcTool implements Tool {
   readonly name = 'Arc'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
-    const stage = this.faceStage.kind !== 'idle' ? this.faceStage.kind : this.groundStage.kind
+    const stage = this.faceStage.kind !== 'idle' ? this.faceStage.kind : this.planeStage.kind
     if (stage === 'chord') {
       return "Click the arc's second endpoint — or type an exact chord length."
     }
     if (stage === 'bulge') {
       return 'Click to set the curve — Alt cycles open arc / pie / segment; or type an exact bulge.'
     }
-    return "Click the arc's first endpoint — on the ground plane or any face."
+    if (this.idlePlaneLock !== null) {
+      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+    }
+    return "Click the arc's first endpoint — on the ground plane or any face or sketch."
   }
 
-  private groundStage: GroundStage = { kind: 'idle' }
+  private planeStage: PlaneStage = { kind: 'idle' }
   private faceStage: FaceStage = { kind: 'idle' }
   private preview: THREE.Group
   private wasmScene: WasmScene
@@ -192,9 +200,10 @@ export class ArcTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Cached ground-sketch handle — the Viewport passes one cache shared by
-   *  every draw tool, so mixed-tool profiles land in a single sketch. */
-  private readonly sketchCache: SketchHandleCache
+  /** Cached plane-mode sketch handles — the Viewport passes one cache
+   *  shared by every draw tool, so mixed-tool profiles land in a single
+   *  sketch per plane. */
+  private readonly sketchCache: SketchPlaneCache
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -206,10 +215,10 @@ export class ArcTool implements Tool {
   /** VCB buffer — raw string being typed by the user (length, in display units). */
   private typed: string = ''
 
-  /** Last live cursor position seen this stage (ground/face — only one is
+  /** Last live cursor position seen this stage (plane/face — only one is
    *  ever populated at a time, mirroring LineTool's pair of fields). Used
    *  for the typed-commit chord direction and the bulge-side resolution. */
-  private _lastGroundCursor: [number, number] | null = null
+  private _lastPlaneCursor: V3 | null = null
   private _lastFaceCursor: V3 | null = null
 
   /** The last NONZERO sagitta sign seen during the current bulge stage —
@@ -218,6 +227,21 @@ export class ArcTool implements Tool {
    *  bulge stage begins (or the gesture ends). */
   private _lastSagittaSign: -1 | 1 | null = null
 
+  /** Idle plane lock (design §5.2): while FULLY idle (no chord/bulge
+   *  stage), an arrow key locks the future plane's NORMAL to a world axis
+   *  (0=X/red, 1=Y/green, 2=Z/blue — `arrowToAxis`); the same arrow again,
+   *  or Escape/ArrowDown, clears it. An ACTIVE lock overrides face pick and
+   *  sketch-hover adoption on the next click (SketchUp: an explicit lock
+   *  beats inference) — see `_currentMode`/`_resolveClickTarget`. Survives
+   *  a completed gesture (cleared only by `cancel()`, which
+   *  `onDocumentReset()`/`setActiveContext()` already route through). */
+  private idlePlaneLock: 0 | 1 | 2 | null = null
+
+  /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
+   *  `activeDrawPlaneCue()`'s idle-locked case. Reset to null whenever the
+   *  lock itself changes (a fresh lock has no hover yet) and by `cancel()`. */
+  private _lastIdleHoverPoint: V3 | null = null
+
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
@@ -225,7 +249,7 @@ export class ArcTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
-    sketchCache: SketchHandleCache = makeSketchHandleCache(),
+    sketchCache: SketchPlaneCache = makeSketchPlaneCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -245,6 +269,8 @@ export class ArcTool implements Tool {
 
   /** Per-pointer-event `pick_face` memo — see `FacePickCache` in faceDraw.ts. */
   private readonly _pickCache = new FacePickCache()
+  /** Per-pointer-event `pick_sketch` memo — see `SketchPickCache` in drawPlane.ts. */
+  private readonly _sketchPickCache = new SketchPickCache()
 
   /** Optional richer eligibility, injected by the Viewport (which knows the
    *  full group/instance context path the tool can't see). Null = the shared
@@ -268,31 +294,92 @@ export class ArcTool implements Tool {
   }
 
   /**
+   * Resolve the plane/target an IDLE gesture would anchor onto at `ray`
+   * (design §1/§4): a top-level `pick_sketch` hit whose plane is non-ground
+   * adopts that sketch (SKETCH MODE); otherwise the ground plane (PLANE
+   * MODE, today's behavior). Only reachable when `_currentMode` has already
+   * ruled out face mode (which takes priority), so no `_activeContext`
+   * re-check is needed here.
+   */
+  private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
+    const sketchHandle = this._sketchPickCache.pickFor(this.wasmScene, ray)
+    if (sketchHandle !== null) {
+      const plane = planeFromSketch(this.wasmScene, sketchHandle)
+      if (plane !== null && !plane.ground) {
+        return { plane, target: { kind: 'existing', handle: sketchHandle } }
+      }
+    }
+    const plane = groundDrawPlane()
+    return { plane, target: { kind: 'plane', plane } }
+  }
+
+  /**
+   * Resolve the plane/target the FIRST click of a gesture anchors onto
+   * (design §5.2): an ACTIVE idle plane lock beats face pick and
+   * sketch-hover adoption — the locked plane passes through `snap`'s point
+   * (free/unconstrained, per `snapConstraint`'s idle-lock branch above), so
+   * clicking a solid's corner starts a vertical sketch at that corner.
+   * Falls back to `_resolveIdleTarget` (face/sketch/ground) when no lock is
+   * active. Returns `null` only when a lock is active but there's no snap
+   * point yet (nothing to click through).
+   */
+  private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
+    if (this.idlePlaneLock !== null) {
+      if (snap === null) return null
+      const clickedPoint: V3 = [snap.x, snap.y, snap.z]
+      const plane = axisDrawPlane(this.idlePlaneLock, clickedPoint)
+      return { plane, target: { kind: 'plane', plane } }
+    }
+    return this._resolveIdleTarget(ray)
+  }
+
+  /** The cursor's position on `plane`. On the ground plane this is EXACTLY
+   *  `[snap.x, snap.y, 0]` (no basis math, snap required) — the legacy fast
+   *  path, bit-identical to before this module existed. On any other plane:
+   *  the snap (already plane-constrained via `snapConstraint`) if present,
+   *  else ray∩plane. */
+  private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
+    if (plane.ground) {
+      if (snap === null) return null
+      return [snap.x, snap.y, 0]
+    }
+    if (snap !== null) return [snap.x, snap.y, snap.z]
+    return pointOnPlane(ray, plane)
+  }
+
+  /**
    * Decide which mode governs the NEXT pointer event (same contract as the
    * other draw tools): sticky mid-gesture; always face mode inside an
-   * entered object context (scoped drawing — no top-level ground sketch
-   * from inside); else decided by what's under the cursor.
+   * entered object context (scoped drawing — no top-level plane sketch from
+   * inside); else decided by what's under the cursor.
    */
-  private _currentMode(ray?: Ray): 'face' | 'ground' {
+  private _currentMode(ray?: Ray): 'face' | 'plane' {
     if (this.faceStage.kind !== 'idle') return 'face'
-    if (this.groundStage.kind !== 'idle') return 'ground'
+    if (this.planeStage.kind !== 'idle') return 'plane'
     // Inside an entered object context, drawing stays scoped to that
     // object's faces — a click elsewhere is ignored by the face handler
-    // rather than falling through to a top-level ground sketch.
+    // rather than falling through to a top-level plane sketch.
     if (this._activeContext !== null) return 'face'
-    if (ray === undefined) return 'ground'
-    return this._eligiblePickFor(ray) !== null ? 'face' : 'ground'
+    // An active idle plane lock beats face pick and sketch-hover adoption
+    // (design §5.2) — the user already chose a plane.
+    if (this.idlePlaneLock !== null) return 'plane'
+    if (ray === undefined) return 'plane'
+    return this._eligiblePickFor(ray) !== null ? 'face' : 'plane'
   }
 
   /**
    * Provide a constraint plane for snap so off-plane/occluded geometry is
-   * excluded while snapping during face-mode drawing — identical to
-   * CircleTool's policy:
+   * excluded while snapping during face-mode or non-ground plane/sketch-mode
+   * drawing.
    *
    * - Face mode, gesture in progress: return the already-locked face plane.
+   * - Plane mode, gesture in progress on a NON-ground plane (sketch mode):
+   *   same — return the frozen plane. Ground-anchored: no constraint
+   *   (today's behavior, unchanged).
    * - Idle: pick the hovered face (if an eligible one is under the cursor)
    *   and return its plane so the FIRST-click endpoint lands precisely on
-   *   the face.
+   *   the face; absent that, a top-level hover over a non-ground sketch
+   *   returns ITS plane.
    * - Otherwise (ground mode): return null (unconstrained).
    */
   snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null {
@@ -306,29 +393,89 @@ export class ArcTool implements Tool {
       }
     }
 
-    if (this.groundStage.kind !== 'idle') {
-      // Mid ground gesture — no constraint
-      return null
+    if (this.planeStage.kind !== 'idle') {
+      if (this.planeStage.plane.ground) return null
+      return {
+        constraintPlane: {
+          point: this.planeStage.plane.origin,
+          normal: this.planeStage.plane.normal,
+        },
+      }
     }
+
+    // Idle plane lock (design §5.2): the first click is FREE — no
+    // constraint plane. The locked plane is derived FROM that click
+    // (`_resolveClickTarget`), so constraining the snap here would be
+    // circular. A lock also beats face pick / sketch-hover adoption, so
+    // neither of those runs below while one is active.
+    if (this.idlePlaneLock !== null) return null
 
     // Idle: face mode iff an eligible face is under the cursor
     const eligible = this._eligiblePickFor(ray)
-    if (eligible === null) return null
-
-    const a = this.wasmScene.face_plane(eligible.object, eligible.face)
-    return {
-      constraintPlane: {
-        point: [a[0], a[1], a[2]],
-        normal: [a[3], a[4], a[5]],
-      },
+    if (eligible !== null) {
+      const a = this.wasmScene.face_plane(eligible.object, eligible.face)
+      return {
+        constraintPlane: {
+          point: [a[0], a[1], a[2]],
+          normal: [a[3], a[4], a[5]],
+        },
+      }
     }
+
+    const { plane } = this._resolveIdleTarget(ray)
+    if (!plane.ground) {
+      return { constraintPlane: { point: plane.origin, normal: plane.normal } }
+    }
+    return null
+  }
+
+  /**
+   * The drawing-plane cue the Viewport should render right now (design §6
+   * bullet 1) — a grid patch on the active NON-ground plane, or null (ground
+   * is covered by the world grid already). See `drawPlaneCue` in
+   * `drawPlane.ts` for the two cases (anchored non-ground / idle-locked with
+   * a tracked hover). "Anchored" here is either the chord or bulge stage —
+   * both freeze the same plane/anchor for the rest of the gesture.
+   */
+  activeDrawPlaneCue(): { plane: DrawPlane; through: V3 } | null {
+    if (this.faceStage.kind !== 'idle') {
+      const basis = facePlaneBasis(this.faceStage.normal)
+      if (basis === null) return null
+      const anchoredPlane: DrawPlane = {
+        origin: this.faceStage.planePoint,
+        normal: this.faceStage.normal,
+        u: basis.u,
+        v: basis.v,
+        ground: isGroundPlane(this.faceStage.planePoint, this.faceStage.normal),
+      }
+      return drawPlaneCue({
+        anchoredPlane,
+        anchoredThrough: this.faceStage.planePoint,
+        idleLock: null,
+        idleHover: null,
+      })
+    }
+    if (this.planeStage.kind !== 'idle') {
+      return drawPlaneCue({
+        anchoredPlane: this.planeStage.plane,
+        anchoredThrough: this.planeStage.a,
+        idleLock: null,
+        idleHover: null,
+      })
+    }
+    return drawPlaneCue({
+      anchoredPlane: null,
+      anchoredThrough: null,
+      idleLock: this.idlePlaneLock,
+      idleHover: this._lastIdleHoverPoint,
+    })
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
     if (this._currentMode(ray) === 'face') {
       this._onPointerMoveFace(snap, ray)
     } else {
-      this._onPointerMoveGround(snap)
+      this._onPointerMovePlane(snap, ray)
     }
   }
 
@@ -336,7 +483,7 @@ export class ArcTool implements Tool {
     if (this._currentMode(ray) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
-      this._onPointerDownGround(snap)
+      this._onPointerDownPlane(snap, ray)
     }
   }
 
@@ -346,16 +493,38 @@ export class ArcTool implements Tool {
    * of treating letters as tool-switch shortcuts mid-gesture.
    */
   capturingInput(): boolean {
-    return this.groundStage.kind !== 'idle' || this.faceStage.kind !== 'idle'
+    return this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle'
   }
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      // Idle with an active plane lock: Escape clears the lock FIRST — only
+      // a second Escape (already idle, unlocked) falls through to today's
+      // idle-Escape behavior (design §5.2).
+      if (!this.capturingInput() && this.idlePlaneLock !== null) {
+        this.idlePlaneLock = null
+        this._lastIdleHoverPoint = null
+        return
+      }
+      // Aborting an in-progress gesture keeps the plane lock: the lock is
+      // an idle aiming choice, cleared only by an idle Escape or toggle
+      // (parity across all four draw tools — LineTool's _endChain path).
+      const lock = this.idlePlaneLock
       this._stepBack()
+      this.idlePlaneLock = lock
       return
     }
 
-    if (!this.capturingInput()) return
+    if (!this.capturingInput()) {
+      // Idle plane lock via arrow keys (design §5.2) — consumed by neither
+      // hover nor preview, only by the next first click.
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+        this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
+        // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
+        this._lastIdleHoverPoint = null
+      }
+      return
+    }
 
     if (ev.key === 'Alt') {
       // SketchUp's Alt/Option toggle, extended with the chord close. Guard
@@ -405,10 +574,11 @@ export class ArcTool implements Tool {
 
   /** Esc steps back one stage: bulge → chord (A kept), chord → idle. */
   private _stepBack(): void {
-    if (this.groundStage.kind === 'bulge') {
-      this.groundStage = { kind: 'chord', a: this.groundStage.a }
+    if (this.planeStage.kind === 'bulge') {
+      const { plane, target, a } = this.planeStage
+      this.planeStage = { kind: 'chord', plane, target, a }
       this.typed = ''
-      this._lastGroundCursor = null
+      this._lastPlaneCursor = null
       this._lastSagittaSign = null
       this._clearPreview()
       this.onMeasurementCb('')
@@ -428,24 +598,37 @@ export class ArcTool implements Tool {
   }
 
   cancel(): void {
-    this.groundStage = { kind: 'idle' }
+    this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
-    this._lastGroundCursor = null
+    this._lastPlaneCursor = null
     this._lastFaceCursor = null
     this._lastSagittaSign = null
+    this.idlePlaneLock = null
+    this._lastIdleHoverPoint = null
     this._clearPreview()
     this.onMeasurementCb('')
+  }
+
+  /**
+   * A new/loaded document replaced the Scene, so every cached plane-mode
+   * sketch handle is now stale (reusing one throws UnknownSketch). Drop them
+   * all and reset. Called by the Viewport from `notifyLoaded`.
+   */
+  onDocumentReset(): void {
+    this.sketchCache.clear()
+    this.completion = 'open' // a fresh document starts with the default close
+    this.cancel()
   }
 
   /**
    * Enter with a non-empty typed buffer: resolved per-stage (see module doc).
    */
   private _commitTyped(distance: number): void {
-    if (this.groundStage.kind === 'chord') {
-      this._commitTypedGroundChord(distance)
-    } else if (this.groundStage.kind === 'bulge') {
-      this._commitTypedGroundBulge(distance)
+    if (this.planeStage.kind === 'chord') {
+      this._commitTypedPlaneChord(distance)
+    } else if (this.planeStage.kind === 'bulge') {
+      this._commitTypedPlaneBulge(distance)
     } else if (this.faceStage.kind === 'chord') {
       this._commitTypedFaceChord(distance)
     } else if (this.faceStage.kind === 'bulge') {
@@ -453,42 +636,41 @@ export class ArcTool implements Tool {
     }
   }
 
-  /** Chord stage (ground): place B at `distance` from A along the live
-   *  cursor direction. Refused (buffer kept) with no direction yet, or a
-   *  sub-ARC_MIN_CHORD_M distance. */
-  private _commitTypedGroundChord(distance: number): void {
-    if (this.groundStage.kind !== 'chord') return
+  /** Chord stage (plane mode, ground or non-ground): place B at `distance`
+   *  from A along the live cursor direction. Refused (buffer kept) with no
+   *  direction yet, or a sub-ARC_MIN_CHORD_M distance. */
+  private _commitTypedPlaneChord(distance: number): void {
+    if (this.planeStage.kind !== 'chord') return
     if (distance < ARC_MIN_CHORD_M) return
-    const cursor = this._lastGroundCursor
+    const cursor = this._lastPlaneCursor
     if (cursor === null) return
-    const { a } = this.groundStage
-    const a3: V3 = [a[0], a[1], 0]
-    const dir = directionBetween(a3, [cursor[0], cursor[1], 0])
+    const { a } = this.planeStage
+    const dir = directionBetween(a, cursor)
     if (dir === null) return
-    const endpoint = pointAlong(a3, dir, distance)
-    this._placeGroundB([endpoint[0], endpoint[1]])
+    const endpoint = pointAlong(a, dir, distance)
+    this._placePlaneB(endpoint)
   }
 
-  /** Bulge stage (ground): commit the arc with |sagitta| == `distance`, on
-   *  the side resolved by `_resolveGroundSagittaSign`. Refused (same hint as
-   *  a flat pointer-commit) with no side resolvable, or a flat result. */
-  private _commitTypedGroundBulge(distance: number): void {
-    if (this.groundStage.kind !== 'bulge') return
-    const sign = this._resolveGroundSagittaSign()
+  /** Bulge stage (plane mode): commit the arc with |sagitta| == `distance`,
+   *  on the side resolved by `_resolvePlaneSagittaSign`. Refused (same hint
+   *  as a flat pointer-commit) with no side resolvable, or a flat result. */
+  private _commitTypedPlaneBulge(distance: number): void {
+    if (this.planeStage.kind !== 'bulge') return
+    const { plane, target, a, b } = this.planeStage
+    const sign = this._resolvePlaneSagittaSign(plane, a, b)
     if (sign === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
-    const { a, b } = this.groundStage
-    const chain = this._groundChain(a, b, sign * distance)
+    const chain = this._planeChain(plane, a, b, sign * distance)
     if (chain === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
-    this._commitGroundChain(chain.chain, chain.curveSegments, chain.geom)
-    this.groundStage = { kind: 'idle' }
+    this._commitPlaneChain(target, chain)
+    this.planeStage = { kind: 'idle' }
     this.typed = ''
-    this._lastGroundCursor = null
+    this._lastPlaneCursor = null
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
@@ -534,22 +716,24 @@ export class ArcTool implements Tool {
   }
 
   /**
-   * Resolve the bulge side for a typed ground commit: the sign of the live
-   * cursor's sagitta if it's non-negligible, else the last nonzero side seen
-   * this bulge stage, else null (refuse — see module doc).
+   * Resolve the bulge side for a typed plane-mode commit: the sign of the
+   * live cursor's sagitta if it's non-negligible, else the last nonzero side
+   * seen this bulge stage, else null (refuse — see module doc). Ground uses
+   * the exact legacy 2D `chordSagitta`; any other plane uses the generic
+   * in-plane sagitta (`_faceChordSagitta`) — the same math face mode uses.
    */
-  private _resolveGroundSagittaSign(): -1 | 1 | null {
-    if (this.groundStage.kind !== 'bulge') return null
-    const { a, b } = this.groundStage
-    const cursor = this._lastGroundCursor
+  private _resolvePlaneSagittaSign(plane: DrawPlane, a: V3, b: V3): -1 | 1 | null {
+    const cursor = this._lastPlaneCursor
     if (cursor !== null) {
-      const s = chordSagitta(a, b, cursor)
+      const s = plane.ground
+        ? chordSagitta([a[0], a[1]], [b[0], b[1]], [cursor[0], cursor[1]])
+        : this._faceChordSagitta(a, b, plane.normal, cursor)
       if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) return Math.sign(s) as -1 | 1
     }
     return this._lastSagittaSign
   }
 
-  /** Face-mode counterpart of `_resolveGroundSagittaSign`. */
+  /** Face-mode counterpart of `_resolvePlaneSagittaSign`. */
   private _resolveFaceSagittaSign(): -1 | 1 | null {
     if (this.faceStage.kind !== 'bulge') return null
     const { a, b, normal } = this.faceStage
@@ -561,103 +745,131 @@ export class ArcTool implements Tool {
     return this._lastSagittaSign
   }
 
-  /**
-   * A new/loaded document replaced the Scene, so the cached ground-sketch
-   * handle is now stale (reusing it throws UnknownSketch). Drop it and reset.
-   * Called by the Viewport from `notifyLoaded`.
-   */
-  onDocumentReset(): void {
-    this.sketchCache.set(null)
-    this.completion = 'open' // a fresh document starts with the default close
-    this.cancel()
-  }
+  // ------------------------------------------------------------------ plane mode
 
-  // ------------------------------------------------------------------ ground mode
-
-  private _onPointerMoveGround(snap: Snap | null): void {
-    if (snap === null || this.groundStage.kind === 'idle') {
+  private _onPointerMovePlane(snap: Snap | null, ray: Ray): void {
+    if (this.planeStage.kind === 'idle') {
+      // Idle-locked: track the hover snap for `activeDrawPlaneCue()` (design
+      // §6 bullet 1).
+      if (this.idlePlaneLock !== null && snap !== null) {
+        this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
+      }
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
       return
     }
-
-    if (this.groundStage.kind === 'chord') {
-      // Stage 2: rubber-band the chord A→cursor, report chord length.
-      const { a } = this.groundStage
-      const cursor: [number, number] = [snap.x, snap.y]
-      this._lastGroundCursor = cursor
+    const { plane } = this.planeStage
+    const cursor = this._planeCursor(snap, ray, plane)
+    if (cursor === null) {
       this._clearPreview()
-      this._drawSegments([[a[0], a[1], 0], [cursor[0], cursor[1], 0]])
-      this.onMeasurementCb(this._measurementText(formatLength(Math.hypot(cursor[0] - a[0], cursor[1] - a[1]))))
+      if (this.typed === '') this.onMeasurementCb('')
+      return
+    }
+    this._lastPlaneCursor = cursor
+
+    if (this.planeStage.kind === 'chord') {
+      // Stage 2: rubber-band the chord A→cursor, report chord length.
+      const { a } = this.planeStage
+      this._clearPreview()
+      this._drawSegments([a, cursor])
+      this.onMeasurementCb(this._measurementText(formatLength(segmentLength(a, cursor))))
       return
     }
 
     // Stage 3: rubber-band the faceted arc (plus any completion-mode closing
-    // edges) through the cursor's bulge side.
-    const { a, b } = this.groundStage
-    const cursor: [number, number] = [snap.x, snap.y]
-    this._lastGroundCursor = cursor
-    const s = chordSagitta(a, b, cursor)
-    if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(s) as -1 | 1
-    const verts = s === null ? null : (this._groundChain(a, b, s)?.chain ?? null)
-    if (verts === null) {
-      // Flat bulge — fall back to showing the bare chord.
+    // edges) through the cursor's bulge side. Ground keeps the EXACT legacy
+    // 2D path (chordSagitta/_groundChain/_reportRadius, no basis math) —
+    // bit-identical to before this module existed; any other plane uses the
+    // generic in-plane math (`_faceChordSagitta`/`_facePolyline`) face mode
+    // already proved on arbitrary planes.
+    const { a, b } = this.planeStage
+    if (plane.ground) {
+      const a2: Vec2 = [a[0], a[1]]
+      const b2: Vec2 = [b[0], b[1]]
+      const cursor2: Vec2 = [cursor[0], cursor[1]]
+      const s = chordSagitta(a2, b2, cursor2)
+      if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(s) as -1 | 1
+      const verts = s === null ? null : (this._groundChain(a2, b2, s)?.chain ?? null)
+      if (verts === null) {
+        this._clearPreview()
+        this._drawSegments([a, b])
+        this.onMeasurementCb(this._measurementText(''))
+        return
+      }
       this._clearPreview()
-      this._drawSegments([[a[0], a[1], 0], [b[0], b[1], 0]])
+      this._drawSegments(verts)
+      this._reportRadius(a2, b2, s as number)
+      return
+    }
+
+    const s = this._faceChordSagitta(a, b, plane.normal, cursor)
+    if (s !== null && Math.abs(s) >= ARC_MIN_SAGITTA_M) this._lastSagittaSign = Math.sign(s) as -1 | 1
+    const verts = this._facePolyline(a, b, plane.normal, cursor)
+    if (verts === null || s === null) {
+      this._clearPreview()
+      this._drawSegments([a, b])
       this.onMeasurementCb(this._measurementText(''))
       return
     }
     this._clearPreview()
-    this._drawSegments(verts)
-    this._reportRadius(a, b, s as number)
+    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, plane.normal, s))))
+    this._reportRadiusFromChain(verts)
   }
 
-  private _onPointerDownGround(snap: Snap | null): void {
-    if (snap === null) return
-
-    if (this.groundStage.kind === 'idle') {
-      // First click: endpoint A
-      this.groundStage = { kind: 'chord', a: [snap.x, snap.y] }
+  private _onPointerDownPlane(snap: Snap | null, ray: Ray): void {
+    if (this.planeStage.kind === 'idle') {
+      // First click: resolve (and freeze) the plane/target, then anchor A.
+      const resolved = this._resolveClickTarget(snap, ray)
+      if (resolved === null) return
+      const { plane, target } = resolved
+      const a = this._planeCursor(snap, ray, plane)
+      if (a === null) return
+      this.planeStage = { kind: 'chord', plane, target, a }
       this.typed = ''
-      this._lastGroundCursor = null
+      this._lastPlaneCursor = null
       return
     }
 
-    if (this.groundStage.kind === 'chord') {
+    const { plane } = this.planeStage
+    const cursor = this._planeCursor(snap, ray, plane)
+    if (cursor === null) return
+
+    if (this.planeStage.kind === 'chord') {
       // Second click: endpoint B (the chord). Ignore a degenerate chord.
-      const b: [number, number] = [snap.x, snap.y]
-      this._placeGroundB(b)
+      this._placePlaneB(cursor)
       return
     }
 
     // Third click: commit at the cursor's sagitta. Refuse a flat bulge.
-    const { a, b } = this.groundStage
-    const s = chordSagitta(a, b, [snap.x, snap.y])
-    const chain = s === null ? null : this._groundChain(a, b, s)
+    const { target, a, b } = this.planeStage
+    const s = plane.ground
+      ? chordSagitta([a[0], a[1]], [b[0], b[1]], [cursor[0], cursor[1]])
+      : this._faceChordSagitta(a, b, plane.normal, cursor)
+    const chain = s === null ? null : this._planeChain(plane, a, b, s)
     if (chain === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
     }
 
-    this._commitGroundChain(chain.chain, chain.curveSegments, chain.geom)
-    this.groundStage = { kind: 'idle' }
+    this._commitPlaneChain(target, chain)
+    this.planeStage = { kind: 'idle' }
     this.typed = ''
-    this._lastGroundCursor = null
+    this._lastPlaneCursor = null
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
   }
 
-  /** Place chord endpoint B (ground) — shared by the pointer-click and typed
-   *  (`_commitTypedGroundChord`) paths. Ignores a degenerate (sub-ARC_MIN_CHORD_M)
-   *  chord. */
-  private _placeGroundB(b: [number, number]): void {
-    if (this.groundStage.kind !== 'chord') return
-    const { a } = this.groundStage
-    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < ARC_MIN_CHORD_M) return
-    this.groundStage = { kind: 'bulge', a, b }
+  /** Place chord endpoint B (plane mode) — shared by the pointer-click and
+   *  typed (`_commitTypedPlaneChord`) paths. Ignores a degenerate
+   *  (sub-ARC_MIN_CHORD_M) chord. */
+  private _placePlaneB(b: V3): void {
+    if (this.planeStage.kind !== 'chord') return
+    const { plane, target, a } = this.planeStage
+    if (segmentLength(a, b) < ARC_MIN_CHORD_M) return
+    this.planeStage = { kind: 'bulge', plane, target, a, b }
     this.typed = ''
-    this._lastGroundCursor = null
+    this._lastPlaneCursor = null
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
@@ -686,8 +898,11 @@ export class ArcTool implements Tool {
     return arc === null ? null : [arc.center[0], arc.center[1], 0]
   }
 
-  /** 3D arc center for the face chord a→b with sagitta s, lifted through the
-   *  face's in-plane basis, or null on degenerate input. */
+  /** 3D arc center for the chord a→b with sagitta s on an arbitrary plane
+   *  with unit `normal`, lifted through the plane's in-plane basis, or null
+   *  on degenerate input. Pure — used by face mode AND non-ground plane
+   *  mode (the design's "face mode already proved this on arbitrary
+   *  planes" toolbox). */
   private _faceCenter(a: V3, b: V3, normal: V3, s: number): V3 | null {
     const basis = facePlaneBasis(normal)
     if (basis === null) return null
@@ -713,11 +928,7 @@ export class ArcTool implements Tool {
    *  edges stay plain lines. `geom` is the arc's analytic circle (center on
    *  the ground plane + radius), recorded on the curve chain so the kernel
    *  keeps the exact definition the facets approximate. */
-  private _groundChain(
-    a: Vec2,
-    b: Vec2,
-    s: number,
-  ): { chain: V3[]; curveSegments: number; geom: { center: V3; radius: number } | null } | null {
+  private _groundChain(a: Vec2, b: Vec2, s: number): ArcChain | null {
     const verts = this._groundPolyline(a, b, s)
     if (verts === null) return null
     const arc = arcFromChord(a, b, s)
@@ -728,18 +939,44 @@ export class ArcTool implements Tool {
     }
   }
 
-  /** Commit the polyline chain as N ground-sketch segments; the first
-   *  `curveSegments` of them are bracketed as ONE curve chain (the arc), so
-   *  clicking any facet later selects the whole arc. When the arc's analytic
-   *  circle is known it rides on the chain (durable center/radius —
-   *  the true-curves design). */
-  private _commitGroundChain(
-    verts: V3[],
-    curveSegments: number,
-    geom: { center: V3; radius: number } | null = null,
-  ): void {
+  /** Non-ground plane-mode counterpart of `_groundChain`: the arc polyline
+   *  built in the plane's own in-plane basis (`facePlaneBasis` +
+   *  `arcPolylineOnPlane` — exactly the face-mode toolbox) plus the closing
+   *  vertices for the current completion mode, with the analytic circle
+   *  (center + radius) to ride the curve chain. Returns null on a
+   *  degenerate basis or chord/sagitta (mirrors `_groundChain`). */
+  private _nonGroundChain(a: V3, b: V3, normal: V3, s: number): ArcChain | null {
+    const basis = facePlaneBasis(normal)
+    if (basis === null) return null
+    const verts = arcPolylineOnPlane(a, b, s, basis.u, basis.v)
+    if (verts === null) return null
+    const center = this._faceCenter(a, b, normal, s)
+    return {
+      chain: verts.concat(this._closingVerts(verts, center)),
+      curveSegments: verts.length - 1,
+      geom: center === null ? null : { center, radius: segmentLength(center, a) },
+    }
+  }
+
+  /** The arc chain for chord a→b with sagitta s, dispatching to the EXACT
+   *  legacy ground path (bit-identical arithmetic) or the generic
+   *  arbitrary-plane path, per `plane.ground`. */
+  private _planeChain(plane: DrawPlane, a: V3, b: V3, s: number): ArcChain | null {
+    return plane.ground
+      ? this._groundChain([a[0], a[1]], [b[0], b[1]], s)
+      : this._nonGroundChain(a, b, plane.normal, s)
+  }
+
+  /** Commit the polyline chain as N sketch segments into `target`'s sketch;
+   *  the first `curveSegments` of them are bracketed as ONE curve chain (the
+   *  arc), so clicking any facet later selects the whole arc. When the arc's
+   *  analytic circle is known it rides on the chain (durable center/radius —
+   *  the true-curves design). Used by plane mode — ground AND any other
+   *  plane (sketch mode) — via `runSketchGesture`; real face mode instead
+   *  imprints via `split_face`/`split_face_inner` (see `_commitFace`). */
+  private _commitPlaneChain(target: SketchTarget, { chain: verts, curveSegments, geom }: ArcChain): void {
     try {
-      runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch) => {
         let lastRegionsCreated: bigint[] = []
         if (geom !== null) {
           this.wasmScene.sketch_begin_curve_with(
@@ -791,13 +1028,14 @@ export class ArcTool implements Tool {
     if (this.faceStage.kind === 'idle') return null
     if (snap !== null) return [snap.x, snap.y, snap.z]
     const { planePoint, normal } = this.faceStage
-    return intersectPlane(ray.origin, ray.direction, planePoint, normal)
+    return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
   }
 
-  /** In-plane (u,v) signed sagitta of `cursor` relative to the face chord
-   * a→b (the shared projection step `_facePolyline` and the bulge-side
-   * resolution both need). Returns null when the face has no valid in-plane
-   * basis, or the chord is degenerate in-plane. */
+  /** In-plane (u,v) signed sagitta of `cursor` relative to the chord a→b on
+   * an arbitrary plane with unit `normal` (the shared projection step
+   * `_facePolyline` and the bulge-side resolution both need). Pure — used by
+   * face mode AND non-ground plane mode. Returns null when the plane has no
+   * valid in-plane basis, or the chord is degenerate in-plane. */
   private _faceChordSagitta(a: V3, b: V3, normal: V3, cursor: V3): number | null {
     const basis = facePlaneBasis(normal)
     if (basis === null) return null
@@ -998,7 +1236,9 @@ export class ArcTool implements Tool {
   // ------------------------------------------------------------------ measurement
 
   /** Report the live arc radius for a valid ground bulge (`_measurementText`
-   *  suffixes the completion mode). */
+   *  suffixes the completion mode) — the EXACT legacy formula (straight from
+   *  `arcFromChord`, no chain round-trip), kept bit-identical to before this
+   *  module existed. */
   private _reportRadius(a: Vec2, b: Vec2, s: number): void {
     const arc = arcFromChord(a, b, s)
     if (arc === null) {
@@ -1008,10 +1248,11 @@ export class ArcTool implements Tool {
     this.onMeasurementCb(this._measurementText(`R ${formatLength(arc.radius)}`))
   }
 
-  /** Report the radius from an already-built polyline (face mode): the
-   * distance from any interior vertex to the chord endpoints determines the
-   * circle, but it's simplest to recompute from the sagitta implied by the
-   * mid vertex. */
+  /** Report the radius from an already-built polyline (the bare arc, no
+   *  completion-mode closing vertices): the distance from any interior
+   *  vertex to the chord endpoints determines the circle, but it's simplest
+   *  to recompute from the sagitta implied by the mid vertex. Used by face
+   *  mode and non-ground plane mode. */
   private _reportRadiusFromChain(verts: V3[]): void {
     const a = verts[0]
     const b = verts[verts.length - 1]

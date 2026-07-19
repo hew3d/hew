@@ -44,6 +44,8 @@ function makeWasmScene(opts: {
       free: vi.fn(),
     })),
     pick_face: vi.fn(() => opts.pick?.()),
+    pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
+    sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])), // every minted sketch is on the ground plane
     node_parent: vi.fn((_kind: number, id: bigint) => opts.parents?.get(id)),
     // A top face at z=1, normal +Z.
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),

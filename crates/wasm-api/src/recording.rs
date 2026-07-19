@@ -38,6 +38,20 @@ pub const RECORDING_FORMAT_VERSION: u32 = 2;
 pub enum RecordedCall {
     /// `begin_ground_sketch()`.
     BeginGroundSketch,
+    /// `begin_sketch_on_plane(px, py, pz, nx, ny, nz)` — mints a sketch on an
+    /// arbitrary plane (sketches-on-any-plane design §5: the idle-lock draw
+    /// path). Additive variant (the [`RecordedCall::SketchBeginCurveWith`]
+    /// posture): recordings that never draw off the ground plane replay on
+    /// older builds unchanged; one that does fails to parse there — loudly,
+    /// never silently divergent.
+    BeginSketchOnPlane {
+        px: f64,
+        py: f64,
+        pz: f64,
+        nx: f64,
+        ny: f64,
+        nz: f64,
+    },
     /// `sketch_add_segment(sketch, a, b)`.
     SketchAddSegment {
         sketch: u64,

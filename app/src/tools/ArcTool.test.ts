@@ -6,7 +6,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { ArcTool } from './ArcTool'
-import { makeSketchHandleCache } from './sketchGesture'
+import { makeSketchPlaneCache } from './sketchGesture'
+import { groundDrawPlane, planeKey } from './drawPlane'
 import { arcFromChord, arcSegmentCount } from './arcMath'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -88,6 +89,7 @@ function makeWasmScene(opts: {
       }
     }),
     pick_face: vi.fn(() => opts.pick),
+    pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
     face_normal: vi.fn(() => new Float64Array(opts.faceNormal ?? [0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array(opts.facePlane ?? [0, 0, 1, 0, 0, 1])),
     split_face: vi.fn((_object: bigint, _face: bigint, path: Float64Array) => {
@@ -163,8 +165,8 @@ describe('ArcTool — ground mode', () => {
     const onCommit = vi.fn()
     const onToast = vi.fn()
     // Seed the shared cache with a handle whose creating gesture was undone.
-    const cache = makeSketchHandleCache()
-    cache.set(7n)
+    const cache = makeSketchPlaneCache()
+    cache.set(planeKey(groundDrawPlane()), 7n)
     const tool = new ArcTool(scene, preview, onCommit, onToast, vi.fn(), vi.fn(), cache)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)   // A

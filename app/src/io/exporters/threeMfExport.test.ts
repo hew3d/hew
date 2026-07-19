@@ -241,7 +241,7 @@ describe('collectExportParts', () => {
     )
     expect(parts).toHaveLength(1)
     expect(parts[0].name).toBe('Leg')
-    expect(Array.from(parts[0].triangles.slice(0, 3) as number[])).toEqual([10, 0, 0])
+    expect(Array.from(parts[0].triangles).slice(0, 3)).toEqual([10, 0, 0])
   })
 
   it('gives fully anonymous placements of one component distinct per-instance names', () => {

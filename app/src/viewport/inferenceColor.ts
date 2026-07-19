@@ -21,6 +21,7 @@ export const KIND_CSS_COLOR: Record<string, string> = {
   'on-face': '#0055cc',
   'on-guide': '#9933cc',
   ground: '#888888',
+  plane: '#888888',
 }
 
 /** Generous tolerance — a label/color decision, not a snap decision (the

@@ -72,6 +72,14 @@
  *     TapeMeasureTool keeps a single preview primitive per stage).
  *   - The exact arrow↔axis mapping (Up/Down→Z, Right→X, Left→Y) is a
  *     best-effort guess at SketchUp's convention and may need confirmation.
+ *
+ * Sketches on any plane (the sketch-planes design §6 bullet 2):
+ * `snapConstraint()` hover-adopts a non-ground sketch under the cursor
+ * (`pick_sketch` + `planeFromSketch` — the same helpers the draw tools use)
+ * BEFORE the apex is placed, so the apex snap lands precisely on that
+ * sketch's plane. No idle arrow-key plane lock here (unlike TapeMeasureTool)
+ * — Protractor already owns all four arrows for its OWN plane lock (above),
+ * a genuine conflict noted in the Phase 4 report.
  */
 
 import * as THREE from 'three'
@@ -88,6 +96,7 @@ import {
 } from './transformMath'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import { planeFromSketch, SketchPickCache } from './drawPlane'
 
 export type OnGuideCreated = () => void
 export type OnToast = (message: string, code?: string) => void
@@ -172,6 +181,19 @@ export class ProtractorTool implements Tool {
   private candidateNormal: [number, number, number] | null = null
   /** Locked plane normal, if the user has locked one (Shift toggle or arrow key). Persists across stages/commits. */
   private lockedNormal: [number, number, number] | null = null
+  /**
+   * The normal of the non-ground sketch plane most recently hover-adopted by
+   * `snapConstraint()` (Blocker-1 fix, the sketch-planes design §6 bullet
+   * 2): `snapConstraint()` runs BEFORE `onPointerMove` on every pointer move
+   * (the Viewport resolves the snap constraint, then feeds the resulting
+   * snap to the tool), so this cache lets `_resolvePlaneNormal` — called from
+   * that same `onPointerMove` — use the SAME plane the apex's point snapped
+   * onto, instead of falling back to WORLD_UP because a sketch hover has no
+   * `elementKind === 'face'`. Refreshed every idle `snapConstraint()` call
+   * (set to the resolved plane's normal, or cleared to null when nothing
+   * qualifies); also cleared on any hover/gesture reset.
+   */
+  private _hoveredSketchNormal: [number, number, number] | null = null
 
   constructor(
     wasmScene: WasmScene,
@@ -202,6 +224,36 @@ export class ProtractorTool implements Tool {
     if (this.previewDisk === null) return
     const dist = camera.position.distanceTo(this.previewDisk.position)
     this.previewDisk.scale.setScalar(DISK_SCREEN_K * dist)
+  }
+
+  /** Per-pointer-event `pick_sketch` memo — see `SketchPickCache` in drawPlane.ts. */
+  private readonly _sketchPickCache = new SketchPickCache()
+
+  /**
+   * Hover-adopt a non-ground sketch's plane BEFORE the apex is placed
+   * (design §6 bullet 2), so the apex snap lands precisely on it and the
+   * Phase 1 'plane' fallback resolves there too. Once the apex is placed,
+   * Protractor's own math already keeps the baseline/sweep analytically ON
+   * `this.stage.planeNormal` via `projectOntoPlane` regardless of the raw
+   * snap, so no further constraint is needed (or added) past this first
+   * pick — unlike the draw tools, which commit the raw snapped point
+   * verbatim and so need the constraint for the whole gesture.
+   */
+  snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null {
+    if (this.stage.kind !== 'idle') return null
+    const handle = this._sketchPickCache.pickFor(this.wasmScene, ray)
+    if (handle !== null) {
+      const plane = planeFromSketch(this.wasmScene, handle)
+      if (plane !== null && !plane.ground) {
+        // Cache the adopted plane's normal (Blocker 1) so `_resolvePlaneNormal`
+        // — invoked from the `onPointerMove` that follows this same pointer
+        // event — uses the SAME plane the apex point is about to snap onto.
+        this._hoveredSketchNormal = plane.normal
+        return { constraintPlane: { point: plane.origin, normal: plane.normal } }
+      }
+    }
+    this._hoveredSketchNormal = null
+    return null
   }
 
   // ── Tool interface ──────────────────────────────────────────────────────
@@ -363,9 +415,16 @@ export class ProtractorTool implements Tool {
   // ── Private helpers ─────────────────────────────────────────────────────
 
   /**
-   * Resolve the candidate measurement-plane normal for a hover/apex snap:
-   * the world-Object face normal under the snap, if resolvable, else world up.
-   * (Does NOT consult `lockedNormal` — callers combine the two.)
+   * Resolve the candidate measurement-plane normal for a hover/apex snap, in
+   * priority order (Blocker 1 fix — `lockedNormal` is handled by callers,
+   * above this):
+   *   1. The world-Object face normal under the snap, if resolvable.
+   *   2. The hovered non-ground sketch plane most recently adopted by
+   *      `snapConstraint()` (`_hoveredSketchNormal`) — so a hovered SKETCH
+   *      (which has no `elementKind === 'face'`) still resolves to the plane
+   *      its point actually snapped onto, instead of falling through to
+   *      world up.
+   *   3. World up.
    */
   private _resolvePlaneNormal(snap: Snap): [number, number, number] {
     if (snap.elementKind === 'face' && snap.object !== undefined && snap.element !== undefined) {
@@ -377,6 +436,7 @@ export class ProtractorTool implements Tool {
         // Not a live world-Object face (e.g. instanced geometry) — fall through.
       }
     }
+    if (this._hoveredSketchNormal !== null) return this._hoveredSketchNormal
     return WORLD_UP
   }
 
@@ -434,6 +494,7 @@ export class ProtractorTool implements Tool {
     this._clearPreviewLine()
     this._clearPreviewDisk()
     this.candidateNormal = null
+    this._hoveredSketchNormal = null
     this.onMeasurementCb('')
   }
 

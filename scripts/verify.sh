@@ -25,6 +25,9 @@ wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 echo "=== pnpm --dir app typecheck ==="
 pnpm --dir app typecheck
 
+echo "=== pnpm --dir app typecheck:test ==="
+pnpm --dir app typecheck:test
+
 echo "=== pnpm --dir app test ==="
 pnpm --dir app test
 

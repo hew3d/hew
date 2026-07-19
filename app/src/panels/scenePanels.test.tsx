@@ -1193,6 +1193,7 @@ describe('TagsPanel', () => {
     docRev: 0,
     hiddenTagPaths: new Set<string>(),
     onToggleTagPath: vi.fn(),
+    onDeleteTag: vi.fn(),
   }
 
   beforeEach(() => {

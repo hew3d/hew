@@ -279,14 +279,16 @@ export class OffsetTool implements Tool {
     try {
       const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
       if (boundary.length < 9) return
-      // All sketches are ground-plane today (see PushPullTool); anchor the
-      // plane at the boundary's first vertex so a future non-ground sketch
-      // still measures in its own plane once the normal is queried.
+      // Anchor the plane at the boundary's first vertex; the normal comes
+      // from the sketch's own plane (sketches on any plane — Phase 1) so a
+      // rotated sketch still measures its offset in-plane.
+      const plane = this.wasmScene.sketch_plane(sketchHandle)
+      if (plane === undefined) return // stale handle — stay idle
       this._beginDrag(
         { kind: 'region', sketchHandle, regionHandle },
         boundary,
         [boundary[0], boundary[1], boundary[2]],
-        [0, 0, 1],
+        [plane[3], plane[4], plane[5]],
       )
     } catch {
       // Stale region — stay idle.

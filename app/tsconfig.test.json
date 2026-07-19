@@ -1,12 +1,25 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    // Test-only bump: several suites use `Array.prototype.at` (ES2022), fine
+    // at runtime under Vitest/Node regardless of this setting — `lib` only
+    // gates the type-checker. The shipped app keeps the parent's ES2020 lib.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
   "include": [
     "src/**/*.test.ts",
     "src/**/*.test.tsx",
+    "src/**/*.d.ts",
+    "src/test/setup.ts",
     "e2e/**/*.test.ts",
     "playwright.config.ts"
-  ]
+  ],
+  // The parent tsconfig.json excludes every *.test.ts(x) (so the app build
+  // doesn't try to bundle tests); `extends` inherits that `exclude` verbatim
+  // unless overridden here, which silently cancelled this file's own
+  // `include` above (every match got excluded again) — this config never
+  // actually typechecked a test. See DEVELOPMENT.md / verify.sh's
+  // `typecheck:test` step.
+  "exclude": []
 }

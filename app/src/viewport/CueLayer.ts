@@ -10,6 +10,7 @@
  *       on-guide   → purple  #9933cc  (construction guide)
  *       on-axis    → axis color (X=red, Y=green, Z=blue; unknown=magenta)
  *       ground     → gray    #888888  (fallback — no kernel snap)
+ *       plane      → gray    #888888  (constraint-plane fallback, same role)
  *       other      → white   #ffffff
  *   - Dashed guide line through the snap point along direction() when present.
  *
@@ -34,6 +35,7 @@ const SNAP_COLORS: Record<string, number> = {
   'on-face': 0x0055cc,
   'on-guide': 0x9933cc,
   ground: 0x888888,
+  plane: 0x888888,
 }
 
 /** Half-length of the dashed guide line (meters) */

@@ -22,6 +22,7 @@ const KIND_LABEL: Record<string, string> = {
   'on-guide': 'On Guide',
   'on-axis': 'On Axis',
   ground: 'Ground',
+  plane: 'On Plane',
 }
 
 export function InferenceTooltip({ info }: { info: InferenceInfo | null }) {

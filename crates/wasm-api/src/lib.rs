@@ -1298,6 +1298,42 @@ impl Scene {
         self.doc.add_sketch(ground_plane()).data().as_ffi()
     }
 
+    /// Adds a fresh, empty sketch on the plane through `(px,py,pz)` with
+    /// normal `(nx,ny,nz)` — needn't be unit length, it is normalized here —
+    /// and returns its handle. **Additive** — existing sketches are
+    /// untouched. The one public-surface addition of the sketch-planes
+    /// design (§5): mints the sketch an
+    /// idle plane lock's first click targets when no cached sketch already
+    /// lives on that plane.
+    ///
+    /// # Errors
+    /// - `DegenerateVector` — `(nx,ny,nz)` is shorter than the kernel's
+    ///   minimum normalize length (no direction — refuses rather than
+    ///   guessing, DEVELOPMENT.md rule 4).
+    pub fn begin_sketch_on_plane(
+        &mut self,
+        px: f64,
+        py: f64,
+        pz: f64,
+        nx: f64,
+        ny: f64,
+        nz: f64,
+    ) -> Result<u64, ApiError> {
+        let point = Point3::new(px, py, pz);
+        let normal = kernel::Vec3::new(nx, ny, nz);
+        let plane = Plane::from_point_normal(point, normal).map_err(|e| api_err(&e, &e))?;
+        let handle = self.doc.add_sketch(plane).data().as_ffi();
+        recording::record(recording::RecordedCall::BeginSketchOnPlane {
+            px,
+            py,
+            pz,
+            nx,
+            ny,
+            nz,
+        });
+        Ok(handle)
+    }
+
     /// Opens a drawing gesture on `sketch`: everything drawn until
     /// `sketch_end_gesture` (a whole rectangle/circle/arc) lands on the undo
     /// stack as ONE step. The first gesture on a freshly-created sketch folds
@@ -4100,6 +4136,16 @@ impl Scene {
                     BeginGroundSketch => {
                         self.begin_ground_sketch();
                     }
+                    BeginSketchOnPlane {
+                        px,
+                        py,
+                        pz,
+                        nx,
+                        ny,
+                        nz,
+                    } => {
+                        self.begin_sketch_on_plane(px, py, pz, nx, ny, nz)?;
+                    }
                     SketchAddSegment { sketch, a, b } => {
                         self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
                     }
@@ -6898,5 +6944,134 @@ mod tests {
             .unwrap()
             .expect("ray points straight at the guide point");
         assert_eq!(snap.kind(), "endpoint");
+    }
+
+    // ---------------------------------------------------------- begin_sketch_on_plane
+
+    /// `begin_sketch_on_plane` creates a live sketch whose `sketch_plane`
+    /// round-trips the requested point/normalized normal. `(2,0,0)` with
+    /// normal `(1,0,0)` is deliberately its OWN perpendicular foot (the
+    /// point `Plane::point()` returns), so the round-trip is an exact
+    /// component match rather than merely "some point on the plane".
+    #[test]
+    fn begin_sketch_on_plane_round_trips_point_and_normal() {
+        let mut scene = Scene::new();
+        let sketch = scene
+            .begin_sketch_on_plane(2.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+
+        let plane = scene
+            .sketch_plane(sketch)
+            .expect("freshly minted sketch is live");
+        assert_eq!(plane, vec![2.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+        // A non-unit normal is normalized, not rejected — the point is
+        // already its own perpendicular foot here too (3 = 1*3 along the
+        // normalized (1,0,0) direction).
+        let sketch2 = scene
+            .begin_sketch_on_plane(3.0, 0.0, 0.0, 2.0, 0.0, 0.0)
+            .unwrap();
+        let plane2 = scene.sketch_plane(sketch2).unwrap();
+        assert_eq!(
+            plane2,
+            vec![3.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            "normal normalized to unit length"
+        );
+    }
+
+    /// Drawing a closed region on a vertical plane (normal +X through
+    /// `(2,0,0)`) via `sketch_add_segment` in WORLD coordinates, then
+    /// `extrude_region`, yields a solid — the kernel's plane-generic sketch
+    /// math (the sketch-planes design §2) exercised through the new
+    /// entry point rather than only through `begin_ground_sketch`.
+    #[test]
+    fn begin_sketch_on_plane_draws_and_extrudes_a_vertical_solid() {
+        let mut scene = Scene::new();
+        let sketch = scene
+            .begin_sketch_on_plane(2.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+
+        let corners = [
+            (0.0, 0.0, 1.0, 0.0),
+            (1.0, 0.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0, 0.0),
+        ];
+        let mut region = None;
+        for (ay, az, by, bz) in corners {
+            let report = scene
+                .sketch_add_segment(sketch, 2.0, ay, az, 2.0, by, bz)
+                .unwrap();
+            if let Some(&r) = report.inner.regions_created.first() {
+                region = Some(r.data().as_ffi());
+            }
+        }
+        let region = region.expect("closing the loop creates a region");
+
+        let object = scene.extrude_region(sketch, region, 1.0).unwrap();
+        assert!(
+            scene.object_ids().contains(&object),
+            "extrusion produced a live solid"
+        );
+    }
+
+    /// A degenerate (zero) normal is a typed `DegenerateVector` refusal
+    /// (DEVELOPMENT.md rule 4 — no silent repair, no guessed direction) and
+    /// creates no sketch.
+    #[test]
+    fn begin_sketch_on_plane_rejects_degenerate_normal() {
+        let mut scene = Scene::new();
+        let err = scene
+            .begin_sketch_on_plane(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap_err();
+        assert!(err.0.starts_with("DegenerateVector"), "got {}", err.0);
+        assert!(
+            scene.sketch_ids().is_empty(),
+            "the refused call created nothing"
+        );
+    }
+
+    /// A recording containing `begin_sketch_on_plane` replays: the same
+    /// pattern as `copy_and_array_copy_record_and_replay`, exercised on the
+    /// one new public wasm-api call this phase adds.
+    #[test]
+    fn begin_sketch_on_plane_records_and_replays() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let sketch = scene
+            .begin_sketch_on_plane(2.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+        let corners = [
+            (0.0, 0.0, 1.0, 0.0),
+            (1.0, 0.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0, 0.0),
+        ];
+        let mut region = None;
+        for (ay, az, by, bz) in corners {
+            let report = scene
+                .sketch_add_segment(sketch, 2.0, ay, az, 2.0, by, bz)
+                .unwrap();
+            if let Some(&r) = report.inner.regions_created.first() {
+                region = Some(r.data().as_ffi());
+            }
+        }
+        scene.extrude_region(sketch, region.unwrap(), 1.0).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"begin_sketch_on_plane\""));
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying a begin_sketch_on_plane session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 }

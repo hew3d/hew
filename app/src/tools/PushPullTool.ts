@@ -193,6 +193,12 @@ export class PushPullTool implements Tool {
           try {
             const sketchHandle = regionPick.sketch()
             const regionHandle = regionPick.region()
+            // The kernel extrudes along the profile plane's own normal, so
+            // the drag axis/ghost must match it (sketches on any plane —
+            // Phase 1). A stale handle between the region pick and this
+            // query is a miss, not a fallback to ground.
+            const plane = this.wasmScene.sketch_plane(sketchHandle)
+            if (plane === undefined) return // stale handle — treat as a miss
             if (snap !== null) {
               anchor = [snap.x, snap.y, snap.z]
             } else {
@@ -203,7 +209,7 @@ export class PushPullTool implements Tool {
               kind: 'region',
               sketchHandle,
               regionHandle,
-              normal: [0, 0, 1], // ground plane normal — all sketches are ground-plane today
+              normal: [plane[3], plane[4], plane[5]],
             }
           } finally {
             regionPick.free()

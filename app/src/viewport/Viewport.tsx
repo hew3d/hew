@@ -27,6 +27,8 @@ import { updateFatLineResolutions } from './fatLine'
 import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
+import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
+import type { DrawPlane } from '../tools/drawPlane'
 import { SnapService } from './snapService'
 import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
@@ -50,7 +52,7 @@ import { TapeMeasureTool } from '../tools/TapeMeasureTool'
 import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
-import { makeSketchHandleCache } from '../tools/sketchGesture'
+import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray } from './math'
 import type { Snap } from '../tools/types'
@@ -858,6 +860,11 @@ export default function Viewport({
 
   const sceneRendererRef = useRef<SceneRenderer | null>(null)
   const scheduleRenderRef = useRef<() => void>(() => { /* filled in effect */ })
+  // The drawing-plane cue layer is created inside the setup effect's closure
+  // (keyed to `wasmScene`); this ref lets the separate activeContext-change
+  // effect below reach it too, to clear a stale cue on context change
+  // (Blocker 3, the sketch-planes design §6 bullet 1).
+  const drawPlaneCueLayerRef = useRef<DrawPlaneCueLayer | null>(null)
 
   // Tool instances are created inside the effect, but we need to be able to
   // switch them from outside (via activeToolProp). Use a ref for the switch fn.
@@ -1045,6 +1052,22 @@ export default function Viewport({
     const cueLayer = new CueLayer()
     threeScene.add(cueLayer.group)
 
+    // Drawing-plane cue (sketches on any plane, Phase 4 — design §6 bullet
+    // 1): a subtle grid patch on a draw tool's active non-ground plane.
+    // Purely visual — see DrawPlaneCueLayer.ts's module doc.
+    const drawPlaneCueLayer = new DrawPlaneCueLayer()
+    threeScene.add(drawPlaneCueLayer.group)
+    drawPlaneCueLayerRef.current = drawPlaneCueLayer
+
+    // Duck-typed like `snapConstraint` — only the four draw tools implement
+    // this. Called after the active tool's own state update (`onPointerMove`
+    // / `onKey`) so a just-changed idle-lock or hover is reflected.
+    function queryDrawPlaneCue(tool: object): { plane: DrawPlane; through: [number, number, number] } | null {
+      return 'activeDrawPlaneCue' in tool
+        ? (tool as { activeDrawPlaneCue(): { plane: DrawPlane; through: [number, number, number] } | null }).activeDrawPlaneCue()
+        : null
+    }
+
     // Preview group shared by tools
     const previewGroup = new THREE.Group()
     previewGroup.name = 'Preview'
@@ -1112,11 +1135,12 @@ export default function Viewport({
     toolController.onToolChange(() => reportToolHint())
     reportToolHint()
 
-    // ONE ground sketch shared by every draw tool (Line/Rectangle/Circle/
-    // Arc), surviving tool switches, so mixed-tool profiles — an arc closed
-    // by a Line chord, a rectangle meeting an arc — land in the same sketch
-    // and can close regions. Cleared when a new document replaces the Scene.
-    const groundSketchCache = makeSketchHandleCache()
+    // ONE plane-keyed sketch cache shared by every draw tool (Line/
+    // Rectangle/Circle/Arc), surviving tool switches, so mixed-tool profiles
+    // drawn on the SAME plane — an arc closed by a Line chord, a rectangle
+    // meeting an arc — land in the same sketch and can close regions.
+    // Cleared (every plane's handle) when a new document replaces the Scene.
+    const sketchPlaneCache = makeSketchPlaneCache()
 
     // ------------------------------------------------- select-all + marquee
     /**
@@ -1700,14 +1724,19 @@ export default function Viewport({
     }
 
     function notifyLoaded(): void {
-      // A new/loaded document replaced the Scene — the shared ground-sketch
-      // handle and any handles the active tool cached are now stale.
-      // Re-selecting the same tool doesn't recreate it, so reset explicitly.
-      groundSketchCache.set(null)
+      // A new/loaded document replaced the Scene — every plane's cached
+      // sketch handle, and any handle the active tool cached itself, is now
+      // stale. Re-selecting the same tool doesn't recreate it, so reset
+      // explicitly.
+      sketchPlaneCache.clear()
       const at = toolController.activeTool
       if ('onDocumentReset' in at) {
         (at as { onDocumentReset(): void }).onDocumentReset()
       }
+      // The reset silently rewound the tool to idle (and cleared any idle
+      // plane lock) — the drawing-plane cue, if any was showing, no longer
+      // applies (design §6 bullet 1).
+      drawPlaneCueLayer.clear()
       // The reset silently rewound the tool to idle — without a re-poll the
       // status bar would keep the mid-gesture hint until the next mouse move.
       reportToolHint()
@@ -2002,7 +2031,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        groundSketchCache,
+        sketchPlaneCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -2029,7 +2058,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        groundSketchCache,
+        sketchPlaneCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -2056,7 +2085,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        groundSketchCache,
+        sketchPlaneCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -2083,7 +2112,7 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        groundSketchCache,
+        sketchPlaneCache,
       )
       // Scope the tool to the current editing context, if any.
       const ctx = activeContextRef.current
@@ -2490,6 +2519,9 @@ export default function Viewport({
       // switch are the shift-pan swap and MoveTool's copy-toggle badge
       // (makeMoveTool), both routed through the same cursorFor pipeline.
       renderer.domElement.style.cursor = cursorFor(toolName)
+      // The outgoing tool's drawing-plane cue (if any) no longer applies —
+      // don't wait for the next pointer move to hide it (design §6 bullet 1).
+      drawPlaneCueLayer.clear()
       scheduleRender()
     }
 
@@ -2864,6 +2896,7 @@ export default function Viewport({
       const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
       activeTool.onPointerMove(snap, ray)
       cueLayer.update(snap)
+      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
       scheduleRender()
 
       const snapKind = 'lastSnap' in activeTool && (activeTool as { lastSnap: unknown }).lastSnap !== null
@@ -3154,6 +3187,7 @@ export default function Viewport({
             const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
             activeTool.onPointerMove(snap, cached.ray)
             cueLayer.update(snap)
+            drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
           }
           return
         }
@@ -3203,8 +3237,18 @@ export default function Viewport({
       // as VCB length input, so an unhandled chord like Ctrl+K (palette) or
       // Ctrl+C would otherwise append its letter to a mid-entry buffer
       // ("5" → "5k") and wedge it. Tools only consume plain keys.
+      // Arrow keys while a text field has focus are caret/list navigation
+      // (command palette results, rename inputs), not tool input — with the
+      // idle plane lock they would otherwise silently re-aim the next draw
+      // gesture from inside an unrelated text box.
+      if (isTyping && ev.key.startsWith('Arrow')) return
       if (!isMod) {
-        toolController.activeTool.onKey(ev)
+        const activeTool = toolController.activeTool
+        activeTool.onKey(ev)
+        // The idle arrow-key plane lock (design §5.2/§6) toggles here — the
+        // capturing branch above only runs once a gesture has anchored, so
+        // this is where a lock's ON/OFF/switch needs its own cue re-poll.
+        drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
         // A tool may have restyled its gizmo in response (e.g. Rotate /
         // Protractor / Slice locking the axis with Shift or an arrow during
         // the idle/hover phase, before capturingInput() is true). The
@@ -3354,10 +3398,12 @@ export default function Viewport({
       infiniteGrid.dispose()
       controls.dispose()
       cueLayer.clear()
+      drawPlaneCueLayer.clear()
       sceneRenderer.dispose()
       toolControllerRef.current = null
       switchToolRef.current = null
       sceneRendererRef.current = null
+      drawPlaneCueLayerRef.current = null
       if (apiRefRef.current !== undefined) {
         apiRefRef.current.current = null
       }
@@ -3405,6 +3451,11 @@ export default function Viewport({
       // only; eligibility comes from the injected predicate).
       ;(tool as { setContextScoped: (scoped: boolean) => void }).setContextScoped(activeContext.length > 0)
     }
+    // A drawing-plane cue rendered for the OUTGOING context no longer
+    // applies (e.g. a tool's non-ground plane cue from before entering/
+    // exiting an object) — don't wait for the next pointer move to hide it
+    // (Blocker 3, mirrors the tool-switch clear above).
+    drawPlaneCueLayerRef.current?.clear()
     scheduleRenderRef.current()
   }, [activeContext, activeLitSet])
 

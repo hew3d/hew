@@ -59,6 +59,9 @@ function makeWasmScene(opts: {
   regionPick?: ReturnType<typeof makeRegionPick>
   edgePick?: ReturnType<typeof makeEdgePick>
   edgeEndpoints?: Float64Array
+  /** `sketch_plane` result for the region's sketch — `[px,py,pz,nx,ny,nz]`
+   *  (default: ground, normal +Z). `undefined` simulates a stale handle. */
+  sketchPlane?: [number, number, number, number, number, number] | undefined
 } = {}): WasmScene {
   const offsetReport = {
     new_edges: () => new BigUint64Array([]),
@@ -67,12 +70,14 @@ function makeWasmScene(opts: {
     regions_removed: () => new BigUint64Array([]),
     free: vi.fn(),
   }
+  const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
     pick_sketch_edge: vi.fn(() => opts.edgePick),
     sketch_edge_endpoints: vi.fn(() => opts.edgeEndpoints),
     sketch_regions: vi.fn(() => BigUint64Array.from([7n])),
+    sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     face_boundary: vi.fn(() => squareBoundary(1)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
     region_boundary: vi.fn(() => squareBoundary(0)),
@@ -197,6 +202,52 @@ describe('OffsetTool — Path B (sketch region)', () => {
     tool.onPointerDown(null, rayAt(1, 1))
 
     expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(false)
+  })
+})
+
+// Sketches on any plane (Phase 1, the sketch-planes design §3): the
+// region branch's plane normal must come from `sketch_plane`, not a
+// hardcoded [0,0,1] — otherwise a rotated sketch's offset distance would be
+// measured against the wrong plane.
+describe('OffsetTool — Path B on a rotated sketch (sketch_plane normal)', () => {
+  it('measures the offset in the sketch\'s OWN plane (XZ, normal +Y), not the ground XY plane', () => {
+    const regionPick = makeRegionPick(9n, 7n)
+    const scene = makeWasmScene({ regionPick, sketchPlane: [0, 0, 0, 0, 1, 0] })
+    // A 2x2 square boundary lying in the XZ plane (y = 0).
+    ;(scene.region_boundary as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Float32Array([0, 0, 0, 2, 0, 0, 2, 0, 2, 0, 0, 2]),
+    )
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    // A ray straight down -Y — parallel to the ground (XY) plane, so a
+    // ground-normal fallback would never intersect anything; only the
+    // sketch's true plane (Y-normal) makes this drag/commit work at all.
+    const rayXZ = (x: number, z: number): Ray => ({ origin: [x, 5, z], direction: [0, -1, 0] })
+
+    tool.onPointerDown(null, rayXZ(1, 1))
+    expect(scene.sketch_plane).toHaveBeenCalledWith(9n)
+    expect(tool.capturingInput()).toBe(true)
+    tool.onPointerMove(null, rayXZ(1, 0.5))
+    tool.onPointerDown(null, rayXZ(1, 0.5))
+
+    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
+    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(9n)
+    expect(call[1]).toBe(7n)
+    expect(call[2]).toBeCloseTo(-0.5) // 0.5 m inside the boundary along Z
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('a stale sketch handle (sketch_plane undefined) leaves the tool idle instead of falling back to ground', () => {
+    const regionPick = makeRegionPick(9n, 7n)
+    const scene = makeWasmScene({ regionPick, sketchPlane: undefined })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(null, rayAt(1, 1))
+
+    expect(scene.sketch_plane).toHaveBeenCalledWith(9n)
     expect(tool.capturingInput()).toBe(false)
   })
 })

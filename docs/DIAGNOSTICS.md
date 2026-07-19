@@ -157,6 +157,7 @@ literal internal handles from the recording session.
 | `method` | Arguments | Effect |
 |---|---|---|
 | `begin_ground_sketch` | — | begin a ground-plane sketch |
+| `begin_sketch_on_plane` | `px`,`py`,`pz`,`nx`,`ny`,`nz` | begin a sketch on an arbitrary plane (point + normal, normalized) — the idle plane lock's first-click mint (sketches-on-any-plane design §5) |
 | `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one multi-segment commit as a single undo step |
 | `sketch_cancel_gesture` | — | abandon an open gesture bracket |
 | `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket the segments of one drawn arc/circle as a curve chain |

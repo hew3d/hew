@@ -44,13 +44,19 @@ function makeWasmScene(opts: {
   parents?: Map<bigint, bigint>
   /** Unit normal `face_normal` reports for the picked face (default +Z). */
   faceNormal?: [number, number, number]
+  /** `sketch_plane` result for the region's sketch — `[px,py,pz,nx,ny,nz]`
+   *  (default: ground, point at origin, normal +Z). `undefined` simulates a
+   *  stale handle (the pick must then miss, not fall back to ground). */
+  sketchPlane?: [number, number, number, number, number, number] | undefined
 } = {}): WasmScene {
   const faceNormal = opts.faceNormal ?? [0, 0, 1]
+  const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
     node_parent: vi.fn((_kind: number, id: bigint) => opts.parents?.get(id)),
     face_normal: vi.fn(() => new Float64Array(faceNormal)),
+    sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     region_boundary: vi.fn(() => new Float32Array([])),
     face_boundary: vi.fn(() => new Float32Array([])),
     extrude_region: vi.fn(() => 55n),
@@ -285,6 +291,51 @@ describe('PushPullTool — Path B (sketch region, any live sketch)', () => {
     expect(scene.extrude_region).toHaveBeenCalledTimes(1)
     const call = (scene.extrude_region as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(call[2]).toBeLessThan(0)
+  })
+})
+
+// Sketches on any plane (Phase 1, the sketch-planes design §3): the
+// region target's normal must come from the sketch's OWN plane
+// (`sketch_plane`), not a hardcoded [0,0,1] — it drives the drag axis, the
+// ghost preview, and (unchanged) the sign the kernel extrudes along.
+describe('PushPullTool — Path B on a rotated sketch (sketch_plane normal)', () => {
+  it('drags and commits along the sketch plane\'s own normal, not [0,0,1]', () => {
+    const regionPick = makeRegionPick(99n, 7n)
+    // A vertical sketch: plane through the origin with normal +X.
+    const scene = makeWasmScene({
+      facePick: undefined,
+      regionPick,
+      sketchPlane: [0, 0, 0, 1, 0, 0],
+    })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    // A ray traveling -X so it can reach the x=0 plane and a snap that lands
+    // 3 m along the normal (+X) from the anchor.
+    const rayX: Ray = { origin: [5, 0, 0], direction: [-1, 0, 0] }
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), rayX)
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0, kind: 'endpoint' }), rayX)
+
+    expect(scene.sketch_plane).toHaveBeenCalledWith(99n)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+    const call = (scene.extrude_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(99n)
+    expect(call[1]).toBe(7n)
+    // Signed distance along +X (the sketch's normal), not along Z.
+    expect(call[2]).toBeCloseTo(3)
+    expect(onCommit).toHaveBeenCalledWith(55n)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('a stale sketch handle (sketch_plane undefined) is treated as a pick miss, not a ground fallback', () => {
+    const regionPick = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({ facePick: undefined, regionPick, sketchPlane: undefined })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(scene.sketch_plane).toHaveBeenCalledWith(99n)
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.extrude_region).not.toHaveBeenCalled()
   })
 })
 

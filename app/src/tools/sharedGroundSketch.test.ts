@@ -1,15 +1,18 @@
 /**
  * Cross-tool shared ground sketch — the Viewport hands every draw tool ONE
- * `SketchHandleCache`, so geometry drawn with different tools lands in the
- * same sketch and can close regions together (an arc closed by a Line chord,
- * a rectangle meeting an arc). These tests drive two real tools against one
- * fake WasmScene and assert the sketch handle is minted once and shared.
+ * `SketchPlaneCache`, so geometry drawn with different tools on the SAME
+ * plane lands in the same sketch and can close regions together (an arc
+ * closed by a Line chord, a rectangle meeting an arc). These tests drive two
+ * real tools against one fake WasmScene and assert the sketch handle is
+ * minted once and shared — both tools stay in ground/plane mode throughout
+ * (no eligible face, no hovered sketch), the one case Circle/Arc exercise in
+ * this wave.
  */
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { ArcTool } from './ArcTool'
 import { CircleTool } from './CircleTool'
-import { makeSketchHandleCache } from './sketchGesture'
+import { makeSketchPlaneCache } from './sketchGesture'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
@@ -30,6 +33,9 @@ function makeWasmScene() {
       sketchCounter += 1n
       return sketchCounter
     }),
+    // Every minted sketch lies on the ground plane — exercises the cache's
+    // "still on this plane" pre-check on the second (circle) commit.
+    sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),
     sketch_begin_curve: vi.fn(() => 91n),
@@ -45,22 +51,23 @@ function makeWasmScene() {
       }
     }),
     pick_face: vi.fn(() => undefined),
+    pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
   }
   return { scene: scene as unknown as WasmScene, segmentSketches }
 }
 
-function makeArcTool(scene: WasmScene, cache: ReturnType<typeof makeSketchHandleCache>) {
+function makeArcTool(scene: WasmScene, cache: ReturnType<typeof makeSketchPlaneCache>) {
   return new ArcTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache)
 }
 
-function makeCircleTool(scene: WasmScene, cache: ReturnType<typeof makeSketchHandleCache>) {
+function makeCircleTool(scene: WasmScene, cache: ReturnType<typeof makeSketchPlaneCache>) {
   return new CircleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache)
 }
 
 describe('shared ground-sketch cache across draw tools', () => {
   it('an arc and a circle drawn by different tools land in the same sketch', () => {
     const { scene, segmentSketches } = makeWasmScene()
-    const cache = makeSketchHandleCache()
+    const cache = makeSketchPlaneCache()
 
     // Arc tool commits first (as if the user drew an arc, then switched tools).
     const arc = makeArcTool(scene, cache)
@@ -82,7 +89,7 @@ describe('shared ground-sketch cache across draw tools', () => {
 
   it('onDocumentReset on ONE tool clears the shared handle for all of them', () => {
     const { scene, segmentSketches } = makeWasmScene()
-    const cache = makeSketchHandleCache()
+    const cache = makeSketchPlaneCache()
 
     const arc = makeArcTool(scene, cache)
     arc.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)

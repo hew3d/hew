@@ -5,7 +5,7 @@ import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
-const RAY: Ray = { origin: new THREE.Vector3(), direction: new THREE.Vector3(0, 0, -1) }
+const RAY: Ray = { origin: [0, 0, 0], direction: [0, 0, -1] }
 
 function makeSnap(overrides: Partial<Snap> = {}): Snap {
   return { x: 0, y: 0, z: 0, kind: 'ground', ...overrides }

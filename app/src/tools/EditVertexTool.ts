@@ -54,6 +54,11 @@ type Stage =
       base: [number, number, number]
       /** Other endpoints of edges incident to `base`, captured once at pick time. */
       incidentOthers: [number, number, number][]
+      /** The sketch's plane at pick time (`sketch_plane`), point + unit
+       *  normal — drives `snapConstraint` so the destination snap stays
+       *  on-plane instead of resolving to ground (sketches on any plane —
+       *  Phase 1). */
+      plane: { point: [number, number, number]; normal: [number, number, number] }
     }
 
 function approxEqual(a: [number, number, number], b: [number, number, number]): boolean {
@@ -99,6 +104,16 @@ export class EditVertexTool implements Tool {
 
   // ── Tool interface ──────────────────────────────────────────────────────
 
+  /** While dragging, constrain destination snapping to the picked vertex's
+   *  own sketch plane — otherwise a rotated sketch's vertex would resolve to
+   *  ground and every drag would be refused by the kernel with
+   *  PointOffPlane (see Viewport's `'snapConstraint' in activeTool` duck
+   *  type, the OffsetTool/LineTool precedent). Idle has no plane to offer. */
+  snapConstraint(): { constraintPlane: { point: [number, number, number]; normal: [number, number, number] } } | null {
+    if (this.stage.kind !== 'base') return null
+    return { constraintPlane: this.stage.plane }
+  }
+
   onPointerMove(snap: Snap | null, _ray: Ray): void {
     if (this.stage.kind !== 'base' || snap === null) return
     const cursor: [number, number, number] = [snap.x, snap.y, snap.z]
@@ -123,8 +138,18 @@ export class EditVertexTool implements Tool {
         pick.free()
       }
 
+      // A picked vertex's sketch is live by construction, but query defensively
+      // (see PushPullTool/OffsetTool): a stale plane between the pick and here
+      // is a miss, not a silent ground fallback.
+      const planeArr = this.wasmScene.sketch_plane(sketch)
+      if (planeArr === undefined) return
+      const plane = {
+        point: [planeArr[0], planeArr[1], planeArr[2]] as [number, number, number],
+        normal: [planeArr[3], planeArr[4], planeArr[5]] as [number, number, number],
+      }
+
       const incidentOthers = this._findIncidentOthers(sketch, base)
-      this.stage = { kind: 'base', sketch, vertex, base, incidentOthers }
+      this.stage = { kind: 'base', sketch, vertex, base, incidentOthers, plane }
       this._updateGhost(base)
       return
     }

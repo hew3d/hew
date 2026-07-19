@@ -12,12 +12,25 @@
  * This is what makes the #1 workflow — draw a line on a solid's face, at top
  * level, to split that face — work without first entering the object.
  *
- * Ground mode (no eligible face under the cursor):
- *   1. First click: anchor the first point (snapped, on Z=0).
+ * Plane mode (sketches on any plane — no eligible face under the cursor;
+ * design doc §1/§4): the drawing plane is resolved once, at the FIRST click
+ * of a chain, and frozen for the rest of the gesture:
+ *   - A top-level hover over a committed sketch whose plane is non-ground
+ *     (`pick_sketch` + `planeFromSketch`) adopts THAT sketch's plane —
+ *     SKETCH MODE — and every segment lands in that one sketch
+ *     (`SketchTarget.existing`).
+ *   - Otherwise the plane is the ground plane — PLANE MODE, today's
+ *     behavior — and segments land in the shared per-plane cached sketch
+ *     (`SketchTarget.plane`; `begin_ground_sketch()` on a cache miss).
+ *   On the ground plane every point is `[snap.x, snap.y, 0]` EXACTLY as
+ *   before this generalization (no basis math) — bit-identical committed
+ *   coordinates. On a non-ground plane, the cursor is the snap (already
+ *   plane-constrained via `snapConstraint`) or, absent one, ray∩plane.
+ *
+ *   1. First click: anchor the first point.
  *   2. Each subsequent click commits ONE segment from the previous point to
- *      the new point: lazily begin_ground_sketch() if no sketch handle yet,
- *      then sketch_add_segment(sketch, prev.., cur..). The new point becomes
- *      the anchor for the next segment (chain forward).
+ *      the new point via `sketch_add_segment`. The new point becomes the
+ *      anchor for the next segment (chain forward).
  *   3. Rubber-band preview: a single line from the last placed point to the
  *      live cursor.
  *   4. Closing the loop: when a commit's regions_created() is non-empty, a
@@ -52,12 +65,14 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
+import { rayPlaneIntersect, facePlaneBasis } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
-import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong } from './moveInput'
+import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { segmentLength, directionBetween } from './lineInput'
-import { runSketchGesture, makeSketchHandleCache, type SketchHandleCache } from './sketchGesture'
+import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
+import { groundDrawPlane, planeFromSketch, pointOnPlane, axisDrawPlane, drawPlaneCue, isGroundPlane, SketchPickCache, type DrawPlane } from './drawPlane'
 import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
@@ -65,10 +80,12 @@ export type OnFaceImprint = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
-/** Ground chain: idle, or anchored with the last placed point. */
-type GroundStage =
+/** Plane chain: idle, or anchored on a frozen `DrawPlane`/`SketchTarget`
+ *  with the last placed point (world-space; z = 0 exactly on the ground
+ *  plane — see the module doc). */
+type PlaneStage =
   | { kind: 'idle' }
-  | { kind: 'anchored'; anchor: [number, number] }
+  | { kind: 'anchored'; plane: DrawPlane; target: SketchTarget; anchor: V3 }
 
 /** Face chain: idle, or anchored on a specific face plane with accumulated points. */
 type FaceStage =
@@ -85,43 +102,21 @@ type FaceStage =
     }
 
 
-/**
- * Intersect a ray with an arbitrary plane defined by a point and unit normal.
- * Returns the intersection point, or null if the ray is nearly parallel to
- * the plane (|dot(dir, normal)| < 1e-10) or the intersection is behind the
- * ray origin.
- */
-function intersectPlane(
-  rayOrigin: [number, number, number],
-  rayDir: [number, number, number],
-  planePoint: V3,
-  normal: V3,
-): V3 | null {
-  const denom = rayDir[0] * normal[0] + rayDir[1] * normal[1] + rayDir[2] * normal[2]
-  if (Math.abs(denom) < 1e-10) return null
-  const wx = planePoint[0] - rayOrigin[0]
-  const wy = planePoint[1] - rayOrigin[1]
-  const wz = planePoint[2] - rayOrigin[2]
-  const t = (wx * normal[0] + wy * normal[1] + wz * normal[2]) / denom
-  if (t < 0) return null
-  return [
-    rayOrigin[0] + t * rayDir[0],
-    rayOrigin[1] + t * rayDir[1],
-    rayOrigin[2] + t * rayDir[2],
-  ]
-}
-
 export class LineTool implements Tool {
   readonly name = 'Line'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
-    return this.groundStage.kind === 'idle' && this.faceStage.kind === 'idle'
-      ? 'Click to start a line — on the ground plane or any face.'
-      : 'Click the next point — type a length for an exact segment; double-click or Esc to finish.'
+    if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
+      return 'Click the next point — type a length for an exact segment; double-click or Esc to finish.'
+    }
+    if (this.idlePlaneLock !== null) {
+      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+    }
+    return 'Click to start a line — on the ground plane or any face or sketch.'
   }
 
-  private groundStage: GroundStage = { kind: 'idle' }
+  private planeStage: PlaneStage = { kind: 'idle' }
   private faceStage: FaceStage = { kind: 'idle' }
   private preview: THREE.Group
   private wasmScene: WasmScene
@@ -130,9 +125,10 @@ export class LineTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Cached ground-sketch handle — the Viewport passes one cache shared by
-   *  every draw tool, so mixed-tool profiles land in a single sketch. */
-  private readonly sketchCache: SketchHandleCache
+  /** Cached plane-mode sketch handles — the Viewport passes one cache
+   *  shared by every draw tool, so mixed-tool profiles land in a single
+   *  sketch per plane. */
+  private readonly sketchCache: SketchPlaneCache
 
   /** The currently active editing context (entered object), or null at top level. */
   private _activeContext: bigint | null = null
@@ -141,7 +137,7 @@ export class LineTool implements Tool {
   private typed: string = ''
 
   /** Last rubber-band cursor positions, tracked for typed-entry direction */
-  private _lastGroundCursor: [number, number] | null = null
+  private _lastPlaneCursor: V3 | null = null
   private _lastFaceCursor: V3 | null = null
 
 
@@ -150,8 +146,25 @@ export class LineTool implements Tool {
   /** True when the *current* axis lock was set by holding Shift (vs. an arrow). */
   private shiftAxisLock: boolean = false
 
+  /** Idle plane lock (design §5.2): while FULLY idle (no anchored stage),
+   *  an arrow key locks the future plane's NORMAL to a world axis (0=X/red,
+   *  1=Y/green, 2=Z/blue — `arrowToAxis`); the same arrow again, or
+   *  Escape/ArrowDown, clears it. An ACTIVE lock overrides face pick and
+   *  sketch-hover adoption on the next click (SketchUp: an explicit lock
+   *  beats inference) — see `_currentMode`/`_resolveClickTarget`. Survives a
+   *  completed gesture (cleared only by `cancel()`, which
+   *  `onDocumentReset()`/`setActiveContext()` already route through). */
+  private idlePlaneLock: 0 | 1 | 2 | null = null
+
+  /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
+   *  `activeDrawPlaneCue()`'s idle-locked case. Reset to null whenever the
+   *  lock itself changes (a fresh lock has no hover yet) and by `cancel()`. */
+  private _lastIdleHoverPoint: V3 | null = null
+
   /** Per-pointer-event `pick_face` memo — see `FacePickCache` in faceDraw.ts. */
   private readonly _pickCache = new FacePickCache()
+  /** Per-pointer-event `pick_sketch` memo — see `SketchPickCache` in drawPlane.ts. */
+  private readonly _sketchPickCache = new SketchPickCache()
 
   /** Run `pick_face` for `ray` and return the eligible {object, face} pair
    *  (or null), reusing a cached result for the same `ray` reference if one
@@ -168,7 +181,7 @@ export class LineTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
-    sketchCache: SketchHandleCache = makeSketchHandleCache(),
+    sketchCache: SketchPlaneCache = makeSketchPlaneCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -187,11 +200,12 @@ export class LineTool implements Tool {
   }
 
   /**
-   * Provide snap constraints: a constraint plane while drawing on a face
-   * (so off-plane/occluded geometry is excluded), and/or an axis lock
-   * (arrow keys / Shift, mirroring MoveTool) once a chain is anchored.
+   * Provide snap constraints: a constraint plane while drawing on a face or
+   * a non-ground plane/sketch (so off-plane/occluded geometry is excluded),
+   * and/or an axis lock (arrow keys / Shift, mirroring MoveTool) once a
+   * chain is anchored.
    *
-   * - Anchored (ground or face): always include `anchor` (the last placed
+   * - Anchored (plane or face): always include `anchor` (the last placed
    *   point) — the inference engine derives anchor-dependent candidates
    *   from it (a Tangent snap is "the rim point where the segment from the
    *   anchor touches the circle", the true-curves design). With an
@@ -200,11 +214,16 @@ export class LineTool implements Tool {
    * - Face-anchored: ALSO return the known face plane's `constraintPlane`
    *   (unconditionally — independent of any axis lock) so subsequent snaps
    *   stay on that plane.
+   * - Plane-anchored on a NON-ground plane (sketch mode): same —
+   *   `constraintPlane` from the frozen plane. Ground-anchored keeps
+   *   today's unconstrained behavior (just the axis lock, if any).
    * - Idle: pick the hovered face (any eligible Object, scoped by
    *   `_activeContext` exactly like PushPullTool) and return its plane so
-   *   the FIRST-click point lands precisely on the face.
-   * - No eligible face under the cursor and nothing anchored: return null
-   *   (ground, unconstrained).
+   *   the FIRST-click point lands precisely on the face; absent that, a
+   *   top-level hover over a non-ground sketch returns ITS plane so the
+   *   first click lands on it.
+   * - No eligible face/sketch under the cursor and nothing anchored: return
+   *   null (ground, unconstrained).
    */
   snapConstraint(ray: Ray): {
     anchor?: [number, number, number]
@@ -230,21 +249,86 @@ export class LineTool implements Tool {
       }
     }
 
-    if (this.groundStage.kind === 'anchored') {
-      // No face plane while ground-anchored; just the axis lock (if any).
+    if (this.planeStage.kind === 'anchored') {
+      if (this.planeStage.plane.ground) {
+        // No constraint plane while ground-anchored; just the axis lock (if any).
+        return Object.keys(lockPart).length > 0 ? lockPart : null
+      }
+      return {
+        ...lockPart,
+        constraintPlane: {
+          point: this.planeStage.plane.origin,
+          normal: this.planeStage.plane.normal,
+        },
+      }
+    }
+
+    // Idle plane lock (design §5.2): the first click is FREE — no
+    // constraint plane. The locked plane is derived FROM that click
+    // (`_resolveClickTarget`), so constraining the snap here would be
+    // circular. A lock also beats face pick / sketch-hover adoption, so
+    // neither of those runs below while one is active.
+    if (this.idlePlaneLock !== null) {
       return Object.keys(lockPart).length > 0 ? lockPart : null
     }
 
     const eligible = this._eligiblePickFor(ray)
-    if (eligible === null) return null
-
-    const a = this.wasmScene.face_plane(eligible.object, eligible.face)
-    return {
-      constraintPlane: {
-        point: [a[0], a[1], a[2]],
-        normal: [a[3], a[4], a[5]],
-      },
+    if (eligible !== null) {
+      const a = this.wasmScene.face_plane(eligible.object, eligible.face)
+      return {
+        constraintPlane: {
+          point: [a[0], a[1], a[2]],
+          normal: [a[3], a[4], a[5]],
+        },
+      }
     }
+
+    const { plane } = this._resolveIdleTarget(ray)
+    if (!plane.ground) {
+      return { constraintPlane: { point: plane.origin, normal: plane.normal } }
+    }
+    return null
+  }
+
+  /**
+   * The drawing-plane cue the Viewport should render right now (design §6
+   * bullet 1) — a grid patch on the active NON-ground plane, or null (ground
+   * is covered by the world grid already). See `drawPlaneCue` in
+   * `drawPlane.ts` for the two cases (anchored non-ground / idle-locked with
+   * a tracked hover).
+   */
+  activeDrawPlaneCue(): { plane: DrawPlane; through: V3 } | null {
+    if (this.faceStage.kind === 'anchored') {
+      const basis = facePlaneBasis(this.faceStage.normal)
+      if (basis === null) return null
+      const anchoredPlane: DrawPlane = {
+        origin: this.faceStage.planePoint,
+        normal: this.faceStage.normal,
+        u: basis.u,
+        v: basis.v,
+        ground: isGroundPlane(this.faceStage.planePoint, this.faceStage.normal),
+      }
+      return drawPlaneCue({
+        anchoredPlane,
+        anchoredThrough: this.faceStage.planePoint,
+        idleLock: null,
+        idleHover: null,
+      })
+    }
+    if (this.planeStage.kind === 'anchored') {
+      return drawPlaneCue({
+        anchoredPlane: this.planeStage.plane,
+        anchoredThrough: this.planeStage.anchor,
+        idleLock: null,
+        idleHover: null,
+      })
+    }
+    return drawPlaneCue({
+      anchoredPlane: null,
+      anchoredThrough: null,
+      idleLock: this.idlePlaneLock,
+      idleHover: this._lastIdleHoverPoint,
+    })
   }
 
   /** The last placed point of whichever chain is currently anchored, or null. */
@@ -253,9 +337,8 @@ export class LineTool implements Tool {
       const { points } = this.faceStage
       return points[points.length - 1]
     }
-    if (this.groundStage.kind === 'anchored') {
-      const { anchor } = this.groundStage
-      return [anchor[0], anchor[1], 0]
+    if (this.planeStage.kind === 'anchored') {
+      return this.planeStage.anchor
     }
     return null
   }
@@ -276,11 +359,65 @@ export class LineTool implements Tool {
     return defaultFaceEligible(this.wasmScene, this._activeContext, objectHandle, instanceHandle)
   }
 
+  /**
+   * Resolve the plane/target an IDLE gesture would anchor onto at `ray`
+   * (design §1/§4): a top-level `pick_sketch` hit whose plane is non-ground
+   * adopts that sketch (SKETCH MODE); otherwise the ground plane (PLANE
+   * MODE, today's behavior). Only reachable when `_currentMode` has already
+   * ruled out face mode (which takes priority), so no `_activeContext`
+   * re-check is needed here.
+   */
+  private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
+    const sketchHandle = this._sketchPickCache.pickFor(this.wasmScene, ray)
+    if (sketchHandle !== null) {
+      const plane = planeFromSketch(this.wasmScene, sketchHandle)
+      if (plane !== null && !plane.ground) {
+        return { plane, target: { kind: 'existing', handle: sketchHandle } }
+      }
+    }
+    const plane = groundDrawPlane()
+    return { plane, target: { kind: 'plane', plane } }
+  }
+
+  /**
+   * Resolve the plane/target the FIRST click of a gesture anchors onto
+   * (design §5.2): an ACTIVE idle plane lock beats face pick and
+   * sketch-hover adoption — the locked plane passes through `snap`'s point
+   * (free/unconstrained, per `snapConstraint`'s idle-lock branch above), so
+   * clicking a solid's corner starts a vertical sketch at that corner.
+   * Falls back to `_resolveIdleTarget` (face/sketch/ground) when no lock is
+   * active. Returns `null` only when a lock is active but there's no snap
+   * point yet (nothing to click through).
+   */
+  private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
+    if (this.idlePlaneLock !== null) {
+      if (snap === null) return null
+      const clickedPoint: V3 = [snap.x, snap.y, snap.z]
+      const plane = axisDrawPlane(this.idlePlaneLock, clickedPoint)
+      return { plane, target: { kind: 'plane', plane } }
+    }
+    return this._resolveIdleTarget(ray)
+  }
+
+  /** The cursor's position on `plane`. On the ground plane this is EXACTLY
+   *  `[snap.x, snap.y, 0]` (no basis math, snap required) — the legacy fast
+   *  path, bit-identical to before this module existed. On any other plane:
+   *  the snap (already plane-constrained via `snapConstraint`) if present,
+   *  else ray∩plane. */
+  private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
+    if (plane.ground) {
+      if (snap === null) return null
+      return [snap.x, snap.y, 0]
+    }
+    if (snap !== null) return [snap.x, snap.y, snap.z]
+    return pointOnPlane(ray, plane)
+  }
+
   onPointerMove(snap: Snap | null, ray: Ray): void {
     if (this._currentMode(ray) === 'face') {
       this._onPointerMoveFace(snap, ray)
     } else {
-      this._onPointerMoveGround(snap)
+      this._onPointerMovePlane(snap, ray)
     }
   }
 
@@ -290,32 +427,48 @@ export class LineTool implements Tool {
    *   - Already anchored in one mode: stick with it (mid-chain).
    *   - Inside an entered object context: always face mode — drawing stays
    *     scoped to that object's faces, so a click elsewhere is ignored by
-   *     the face handler rather than falling through to a TOP-LEVEL ground
+   *     the face handler rather than falling through to a TOP-LEVEL plane
    *     sketch from inside the context.
    *   - Otherwise idle at top level: face mode if an eligible Object face is
-   *     under the cursor (via `pick_face`), else ground mode.
+   *     under the cursor (via `pick_face`), else plane mode (which itself
+   *     resolves sketch-vs-ground via `_resolveIdleTarget`).
    */
-  private _currentMode(ray?: Ray): 'face' | 'ground' {
+  private _currentMode(ray?: Ray): 'face' | 'plane' {
     if (this.faceStage.kind === 'anchored') return 'face'
-    if (this.groundStage.kind === 'anchored') return 'ground'
+    if (this.planeStage.kind === 'anchored') return 'plane'
     if (this._activeContext !== null) return 'face'
-    if (ray === undefined) return 'ground'
+    // An active idle plane lock beats face pick and sketch-hover adoption
+    // (design §5.2) — the user already chose a plane.
+    if (this.idlePlaneLock !== null) return 'plane'
+    if (ray === undefined) return 'plane'
 
-    return this._eligiblePickFor(ray) !== null ? 'face' : 'ground'
+    return this._eligiblePickFor(ray) !== null ? 'face' : 'plane'
   }
 
-  private _onPointerMoveGround(snap: Snap | null): void {
-    if (this.groundStage.kind !== 'anchored' || snap === null) {
+  private _onPointerMovePlane(snap: Snap | null, ray: Ray): void {
+    if (this.planeStage.kind !== 'anchored') {
+      // Idle-locked: track the hover snap for `activeDrawPlaneCue()` (design
+      // §6 bullet 1) — the cue previews the plane through wherever the FIRST
+      // click would land right now.
+      if (this.idlePlaneLock !== null && snap !== null) {
+        this._lastIdleHoverPoint = [snap.x, snap.y, snap.z]
+      }
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
       return
     }
-    const { anchor } = this.groundStage
-    const cursor: [number, number] = [snap.x, snap.y]
-    this._lastGroundCursor = cursor
-    this._drawRubberBandGround(anchor, cursor)
-    this._reportMeasurement([anchor[0], anchor[1], 0], [cursor[0], cursor[1], 0])
-    this._publishTransient([cursor[0], cursor[1], 0])
+    const { plane, anchor } = this.planeStage
+    const cursor = this._planeCursor(snap, ray, plane)
+    if (cursor === null) {
+      this._clearPreview()
+      if (this.typed === '') this.onMeasurementCb('')
+      return
+    }
+    this._lastPlaneCursor = cursor
+    this._clearPreview()
+    this._drawRubberBandSegment(anchor, cursor)
+    this._reportMeasurement(anchor, cursor)
+    this._publishTransient(cursor)
   }
 
   private _onPointerMoveFace(snap: Snap | null, ray: Ray): void {
@@ -333,7 +486,8 @@ export class LineTool implements Tool {
     this._lastFaceCursor = cursor
     const { points } = this.faceStage
     const last = points[points.length - 1]
-    this._drawRubberBandFace(last, cursor)
+    this._clearPreview()
+    this._drawRubberBandSegment(last, cursor)
     this._reportMeasurement(last, cursor)
     this._publishTransient(cursor)
   }
@@ -351,7 +505,7 @@ export class LineTool implements Tool {
     if (this.faceStage.kind !== 'anchored') return null
     if (snap !== null) return [snap.x, snap.y, snap.z]
     const { planePoint, normal } = this.faceStage
-    return intersectPlane(ray.origin, ray.direction, planePoint, normal)
+    return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
   }
 
   /**
@@ -361,7 +515,7 @@ export class LineTool implements Tool {
    * - Face mode: every consecutive pair of accumulated `points` (none of
    *   which touch the kernel sketch until `split_face` commits) plus a
    *   trailing rubber-band segment to `cursor` (if given).
-   * - Ground mode: committed segments are already persistent via
+   * - Plane mode: committed segments are already persistent via
    *   `reconcile`/`register_sketch`, so the only transient needed is the
    *   live rubber band from the anchor to `cursor`.
    *
@@ -378,9 +532,8 @@ export class LineTool implements Tool {
       if (cursor !== null) {
         this._publishSegment(points[points.length - 1], cursor)
       }
-    } else if (this.groundStage.kind === 'anchored' && cursor !== null) {
-      const { anchor } = this.groundStage
-      this._publishSegment([anchor[0], anchor[1], 0], cursor)
+    } else if (this.planeStage.kind === 'anchored' && cursor !== null) {
+      this._publishSegment(this.planeStage.anchor, cursor)
     }
   }
 
@@ -397,25 +550,42 @@ export class LineTool implements Tool {
     if (this._currentMode(ray) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
-      this._onPointerDownGround(snap)
+      this._onPointerDownPlane(snap, ray)
     }
   }
 
   /**
    * Typed VCB entry is available once the first point has been placed
-   * (either ground or face mode) — mirrors RectangleTool.
+   * (either plane or face mode) — mirrors RectangleTool.
    */
   capturingInput(): boolean {
-    return this.groundStage.kind === 'anchored' || this.faceStage.kind === 'anchored'
+    return this.planeStage.kind === 'anchored' || this.faceStage.kind === 'anchored'
   }
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      // Idle with an active plane lock: Escape clears the lock FIRST — only
+      // a second Escape (already idle, unlocked) falls through to today's
+      // idle-Escape behavior (design §5.2).
+      if (!this.capturingInput() && this.idlePlaneLock !== null) {
+        this.idlePlaneLock = null
+        this._lastIdleHoverPoint = null
+        return
+      }
       this._onEscape()
       return
     }
 
-    if (!this.capturingInput()) return
+    if (!this.capturingInput()) {
+      // Idle plane lock via arrow keys (design §5.2) — consumed by neither
+      // hover nor preview, only by the next first click.
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+        this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
+        // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
+        this._lastIdleHoverPoint = null
+      }
+      return
+    }
 
     // ── Axis lock via arrow keys (mirrors MoveTool) ──
     if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
@@ -476,7 +646,7 @@ export class LineTool implements Tool {
     if (anchor === null) return null
     const cursor = this.faceStage.kind === 'anchored'
       ? this._lastFaceCursor
-      : (this._lastGroundCursor !== null ? [this._lastGroundCursor[0], this._lastGroundCursor[1], 0] as V3 : null)
+      : this._lastPlaneCursor
     if (cursor === null) return null
 
     const dx = cursor[0] - anchor[0]
@@ -511,7 +681,7 @@ export class LineTool implements Tool {
   /** Escape: first ends the in-progress chain (keeping committed geometry);
    * a second Escape (already idle) is a full cancel(). */
   private _onEscape(): void {
-    if (this.groundStage.kind === 'anchored' || this.faceStage.kind === 'anchored') {
+    if (this.planeStage.kind === 'anchored' || this.faceStage.kind === 'anchored') {
       this._endChain()
     } else {
       this.cancel()
@@ -528,10 +698,10 @@ export class LineTool implements Tool {
       const { object, face, points } = this.faceStage
       this._commitFacePath(object, face, points)
     }
-    this.groundStage = { kind: 'idle' }
+    this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
-    this._lastGroundCursor = null
+    this._lastPlaneCursor = null
     this._lastFaceCursor = null
     this.lockAxis = null
     this.shiftAxisLock = false
@@ -541,27 +711,30 @@ export class LineTool implements Tool {
   }
 
   cancel(): void {
-    this.groundStage = { kind: 'idle' }
+    this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
-    this._lastGroundCursor = null
+    this._lastPlaneCursor = null
     this._lastFaceCursor = null
     this.lockAxis = null
     this.shiftAxisLock = false
+    this.idlePlaneLock = null
+    this._lastIdleHoverPoint = null
     this._clearPreview()
     this.onMeasurementCb('')
     this.wasmScene.clear_transient_segments()
   }
 
   /**
-   * A new/loaded document replaced the Scene, so any cached ground-sketch
-   * handle is now stale (reusing it throws UnknownSketch). Drop it and reset
-   * to idle. The Viewport calls this from `notifyLoaded`. Re-pressing the
-   * Line shortcut while Line is already active does NOT recreate the tool, so
-   * this hook — not tool re-instantiation — is what clears the stale handle.
+   * A new/loaded document replaced the Scene, so every cached plane-mode
+   * sketch handle is now stale (reusing one throws UnknownSketch). Drop them
+   * all and reset to idle. The Viewport calls this from `notifyLoaded`.
+   * Re-pressing the Line shortcut while Line is already active does NOT
+   * recreate the tool, so this hook — not tool re-instantiation — is what
+   * clears the stale handles.
    */
   onDocumentReset(): void {
-    this.sketchCache.set(null)
+    this.sketchCache.clear()
     this.cancel()
   }
 
@@ -581,15 +754,13 @@ export class LineTool implements Tool {
    * direction is available at all.
    */
   private _commitTyped(distance: number): void {
-    if (this.groundStage.kind === 'anchored') {
-      const { anchor } = this.groundStage
-      const last: V3 = [anchor[0], anchor[1], 0]
-      const cursor2 = this._lastGroundCursor
-      const cursor: V3 = cursor2 !== null ? [cursor2[0], cursor2[1], 0] : last
-      const dir = directionBetween(last, cursor)
+    if (this.planeStage.kind === 'anchored') {
+      const { plane, target, anchor } = this.planeStage
+      const cursor = this._lastPlaneCursor ?? anchor
+      const dir = directionBetween(anchor, cursor)
       if (dir === null) return
-      const endpoint = pointAlong(last, dir, distance)
-      this._commitGroundSegment(anchor, [endpoint[0], endpoint[1]])
+      const endpoint = pointAlong(anchor, dir, distance)
+      this._commitPlaneSegment(plane, target, anchor, endpoint)
     } else if (this.faceStage.kind === 'anchored') {
       const { points } = this.faceStage
       const last = points[points.length - 1]
@@ -601,43 +772,51 @@ export class LineTool implements Tool {
     }
   }
 
-  // ------------------------------------------------------------------ ground mode
+  // ------------------------------------------------------------------ plane mode
 
-  private _onPointerDownGround(snap: Snap | null): void {
-    if (snap === null) return
-    const cursor: [number, number] = [snap.x, snap.y]
+  private _onPointerDownPlane(snap: Snap | null, ray: Ray): void {
+    if (this.planeStage.kind === 'idle') {
+      // First click: resolve (and freeze) the plane/target, then set anchor
+      // — no segment to commit yet.
+      const resolved = this._resolveClickTarget(snap, ray)
+      if (resolved === null) return
+      const { plane, target } = resolved
+      const anchor = this._planeCursor(snap, ray, plane)
+      if (anchor === null) return
 
-    if (this.groundStage.kind === 'idle') {
-      // First click: set anchor — no segment to commit yet.
-      this.groundStage = { kind: 'anchored', anchor: cursor }
-      this._lastGroundCursor = null
+      this.planeStage = { kind: 'anchored', plane, target, anchor }
+      this._lastPlaneCursor = null
       this.typed = ''
       this.onMeasurementCb('')
       this._publishTransient(null)
     } else {
-      const { anchor } = this.groundStage
-      this._commitGroundSegment(anchor, cursor)
+      const { plane, target, anchor } = this.planeStage
+      const cursor = this._planeCursor(snap, ray, plane)
+      if (cursor === null) return
+      this._commitPlaneSegment(plane, target, anchor, cursor)
     }
   }
 
   /** Commit one segment anchor -> cursor, then chain forward from cursor. */
-  private _commitGroundSegment(anchor: [number, number], cursor: [number, number]): void {
-    // Skip degenerate zero-length segments.
-    if (
-      Math.abs(anchor[0] - cursor[0]) < 1e-8 &&
-      Math.abs(anchor[1] - cursor[1]) < 1e-8
-    ) {
+  private _commitPlaneSegment(plane: DrawPlane, target: SketchTarget, anchor: V3, cursor: V3): void {
+    // Skip degenerate zero-length segments. The ground branch keeps the
+    // EXACT legacy per-axis check (independent x/y thresholds, ignoring z
+    // since it's always 0) — bit-identical gating to before this module
+    // existed; non-ground uses the Euclidean check face mode already uses.
+    if (plane.ground) {
+      if (Math.abs(anchor[0] - cursor[0]) < 1e-8 && Math.abs(anchor[1] - cursor[1]) < 1e-8) return
+    } else if (segmentLength(anchor, cursor) < 1e-8) {
       return
     }
 
     try {
       // Each committed segment is its own gesture — one Cmd+Z undoes exactly
       // that segment, matching LineTool's chain-forward-per-click semantics.
-      runSketchGesture(this.wasmScene, this.sketchCache, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch) => {
         const report = this.wasmScene.sketch_add_segment(
           sketch,
-          anchor[0], anchor[1], 0,
-          cursor[0], cursor[1], 0,
+          anchor[0], anchor[1], anchor[2],
+          cursor[0], cursor[1], cursor[2],
         )
         let closed: boolean
         try {
@@ -650,18 +829,19 @@ export class LineTool implements Tool {
 
         if (closed) {
           // The loop closed into a face — end the chain (idle, ready for a new line).
-          this.groundStage = { kind: 'idle' }
+          this.planeStage = { kind: 'idle' }
           this.typed = ''
-          this._lastGroundCursor = null
+          this._lastPlaneCursor = null
           this.lockAxis = null
           this.shiftAxisLock = false
           this._clearPreview()
           this.onMeasurementCb('')
           this.wasmScene.clear_transient_segments()
         } else {
-          // Chain forward: the new point becomes the anchor for the next segment.
-          this.groundStage = { kind: 'anchored', anchor: cursor }
-          this._lastGroundCursor = null
+          // Chain forward: the new point becomes the anchor for the next
+          // segment, on the SAME frozen plane/target.
+          this.planeStage = { kind: 'anchored', plane, target, anchor: cursor }
+          this._lastPlaneCursor = null
           this.typed = ''
           this._clearPreview()
           this.onMeasurementCb('')
@@ -746,18 +926,6 @@ export class LineTool implements Tool {
   }
 
   // ------------------------------------------------------------------ preview
-
-  /** Draw a rubber-band line from a 2D ground-plane anchor to the cursor. */
-  private _drawRubberBandGround(anchor: [number, number], cursor: [number, number]): void {
-    this._clearPreview()
-    this._drawRubberBandSegment([anchor[0], anchor[1], 0], [cursor[0], cursor[1], 0])
-  }
-
-  /** Draw a rubber-band line from the last placed point to the cursor (face mode). */
-  private _drawRubberBandFace(last: V3, cursor: V3): void {
-    this._clearPreview()
-    this._drawRubberBandSegment(last, cursor)
-  }
 
   /**
    * Emit a LineSegments preview for a single segment. Endpoints are used

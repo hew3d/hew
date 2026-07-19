@@ -15,9 +15,18 @@ below.
 
 ### Modeling
 
-- Rectangle, line, circle, and arc drawing on the ground plane or on any
-  face, all sharing one ground sketch so mixed-tool profiles close into
-  regions; arcs optionally close as a pie or a chord segment (Alt cycles)
+- Rectangle, line, circle, and arc drawing on any plane, SketchUp-style: the
+  ground plane, any face, the plane of a hovered sketch (drawing onto it
+  extends it directly), or — with a draw tool idle — an arrow-key lock to a
+  world-axis plane through the next click (Right/Left/Up = red/green/blue,
+  same key mapping and color semantics as the transform tools' axis locks).
+  Mixed-tool profiles close into regions in one shared sketch PER plane
+  (ground drawing keeps its own single shared ground sketch, generalized
+  rather than replaced); arcs optionally close as a pie or a chord segment
+  (Alt cycles). Editing (select, delete, transform) is plane-blind and
+  already worked on a rotated sketch. TapeMeasure and Protractor adopt a
+  hovered sketch's plane too, so a guide/measurement started on a tilted
+  sketch stays in that plane
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent
