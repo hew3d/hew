@@ -24,9 +24,10 @@ Object Info (Window ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the singl
 - **Name**: type a new one and press `Enter`. Clear the field to fall back to the automatic label ("Object 1", "Group 2", …). Sketches can't be renamed.
 - **Type**: Object, Group, Component, or Sketch.
 - **Geometry**, for objects: **Solid** (green) or **Leaky** (red). [Core concepts](/learn/core-concepts/) explains why this matters.
+- **Dimensions**: the selection's overall size — `X × Y × Z` in your current units — as a world, axis-aligned bounding box. A rotated part's box is bigger than its own footprint, same as SketchUp's; it's the number that tells you whether the thing fits your print bed or stock, not its true local size.
 - **Tags**: the item's tag chips. Click **+** to add a tag; click a chip's **×** to remove it.
 
-With several things selected, Object Info shows just the count; select one item to edit its details.
+With several things selected, Object Info shows just the count and the selection's combined Dimensions; select one item to edit its details.
 
 ## Tags
 

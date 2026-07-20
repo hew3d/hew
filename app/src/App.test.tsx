@@ -67,6 +67,10 @@ const mockScene = {
   material_texture_bytes: () => undefined,
   set_torture_mode: vi.fn(),
   component_member_objects: () => new BigUint64Array(),
+  // Object Info's Bounding Box row (objectBounds.worldBoundsForSelection) reads
+  // per-object render meshes; a mesh-less stub keeps it a no-op here.
+  object_mesh: () => ({ positions: () => new Float32Array(), free: () => {} }),
+  instance_pose: () => undefined as Float64Array | undefined,
   node_leaf_objects: () => new BigUint64Array(),
   set_hidden: vi.fn(),
   group_members: () => [] as { kind: string; id: bigint }[],

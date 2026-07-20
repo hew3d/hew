@@ -16,6 +16,7 @@ import { DocumentTree } from './DocumentTree'
 import { TagsPanel } from './TagsPanel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { MATERIAL_SENTINEL } from '../tools/PaintTool'
+import { getLengthUnit, setLengthUnit } from '../settings/units'
 
 // ---------------------------------------------------------------------------
 // Mock Scene factory — provides only the methods the panels actually call.
@@ -58,6 +59,12 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     component_name: (_id: bigint) => undefined as string | undefined,
     instances_of: (_id: bigint) => new BigUint64Array(),
     set_component_name: vi.fn(),
+    // Bounding Box row (objectBounds.worldBoundsForSelection) — default to a
+    // mesh-less scene (no positions), so tests that don't care about
+    // Bounding Box sees no row rather than a thrown "not a function".
+    object_mesh: (_id: bigint) => ({ positions: () => new Float32Array(), free: () => {} }),
+    instance_pose: (_id: bigint) => undefined as Float64Array | undefined,
+    component_member_objects: (_id: bigint) => new BigUint64Array(),
     ...overrides,
   } as unknown as WasmScene
 }
@@ -662,6 +669,111 @@ describe('ObjectInfoPanel', () => {
     expect(screen.queryByText(/a drawn line/i)).not.toBeInTheDocument()
     // No name input (sketches aren't renameable), no crash from nodeKindToNumber.
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  })
+
+  // -------------------------------------------------------------------------
+  // Bounding Box row (objectBounds.worldBoundsForSelection) — world AABB
+  // extents, formatted with the same length formatter Tape Measure/typed
+  // entry use.
+  // -------------------------------------------------------------------------
+
+  it('shows a Bounding Box row for a selected object, formatted in the active length unit', () => {
+    const originalFormat = getLengthUnit()
+    try {
+      setLengthUnit('mm')
+      const { container } = render(
+        <ObjectInfoPanel
+          scene={makeScene({
+            object_name: () => 'Bracket',
+            node_tags: () => [],
+            object_solid: () => true,
+            // A 220mm x 150mm x 100mm box (two opposite corners suffice —
+            // meshWorldBounds only reads extremal coordinates).
+            object_mesh: () => ({
+              positions: () => new Float32Array([-0.11, -0.075, -0.05, 0.11, 0.075, 0.05]),
+              free: () => {},
+            }),
+          })}
+          docRev={0}
+          selectedIds={[{ kind: 'object', id: 1n }]}
+          onDocumentChanged={vi.fn()}
+          onSelectMany={vi.fn()}
+        />,
+      )
+      expect(screen.getByText('Bounding Box')).toBeInTheDocument()
+      expect(container.textContent).toContain('220 mm')
+      expect(container.textContent).toContain('150 mm')
+      expect(container.textContent).toContain('100 mm')
+    } finally {
+      setLengthUnit(originalFormat)
+    }
+  })
+
+  it('shows no Bounding Box row for a mesh-less selection (a sketch)', () => {
+    render(
+      <ObjectInfoPanel
+        scene={makeScene({
+          sketch_ids: () => new BigUint64Array([10n]),
+        })}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch-island', id: 110n, sketch: 10n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.queryByText('Bounding Box')).not.toBeInTheDocument()
+  })
+
+  it('shows the union Bounding Box of a multi-selection alongside the count line', () => {
+    const scene = makeScene({
+      object_mesh: (id: bigint) =>
+        id === 1n
+          ? { positions: () => new Float32Array([0, 0, 0, 1, 1, 1]), free: () => {} }
+          : { positions: () => new Float32Array([2, 2, 2, 3, 3, 3]), free: () => {} },
+    })
+    const { container } = render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[
+          { kind: 'object', id: 1n },
+          { kind: 'object', id: 2n },
+        ]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('2 selected')).toBeInTheDocument()
+    expect(screen.getByText('Bounding Box')).toBeInTheDocument()
+    // Union extent is 3m on each axis (0 to 3) in the default 'm' format.
+    expect(container.textContent).toContain('3 m')
+  })
+
+  it('renders without throwing when object_mesh throws for the selected id (no Bounding Box row)', () => {
+    // `object_mesh` throws (UnknownObject) on a stale/deleted id — reproducing
+    // the post-undo case where the selection still names a removed object.
+    // The panel must degrade gracefully (no crash, no Bounding Box row), like
+    // the mesh-less-sketch case above.
+    const scene = makeScene({
+      object_name: () => 'Ghost',
+      node_tags: () => [],
+      object_solid: () => true,
+      object_mesh: () => {
+        throw new Error('UnknownObject: object')
+      },
+    })
+    expect(() =>
+      render(
+        <ObjectInfoPanel
+          scene={scene}
+          docRev={0}
+          selectedIds={[{ kind: 'object', id: 1n }]}
+          onDocumentChanged={vi.fn()}
+          onSelectMany={vi.fn()}
+        />,
+      ),
+    ).not.toThrow()
+    expect(screen.queryByText('Bounding Box')).not.toBeInTheDocument()
   })
 })
 

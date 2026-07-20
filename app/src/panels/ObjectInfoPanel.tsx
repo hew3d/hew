@@ -7,6 +7,11 @@
  *     default label the Outliner shows, via resolveLabel — never "(unnamed)")
  *   - Type (read-only: "Object", "Group", "Component", or "Sketch")
  *   - Solid / Leaky (only for Objects; calls scene.object_solid)
+ *   - Bounding Box (world axis-aligned bounding-box extents, X × Y × Z, in the
+ *     active length format — objectBounds.worldBoundsForSelection computes
+ *     it client-side from the render meshes the app already holds; shown for
+ *     Object/Group/Component/multi-selection, hidden when the selection has
+ *     no mesh, e.g. only Sketches)
  *   - Tags (removable chips + a "+" affordance that reveals the add field)
  *
  * A component instance gets the component treatment instead of the plain
@@ -36,6 +41,8 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
+import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
+import { formatLength } from '../settings/units'
 
 interface Props {
   scene: WasmScene
@@ -222,6 +229,21 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
   }, [scene, docRev, selectedIds])
 
   // --------------------------------------------------------------------------
+  // World bounding-box (Bounding Box row). Computed for ANY selection — single
+  // node OR multi-selection — unlike nodeInfo above, which is single-node
+  // only; this is why it's a separate memo rather than a field on nodeInfo.
+  // Client-side (objectBounds.worldBoundsForSelection): unions the world AABB
+  // of every leaf mesh reachable from the selection. Null for an empty
+  // selection or one with no mesh (e.g. only Sketches) — the Bounding Box row
+  // just doesn't render in that case.
+  // --------------------------------------------------------------------------
+  const bounds = useMemo(
+    () => worldBoundsForSelection(scene, selectedIds),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scene, docRev, selectedIds],
+  )
+
+  // --------------------------------------------------------------------------
   // Local controlled state for the name input.
   // Sync with the kernel-derived name whenever nodeInfo changes (new selection
   // or doc mutation). This effect is idempotent — calling setLocalName with the
@@ -345,13 +367,15 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     return <div style={PANEL_STYLE} />
   }
 
-  // Multi-selection → a single quiet count line (information, not boilerplate).
+  // Multi-selection → a single quiet count line (information, not boilerplate),
+  // plus the union Bounding Box of every selected node's mesh, if any.
   if (nodeInfo === null) {
     return (
       <div style={PANEL_STYLE}>
         <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', padding: '4px 8px' }}>
           {selectedIds.length} selected
         </div>
+        {bounds !== null && <BoundingBoxRow bounds={bounds} />}
       </div>
     )
   }
@@ -470,6 +494,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
         </div>
       )}
 
+      {/* Bounding Box — world AABB extents; hidden for a mesh-less selection
+       * (e.g. a Sketch, or a stale instance). */}
+      {bounds !== null && <BoundingBoxRow bounds={bounds} />}
+
       {/* Tags — sketches can't be tagged yet. Empty state is just the "+"
        * button next to the label: no chips, no "No tags" text. */}
       {(nodeInfo.kind === 'object' || nodeInfo.kind === 'group' || nodeInfo.kind === 'instance') && (
@@ -545,6 +573,33 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
         )}
       </div>
       )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// BoundingBoxRow — world AABB extents as "X 12mm × Y 34mm × Z 56mm", each
+// axis letter colored to match the viewport's axis colors (X=red, Y=green,
+// Z=blue — Z is height) and each extent formatted with the same length
+// formatter Tape Measure / typed entry use, so it always reads in the
+// active length format (docs/DEVELOPMENT.md rule 6 — display-layer
+// formatting only, kernel lengths stay f64 meters throughout). Labeled
+// "Bounding Box" (not "Dimensions") so it's clear the three numbers are the
+// selection's axis-aligned extents, not e.g. a single object property.
+// ---------------------------------------------------------------------------
+
+function BoundingBoxRow({ bounds }: { bounds: Bounds }) {
+  const [ex, ey, ez] = boundsExtents(bounds)
+  return (
+    <div>
+      <div style={LABEL_STYLE}>Bounding Box</div>
+      <div style={VALUE_STYLE}>
+        <span style={{ color: 'var(--axis-red)' }}>X</span> {formatLength(ex)}
+        <span style={{ color: 'var(--text-faint, #888)' }}> × </span>
+        <span style={{ color: 'var(--axis-green)' }}>Y</span> {formatLength(ey)}
+        <span style={{ color: 'var(--text-faint, #888)' }}> × </span>
+        <span style={{ color: 'var(--axis-blue)' }}>Z</span> {formatLength(ez)}
+      </div>
     </div>
   )
 }
