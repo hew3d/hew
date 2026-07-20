@@ -1,8 +1,9 @@
 /**
  *  — component tests for the dialog chrome.
  *
- * Covers: RecoveryDialog, ImportingOverlay, ImportReportDialog, and the
- * STL solid-gating dialog StlExportDialog.
+ * Covers: RecoveryDialog, ImportingOverlay, ImportReportDialog, the STL
+ * solid-gating dialog StlExportDialog, and the STL import units-chooser
+ * StlUnitsDialog.
  * None of these touch WASM or three.js, so no mocks beyond callbacks are needed.
  *
  * FloatingPanel's tests lived here too until deleted that component
@@ -11,12 +12,14 @@
  */
 
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RecoveryDialog } from './RecoveryDialog'
 import { ImportingOverlay } from './ImportingOverlay'
 import { ImportReportDialog } from './ImportReportDialog'
 import { StlExportDialog } from './StlExportDialog'
+import { StlUnitsDialog } from './StlUnitsDialog'
 import { ExportDialog } from './ExportDialog'
+import { resetStlImportUnitForTest, setLastStlImportUnit } from '../settings/stlImportUnit'
 import type { RecoveryListing } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
 
@@ -355,6 +358,72 @@ describe('StlExportDialog', () => {
     expect(
       screen.getByText(/not watertight solids; the 3MF may not be manifold/i),
     ).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// StlUnitsDialog (STL import units-chooser — DESIGN §5/§7: default
+// selection is Millimeters, and the chosen unit_scale threads through to
+// onChoose exactly as import_stl expects)
+// ---------------------------------------------------------------------------
+
+describe('StlUnitsDialog', () => {
+  beforeEach(() => {
+    resetStlImportUnitForTest()
+  })
+
+  it('defaults to Millimeters', () => {
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={vi.fn()} onCancel={vi.fn()} />)
+    const mm = screen.getByRole('radio', { name: /millimeters/i })
+    expect(mm).toBeChecked()
+  })
+
+  it('shows the file name and the units prompt', () => {
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByText(/bracket\.stl/)).toBeInTheDocument()
+    expect(screen.getByText(/don.t record their units/i)).toBeInTheDocument()
+  })
+
+  it('calls onChoose with unit_scale 0.001 for the default Millimeters selection', () => {
+    const onChoose = vi.fn()
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={onChoose} onCancel={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /^import$/i }))
+    expect(onChoose).toHaveBeenCalledWith(0.001, 'mm')
+  })
+
+  it('threads the chosen unit through to onChoose (Inches -> 0.0254)', () => {
+    const onChoose = vi.fn()
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={onChoose} onCancel={vi.fn()} />)
+    fireEvent.click(screen.getByRole('radio', { name: /inches/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^import$/i }))
+    expect(onChoose).toHaveBeenCalledWith(0.0254, 'in')
+  })
+
+  it('preselects the last choice made this session', () => {
+    setLastStlImportUnit('m')
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByRole('radio', { name: /^meters$/i })).toBeChecked()
+  })
+
+  it('calls onCancel when Cancel is clicked', () => {
+    const onCancel = vi.fn()
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={vi.fn()} onCancel={onCancel} />)
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  it('calls onCancel — never onChoose — when Escape is pressed', () => {
+    const onChoose = vi.fn()
+    const onCancel = vi.fn()
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={onChoose} onCancel={onCancel} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledOnce()
+    expect(onChoose).not.toHaveBeenCalled()
+  })
+
+  it('has the expected ARIA dialog role and label', () => {
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByRole('dialog', { name: /stl import units/i })).toBeInTheDocument()
   })
 })
 

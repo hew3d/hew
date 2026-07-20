@@ -1,6 +1,6 @@
 ---
 title: "Import and export"
-description: "Hew reads SketchUp, COLLADA, and glTF, and writes manifold STL and 3MF for printing plus glTF for everything else."
+description: "Hew reads SketchUp, COLLADA, glTF, and STL, and writes manifold STL and 3MF for printing plus glTF for everything else."
 order: 15
 ---
 
@@ -10,12 +10,12 @@ order: 15
 | glTF / GLB (`.gltf`, `.glb`) | ✓ | ✓ (`.glb`) |
 | COLLADA (`.dae`) | ✓ | — |
 | SketchUp (`.skp`, 2017 format) | ✓ | — |
-| STL (`.stl`) | — | ✓ |
+| STL (`.stl`) | ✓ | ✓ |
 | 3MF (`.3mf`) | — | ✓ |
 
 ## Importing
 
-**File ▸ Import…** accepts SketchUp, COLLADA, and glTF files; the format is detected from the file you pick. Imported geometry is rebuilt into real, editable Hew Objects that you can keep modeling, and each object's watertightness is assessed on the way in.
+**File ▸ Import…** accepts SketchUp, COLLADA, glTF, and STL files; the format is detected from the file you pick. Imported geometry is rebuilt into real, editable Hew Objects that you can keep modeling, and each object's watertightness is assessed on the way in.
 
 After every import, an **Import Complete** report summarizes what happened: how many objects were created (and how many are solid vs. leaky), any meshes that had to be skipped and why, any texture images the file referenced but Hew couldn't find, and warnings — for instance a non-manifold mesh imported as separate open shells rather than one solid. Nothing is silently repaired or silently dropped.
 
@@ -30,6 +30,16 @@ COLLADA import covers SketchUp's own export path, including a healing pass that 
 ### glTF / GLB
 
 Both `.gltf` and `.glb` import, with embedded textures and the full node hierarchy.
+
+### STL
+
+STL is where downloaded prints live — Printables, Thingiverse, anywhere makers share models — and Hew reads both the binary and text (ASCII) flavors, auto-detected from the file itself. STL is the crudest format Hew imports: no object grouping, no names, no materials, no units, and its per-triangle normals are unreliable enough that Hew ignores them and works out which way is "outward" from the geometry itself, the same way every other importer does.
+
+Because STL carries no unit information at all, Hew asks once per import: millimeters (the default — the near-universal maker convention), centimeters, inches, or meters. Picking wrong is the single most common STL headache ("why is my model 1000× too big"), so there's no silent guess. Your last choice is remembered for the rest of the session.
+
+A single-part file becomes one Object. A multi-part plate — several disconnected shapes saved into one `.stl`, common for a print batch — comes back as one Object per part, each independently assessed for watertightness. Objects are named from the file: `bunny.stl` gives you "bunny", or "bunny", "bunny (2)", "bunny (3)" for a multi-part file. A part with a genuine gap in its surface imports anyway, flagged leaky in the report, exactly like a leaky COLLADA or glTF mesh: never refused, never silently patched shut.
+
+A hollow model — one whose outer wall encloses a separate inner wall (vase-mode or explicit wall-thickness prints) — reconstructs into one watertight Object with the inner wall as a cavity, a real void in the material, exactly how a hollow is meant to be. A solid piece floating inside that cavity comes in as its own separate Object.
 
 ## Exporting
 

@@ -90,6 +90,14 @@ const mockScene = {
     textures_missing: [] as string[],
     warnings: [] as string[],
   })),
+  import_stl: vi.fn(() => ({
+    objects_created: 0,
+    watertight: 0,
+    leaky: 0,
+    skipped: [] as { name: string; reason: string }[],
+    textures_missing: [] as string[],
+    warnings: [] as string[],
+  })),
 }
 
 vi.mock('./wasm/loader', () => ({
@@ -143,6 +151,7 @@ import App from './App'
 import Viewport from './viewport/Viewport'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 import { setShowWelcome } from './settings/welcomeScreen'
+import { resetStlImportUnitForTest } from './settings/stlImportUnit'
 import { makeFileHost, type FileHost } from './io/fileHost'
 
 // ---------------------------------------------------------------------------
@@ -745,6 +754,138 @@ describe('App — import overlay lifecycle', () => {
     await waitFor(() => expect(fakeFileHost.openForImport).toHaveBeenCalled())
     expect(mockScene.import_skp).not.toHaveBeenCalled()
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — STL import: the units-chooser modal (DESIGN §5) must appear
+// BEFORE the blocking overlay, and its resolved unit_scale must be exactly
+// what reaches scene.import_stl. Cancelling the chooser must behave like
+// cancelling the file picker (no import, no overlay, document untouched).
+// ---------------------------------------------------------------------------
+
+describe('App — STL import units chooser', () => {
+  const defaultImportStl = mockScene.import_stl
+  const emptyReport = {
+    objects_created: 1,
+    watertight: 1,
+    leaky: 0,
+    skipped: [] as { name: string; reason: string }[],
+    textures_missing: [] as string[],
+    warnings: [] as string[],
+  }
+
+  let fakeFileHost: FileHost
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+    // The last-STL-unit singleton persists across tests; reset so the chooser
+    // defaults to Millimeters regardless of what a prior test picked.
+    resetStlImportUnitForTest()
+    fakeFileHost = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      openForImport: vi.fn().mockResolvedValue({
+        kind: 'stl',
+        name: 'bracket.stl',
+        bytes: new Uint8Array([1, 2, 3]),
+      }),
+      exportBinary: vi.fn(),
+    }
+    vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
+  })
+
+  afterEach(() => {
+    mockScene.import_stl = defaultImportStl
+    vi.mocked(makeFileHost).mockReset()
+  })
+
+  const triggerImport = () => {
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Import…'))
+  }
+
+  it('shows the units chooser before the overlay, defaulting to Millimeters', async () => {
+    mockScene.import_stl = vi.fn(() => emptyReport)
+
+    await renderAndLoad()
+    triggerImport()
+
+    const dialog = await screen.findByRole('dialog', { name: /stl import units/i })
+    expect(within(dialog).getByRole('radio', { name: /millimeters/i })).toBeChecked()
+    // The blocking overlay must not appear until AFTER the unit is chosen.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(mockScene.import_stl).not.toHaveBeenCalled()
+  })
+
+  it('threads the default Millimeters choice through to scene.import_stl as unit_scale 0.001', async () => {
+    mockScene.import_stl = vi.fn(() => emptyReport)
+
+    await renderAndLoad()
+    triggerImport()
+
+    const dialog = await screen.findByRole('dialog', { name: /stl import units/i })
+    fireEvent.click(within(dialog).getByRole('button', { name: /^import$/i }))
+
+    await waitFor(() => expect(mockScene.import_stl).toHaveBeenCalled())
+    expect(mockScene.import_stl).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), 0.001, 'bracket')
+  })
+
+  it('threads a non-default choice (Inches) through as unit_scale 0.0254', async () => {
+    mockScene.import_stl = vi.fn(() => emptyReport)
+
+    await renderAndLoad()
+    triggerImport()
+
+    const dialog = await screen.findByRole('dialog', { name: /stl import units/i })
+    fireEvent.click(within(dialog).getByRole('radio', { name: /inches/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /^import$/i }))
+
+    await waitFor(() => expect(mockScene.import_stl).toHaveBeenCalled())
+    expect(mockScene.import_stl).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), 0.0254, 'bracket')
+  })
+
+  it('cancelling the units chooser never imports and leaves the document untouched', async () => {
+    mockScene.import_stl = vi.fn(() => emptyReport)
+
+    await renderAndLoad()
+    triggerImport()
+
+    const dialog = await screen.findByRole('dialog', { name: /stl import units/i })
+    fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /stl import units/i })).not.toBeInTheDocument(),
+    )
+    expect(mockScene.import_stl).not.toHaveBeenCalled()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('a second import triggered while the units chooser is open is refused (no hang, first import survives)', async () => {
+    mockScene.import_stl = vi.fn(() => emptyReport)
+
+    await renderAndLoad()
+    triggerImport()
+
+    // First chooser is open.
+    const dialog = await screen.findByRole('dialog', { name: /stl import units/i })
+    expect(vi.mocked(fakeFileHost.openForImport)).toHaveBeenCalledTimes(1)
+
+    // Fire a SECOND import while the first chooser is still open. The
+    // re-entrancy guard must refuse it: no second file dialog, and the first
+    // chooser stays exactly as it was (not clobbered).
+    triggerImport()
+    await Promise.resolve()
+    expect(vi.mocked(fakeFileHost.openForImport)).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('dialog', { name: /stl import units/i })).toBe(dialog)
+
+    // Completing the FIRST chooser still drives its import to completion —
+    // proof the first call was never orphaned.
+    fireEvent.click(within(dialog).getByRole('button', { name: /^import$/i }))
+    await waitFor(() => expect(mockScene.import_stl).toHaveBeenCalledTimes(1))
+    expect(mockScene.import_stl).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), 0.001, 'bracket')
   })
 })
 

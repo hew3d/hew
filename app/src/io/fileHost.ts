@@ -40,12 +40,15 @@ export interface ImportReport {
 /**
  * A successfully-picked import file. `kind` selects the kernel importer:
  * COLLADA carries host-resolved `images`; glTF and SketchUp embed their own
- * resources, so they carry only bytes.
+ * resources, so they carry only bytes. STL carries neither resources nor
+ * units — the caller (App.tsx) prompts for a unit scale before dispatching
+ * to `scene.import_stl`.
  */
 export type ImportPick =
   | { kind: 'dae'; name: string; bytes: Uint8Array; images: Record<string, ImageEntry> }
   | { kind: 'gltf'; name: string; bytes: Uint8Array }
   | { kind: 'skp'; name: string; bytes: Uint8Array }
+  | { kind: 'stl'; name: string; bytes: Uint8Array }
 
 export interface FileHost {
   /**
@@ -69,15 +72,17 @@ export interface FileHost {
 
   /**
    * Prompt the user to choose a model file to import — COLLADA (`.dae`),
-   * SketchUp 2017 (`.skp`), or glTF (`.glb` / `.gltf`) — the format is chosen
-   * by the file the user picks (the dialog offers a filter for each). Returns
-   * null if the user cancels.
+   * SketchUp 2017 (`.skp`), glTF (`.glb` / `.gltf`), or STL (`.stl`) — the
+   * format is chosen by the file the user picks (the dialog offers a filter
+   * for each). Returns null if the user cancels.
    *
    * The returned `kind` tells the caller which kernel importer to run. For
    * COLLADA, `images` maps each referenced image URI to its encoded bytes +
    * format (missing images are reported by the kernel ImportReport, not an
-   * error here); glTF and SketchUp both embed their own resources (SketchUp
-   * files embed their textures), so they carry only the bytes.
+   * error here); glTF, SketchUp, and STL all embed their own resources
+   * (SketchUp files embed their textures; STL has none), so they carry only
+   * the bytes. STL additionally carries no units — the caller prompts for a
+   * unit scale before calling `scene.import_stl`.
    *
    * `name` is the display name (basename) of the chosen file, used by the
    * importing overlay to show "Importing "<name>"…" while the parse runs.

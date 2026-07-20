@@ -150,7 +150,7 @@ function toolEntries(): PaletteEntry[] {
 const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'new', label: 'New', description: 'Start a new, blank document.', group: 'Actions' },
   { id: 'open', label: 'Open…', description: 'Open a .hew file from disk.', group: 'Actions' },
-  { id: 'import', label: 'Import…', description: 'Import a COLLADA (.dae), SketchUp (.skp), or glTF model.', group: 'Actions' },
+  { id: 'import', label: 'Import…', description: 'Import a COLLADA (.dae), SketchUp (.skp), glTF, or STL model.', group: 'Actions' },
   { id: 'export', label: 'Export…', description: 'Export the model as glTF, STL, or 3MF — format chosen in the dialog.', group: 'Actions', synonyms: ['stl', 'glb', 'gltf', '3mf', '3d print', 'print', 'slicer'] },
   { id: 'save', label: 'Save', description: 'Save the current document.', group: 'Actions' },
   { id: 'save-as', label: 'Save As…', description: 'Save the current document under a new name.', group: 'Actions' },

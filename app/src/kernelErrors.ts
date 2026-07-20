@@ -240,14 +240,15 @@ export function kernelErrorMessage(code: string, rawMsg: string): string {
 }
 
 /**
- * Importer wrapper prefixes: `import_dae`/`import_gltf`/`import_skp` (and,
- * historically, `Scene::load`) tag errors with the FORMAT, not a typed
- * variant, and their payload text is already written for people — e.g. the
- * `.skp` version message carries exact "Save As 2017" guidance. Unwrap the
- * tag and show the payload as-is; running it through the table's fallback
- * would bury real guidance inside boilerplate.
+ * Importer wrapper prefixes: `import_dae`/`import_gltf`/`import_skp`/
+ * `import_stl` (and, historically, `Scene::load`) tag errors with the
+ * FORMAT, not a typed variant, and their payload text is already written
+ * for people — e.g. the `.skp` version message carries exact "Save As 2017"
+ * guidance, and `.stl`'s carries "This file isn't a valid STL." / "This STL
+ * is empty." Unwrap the tag and show the payload as-is; running it through
+ * the table's fallback would bury real guidance inside boilerplate.
  */
-const WRAPPER_CODES = new Set(['DAE', 'glTF', 'SKP', 'LOAD'])
+const WRAPPER_CODES = new Set(['DAE', 'glTF', 'SKP', 'STL', 'LOAD'])
 
 /**
  * One-step convenience for `catch` sites holding a raw thrown value: map a

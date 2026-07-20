@@ -217,6 +217,16 @@ below.
 - 3MF export — a modern print format alongside STL: explicit millimeter
   units, one mesh per object carrying its name and per-face colors,
   better suited to multi-part prints; gated on solids the same way STL is
+- Native STL import — the maker-download-and-remix path (Printables,
+  Thingiverse): a hand-written binary/ASCII reader (no external STL crate)
+  feeds the same weld → heal pipeline every importer shares, so a triangle
+  soup with no shared vertices, no object grouping, and no units comes back
+  as editable, correctly oriented, watertight-or-honestly-leaky Objects — a
+  disjoint multi-part plate splits into one Object per part, and a hollow part
+  (outer wall enclosing an inner wall) reconstructs into one Object with a
+  cavity. Objects are named from the file (`bunny.stl` → "bunny", "bunny (2)",
+  …). STL carries no unit information, so the UI prompts once per import
+  (millimeters default, the maker convention)
 
 | Format | Import | Export |
 |---|---|---|
@@ -224,7 +234,7 @@ below.
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
 | SketchUp (`.skp`, 2017 format) | yes | — |
-| STL | — | yes |
+| STL | yes | yes |
 | 3MF | — | yes |
 
 ### Application shell & UX

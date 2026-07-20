@@ -110,13 +110,16 @@ pub fn build_scene(
     let SplitWarnings {
         messages,
         index_messages,
+        degenerate_messages,
         ..
     } = warnings;
     let mut warnings = messages;
     cap_split_warnings(&mut warnings);
-    // Bad-index reports ride after the (capped) split notices: one line per
-    // affected mesh, never absorbed into the non-manifold aggregate.
+    // Bad-index and degenerate-drop reports ride after the (capped) split
+    // notices: one line per affected mesh, never absorbed into the
+    // non-manifold aggregate.
     warnings.extend(index_messages);
+    warnings.extend(degenerate_messages);
     Ok((
         ImportScene {
             materials: mat_table.materials,
@@ -236,6 +239,13 @@ struct SplitWarnings {
     /// Bad-index warnings, kept apart from `messages` so the non-manifold
     /// aggregation cap never truncates or mislabels them.
     index_messages: Vec<String>,
+    /// glTF mesh indices that have already produced a degenerate-drop warning
+    /// (same re-extraction dedup as `warned_bad_indices`).
+    warned_degenerate: HashSet<usize>,
+    /// Kernel-degenerate sliver-drop warnings (heal removed faces the kernel
+    /// could not build a plane through), kept apart from `messages` for the
+    /// same cap reason as `index_messages`.
+    degenerate_messages: Vec<String>,
 }
 
 impl SplitWarnings {
@@ -255,6 +265,27 @@ impl SplitWarnings {
             },
             skipped,
             if skipped == 1 { "" } else { "s" },
+        ));
+    }
+
+    /// Report kernel-degenerate sliver faces the heal pass removed (rule 4:
+    /// a geometry-altering drop is reported loudly, never silent), once per
+    /// glTF mesh.
+    fn note_degenerate_drops(&mut self, mesh_index: usize, name: &str, dropped: usize) {
+        if dropped == 0 || !self.warned_degenerate.insert(mesh_index) {
+            return;
+        }
+        self.degenerate_messages.push(format!(
+            "'{}': {} degenerate sliver face{} (too thin to build) {} removed; \
+             the mesh may arrive leaky",
+            if name.is_empty() {
+                "unnamed mesh"
+            } else {
+                name
+            },
+            dropped,
+            if dropped == 1 { "" } else { "s" },
+            if dropped == 1 { "was" } else { "were" },
         ));
     }
 }
@@ -295,20 +326,24 @@ fn build_recipes(
     // the identity) keeps the tolerance and the welded coordinates in the
     // same space.
     let baked: Vec<Point3> = raw.positions.iter().map(|&p| bake.apply_point(p)).collect();
-    let (positions, faces, face_materials, healed_uvs, face_holes) = heal_mesh_with_tol(
-        &baked,
-        &raw.faces,
-        &raw.face_materials,
-        &raw.face_corner_uvs,
-        &no_holes,
-        &Transform::IDENTITY,
-        gltf_weld_tol(&baked),
-        // Merge coplanar triangles at the kernel's import planarity (1 mm), not
-        // the 1 nm native tolerance — f32 flat surfaces sit microns off-plane,
-        // so the strict gate would leave every wall/floor as triangle soup
-        // (huge face count + memory; D-fix for the OOM crash).
-        kernel::tol::IMPORT_PLANE_DIST,
-    );
+    let (positions, faces, face_materials, healed_uvs, face_holes, dropped_degenerate) =
+        heal_mesh_with_tol(
+            &baked,
+            &raw.faces,
+            &raw.face_materials,
+            &raw.face_corner_uvs,
+            &no_holes,
+            &Transform::IDENTITY,
+            gltf_weld_tol(&baked),
+            // Merge coplanar triangles at the kernel's import planarity (1 mm), not
+            // the 1 nm native tolerance — f32 flat surfaces sit microns off-plane,
+            // so the strict gate would leave every wall/floor as triangle soup
+            // (huge face count + memory; D-fix for the OOM crash).
+            kernel::tol::IMPORT_PLANE_DIST,
+        );
+    // Report BEFORE the emptiness bail so a mesh made entirely of degenerate
+    // slivers still says why it vanished instead of disappearing silently.
+    warnings.note_degenerate_drops(mesh_index, &name, dropped_degenerate);
     if faces.is_empty() {
         return Vec::new();
     }

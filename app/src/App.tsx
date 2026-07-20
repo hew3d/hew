@@ -44,6 +44,8 @@ import { WelcomeScreen, type SampleEntry } from './panels/WelcomeScreen'
 import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
 import { getLengthUnit, setLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit, type LengthFormat } from './settings/units'
 import { StlExportDialog } from './panels/StlExportDialog'
+import { StlUnitsDialog } from './panels/StlUnitsDialog'
+import { setLastStlImportUnit } from './settings/stlImportUnit'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
 import { friendlyErrorText, isErrorLevelCode } from './kernelErrors'
@@ -233,6 +235,8 @@ export default function App() {
   const [isImporting, setIsImporting] = useState(false)
   /** Display name of the file being imported (shown in the overlay). */
   const [importingName, setImportingName] = useState('')
+  /** STL units-chooser modal: the picked file's name, or null when closed. */
+  const [pendingStlImport, setPendingStlImport] = useState<{ name: string } | null>(null)
   /** Recovery snapshot to offer at startup (null = no dialog). */
   const [recoveryPrompt, setRecoveryPrompt] = useState<RecoveryListing[] | null>(null)
   /** Welcome screen on a bare launch (startup-handoff effect decides). */
@@ -267,6 +271,14 @@ export default function App() {
   const blankBytesRef = useRef<Uint8Array | null>(null)
   // Stable file host instance.
   const fileHostRef = useRef(makeFileHost())
+  // Resolver for the in-flight StlUnitsDialog promise (see promptStlUnits);
+  // null when no chooser is open.
+  const stlUnitsResolveRef = useRef<((unitScale: number | null) => void) | null>(null)
+  // Guards importDocument against re-entry: a second import started while the
+  // first is mid-flight (e.g. Ctrl+K ▸ "import" ▸ Enter behind the units
+  // modal) would otherwise orphan the first, hanging it forever. A ref (not
+  // state) so the guard is synchronous, before the first await.
+  const importInFlightRef = useRef(false)
   // Mirror of docSession kept up-to-date so callbacks can read current state
   // without capturing stale closures or causing impure updater functions.
   const docSessionRef = useRef<DocSessionState>(INITIAL_SESSION)
@@ -1025,14 +1037,41 @@ export default function App() {
     })
   }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot])
 
+  // Show the STL units-chooser modal and resolve with the chosen unit_scale,
+  // or null if the user cancels (Escape / backdrop click / Cancel button).
+  // A promise-plus-ref-resolver bridges the imperative importDocument flow
+  // below to the declarative modal rendered near the bottom of this
+  // component (see the `pendingStlImport` block).
+  const promptStlUnits = useCallback((fileName: string): Promise<number | null> => {
+    return new Promise((resolve) => {
+      // Defense in depth: if a chooser is somehow already open, fail its
+      // promise cleanly (null) before taking over the resolver slot, so a
+      // clobbered import bails rather than hanging forever.
+      if (stlUnitsResolveRef.current !== null) {
+        stlUnitsResolveRef.current(null)
+      }
+      stlUnitsResolveRef.current = resolve
+      setPendingStlImport({ name: fileName })
+    })
+  }, [])
+
   const importDocument = useCallback(async () => {
     const scene = sceneRef.current
     if (scene === null) return
+    // Re-entrancy guard: a second import started while the first is mid-flight
+    // (e.g. Ctrl+K ▸ "import" ▸ Enter behind the units modal) would orphan the
+    // first — hanging it forever and silently discarding its work. Refuse it.
+    // A ref (not state) so the check is synchronous, before the first await.
+    if (importInFlightRef.current) return
+    importInFlightRef.current = true
 
     // Step 1: guard unsaved changes BEFORE showing any file dialog.
     // If the user cancels the discard prompt, we leave the current document
     // completely untouched.
-    if (!(await confirmDiscard())) return
+    if (!(await confirmDiscard())) {
+      importInFlightRef.current = false
+      return
+    }
 
     // Step 2: show the file-open dialog.  If the user cancels (null), we
     // return immediately without touching the current document.
@@ -1047,9 +1086,27 @@ export default function App() {
       result = await fileHostRef.current.openForImport()
     } catch (err: unknown) {
       handleToast(`Import failed: ${friendlyErrorText(err)}`)
+      importInFlightRef.current = false
       return
     }
-    if (result === null) return // user cancelled — current document unchanged
+    if (result === null) {
+      importInFlightRef.current = false
+      return // user cancelled — current document unchanged
+    }
+
+    // Step 2b: STL carries no units of its own — ask before doing any
+    // blocking work (unlike the other formats, which get no prompt at all).
+    // Cancelling here leaves the current document untouched, same as
+    // cancelling the file picker.
+    let stlUnitScale = 0.001 // unused for non-STL kinds
+    if (result.kind === 'stl') {
+      const chosen = await promptStlUnits(result.name)
+      if (chosen === null) {
+        importInFlightRef.current = false
+        return
+      }
+      stlUnitScale = chosen
+    }
 
     // Step 3: show the overlay BEFORE any blocking work.
     //
@@ -1090,15 +1147,21 @@ export default function App() {
       if (discardsUnsaved) void clearRecoverySnapshot()
 
       // Step 5: import into the now-empty document, dispatched by format.
+      // STL has no internal object names, so name its Objects from the file
+      // stem (the picked basename minus the .stl extension); a blank stem
+      // falls back to "Imported" in the kernel.
+      const stlStem = result!.name.replace(/\.stl$/i, '').trim() || undefined
       report = (
         result!.kind === 'gltf'
           ? scene.import_gltf(result!.bytes)
           : result!.kind === 'skp'
             ? scene.import_skp(result!.bytes)
-            : scene.import_dae(
-                result!.bytes,
-                Object.keys(result!.images).length > 0 ? result!.images : null,
-              )
+            : result!.kind === 'stl'
+              ? scene.import_stl(result!.bytes, stlUnitScale, stlStem)
+              : scene.import_dae(
+                  result!.bytes,
+                  Object.keys(result!.images).length > 0 ? result!.images : null,
+                )
       ) as ImportReport
     } catch (err: unknown) {
       handleToast(`Import failed: ${friendlyErrorText(err)}`)
@@ -1106,6 +1169,10 @@ export default function App() {
     } finally {
       // Always clear the overlay — even on throw, so it can never get stuck.
       setIsImporting(false)
+      // Release the re-entrancy guard here: everything after this point (the
+      // tessellate/session-commit steps) is synchronous, so there is no async
+      // gap in which a second import could start.
+      importInFlightRef.current = false
     }
 
     // Step 6: tessellate the imported objects and update session state.
@@ -1136,10 +1203,11 @@ export default function App() {
     setDocSession(afterImport(result!.name, Date.now()))
 
     setImportReport(report)
-    const fmt = result!.kind === 'gltf' ? 'glTF' : result!.kind === 'skp' ? 'SKP' : 'DAE'
+    const fmt =
+      result!.kind === 'gltf' ? 'glTF' : result!.kind === 'skp' ? 'SKP' : result!.kind === 'stl' ? 'STL' : 'DAE'
     LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
-  }, [confirmDiscard, handleToast, applyLoadedBytes, clearRecoverySnapshot])
+  }, [confirmDiscard, handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits])
 
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
@@ -2941,6 +3009,25 @@ export default function App() {
           importDocument.  isImporting is always cleared in a finally block,
           so a thrown import error can never leave the overlay stuck. */}
       {isImporting && <ImportingOverlay fileName={importingName} />}
+
+      {/* STL units-chooser — shown before the overlay above, since STL
+          carries no unit information (see promptStlUnits). */}
+      {pendingStlImport !== null && (
+        <StlUnitsDialog
+          fileName={pendingStlImport.name}
+          onChoose={(unitScale, value) => {
+            setLastStlImportUnit(value)
+            setPendingStlImport(null)
+            stlUnitsResolveRef.current?.(unitScale)
+            stlUnitsResolveRef.current = null
+          }}
+          onCancel={() => {
+            setPendingStlImport(null)
+            stlUnitsResolveRef.current?.(null)
+            stlUnitsResolveRef.current = null
+          }}
+        />
+      )}
 
       {/* Import report modal — shown after a successful model import */}
       {importReport !== null && (

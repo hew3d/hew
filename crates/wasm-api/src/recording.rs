@@ -357,6 +357,20 @@ pub enum RecordedCall {
     ImportGltf { bytes: Vec<u8> },
     /// `import_skp(bytes)` — embeds the .skp file.
     ImportSkp { bytes: Vec<u8> },
+    /// `import_stl(bytes, unit_scale, name)` — embeds the STL file, the
+    /// units-chooser scale it was imported with (STL carries no units of its
+    /// own, so replaying without the scale would reproduce the wrong geometry
+    /// size), and the file-stem name the Objects were given (STL has no
+    /// internal names, so replaying without it would rename the Objects and
+    /// diverge the state hash). Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings replay
+    /// unchanged; one that imports an STL fails to parse on older builds —
+    /// loudly, never silently divergent.
+    ImportStl {
+        bytes: Vec<u8>,
+        unit_scale: f64,
+        name: Option<String>,
+    },
     /// `load(bytes)` — a mid-session File ▸ Open/New replaces the whole
     /// document; embedding the `.hew` bytes keeps everything after it
     /// replayable from a fresh `Scene`.

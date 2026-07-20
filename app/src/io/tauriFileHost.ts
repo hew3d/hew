@@ -106,10 +106,14 @@ export class TauriFileHost implements FileHost {
     // siblings and textures/-style subfolders; the pick approves that too.
     const filePath = await invoke<string | null>('pick_open_path', {
       filters: [
-        { name: 'Model files (COLLADA, SketchUp, glTF)', extensions: ['dae', 'skp', 'glb', 'gltf'] },
+        {
+          name: 'Model files (COLLADA, SketchUp, glTF, STL)',
+          extensions: ['dae', 'skp', 'glb', 'gltf', 'stl'],
+        },
         { name: 'COLLADA model', extensions: ['dae'] },
         { name: 'SketchUp 2017 Model', extensions: ['skp'] },
         { name: 'glTF model', extensions: ['glb', 'gltf'] },
+        { name: 'STL model', extensions: ['stl'] },
       ],
       write: false,
       approveDir: true,
@@ -127,6 +131,11 @@ export class TauriFileHost implements FileHost {
     // SketchUp files embed their textures — return the bytes, skip texture scan.
     if (/\.skp$/i.test(filePath)) {
       return { kind: 'skp', name: basename(filePath), bytes: fileBytes }
+    }
+
+    // STL has no external resources (and no units — the caller prompts).
+    if (/\.stl$/i.test(filePath)) {
+      return { kind: 'stl', name: basename(filePath), bytes: fileBytes }
     }
 
     // Scan the sibling directory (and a <stem>_textures / textures subfolder

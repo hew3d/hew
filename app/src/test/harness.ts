@@ -28,6 +28,7 @@
 
 import type { Scene } from '../wasm/loader'
 import type { ViewportApi } from '../viewport/Viewport'
+import { exportSceneToStl, type StlExportScene } from '../io/exporters/stlExport'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
@@ -78,6 +79,17 @@ export interface HarnessDeps {
   /** Delete a tag everywhere through the app's real Tags-panel path
    * (kernel `delete_tag` + tag-visibility resync + document-changed). */
   deleteTag: (path: string[]) => void
+}
+
+/** The `ImportReport` shape `scene.import_stl` returns across the boundary
+ * (structured-clone-safe: numbers + string arrays). */
+export interface StlImportReportJs {
+  objects_created: number
+  watertight: number
+  leaky: number
+  skipped: { name: string; reason: string }[]
+  textures_missing: string[]
+  warnings: string[]
 }
 
 export interface HewTestHarness {
@@ -198,6 +210,15 @@ export interface HewTestHarness {
   // (portable + structured-cloneable); a box is tiny, so the cost is moot.
   save(): number[]
   load(bytes: number[]): void
+  /** Export the current solid geometry to binary STL bytes (mm, Z-up) through
+   * the app's REAL exporter (`exportSceneToStl`); instances flatten into the
+   * soup. `segmentsPerTurn` re-facets curved walls (0 = stored facets). Null
+   * when nothing solid. Test-only — the round-trip verification uses it. */
+  exportStl(segmentsPerTurn: number): { bytes: number[]; triangleCount: number } | null
+  /** Import binary/ASCII STL bytes through the REAL `scene.import_stl`,
+   * returning the ImportReport (object/watertight/leaky/skipped/warnings).
+   * Additive, exactly like File▸Import's kernel call. Test-only. */
+  importStl(bytes: number[], unitScale: number): StlImportReportJs
   // recording ( high + low, one artifact)
   startRecording(): void
   stopRecording(): void
@@ -846,6 +867,19 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       }
       lastError = null
     },
+
+    exportStl: (segmentsPerTurn) =>
+      query((s) => {
+        // The wasm `Scene` structurally satisfies StlExportScene (object_ids /
+        // instance_ids / instance_def / instance_pose / object_export_triangles).
+        const out = exportSceneToStl(s as unknown as StlExportScene, segmentsPerTurn)
+        return out === null
+          ? null
+          : { bytes: Array.from(out.bytes), triangleCount: out.triangleCount }
+      }),
+
+    importStl: (bytes, unitScale) =>
+      act((s) => s.import_stl(new Uint8Array(bytes), unitScale) as StlImportReportJs),
 
     startRecording: () => {
       scene().start_recording()

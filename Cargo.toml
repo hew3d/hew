@@ -9,6 +9,7 @@ members = [
     "crates/dae-import",
     "crates/gltf-import",
     "crates/skp-import",
+    "crates/stl-import",
 ]
 # The Tauri host crate is deliberately NOT a workspace member: it drags
 # desktop-only dependencies into `cargo test --workspace` and would slow the
@@ -37,6 +38,7 @@ mesh-heal = { path = "crates/mesh-heal" }
 dae-import = { path = "crates/dae-import" }
 gltf-import = { path = "crates/gltf-import" }
 skp-import = { path = "crates/skp-import" }
+stl-import = { path = "crates/stl-import" }
 # Clean-room SketchUp 2017 .skp reader: a crates.io semver pin on the hosted
 # OpenSKP releases, so CI resolves it like any other dependency. No Trimble
 # SDK material anywhere in its chain (rule 7 admissibility test). Local dev

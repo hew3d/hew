@@ -4032,6 +4032,63 @@ impl Scene {
         Ok((report, out.warnings))
     }
 
+    /// Import STL bytes into the current document. Additive: existing
+    /// geometry is untouched. Returns the same `ImportReport` JS shape as
+    /// [`Scene::import_dae`], plus `warnings: [string]` — non-manifold split
+    /// notices and a leaky-piece summary (STL never carries units or materials,
+    /// so there is nothing else to report missing).
+    ///
+    /// `unit_scale` is meters-per-STL-unit: STL carries no units of its own,
+    /// so the UI's units-chooser prompt decides (millimeters — `0.001` — is
+    /// the maker-community default).
+    ///
+    /// `name` names the imported Objects — the UI passes the picked file's
+    /// stem (`bunny.stl` → `"bunny"`, `"bunny (2)"`, …). `None`/blank falls
+    /// back to `"Imported"`. STL has no internal object names, so this is the
+    /// only source.
+    ///
+    /// # Errors
+    /// Throws a `"STL: <message>"` `JsError` on parse failure or a file with
+    /// no usable triangles.
+    pub fn import_stl(
+        &mut self,
+        stl_bytes: &[u8],
+        unit_scale: f64,
+        name: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let (report, warnings) = self
+            .import_stl_core(stl_bytes, unit_scale, name)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(import_report_to_js(&report, &warnings))
+    }
+
+    /// [`Scene::import_stl`] minus the JS-value plumbing (see
+    /// [`Scene::import_dae_core`]).
+    fn import_stl_core(
+        &mut self,
+        stl_bytes: &[u8],
+        unit_scale: f64,
+        name: Option<String>,
+    ) -> Result<(kernel::ImportReport, Vec<String>), ApiError> {
+        let out = stl_import::import(stl_bytes, unit_scale, name.as_deref())
+            .map_err(|e| ApiError(format!("STL: {e}")))?;
+
+        let (report, change) = self
+            .doc
+            .ingest(out.scene, out.missing)
+            .map_err(|e| ApiError(format!("STL: {e}")))?;
+
+        // Additive — do NOT clear caches like `load`.
+        self.reconcile(&change);
+
+        recording::record(recording::RecordedCall::ImportStl {
+            bytes: stl_bytes.to_vec(),
+            unit_scale,
+            name,
+        });
+        Ok((report, out.warnings))
+    }
+
     // --------------------------------------------------------- persistence
 
     /// Serialise the entire document to a `.hew` zip container (HEW_FILE_FORMAT.md).
@@ -4419,6 +4476,13 @@ impl Scene {
                     }
                     ImportSkp { bytes } => {
                         self.import_skp_core(&bytes)?;
+                    }
+                    ImportStl {
+                        bytes,
+                        unit_scale,
+                        name,
+                    } => {
+                        self.import_stl_core(&bytes, unit_scale, name)?;
                     }
                     Load { bytes } => {
                         self.load_core(&bytes)?;
@@ -5849,6 +5913,109 @@ mod tests {
         assert_eq!(
             final_hash, golden,
             "replaying a byte-embedding session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// `RecordedCall::ImportStl` — the merge hazard the STL importer's design
+    /// specifically calls out: a dropped match arm anywhere in the
+    /// record/serialize/replay-dispatch chain builds locally but breaks
+    /// replay determinism. This proves the whole chain, exactly like
+    /// [`record_then_replay_covers_byte_embedding_calls`] does for glTF:
+    /// `unit_scale` AND the file-stem `name` are embedded too (STL carries
+    /// neither units nor object names of its own, so a replay that lost either
+    /// would reproduce the wrong-sized or wrong-named geometry).
+    ///
+    /// Crucially the imported Object is left VISIBLE through the golden-state
+    /// capture (no trailing `scene_undo`): undo sets `hidden = true`, and
+    /// `save`/`state_hash` filter hidden objects out — so an undone import
+    /// would compare byte-identical no matter WHICH `name`/`unit_scale` the
+    /// replay arm forwarded, masking a dropped field at exactly this hazard.
+    /// The Object's name and its exported-triangle bounding box are compared
+    /// directly on both scenes while it is visible: a lost `name` renames it,
+    /// a lost `unit_scale` rescales it 1000×.
+    #[test]
+    fn record_then_replay_covers_stl_import() {
+        recording::reset();
+
+        let stl: &[u8] = include_bytes!("../../stl-import/tests/fixtures/cube_binary.stl");
+
+        // Name + exported-triangle bbox of the imported Object (the one NOT
+        // named like the extruded box below), for cross-scene comparison.
+        fn imported_probe(scene: &Scene) -> (String, [f64; 6]) {
+            let id = scene
+                .object_ids()
+                .into_iter()
+                .find(|&id| scene.object_name(id).as_deref() == Some("bunny"))
+                .expect("the imported Object named 'bunny' exists and is visible");
+            let name = scene.object_name(id).unwrap();
+            let tris = scene.object_export_triangles(id, 0).unwrap();
+            let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
+            for v in tris.chunks_exact(3) {
+                for a in 0..3 {
+                    b[a] = b[a].min(v[a]);
+                    b[a + 3] = b[a + 3].max(v[a]);
+                }
+            }
+            (name, b.map(|x| x as f64))
+        }
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+        scene
+            .import_stl_core(stl, 0.001, Some("bunny".to_string()))
+            .unwrap();
+
+        // Golden state is captured with the import VISIBLE (see the doc note) —
+        // no undo, so the hash/save are actually sensitive to name + unit_scale.
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let (golden_name, golden_bbox) = imported_probe(&scene);
+        let json = scene.take_recording();
+        assert!(
+            json.contains("\"method\":\"import_stl\""),
+            "the import is in the call stream"
+        );
+        assert!(
+            json.contains("\"unit_scale\":0.001"),
+            "the unit scale is embedded, not just the bytes"
+        );
+        assert!(
+            json.contains("\"name\":\"bunny\""),
+            "the file-stem name is embedded so the Objects replay identically"
+        );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            replayed.object_ids().len(),
+            scene.object_ids().len(),
+            "object counts match after replaying an STL import session"
+        );
+
+        // The imported Object's NAME and GEOMETRY match after replay — this is
+        // what catches a dropped `name` or `unit_scale` at the RecordedCall arm.
+        let (replay_name, replay_bbox) = imported_probe(&replayed);
+        assert_eq!(
+            replay_name, golden_name,
+            "the imported Object's name replays"
+        );
+        for a in 0..6 {
+            assert!(
+                (replay_bbox[a] - golden_bbox[a]).abs() < 1e-9,
+                "the imported Object's bbox (unit-scale-dependent) replays: axis {a}, \
+                 golden {} vs replay {}",
+                golden_bbox[a],
+                replay_bbox[a]
+            );
+        }
+
+        assert_eq!(
+            final_hash, golden,
+            "replaying an STL-import session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }

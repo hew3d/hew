@@ -218,6 +218,7 @@ literal internal handles from the recording session.
 | `import_dae` | `bytes[]`, `images[]` (`{uri, bytes[], format}` objects) | additive COLLADA import (embeds the file + images) |
 | `import_gltf` | `bytes[]` | additive glTF/GLB import (embeds the file) |
 | `import_skp` | `bytes[]` | additive `.skp` import (embeds the file) |
+| `import_stl` | `bytes[]`, `unit_scale`, `name` (string or null) | additive STL import (embeds the file); `unit_scale` is meters-per-STL-unit since STL carries no units of its own, and `name` is the file stem the Objects are named from (STL carries no names) — both embedded so replay reproduces the same geometry size and Object names |
 | `load` | `bytes[]` | replace the whole document — a mid-session File ▸ Open/New (embeds the `.hew` bytes) |
 
 **Coverage rule** (ratified with the recording audit): every `Scene` method

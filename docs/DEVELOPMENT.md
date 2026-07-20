@@ -77,6 +77,8 @@ crates/dae-import/    COLLADA .dae -> Objects/Instances
 crates/gltf-import/   glTF -> Objects/Instances
 crates/skp-import/    SketchUp .skp -> Objects/Instances, built on the
                       clean-room OpenSKP reader (see rule 7)
+crates/stl-import/    STL (binary + ASCII) -> Objects; hand-written parser,
+                      no external STL dependency
 crates/wasm-api/      wasm-bindgen surface exposing the kernel to the UI
 crates/vendor/        vendored third-party code (dae-parser)
 app/                  TypeScript UI (viewport, tools, panels, E2E suite)
@@ -98,6 +100,13 @@ Hew's Objects/Instances, then hand off to the kernel:
 - `skp-import` reads SketchUp's native `.skp` format directly, using
   [OpenSKP](https://github.com/hew3d/openskp) (crates.io: `openskp`), a
   clean-room implementation with no SketchUp SDK in its history (rule 7).
+- `stl-import` reads STL (binary and ASCII, auto-detected), the format the
+  maker community lives in. Hand-written on `std` — no external STL crate —
+  since the binary layout is a fixed-width record and the ASCII grammar is a
+  handful of whitespace-separated tokens. STL carries no units, so the
+  crate is unit-blind (the caller resolves a `unit_scale`); its stored
+  facet normals are unreliable and are ignored, same as every other
+  importer's foreign normals.
 
 A STEP/IGES path is planned as an out-of-process OpenCASCADE converter
 (a Tauri sidecar rather than a linked crate, because OpenCASCADE is a

@@ -33,7 +33,7 @@
 //! meshes that `from_polygons` would reject are still emitted — the kernel
 //! reports them as skipped (DEVELOPMENT.md rule 4).
 
-use kernel::{Point3, Transform, Vec3, tol};
+use kernel::{Plane, Point3, Transform, Vec3, tol};
 
 /// Non-manifold mesh splitting: cut kernel-rejectable meshes into
 /// buildable open shells (never repaired, always reported by the caller).
@@ -53,6 +53,19 @@ type FaceHoles = Vec<Vec<Vec<usize>>>;
 
 /// Output of the face-filtering steps: (faces, materials, corner_uvs, holes).
 type FilteredFaces = (Vec<Vec<usize>>, Vec<u32>, FaceCornerUvs, FaceHoles);
+
+/// Full output of [`heal_mesh_with_tol`]: (positions, faces, face_materials,
+/// face_corner_uvs, face_holes, dropped_degenerate_count) — the final `usize`
+/// is step 7a's kernel-degenerate drop count, which callers surface in their
+/// import warnings (a geometry-altering drop is never silent).
+type HealedMeshWithStats = (
+    Vec<Point3>,
+    Vec<Vec<usize>>,
+    Vec<u32>,
+    FaceCornerUvs,
+    FaceHoles,
+    usize,
+);
 
 use std::collections::BTreeMap;
 
@@ -1494,6 +1507,12 @@ pub fn merge_coplanar(
 /// Returns `(healed_positions, healed_faces, healed_face_materials,
 /// healed_face_corner_uvs, healed_face_holes)`.  `healed_face_corner_uvs` and
 /// `healed_face_holes` are parallel to `healed_faces`.
+///
+/// NOTE: this wrapper discards [`heal_mesh_with_tol`]'s dropped-degenerate
+/// face count, so its callers (dae-import, skp-import) do not yet surface
+/// that drop in their import warnings the way stl-import and gltf-import do.
+/// Wiring them is a known follow-up; switch those callers to
+/// `heal_mesh_with_tol` when doing it.
 pub fn heal_mesh(
     raw_positions: &[Point3],
     raw_faces: &[Vec<usize>],
@@ -1508,7 +1527,7 @@ pub fn heal_mesh(
     FaceCornerUvs,
     FaceHoles,
 ) {
-    heal_mesh_with_tol(
+    let (positions, faces, mats, uvs, holes, _dropped_degenerate) = heal_mesh_with_tol(
         raw_positions,
         raw_faces,
         raw_face_materials,
@@ -1517,7 +1536,8 @@ pub fn heal_mesh(
         bake_tf,
         tol::POINT_MERGE,
         tol::PLANE_DIST,
-    )
+    );
+    (positions, faces, mats, uvs, holes)
 }
 
 /// Like [`heal_mesh`] but with explicit tolerances for f32-quantised sources
@@ -1530,6 +1550,10 @@ pub fn heal_mesh(
 ///   native 1 nm `PLANE_DIST` rejects every f32 flat surface, so coplanar
 ///   triangles never coalesce — exploding face count and memory. Pass the
 ///   kernel's import planarity (`IMPORT_PLANE_DIST`, 1 mm).
+///
+/// The final `usize` is the number of faces step 7a removed as
+/// kernel-degenerate ([`drop_kernel_degenerate_faces`]) — callers surface it
+/// in their import warnings so a geometry-altering drop is never silent.
 #[allow(clippy::too_many_arguments)]
 pub fn heal_mesh_with_tol(
     raw_positions: &[Point3],
@@ -1540,13 +1564,7 @@ pub fn heal_mesh_with_tol(
     bake_tf: &Transform,
     weld_tol: f64,
     merge_plane_tol: f64,
-) -> (
-    Vec<Point3>,
-    Vec<Vec<usize>>,
-    Vec<u32>,
-    FaceCornerUvs,
-    FaceHoles,
-) {
+) -> HealedMeshWithStats {
     // 0. Validate face/hole vertex indices against the position array:
     //    untrusted import data (crafted glTF index buffers, corrupt sources)
     //    must be dropped here, never panic a later unchecked index.
@@ -1638,7 +1656,7 @@ pub fn heal_mesh_with_tol(
     //    selection treat them as the single face the user drew. Non-regressive:
     //    a group that wouldn't form a clean simple-loop polygon is left as-is.
     //    Faces with holes are never merged — they stay as singletons.
-    let (final_faces, final_mats, final_uvs, final_holes) = merge_coplanar(
+    let (merged_faces, merged_mats, merged_uvs, merged_holes) = merge_coplanar(
         &oriented_faces,
         &oriented_mats,
         &oriented_uvs,
@@ -1646,6 +1664,34 @@ pub fn heal_mesh_with_tol(
         &unique_positions,
         merge_plane_tol,
     );
+
+    // 7a. Drop any face the KERNEL would reject as degenerate. `drop_zero_area_faces`
+    //    (step 3) gates on effective HEIGHT relative to `weld_tol` — the source's
+    //    coincidence precision — but `Object::from_polygons`'s degeneracy gate is
+    //    `Plane::from_polygon`, which fails when the Newell normal magnitude (= 2×
+    //    area) falls below the ABSOLUTE floor `tol::NORMALIZE_MIN_LENGTH`. A small
+    //    sliver can clear the height gate yet trip the absolute one, and because
+    //    `Document::ingest` builds each object all-or-nothing, ONE such face out of
+    //    ~110k skips the ENTIRE model (as a 3DBenchy-class real-world STL routinely
+    //    does). Filter with the kernel's OWN predicate here so the healer's output
+    //    is buildable by construction — the two agree, no threshold drift. This is
+    //    import-boundary normalization (foreign-input artefact), not silent kernel
+    //    repair; a dropped face may open the shell, and the object then arrives
+    //    honestly LEAKY rather than skipped. The count is returned so callers put
+    //    the drop in their import warnings — never silent.
+    //    Placement is invariant for this face class: `merge_coplanar` can neither
+    //    absorb nor produce one (its adjacency test requires `face_normal` — the
+    //    same Newell criterion — to succeed on both sides), so filtering before or
+    //    after step 7 yields the same result; after keeps the pipeline's
+    //    drop-passes-last shape.
+    let (final_faces, final_mats, final_uvs, final_holes) = drop_kernel_degenerate_faces(
+        &merged_faces,
+        &merged_mats,
+        &merged_uvs,
+        &merged_holes,
+        &unique_positions,
+    );
+    let dropped_degenerate = merged_faces.len() - final_faces.len();
 
     // 7b. Normalize hole winding so every inner loop winds OPPOSITE its outer
     //    loop (Hew's native convention; see `Object::from_faces_with_holes`).
@@ -1666,6 +1712,7 @@ pub fn heal_mesh_with_tol(
         final_mats,
         final_uvs,
         compact_holes,
+        dropped_degenerate,
     )
 }
 
@@ -1755,6 +1802,73 @@ fn drop_zero_area_faces(
         }
         // Faces at or below the height gate are collinear slivers;
         // drop silently (import boundary normalization, not silent repair).
+    }
+
+    (out_faces, out_mats, out_uvs, out_holes)
+}
+
+/// Drop any face the kernel's `Object::from_polygons` would reject as a
+/// `DegenerateFace` — i.e. one whose outer loop `Plane::from_polygon` cannot
+/// fit a plane through (Newell normal magnitude below the ABSOLUTE floor
+/// `tol::NORMALIZE_MIN_LENGTH`). Uses the kernel's own predicate so the healer
+/// and the kernel agree exactly, with no threshold drift: a near-degenerate
+/// sliver that clears `drop_zero_area_faces`'s scale-relative height gate but
+/// trips the kernel's absolute one is removed HERE, at the import boundary,
+/// instead of skipping the whole object at ingest (which is all-or-nothing per
+/// object — one bad face out of a real STL's ~110k would drop the entire
+/// model).
+///
+/// Only the OUTER loop is tested (that is what `Plane::from_polygon` fits in
+/// `from_polygons_impl`); hole loops ride with their face. A dropped face may
+/// open the shell — the object then arrives honestly leaky, never patched or
+/// silently repaired (DEVELOPMENT.md rule 4 governs kernel operations; this is
+/// pre-kernel boundary filtering, the same category as `drop_zero_area_faces`).
+///
+/// CAVEAT — this predicate matches the kernel's `DegenerateFace` only in
+/// combination with the upstream pipeline: the kernel ALSO raises
+/// `DegenerateFace` for a repeated vertex index within a loop
+/// (`build_validated_loop`), which a plane fit cannot detect (a self-revisiting
+/// loop can have a nonzero Newell normal). That trigger cannot fire here today
+/// because every path into step 7a guarantees repeat-free loops —
+/// `remap_faces` drops post-weld repeats, `merge_coplanar` re-checks
+/// distinctness, and `split_t_junctions` never splices a face's own vertex
+/// back into its loop. Any new step inserted between the weld and 7a (or a
+/// caller bypassing `remap_faces`) must preserve that invariant, or a repeat
+/// face will pass this filter and reopen the whole-object ingest skip.
+fn drop_kernel_degenerate_faces(
+    faces: &[Vec<usize>],
+    face_materials: &[u32],
+    face_corner_uvs: &[Vec<[f64; 2]>],
+    face_holes: &[Vec<Vec<usize>>],
+    positions: &[Point3],
+) -> FilteredFaces {
+    let mut out_faces = Vec::with_capacity(faces.len());
+    let mut out_mats = Vec::with_capacity(faces.len());
+    let mut out_uvs: Vec<Vec<[f64; 2]>> = Vec::with_capacity(faces.len());
+    let mut out_holes: FaceHoles = Vec::with_capacity(faces.len());
+
+    let empty_holes: Vec<Vec<usize>> = Vec::new();
+    for (((face, &mat), corner_uvs), holes) in faces
+        .iter()
+        .zip(face_materials.iter())
+        .zip(face_corner_uvs.iter())
+        .zip(
+            face_holes
+                .iter()
+                .map(Some)
+                .chain(std::iter::repeat(None))
+                .map(|h| h.unwrap_or(&empty_holes)),
+        )
+    {
+        let pts: Vec<Point3> = face.iter().map(|&i| positions[i]).collect();
+        // Keep iff the kernel could fit a plane through the outer loop — the
+        // exact `from_polygons` DegenerateFace criterion.
+        if Plane::from_polygon(&pts).is_ok() {
+            out_faces.push(face.clone());
+            out_mats.push(mat);
+            out_uvs.push(corner_uvs.clone());
+            out_holes.push(holes.clone());
+        }
     }
 
     (out_faces, out_mats, out_uvs, out_holes)
@@ -2475,7 +2589,7 @@ mod tests {
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
 
         // At a 10 µm weld tolerance the T-vertex must be spliced in.
-        let (_, out_faces, _, _, _) = heal_mesh_with_tol(
+        let (_, out_faces, _, _, _, _) = heal_mesh_with_tol(
             &positions,
             &faces,
             &mats,
@@ -2524,7 +2638,7 @@ mod tests {
         let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new()];
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new()];
 
-        let (_, coarse_faces, _, _, _) = heal_mesh_with_tol(
+        let (_, coarse_faces, _, _, _, _) = heal_mesh_with_tol(
             &positions,
             &faces,
             &mats,
@@ -2573,7 +2687,7 @@ mod tests {
             Point3::new(0.0, 9e-3, 0.0),
         ];
         let faces = vec![vec![0usize, 1, 2]];
-        let (_, kept, _, _, _) = heal_mesh_with_tol(
+        let (_, kept, _, _, _, _) = heal_mesh_with_tol(
             &small,
             &faces,
             &mats,
@@ -2596,7 +2710,7 @@ mod tests {
             Point3::new(1.0, 0.0, 0.0),
             Point3::new(0.5, 5e-5, 0.0),
         ];
-        let (_, dropped, _, _, _) = heal_mesh_with_tol(
+        let (_, dropped, _, _, _, _) = heal_mesh_with_tol(
             &sliver,
             &faces,
             &mats,
@@ -2818,6 +2932,46 @@ mod tests {
                     split_t_junctions_reference(&faces, &mats, &uvs, &holes, &positions, tol::POINT_MERGE)
                 );
             }
+        );
+    }
+
+    /// `drop_kernel_degenerate_faces` removes exactly the faces the kernel's
+    /// `Plane::from_polygon` would reject (Newell normal below
+    /// `tol::NORMALIZE_MIN_LENGTH`), keeping well-formed faces — so no face the
+    /// kernel calls `DegenerateFace` ever reaches `from_polygons`.
+    #[test]
+    fn drop_kernel_degenerate_faces_matches_the_kernel_gate() {
+        let positions = vec![
+            // A well-formed triangle (2·area = 1, far above the floor).
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            // A near-degenerate sliver: base 1e-5, height 1e-8 → 2·area = 1e-13,
+            // below NORMALIZE_MIN_LENGTH (1e-12), so Plane::from_polygon fails.
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(1e-5, 0.0, 1.0),
+            Point3::new(5e-6, 1e-8, 1.0),
+        ];
+        let faces = vec![vec![0usize, 1, 2], vec![3usize, 4, 5]];
+        let mats = vec![7u32, 9u32];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(), Vec::new()];
+        let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
+
+        // The sliver really is kernel-degenerate; the good triangle is not.
+        assert!(Plane::from_polygon(&[positions[0], positions[1], positions[2]]).is_ok());
+        assert!(Plane::from_polygon(&[positions[3], positions[4], positions[5]]).is_err());
+
+        let (out_faces, out_mats, _uvs, _holes) =
+            drop_kernel_degenerate_faces(&faces, &mats, &uvs, &holes, &positions);
+        assert_eq!(
+            out_faces,
+            vec![vec![0usize, 1, 2]],
+            "only the sliver is dropped"
+        );
+        assert_eq!(
+            out_mats,
+            vec![7u32],
+            "per-face payloads follow the surviving face"
         );
     }
 }

@@ -250,6 +250,7 @@ is designed so that watertightness can never be broken as a side effect:
 | `crates/dae-import` | COLLADA (`.dae`) → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/gltf-import` | glTF/GLB → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `openskp` reader | `kernel`, `mesh-heal`, `openskp` |
+| `crates/stl-import` | STL (binary + ASCII, hand-written parser) → Objects | `kernel`, `mesh-heal` |
 | `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference and tessellate) to the UI | `kernel`, `inference`, `tessellate` |
 | `app/` | TypeScript/React UI: viewport, tools, panels | `wasm-api` (via the compiled WASM package) |
 | `shells/tauri` | Desktop shell | `app/` |
@@ -328,6 +329,17 @@ teaching the kernel about any external format:
   importer.
 - **`gltf-import`** reads glTF/GLB through the same importer shape and the
   same shared healing pipeline.
+- **`stl-import`** reads STL (binary and ASCII, auto-detected; a
+  hand-written parser on `std` — no external STL dependency). STL is the
+  crudest source format: an unstructured triangle soup with no shared
+  vertices, no object grouping, no names, no materials, and no units, and
+  its stored facet normals are unreliable and ignored. The importer welds
+  the soup, splits it into geometrically-disjoint shells (so a downloaded
+  multi-part plate becomes one Object per part — `mesh_heal::split`'s
+  non-manifold cutter alone does not do this, since two untouching shells
+  already satisfy the kernel's directed-edge precondition), then runs the
+  same shared healing pipeline per shell. STL carries no units, so the UI
+  prompts once per import for a unit scale (millimeters default).
 - STEP/IGES interoperability (planned — see `docs/ROADMAP.md`) is designed
   as a standalone converter wrapping OpenCASCADE, invoked as an external
   process rather than linked into the kernel — keeping a large C++
@@ -342,9 +354,9 @@ teaching the kernel about any external format:
   whose boundary is no longer fully analytic.
 
 Every importer depends on the kernel and never the reverse, so the kernel's
-public surface has no knowledge of COLLADA, glTF, or `.skp` at all — it only
-ever sees the Objects, Instances, and Groups an importer constructs from
-them.
+public surface has no knowledge of COLLADA, glTF, `.skp`, or STL at all — it
+only ever sees the Objects, Instances, and Groups an importer constructs
+from them.
 
 ### 3.5 Native file format
 
