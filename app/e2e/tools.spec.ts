@@ -494,6 +494,233 @@ test('Rotate: 360-degree rotation returns to the same hash', async ({ page }) =>
 })
 
 // ---------------------------------------------------------------------------
+// Scale — scaleObject via transform_object (nonuniform-scale effort)
+// ---------------------------------------------------------------------------
+
+// Headline maker gesture: DRAG the top (+Z) face grip up and the box must grow
+// TALLER. Before the axis-constraint fix, a vertical grip's drag snapped to the
+// ground plane and collapsed the box to the MIN_SCALE floor instead of
+// stretching. Drives real mouse + the grip's projected screen position.
+test('Scale: dragging the top face grip up stretches the height (does not collapse to the ground)', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [7, -7, 5], target: [1, 1, 0.5], fovDeg: 45 })
+    const id = h.drawBox([0, 0, 0], [2, 2, 1], 1) // 2x2x1 box
+    h.selectObjects([id])
+  })
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.press('s')
+  // Wait for the Scale tool to actually be active (its idle status hint shows)
+  // before driving the mouse — a fixed timeout races the tool switch.
+  await page.locator('text=Drag a grip').first().waitFor({ timeout: 5000 })
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+
+  const gripZ = await toPage([1, 1, 1]) // +Z face grip (top center)
+  const target = await toPage([1, 1, 3]) // drag up along Z to world z=3
+
+  await page.mouse.move(gripZ.x, gripZ.y)
+  await page.mouse.down() // grab
+  await page.mouse.move(target.x, target.y, { steps: 12 }) // drag up
+  await page.mouse.up()
+  await page.mouse.move(target.x, target.y)
+  await page.mouse.down() // commit
+  await page.mouse.up()
+  await page.waitForTimeout(120)
+
+  const b = await page.evaluate(() =>
+    window.__hew_test!.getObjectBounds(window.__hew_test!.getObjectIds()[0]),
+  )
+  const height = b[5] - b[2]
+  expect(height).toBeGreaterThan(2.5) // grew from 1 toward ~3 (NOT collapsed to ~0.01)
+  expect(b[2]).toBeCloseTo(0, 5) // bottom (opposite-grip anchor) stayed at z=0
+  expect(b[3] - b[0]).toBeCloseTo(2, 5) // width (X) unchanged — only Z was driven
+  expect(b[4] - b[1]).toBeCloseTo(2, 5) // depth (Y) unchanged
+})
+
+test('Scale: stretching a box 2x in Z doubles its Z extent, stays watertight, and undo restores the exact prior state', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [2, 2, 0], 1) // 2x2x1 box, base at z=0
+    const hash0 = h.getStateHash()
+    const bounds0 = h.getObjectBounds(box)
+
+    // Stretch 2x in Z about the bottom face (z=0 stays put — the default
+    // "anchor at the opposite grip" ScaleTool's gizmo uses for a face grip).
+    h.scaleObject(box, 1, 1, 2, [0, 0, 0])
+    const hash1 = h.getStateHash()
+    const bounds1 = h.getObjectBounds(box)
+    const solid1 = h.isObjectSolid(box)
+
+    h.undo()
+    const hashAfterUndo = h.getStateHash()
+    const boundsAfterUndo = h.getObjectBounds(box)
+
+    return { hash0, hash1, hashAfterUndo, bounds0, bounds1, boundsAfterUndo, solid1 }
+  })
+
+  expect(result.hash1).not.toBe(result.hash0) // geometry changed
+  expect(result.solid1).toBe(true) // still watertight after an anisotropic scale
+
+  const [, , minZ0, , , maxZ0] = result.bounds0
+  const [, , minZ1, , , maxZ1] = result.bounds1
+  expect(maxZ1 - minZ1).toBeCloseTo(2 * (maxZ0 - minZ0), 6) // Z extent doubled
+  expect(minZ1).toBeCloseTo(minZ0, 6) // the anchored face (z=0) stayed put
+  // X/Y untouched — only Z was driven.
+  expect(result.bounds1[0]).toBeCloseTo(result.bounds0[0], 6)
+  expect(result.bounds1[3]).toBeCloseTo(result.bounds0[3], 6)
+  expect(result.bounds1[1]).toBeCloseTo(result.bounds0[1], 6)
+  expect(result.bounds1[4]).toBeCloseTo(result.bounds0[4], 6)
+
+  expect(result.hashAfterUndo).toBe(result.hash0) // undo restores exactly
+  expect(result.boundsAfterUndo).toEqual(result.bounds0)
+})
+
+test('Scale: a uniform corner-style scale (equal sx=sy=sz) preserves proportions', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [2, 4, 0], 1) // 2x4x1 box
+    const bounds0 = h.getObjectBounds(box)
+
+    h.scaleObject(box, 3, 3, 3, [0, 0, 0]) // uniform 3x about the origin corner
+    const bounds1 = h.getObjectBounds(box)
+    const solid1 = h.isObjectSolid(box)
+
+    return { bounds0, bounds1, solid1 }
+  })
+
+  expect(result.solid1).toBe(true)
+  const extent = (b: number[], lo: number, hi: number) => b[hi] - b[lo]
+  // All three extents scaled by exactly 3x — the same ratio on every axis.
+  expect(extent(result.bounds1, 0, 3)).toBeCloseTo(3 * extent(result.bounds0, 0, 3), 6)
+  expect(extent(result.bounds1, 1, 4)).toBeCloseTo(3 * extent(result.bounds0, 1, 4), 6)
+  expect(extent(result.bounds1, 2, 5)).toBeCloseTo(3 * extent(result.bounds0, 2, 5), 6)
+})
+
+// Ctrl center-anchor toggle, driven through the REAL keyboard + mouse path
+// (not tool.onKey — a bare Control keydown reports ctrlKey:true and never
+// reaches a tool's onKey; it's wired through a dedicated Viewport listener).
+// The only difference between the two drags below is a real Control keypress:
+// without it the anchor is the grabbed grip's opposite (left face fixed at
+// x=0); with it the anchor is the box center (left face moves). A regression
+// where the Ctrl wiring goes dead would leave both drags identical.
+test('Scale: a real Control keypress toggles the center anchor mid-drag', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [7, -7, 5], target: [1, 1, 0.5], fovDeg: 45 })
+    const id = h.drawBox([0, 0, 0], [2, 2, 1], 1) // 2x2x1 box on the ground
+    h.selectObjects([id])
+  })
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.press('s') // real key -> Scale tool; gizmo appears
+  await page.locator('text=Drag a grip').first().waitFor({ timeout: 5000 })
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  // World -> page pixels: worldToScreen is canvas-relative; add the canvas
+  // offset so page.mouse (page-relative) lands on the projected point.
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+  // Grab the +X face grip (world center of the +X face) and drag it to a far
+  // ground target in +X; the drag resolves on the ground plane, so the X
+  // factor is predictable from where the target lands.
+  const grip = await toPage([2, 1, 0.5])
+  const target = await toPage([5, 1, 0])
+
+  const dragXGrip = async (withCtrl: boolean) => {
+    await page.mouse.move(grip.x, grip.y)
+    await page.mouse.down() // grab
+    if (withCtrl) await page.keyboard.press('Control') // clean tap -> center anchor
+    await page.mouse.move(target.x, target.y, { steps: 10 }) // drag
+    await page.mouse.up()
+    await page.mouse.move(target.x, target.y)
+    await page.mouse.down() // commit
+    await page.mouse.up()
+    await page.waitForTimeout(120)
+  }
+
+  await dragXGrip(false)
+  const noCtrl = await page.evaluate(() =>
+    window.__hew_test!.getObjectBounds(window.__hew_test!.getObjectIds()[0]),
+  )
+  await page.evaluate(() => window.__hew_test!.undo()) // back to the 2x2x1 box
+
+  await dragXGrip(true)
+  const ctrl = await page.evaluate(() =>
+    window.__hew_test!.getObjectBounds(window.__hew_test!.getObjectIds()[0]),
+  )
+
+  // Without Ctrl: opposite-grip anchor — the left (x=0) face stays put.
+  expect(noCtrl[0]).toBeCloseTo(0, 5)
+  expect(noCtrl[3]).toBeGreaterThan(2) // the box did grow in +X
+  // With the real Ctrl tap: center anchor — the left face moved LEFT past 0.
+  // (If the Ctrl wiring were dead this would still be ~0, matching noCtrl.)
+  expect(ctrl[0]).toBeLessThan(-0.5)
+})
+
+// Edge grip via a REAL drag (not a scaleObject call): dragging along one of
+// its two driven axes must scale that axis only, leaving the other fixed.
+test('Scale: dragging an edge grip along one axis scales that axis only', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [7, -7, 6], target: [1, 2, 1], fovDeg: 45 })
+    h.drawBox([0, 0, 0], [2, 4, 2], 2) // 2x4x2 box (drawBox height = 2)
+    h.selectObjects([h.getObjectIds()[0]])
+  })
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.press('s')
+  await page.locator('text=Drag a grip').first().waitFor({ timeout: 5000 })
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+  const before = await page.evaluate(() =>
+    window.__hew_test!.getObjectBounds(window.__hew_test!.getObjectIds()[0]),
+  )
+
+  // The +X/+Z edge grip sits at (2, 2, 2) (fixed axis Y at the box's mid-Y=2).
+  // Drag along X only, to world (4, 2, 2) on the grip's Y=2 plane.
+  const grip = await toPage([2, 2, 2])
+  const target = await toPage([4, 2, 2])
+  await page.mouse.move(grip.x, grip.y)
+  await page.mouse.down()
+  await page.mouse.move(target.x, target.y, { steps: 10 })
+  await page.mouse.up()
+  await page.mouse.move(target.x, target.y)
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.waitForTimeout(120)
+
+  const after = await page.evaluate(() =>
+    window.__hew_test!.getObjectBounds(window.__hew_test!.getObjectIds()[0]),
+  )
+  const xBefore = before[3] - before[0], xAfter = after[3] - after[0]
+  const zBefore = before[5] - before[2], zAfter = after[5] - after[2]
+  expect(xAfter).toBeGreaterThan(xBefore * 1.4) // X grew (toward 2x)
+  expect(zAfter).toBeCloseTo(zBefore, 4) // Z unchanged — the OTHER driven axis stayed fixed
+  expect(after[4] - after[1]).toBeCloseTo(before[4] - before[1], 4) // Y (undriven) unchanged
+})
+
+// ---------------------------------------------------------------------------
 // Guides — addGuideLine / addGuidePoint / getGuideIds / deleteGuide
 // ---------------------------------------------------------------------------
 

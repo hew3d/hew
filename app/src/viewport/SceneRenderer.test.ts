@@ -791,15 +791,19 @@ describe('group drag preview + scale pivot include leaf INSTANCES, not just obje
       () => { /* onToast */ },
       (id) => renderer.getInstanceGroup(id),
     )
-    const center = (tool as unknown as {
-      _selectionCenter(nodes: NodeRef[]): [number, number, number] | null
-    })._selectionCenter([groupNode])
+    // `_selectionCenter` became `_selectionBox` (the nonuniform-scale gizmo
+    // needs the full box, not just its center) — derive the center the same
+    // way the tool itself now does.
+    const box = (tool as unknown as {
+      _selectionBox(nodes: NodeRef[]): THREE.Box3 | null
+    })._selectionBox([groupNode])
 
-    expect(center).not.toBeNull()
+    expect(box).not.toBeNull()
+    const center = box!.getCenter(new THREE.Vector3())
     // Object center x≈0.5, instance center x≈100.5 → combined center x≈50.5.
     // Object-only (the bug) would land near x≈0.5.
-    expect(center![0]).toBeGreaterThan(40)
-    expect(center![0]).toBeLessThan(60)
+    expect(center.x).toBeGreaterThan(40)
+    expect(center.x).toBeLessThan(60)
   })
 })
 

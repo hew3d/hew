@@ -11,6 +11,7 @@ import {
   projectOntoPlane,
   signedAngleAboutAxis,
   scaleAboutCenter,
+  nonUniformScaleAboutPivot,
   snapAngleDeg,
   angleFromPivot,
   meshBoundingBoxCenter,
@@ -386,6 +387,56 @@ describe('scaleAboutCenter', () => {
     expect(x).toBeCloseTo(2)
     expect(y).toBeCloseTo(-1)
     expect(z).toBeCloseTo(3)
+  })
+})
+
+describe('nonUniformScaleAboutPivot', () => {
+  it('a single driven axis (face grip) scales that axis and leaves the others fixed', () => {
+    // Z-only stretch by 3x about pivot (0,0,0): X and Y untouched.
+    const a = nonUniformScaleAboutPivot(1, 1, 3, [0, 0, 0])
+    const [x, y, z] = applyAffine(a, 2, 5, 4)
+    expect(x).toBeCloseTo(2)
+    expect(y).toBeCloseTo(5)
+    expect(z).toBeCloseTo(12)
+  })
+
+  it('two driven axes (edge grip) scale those and leave the third fixed', () => {
+    const a = nonUniformScaleAboutPivot(2, 1, 4, [0, 0, 0])
+    const [x, y, z] = applyAffine(a, 1, 1, 1)
+    expect(x).toBeCloseTo(2)
+    expect(y).toBeCloseTo(1)
+    expect(z).toBeCloseTo(4)
+  })
+
+  it('the pivot point itself is stationary', () => {
+    const pivot: [number, number, number] = [3, -2, 5]
+    const a = nonUniformScaleAboutPivot(2, 0.5, 7, pivot)
+    const [x, y, z] = applyAffine(a, ...pivot)
+    expect(x).toBeCloseTo(pivot[0])
+    expect(y).toBeCloseTo(pivot[1])
+    expect(z).toBeCloseTo(pivot[2])
+  })
+
+  it('an off-pivot point on a non-driven axis stays on its original plane', () => {
+    // Driving only X about pivot (1,1,1): a point with y=1,z=1 (matching the
+    // pivot on the untouched axes) keeps those coordinates exactly.
+    const pivot: [number, number, number] = [1, 1, 1]
+    const a = nonUniformScaleAboutPivot(4, 1, 1, pivot)
+    const [x, y, z] = applyAffine(a, 3, 1, 1)
+    expect(x).toBeCloseTo(1 + (3 - 1) * 4) // 9
+    expect(y).toBeCloseTo(1)
+    expect(z).toBeCloseTo(1)
+  })
+
+  it('a uniform call (sx=sy=sz) matches scaleAboutCenter', () => {
+    const pivot: [number, number, number] = [2, -1, 3]
+    const a = nonUniformScaleAboutPivot(2.5, 2.5, 2.5, pivot)
+    const b = scaleAboutCenter(pivot[0], pivot[1], pivot[2], 2.5)
+    const pa = applyAffine(a, 7, -4, 1)
+    const pb = applyAffine(b, 7, -4, 1)
+    expect(pa[0]).toBeCloseTo(pb[0])
+    expect(pa[1]).toBeCloseTo(pb[1])
+    expect(pa[2]).toBeCloseTo(pb[2])
   })
 })
 

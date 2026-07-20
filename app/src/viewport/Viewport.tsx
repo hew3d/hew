@@ -363,6 +363,15 @@ export interface ViewportApi {
   captureFrame: () => { width: number; height: number; pixels: Uint8Array }
 
   /**
+   * Project a world point to canvas-relative CSS pixels (origin top-left) at
+   * the current camera. `behind` is true when the point is behind the camera
+   * (the x/y are then meaningless). Test-only: lets a pointer-driven E2E
+   * (e.g. the Scale gizmo's grip-grab) target a grip's exact screen position
+   * robustly, instead of hard-coding pixels read off a screenshot.
+   */
+  worldToScreen: (world: [number, number, number]) => { x: number; y: number; behind: boolean }
+
+  /**
    * The camera's current pose (position, orbit target, vertical FOV) —
    * the read complement of `setCamera`, for tests that assert framing
    * (e.g. that Zoom Extents re-targeted onto a placed instance).
@@ -1931,6 +1940,18 @@ export default function Viewport({
       }
     }
 
+    // Test-only world→screen projection (ViewportApi.worldToScreen). Delegates
+    // to the same `worldToPixels` the inference-dot overlay uses (hoisted —
+    // declared later in this effect). Canvas-relative CSS pixels, top-left
+    // origin.
+    function worldToScreenPx(world: [number, number, number]): {
+      x: number
+      y: number
+      behind: boolean
+    } {
+      return worldToPixels(new THREE.Vector3(world[0], world[1], world[2]))
+    }
+
     function setHomeFraming(scale: number): void {
       // Re-pose the camera at the default 3/4 home view, `scale`× the
       // meter-scale distance (welcome-screen unit choice on a blank
@@ -2017,7 +2038,7 @@ export default function Viewport({
         }
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -2665,6 +2686,35 @@ export default function Viewport({
     window.addEventListener('keydown', onShiftKeyDown)
     window.addEventListener('keyup', onShiftKeyUp)
 
+    // Ctrl toggles the active tool's durable center-anchor (Scale's
+    // `toggleCenterAnchor`). Like Shift above, a BARE Control keydown reports
+    // ctrlKey:true, so the generic key path in onKeyDown (gated on `!isMod`)
+    // never carries it — hence a dedicated listener. Fire on a CLEAN TAP only:
+    // Control pressed and released with NO other key in between. Toggling on
+    // the leading keydown would also flip the anchor as a side effect of every
+    // Ctrl chord (Ctrl+Z undo, Ctrl+A select-all, …), which the clean-tap
+    // guard prevents. `ctrlTapClean` is armed on a non-repeat Control keydown
+    // and disarmed by any other keydown before the matching keyup.
+    let ctrlTapClean = false
+    function onCtrlKeyDown(ev: KeyboardEvent): void {
+      if (ev.key === 'Control') {
+        if (!ev.repeat) ctrlTapClean = true
+        return
+      }
+      ctrlTapClean = false // another key joined the press → it's a chord, not a tap
+    }
+    function onCtrlKeyUp(ev: KeyboardEvent): void {
+      if (ev.key !== 'Control' || !ctrlTapClean) return
+      ctrlTapClean = false
+      const at = toolController.activeTool
+      if ('toggleCenterAnchor' in at) {
+        (at as { toggleCenterAnchor(): void }).toggleCenterAnchor()
+        scheduleRender()
+      }
+    }
+    window.addEventListener('keydown', onCtrlKeyDown)
+    window.addEventListener('keyup', onCtrlKeyUp)
+
     // ------------------------------------------------------------------ animation loop
     let rafId = 0
     let needsRender = true
@@ -2680,6 +2730,15 @@ export default function Viewport({
         const activeToolForScale = toolController.activeTool
         if ('updateDiskScale' in activeToolForScale) {
           ;(activeToolForScale as { updateDiskScale(c: THREE.Camera): void }).updateDiskScale(camera)
+        }
+        // ScaleTool's grip markers are screen-constant size too, but each
+        // grip needs its OWN world-space size (they sit at different
+        // distances from the camera, unlike a single-position disk) — see
+        // ScaleTool.updateGripScale. Called here, before renderer.render(),
+        // so the scale takes effect on THIS frame's updateMatrixWorld pass.
+        if ('updateGripScale' in activeToolForScale) {
+          ;(activeToolForScale as { updateGripScale(c: THREE.Camera, viewportHeight: number): void })
+            .updateGripScale(camera, el.clientHeight)
         }
         // Feed the shader grid the camera's current position so it can pick
         // the right cell-size decade per fragment.
@@ -3419,6 +3478,8 @@ export default function Viewport({
       if (cameraDragActive) onCameraDragChangeRef.current?.(false)
       window.removeEventListener('keydown', onShiftKeyDown)
       window.removeEventListener('keyup', onShiftKeyUp)
+      window.removeEventListener('keydown', onCtrlKeyDown)
+      window.removeEventListener('keyup', onCtrlKeyUp)
       window.removeEventListener('keydown', onKeyDownRecord)
       window.removeEventListener('keyup', onKeyUpRecord)
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost)

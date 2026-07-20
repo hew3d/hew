@@ -104,6 +104,16 @@ below.
   translated plane, source untouched — so a profile can be copied up rather
   than moving the only one you have. Sketch copies stay single (no ×N
   array) until a kernel-side sketch duplicate op exists
+- Scale: a bounding-box grip gizmo — 6 face-center grips stretch one axis,
+  8 corner grips scale uniformly, and 12 edge-midpoint grips scale two axes
+  — about a chosen anchor (the grabbed grip's opposite by default, the box
+  center with a durable Ctrl toggle), with typed exact factors or target
+  dimensions. Dragging a grip past its anchor clamps rather than reflects
+  (mirroring is a separate future tool). Move, Rotate, and Scale all extend
+  to a whole mixed selection — one Object, a Group, a component instance,
+  or any combination — as one shared transform and one undo step; a scaled
+  component instance carries the (possibly non-uniform) scale in its own
+  pose, leaving the shared definition and every sibling instance untouched
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
@@ -290,8 +300,6 @@ below.
 
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
-- **Non-uniform scale**, and moving/rotating/scaling multiple selected
-  objects together
 - **Nested component definitions** (a component containing other
   components)
 - **Layers and saved Scenes** (named camera bookmarks)

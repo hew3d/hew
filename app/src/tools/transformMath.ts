@@ -259,12 +259,42 @@ export function signedAngleAboutAxis(
 }
 
 /**
+ * Non-uniform scale about a world-space pivot: `diag(sx, sy, sz)` applied
+ * about `pivot` in world axes —
+ *   1. Translate pivot to origin: T(-pivot)
+ *   2. Per-axis scale: diag(sx, sy, sz)
+ *   3. Translate back: T(+pivot)
+ *
+ * A factor of 1 on an axis leaves it untouched, so a single-axis (face) grip
+ * passes 1 for the two axes it doesn't drive, and a two-axis (edge) grip
+ * passes 1 for the one it doesn't. Each factor must be > 0 (callers are
+ * responsible for clamping — the kernel refuses a zero/negative factor as
+ * singular/reflecting).
+ */
+export function nonUniformScaleAboutPivot(
+  sx: number,
+  sy: number,
+  sz: number,
+  pivot: readonly [number, number, number],
+): Affine {
+  const toPivot = translationAffine(-pivot[0], -pivot[1], -pivot[2])
+  const scale: Affine = [
+    sx, 0, 0, 0,
+    0, sy, 0, 0,
+    0, 0, sz, 0,
+  ]
+  const fromPivot = translationAffine(pivot[0], pivot[1], pivot[2])
+  return composeAffine(composeAffine(toPivot, scale), fromPivot)
+}
+
+/**
  * Build a uniform-scale-about-center affine:
  *   1. Translate center to origin: T(-center)
  *   2. Uniform scale by f: S(f)
  *   3. Translate back: T(+center)
  *
- * f must be > 0 (guarded by the caller).
+ * f must be > 0 (guarded by the caller). The `sx === sy === sz`,
+ * `pivot === center` special case of {@link nonUniformScaleAboutPivot}.
  */
 export function scaleAboutCenter(
   cx: number,
@@ -272,10 +302,7 @@ export function scaleAboutCenter(
   cz: number,
   f: number,
 ): Affine {
-  const toCenter = translationAffine(-cx, -cy, -cz)
-  const scale = uniformScaleAffine(f)
-  const fromCenter = translationAffine(cx, cy, cz)
-  return composeAffine(composeAffine(toCenter, scale), fromCenter)
+  return nonUniformScaleAboutPivot(f, f, f, [cx, cy, cz])
 }
 
 /**

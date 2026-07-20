@@ -117,6 +117,13 @@ export interface HewTestHarness {
   /** Whether an object is currently a watertight solid (`object_solid`). */
   isObjectSolid(id: string): boolean
   /**
+   * World-axis-aligned bounding box of `object`'s current mesh, as
+   * `[minX,minY,minZ,maxX,maxY,maxZ]` (meters) — read from `object_mesh`'s
+   * position buffer, the same source ScaleTool's gizmo box is computed from
+   * on the UI side.
+   */
+  getObjectBounds(id: string): [number, number, number, number, number, number]
+  /**
    * Deep-copy ANY tree node — object, group, or instance — offset by
    * `(dx, dy, dz)` meters: `duplicate_node` on the node's own kind, exactly
    * the Move+Alt copy commit. Returns the new root node.
@@ -273,6 +280,15 @@ export interface HewTestHarness {
    * RotateTool's commit.
    */
   rotateObject(object: string, angleDeg: number, axis?: Vec3): void
+
+  /**
+   * Scale `object` by `(sx, sy, sz)` about `pivot` (world meters, non-uniform
+   * allowed). Builds the same "diag(sx,sy,sz) about a world pivot" affine as
+   * `nonUniformScaleAboutPivot` in `tools/transformMath.ts` and calls
+   * `transform_object`, matching ScaleTool's grip-gizmo commit. The handle is
+   * unchanged; the document state_hash changes.
+   */
+  scaleObject(object: string, sx: number, sy: number, sz: number, pivot: Vec3): void
 
   /**
    * Slice a watertight solid by a plane. `plane` is 6 floats `[px,py,pz,nx,ny,nz]`
@@ -516,6 +532,12 @@ export interface HewTestHarness {
   /** The camera's current pose — the read complement of `setCamera`, for
    * asserting framing (e.g. Zoom Extents re-targeting onto an instance). */
   getCamera(): { position: Vec3; target: Vec3; fovDeg: number }
+
+  /** Project a world point to canvas-relative CSS pixels at the current
+   * camera, for pointer-driven E2E that must target an on-screen widget (e.g.
+   * grabbing a Scale-gizmo grip by its exact projected position instead of a
+   * hard-coded pixel). `behind` true = the point is behind the camera. */
+  worldToScreen(world: Vec3): { x: number; y: number; behind: boolean }
 }
 
 declare global {
@@ -672,6 +694,32 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       ),
 
     isObjectSolid: (id) => query((s) => s.object_solid(BigInt(id))),
+
+    getObjectBounds: (id) =>
+      query((s) => {
+        const mesh = s.object_mesh(BigInt(id))
+        try {
+          const pos = mesh.positions()
+          if (pos.length < 3) {
+            throw new Error(`getObjectBounds: object ${id} has no geometry`)
+          }
+          let minX = pos[0], maxX = pos[0]
+          let minY = pos[1], maxY = pos[1]
+          let minZ = pos[2], maxZ = pos[2]
+          for (let i = 3; i < pos.length; i += 3) {
+            const x = pos[i], y = pos[i + 1], z = pos[i + 2]
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+            if (z < minZ) minZ = z
+            if (z > maxZ) maxZ = z
+          }
+          return [minX, minY, minZ, maxX, maxY, maxZ]
+        } finally {
+          mesh.free()
+        }
+      }),
 
     copyNode: (kind, id, dx, dy, dz) => {
       const affine = new Float64Array([1, 0, 0, dx, 0, 1, 0, dy, 0, 0, 1, dz])
@@ -958,6 +1006,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       act((s) => s.transform_object(BigInt(object), affine))
     },
 
+    scaleObject: (object, sx, sy, sz, pivot) => {
+      // diag(sx,sy,sz) about `pivot`: translation = pivot componentwise
+      // (1 - s) — matches `nonUniformScaleAboutPivot` in tools/transformMath.ts.
+      const [px, py, pz] = pivot
+      const affine = new Float64Array([
+        sx, 0, 0, px * (1 - sx),
+        0, sy, 0, py * (1 - sy),
+        0, 0, sz, pz * (1 - sz),
+      ])
+      act((s) => s.transform_object(BigInt(object), affine))
+    },
+
     sliceObject: (object, plane) =>
       act((s) => {
         const ids = s.slice_object(BigInt(object), new Float64Array(plane))
@@ -1193,6 +1253,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getCamera()
+    },
+
+    worldToScreen: (world) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.worldToScreen(world)
     },
   }
 

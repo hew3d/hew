@@ -108,4 +108,4 @@ There's no input box to click, and none appears. With a tool mid-gesture, start 
 - An explicit unit that overrides the display unit: `mm`, `cm`, `m`, `km`, `in`, `ft` — `250mm`, `3.5cm`, `6"`, `2'`.
 - Feet-inches-fractions, SketchUp style: `5'3"`, `5' 3-1/2"`, `3 1/2"`, `5/8"`.
 
-Angle tools (Rotate, Protractor) take plain degrees; Scale takes a plain factor. Display units are set in **Settings ▸ Units** ([Settings](/learn/settings/)).
+Angle tools (Rotate, Protractor) take plain degrees; Scale takes a plain factor, or a length in any of the forms above as a target dimension for the axis being dragged. Display units are set in **Settings ▸ Units** ([Settings](/learn/settings/)).

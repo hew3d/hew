@@ -38,6 +38,14 @@ export class ToolController {
   setTool(tool: Tool): void {
     this._activeTool.cancel()
     this._activeTool = tool
+    // Let a tool draw its at-rest overlay AFTER the outgoing tool's cancel()
+    // has cleared the shared preview group — otherwise the outgoing cancel
+    // wipes anything the incoming tool set up in its constructor. Only the
+    // Scale tool's always-on grip gizmo needs this today; feature-detected so
+    // every other tool is unaffected.
+    if ('activate' in tool && typeof (tool as { activate?: unknown }).activate === 'function') {
+      (tool as { activate(): void }).activate()
+    }
     this._notifyListeners()
   }
 

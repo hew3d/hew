@@ -15,7 +15,8 @@
 
 use kernel::{
     BooleanError, BooleanOp, FaceId, History, HistoryError, KernelOp, KernelOpReport, Object,
-    Plane, Point3, Profile, PushPullError, StickyError, Transform, Vec3, WatertightState, tol,
+    Plane, Point3, Profile, PushPullError, StickyError, Transform, TransformError, Vec3,
+    WatertightState, tol,
 };
 use proptest::prelude::*;
 
@@ -4095,4 +4096,147 @@ fn push_through_then_split_severs_into_two_solids() {
     );
     pieces[0].validate().unwrap();
     assert_eq!(pieces[0].watertight(), WatertightState::Watertight);
+}
+
+// ------------------------- transform: non-uniform scale (design nonuniform-scale §4)
+//
+// `Object::apply_transform` (crates/kernel/src/ops.rs) is where
+// `Document::transform_object` / `transform_group` / `transform_selection`
+// all bottom out (see their doc comments) — one spec here pins the math for
+// all three. The trap: a face's plane must be refit from where its boundary
+// LANDED (Newell over the moved points — exactly what `Transform::apply_plane`
+// does internally by mapping three points and refitting), never by
+// transforming the stored normal like an ordinary vector — that only agrees
+// with the correct inverse-transpose answer for similarities (uniform scale,
+// rotation), and silently drifts under anisotropic non-uniform scale.
+// `sliced_wedge` supplies a face that is not axis-aligned, so a wrong
+// implementation actually fails these assertions; an axis-aligned box would
+// hide the bug (its face normals stay axis-aligned under any diagonal scale,
+// right or wrong).
+
+/// Non-uniform, anisotropic, non-reflecting scale on a shape with an oblique
+/// face: the object stays watertight and the transformed face's plane
+/// matches Newell's method run over the ACTUAL MOVED boundary — not a
+/// naively-scaled normal — proving `apply_transform` takes the
+/// inverse-transpose route DEVELOPMENT.md §4 calls out, not the vector route.
+#[test]
+fn transform_non_uniform_scale_refits_oblique_plane_via_newell() {
+    let mut wedge = sliced_wedge();
+    let cut = wedge_cut_face(&wedge);
+    let pre_points: Vec<Point3> = wedge
+        .loop_positions(wedge.faces()[cut].outer_loop)
+        .collect();
+    let volume_before = signed_volume(&wedge);
+
+    let t = Transform::scale(Vec3::new(2.0, 0.5, 3.0)); // three distinct factors
+    wedge
+        .apply_transform(&t)
+        .expect("positive anisotropic scale is accepted");
+
+    assert_eq!(wedge.watertight(), WatertightState::Watertight);
+    wedge
+        .validate()
+        .expect("faces stay planar within tolerance under anisotropic scale");
+
+    // The independently-computed Newell plane over the moved boundary...
+    let moved: Vec<Point3> = pre_points.iter().map(|&p| t.apply_point(p)).collect();
+    let expected = Plane::from_polygon(&moved).expect("moved boundary is still planar");
+    // ...must equal what apply_transform actually stored.
+    let actual = wedge.faces()[cut].plane;
+    assert!(
+        actual
+            .normal()
+            .approx_eq(expected.normal(), tol::NORMAL_DIRECTION),
+        "refit normal {:?} != Newell-over-moved-boundary normal {:?}",
+        actual.normal(),
+        expected.normal(),
+    );
+    for p in &moved {
+        assert!(
+            actual.signed_distance(*p).abs() < tol::PLANE_DIST,
+            "a moved boundary point left the refit plane"
+        );
+    }
+
+    assert!(
+        (signed_volume(&wedge) - volume_before * 2.0 * 0.5 * 3.0).abs() < VOLUME_TOL,
+        "volume scales by the product of the three factors"
+    );
+}
+
+proptest! {
+    /// Non-uniform scale by `(sx,sy,sz)` about an arbitrary world pivot,
+    /// followed by its exact inverse `(1/sx,1/sy,1/sz)` about the same
+    /// pivot, restores the wedge's prior topology — the round trip a
+    /// Ctrl-anchored gizmo drag and its undo both rely on (tolerance-aware
+    /// equivalence, not bitwise: DEVELOPMENT.md §4 — float round-trips are
+    /// not `(p + d) - d == p`).
+    #[test]
+    fn transform_non_uniform_scale_then_inverse_restores_wedge_topology(
+        sx in 0.3f64..4.0,
+        sy in 0.3f64..4.0,
+        sz in 0.3f64..4.0,
+        px in -3.0f64..3.0,
+        py in -3.0f64..3.0,
+        pz in -3.0f64..3.0,
+    ) {
+        let original = sliced_wedge();
+        let pivot = Vec3::new(px, py, pz);
+        let to_pivot = Transform::translation(-pivot);
+        let from_pivot = Transform::translation(pivot);
+        let forward = to_pivot
+            .then(&Transform::scale(Vec3::new(sx, sy, sz)))
+            .then(&from_pivot);
+        let inverse = to_pivot
+            .then(&Transform::scale(Vec3::new(1.0 / sx, 1.0 / sy, 1.0 / sz)))
+            .then(&from_pivot);
+
+        let mut obj = original.clone();
+        obj.apply_transform(&forward)
+            .expect("forward scale is positive and non-reflecting");
+        obj.apply_transform(&inverse)
+            .expect("inverse scale is positive and non-reflecting");
+
+        obj.validate().expect("round trip stays valid");
+        prop_assert_eq!(obj.watertight(), WatertightState::Watertight);
+        prop_assert!(
+            objects_equivalent(&obj, &original),
+            "non-uniform scale then its inverse restores the original topology"
+        );
+    }
+}
+
+/// A reflecting affine is refused typed even when it is also non-uniform (the
+/// class the UI's per-axis clamp exists to keep the kernel from ever seeing),
+/// and a merely-singular one (one axis at exactly zero) is refused as
+/// `Singular` rather than `Reflection` — both leave the object byte-identical
+/// (the strong exception guarantee), never half-transformed.
+#[test]
+fn transform_refuses_anisotropic_reflection_and_singular_leaving_object_untouched() {
+    let mut wedge = sliced_wedge();
+    let before = exact_snapshot(&wedge);
+
+    assert_eq!(
+        wedge
+            .apply_transform(&Transform::scale(Vec3::new(-2.0, 1.0, 3.0)))
+            .unwrap_err(),
+        TransformError::Reflection
+    );
+    assert_eq!(
+        exact_snapshot(&wedge),
+        before,
+        "refused reflection leaves geometry untouched"
+    );
+
+    assert_eq!(
+        wedge
+            .apply_transform(&Transform::scale(Vec3::new(0.0, 1.0, 3.0)))
+            .unwrap_err(),
+        TransformError::Singular
+    );
+    assert_eq!(
+        exact_snapshot(&wedge),
+        before,
+        "refused singular transform leaves geometry untouched"
+    );
 }

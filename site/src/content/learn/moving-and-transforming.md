@@ -53,14 +53,23 @@ The live angle snaps to 15° increments as you sweep. For any other angle, type 
 
 ## Scale (`S`)
 
-1. Click a **base point**.
-2. Move away from or toward the selection's center and click to commit. The readout shows the factor (`×1.50`).
+Scale draws a **grip gizmo** on the selection's bounding box: a grip at the center of each of the 6 faces, one at each of the 8 corners, and one at each of the 12 edge midpoints.
 
-Scaling is **uniform**, about the selection's bounding-box center. For an exact factor, type it (`0.5`, `2.54`) and press `Enter`; factors must be positive. Non-uniform (per-axis) scaling is on the roadmap.
+1. **Drag a grip.**
+   - A **face grip** stretches one axis only — height, width, or depth — leaving the other two untouched.
+   - An **edge grip** drives the two axes it sits between, each following your drag independently — pull mostly along one axis and that axis stretches more. (A single typed value scales both proportionally instead.)
+   - A **corner grip** scales all three axes together — uniform scale, like SketchUp's own corner handles.
+2. **Click again** to commit. The live readout shows the factor (`×1.50`) tagged with the axis for a face grip, both axes' factors for an edge grip.
+
+By default the grip **opposite** the one you grabbed stays anchored — grab the top face and the bottom stays put, so the object grows upward from there. Tap `Control` to durably anchor at the box's **center** instead, so both sides move symmetrically; tap it again to go back to the opposite-grip anchor. Dragging a grip past its anchor never flips the object inside out — it clamps at a tiny minimum size instead (mirroring is a separate tool).
+
+**Exact values:** type a plain number (`0.5`, `2.54`) and press `Enter` for a factor on the driven axis or axes — a corner grip's one typed value drives all three. Type a length instead (`50mm`, `8"`) and Hew reads it as a **target dimension**: the driven axis scales to land at exactly that size, computed against the box's current extent.
+
+Scaling a component instance scales that instance alone — the shared definition and every sibling instance are untouched, even for a non-uniform stretch.
 
 ## What transforms apply to
 
-Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Multi-selections scale about the selection's overall bounding-box center. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike; a sketch's in-plane copies arrive as one undo step per sketch, and a copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch (so a shape with a hole keeps its hole), one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
+Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. A multi-selection's Scale gizmo is built from the union of every selected object's bounding box, so grabbing a grip spreads the whole selection apart (or together) correctly around the chosen anchor, rather than resizing each object in place. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike; a sketch's in-plane copies arrive as one undo step per sketch, and a copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch (so a shape with a hole keeps its hole), one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
 
 Sketch geometry transforms at shape granularity. Whether you selected a filled shape, one of its lines, or a drawn arc or circle, the transform moves the whole connected shape as a rigid body — an open chain of lines included. Rotation isn't confined to the sketch plane: tipping a drawn profile upright (the [Follow Me](/learn/follow-me/) setup) rotates the shape out of the ground with the same gesture as any other rotation. If the shape is the only thing in its sketch, the whole sketch tips with it; if it shares the working sketch with other drawing, the shape splits off into its own sketch on the new plane and everything else stays where it was. An in-plane move that would land one shape on top of another is still refused rather than welded.
 

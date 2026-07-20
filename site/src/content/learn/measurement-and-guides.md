@@ -29,7 +29,7 @@ While a tool is mid-gesture, type a value and press `Enter`. The rules:
 - **Explicit units always win**, in any display mode: `250mm`, `3.5cm`, `1.2m`, `2km`, `6"`, `6in`, `2'`, `2ft`.
 - **Feet-inches-fractions** parse whenever `'` or `"` appears: `5'3"`, `5' 3-1/2"`, `3 1/2"`, `5/8"`.
 - **Rectangle** takes two comma- or `x`-separated dimensions, mixable: `1cm,100mm`, `2' x 18"`; one value makes a square.
-- **Rotate and Protractor** take plain degrees; **Scale** takes a plain positive factor.
+- **Rotate and Protractor** take plain degrees; **Scale** takes a plain positive factor as-typed (not a length in the display unit) — or an explicit length (`50mm`, `8"`) as a target dimension for the axis being dragged.
 
 ## Tape Measure (`T`)
 

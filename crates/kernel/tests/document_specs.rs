@@ -420,6 +420,57 @@ fn uniform_scale_scales_volume() {
     assert!((signed_volume(doc.object(id).unwrap()) - v0 * 8.0).abs() < 1e-6);
 }
 
+/// A wedge with one oblique (non-axis-aligned) face: extrude a unit box then
+/// slice it by the plane `x + z = 1`, keeping the piece `x + z <= 1` (mirrors
+/// `sliced_wedge` in `op_specs.rs`, built through the Document API instead of
+/// bare `Object` construction). The non-uniform-scale specs below need an
+/// oblique face to exercise the plane-refit inverse-transpose trap
+/// (DEVELOPMENT.md §4) — an axis-aligned box's faces stay axis-aligned under
+/// any diagonal scale whether or not the refit math is right, so it can't
+/// catch this class of bug.
+fn extrude_wedge(doc: &mut Document) -> ObjectId {
+    let id = extrude_box(doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let plane = Plane::from_point_normal(Point3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 1.0))
+        .expect("slice plane is well-defined");
+    let ((_above, below), _change) = doc.slice_node(id, &plane).expect("slice the cube");
+    below
+}
+
+/// The trap DESIGN §4 warns about, exercised
+/// through the actual API surface the UI calls: a NON-UNIFORM, anisotropic,
+/// non-reflecting scale on an object with a genuinely oblique face must still
+/// yield a watertight object whose plane was correctly refit. `op_specs.rs`
+/// (`transform_non_uniform_scale_refits_oblique_plane_via_newell`) pins the
+/// exact Newell-refit equality at the `Object` layer that
+/// `transform_object`/`transform_group`/`transform_selection` all delegate
+/// to (see their doc comments in `document.rs`); this spec pins the same
+/// contract at the Document layer, plus the undo/redo round trip.
+#[test]
+fn non_uniform_scale_refits_oblique_face_through_transform_object() {
+    let mut doc = Document::new();
+    let id = extrude_wedge(&mut doc);
+    let original = doc.object(id).unwrap().clone();
+
+    doc.transform_object(id, &Transform::scale(Vec3::new(2.0, 0.5, 3.0)))
+        .expect("non-uniform anisotropic scale");
+    let scaled = doc.object(id).unwrap();
+    assert_eq!(scaled.watertight(), WatertightState::Watertight);
+    scaled
+        .validate()
+        .expect("oblique face plane stays valid under anisotropic scale");
+
+    doc.undo().expect("undo the scale");
+    assert!(
+        objects_equivalent(doc.object(id).unwrap(), &original),
+        "undo restores the wedge exactly"
+    );
+    doc.redo().expect("redo the scale");
+    assert_eq!(
+        doc.object(id).unwrap().watertight(),
+        WatertightState::Watertight
+    );
+}
+
 /// Orientation-flipping (negative scale) and singular transforms are refused
 /// without mutating the object.
 #[test]
@@ -849,6 +900,34 @@ fn transform_group_moves_all_leaves_and_round_trips() {
     doc.redo().expect("redo group transform");
     assert!(approx_pt(centroid(doc.object(a).unwrap()), ca + offset));
     assert!(approx_pt(centroid(doc.object(c).unwrap()), cc + offset));
+}
+
+/// `transform_group` bakes into every leaf exactly like `transform_object`
+/// (see its doc comment: the group itself holds no pose) — an oblique-faced
+/// leaf inside a group proves the group path takes the same
+/// correctly-refit-plane route, not a shortcut that only happens to work for
+/// axis-aligned geometry.
+#[test]
+fn transform_group_non_uniform_scale_refits_oblique_leaf() {
+    let mut doc = Document::new();
+    let wedge = extrude_wedge(&mut doc);
+    let block = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(wedge), NodeId::Object(block)])
+        .unwrap();
+
+    doc.transform_group(group, &Transform::scale(Vec3::new(1.5, 2.0, 0.25)))
+        .expect("non-uniform scale on a group with an oblique-faced leaf");
+
+    let scaled_wedge = doc.object(wedge).unwrap();
+    assert_eq!(scaled_wedge.watertight(), WatertightState::Watertight);
+    scaled_wedge
+        .validate()
+        .expect("oblique leaf's plane stays valid under the group's anisotropic scale");
+    assert_eq!(
+        doc.object(block).unwrap().watertight(),
+        WatertightState::Watertight
+    );
 }
 
 // ------------------------------------------- transform a whole mixed selection
@@ -1554,6 +1633,54 @@ fn explode_bakes_pose_into_world_objects_and_refuses_mirror() {
     assert_eq!(
         doc.explode_instance(inst2),
         Err(DocumentError::CannotExplodeReflected)
+    );
+}
+
+/// Non-uniformly scaling ONE component instance leaves its siblings and the
+/// shared definition untouched — the product claim the Scale gizmo's
+/// per-instance behavior rests on (DESIGN §3 / the learn doc). A scale is
+/// composed into that instance's POSE (never baked into the shared geometry),
+/// so a second instance of the same definition keeps both its pose and its
+/// geometry exactly. Complements `transform_instance_composes_pose_and_undo_is_exact`
+/// (which uses a single instance) by proving the ISOLATION across siblings.
+#[test]
+fn non_uniform_scale_of_one_instance_leaves_siblings_and_definition_untouched() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (comp, i1, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (i2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(5.0, 0.0, 0.0)))
+        .unwrap();
+
+    let member = doc.def_members(comp).unwrap()[0];
+    let def_before = doc.object(member).unwrap().clone();
+    let i1_pose_before = doc.instance_pose(i1).unwrap();
+
+    // A NON-UNIFORM scale on i2 — the exact anisotropic case the gizmo emits.
+    doc.transform_instance(i2, &Transform::scale(Vec3::new(2.0, 3.0, 0.5)))
+        .unwrap();
+
+    // The scaled instance's pose picked up the scale...
+    let probe = Point3::new(0.4, 0.6, 0.2);
+    assert!(
+        doc.instance_pose(i2).unwrap().apply_point(probe).approx_eq(
+            Transform::translation(Vec3::new(5.0, 0.0, 0.0))
+                .then(&Transform::scale(Vec3::new(2.0, 3.0, 0.5)))
+                .apply_point(probe),
+            1e-9,
+        ),
+        "the scaled instance's pose composed the non-uniform scale"
+    );
+    // ...while the sibling's pose is byte-identical...
+    assert_eq!(
+        doc.instance_pose(i1).unwrap(),
+        i1_pose_before,
+        "the sibling instance's pose is untouched"
+    );
+    // ...and the shared definition geometry never moved (no baking).
+    assert!(
+        objects_equivalent(doc.object(member).unwrap(), &def_before),
+        "the shared definition is untouched — the scale lives only in i2's pose"
     );
 }
 
