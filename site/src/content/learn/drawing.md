@@ -1,12 +1,12 @@
 ---
 title: "Drawing"
-description: "The four profile tools, offsetting a boundary, what changes when you draw on a face instead of the ground, and every way to type an exact dimension."
+description: "The five profile tools, offsetting a boundary, what changes when you draw on a face instead of the ground, and every way to type an exact dimension."
 order: 5
 ---
 
-Hew's four drawing tools create 2D profiles. On the empty ground plane, a closed profile becomes a **sketch region** ready to extrude. Drawn directly on a solid's face, the same tools **split the face**, carving regions you can push in or pull out. The tool decides which mode to use from what's under your cursor; there is no explicit switch.
+Hew's five drawing tools create 2D profiles. On the empty ground plane, a closed profile becomes a **sketch region** ready to extrude. Drawn directly on a solid's face, the same tools **split the face**, carving regions you can push in or pull out. The tool decides which mode to use from what's under your cursor; there is no explicit switch.
 
-The four tools share one working sketch on the ground, so shapes drawn with different tools combine: draw an arc, switch to Line, and close it with a chord — the face forms the moment the circuit closes, exactly as if one tool had drawn it all. An arch profile, for instance, is three Line segments topped with an Arc, extruded once.
+The five tools share one working sketch on the ground, so shapes drawn with different tools combine: draw an arc, switch to Line, and close it with a chord — the face forms the moment the circuit closes, exactly as if one tool had drawn it all. An arch profile, for instance, is three Line segments topped with an Arc, extruded once.
 
 Layered shapes edit like a drawing, too. Where two closed shapes share a line, that line splits them into separate regions; select it with the Select tool and press `Delete`, and the regions merge into one larger face. Draw a rectangle, cap it with an arc, delete the line between them — one arch-shaped region, one pull.
 
@@ -42,6 +42,17 @@ To finish a chain *without* closing it: double-click, press `Enter` with nothing
 
 Hew's circles are stored as regular polygons, but they remember the exact circle you drew — center and radius ride along with the shape, power the Center/Quadrant/Tangent snaps, keep extruded walls smooth on screen, and let STL export re-facet the wall at whatever resolution you pick. The stored facet count adapts to the size of the circle: small circles get 24 sides, larger ones up to 96, keeping the worst chord deviation at about half a millimeter.
 
+## Polygon
+
+A regular N-sided polygon, for hex bolt heads and nuts, gear blanks, standoffs, and dice:
+
+1. Click to set the center.
+2. Move outward — a preview shows the polygon with one vertex under the cursor, rotating to follow it — and click to commit, or type an exact radius and press `Enter`.
+
+**Sides:** six by default. Type `Ns` at any point during the gesture (`8s` for an octagon) to change the side count — it can be typed before or after the radius, and re-typing it updates the preview immediately. The count is clamped between 3 and 120; above that, Circle is the right tool. The side count you last used carries over to the next polygon you draw, so a run of hex nuts doesn't need retyping `6s` each time.
+
+Unlike Circle, a polygon carries no hidden analytic shape — the straight facets you see are its exact geometry, stored as plain edges like any other drawn line. The typed radius is the **circumradius**, center to vertex, matching SketchUp's Polygon tool.
+
 ## Arc (`A`)
 
 A two-point arc, like SketchUp's:
@@ -56,7 +67,7 @@ A two-point arc, like SketchUp's:
 
 ## Drawing on a face
 
-Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level, any plain object's face is drawable directly — objects are immediately editable, just as they are with Push/Pull. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered.
+Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, polygon, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level, any plain object's face is drawable directly — objects are immediately editable, just as they are with Push/Pull. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered.
 
 ## Offset (`F`)
 

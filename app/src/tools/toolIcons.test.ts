@@ -5,6 +5,7 @@ const ALL_TOOLS: ToolName[] = [
   'Select',
   'Rectangle',
   'Circle',
+  'Polygon',
   'Arc',
   'Line',
   'Push/Pull',

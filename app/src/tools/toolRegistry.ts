@@ -49,6 +49,9 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Line', group: 'Draw', macKey: 'L', winKey: 'L' },
   { name: 'Rectangle', group: 'Draw', macKey: 'R', winKey: 'R' },
   { name: 'Circle', group: 'Draw', macKey: 'C', winKey: 'C' },
+  // Polygon: SketchUp assigns no default key (it lives in the shapes
+  // flyout) — reachable from the rail and the command palette only.
+  { name: 'Polygon', group: 'Draw', macKey: '', winKey: '' },
   // Arc: 'A' is SketchUp's real arc key (the arc FAMILY key there — it
   // cycles 2-point/3-point/pie modes; Hew's Arc is the simpler 2-point
   // gesture, but the same key keeps muscle memory intact).

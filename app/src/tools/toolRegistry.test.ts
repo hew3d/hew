@@ -14,8 +14,8 @@ describe('toolRegistry', () => {
     expect(toolSpec('Select').macKey).toBe('Spc')
   })
 
-  it('groups the 03_tool_rail.md tools plus Arc and Follow Me, 5/5/2 per group', () => {
-    expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Arc'])
+  it('groups the 03_tool_rail.md tools plus Arc, Polygon, and Follow Me, 6/5/2 per group', () => {
+    expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Polygon', 'Arc'])
     expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Move', 'Rotate', 'Scale'])
     expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Paint'])
   })
@@ -56,8 +56,8 @@ describe('toolRegistry', () => {
       expect(shortcutFor('Paint', false)).toBe('B')
     })
 
-    it('non-spec tools (Follow Me/Protractor/Slice/Edit Vertex) have no shortcut on either platform', () => {
-      for (const name of ['Follow Me', 'Protractor', 'Slice', 'Edit Vertex'] as const) {
+    it('non-spec tools (Follow Me/Polygon/Protractor/Slice/Edit Vertex) have no shortcut on either platform', () => {
+      for (const name of ['Follow Me', 'Polygon', 'Protractor', 'Slice', 'Edit Vertex'] as const) {
         expect(shortcutFor(name, true)).toBe('')
         expect(shortcutFor(name, false)).toBe('')
       }

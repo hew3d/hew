@@ -160,6 +160,52 @@ export function editLengthBuffer(buf: string, key: string, _format: LengthFormat
 }
 
 /**
+ * True if `key` is a keystroke PolygonTool's typed VCB accepts: everything
+ * `isLengthInputKey` takes (the circumradius grammar) PLUS `s`/`S`, the
+ * terminator of the `<n>s` side-count token (SketchUp's Polygon convention,
+ * e.g. `8s`).
+ */
+export function isPolygonInputKey(key: string): boolean {
+  return key === 's' || key === 'S' || isLengthInputKey(key)
+}
+
+/**
+ * Immutably edit PolygonTool's typed VCB buffer: `editLengthBuffer` (the
+ * circumradius grammar) PLUS `s`/`S`, which terminates a plain-integer
+ * side-count token ("8s"). The two grammars never mix within one buffer —
+ * `s` is only appended onto a buffer that is digits-only so far, so a
+ * completed token is unambiguously either a length or a side count (see
+ * `parsePolygonSideCount` / `parseLengthToMeters`, tried in that order on
+ * `Enter`).
+ *
+ * A COMPLETED `<n>s` token is frozen — only Backspace edits it, exactly as
+ * `editArrayBuffer` freezes its completed `Nx`/`N/` form. Without the freeze a
+ * stray key after `8s` would fall through to `editLengthBuffer` and append
+ * ("8s2"), which parses as NEITHER grammar, wedging the buffer so `Enter`
+ * silently does nothing.
+ */
+export function editPolygonBuffer(buf: string, key: string, format: LengthFormat): string {
+  if (/^\d+s$/i.test(buf) && key !== 'Backspace') return buf
+  if (key === 's' || key === 'S') {
+    return /^\d+$/.test(buf) ? buf + 's' : buf
+  }
+  return editLengthBuffer(buf, key, format)
+}
+
+/**
+ * Parse a completed `<n>s` side-count token (e.g. "8s") to `n`, or null if
+ * `buf` isn't one — including a bare digit string with no trailing `s`
+ * (still a circumradius in progress). The caller (PolygonTool) clamps `n` to
+ * the tool's min/max side count.
+ */
+export function parsePolygonSideCount(buf: string): number | null {
+  const m = /^(\d+)s$/i.exec(buf)
+  if (m === null) return null
+  const n = parseInt(m[1], 10)
+  return Number.isFinite(n) ? n : null
+}
+
+/**
  * Parse the numeric buffer to a finite number, or null if the string is
  * empty, just `-`, just `.`, or not a finite number.
  */

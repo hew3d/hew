@@ -91,7 +91,7 @@ let toastCounter = 0
 /** Tools that create new geometry — picking one clears a lingering
  * top-level selection (the contextual dock should switch to draw context,
  * not stay pinned to the old object). */
-const DRAW_TOOLS: ReadonlySet<string> = new Set(['Line', 'Rectangle', 'Circle', 'Arc'])
+const DRAW_TOOLS: ReadonlySet<string> = new Set(['Line', 'Rectangle', 'Circle', 'Polygon', 'Arc'])
 
 /** Tool name → native menu item id, for the macOS menu's radio checks.
  * Exported for the native-menu parity test (`nativeMenuParity.test.ts`):
@@ -100,6 +100,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Select: 'tool-select',
   Rectangle: 'draw-rectangle',
   Circle: 'draw-circle',
+  Polygon: 'draw-polygon',
   Arc: 'draw-arc',
   Line: 'draw-line',
   'Push/Pull': 'tool-pushpull',
@@ -1650,6 +1651,7 @@ export default function App() {
       case 'tool-select':    setActiveTool('Select'); break
       case 'tool-rectangle': setActiveTool('Rectangle'); break
       case 'tool-circle':    setActiveTool('Circle'); break
+      case 'tool-polygon':   setActiveTool('Polygon'); break
       case 'tool-arc':       setActiveTool('Arc'); break
       case 'tool-line':      setActiveTool('Line'); break
       case 'tool-pushpull':  setActiveTool('Push/Pull'); break

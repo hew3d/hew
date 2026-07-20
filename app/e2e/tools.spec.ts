@@ -128,6 +128,46 @@ test('Circle tool: custom segment count (12-gon) produces a region', async ({ pa
 })
 
 // ---------------------------------------------------------------------------
+// Polygon tool — N plain segments (drawLineChain), no new harness surface
+// (the polygon-tool design §6): a polygon commits through the exact same
+// sketch_add_segment path a closed Line chain does, so drawLineChain with a
+// closed hexagon loop is a faithful stand-in for PolygonTool's own commit —
+// unlike Circle, there is no curve-chain bracket to also exercise.
+// ---------------------------------------------------------------------------
+
+test('Polygon tool: a closed hexagon loop forms a region that extrudes to a watertight prism', async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const hash0 = h.getStateHash()
+
+    // A regular hexagon, circumradius 2 m at the origin, vertex 0 on +X —
+    // the same vertex layout PolygonTool's ground commit produces.
+    const n = 6
+    const radius = 2
+    const points: [number, number, number][] = []
+    for (let i = 0; i <= n; i++) {
+      const angle = (2 * Math.PI * (i % n)) / n
+      points.push([radius * Math.cos(angle), radius * Math.sin(angle), 0])
+    }
+
+    const chain = h.drawLineChain(points)
+    const hasRegion = chain.regions.length >= 1
+    const objId = h.extrudeRegion(chain.sketch, chain.regions[0], 1.0)
+    const solid = h.isObjectSolid(objId)
+    const hash1 = h.getStateHash()
+
+    return { hash0, hash1, hasRegion, objId, solid }
+  })
+
+  expect(result.hasRegion).toBe(true)
+  expect(result.solid).toBe(true)
+  expect(result.hash1).not.toBe(result.hash0)
+  expect(result.objId.length).toBeGreaterThan(0)
+})
+
+// ---------------------------------------------------------------------------
 // Arc tool — drawArc / drawArcOnFace ( faceted 2-point arc)
 // ---------------------------------------------------------------------------
 

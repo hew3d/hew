@@ -1836,6 +1836,11 @@ fn main() {
                 Some("C"),
             )?;
 
+            // Polygon: SketchUp assigns no default key (it lives in the
+            // shapes flyout) — no accelerator on either platform.
+            let draw_polygon =
+                check_item(handle, &mut checks, "draw-polygon", "Polygon", None, None)?;
+
             // Arc : Cmd+J is SketchUp's arc-family
             // key on macOS, even though Hew's Arc is the simpler 2-point
             // gesture rather than SketchUp's multi-mode arc tool family.
@@ -1851,6 +1856,7 @@ fn main() {
             let draw_shapes = SubmenuBuilder::new(handle, "Shapes")
                 .item(&draw_rect)
                 .item(&draw_circle)
+                .item(&draw_polygon)
                 .item(&draw_arc)
                 .build()?;
 
@@ -2323,6 +2329,7 @@ fn main() {
                 "view-palette" => "open-palette",
                 "draw-rectangle" => "tool-rectangle",
                 "draw-circle" => "tool-circle",
+                "draw-polygon" => "tool-polygon",
                 "draw-arc" => "tool-arc",
                 "draw-line" => "tool-line",
                 "tool-select" => "tool-select",

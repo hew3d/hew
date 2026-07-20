@@ -661,6 +661,12 @@ export function MenuBar({
               onClick={withClose(() => onSelectTool?.('Circle'))}
             />
             <CheckMenuItem
+              label="Polygon"
+              shortcut={keyFor('Polygon')}
+              checked={activeTool === 'Polygon'}
+              onClick={withClose(() => onSelectTool?.('Polygon'))}
+            />
+            <CheckMenuItem
               label="Arc"
               shortcut={keyFor('Arc')}
               checked={activeTool === 'Arc'}

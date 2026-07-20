@@ -1,6 +1,6 @@
 /**
  * faceDraw — the shared "may this face be drawn on directly?" policy for the
- * draw tools (Line / Rectangle / Circle / Arc), plus the per-pointer-event
+ * draw tools (Line / Rectangle / Circle / Polygon / Arc), plus the per-pointer-event
  * pick cache they all use to avoid re-running the O(faces) `pick_face`
  * raycast two or three times for the same ray (snapConstraint and the
  * pointer-move/down dispatcher are called back-to-back by the Viewport).

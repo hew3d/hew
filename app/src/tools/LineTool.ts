@@ -423,7 +423,7 @@ export class LineTool implements Tool {
 
   /**
    * Decide which mode governs the NEXT pointer event (same contract as
-   * Rectangle/Circle/Arc):
+   * Rectangle/Circle/Polygon/Arc):
    *   - Already anchored in one mode: stick with it (mid-chain).
    *   - Inside an entered object context: always face mode — drawing stays
    *     scoped to that object's faces, so a click elsewhere is ignored by

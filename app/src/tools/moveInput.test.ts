@@ -5,10 +5,13 @@ import {
   editNumericBuffer,
   editLengthBuffer,
   editDimsBuffer,
+  editPolygonBuffer,
   isLengthInputKey,
+  isPolygonInputKey,
   parseArraySpec,
   parseDistance,
   parseDimensions,
+  parsePolygonSideCount,
   pointAlong,
 } from './moveInput'
 
@@ -212,6 +215,90 @@ describe('isLengthInputKey', () => {
     for (const key of ['a', 'x', 'X', 'q', 'Enter', 'ArrowUp', 'Escape']) {
       expect(isLengthInputKey(key)).toBe(false)
     }
+  })
+})
+
+describe('isPolygonInputKey', () => {
+  it('accepts everything isLengthInputKey does', () => {
+    for (const key of ['0', '9', '.', '-', "'", '"', '/', ' ', 'Backspace', 'm', 'n']) {
+      expect(isPolygonInputKey(key)).toBe(true)
+    }
+  })
+
+  it('also accepts s/S, the side-count token terminator', () => {
+    expect(isPolygonInputKey('s')).toBe(true)
+    expect(isPolygonInputKey('S')).toBe(true)
+  })
+
+  it('rejects other keys', () => {
+    for (const key of ['a', 'x', 'X', 'q', 'Enter', 'ArrowUp', 'Escape']) {
+      expect(isPolygonInputKey(key)).toBe(false)
+    }
+  })
+})
+
+describe('editPolygonBuffer', () => {
+  it('matches editLengthBuffer for every non-s key', () => {
+    for (const format of ['m', 'arch'] as const) {
+      expect(editPolygonBuffer('', '8', format)).toBe(editLengthBuffer('', '8', format))
+      expect(editPolygonBuffer('8', '.', format)).toBe(editLengthBuffer('8', '.', format))
+      expect(editPolygonBuffer('8', "'", format)).toBe(editLengthBuffer('8', "'", format))
+    }
+  })
+
+  it('appends s/S onto a digits-only buffer, completing a side-count token (normalized to lowercase s, like editArrayBuffer normalizes its mode tokens)', () => {
+    expect(editPolygonBuffer('8', 's', 'm')).toBe('8s')
+    expect(editPolygonBuffer('12', 'S', 'm')).toBe('12s')
+  })
+
+  it('rejects s on an empty buffer (no digits typed yet)', () => {
+    expect(editPolygonBuffer('', 's', 'm')).toBe('')
+  })
+
+  it('rejects s once the buffer already carries length-grammar tokens', () => {
+    expect(editPolygonBuffer('8.5', 's', 'm')).toBe('8.5')
+    expect(editPolygonBuffer("8'", 's', 'm')).toBe("8'")
+    expect(editPolygonBuffer('8mm', 's', 'm')).toBe('8mm')
+  })
+
+  it('Backspace removes a trailing s like any other character', () => {
+    expect(editPolygonBuffer('8s', 'Backspace', 'm')).toBe('8')
+  })
+
+  it('freezes a completed <n>s token — every key except Backspace is rejected', () => {
+    // Without the freeze, a stray key falls through to editLengthBuffer and
+    // appends ("8s2"), which parses as NEITHER grammar and wedges the buffer.
+    for (const key of ['2', '.', "'", 'm', 's', 'S', 'x']) {
+      expect(editPolygonBuffer('8s', key, 'm')).toBe('8s')
+    }
+    // Backspace is still the way out.
+    expect(editPolygonBuffer('8s', 'Backspace', 'm')).toBe('8')
+    // The frozen buffer still parses (Enter would set the side count).
+    expect(parsePolygonSideCount(editPolygonBuffer('8s', '2', 'm'))).toBe(8)
+  })
+})
+
+describe('parsePolygonSideCount', () => {
+  it('parses a completed <n>s token', () => {
+    expect(parsePolygonSideCount('8s')).toBe(8)
+    expect(parsePolygonSideCount('12S')).toBe(12)
+    expect(parsePolygonSideCount('3s')).toBe(3)
+  })
+
+  it('returns null for a bare digit string (still a radius in progress)', () => {
+    expect(parsePolygonSideCount('8')).toBeNull()
+  })
+
+  it('returns null for a length buffer, even one containing digits', () => {
+    expect(parsePolygonSideCount('8.5')).toBeNull()
+    expect(parsePolygonSideCount('8mm')).toBeNull()
+    expect(parsePolygonSideCount("8'")).toBeNull()
+  })
+
+  it('returns null for empty or malformed input', () => {
+    expect(parsePolygonSideCount('')).toBeNull()
+    expect(parsePolygonSideCount('s')).toBeNull()
+    expect(parsePolygonSideCount('8s5')).toBeNull()
   })
 })
 

@@ -16,9 +16,9 @@
  * - `{ kind: 'plane' }` — PLANE MODE: empty-space drawing on a plane (the
  *   ground plane today; any locked plane from Phase 3). Handles are cached
  *   per plane (`SketchPlaneCache`, keyed by `planeKey`) so everything drawn
- *   on one plane at top level — mixed Line/Rectangle/Circle/Arc — lands in
- *   the same sketch, the same shared-ground-sketch feel Phase 1 had, now
- *   generalized to every plane.
+ *   on one plane at top level — mixed Line/Rectangle/Circle/Polygon/Arc —
+ *   lands in the same sketch, the same shared-ground-sketch feel Phase 1
+ *   had, now generalized to every plane.
  *
  * Handles a cached PLANE handle going bad two ways, both caught by a
  * PRE-CHECK before the gesture opens:

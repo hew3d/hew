@@ -416,3 +416,156 @@ test('Ctrl+G with a single object selected is a no-op — the keyboard path hono
   expect(sel).toHaveLength(1)
   expect(sel[0].kind).toBe('object')
 })
+
+// ---------------------------------------------------------------------------
+// Polygon: the REAL tool end-to-end — rail activation, a live center→radius
+// pointer gesture, typed `Ns` side count, and a typed exact radius. The
+// tools.spec.ts hexagon test builds its shape with `drawLineChain`, which
+// never touches PolygonTool; only this file exercises the actual wiring
+// (rail → tool activation → gesture → VCB → commit → push/pull).
+// ---------------------------------------------------------------------------
+
+test('Polygon: rail activation + center→radius pointer gesture makes a 6-gon that push/pulls to a solid', async ({
+  page,
+}) => {
+  const ctx = await setup(page)
+  const rail = page.getByRole('radiogroup', { name: 'Tools' })
+
+  // Activate the way a user does — the rail row (Polygon has no shortcut).
+  await rail.getByRole('radio', { name: 'Polygon' }).click()
+  await expect(rail.getByRole('radio', { name: 'Polygon' })).toHaveAttribute('aria-checked', 'true')
+
+  // Click the center, move out to a radius-2 point, then click to commit.
+  await clickWorld(page, ctx, 0, 0, 0)
+  await page.mouse.move(px(ctx, 2, 0, 0).x, px(ctx, 2, 0, 0).y)
+  // The live rubber-band reports the radius — proof the real gesture is running.
+  await expect(page.getByText(/^R /)).toBeVisible()
+  await page.mouse.down()
+  await page.mouse.up()
+
+  // A single ground sketch holds one region whose loop has 6 edges (default).
+  const afterCommit = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const sketches = h.getSketchIds()
+    return {
+      sketchCount: sketches.length,
+      edgeCount: sketches.length === 1 ? h.getSketchEdgeIds(sketches[0]).length : -1,
+      objects: h.getObjectCount(),
+      err: h.getLastError(),
+    }
+  })
+  expect(afterCommit.err).toBeNull()
+  expect(afterCommit.sketchCount).toBe(1)
+  expect(afterCommit.edgeCount).toBe(6) // default hexagon, committed by the tool
+  expect(afterCommit.objects).toBe(0) // a region, not yet a solid
+
+  // Push/Pull the region (real shortcut + real gesture) into a prism.
+  await page.keyboard.press('p')
+  await clickWorld(page, ctx, 0, 0, 0) // grab the region under the cursor
+  await page.mouse.move(px(ctx, 0, 0, 1.5).x, px(ctx, 0, 0, 1.5).y)
+  await page.keyboard.type('1')
+  await expect(page.getByText('Push depth')).toBeVisible()
+  await page.keyboard.press('Enter')
+
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+  const solid = await page.evaluate(() => {
+    const h = window.__hew_test!
+    return { solid: h.isObjectSolid(h.getObjectIds()[0]), err: h.getLastError() }
+  })
+  expect(solid.err).toBeNull()
+  expect(solid.solid).toBe(true) // watertight hexagonal prism
+})
+
+test('Polygon: mid-gesture `8s` sets 8 sides and a typed radius commits at that radius', async ({
+  page,
+}) => {
+  const ctx = await setup(page)
+  const rail = page.getByRole('radiogroup', { name: 'Tools' })
+
+  await rail.getByRole('radio', { name: 'Polygon' }).click()
+
+  await clickWorld(page, ctx, 0, 0, 0) // center
+  await page.mouse.move(px(ctx, 2, 0, 0).x, px(ctx, 2, 0, 0).y) // seed a +X direction
+
+  // `Ns` typed mid-gesture: sets the side count, stays anchored (no commit).
+  await page.keyboard.type('8s')
+  await expect(page.getByText('8s')).toBeVisible() // VCB mirrors the token
+  await page.keyboard.press('Enter')
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds().length)).toBe(0) // still drawing
+
+  // A typed exact radius then commits the octagon at that radius.
+  await page.keyboard.type('1.5')
+  await expect(page.getByText('1.5 m')).toBeVisible()
+  await page.keyboard.press('Enter')
+
+  const res = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const sketches = h.getSketchIds()
+    const sketch = sketches[0]
+    const lines = h.getSketchLines(sketch)
+    let maxR = 0
+    for (let i = 0; i < lines.length; i += 3) {
+      maxR = Math.max(maxR, Math.hypot(lines[i], lines[i + 1]))
+    }
+    return {
+      sketchCount: sketches.length,
+      edgeCount: h.getSketchEdgeIds(sketch).length,
+      maxR,
+      err: h.getLastError(),
+    }
+  })
+  expect(res.err).toBeNull()
+  expect(res.sketchCount).toBe(1)
+  expect(res.edgeCount).toBe(8) // `8s` took effect
+  expect(res.maxR).toBeCloseTo(1.5, 5) // the typed circumradius is exact
+})
+
+test('Polygon: a zero-radius second click stays anchored — the center is not silently dropped', async ({
+  page,
+}) => {
+  const ctx = await setup(page)
+  const rail = page.getByRole('radiogroup', { name: 'Tools' })
+
+  await rail.getByRole('radio', { name: 'Polygon' }).click()
+
+  await clickWorld(page, ctx, 0, 0, 0) // center
+  await clickWorld(page, ctx, 0, 0, 0) // same point → degenerate radius, no-op
+
+  // Nothing committed, but the gesture must still be live.
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds().length)).toBe(0)
+
+  // A real second click from the preserved center completes the hexagon —
+  // proving the degenerate click did not tear the gesture down.
+  await clickWorld(page, ctx, 2, 0, 0)
+  const after = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const s = h.getSketchIds()
+    return { sketchCount: s.length, edgeCount: s.length ? h.getSketchEdgeIds(s[0]).length : -1 }
+  })
+  expect(after.sketchCount).toBe(1)
+  expect(after.edgeCount).toBe(6)
+})
+
+test('Polygon: typed `0` + Enter is a no-op that stays in the gesture', async ({ page }) => {
+  const ctx = await setup(page)
+  const rail = page.getByRole('radiogroup', { name: 'Tools' })
+
+  await rail.getByRole('radio', { name: 'Polygon' }).click()
+
+  await clickWorld(page, ctx, 0, 0, 0) // center
+  await page.mouse.move(px(ctx, 2, 0, 0).x, px(ctx, 2, 0, 0).y)
+  await page.keyboard.type('0')
+  await page.keyboard.press('Enter') // sub-tolerance radius → no-op, stay anchored
+
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds().length)).toBe(0)
+
+  // The center survived: a real second click still commits the hexagon.
+  await clickWorld(page, ctx, 2, 0, 0)
+  const after = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const s = h.getSketchIds()
+    return { sketchCount: s.length, edgeCount: s.length ? h.getSketchEdgeIds(s[0]).length : -1 }
+  })
+  expect(after.sketchCount).toBe(1)
+  expect(after.edgeCount).toBe(6)
+})

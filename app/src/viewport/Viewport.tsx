@@ -39,6 +39,7 @@ import { exportSceneTo3mf, type ThreeMfBuildResult } from '../io/exporters/three
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
 import { CircleTool } from '../tools/CircleTool'
+import { PolygonTool, DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
 import { ArcTool } from '../tools/ArcTool'
 import { LineTool } from '../tools/LineTool'
 import { PushPullTool } from '../tools/PushPullTool'
@@ -847,6 +848,10 @@ export default function Viewport({
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
+  // Polygon's last-used side count — session-lived across tool re-selection
+  // (design §1: "the last-used side count persists for the session"),
+  // mirroring how currentMaterialIdRef persists Paint's material.
+  const polygonSidesRef = useRef<number>(DEFAULT_POLYGON_SIDES)
   // Whether the in-flight click is a shift-click (additive multi-select).
   const selectAdditiveRef = useRef(false)
 
@@ -1332,7 +1337,7 @@ export default function Viewport({
 
     /**
      * "Plain objects are immediately editable": may a draw tool
-     * (Line/Rectangle/Circle/Arc) draw directly on this picked face?
+     * (Line/Rectangle/Circle/Polygon/Arc) draw directly on this picked face?
      * Injected into the draw tools (which only know an entered-object id)
      * because the answer depends on the full context path:
      *
@@ -2070,6 +2075,37 @@ export default function Viewport({
       return tool
     }
 
+    function makePolygonTool(): PolygonTool {
+      const tool = new PolygonTool(
+        wasmScene,
+        previewGroup,
+        (result) => {
+          sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
+        },
+        (text: string) => { onMeasurementRef.current?.(text) },
+        sketchPlaneCache,
+        // Side count persists across tool re-selection for the session
+        // (design §1), the same way Paint's current material does.
+        (sides) => { polygonSidesRef.current = sides },
+      )
+      tool.setSideCount(polygonSidesRef.current)
+      // Scope the tool to the current editing context, if any.
+      const ctx = activeContextRef.current
+      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
+        ? ctx[ctx.length - 1].id : null
+      tool.setActiveContext(ctxId)
+      // Plain objects are directly drawable — context-path-aware eligibility.
+      tool.setFaceEligibility(faceDrawEligible)
+      return tool
+    }
+
     function makeArcTool(): ArcTool {
       const tool = new ArcTool(
         wasmScene,
@@ -2417,6 +2453,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeCircleTool())
+          break
+        case 'Polygon':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makePolygonTool())
           break
         case 'Arc':
           cameraModeRef.current = false
