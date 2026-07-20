@@ -27,7 +27,7 @@ Tool shortcuts are plain letters, the same on every platform, and match SketchUp
 | Pan | `H` |
 | Zoom | `Z` |
 
-Polygon, Protractor, Slice, and Edit Vertex have no default key (as in SketchUp); reach them via the Draw/Tools menu or the command palette. On macOS the menus also display `⌘`-combination accelerators beside the tools; those work too, but the letters above are the ones worth learning.
+Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key (as in SketchUp); reach them via the Draw/Tools menu or the command palette. On macOS the menus also display `⌘`-combination accelerators beside the tools; those work too, but the letters above are the ones worth learning.
 
 ## Commands
 

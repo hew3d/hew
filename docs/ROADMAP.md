@@ -152,6 +152,13 @@ below.
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
   offset — sourced from an edge, a sketch line, a world axis, or another
   guide line) and Protractor (measure an angle, or drop an angular guide)
+- Section Plane: a non-destructive clipping plane for looking inside a
+  model (wall thickness, clearance, voids) — click a face to section it
+  there, drag its widget to sweep the cut, toggle it on/off, delete it.
+  Distinct from the destructive Slice tool: it changes no geometry, only
+  what the viewport draws. Session-only (not saved to `.hew`) and
+  uncapped (the cut reads via exposed walls, not a filled stencil) in this
+  release; persistence and section fill follow the Scenes feature
 - Metric and imperial units, including SketchUp-style architectural
   (feet-inches-fractions) input, with typed numeric entry on every
   length-driven tool
@@ -303,8 +310,6 @@ below.
 - **Nested component definitions** (a component containing other
   components)
 - **Layers and saved Scenes** (named camera bookmarks)
-- **Section planes** — non-destructive visual clipping, distinct from the
-  existing destructive Slice tool
 - **A WebGPU rendering path**, as a progressive enhancement over the
   current WebGL2 baseline
 - **An out-of-process kernel option** for very large models

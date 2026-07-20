@@ -1957,6 +1957,17 @@ fn main() {
                 None,
             )?;
             let tool_slice = check_item(handle, &mut checks, "tool-slice", "Slice", None, None)?;
+            let tool_section_plane = check_item(
+                handle,
+                &mut checks,
+                "tool-section-plane",
+                "Section Plane",
+                None,
+                None,
+            )?;
+            let tool_section_toggle_active =
+                MenuItemBuilder::with_id("tool-section-toggle-active", "Toggle Section Active")
+                    .build(handle)?;
             let tool_edit_vertex = check_item(
                 handle,
                 &mut checks,
@@ -1979,6 +1990,8 @@ fn main() {
                 .item(&tool_tape_measure)
                 .item(&tool_protractor)
                 .item(&tool_slice)
+                .item(&tool_section_plane)
+                .item(&tool_section_toggle_active)
                 .item(&tool_edit_vertex)
                 .build()?;
 
@@ -2343,6 +2356,8 @@ fn main() {
                 "tool-tape-measure" => "tool-tape-measure",
                 "tool-protractor" => "tool-protractor",
                 "tool-slice" => "tool-slice",
+                "tool-section-plane" => "tool-section-plane",
+                "tool-section-toggle-active" => "toggle-section-active",
                 "tool-edit-vertex" => "tool-edit-vertex",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",

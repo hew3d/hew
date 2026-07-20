@@ -16,6 +16,7 @@ const ALL_TOOLS: ToolName[] = [
   'Tape Measure',
   'Protractor',
   'Slice',
+  'Section Plane',
   'Edit Vertex',
   'Orbit',
   'Pan',

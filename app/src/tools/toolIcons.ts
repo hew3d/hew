@@ -32,6 +32,7 @@ import panToolSvg from '@material-symbols/svg-400/outlined/pan_tool.svg?raw'
 import zoomInSvg from '@material-symbols/svg-400/outlined/zoom_in.svg?raw'
 import contentCutSvg from '@material-symbols/svg-400/outlined/content_cut.svg?raw'
 import dragPanSvg from '@material-symbols/svg-400/outlined/drag_pan.svg?raw'
+import verticalSplitSvg from '@material-symbols/svg-400/outlined/vertical_split.svg?raw'
 
 /** Keep in sync with the `ToolName` union in App.tsx (not imported here to
  * avoid a UI-module -> App.tsx dependency edge; the key set is asserted by
@@ -53,6 +54,7 @@ export type ToolName =
   | 'Tape Measure'
   | 'Protractor'
   | 'Slice'
+  | 'Section Plane'
   | 'Edit Vertex'
   | 'Orbit'
   | 'Pan'
@@ -76,6 +78,7 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Tape Measure': straightenSvg,
   'Protractor': architectureSvg,
   'Slice': contentCutSvg,
+  'Section Plane': verticalSplitSvg,
   'Edit Vertex': dragPanSvg,
   'Orbit': threeDRotationSvg,
   'Pan': panToolSvg,
@@ -102,6 +105,7 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Tape Measure': { x: 0.1, y: 0.9 },
   'Protractor': { x: 0.1, y: 0.9 },
   'Slice': { x: 0.1, y: 0.9 },
+  'Section Plane': { x: 0.1, y: 0.9 },
   'Edit Vertex': { x: 0.5, y: 0.5 },
   'Orbit': { x: 0.5, y: 0.5 },
   'Pan': { x: 0.5, y: 0.5 },

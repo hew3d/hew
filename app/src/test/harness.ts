@@ -169,6 +169,29 @@ export interface HewTestHarness {
   setGridVisible(visible: boolean): void
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible(visible: boolean): void
+
+  // -------- section plane (session view state, non-destructive) --------
+  /** "Toggle Section Plane Active" — flips the placed section's clip on/off
+   *  (Tools menu / palette). No-op when none is placed. */
+  toggleSectionActive(): void
+  /** The current session section (`{ origin, normal, active }`) or null —
+   *  observe-only, reads the same SectionManager the tool/menu mutate. */
+  getSectionState(): { origin: Vec3; normal: Vec3; active: boolean } | null
+  /** Section-plane render diagnostics for a rendered object/instance: whether
+   *  the widget overlay is built, the widget's own clip count (must be 0),
+   *  the clip-plane count on that node's face material (-1 if not rendered),
+   *  and the active clip plane's world normal + constant (null when inactive)
+   *  for asserting the clip SIDE. `kind` is 'object'/'instance'; `id` decimal. */
+  getSectionRenderInfo(
+    kind: 'object' | 'instance',
+    id: string,
+  ): {
+    widget: boolean
+    widgetClipCount: number
+    nodeClipCount: number
+    clipPlane: { normal: Vec3; constant: number } | null
+  }
+
   replay(recordingJson: string): string
   // serialization ( — round-trips the live `.hew` container through the
   // app's real save/open path). Bytes cross `page.evaluate` as a plain number[]
@@ -790,6 +813,22 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       api.setGuidesVisible(visible)
+    },
+
+    toggleSectionActive: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.toggleSectionActive()
+    },
+    getSectionState: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getSectionState()
+    },
+    getSectionRenderInfo: (kind, id) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getSectionRenderInfo(kind, BigInt(id))
     },
 
     replay: (json) => act((s) => s.replay(json).toString()),

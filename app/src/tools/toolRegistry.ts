@@ -20,8 +20,8 @@
  * SketchUp-for-Windows' real bare letters: the 10 tools `03_tool_rail.md`
  * covers plus the camera tools' O / H / Z (verified against the official
  * SketchUp 2024 Windows Quick Reference Card). Protractor / Slice /
- * Edit Vertex stay shortcut-less: SketchUp defines no default key for them
- * either.
+ * Section Plane / Edit Vertex stay shortcut-less: SketchUp defines no
+ * default key for them either.
  */
 
 import type { ToolName } from './toolIcons'
@@ -68,6 +68,8 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   // ---- Inspect ----
   { name: 'Tape Measure', group: 'Inspect', macKey: 'T', winKey: 'T' },
   { name: 'Paint', group: 'Inspect', macKey: 'B', winKey: 'B' },
+  // Section Plane: SketchUp assigns no default key either.
+  { name: 'Section Plane', group: 'Inspect', macKey: '', winKey: '' },
   // ---- Menu/palette-only (no rail slot; see ToolSpec.group doc above) ----
   { name: 'Protractor', macKey: '', winKey: '' },
   { name: 'Slice', macKey: '', winKey: '' },

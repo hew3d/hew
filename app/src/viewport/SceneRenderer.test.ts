@@ -1082,3 +1082,256 @@ describe('SceneRenderer — hidden/selected/isolation interactions (RR17)', () =
     expect((batchEdges.material as THREE.LineBasicMaterial).opacity).toBe(1)
   })
 })
+
+/** Edge LineBasicMaterial for a named object group (mirrors `facesMaterial`). */
+function edgesMaterial(root: THREE.Group, name: string): THREE.LineBasicMaterial {
+  const group = root.getObjectByName(name)
+  if (group === undefined) throw new Error(`no group named ${name}`)
+  const edges = group.children[1] as THREE.LineSegments
+  return edges.material as THREE.LineBasicMaterial
+}
+
+describe('SceneRenderer — section plane (DESIGN §3/§4)', () => {
+  const PLANE = { origin: [0, 0, 0] as [number, number, number], normal: [0, 0, 1] as [number, number, number], active: true }
+
+  it('with no section, solid materials carry no clipping plane', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes).toBeFalsy()
+  })
+
+  it('an active section applies clippingPlanes + DoubleSide to object face AND edge materials', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').side).toBe(THREE.FrontSide)
+
+    renderer.setSectionPlane(PLANE)
+
+    const faceMat = facesMaterial(renderer.objectsGroup, 'Object_1')
+    expect(faceMat.clippingPlanes).toHaveLength(1)
+    expect(faceMat.clippingPlanes?.[0]).toBeInstanceOf(THREE.Plane)
+    expect(faceMat.side).toBe(THREE.DoubleSide)
+
+    const edgeMat = edgesMaterial(renderer.objectsGroup, 'Object_1')
+    expect(edgeMat.clippingPlanes).toHaveLength(1)
+  })
+
+  it('REMOVES the +normal (near/outer) side and KEEPS the -normal (interior) side', () => {
+    // The whole point of the clip-side fix: placed on a top face (outward
+    // normal +Z), the section must cut away the material ABOVE and reveal the
+    // interior BELOW. three.js keeps `distanceToPoint >= 0`, discards `< 0`.
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE) // origin [0,0,0], normal [0,0,1]
+
+    const clip = facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes?.[0] as THREE.Plane
+    expect(clip).toBeInstanceOf(THREE.Plane)
+    // The clip-plane normal is the NEGATED section normal.
+    expect(clip.normal.z).toBeCloseTo(-1, 10)
+    // A point ABOVE (the +normal / near side you clicked) is CUT AWAY (< 0)...
+    expect(clip.distanceToPoint(new THREE.Vector3(0, 0, 5))).toBeLessThan(0)
+    // ...and a point BELOW (the -normal / interior side) is KEPT (>= 0).
+    expect(clip.distanceToPoint(new THREE.Vector3(0, 0, -5))).toBeGreaterThan(0)
+  })
+
+  it('offset preserves the clip side — sweeping down keeps removing the top', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE)
+    // Sweep the section down to z = -3.
+    renderer.updateSectionPlaneOffset({ ...PLANE, origin: [0, 0, -3] })
+
+    const clip = facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes?.[0] as THREE.Plane
+    expect(clip.normal.z).toBeCloseTo(-1, 10)
+    // Above the swept plane (z > -3) is still removed; below is kept.
+    expect(clip.distanceToPoint(new THREE.Vector3(0, 0, 0))).toBeLessThan(0)
+    expect(clip.distanceToPoint(new THREE.Vector3(0, 0, -5))).toBeGreaterThan(0)
+  })
+
+  it('an active section applies clippingPlanes to instanced-batch face AND edge materials', () => {
+    const scene = makeScene({
+      instances: { '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } } },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    renderer.setSectionPlane(PLANE)
+
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    expect(batchMaterial(batch).clippingPlanes).toHaveLength(1)
+    expect(batchMaterial(batch).side).toBe(THREE.DoubleSide)
+    const edges = instancedEdges(renderer.instancesGroup)[0]
+    expect((edges.material as THREE.LineBasicMaterial).clippingPlanes).toHaveLength(1)
+  })
+
+  it('an active section applies clippingPlanes to a MATERIALIZED (selected) instance', () => {
+    const scene = makeScene({
+      instances: { '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } } },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSelectedInstances([10n])
+
+    renderer.setSectionPlane(PLANE)
+
+    const group = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+    expect(group).toBeDefined()
+    const faceMesh = group.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    const faceMat = (Array.isArray(faceMesh.material) ? faceMesh.material[0] : faceMesh.material) as THREE.MeshPhongMaterial
+    expect(faceMat.clippingPlanes).toHaveLength(1)
+    expect(faceMat.side).toBe(THREE.DoubleSide)
+  })
+
+  // Regression: selecting/entering/preview-materializing a component
+  // instance while a section is ALREADY active must not render it whole
+  // again. _materialize builds fresh (unclipped) materials, so every path
+  // reaching it must reassert the clip — via _syncMaterialized for
+  // selection/isolation/refresh, and explicitly in getInstanceGroup.
+  const INSTANCE_SCENE = () =>
+    makeScene({
+      instances: { '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } } },
+    })
+
+  function materializedFaceMat(renderer: SceneRenderer): THREE.MeshPhongMaterial {
+    const group = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+    expect(group).toBeDefined()
+    const faceMesh = group.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    return (Array.isArray(faceMesh.material) ? faceMesh.material[0] : faceMesh.material) as THREE.MeshPhongMaterial
+  }
+
+  it('selecting an instance AFTER a section is active clips the freshly materialized instance', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), INSTANCE_SCENE())
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE) // section active first — instance is batched, not yet materialized
+
+    renderer.setSelectedInstances([10n]) // materializes it now
+
+    const faceMat = materializedFaceMat(renderer)
+    expect(faceMat.clippingPlanes).toHaveLength(1)
+    expect(faceMat.side).toBe(THREE.DoubleSide)
+  })
+
+  it('getInstanceGroup (transform preview / marquee) clips the on-demand materialized instance under an active section', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), INSTANCE_SCENE())
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE)
+
+    renderer.getInstanceGroup(10n) // materializes on demand, bypassing _syncMaterialized
+
+    const faceMat = materializedFaceMat(renderer)
+    expect(faceMat.clippingPlanes).toHaveLength(1)
+    expect(faceMat.side).toBe(THREE.DoubleSide)
+  })
+
+  it('entering a context (setActiveContext isolation) clips the freshly materialized lit instance', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), INSTANCE_SCENE())
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE)
+
+    renderer.setActiveContext(null, new Set([10n])) // lit instance materializes
+
+    const faceMat = materializedFaceMat(renderer)
+    expect(faceMat.clippingPlanes).toHaveLength(1)
+    expect(faceMat.side).toBe(THREE.DoubleSide)
+  })
+
+  it('OVERLAY materials never carry the clipping plane: guides and the section widget itself', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    ;(scene as unknown as { guide_kind: (id: bigint) => string }).guide_kind = () => 'line'
+    ;(scene as unknown as { guide_geometry: (id: bigint) => Float64Array }).guide_geometry = () =>
+      new Float64Array([0, 0, 0, 1, 0, 0])
+    ;(scene as unknown as { guide_ids: () => BigUint64Array }).guide_ids = () => new BigUint64Array([1n])
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.refreshGuides()
+
+    renderer.setSectionPlane(PLANE)
+
+    // Construction guide — a genuine pre-existing overlay.
+    const guideLine = renderer.guidesGroup.children.find(
+      (c) => c instanceof THREE.LineSegments,
+    ) as THREE.LineSegments
+    expect(guideLine).toBeDefined()
+    expect((guideLine.material as THREE.Material).clippingPlanes).toBeFalsy()
+
+    // The section widget's own fill/outline/arrow must not clip themselves.
+    const widget = renderer.sectionGroup.getObjectByName('SectionWidget') as THREE.Group
+    expect(widget).toBeDefined()
+    for (const child of widget.children) {
+      const mat = (child as THREE.Mesh | THREE.LineSegments).material as THREE.Material
+      expect(mat.clippingPlanes).toBeFalsy()
+    }
+  })
+
+  it('deactivating (active: false) clears the plane from solids and restores natural side, but keeps the widget', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes).toHaveLength(1)
+
+    renderer.setSectionPlane({ ...PLANE, active: false })
+
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes).toBeFalsy()
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').side).toBe(THREE.FrontSide)
+    expect(renderer.sectionGroup.getObjectByName('SectionWidget')).toBeDefined()
+  })
+
+  it('deleting the section (null) clears the plane from solids AND removes the widget', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE)
+
+    renderer.setSectionPlane(null)
+
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes).toBeFalsy()
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').side).toBe(THREE.FrontSide)
+    expect(renderer.sectionGroup.children).toHaveLength(0)
+  })
+
+  it('updateSectionPlaneOffset mutates the SAME Plane object in place — no material touch needed', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE)
+    const planeRef = facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes?.[0]
+    expect(planeRef).toBeDefined()
+
+    renderer.updateSectionPlaneOffset({ ...PLANE, origin: [0, 0, 5] })
+
+    // Same object reference — the array was never reassigned by the offset path.
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').clippingPlanes?.[0]).toBe(planeRef)
+    // The point (0,0,5) now lies exactly on the plane.
+    expect((planeRef as THREE.Plane).distanceToPoint(new THREE.Vector3(0, 0, 5))).toBeCloseTo(0, 10)
+    // The widget followed the offset too.
+    const widget = renderer.sectionGroup.getObjectByName('SectionWidget') as THREE.Group
+    expect(widget.position.z).toBeCloseTo(5, 10)
+  })
+
+  it('a rebuild after activation re-applies the clip to freshly-created geometry', () => {
+    const objects: Record<string, boolean> = { '1': true }
+    const scene = makeScene({ objects })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane(PLANE)
+
+    // A new object appears (e.g. an extrusion) — refresh rebuilds its material fresh.
+    objects['2'] = true
+    renderer.refresh()
+
+    expect(facesMaterial(renderer.objectsGroup, 'Object_2').clippingPlanes).toHaveLength(1)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_2').side).toBe(THREE.DoubleSide)
+  })
+
+  it('sectionWidgetHalfExtent returns a positive, floored size', () => {
+    const scene = makeScene({})
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(renderer.sectionWidgetHalfExtent()).toBeGreaterThan(0)
+  })
+})

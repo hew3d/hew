@@ -96,6 +96,9 @@ export interface MenuBarProps {
   onToggleGuides?: () => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   onDeleteGuides?: () => void
+  /** Toggle the placed section plane's active (clipping) flag — Tools ▸
+   *  Toggle Section Active, SketchUp's "Active Cut". */
+  onToggleSectionActive?: () => void
   /** Delete the current selection — whole Object/Group/Instance nodes only (Edit ▸ Delete). */
   onDelete?: () => void
   /** Run an Edit-menu object command by action id (edit-group, edit-union, …)
@@ -422,6 +425,7 @@ export function MenuBar({
   onToggleGrid,
   onToggleGuides,
   onDeleteGuides,
+  onToggleSectionActive,
   onDelete,
   onEditAction,
   editGates,
@@ -751,6 +755,15 @@ export function MenuBar({
               label="Slice"
               checked={activeTool === 'Slice'}
               onClick={withClose(() => onSelectTool?.('Slice'))}
+            />
+            <CheckMenuItem
+              label="Section Plane"
+              checked={activeTool === 'Section Plane'}
+              onClick={withClose(() => onSelectTool?.('Section Plane'))}
+            />
+            <MenuItem
+              label="Toggle Section Active"
+              onClick={withClose(() => onToggleSectionActive?.())}
             />
             <CheckMenuItem
               label="Edit Vertex"

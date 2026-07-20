@@ -78,6 +78,7 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
   'Tape Measure': 'tool-tape-measure',
   'Protractor': 'tool-protractor',
   'Slice': 'tool-slice',
+  'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
   'Orbit': 'tool-orbit',
   'Pan': 'tool-pan',
@@ -101,6 +102,7 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Tape Measure': 'Measure a distance, or create a parallel guide line.',
   'Protractor': 'Measure an angle, or create an angular guide line.',
   'Slice': 'Cut a solid into two separate watertight Objects.',
+  'Section Plane': 'Look inside the model with a non-destructive clipping plane.',
   'Edit Vertex': 'Drag an individual vertex to reshape a face.',
   'Orbit': 'Rotate the camera around the model.',
   'Pan': 'Slide the camera parallel to the view plane.',
@@ -130,6 +132,7 @@ const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
   'Polygon': ['polygon', 'hexagon', 'hex', 'pentagon', 'n-gon', 'nut', 'bolt'],
   'Tape Measure': ['measure', 'distance', 'guide'],
   'Protractor': ['angle'],
+  'Section Plane': ['section', 'cut', 'cross-section', 'clip', 'inside', 'wall thickness'],
   'Edit Vertex': ['vertex', 'reshape'],
 }
 
@@ -168,6 +171,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'toggle-axes', label: 'Toggle Axes', description: 'Show or hide the world axes.', group: 'Actions' },
   { id: 'toggle-grid', label: 'Toggle Grid', description: 'Show or hide the ground grid.', group: 'Actions' },
   { id: 'toggle-guides', label: 'Toggle Guides', description: 'Show or hide construction guides.', group: 'Actions' },
+  { id: 'toggle-section-active', label: 'Toggle Section Active', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'cross-section', 'active cut'] },
   { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
   { id: 'view-top', label: 'Standard View: Top', description: 'Look straight down at the model.', group: 'Actions' },
   { id: 'view-bottom', label: 'Standard View: Bottom', description: 'Look straight up at the model.', group: 'Actions' },

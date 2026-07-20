@@ -27,6 +27,12 @@ function fadePreviewMaterial(
     c.opacity = 0.5
     c.transparent = true
     c.depthWrite = false
+    // A transform ghost is a drag overlay, never a sectioned solid — but
+    // Material.clone() deep-copies clippingPlanes into a FROZEN snapshot, so
+    // a clone of a clipped object would render cut at the grab-time plane
+    // position no matter where it's dragged. Strip the clip so the ghost is
+    // never clipped, like every other overlay.
+    c.clippingPlanes = null
     return c
   }
   return Array.isArray(material) ? material.map(fade) : fade(material)

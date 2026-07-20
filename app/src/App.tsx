@@ -113,6 +113,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   'Tape Measure': 'tool-tape-measure',
   Protractor: 'tool-protractor',
   Slice: 'tool-slice',
+  'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
   Orbit: 'cam-orbit',
   Pan: 'cam-pan',
@@ -1664,6 +1665,7 @@ export default function App() {
       case 'tool-tape-measure': setActiveTool('Tape Measure'); break
       case 'tool-protractor': setActiveTool('Protractor'); break
       case 'tool-slice':     setActiveTool('Slice'); break
+      case 'tool-section-plane': setActiveTool('Section Plane'); break
       case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
       case 'tool-orbit':     setActiveTool('Orbit'); break
       case 'tool-pan':       setActiveTool('Pan'); break
@@ -1677,6 +1679,7 @@ export default function App() {
       case 'toggle-axes':         setShowAxes((v) => !v); break
       case 'toggle-grid':         setShowGrid((v) => !v); break
       case 'toggle-guides':       setShowGuides((v) => !v); break
+      case 'toggle-section-active': viewportApi.current?.toggleSectionActive(); break
       case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
       case 'view-top':            viewportApi.current?.setStandardView('top'); break
@@ -2564,6 +2567,7 @@ export default function App() {
         onToggleGrid={() => setShowGrid((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
+        onToggleSectionActive={() => viewportApi.current?.toggleSectionActive()}
         onDelete={deleteSelection}
         onEditAction={(id) => menuActionRef.current(id)}
         editGates={{

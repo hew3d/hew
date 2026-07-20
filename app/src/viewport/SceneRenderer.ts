@@ -23,6 +23,9 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { makeFatSegments, disposeFatSegments } from './fatLine'
 import { DEPTH_BIAS } from './depthPolicy'
 import { srgbColorsToLinear } from './colorSpace'
+import { expandByVisibleObject } from './visibleBounds'
+import { facePlaneBasis, type V3 } from './geoHelpers'
+import type { SectionPlane } from './sectionManager'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -40,6 +43,20 @@ const SKETCH_HIGHLIGHT_WIDTH_PX = 3.8
 const SKETCH_REGION_COLOR = 0x88aadd
 /** Normal translucency of a sketch region fill. */
 const SKETCH_REGION_OPACITY = 0.4
+/** Section-plane widget color — teal/cyan, distinct from the selection
+ * orange and from Slice's purple preview (SliceTool.ts) so the two
+ * cutting-plane-shaped tools never read as the same feature. Matches
+ * `SectionPlaneTool`'s placement-preview color (kept as a literal in both
+ * places rather than a cross-module import between viewport/ and tools/). */
+const SECTION_WIDGET_COLOR = 0x00bcd4
+/** Fill opacity while the section is active (clipping) vs inactive (widget
+ * shown, no clip — DESIGN §1/§4's active=solid vs inactive=dashed/dimmed). */
+const SECTION_WIDGET_FILL_OPACITY_ACTIVE = 0.16
+const SECTION_WIDGET_FILL_OPACITY_INACTIVE = 0.06
+const SECTION_WIDGET_OUTLINE_OPACITY_INACTIVE = 0.55
+/** Floor for the widget's half-extent (meters) so an empty or tiny scene
+ * still gets a usable, visible frame. */
+const SECTION_WIDGET_MIN_HALF_EXTENT = 0.5
 /** Opacity of entities faded out by the active editing context (isolation). */
 const DIMMED_OPACITY = 0.15
 /** Muted grey for construction guides — distinct from edges/axes/sketch lines. */
@@ -293,6 +310,19 @@ export class SceneRenderer {
   /** Instance ids that are hidden (group.visible = false). Session-only. */
   private hiddenInstanceIds: Set<bigint> = new Set()
 
+  /** Parent group for the section-plane widget overlay (DESIGN §4) —
+   * NEVER visited by `_forEachSolidMaterial`, so it is excluded from
+   * clipping by construction, like every other overlay. */
+  readonly sectionGroup: THREE.Group
+  /** The active clip Plane, or null when no section is placed OR the
+   * placed one is inactive (DESIGN §1's "Active Cut" — inactive shows the
+   * widget but clips nothing). Every solid material's `clippingPlanes`
+   * array references this EXACT object, so `updateSectionPlaneOffset`
+   * mutates it in place for a sweep without touching any material. */
+  private sectionClipPlane: THREE.Plane | null = null
+  /** The rendered widget (frame + arrow), or null when no section is placed. */
+  private sectionWidget: THREE.Group | null = null
+
   constructor(threeScene: THREE.Scene, wasmScene: WasmScene) {
     this.scene = threeScene
     this.wasmScene = wasmScene
@@ -308,6 +338,10 @@ export class SceneRenderer {
     this.sketchGroup = new THREE.Group()
     this.sketchGroup.name = 'Sketch'
     threeScene.add(this.sketchGroup)
+
+    this.sectionGroup = new THREE.Group()
+    this.sectionGroup.name = 'Section'
+    threeScene.add(this.sectionGroup)
 
     this.guidesGroup = new THREE.Group()
     this.guidesGroup.name = 'Guides'
@@ -498,6 +532,9 @@ export class SceneRenderer {
         }
       }
     }
+    // `_syncMaterialized` (above) reasserts the active section clip onto
+    // every solid material — including the object materials rebuilt earlier
+    // in this method — so no separate reassert is needed here.
     this._syncMaterialized()
 
     // Rebuilt groups start opaque/visible; re-apply isolation + hidden state
@@ -541,6 +578,9 @@ export class SceneRenderer {
     }
 
     // Selected / isolation-lit placements come back out of their batches.
+    // `_syncMaterialized` reasserts the active section clip onto every solid
+    // material (the batches rebuilt just above included), so no separate
+    // reassert is needed here.
     this._syncMaterialized()
     this._applyInstanceIsolation()
     // Re-apply hidden visibility for materialized groups (batched placements
@@ -916,6 +956,14 @@ export class SceneRenderer {
     for (const id of desired) {
       if (!this.instanceGroups.has(id)) this._materialize(id)
     }
+    // Any placement just materialized above built fresh face/edge materials
+    // (which start UNCLIPPED), so reassert the active section onto them — the
+    // one place that covers every path reaching _materialize through
+    // reconciliation: setSelectedInstances (instance click-select),
+    // setActiveContext (double-click-enter / isolation), refreshInstances,
+    // and refreshTouched. `getInstanceGroup` bypasses this reconciliation
+    // and reasserts on its own. Cheap CPU-side property writes, no wasm calls.
+    this._reassertSectionClip()
   }
 
   /** Pull one placement out of its batches into the classic per-instance
@@ -1222,6 +1270,14 @@ export class SceneRenderer {
           polygonOffsetUnits: DEPTH_BIAS.FACE,
         }),
       )
+    }
+
+    // Remember the side this context computed (watertight/bucket/reflection
+    // derived) so `_reassertSectionClip` can restore it when the section
+    // plane deactivates — a section forces every solid to DoubleSide while
+    // active (DESIGN §3) and must not just leave it there afterward.
+    for (const m of materials) {
+      m.userData.naturalSide = side
     }
 
     return materials
@@ -1935,6 +1991,342 @@ export class SceneRenderer {
     this._applyIsolation()
   }
 
+  // ── Section plane (DESIGN §3/§4) ─────────────────────────────────────────
+  //
+  // A section clip is applied as `material.clippingPlanes` on SOLID face AND
+  // edge materials ONLY — object groups, instanced batches, and materialized
+  // instances (`_forEachSolidMaterial`). Overlays (grid, axes, cues,
+  // selection highlights, gizmos, sketches, guides, and the section widget
+  // itself) live in groups `_forEachSolidMaterial` never visits, so they are
+  // excluded from clipping BY CONSTRUCTION rather than by an opt-out flag —
+  // there is no global `renderer.clippingPlanes` anywhere in this file.
+  // `renderer.localClippingEnabled = true` is the Viewport's one-line
+  // responsibility (it owns the THREE.WebGLRenderer); this class only ever
+  // touches per-material `clippingPlanes`.
+
+  /**
+   * Every material considered "solid" for section-plane purposes: object,
+   * batch, and materialized-instance FACE and EDGE materials. Edges are
+   * included so a cut edge doesn't visually float past the clipped face it
+   * used to outline; overlay/cue/gizmo/sketch/guide materials are never
+   * visited here, which is what keeps them un-clippable.
+   */
+  private _forEachSolidMaterial(fn: (m: THREE.Material) => void): void {
+    const touch = (mat: THREE.Material | THREE.Material[]) => {
+      for (const m of Array.isArray(mat) ? mat : [mat]) fn(m)
+    }
+    for (const g of this.objectGroups.values()) {
+      touch(g.facesMesh.material)
+      touch(g.edgesLines.material)
+    }
+    for (const b of this.batches.values()) {
+      touch(b.mesh.material)
+      touch(b.edges.material)
+    }
+    for (const g of this.instanceGroups.values()) {
+      for (const mesh of g.facesMeshes) touch(mesh.material)
+      for (const lines of g.edgesLines) touch(lines.material)
+    }
+  }
+
+  /**
+   * Apply the CURRENT `sectionClipPlane` state to every currently-rendered
+   * solid material: `clippingPlanes = [plane]` + forced `DoubleSide` (so
+   * interior walls read at the cut, DESIGN §3) while a plane is set, or
+   * `clippingPlanes = null` + each material's own `naturalSide` restored
+   * when it is not. Called once per state change (`setSectionPlane`) and
+   * again after any geometry rebuild (`refresh`/`refreshTouched`/
+   * `refreshInstances`) so freshly-created materials — which start
+   * unclipped — pick up whatever section is currently active, exactly like
+   * `_applyIsolation`/`_applyHidden` reassert their own state on rebuild.
+   */
+  private _reassertSectionClip(): void {
+    const plane = this.sectionClipPlane
+    const planes = plane !== null ? [plane] : null
+    this._forEachSolidMaterial((m) => {
+      m.clippingPlanes = planes
+      const naturalSide = m.userData.naturalSide as THREE.Side | undefined
+      if (naturalSide !== undefined) {
+        (m as THREE.MeshPhongMaterial).side = plane !== null ? THREE.DoubleSide : naturalSide
+      }
+    })
+  }
+
+  /**
+   * Set (or clear, with null) the active section. Rebuilds the widget
+   * overlay (frame + normal arrow — DESIGN §4) and applies/clears the clip
+   * on every solid material. `plane.active === false` still shows the
+   * widget (dashed/dimmed) but clips nothing (SketchUp's "Active Cut").
+   *
+   * This is the FULL path: it (re)creates the clip `THREE.Plane` and walks
+   * every solid material via `_reassertSectionClip`. A pure offset sweep —
+   * the common case, driven continuously from `SectionPlaneTool`'s
+   * widget-drag preview — should use `updateSectionPlaneOffset` instead,
+   * which mutates the existing Plane object in place and touches no
+   * material at all (DESIGN §3: "update the plane in place on offset ...
+   * do not rebuild materials").
+   */
+  setSectionPlane(plane: SectionPlane | null): void {
+    this._rebuildSectionWidget(plane)
+
+    const clipping = plane !== null && plane.active ? plane : null
+    if (clipping === null) {
+      this.sectionClipPlane = null
+    } else {
+      // three.js KEEPS the side its clip-plane normal points toward and
+      // discards the other. A section must REMOVE the near/outer side you
+      // clicked (the side the section's normal — the face's outward normal —
+      // points toward) and KEEP the far interior, so lowering a horizontal
+      // section removes the TOP and exposes the cross-section + interior
+      // below. So build the clip plane with the NEGATED section normal: it
+      // keeps `-sectionNormal` (interior) and discards `+sectionNormal`
+      // (near/outer).
+      const clipNormal = new THREE.Vector3(-clipping.normal[0], -clipping.normal[1], -clipping.normal[2])
+      const origin = new THREE.Vector3(clipping.origin[0], clipping.origin[1], clipping.origin[2])
+      this.sectionClipPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(clipNormal, origin)
+    }
+    this._reassertSectionClip()
+  }
+
+  /**
+   * Cheap in-place update for a pure offset sweep: repositions the widget
+   * overlay and, if the section is currently active, mutates the EXISTING
+   * clip Plane's normal/constant — the SAME object every solid material's
+   * `clippingPlanes` array already references, so the visual update needs
+   * NO material touch (DESIGN §3). `plane`'s `normal`/`active` must match
+   * the last `setSectionPlane` call (only `origin` may differ) — a
+   * re-orientation or (de)activation goes through `setSectionPlane` instead.
+   */
+  updateSectionPlaneOffset(plane: SectionPlane): void {
+    if (this.sectionWidget !== null) {
+      this.sectionWidget.position.set(plane.origin[0], plane.origin[1], plane.origin[2])
+    }
+    if (this.sectionClipPlane !== null && plane.active) {
+      // Mirror `setSectionPlane`'s NEGATED-normal convention: the clip plane
+      // keeps `-sectionNormal` (interior) and discards `+sectionNormal`.
+      this.sectionClipPlane.normal.set(-plane.normal[0], -plane.normal[1], -plane.normal[2])
+      this.sectionClipPlane.constant = -this.sectionClipPlane.normal.dot(
+        new THREE.Vector3(plane.origin[0], plane.origin[1], plane.origin[2]),
+      )
+    }
+  }
+
+  /**
+   * Half-extent (meters) the section widget's rectangle is sized to (DESIGN
+   * §4: "sized to the scene bounds") — half the current scene's visible
+   * bounding-box diagonal, floored so an empty/tiny scene still gets a
+   * usable frame. `SectionPlaneTool` snapshots this once at tool activation
+   * for its widget hit-test rather than re-querying on every pointer move —
+   * see that class's doc comment for the rationale (this walks the whole
+   * rendered scene graph, cheap enough for an on-click query, wasteful on
+   * every mouse move).
+   */
+  sectionWidgetHalfExtent(): number {
+    const box = new THREE.Box3()
+    expandByVisibleObject(box, this.objectsGroup)
+    expandByVisibleObject(box, this.instancesGroup)
+    if (box.isEmpty()) return SECTION_WIDGET_MIN_HALF_EXTENT
+    const size = box.getSize(new THREE.Vector3())
+    return Math.max(size.length() / 2, SECTION_WIDGET_MIN_HALF_EXTENT)
+  }
+
+  // ── Section-plane test/E2E diagnostics (read-only) ──────────────────────
+  // Consistent with the harness's other observe-only hooks (captureFrame,
+  // getStateHash): they let a Playwright spec assert the section clip's
+  // material state — the real-wiring checks unit tests can't reach — without
+  // touching pixels.
+
+  /** Whether the section widget overlay is currently built. */
+  hasSectionWidget(): boolean {
+    return this.sectionWidget !== null
+  }
+
+  /** The active clip plane's world normal + constant (three.js keeps
+   * `normal·p + constant >= 0`, discards `< 0`), or null when no active clip.
+   * Lets a spec assert the clip SIDE (that the near/outer side is removed).
+   * Test/E2E only. */
+  debugSectionClipPlane(): { normal: [number, number, number]; constant: number } | null {
+    const p = this.sectionClipPlane
+    if (p === null) return null
+    return { normal: [p.normal.x, p.normal.y, p.normal.z], constant: p.constant }
+  }
+
+  /** Number of clipping planes on the first material of `mat`. */
+  private _materialClipCount(mat: THREE.Material | THREE.Material[] | undefined): number {
+    if (mat === undefined) return 0
+    const m = Array.isArray(mat) ? mat[0] : mat
+    return m?.clippingPlanes?.length ?? 0
+  }
+
+  /**
+   * Clipping-plane count on the face material of a rendered object or
+   * instance — the material state a section clip lands on. For an instance:
+   * the MATERIALIZED group's material when it is materialized (selected /
+   * isolation-lit / preview), else its batch material. Returns -1 when the
+   * node is not currently rendered at all. Test/E2E only.
+   */
+  debugNodeClipPlaneCount(kind: 'object' | 'instance', id: bigint): number {
+    if (kind === 'object') {
+      const g = this.objectGroups.get(id)
+      return g === undefined ? -1 : this._materialClipCount(g.facesMesh.material)
+    }
+    const mg = this.instanceGroups.get(id)
+    if (mg !== undefined) return this._materialClipCount(mg.facesMeshes[0]?.material)
+    const rec = this.instanceRecords.get(id)
+    if (rec === undefined) return -1
+    for (const m of rec.memberIds) {
+      const key = this._batchKeyFor(m, rec)
+      const batch = key !== undefined ? this.batches.get(key) : undefined
+      if (batch?.slotOf.has(id)) return this._materialClipCount(batch.mesh.material)
+    }
+    return -1
+  }
+
+  /** The max clipping-plane count across the section widget's own materials —
+   * must always be 0 (the widget is an overlay, never clipped). Test/E2E. */
+  debugSectionWidgetClipPlaneCount(): number {
+    if (this.sectionWidget === null) return 0
+    let max = 0
+    this.sectionWidget.traverse((child) => {
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+        max = Math.max(max, this._materialClipCount(child.material))
+      }
+    })
+    return max
+  }
+
+  /** Dispose the current widget's GPU resources (plain Mesh/LineSegments
+   * geometry — hand-rolled, not `THREE.ArrowHelper`, whose line/cone
+   * geometries are process-wide singletons shared across every instance and
+   * must never be disposed per-use). */
+  private _disposeSectionWidget(): void {
+    if (this.sectionWidget === null) return
+    this.sectionWidget.traverse((child) => {
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+        child.geometry.dispose()
+        if (child.material instanceof THREE.Material) child.material.dispose()
+      }
+    })
+    this.sectionGroup.remove(this.sectionWidget)
+    this.sectionWidget = null
+  }
+
+  /** Rebuild the widget overlay for `plane` (or remove it, for null): a
+   * translucent framed rectangle in-plane, sized via `sectionWidgetHalfExtent`,
+   * plus a short normal arrow — solid outline/brighter fill while active,
+   * dashed/dimmer while inactive (DESIGN §4). The whole group sits at
+   * `plane.origin` with NO rotation applied; every child vertex is instead
+   * authored directly in world-direction offsets along the plane's own
+   * (u, v, normal) basis, so `updateSectionPlaneOffset`'s cheap path can
+   * reposition it with a single `.position.set` (mirrors SliceTool's
+   * preview-quad construction). */
+  private _rebuildSectionWidget(plane: SectionPlane | null): void {
+    this._disposeSectionWidget()
+    if (plane === null) return
+
+    const basis = facePlaneBasis(plane.normal)
+    if (basis === null) return
+    const { u, v } = basis
+    const half = this.sectionWidgetHalfExtent()
+
+    const corners: Array<[number, number]> = [[-half, -half], [half, -half], [half, half], [-half, half]]
+    const toWorldOffset = ([cu, cv]: [number, number]): V3 => [
+      u[0] * cu + v[0] * cv,
+      u[1] * cu + v[1] * cv,
+      u[2] * cu + v[2] * cv,
+    ]
+    const worldCorners = corners.map(toWorldOffset)
+
+    // Fill — two triangles, translucent, never depth-writing (a glass pane
+    // must not occlude geometry behind it in the depth buffer).
+    const tri1 = [worldCorners[0], worldCorners[1], worldCorners[2]]
+    const tri2 = [worldCorners[0], worldCorners[2], worldCorners[3]]
+    const fillPts = new Float32Array(18)
+    let i = 0
+    for (const p of [...tri1, ...tri2]) {
+      fillPts[i++] = p[0]; fillPts[i++] = p[1]; fillPts[i++] = p[2]
+    }
+    const fillGeo = new THREE.BufferGeometry()
+    fillGeo.setAttribute('position', new THREE.BufferAttribute(fillPts, 3))
+    const fillMat = new THREE.MeshBasicMaterial({
+      color: SECTION_WIDGET_COLOR,
+      transparent: true,
+      opacity: plane.active ? SECTION_WIDGET_FILL_OPACITY_ACTIVE : SECTION_WIDGET_FILL_OPACITY_INACTIVE,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    })
+    const fillMesh = new THREE.Mesh(fillGeo, fillMat)
+
+    // Outline — 4 independent segments (not a LineLoop) so a dashed material
+    // can `computeLineDistances()` over them; consecutive segments share a
+    // vertex at each corner, so the dash pattern still flows continuously
+    // around the whole rectangle.
+    const outlinePts: number[] = []
+    for (let k = 0; k < 4; k++) {
+      const a = worldCorners[k]
+      const b = worldCorners[(k + 1) % 4]
+      outlinePts.push(a[0], a[1], a[2], b[0], b[1], b[2])
+    }
+    const outlineGeo = new THREE.BufferGeometry()
+    outlineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(outlinePts), 3))
+    let outline: THREE.LineSegments
+    if (plane.active) {
+      outline = new THREE.LineSegments(outlineGeo, new THREE.LineBasicMaterial({ color: SECTION_WIDGET_COLOR }))
+    } else {
+      const dashMat = new THREE.LineDashedMaterial({
+        color: SECTION_WIDGET_COLOR,
+        dashSize: Math.max(half * 0.08, 0.02),
+        gapSize: Math.max(half * 0.05, 0.015),
+        transparent: true,
+        opacity: SECTION_WIDGET_OUTLINE_OPACITY_INACTIVE,
+      })
+      outline = new THREE.LineSegments(outlineGeo, dashMat)
+      outline.computeLineDistances()
+    }
+
+    // Normal arrow — hand-rolled (see `_disposeSectionWidget`'s doc comment
+    // for why not `THREE.ArrowHelper`): a shaft along the section normal plus
+    // a 4-stroke cross-shaped head (readable from any viewing angle, unlike a
+    // flat 2-stroke arrowhead which can foreshorten to a line). It points
+    // along `+plane.normal` — the near/outer side the clip REMOVES — so it
+    // reads as "material this way is cut away" (the clip keeps the opposite,
+    // interior side; see `setSectionPlane`).
+    const arrowLen = Math.min(Math.max(half * 0.35, 0.1), half)
+    const headLen = arrowLen * 0.3
+    const headWidth = arrowLen * 0.18
+    const n = plane.normal
+    const tip: V3 = [n[0] * arrowLen, n[1] * arrowLen, n[2] * arrowLen]
+    const back: V3 = [tip[0] - n[0] * headLen, tip[1] - n[1] * headLen, tip[2] - n[2] * headLen]
+    const headPts: V3[] = [
+      [back[0] + u[0] * headWidth, back[1] + u[1] * headWidth, back[2] + u[2] * headWidth],
+      [back[0] - u[0] * headWidth, back[1] - u[1] * headWidth, back[2] - u[2] * headWidth],
+      [back[0] + v[0] * headWidth, back[1] + v[1] * headWidth, back[2] + v[2] * headWidth],
+      [back[0] - v[0] * headWidth, back[1] - v[1] * headWidth, back[2] - v[2] * headWidth],
+    ]
+    const arrowSegs: number[] = [0, 0, 0, tip[0], tip[1], tip[2]]
+    for (const p of headPts) {
+      arrowSegs.push(tip[0], tip[1], tip[2], p[0], p[1], p[2])
+    }
+    const arrowGeo = new THREE.BufferGeometry()
+    arrowGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(arrowSegs), 3))
+    const arrowMat = new THREE.LineBasicMaterial({
+      color: SECTION_WIDGET_COLOR,
+      transparent: !plane.active,
+      opacity: plane.active ? 1 : SECTION_WIDGET_OUTLINE_OPACITY_INACTIVE,
+    })
+    const arrow = new THREE.LineSegments(arrowGeo, arrowMat)
+
+    const group = new THREE.Group()
+    group.name = 'SectionWidget'
+    group.add(fillMesh)
+    group.add(outline)
+    group.add(arrow)
+    group.position.set(plane.origin[0], plane.origin[1], plane.origin[2])
+
+    this.sectionGroup.add(group)
+    this.sectionWidget = group
+  }
+
   private _applyIsolation(): void {
     for (const [id, g] of this.objectGroups) {
       const dimmed = this.activeLitSet !== null && !this.activeLitSet.has(id)
@@ -2073,6 +2465,11 @@ export class SceneRenderer {
     if (!this.instanceRecords.has(instanceId)) return null
     this.previewMaterialized.add(instanceId)
     this._materialize(instanceId)
+    // This path materializes on demand WITHOUT going through
+    // `_syncMaterialized`, so the freshly built (unclipped) materials must
+    // pick up an active section here explicitly (used by transform-tool live
+    // previews and marquee hit-testing — see the callers in Viewport.tsx).
+    this._reassertSectionClip()
     return this.instanceGroups.get(instanceId)?.group ?? null
   }
 
@@ -2119,5 +2516,7 @@ export class SceneRenderer {
     this._clearSketchLines()
     this._clearSketchRegions()
     this._clearGuides()
+    this._disposeSectionWidget()
+    this.sectionClipPlane = null
   }
 }

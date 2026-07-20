@@ -32,6 +32,7 @@ import type { DrawPlane } from '../tools/drawPlane'
 import { SnapService } from './snapService'
 import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
+import { SectionManager } from './sectionManager'
 import * as inputRecorder from '../recording/inputRecorder'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { exportSceneToStl, type StlBuildResult } from '../io/exporters/stlExport'
@@ -52,6 +53,7 @@ import { ScaleTool } from '../tools/ScaleTool'
 import { TapeMeasureTool } from '../tools/TapeMeasureTool'
 import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
+import { SectionPlaneTool } from '../tools/SectionPlaneTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
 import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
@@ -407,6 +409,36 @@ export interface ViewportApi {
   deleteAllGuides: () => void
   /** Delete a single picked construction guide. */
   runDeleteGuide: (id: bigint) => void
+  /**
+   * Toggle the placed section plane's active (clipping) flag — "Toggle
+   * Section Plane Active" (menu + palette), SketchUp's "Active Cut". A
+   * no-op when no section is placed. Session-only view state, exactly like
+   * `setAxesVisible`/`setGuidesVisible` above (DESIGN §2).
+   */
+  toggleSectionActive: () => void
+  /**
+   * Test/E2E: the current session section (`{ origin, normal, active }`) or
+   * null. Reads the same SectionManager the tool/menu mutate — no document
+   * state. Observe-only, like `getCamera`.
+   */
+  getSectionState: () => { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null
+  /**
+   * Test/E2E: section-plane render diagnostics — whether the widget overlay
+   * is built, the widget's own clip count (must be 0 — overlays never clip),
+   * the clip-plane count on a specific rendered object/instance face material
+   * (-1 if that node isn't rendered), and the active clip plane's world
+   * normal + constant (null when inactive) so a spec can assert the clip
+   * SIDE. Lets a spec assert the real-wiring clip state unit tests can't reach.
+   */
+  getSectionRenderInfo: (
+    kind: 'object' | 'instance',
+    id: bigint,
+  ) => {
+    widget: boolean
+    widgetClipCount: number
+    nodeClipCount: number
+    clipPlane: { normal: [number, number, number]; constant: number } | null
+  }
   /**
    * Serialize the current solid geometry (objects + instances) to a binary
    * glTF (.glb) buffer. Resolves null when the model has no solids.
@@ -1061,6 +1093,15 @@ export default function Viewport({
     // Initial refresh (empty scene is fine — just populates nothing)
     sceneRenderer.refresh()
     sceneRenderer.refreshGuides()
+
+    // Non-destructive section plane (DESIGN §2) — a
+    // three.js clip, not a kernel/document entity. Session-only for the
+    // lifetime of this mounted viewport; never serialized, never undo-wired.
+    // Requires local clipping on the renderer even before a section is ever
+    // placed — the flag itself has no cost when no material sets
+    // `clippingPlanes` (see WebGLRenderer.render's cheap early-out).
+    renderer.localClippingEnabled = true
+    const sectionManager = new SectionManager()
 
     // ------------------------------------------------------------------ cue layer
     const cueLayer = new CueLayer()
@@ -1757,6 +1798,15 @@ export default function Viewport({
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
       sceneRenderer.refreshGuides()
+      // A section is session view state derived from the PREVIOUS model's
+      // geometry (raw coordinates, not a kernel handle) — carrying it over
+      // to an unrelated freshly-loaded document would leave a confusing,
+      // arbitrarily-placed cut. Not a DESIGN requirement, just the
+      // obvious "new document, clean view state" behavior every other
+      // session overlay already gets implicitly (guides/hidden sets key off
+      // ids that simply don't exist in the new document).
+      sectionManager.delete()
+      sceneRenderer.setSectionPlane(null)
     }
 
     /**
@@ -2013,6 +2063,34 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function toggleSectionActive(): void {
+      sectionManager.toggleActive()
+      sceneRenderer.setSectionPlane(sectionManager.current)
+      scheduleRender()
+    }
+
+    function getSectionState(): { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null {
+      const p = sectionManager.current
+      return p === null ? null : { origin: [...p.origin], normal: [...p.normal], active: p.active }
+    }
+
+    function getSectionRenderInfo(
+      kind: 'object' | 'instance',
+      id: bigint,
+    ): {
+      widget: boolean
+      widgetClipCount: number
+      nodeClipCount: number
+      clipPlane: { normal: [number, number, number]; constant: number } | null
+    } {
+      return {
+        widget: sceneRenderer.hasSectionWidget(),
+        widgetClipCount: sceneRenderer.debugSectionWidgetClipPlaneCount(),
+        nodeClipCount: sceneRenderer.debugNodeClipPlaneCount(kind, id),
+        clipPlane: sceneRenderer.debugSectionClipPlane(),
+      }
+    }
+
     async function exportGlb(): Promise<Uint8Array | null> {
       return exportSceneToGlb(sceneRenderer)
     }
@@ -2038,7 +2116,7 @@ export default function Viewport({
         }
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, exportGlb, exportStl, export3mf }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -2434,6 +2512,65 @@ export default function Viewport({
       )
     }
 
+    function makeSectionPlaneTool(): SectionPlaneTool {
+      return new SectionPlaneTool(
+        wasmScene,
+        previewGroup,
+        () => sectionManager.current,
+        // Snapshotted once at activation — see SectionPlaneTool's doc
+        // comment (a live per-move query would re-walk the scene graph on
+        // every mouse move).
+        sceneRenderer.sectionWidgetHalfExtent(),
+        // Place (or replace) — becomes the active section; the tool STAYS
+        // active (no spring-back to Select) so the user can immediately
+        // sweep, toggle, or delete the section they just placed. Springing
+        // back to Select here would desync App's `activeTool` state (the
+        // internal switchToolRef updates the viewport toolController + status
+        // bar but not the React tool state), leaving the rail showing Section
+        // Plane while Select is really active — which routed Delete to a
+        // destructive kernel delete of the document selection. Keeping the
+        // tool active is also the better inspect-tool UX (place, then sweep).
+        (origin, normal) => {
+          sectionManager.place(origin, normal)
+          sceneRenderer.setSectionPlane(sectionManager.current)
+          scheduleRender()
+        },
+        // Live widget-drag preview — cheap, in-place, no material rebuild.
+        (plane) => {
+          sceneRenderer.updateSectionPlaneOffset(plane)
+          scheduleRender()
+        },
+        // Offset committed (second click or typed Enter) — persist it and
+        // stay in this tool (sweeping is "the primary inspection gesture",
+        // meant to be repeated — DESIGN §1).
+        (plane) => {
+          sectionManager.setPlane(plane)
+          sceneRenderer.setSectionPlane(sectionManager.current)
+          scheduleRender()
+        },
+        // Plain click on the widget — toggle active (SketchUp's "Active Cut").
+        () => {
+          sectionManager.toggleActive()
+          sceneRenderer.setSectionPlane(sectionManager.current)
+          scheduleRender()
+        },
+        // Delete — the model returns to whole.
+        () => {
+          sectionManager.delete()
+          sceneRenderer.setSectionPlane(null)
+          scheduleRender()
+        },
+        // Esc / tool-switch mid-drag — revert the live preview to whatever
+        // is still committed in sectionManager (the drag never wrote there).
+        () => {
+          sceneRenderer.setSectionPlane(sectionManager.current)
+          scheduleRender()
+        },
+        handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
     function makeEditVertexTool(): EditVertexTool {
       return new EditVertexTool(
         wasmScene,
@@ -2542,6 +2679,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeSliceTool())
+          break
+        case 'Section Plane':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeSectionPlaneTool())
           break
         case 'Edit Vertex':
           cameraModeRef.current = false
