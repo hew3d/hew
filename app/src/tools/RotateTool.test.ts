@@ -224,6 +224,115 @@ describe('RotateTool — gesture', () => {
   })
 })
 
+describe('RotateTool — snapConstraint (axis-lock plane)', () => {
+  it('is absent while idle, and absent while a pivot/ref stage has no lock engaged', () => {
+    const { tool } = makeTool()
+    // Idle — no lock, no pivot.
+    expect(tool.snapConstraint()).toBeNull()
+
+    // Pivot placed, still unlocked: axis is merely inferred (ground Z), so
+    // it must stay free — an inferred axis can change on the next hover.
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+    expect(tool.snapConstraint()).toBeNull()
+
+    // Ref stage, still unlocked.
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference
+    expect(tool.snapConstraint()).toBeNull()
+  })
+
+  it('is {pivot, lockedNormal} once an axis lock is engaged with a pivot placed', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 2, y: 3, z: 0 }), rayThrough(2, 3))
+    tool.onPointerDown(makeSnap({ x: 2, y: 3, z: 0 }), rayThrough(2, 3)) // pivot at (2,3,0)
+    tool.onKey(makeKeyEvent('ArrowRight')) // lock X
+
+    expect(tool.snapConstraint()).toEqual({
+      constraintPlane: { point: [2, 3, 0], normal: [1, 0, 0] },
+    })
+
+    // Still constrained once the reference is placed (ref stage).
+    tool.onPointerDown(makeSnap({ x: 2, y: 3, z: 1 }), rayThrough(2, 3)) // reference (in the X-locked plane)
+    expect(tool.snapConstraint()).toEqual({
+      constraintPlane: { point: [2, 3, 0], normal: [1, 0, 0] },
+    })
+  })
+
+  it('stores the reference point projected into the locked plane for an out-of-plane snap', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    tool.onKey(makeKeyEvent('ArrowRight')) // lock X — rotation plane is x=0 (Y-Z plane)
+
+    // The resolved snap for the reference click carries a nonzero X (as if
+    // an off-plane candidate slipped through despite the constraint) — the
+    // tool must still store the reference point IN the x=0 plane, not at
+    // this raw 3D point.
+    tool.onPointerDown(makeSnap({ x: 5, y: 2, z: 3 }), rayThrough(2, 3))
+
+    const stage = (tool as unknown as { stage: { kind: string; refPoint: [number, number, number] } }).stage
+    expect(stage.kind).toBe('ref')
+    expect(stage.refPoint).toEqual([0, 2, 3])
+  })
+
+  it('an arrow-lock change mid-gesture (ref stage) moves the constraint plane', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    tool.onKey(makeKeyEvent('ArrowRight')) // lock X
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(1, 0)) // reference, in-plane
+
+    expect(tool.snapConstraint()).toEqual({
+      constraintPlane: { point: [0, 0, 0], normal: [1, 0, 0] },
+    })
+
+    tool.onKey(makeKeyEvent('ArrowUp')) // relock to Z mid-sweep
+
+    expect(tool.snapConstraint()).toEqual({
+      constraintPlane: { point: [0, 0, 0], normal: [0, 0, 1] },
+    })
+  })
+})
+
+describe('RotateTool — locked sweep consumes the constrained snap', () => {
+  it('the live sweep target is the resolved snap point (not a raw ray∩plane recompute) once locked', () => {
+    const { tool, onMeasurement, wasmScene } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    tool.onKey(makeKeyEvent('ArrowUp')) // lock Z — ground plane, matches the ray helper's plane
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference (+X, 0°)
+
+    // Feed a snap whose (x, y, z) disagrees with what ray∩plane would compute
+    // for this ray (the ray itself points straight through (0, 1, 0) on
+    // z=0) — a snapped vertex sitting exactly at 90° but slightly off the
+    // ray, as a sticky kernel candidate would be. The committed angle must
+    // follow the SNAP, proving the tool consumed it rather than recomputing
+    // ray∩plane and ignoring `snap`.
+    tool.onPointerMove(makeSnap({ x: 0, y: 1, z: 0, kind: 'endpoint' }), rayThrough(0.3, 0.9))
+    expect(onMeasurement).toHaveBeenCalledWith('Z 90.0°')
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0, kind: 'endpoint' }), rayThrough(0.3, 0.9)) // commit
+    expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+  })
+
+  it('unlocked rotation keeps pure ray∩plane intersection (snap.xyz is ignored)', () => {
+    const { tool, onMeasurement } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot (unlocked, inferred Z)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference (+X, 0°)
+
+    // The snap's own (x,y,z) says 45°, but the ray itself intersects the
+    // ground plane at (0,1,0) → 90°. Unlocked must follow the ray, not the
+    // snap payload.
+    tool.onPointerMove(makeSnap({ x: 0.70710678, y: 0.70710678, z: 0 }), rayThrough(0, 1))
+    // "Z " tags the readout because the default INFERRED axis (no face/edge
+    // hit) is world +Z, same as the locked case below — the tag reflects
+    // world-alignment, not lock state. The 90° (not 45°) is the assertion
+    // that matters: it comes from ray∩plane, proving `snap.xyz` was ignored.
+    expect(onMeasurement).toHaveBeenCalledWith('Z 90.0°')
+  })
+})
+
 describe('RotateTool — screen-constant disk scaling', () => {
   // The disk's screen size at the app's reference fov/viewport (45°, 720px
   // tall) — carried over from the old DISK_SCREEN_K = 0.06 constant so the

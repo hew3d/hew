@@ -40,9 +40,15 @@
  * axis.
  *
  * The rotation plane is the plane through the pivot whose normal is the
- * effective axis. Because that plane often has no snappable geometry (a
- * vertical plane floating in space), the live sweep uses ray/plane
- * intersection rather than the resolved snap point.
+ * effective axis. Once an axis LOCK is engaged (Shift or an arrow key) and a
+ * pivot exists, `snapConstraint()` feeds that plane to the snap resolver
+ * (`types.ts`/`snapService.ts`), so every subsequent click and the live sweep
+ * only ever see in-plane candidates (or the plane-intersection fallback) —
+ * the reference arm and the swept target are always exactly what the cursor
+ * confirmed, never a free-3D point that merely projects near it. Unlocked
+ * rotation has no plane to offer (the axis is still just inferred, and may
+ * change every hover) and stays fully unconstrained, using ray/plane
+ * intersection for the live sweep as before.
  *
  * If nothing is selected, the first click auto-selects whatever is under the
  * cursor (via the Viewport-injected selection acquirer) and starts the
@@ -225,6 +231,24 @@ export class RotateTool implements Tool {
   }
 
   /**
+   * Constrain snapping to the rotation plane once an axis LOCK (Shift or an
+   * arrow key) is engaged and a pivot exists (stage `pivot` or `ref`) — the
+   * plane through the pivot perpendicular to the locked axis. This is what
+   * makes the reference arm and the live sweep target land exactly where the
+   * cursor's cue shows, instead of a free-3D snap that only *projects* near
+   * it. Deliberately keyed on `lockedNormal`, not `_effectiveAxis()`: an
+   * INFERRED axis (idle, or pivot/ref with no lock) can still change on
+   * every hover, so constraining to it would be constraining to a plane that
+   * is about to move — idle picking the pivot and unlocked rotation both
+   * stay fully unconstrained, matching prior behavior.
+   */
+  snapConstraint(): { constraintPlane: { point: [number, number, number]; normal: [number, number, number] } } | null {
+    if (this.lockedNormal === null) return null
+    if (this.stage.kind !== 'pivot' && this.stage.kind !== 'ref') return null
+    return { constraintPlane: { point: this.stage.pivot, normal: this.lockedNormal } }
+  }
+
+  /**
    * Keep the protractor a constant on-screen size regardless of camera
    * distance, fov, or viewport resize — called from the Viewport render loop
    * every frame (feature-detected via `'updateDiskScale' in tool`), passing
@@ -247,7 +271,19 @@ export class RotateTool implements Tool {
     if (this.stage.kind === 'ref') {
       const { pivot, previewMesh } = this.stage
       const axis = this._effectiveAxis()
-      const cursorPoint = rayPlaneIntersect(ray.origin, ray.direction, pivot, axis)
+      // Locked: `snapConstraint()` fed the resolver our rotation plane, so
+      // `snap` is either an in-plane kernel candidate or the resolver's own
+      // ray∩plane fallback (`snapService.ts`) — consuming it lets the sweep
+      // land exactly ON a snapped target (SketchUp parity: "rotate to that
+      // vertex"), the 15° soft snap below yielding to a real one. `snap`
+      // is null only when the fallback ray∩plane also failed (ray parallel
+      // to the plane), matching the unlocked branch's own null case.
+      // Unlocked: no constraint plane was offered, so `snap` may be any
+      // free 3D point (or unrelated inference); keep the existing pure
+      // ray∩plane intersection rather than changing unlocked behavior.
+      const cursorPoint = this.lockedNormal !== null
+        ? (snap !== null ? ([snap.x, snap.y, snap.z] as Vec3) : null)
+        : rayPlaneIntersect(ray.origin, ray.direction, pivot, axis)
       if (cursorPoint === null) {
         // Ray parallel to the rotation plane — hold the previous delta.
         if (previewMesh !== null) this._applyPreviewRotation(previewMesh, pivot, axis, this.stage.lastDelta)
@@ -312,16 +348,26 @@ export class RotateTool implements Tool {
       this.onMeasurementCb('')
     } else if (this.stage.kind === 'pivot') {
       const { nodes, pivot, axis } = this.stage
-      const refPoint: Vec3 = [snap.x, snap.y, snap.z]
+      const rawRef: Vec3 = [snap.x, snap.y, snap.z]
       // Ignore a reference that coincides with the pivot, or lies on the axis
       // through it: its projection into the rotation plane is ~zero, which would
       // freeze the sweep at 0° with no feedback. Wait for a usable reference.
       const effAxis = this._effectiveAxis()
-      const baseline = normalize3(projectOntoPlane(
-        refPoint[0] - pivot[0], refPoint[1] - pivot[1], refPoint[2] - pivot[2],
+      const offset = projectOntoPlane(
+        rawRef[0] - pivot[0], rawRef[1] - pivot[1], rawRef[2] - pivot[2],
         effAxis[0], effAxis[1], effAxis[2],
-      ))
+      )
+      const baseline = normalize3(offset)
       if (baseline === null) return
+      // When locked, store the reference point projected INTO the rotation
+      // plane — `snapConstraint()` already asked the resolver to keep the
+      // snap in-plane, but this is the defensive/exact form regardless of
+      // what the resolved snap actually carried, so the drawn baseline arm
+      // passes through precisely the point the cursor confirmed. Unlocked
+      // rotation keeps the raw snap (unconstrained, as before).
+      const refPoint: Vec3 = this.lockedNormal !== null
+        ? [pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]]
+        : rawRef
       const previewMesh = this._buildPreview(nodes)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)

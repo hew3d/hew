@@ -47,7 +47,7 @@ Rotate puts a **protractor** — a round dial — under your cursor. The dial li
 2. Click a **reference point** to define the zero direction.
 3. Sweep to the new angle and click to commit. A dim arm marks 0° and a colored arm tracks the live angle.
 
-**Locking the axis.** Hold `Shift` to lock the dial to the axis it's currently showing — it renders solid, with a short stub along the axis, so the lock is obvious. Or force a world axis outright: `→` X, `←` Y, `↑` Z; `↓` clears the lock and goes back to following faces. Locking with an arrow is how you rotate something that offers no face to aim at — tipping a **cylinder** onto its side, say: hover it, press `←` or `→` to lock a horizontal axis, then pick your two points.
+**Locking the axis.** Hold `Shift` to lock the dial to the axis it's currently showing — it renders solid, with a short stub along the axis, so the lock is obvious. Or force a world axis outright: `→` X, `←` Y, `↑` Z; `↓` clears the lock and goes back to following faces. Locking with an arrow is how you rotate something that offers no face to aim at — tipping a **cylinder** onto its side, say: hover it, press `←` or `→` to lock a horizontal axis, then pick your two points. Once locked, your reference click and the live sweep are held to that plane, so you can snap exactly onto a point in it — a corner, an edge — instead of the nearest point in full 3D, which could read differently than the flat angle you're actually setting.
 
 The live angle snaps to 15° increments as you sweep. For any other angle, type degrees (e.g. `22.5`, negative allowed) and press `Enter`.
 
