@@ -1175,6 +1175,84 @@ describe('App — toast severity', () => {
   })
 })
 
+describe('App — View > Section Plane menu state (D3, section-plane-polish)', () => {
+  // Matches every other top-level describe block in this file (e.g. `App —
+  // loaded state` above): without its own reset, `vi.mocked(Viewport).mock.calls`
+  // accumulates across the WHOLE file, so `latestViewportProps()` below could
+  // read a call from an earlier, unrelated test (adversarial-review finding —
+  // flagged as a plausible flake source, not reproduced, fixed defensively).
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  /** Section-state shape `Viewport.getSectionState()` returns. */
+  type SectionState = { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null
+
+  /** The `onSectionChanged` callback and the (mutable) `apiRef` App handed
+   * the (mocked) Viewport on its last render — mirrors `latestOnToast`'s
+   * pattern. The real Viewport populates `apiRef.current` imperatively and
+   * calls `onSectionChanged` whenever the section's existence/active state
+   * actually changes; the mock does neither, so tests drive both by hand to
+   * exercise App's re-derive-from-truth wiring (not a shadow boolean). */
+  function latestViewportProps(): {
+    onSectionChanged?: () => void
+    apiRef?: { current: { getSectionState: () => SectionState; toggleSectionActive?: () => void } | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  /** Simulate the viewport reporting a new section state and notifying App. */
+  function reportSectionState(state: SectionState, extra: { toggleSectionActive?: () => void } = {}) {
+    const { onSectionChanged, apiRef } = latestViewportProps()
+    act(() => {
+      if (apiRef !== undefined) apiRef.current = { getSectionState: () => state, ...extra }
+      onSectionChanged?.()
+    })
+  }
+
+  it('starts unchecked with no section placed', async () => {
+    await renderAndLoad()
+    fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
+    const el = menubar().getByText('Section Plane')
+    expect(el.closest('div')?.textContent).not.toContain('✓')
+  })
+
+  it('checks View > Section Plane after the viewport reports an active section', async () => {
+    await renderAndLoad()
+    reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: true })
+    fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
+    const el = menubar().getByText('Section Plane')
+    expect(el.closest('div')?.textContent).toContain('✓')
+  })
+
+  it('a section placed but INACTIVE reports unchecked, not checked', async () => {
+    await renderAndLoad()
+    reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: false })
+    fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
+    const el = menubar().getByText('Section Plane')
+    expect(el.closest('div')?.textContent).not.toContain('✓')
+  })
+
+  it('clears back to unchecked when the section is deleted', async () => {
+    await renderAndLoad()
+    reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: true })
+    reportSectionState(null)
+    fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
+    const el = menubar().getByText('Section Plane')
+    expect(el.closest('div')?.textContent).not.toContain('✓')
+  })
+
+  it('View > Section Plane dispatches the SAME toggle-section-active command as before (D3 keeps the action id)', async () => {
+    await renderAndLoad()
+    const toggleSectionActive = vi.fn()
+    reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: true }, { toggleSectionActive })
+    fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(menubar().getByText('Section Plane'))
+    expect(toggleSectionActive).toHaveBeenCalledOnce()
+  })
+})
+
 describe('App — welcome screen', () => {
   it('opens on a bare launch and closes into the blank document', async () => {
     setShowWelcome(true)

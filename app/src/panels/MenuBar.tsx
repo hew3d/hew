@@ -96,8 +96,20 @@ export interface MenuBarProps {
   onToggleGuides?: () => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   onDeleteGuides?: () => void
-  /** Toggle the placed section plane's active (clipping) flag — Tools ▸
-   *  Toggle Section Active, SketchUp's "Active Cut". */
+  /** View ▸ Section Plane's check state: true only when a section is BOTH
+   * placed and active — SketchUp's "Active Cut" — derived by the caller
+   * from the section manager's own state (`getSectionState`), never a
+   * locally-tracked shadow boolean. False (unchecked, and the item
+   * disabled — see `sectionPlaneExists`) when no section is placed. */
+  sectionPlaneChecked?: boolean
+  /** Whether a section is placed at all, regardless of active/inactive —
+   * gates the View ▸ Section Plane item's enabled state (nothing to toggle
+   * with none placed). */
+  sectionPlaneExists?: boolean
+  /** Toggle the placed section plane's active (clipping) flag — View ▸
+   * Section Plane, SketchUp's "Active Cut". Same `toggle-section-active`
+   * dispatch this command has always used; only its menu location moved
+   * (from Tools) in section-plane-polish. */
   onToggleSectionActive?: () => void
   /** Delete the current selection — whole Object/Group/Instance nodes only (Edit ▸ Delete). */
   onDelete?: () => void
@@ -378,22 +390,27 @@ interface CheckMenuItemProps {
   label: string
   shortcut?: string
   checked: boolean
+  /** Mirrors `MenuItem`'s `disabled` — greys the row out and swallows
+   * clicks. Used by View ▸ Section Plane while no section is placed
+   * (D3, section-plane-polish): toggling is a documented no-op then, so
+   * disabling reads better than an always-clickable unchecked box. */
+  disabled?: boolean
   onClick: () => void
 }
 
-function CheckMenuItem({ label, shortcut, checked, onClick }: CheckMenuItemProps) {
+function CheckMenuItem({ label, shortcut, checked, disabled = false, onClick }: CheckMenuItemProps) {
   const [hovered, setHovered] = useState(false)
   return (
     <div
       style={{
-        ...MENU_ITEM_STYLE(false),
-        background: hovered ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
+        ...MENU_ITEM_STYLE(disabled),
+        background: hovered && !disabled ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onMouseDown={(e) => {
         e.preventDefault()
-        onClick()
+        if (!disabled) onClick()
       }}
     >
       <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -444,6 +461,8 @@ export function MenuBar({
   onToggleGrid,
   onToggleGuides,
   onDeleteGuides,
+  sectionPlaneChecked = false,
+  sectionPlaneExists = false,
   onToggleSectionActive,
   onDelete,
   onEditAction,
@@ -664,6 +683,12 @@ export function MenuBar({
               checked={showGuides}
               onClick={withClose(() => onToggleGuides?.())}
             />
+            <CheckMenuItem
+              label="Section Plane"
+              checked={sectionPlaneChecked}
+              disabled={!sectionPlaneExists}
+              onClick={withClose(() => onToggleSectionActive?.())}
+            />
           </div>
         )}
       </div>
@@ -781,10 +806,6 @@ export function MenuBar({
               label="Section Plane"
               checked={activeTool === 'Section Plane'}
               onClick={withClose(() => onSelectTool?.('Section Plane'))}
-            />
-            <MenuItem
-              label="Toggle Section Active"
-              onClick={withClose(() => onToggleSectionActive?.())}
             />
             <CheckMenuItem
               label="Edit Vertex"

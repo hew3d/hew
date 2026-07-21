@@ -45,11 +45,13 @@
  *      Note the click-move-click reality: a single physical tap on the
  *      widget only ARMS the stage; it does not resolve on its own (the
  *      `Tool` interface has no pointer-up). The dependable one-action toggle
- *      is therefore the **Tools ▸ Toggle Section Active** command
- *      (`toggleSectionActive`), which every doc/status-hint points users to
- *      rather than promising a single-click toggle this gesture can't
- *      deliver; the within-threshold toggle path here is a convenience for
- *      the "grab, decide not to move, release" case.
+ *      is therefore the **View ▸ Section Plane** command
+ *      (`toggleSectionActive`, same `toggle-section-active` action id it
+ *      always had — moved out of Tools in section-plane-polish), which every
+ *      doc/status-hint points users to rather than promising a single-click
+ *      toggle this gesture can't deliver; the within-threshold toggle path
+ *      here is a convenience for the "grab, decide not to move, release"
+ *      case.
  *   3. **Delete** (idle stage, Delete/Backspace, a section exists): removes
  *      the section via `onDelete` — "the model returns to whole." The tool
  *      captures Delete/Backspace (via `capturesKey`) ONLY while a section
@@ -79,6 +81,7 @@ import {
 import type { Scene as WasmScene } from '../wasm/loader'
 import { facePlaneBasis, projectRayOntoAxis, rayPlaneIntersect, type V3 } from '../viewport/geoHelpers'
 import { createSectionPlane, offsetSectionPlane, type SectionPlane } from '../viewport/sectionManager'
+import type { SectionWidgetCoverage } from '../viewport/SceneRenderer'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 
@@ -106,7 +109,13 @@ export const OFFSET_DRAG_THRESHOLD_M = 0.001
  * see that file's `SECTION_WIDGET_COLOR`). Distinct from Slice's purple
  * preview so the two tools never look like the same feature. */
 const PREVIEW_COLOR = 0x00bcd4
-const PREVIEW_FILL_OPACITY = 0.22
+/** Placement-hover fill opacity. Brought down from 0.22 alongside D2's
+ * edges-first pass on the COMMITTED widget (SceneRenderer's
+ * SECTION_WIDGET_FILL_OPACITY_ACTIVE dropped to 0.05) — left noticeably
+ * more opaque than the committed widget on purpose: this is a live,
+ * actively-watched placement cue the user is deciding against, not a
+ * settled fixture that should recede once placed. */
+const PREVIEW_FILL_OPACITY = 0.12
 /**
  * Screen-constant scale for the PLACEMENT preview quad (not the committed
  * widget, which SceneRenderer sizes to the real scene bounds), fed to
@@ -152,7 +161,7 @@ export class SectionPlaneTool implements Tool {
       return 'Move to sweep the cut, click to set it — or type an exact distance. Esc reverts.'
     }
     return this.getCurrentPlane() !== null
-      ? 'Click the widget then move to sweep the cut; click a face to re-place. Delete removes it; toggle it off from Tools ▸ Toggle Section Active.'
+      ? 'Click the widget then move to sweep the cut; click a face to re-place. Delete removes it; toggle it off from View ▸ Section Plane.'
       : 'Click a face to section it there, or click the ground for a horizontal cut.'
   }
 
@@ -165,12 +174,14 @@ export class SectionPlaneTool implements Tool {
   private previewPlane: THREE.Group | null = null
   private wasmScene: WasmScene
   private getCurrentPlane: GetCurrentSectionPlane
-  /** Half-extent (meters) of the CURRENT widget rectangle, snapshotted at
-   * tool construction — used only for `_hitWidget`'s bounds check. Matches
-   * `SceneRenderer.sectionWidgetHalfExtent()` at the moment the tool was
-   * activated; see that method's doc comment for why re-querying live on
-   * every pointer move is deliberately not done. */
-  private widgetHalfExtent: number
+  /** Live accessor for the CURRENT widget's coverage rectangle (half-extents
+   * + center offset in the plane's own u,v basis) — used only for
+   * `_hitWidget`'s bounds check. Reads `SceneRenderer.
+   * currentSectionWidgetCoverage()`, a cached field (no scene-graph walk),
+   * so unlike a construction-time snapshot this stays correct across a
+   * widget resize (a model edit growing/shrinking it, D1) without this tool
+   * needing to know that happened. */
+  private getWidgetCoverage: () => SectionWidgetCoverage | null
   private onPlace: OnSectionPlace
   private onOffsetPreview: OnSectionOffsetPreview
   private onOffsetCommit: OnSectionOffsetCommit
@@ -187,7 +198,7 @@ export class SectionPlaneTool implements Tool {
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     getCurrentPlane: GetCurrentSectionPlane,
-    widgetHalfExtent: number,
+    getWidgetCoverage: () => SectionWidgetCoverage | null,
     onPlace: OnSectionPlace,
     onOffsetPreview: OnSectionOffsetPreview,
     onOffsetCommit: OnSectionOffsetCommit,
@@ -200,7 +211,7 @@ export class SectionPlaneTool implements Tool {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.getCurrentPlane = getCurrentPlane
-    this.widgetHalfExtent = widgetHalfExtent
+    this.getWidgetCoverage = getWidgetCoverage
     this.onPlace = onPlace
     this.onOffsetPreview = onOffsetPreview
     this.onOffsetCommit = onOffsetCommit
@@ -393,23 +404,31 @@ export class SectionPlaneTool implements Tool {
 
   /**
    * Whether `ray` hits the rectangle of `plane`'s widget: a ray/plane
-   * intersection followed by an in-plane bounds check against
-   * `widgetHalfExtent` (the same half-extent `SceneRenderer` sizes the
-   * rendered rectangle to — see that method's doc comment for why this is a
-   * construction-time snapshot rather than a live query). False when the ray
-   * is parallel to the plane or the hit falls outside the rectangle.
+   * intersection followed by an in-plane bounds check against the CURRENT
+   * coverage rectangle (`getWidgetCoverage()` — the same shape
+   * `SceneRenderer` actually sizes the rendered rectangle to, read live so
+   * a widget resize is never out of sync with what's clickable). False when
+   * the ray is parallel to the plane, no widget is currently rendered, or
+   * the hit falls outside the rectangle.
    */
   private _rayHitsWidgetPlane(ray: Ray, plane: SectionPlane): boolean {
     const hitPoint = rayPlaneIntersect(ray.origin, ray.direction, plane.origin, plane.normal)
     if (hitPoint === null) return false
     const basis = facePlaneBasis(plane.normal)
     if (basis === null) return false
+    const coverage = this.getWidgetCoverage()
+    if (coverage === null) return false
     const dx = hitPoint[0] - plane.origin[0]
     const dy = hitPoint[1] - plane.origin[1]
     const dz = hitPoint[2] - plane.origin[2]
     const pu = dx * basis.u[0] + dy * basis.u[1] + dz * basis.u[2]
     const pv = dx * basis.v[0] + dy * basis.v[1] + dz * basis.v[2]
-    return Math.abs(pu) <= this.widgetHalfExtent && Math.abs(pv) <= this.widgetHalfExtent
+    return (
+      pu >= coverage.offsetU - coverage.halfU &&
+      pu <= coverage.offsetU + coverage.halfU &&
+      pv >= coverage.offsetV - coverage.halfV &&
+      pv <= coverage.offsetV + coverage.halfV
+    )
   }
 
   /**

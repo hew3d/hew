@@ -18,6 +18,7 @@ import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import type { SectionPlane } from '../viewport/sectionManager'
+import type { SectionWidgetCoverage } from '../viewport/SceneRenderer'
 
 /** Fixed ray direction: 45° between -X and -Z, deliberately not parallel to
  * the [0,0,1] test plane's normal. */
@@ -41,10 +42,16 @@ function makeWasmScene(faceNormal: [number, number, number] = [0, 0, 1]): WasmSc
   } as unknown as WasmScene
 }
 
+/** Symmetric, origin-centered coverage — matches the old `widgetHalfExtent`
+ * default for the tests that only care about a square hit region. */
+function symmetricCoverage(halfExtent: number): SectionWidgetCoverage {
+  return { halfU: halfExtent, halfV: halfExtent, offsetU: 0, offsetV: 0 }
+}
+
 function makeTool(opts: {
   scene?: WasmScene
   currentPlane?: SectionPlane | null
-  widgetHalfExtent?: number
+  widgetCoverage?: SectionWidgetCoverage | null
 } = {}) {
   const scene = opts.scene ?? makeWasmScene()
   const preview = new THREE.Group()
@@ -57,11 +64,12 @@ function makeTool(opts: {
   const onCancelOffset = vi.fn()
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
+  const widgetCoverage = opts.widgetCoverage === undefined ? symmetricCoverage(10) : opts.widgetCoverage
   const tool = new SectionPlaneTool(
     scene,
     preview,
     () => currentPlane,
-    opts.widgetHalfExtent ?? 10,
+    () => widgetCoverage,
     onPlace,
     onOffsetPreview,
     onOffsetCommit,
@@ -234,7 +242,7 @@ describe('SectionPlaneTool — widget offset-drag', () => {
   })
 
   it('a ray missing the widget rectangle falls through to placement', () => {
-    const { tool, onPlace } = makeTool({ currentPlane: PLANE, widgetHalfExtent: 0.01 })
+    const { tool, onPlace } = makeTool({ currentPlane: PLANE, widgetCoverage: symmetricCoverage(0.01) })
     // rayThroughZ(0) hits the plane at world (0,0,0) — comfortably inside a
     // half-extent of 10 but OUTSIDE a half-extent of 0.01 only if the hit
     // point itself is off-center; use a ray that hits well away from the
@@ -251,6 +259,39 @@ describe('SectionPlaneTool — widget offset-drag', () => {
     expect(onPlace).toHaveBeenCalledTimes(1)
   })
 
+  it('with no widget currently rendered (coverage null), a click on the plane falls through to placement', () => {
+    // getWidgetCoverage() returning null (no rebuilt widget yet) must be
+    // treated as a miss, not a crash or an accidental hit.
+    const { tool, onPlace } = makeTool({ currentPlane: PLANE, widgetCoverage: null })
+    tool.onPointerDown(null, rayThroughZ(0))
+    expect(onPlace).not.toHaveBeenCalled() // ground snap is null here, so nothing places either — just no throw
+    expect(tool.capturingInput()).toBe(false) // never armed — the widget test missed
+  })
+
+  it('an OFF-CENTER coverage rectangle (D1: uv-offset, not necessarily centered on the origin) is hit-tested at its actual position, not around the plane origin', () => {
+    // For PLANE's normal [0,0,1], facePlaneBasis picks u=[0,1,0] (world +Y)
+    // and v=[-1,0,0] (world -X) — so a coverage rectangle offset 20 along u
+    // covers world Y ∈ [15,25], X ∈ [-5,5] (pv = -x), regardless of the
+    // plane's own origin (0,0,0).
+    const offCenter: SectionWidgetCoverage = { halfU: 5, halfV: 5, offsetU: 20, offsetV: 0 }
+    const { tool, onPlace } = makeTool({ currentPlane: PLANE, widgetCoverage: offCenter })
+
+    // World (3,0,0) — squarely inside the OLD origin-centered half-extent-10
+    // square this coverage replaces — sits outside the new off-center
+    // rectangle (pu=0, below offsetU-halfU=15), so a click there falls
+    // through to placement rather than arming the drag.
+    const nearOrigin: Ray = { origin: [3, 0, 5], direction: [0, 0, -1] }
+    tool.onPointerDown(null, nearOrigin)
+    expect(tool.capturingInput()).toBe(false)
+
+    // World (0,20,0) — inside the off-center rectangle (pu=20, pv=0) — arms
+    // the drag instead.
+    const onRect: Ray = { origin: [0, 20, 5], direction: [0, 0, -1] }
+    tool.onPointerDown(null, onRect)
+    expect(onPlace).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(true)
+  })
+
   it('an armed offset whose SECOND click MISSES the widget re-places instead of offset-jumping', () => {
     // Widget half-extent 10, plane at origin. Arm on the widget (rayThroughZ(0)
     // hits the z=0 plane at x=3, inside the rect), then the second click lands
@@ -259,7 +300,7 @@ describe('SectionPlaneTool — widget offset-drag', () => {
     // commits a surprise offset.
     const { tool, onPlace, onOffsetCommit, onCancelOffset } = makeTool({
       currentPlane: PLANE,
-      widgetHalfExtent: 10,
+      widgetCoverage: symmetricCoverage(10),
     })
     tool.onPointerDown(null, rayThroughZ(0)) // arm — hits widget at (3,0,0)
     expect(tool.capturingInput()).toBe(true) // armed

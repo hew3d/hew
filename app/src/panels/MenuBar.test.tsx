@@ -295,6 +295,67 @@ describe('MenuBar', () => {
     expect(onToggleGrid).toHaveBeenCalledOnce()
   })
 
+  // --- View > Section Plane (D3, section-plane-polish) ---
+
+  it('shows no checkmark for Section Plane when no section is placed (sectionPlaneChecked=false)', () => {
+    render(<MenuBar {...defaultProps} sectionPlaneChecked={false} sectionPlaneExists={false} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    const el = screen.getByText('Section Plane')
+    expect(el.closest('div')?.textContent).not.toContain('✓')
+  })
+
+  it('shows a checkmark for Section Plane only when a section is placed AND active', () => {
+    render(<MenuBar {...defaultProps} sectionPlaneChecked={true} sectionPlaneExists={true} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    const el = screen.getByText('Section Plane')
+    expect(el.closest('div')?.textContent).toContain('✓')
+  })
+
+  it('a section placed but INACTIVE (dashed widget) shows unchecked, not checked', () => {
+    render(<MenuBar {...defaultProps} sectionPlaneChecked={false} sectionPlaneExists={true} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    const el = screen.getByText('Section Plane')
+    expect(el.closest('div')?.textContent).not.toContain('✓')
+  })
+
+  it('calls onToggleSectionActive when View > Section Plane is mousedown-clicked while a section exists', () => {
+    const onToggleSectionActive = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        sectionPlaneChecked={true}
+        sectionPlaneExists={true}
+        onToggleSectionActive={onToggleSectionActive}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(screen.getByText('Section Plane'))
+    expect(onToggleSectionActive).toHaveBeenCalledOnce()
+  })
+
+  it('View > Section Plane is disabled and swallows clicks when no section is placed', () => {
+    const onToggleSectionActive = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        sectionPlaneChecked={false}
+        sectionPlaneExists={false}
+        onToggleSectionActive={onToggleSectionActive}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(screen.getByText('Section Plane'))
+    expect(onToggleSectionActive).not.toHaveBeenCalled()
+  })
+
+  it('Tools menu no longer has a standalone "Toggle Section Active" command (moved to View)', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /tools/i }))
+    expect(screen.queryByText('Toggle Section Active')).not.toBeInTheDocument()
+    // The Section Plane TOOL selector itself is untouched.
+    expect(screen.getByText('Section Plane')).toBeInTheDocument()
+  })
+
   // --- Help menu ---
 
   it('calls onReportBug when Help > Report Bug… is mousedown-clicked', () => {

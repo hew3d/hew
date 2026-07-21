@@ -2168,6 +2168,19 @@ fn main() {
             let view_axes = check_item(handle, &mut checks, "view-axes", "Axes", None, None)?;
             let view_grid = check_item(handle, &mut checks, "view-grid", "Grid", None, None)?;
             let view_guides = check_item(handle, &mut checks, "view-guides", "Guides", None, None)?;
+            // Section Plane's active (clipping) toggle — moved here from Tools
+            // (section-plane-polish D3); same "toggle-section-active" dispatch
+            // it always had. Checked only when a section is BOTH placed and
+            // active; `sync_menu_state`'s `enabled` map (driven by the same
+            // `view-section-plane` id) disables it while nothing is placed.
+            let view_section_plane = check_item(
+                handle,
+                &mut checks,
+                "view-section-plane",
+                "Section Plane",
+                None,
+                None,
+            )?;
             // Command palette. `Cmd+K` is already Rectangle's
             // accelerator (preserved unchanged) — `Cmd+/` is free and is
             // the same binding Windows/Linux/web reach via the JS keydown
@@ -2185,6 +2198,7 @@ fn main() {
                 .item(&view_axes)
                 .item(&view_grid)
                 .item(&view_guides)
+                .item(&view_section_plane)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&view_palette)
                 .build()?;
@@ -2339,9 +2353,6 @@ fn main() {
                 None,
                 None,
             )?;
-            let tool_section_toggle_active =
-                MenuItemBuilder::with_id("tool-section-toggle-active", "Toggle Section Active")
-                    .build(handle)?;
             let tool_edit_vertex = check_item(
                 handle,
                 &mut checks,
@@ -2365,7 +2376,6 @@ fn main() {
                 .item(&tool_protractor)
                 .item(&tool_slice)
                 .item(&tool_section_plane)
-                .item(&tool_section_toggle_active)
                 .item(&tool_edit_vertex)
                 .build()?;
 
@@ -2739,6 +2749,7 @@ fn main() {
                 "view-axes" => "toggle-axes",
                 "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",
+                "view-section-plane" => "toggle-section-active",
                 "view-palette" => "open-palette",
                 "draw-rectangle" => "tool-rectangle",
                 "draw-circle" => "tool-circle",
@@ -2757,7 +2768,6 @@ fn main() {
                 "tool-protractor" => "tool-protractor",
                 "tool-slice" => "tool-slice",
                 "tool-section-plane" => "tool-section-plane",
-                "tool-section-toggle-active" => "toggle-section-active",
                 "tool-edit-vertex" => "tool-edit-vertex",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",

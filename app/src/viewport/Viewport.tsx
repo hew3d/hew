@@ -209,6 +209,14 @@ interface Props {
   onExitContext?: () => void
   /** Fired after any document change so the parent can refresh the tree. */
   onDocumentChanged?: () => void
+  /** Fired whenever the section plane's existence/active state actually
+   * changes (place, offset-commit, toggle, delete, or a fresh document
+   * clearing it) — NOT on every pointer move of a live offset-drag preview,
+   * which never changes existence/active. The parent re-derives its
+   * View ▸ Section Plane check state from `getSectionState()` in response,
+   * rather than tracking a shadow boolean that could drift from the section
+   * manager's real state (D3, section-plane-polish). */
+  onSectionChanged?: () => void
   /** Fired after a SUCCESSFUL undo/redo, from the one code path every
    * entry point shares (menu, palette, and the viewport's own Cmd+Z/Cmd+
    * Shift+Z all funnel into runUndo/runRedo). Undo/redo can change state
@@ -846,6 +854,7 @@ export default function Viewport({
   onEnterContext,
   onExitContext,
   onDocumentChanged,
+  onSectionChanged,
   onHistoryChanged,
   apiRef,
   onMeasurement,
@@ -880,6 +889,8 @@ export default function Viewport({
   onExitContextRef.current = onExitContext
   const onDocumentChangedRef = useRef(onDocumentChanged)
   onDocumentChangedRef.current = onDocumentChanged
+  const onSectionChangedRef = useRef(onSectionChanged)
+  onSectionChangedRef.current = onSectionChanged
   const onHistoryChangedRef = useRef(onHistoryChanged)
   onHistoryChangedRef.current = onHistoryChanged
   const apiRefRef = useRef(apiRef)
@@ -1814,6 +1825,7 @@ export default function Viewport({
       // ids that simply don't exist in the new document).
       sectionManager.delete()
       sceneRenderer.setSectionPlane(null)
+      onSectionChangedRef.current?.()
     }
 
     /**
@@ -2073,6 +2085,7 @@ export default function Viewport({
     function toggleSectionActive(): void {
       sectionManager.toggleActive()
       sceneRenderer.setSectionPlane(sectionManager.current)
+      onSectionChangedRef.current?.()
       scheduleRender()
     }
 
@@ -2524,10 +2537,11 @@ export default function Viewport({
         wasmScene,
         previewGroup,
         () => sectionManager.current,
-        // Snapshotted once at activation — see SectionPlaneTool's doc
-        // comment (a live per-move query would re-walk the scene graph on
-        // every mouse move).
-        sceneRenderer.sectionWidgetHalfExtent(),
+        // A live read of the CACHED coverage rectangle — cheap (a field
+        // read, no scene-graph walk) and always in sync with whatever the
+        // widget last resized to, unlike a construction-time snapshot (see
+        // SectionPlaneTool's doc comment on `getWidgetCoverage`).
+        () => sceneRenderer.currentSectionWidgetCoverage(),
         // Place (or replace) — becomes the active section; the tool STAYS
         // active (no spring-back to Select) so the user can immediately
         // sweep, toggle, or delete the section they just placed. Springing
@@ -2540,9 +2554,13 @@ export default function Viewport({
         (origin, normal) => {
           sectionManager.place(origin, normal)
           sceneRenderer.setSectionPlane(sectionManager.current)
+          onSectionChangedRef.current?.()
           scheduleRender()
         },
         // Live widget-drag preview — cheap, in-place, no material rebuild.
+        // Never notifies onSectionChanged: existence/active never change
+        // during a pure offset sweep, only origin (see
+        // SceneRenderer.updateSectionPlaneOffset's doc comment).
         (plane) => {
           sceneRenderer.updateSectionPlaneOffset(plane)
           scheduleRender()
@@ -2553,22 +2571,28 @@ export default function Viewport({
         (plane) => {
           sectionManager.setPlane(plane)
           sceneRenderer.setSectionPlane(sectionManager.current)
+          onSectionChangedRef.current?.()
           scheduleRender()
         },
         // Plain click on the widget — toggle active (SketchUp's "Active Cut").
         () => {
           sectionManager.toggleActive()
           sceneRenderer.setSectionPlane(sectionManager.current)
+          onSectionChangedRef.current?.()
           scheduleRender()
         },
         // Delete — the model returns to whole.
         () => {
           sectionManager.delete()
           sceneRenderer.setSectionPlane(null)
+          onSectionChangedRef.current?.()
           scheduleRender()
         },
         // Esc / tool-switch mid-drag — revert the live preview to whatever
         // is still committed in sectionManager (the drag never wrote there).
+        // No onSectionChanged notify: this reverts to the ALREADY-committed
+        // plane, so existence/active can't have changed from what the menu
+        // check state last reflected.
         () => {
           sceneRenderer.setSectionPlane(sectionManager.current)
           scheduleRender()

@@ -29,7 +29,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { SceneRenderer } from './SceneRenderer'
+import { SceneRenderer, type SectionWidgetCoverage } from './SceneRenderer'
+import { facePlaneBasis } from './geoHelpers'
 import { buildInstancePreviewClone } from '../tools/transformPreview'
 import { buildSelectionPreview } from '../tools/transformSelection'
 import { ScaleTool } from '../tools/ScaleTool'
@@ -1328,10 +1329,262 @@ describe('SceneRenderer — section plane (DESIGN §3/§4)', () => {
     expect(facesMaterial(renderer.objectsGroup, 'Object_2').side).toBe(THREE.DoubleSide)
   })
 
-  it('sectionWidgetHalfExtent returns a positive, floored size', () => {
+  it('sectionWidgetCoverage returns a positive, floored size for an empty scene', () => {
     const scene = makeScene({})
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
     renderer.refresh()
-    expect(renderer.sectionWidgetHalfExtent()).toBeGreaterThan(0)
+    const coverage = renderer.sectionWidgetCoverage([0, 0, 0], [0, 0, 1])
+    expect(coverage.halfU).toBeGreaterThan(0)
+    expect(coverage.halfV).toBeGreaterThan(0)
+    expect(coverage.offsetU).toBe(0)
+    expect(coverage.offsetV).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// D1 (section-plane-polish): the committed widget must always fully
+// surround the model — size AND offset the quad to the visible-scene AABB
+// projected into the plane's own (u, v) basis, not a diagonal-based square
+// centered on the click point; and it must re-size when the model changes
+// (staleness fix), including via the offset-drag path.
+// ---------------------------------------------------------------------------
+describe('SceneRenderer — section widget coverage (D1, section-plane-polish)', () => {
+  /** A one-triangle mesh at an arbitrary world offset — lets a test build an
+   * OFF-CENTER model instead of every object sharing `makeMesh`'s fixed
+   * (0,0,0)-(1,0,0)-(0,1,0) triangle. */
+  function makeMeshAt(offset: [number, number, number]) {
+    const [ox, oy, oz] = offset
+    return {
+      positions: () => new Float32Array([ox, oy, oz, ox + 1, oy, oz, ox, oy + 1, oz]),
+      normals: () => new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+      indices: () => new Uint32Array([0, 1, 2]),
+      colors: () => new Float32Array([1, 1, 1, 1, 1, 1, 1, 1, 1]),
+      uvs: () => new Float32Array([0, 0, 1, 0, 0, 1]),
+      group_material_ids: () => new BigUint64Array([SENTINEL]),
+      group_starts: () => new Uint32Array([0]),
+      group_counts: () => new Uint32Array([3]),
+      edge_positions: () => new Float32Array([ox, oy, oz, ox + 1, oy, oz]),
+      watertight: () => true,
+      free: vi.fn(),
+    }
+  }
+
+  /** A scene with a single object built from an arbitrary mesh factory,
+   * bypassing `makeScene`'s fixed-position `makeMesh`. */
+  function makeOffsetScene(offset: [number, number, number]): WasmScene {
+    return {
+      object_ids: () => BigUint64Array.from([1n]),
+      instance_ids: () => new BigUint64Array(),
+      object_mesh: vi.fn(() => makeMeshAt(offset)),
+      instance_def: () => undefined,
+      instance_pose: () => undefined,
+      component_member_objects: () => new BigUint64Array(),
+      sketch_ids: () => new BigUint64Array(),
+      guide_ids: () => new BigUint64Array(),
+    } as unknown as WasmScene
+  }
+
+  /** World-space bounds of the mesh `makeOffsetScene` builds at `offset`. */
+  function worldBounds(offset: [number, number, number]) {
+    const [ox, oy, oz] = offset
+    return { min: [ox, oy, oz] as V3Tuple, max: [ox + 1, oy + 1, oz] as V3Tuple }
+  }
+  type V3Tuple = [number, number, number]
+
+  /** Every corner of `debugSectionWidgetCorners()` must be OUTSIDE (or on)
+   * `bounds` in the plane's own (u, v) basis — i.e. the rendered rectangle
+   * fully contains the model's projected footprint. Trivial when `bounds`
+   * degenerates to a point on the plane's own axis, but the real assertion
+   * here is over the projected 2D extent. */
+  function assertCoversWorldBounds(
+    corners: V3Tuple[],
+    origin: V3Tuple,
+    normal: V3Tuple,
+    bounds: { min: V3Tuple; max: V3Tuple },
+  ) {
+    const basis = facePlaneBasis(normal)
+    expect(basis).not.toBeNull()
+    const { u, v } = basis as { u: V3Tuple; v: V3Tuple }
+    const project = (p: V3Tuple): [number, number] => {
+      const dx = p[0] - origin[0], dy = p[1] - origin[1], dz = p[2] - origin[2]
+      return [dx * u[0] + dy * u[1] + dz * u[2], dx * v[0] + dy * v[1] + dz * v[2]]
+    }
+    const cornerUV = corners.map(project)
+    const rectMinU = Math.min(...cornerUV.map((c) => c[0]))
+    const rectMaxU = Math.max(...cornerUV.map((c) => c[0]))
+    const rectMinV = Math.min(...cornerUV.map((c) => c[1]))
+    const rectMaxV = Math.max(...cornerUV.map((c) => c[1]))
+
+    const modelCorners: V3Tuple[] = [
+      [bounds.min[0], bounds.min[1], bounds.min[2]], [bounds.max[0], bounds.min[1], bounds.min[2]],
+      [bounds.min[0], bounds.max[1], bounds.min[2]], [bounds.max[0], bounds.max[1], bounds.min[2]],
+      [bounds.min[0], bounds.min[1], bounds.max[2]], [bounds.max[0], bounds.min[1], bounds.max[2]],
+      [bounds.min[0], bounds.max[1], bounds.max[2]], [bounds.max[0], bounds.max[1], bounds.max[2]],
+    ]
+    for (const mc of modelCorners) {
+      const [mu, mv] = project(mc)
+      expect(mu).toBeGreaterThanOrEqual(rectMinU - 1e-9)
+      expect(mu).toBeLessThanOrEqual(rectMaxU + 1e-9)
+      expect(mv).toBeGreaterThanOrEqual(rectMinV - 1e-9)
+      expect(mv).toBeLessThanOrEqual(rectMaxV + 1e-9)
+    }
+  }
+
+  it('an OFF-CENTER model is fully covered when the section sits at the model itself (horizontal plane)', () => {
+    const offset: [number, number, number] = [50, 30, 10]
+    const scene = makeOffsetScene(offset)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    // Origin at the model's own corner (a realistic click point — a section
+    // is placed ON a face of the model), normal +Z.
+    const origin: [number, number, number] = [offset[0], offset[1], offset[2]]
+    renderer.setSectionPlane({ origin, normal: [0, 0, 1], active: true })
+
+    const corners = renderer.debugSectionWidgetCorners()
+    expect(corners).not.toBeNull()
+    assertCoversWorldBounds(corners as [number, number, number][], origin, [0, 0, 1], worldBounds(offset))
+  })
+
+  it('an OFF-CENTER model is fully covered for a diagonal (non-axis-aligned) plane orientation', () => {
+    const offset: [number, number, number] = [-20, 40, 5]
+    const scene = makeOffsetScene(offset)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const origin: [number, number, number] = [offset[0], offset[1], offset[2]]
+    // Non-axis-aligned unit normal.
+    const rawNormal: [number, number, number] = [1, 1, 1]
+    const len = Math.hypot(...rawNormal)
+    const normal: [number, number, number] = [rawNormal[0] / len, rawNormal[1] / len, rawNormal[2] / len]
+    renderer.setSectionPlane({ origin, normal, active: true })
+
+    const corners = renderer.debugSectionWidgetCorners()
+    expect(corners).not.toBeNull()
+    assertCoversWorldBounds(corners as [number, number, number][], origin, normal, worldBounds(offset))
+  })
+
+  it('an OFF-CENTER model is fully covered when the section origin sits far from the model (empty-ground placement)', () => {
+    const offset: [number, number, number] = [100, 100, 0]
+    const scene = makeOffsetScene(offset)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    // Origin far from the model — the old diagonal/2-centered-at-origin
+    // approach would badly under-cover this; the coverage must offset the
+    // rectangle toward the model instead.
+    const origin: [number, number, number] = [0, 0, 0]
+    renderer.setSectionPlane({ origin, normal: [0, 0, 1], active: true })
+
+    const corners = renderer.debugSectionWidgetCorners()
+    expect(corners).not.toBeNull()
+    assertCoversWorldBounds(corners as [number, number, number][], origin, [0, 0, 1], worldBounds(offset))
+  })
+
+  it('the widget GROWS after a model edit adds geometry beyond its current coverage (staleness fix)', () => {
+    const objects: Record<string, boolean> = { '1': true } // origin-ish, from makeScene's fixed triangle
+    const scene = makeScene({ objects })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane({ origin: [0, 0, 0], normal: [0, 0, 1], active: true })
+
+    const before = renderer.currentSectionWidgetCoverage()
+    expect(before).not.toBeNull()
+
+    // Extend the mock scene with a second, far-away object and refresh —
+    // the same seam (`_syncMaterialized`, reached via `refreshInstances`
+    // inside `refresh`) that reasserts the section clip must also re-size
+    // the widget.
+    ;(scene as unknown as { object_ids: () => BigUint64Array }).object_ids = () =>
+      BigUint64Array.from([1n, 2n])
+    const originalMesh = (scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh
+    ;(scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh = (id: bigint) => {
+      if (id === 2n) return makeMeshAt([200, 200, 0])
+      return (originalMesh as (id: bigint) => unknown)(id)
+    }
+    renderer.refresh()
+
+    const after = renderer.currentSectionWidgetCoverage()
+    expect(after).not.toBeNull()
+    expect((after as SectionWidgetCoverage).halfU).toBeGreaterThan((before as SectionWidgetCoverage).halfU)
+  })
+
+  // Regression (adversarial review, coverage-math finding): a pure
+  // selection/isolation change never touches geometry or visibility, so it
+  // must NOT pay for a scene-AABB walk + widget rebuild on every click.
+  it('a pure selection change (setSelectedInstances) does NOT rebuild the widget', () => {
+    const scene = makeScene({
+      instances: { '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } } },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane({ origin: [0, 0, 0], normal: [0, 0, 1], active: true })
+
+    const widgetBefore = renderer.sectionGroup.getObjectByName('SectionWidget')
+    expect(widgetBefore).toBeDefined()
+
+    // Materializes the instance out of its batch — a pure selection change,
+    // no geometry or visibility change.
+    renderer.setSelectedInstances([10n])
+
+    const widgetAfter = renderer.sectionGroup.getObjectByName('SectionWidget')
+    // Same object IDENTITY — `_rebuildSectionWidget` always constructs a
+    // fresh `THREE.Group`, so an unchanged reference proves no rebuild ran.
+    expect(widgetAfter).toBe(widgetBefore)
+  })
+
+  // Regression (adversarial review, setHidden staleness): revealing a
+  // previously-hidden object changes exactly what `sectionWidgetCoverage`'s
+  // `expandByVisibleObject` walk sees (it prunes `visible === false`
+  // subtrees), so it must re-size the widget on the same beat as adding new
+  // geometry does — `setHidden` was the one bounds-changing seam that
+  // didn't call `_resizeSectionWidget()`.
+  it('the widget GROWS after revealing a previously-hidden object outside its current coverage (setHidden staleness fix)', () => {
+    const objects: Record<string, boolean> = { '1': true, '2': true }
+    const scene = makeScene({ objects })
+    const originalMesh = (scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh
+    ;(scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh = (id: bigint) => {
+      if (id === 2n) return makeMeshAt([200, 200, 0])
+      return (originalMesh as (id: bigint) => unknown)(id)
+    }
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    // Object 2 starts hidden — the section is placed while only object 1 is visible.
+    renderer.setHidden([2n], [])
+    renderer.setSectionPlane({ origin: [0, 0, 0], normal: [0, 0, 1], active: true })
+    const before = renderer.currentSectionWidgetCoverage()
+    expect(before).not.toBeNull()
+
+    // Reveal object 2 — nothing about the SECTION changed, only visibility.
+    renderer.setHidden([], [])
+
+    const after = renderer.currentSectionWidgetCoverage()
+    expect(after).not.toBeNull()
+    expect((after as SectionWidgetCoverage).halfU).toBeGreaterThan((before as SectionWidgetCoverage).halfU)
+  })
+
+  it('an offset-drag (pure sweep along the normal) keeps the widget correctly positioned — the cached coverage travels with the live origin', () => {
+    const offset: [number, number, number] = [10, 0, 0]
+    const scene = makeOffsetScene(offset)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const origin: [number, number, number] = [offset[0], offset[1], offset[2]]
+    renderer.setSectionPlane({ origin, normal: [0, 0, 1], active: true })
+    const beforeCoverage = renderer.currentSectionWidgetCoverage()
+
+    // Sweep the origin along the normal (Z) — offset-along-normal never
+    // changes the required (u, v) coverage (see `updateSectionPlaneOffset`'s
+    // doc comment), so the CACHED coverage rectangle is unchanged...
+    renderer.updateSectionPlaneOffset({ origin: [origin[0], origin[1], origin[2] + 5], normal: [0, 0, 1], active: true })
+    expect(renderer.currentSectionWidgetCoverage()).toEqual(beforeCoverage)
+
+    // ...but the WORLD corners follow the new origin (the widget visually
+    // stays sized-and-offset correctly, not stuck at the old height).
+    const corners = renderer.debugSectionWidgetCorners() as [number, number, number][]
+    for (const c of corners) expect(c[2]).toBeCloseTo(5, 10)
+    assertCoversWorldBounds(
+      corners,
+      [origin[0], origin[1], origin[2] + 5],
+      [0, 0, 1],
+      worldBounds(offset),
+    )
   })
 })

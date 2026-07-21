@@ -224,6 +224,18 @@ export default function App() {
   const [showAxes, setShowAxes] = useState(true)
   const [showGrid, setShowGrid] = useState(true)
   const [showGuides, setShowGuides] = useState(true)
+  /** View ▸ Section Plane's check/enabled state — a RENDER CACHE of the
+   * section manager's own truth, never toggled directly by this component.
+   * Populated only by `handleSectionChanged` re-reading
+   * `viewportApi.current?.getSectionState()` (D3, section-plane-polish);
+   * unlike showAxes/showGrid/showGuides (which this component itself owns
+   * and pushes DOWN into the viewport), the section's existence/active flag
+   * is owned by the viewport's session-only SectionManager and pulled UP
+   * here, so it can never independently drift from kernel/session truth. */
+  const [sectionPlaneMenuState, setSectionPlaneMenuState] = useState<{ checked: boolean; exists: boolean }>({
+    checked: false,
+    exists: false,
+  })
   /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
   const [showSettingsModal, setShowSettingsModal] = useState(false)
   // Windows desktop settings surface (Fluent in-app page; see openSettings).
@@ -612,6 +624,18 @@ export default function App() {
       dirtySinceAutosaveRef.current = true
     }
   }, [trimContextPath])
+
+  // Re-derive the View ▸ Section Plane menu state from the section
+  // manager's own truth (`getSectionState`) — called by the viewport
+  // whenever a section is placed/offset-committed/toggled/deleted, or a
+  // fresh document clears it (Viewport's `onSectionChanged`). Deliberately
+  // NOT a toggle: this always re-READS live state rather than flipping a
+  // local boolean, so it can never drift from what the session actually
+  // holds (D3, section-plane-polish).
+  const handleSectionChanged = useCallback(() => {
+    const state = viewportApi.current?.getSectionState() ?? null
+    setSectionPlaneMenuState({ checked: state !== null && state.active, exists: state !== null })
+  }, [])
 
   // Semantic test harness `window.__hew_test`, installed only in
   // debug/test builds (dev server, or a build with VITE_HEW_TEST=1 for the
@@ -2443,6 +2467,7 @@ export default function App() {
       'view-axes': showAxes,
       'view-grid': showGrid,
       'view-guides': showGuides,
+      'view-section-plane': sectionPlaneMenuState.checked,
       'win-model-info': showModelInfo,
       'win-materials': showMaterials,
       'win-tags': showTags,
@@ -2463,6 +2488,7 @@ export default function App() {
       'edit-union': menuGates?.canBoolean ?? false,
       'edit-subtract': menuGates?.canBoolean ?? false,
       'edit-intersect': menuGates?.canBoolean ?? false,
+      'view-section-plane': sectionPlaneMenuState.exists,
     }
     import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke('sync_menu_state', { checked, enabled }))
@@ -2472,6 +2498,7 @@ export default function App() {
     showAxes,
     showGrid,
     showGuides,
+    sectionPlaneMenuState,
     showModelInfo,
     showMaterials,
     showTags,
@@ -2876,6 +2903,8 @@ export default function App() {
         onToggleGrid={() => setShowGrid((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
+        sectionPlaneChecked={sectionPlaneMenuState.checked}
+        sectionPlaneExists={sectionPlaneMenuState.exists}
         onToggleSectionActive={() => viewportApi.current?.toggleSectionActive()}
         onDelete={deleteSelection}
         onEditAction={(id) => menuActionRef.current(id)}
@@ -2979,6 +3008,7 @@ export default function App() {
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
             onDocumentChanged={handleDocumentChanged}
+            onSectionChanged={handleSectionChanged}
             onHistoryChanged={handleHistoryChanged}
             apiRef={viewportApi}
             onMeasurement={handleMeasurement}

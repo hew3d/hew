@@ -43,6 +43,24 @@ const SKETCH_HIGHLIGHT_WIDTH_PX = 3.8
 const SKETCH_REGION_COLOR = 0x88aadd
 /** Normal translucency of a sketch region fill. */
 const SKETCH_REGION_OPACITY = 0.4
+/**
+ * A section widget's coverage rectangle, expressed in the plane's own
+ * `(u, v)` basis (`facePlaneBasis(plane.normal)`) at `plane.origin`:
+ * half-extents along `u`/`v` plus a center OFFSET from the origin — the
+ * rectangle need not stay centered on the plane's own origin to fully cover
+ * an off-center model (D1, section-plane-polish: an origin sitting near one
+ * edge of the model needs the quad to reach much further on one side than
+ * the other). `SectionPlaneTool`'s widget hit-test consumes the exact same
+ * shape via `SceneRenderer.currentSectionWidgetCoverage()` so the clickable
+ * region always matches what's actually drawn.
+ */
+export interface SectionWidgetCoverage {
+  halfU: number
+  halfV: number
+  offsetU: number
+  offsetV: number
+}
+
 /** Section-plane widget color — teal/cyan, distinct from the selection
  * orange and from Slice's purple preview (SliceTool.ts) so the two
  * cutting-plane-shaped tools never read as the same feature. Matches
@@ -50,13 +68,22 @@ const SKETCH_REGION_OPACITY = 0.4
  * places rather than a cross-module import between viewport/ and tools/). */
 const SECTION_WIDGET_COLOR = 0x00bcd4
 /** Fill opacity while the section is active (clipping) vs inactive (widget
- * shown, no clip — DESIGN §1/§4's active=solid vs inactive=dashed/dimmed). */
-const SECTION_WIDGET_FILL_OPACITY_ACTIVE = 0.16
-const SECTION_WIDGET_FILL_OPACITY_INACTIVE = 0.06
+ * shown, no clip — DESIGN §1/§4's active=solid vs inactive=dashed/dimmed).
+ * Edges-first (D2, section-plane-polish): the fill is barely-there tinting,
+ * not a readable surface — the outline (solid active / dashed inactive) and
+ * the normal arrow carry the read, matching SketchUp's own section-plane
+ * treatment. Inactive drops to fully transparent (0) rather than a dim
+ * wash — the dashed outline alone says "not cutting." */
+const SECTION_WIDGET_FILL_OPACITY_ACTIVE = 0.05
+const SECTION_WIDGET_FILL_OPACITY_INACTIVE = 0.0
 const SECTION_WIDGET_OUTLINE_OPACITY_INACTIVE = 0.55
 /** Floor for the widget's half-extent (meters) so an empty or tiny scene
  * still gets a usable, visible frame. */
 const SECTION_WIDGET_MIN_HALF_EXTENT = 0.5
+/** Fractional margin added around the visible-scene extent the widget is
+ * sized to cover (D1: "~5% margin") — keeps the outline clearly outside the
+ * model rather than skimming its silhouette. */
+const SECTION_WIDGET_COVERAGE_MARGIN = 0.05
 /** Opacity of entities faded out by the active editing context (isolation). */
 const DIMMED_OPACITY = 0.15
 /** Muted grey for construction guides — distinct from edges/axes/sketch lines. */
@@ -322,6 +349,19 @@ export class SceneRenderer {
   private sectionClipPlane: THREE.Plane | null = null
   /** The rendered widget (frame + arrow), or null when no section is placed. */
   private sectionWidget: THREE.Group | null = null
+  /** The section plane most recently passed to `setSectionPlane` /
+   * `updateSectionPlaneOffset` — kept so a later geometry rebuild
+   * (`_syncMaterialized`, via `_resizeSectionWidget`) can re-size the
+   * widget to newly-changed scene bounds without the caller re-supplying
+   * the plane (D1 staleness fix). Mirrors `sectionClipPlane`'s role for the
+   * clip side of the same state. */
+  private currentSectionPlane: SectionPlane | null = null
+  /** The coverage rectangle the CURRENT `sectionWidget` was last sized to —
+   * cached from the last rebuild so `SectionPlaneTool`'s hit-test
+   * (`currentSectionWidgetCoverage()`) reads it live on every pointer
+   * move/click without re-walking the scene graph, and is always in sync
+   * with whatever the widget last resized to. */
+  private sectionWidgetCoverageCache: SectionWidgetCoverage | null = null
 
   constructor(threeScene: THREE.Scene, wasmScene: WasmScene) {
     this.scene = threeScene
@@ -541,6 +581,12 @@ export class SceneRenderer {
     // (cheap CPU-side property writes — no wasm calls, no GPU uploads).
     this._applyIsolation()
     this._applyHidden()
+    // Geometry may have changed (touched/added/removed objects and
+    // instances) — re-size the section widget to match (D1 staleness fix).
+    // Placed AFTER `_applyHidden` so the coverage walk sees the final,
+    // hidden-state-consistent visibility rather than the rebuilt groups'
+    // momentary all-visible default.
+    this._resizeSectionWidget()
 
     return new Map(this.watertightMap)
   }
@@ -588,6 +634,13 @@ export class SceneRenderer {
     for (const [id, g] of this.instanceGroups) {
       g.group.visible = !this.hiddenInstanceIds.has(id)
     }
+    // Instance geometry/membership may have changed — re-size the section
+    // widget to match (D1 staleness fix), after hidden visibility above is
+    // in its final state. `refresh()` picks this up for free since it calls
+    // `refreshInstances()`; a caller invoking this method standalone (e.g.
+    // after a def-only edit) still gets a correctly-sized widget without a
+    // separate call.
+    this._resizeSectionWidget()
   }
 
   /**
@@ -964,6 +1017,15 @@ export class SceneRenderer {
     // and refreshTouched. `getInstanceGroup` bypasses this reconciliation
     // and reasserts on its own. Cheap CPU-side property writes, no wasm calls.
     this._reassertSectionClip()
+    // Unlike the clip reassert above, the widget's SIZE is NOT resynced here:
+    // a plain selection/isolation change (the two other callers of this
+    // method, `setSelectedInstances` and `setActiveContext`) never touches
+    // any group's geometry or visibility, so the visible-scene bounds the
+    // widget covers cannot have changed — resizing on every click would be
+    // a full scene-AABB walk + widget rebuild for no reason. The geometry-
+    // and visibility-changing callers (`refreshTouched`, `refreshInstances`,
+    // `setHidden`) call `_resizeSectionWidget()` themselves, right where
+    // the bounds actually could have moved (adversarial review finding).
   }
 
   /** Pull one placement out of its batches into the classic per-instance
@@ -1821,11 +1883,20 @@ export class SceneRenderer {
    * Update the hidden set and apply visibility. Hidden objects are invisible and
    * non-pickable (Viewport filters them out of pick results). Call after every
    * hiddenKeys change in App.
+   *
+   * A hide/reveal changes exactly what `sectionWidgetCoverage()` walks
+   * (`expandByVisibleObject` prunes any `visible === false` subtree), so it
+   * changes the widget's required coverage every bit as much as adding or
+   * removing geometry does — re-size here too (D1 staleness fix; adversarial
+   * review finding: this call was the one geometry/visibility-bounds-
+   * changing seam that didn't, leaving the widget under-sized after
+   * revealing a previously-hidden object outside its current coverage).
    */
   setHidden(hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[]): void {
     this.hiddenObjectIds = new Set(hiddenObjectIds)
     this.hiddenInstanceIds = new Set(hiddenInstanceIds)
     this._applyHidden()
+    this._resizeSectionWidget()
   }
 
   /** Re-apply visibility for all objects and instances. Batched instances
@@ -2067,6 +2138,7 @@ export class SceneRenderer {
    * do not rebuild materials").
    */
   setSectionPlane(plane: SectionPlane | null): void {
+    this.currentSectionPlane = plane
     this._rebuildSectionWidget(plane)
 
     const clipping = plane !== null && plane.active ? plane : null
@@ -2098,6 +2170,14 @@ export class SceneRenderer {
    * re-orientation or (de)activation goes through `setSectionPlane` instead.
    */
   updateSectionPlaneOffset(plane: SectionPlane): void {
+    // Kept in sync so a geometry rebuild mid-drag (see `_resizeSectionWidget`)
+    // re-sizes around the LIVE offset origin, not the stale one from the
+    // last `setSectionPlane` call. A pure offset-along-normal never actually
+    // changes the required (u, v) coverage (moving along the normal doesn't
+    // change any point's projection onto u or v, both ⊥ normal), so this by
+    // itself doesn't need to trigger a resize — see `_resizeSectionWidget`'s
+    // doc comment.
+    this.currentSectionPlane = plane
     if (this.sectionWidget !== null) {
       this.sectionWidget.position.set(plane.origin[0], plane.origin[1], plane.origin[2])
     }
@@ -2112,22 +2192,104 @@ export class SceneRenderer {
   }
 
   /**
-   * Half-extent (meters) the section widget's rectangle is sized to (DESIGN
-   * §4: "sized to the scene bounds") — half the current scene's visible
-   * bounding-box diagonal, floored so an empty/tiny scene still gets a
-   * usable frame. `SectionPlaneTool` snapshots this once at tool activation
-   * for its widget hit-test rather than re-querying on every pointer move —
-   * see that class's doc comment for the rationale (this walks the whole
-   * rendered scene graph, cheap enough for an on-click query, wasteful on
-   * every mouse move).
+   * Coverage rectangle (DESIGN §4: "sized to the scene bounds") for a
+   * section plane at `origin`/`normal`: the visible scene's AABB corners,
+   * projected into the plane's own `(u, v)` basis at `origin`, expanded by
+   * `SECTION_WIDGET_COVERAGE_MARGIN` (D1: "~5% margin"). The rectangle need
+   * not stay centered on `origin` — an off-center model needs an
+   * off-center quad to reach every corner — so the result carries a center
+   * OFFSET alongside the half-extents (see `SectionWidgetCoverage`). Falls
+   * back to a symmetric `SECTION_WIDGET_MIN_HALF_EXTENT` square, centered
+   * at the origin, for an empty scene or a degenerate normal.
+   *
+   * Walks the whole rendered scene graph (`expandByVisibleObject`) — cheap
+   * enough for an on-rebuild query (placement, offset commit, geometry
+   * edit) but NOT for every pointer move. `SectionPlaneTool`'s hit-test
+   * instead reads the CACHED result of the last rebuild via
+   * `currentSectionWidgetCoverage()`, which is free.
    */
-  sectionWidgetHalfExtent(): number {
+  sectionWidgetCoverage(origin: V3, normal: V3): SectionWidgetCoverage {
+    const basis = facePlaneBasis(normal)
+    if (basis === null) {
+      return { halfU: SECTION_WIDGET_MIN_HALF_EXTENT, halfV: SECTION_WIDGET_MIN_HALF_EXTENT, offsetU: 0, offsetV: 0 }
+    }
+    return this._coverageFromBasis(origin, basis.u, basis.v)
+  }
+
+  /**
+   * The box-walk + `(u, v)` projection behind `sectionWidgetCoverage`,
+   * taking an ALREADY-COMPUTED basis. `_rebuildSectionWidget` needs the raw
+   * `(u, v)` vectors for its own geometry anyway, so it calls this directly
+   * instead of `sectionWidgetCoverage` — sparing a second `facePlaneBasis`
+   * call for the same normal (adversarial review tidy).
+   */
+  private _coverageFromBasis(origin: V3, u: V3, v: V3): SectionWidgetCoverage {
+    const symmetric: SectionWidgetCoverage = {
+      halfU: SECTION_WIDGET_MIN_HALF_EXTENT,
+      halfV: SECTION_WIDGET_MIN_HALF_EXTENT,
+      offsetU: 0,
+      offsetV: 0,
+    }
     const box = new THREE.Box3()
     expandByVisibleObject(box, this.objectsGroup)
     expandByVisibleObject(box, this.instancesGroup)
-    if (box.isEmpty()) return SECTION_WIDGET_MIN_HALF_EXTENT
-    const size = box.getSize(new THREE.Vector3())
-    return Math.max(size.length() / 2, SECTION_WIDGET_MIN_HALF_EXTENT)
+    if (box.isEmpty()) return symmetric
+
+    const min = box.min
+    const max = box.max
+    const corners: Array<[number, number, number]> = [
+      [min.x, min.y, min.z], [max.x, min.y, min.z],
+      [min.x, max.y, min.z], [max.x, max.y, min.z],
+      [min.x, min.y, max.z], [max.x, min.y, max.z],
+      [min.x, max.y, max.z], [max.x, max.y, max.z],
+    ]
+    let minU = Infinity
+    let maxU = -Infinity
+    let minV = Infinity
+    let maxV = -Infinity
+    for (const [cx, cy, cz] of corners) {
+      const dx = cx - origin[0]
+      const dy = cy - origin[1]
+      const dz = cz - origin[2]
+      const pu = dx * u[0] + dy * u[1] + dz * u[2]
+      const pv = dx * v[0] + dy * v[1] + dz * v[2]
+      if (pu < minU) minU = pu
+      if (pu > maxU) maxU = pu
+      if (pv < minV) minV = pv
+      if (pv > maxV) maxV = pv
+    }
+    const halfU = Math.max(((maxU - minU) / 2) * (1 + SECTION_WIDGET_COVERAGE_MARGIN), SECTION_WIDGET_MIN_HALF_EXTENT)
+    const halfV = Math.max(((maxV - minV) / 2) * (1 + SECTION_WIDGET_COVERAGE_MARGIN), SECTION_WIDGET_MIN_HALF_EXTENT)
+    return { halfU, halfV, offsetU: (minU + maxU) / 2, offsetV: (minV + maxV) / 2 }
+  }
+
+  /**
+   * The coverage rectangle (half-extents + center offset, in the CURRENT
+   * plane's own `(u, v)` basis) the rendered widget was last sized to, or
+   * null when no section is placed. `SectionPlaneTool`'s hit-test reads
+   * this on every pointer move/click instead of re-deriving it — cheap (a
+   * cached field read, no scene-graph walk), and always in sync with
+   * whatever the widget last resized to (D1 staleness fix), unlike a
+   * construction-time snapshot that could go stale across a model edit or
+   * a widget resize.
+   */
+  currentSectionWidgetCoverage(): SectionWidgetCoverage | null {
+    return this.sectionWidgetCoverageCache
+  }
+
+  /**
+   * Re-size (and re-offset) the CURRENT widget to the live visible-scene
+   * bounds. Called from `_syncMaterialized` — the single choke point every
+   * geometry-rebuild path (`refresh`/`refreshTouched`/`refreshInstances`)
+   * and every selection/isolation path already funnels through to reassert
+   * the section clip (D1 staleness fix: a model edit grows/shrinks the
+   * widget on the exact same beat the clip itself gets reasserted). A
+   * no-op when no section is placed. Tears down and rebuilds a handful of
+   * line segments — cheap enough that no dirty-flag/debounce is needed.
+   */
+  private _resizeSectionWidget(): void {
+    if (this.currentSectionPlane === null) return
+    this._rebuildSectionWidget(this.currentSectionPlane)
   }
 
   // ── Section-plane test/E2E diagnostics (read-only) ──────────────────────
@@ -2139,6 +2301,17 @@ export class SceneRenderer {
   /** Whether the section widget overlay is currently built. */
   hasSectionWidget(): boolean {
     return this.sectionWidget !== null
+  }
+
+  /** The section widget's 4 rectangle corners in WORLD space (CCW), or null
+   * when no section is placed. Test/E2E only — lets a spec assert the
+   * widget's actual SIZE/POSITION covers the visible scene (D1) rather than
+   * inferring it indirectly from the half-extent/coverage numbers alone. */
+  debugSectionWidgetCorners(): V3[] | null {
+    if (this.sectionWidget === null) return null
+    const local = this.sectionWidget.userData.localCorners as V3[]
+    const { x, y, z } = this.sectionWidget.position
+    return local.map(([cx, cy, cz]) => [cx + x, cy + y, cz + z] as V3)
   }
 
   /** The active clip plane's world normal + constant (three.js keeps
@@ -2198,8 +2371,12 @@ export class SceneRenderer {
   /** Dispose the current widget's GPU resources (plain Mesh/LineSegments
    * geometry — hand-rolled, not `THREE.ArrowHelper`, whose line/cone
    * geometries are process-wide singletons shared across every instance and
-   * must never be disposed per-use). */
+   * must never be disposed per-use). Also drops the cached coverage
+   * rectangle — the two fields track the same "is there a rendered widget"
+   * lifecycle, so they are cleared together regardless of which
+   * `_rebuildSectionWidget` early-return path runs. */
   private _disposeSectionWidget(): void {
+    this.sectionWidgetCoverageCache = null
     if (this.sectionWidget === null) return
     this.sectionWidget.traverse((child) => {
       if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
@@ -2212,14 +2389,18 @@ export class SceneRenderer {
   }
 
   /** Rebuild the widget overlay for `plane` (or remove it, for null): a
-   * translucent framed rectangle in-plane, sized via `sectionWidgetHalfExtent`,
-   * plus a short normal arrow — solid outline/brighter fill while active,
+   * translucent framed rectangle in-plane, sized+offset via
+   * `sectionWidgetCoverage` to fully surround the visible scene (D1), plus
+   * a short normal arrow — solid outline/brighter fill while active,
    * dashed/dimmer while inactive (DESIGN §4). The whole group sits at
    * `plane.origin` with NO rotation applied; every child vertex is instead
    * authored directly in world-direction offsets along the plane's own
    * (u, v, normal) basis, so `updateSectionPlaneOffset`'s cheap path can
    * reposition it with a single `.position.set` (mirrors SliceTool's
-   * preview-quad construction). */
+   * preview-quad construction) — the rectangle's OWN center offset within
+   * that basis (uv-offset, not necessarily [0,0]) travels with it for free
+   * since it's baked into these local vertex offsets, not into the group
+   * transform. */
   private _rebuildSectionWidget(plane: SectionPlane | null): void {
     this._disposeSectionWidget()
     if (plane === null) return
@@ -2227,9 +2408,20 @@ export class SceneRenderer {
     const basis = facePlaneBasis(plane.normal)
     if (basis === null) return
     const { u, v } = basis
-    const half = this.sectionWidgetHalfExtent()
+    const coverage = this._coverageFromBasis(plane.origin, u, v)
+    this.sectionWidgetCoverageCache = coverage
+    const { halfU, halfV, offsetU, offsetV } = coverage
+    // Representative scale for the dash pattern and arrow, which have no
+    // natural notion of separate U/V sizes — the smaller half-extent keeps
+    // both readable even when the rectangle is far from square.
+    const minHalf = Math.min(halfU, halfV)
 
-    const corners: Array<[number, number]> = [[-half, -half], [half, -half], [half, half], [-half, half]]
+    const corners: Array<[number, number]> = [
+      [offsetU - halfU, offsetV - halfV],
+      [offsetU + halfU, offsetV - halfV],
+      [offsetU + halfU, offsetV + halfV],
+      [offsetU - halfU, offsetV + halfV],
+    ]
     const toWorldOffset = ([cu, cv]: [number, number]): V3 => [
       u[0] * cu + v[0] * cv,
       u[1] * cu + v[1] * cv,
@@ -2275,8 +2467,8 @@ export class SceneRenderer {
     } else {
       const dashMat = new THREE.LineDashedMaterial({
         color: SECTION_WIDGET_COLOR,
-        dashSize: Math.max(half * 0.08, 0.02),
-        gapSize: Math.max(half * 0.05, 0.015),
+        dashSize: Math.max(minHalf * 0.08, 0.02),
+        gapSize: Math.max(minHalf * 0.05, 0.015),
         transparent: true,
         opacity: SECTION_WIDGET_OUTLINE_OPACITY_INACTIVE,
       })
@@ -2291,7 +2483,7 @@ export class SceneRenderer {
     // along `+plane.normal` — the near/outer side the clip REMOVES — so it
     // reads as "material this way is cut away" (the clip keeps the opposite,
     // interior side; see `setSectionPlane`).
-    const arrowLen = Math.min(Math.max(half * 0.35, 0.1), half)
+    const arrowLen = Math.min(Math.max(minHalf * 0.35, 0.1), minHalf)
     const headLen = arrowLen * 0.3
     const headWidth = arrowLen * 0.18
     const n = plane.normal
@@ -2322,6 +2514,10 @@ export class SceneRenderer {
     group.add(outline)
     group.add(arrow)
     group.position.set(plane.origin[0], plane.origin[1], plane.origin[2])
+    // Rectangle corners in LOCAL (group-relative) space, for
+    // `debugSectionWidgetCorners()` — test/E2E only, so a plain stash on
+    // userData rather than a dedicated field.
+    group.userData.localCorners = worldCorners
 
     this.sectionGroup.add(group)
     this.sectionWidget = group

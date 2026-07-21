@@ -171,7 +171,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'toggle-axes', label: 'Toggle Axes', description: 'Show or hide the world axes.', group: 'Actions' },
   { id: 'toggle-grid', label: 'Toggle Grid', description: 'Show or hide the ground grid.', group: 'Actions' },
   { id: 'toggle-guides', label: 'Toggle Guides', description: 'Show or hide construction guides.', group: 'Actions' },
-  { id: 'toggle-section-active', label: 'Toggle Section Active', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'cross-section', 'active cut'] },
+  { id: 'toggle-section-active', label: 'Section Plane', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
   { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
   { id: 'view-top', label: 'Standard View: Top', description: 'Look straight down at the model.', group: 'Actions' },
   { id: 'view-bottom', label: 'Standard View: Bottom', description: 'Look straight up at the model.', group: 'Actions' },
