@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `12`**, and **geometry buffer format version `5`**. Both are covered
+version `12`**, and **geometry buffer format version `6`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -253,6 +253,10 @@ offset  type                field
         --- repeated H times: ---
         u32                 hole_vertex_count (J)
         u32[J]              hole-loop vertex indices
+        u8                  soft_edges flag (v6): 0 = no edge of this face is soft, 1 = per-edge flags follow
+        --- present only when the soft_edges flag is 1: ---
+        --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
+        u8                  soft flag: 0 = hard edge, 1 = soft (a smooth-sweep facet seam; renderers smooth shading across it and suppress its line)
         u8                  edge_curves flag (v5): 0 = no edge of this face carries an analytic circle, 1 = per-edge claims follow
         --- present only when the edge_curves flag is 1: ---
         --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
@@ -341,6 +345,7 @@ present at every version:
 | per-face `uv_frame` flag + payload | 2 | flag byte and payload are not present at all — `outer_count` follows the material id directly | no UV frame |
 | per-face `surface` flag + payload | 4 | flag byte and payload are not present at all — `outer_count` follows the `uv_frame` block directly | no analytic surface |
 | per-face `edge_curves` flag + payload | 5 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the last hole loop directly | no edge carries an analytic circle |
+| per-face `soft_edges` flag + payload | 6 | flag byte and payload are not present at all — the `edge_curves` flag (v5) follows the last hole loop directly | no edge is soft |
 
 All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets

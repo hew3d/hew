@@ -101,7 +101,11 @@ export interface HewTestHarness {
   extrudeRegion(sketch: string, region: string, distance: number): string
   /** Convenience: rectangle on the ground from p0→p1, extruded `height`. */
   drawBox(p0: Vec3, p1: Vec3, height: number): string
-  pickFace(rayOrigin: Vec3, rayDir: Vec3): { object: string; face: string } | null
+  /** `instance` is the placement handle when the ray struck geometry reached
+   *  through a component instance (definition-local `object`/`face`), or
+   *  `null` for a plain/group-member hit — the same three-way split
+   *  `pick_face`'s own `instance()` accessor returns. */
+  pickFace(rayOrigin: Vec3, rayDir: Vec3): { object: string; face: string; instance: string | null } | null
   pushPull(object: string, face: string, distance: number): void
   boolean(op: number, a: string, b: string): string
   /**
@@ -521,21 +525,82 @@ export interface HewTestHarness {
    * Follow Me along sketch edges (the follow-me design): sweeps the
    * closed profile `region` of `sketch` along the chain the `edges` of
    * `pathSketch` form. Returns the new object handle. Equivalent to
-   * FollowMeTool's edge-path commit (`follow_me_along_edges`).
+   * FollowMeTool's edge-path commit (`follow_me_along_edges`). `group`
+   * births the result inside that group (design §2f) instead of
+   * top-level. `stopLen` (trailing, so existing `group` callers are
+   * unaffected) is the partial-sweep arc length from the seam — NEGATIVE
+   * sweeps `|stopLen|` the OTHER way around a closed loop (K2 — the same
+   * value FollowMeTool's drag gesture computes and passes verbatim);
+   * `undefined` sweeps the full path.
    */
   followMeAlongEdges(
     sketch: string,
     region: string,
     pathSketch: string,
     edges: string[],
+    group?: string,
+    stopLen?: number,
   ): string
 
   /**
    * Follow Me around a solid face's outer boundary loop (molding). Returns
    * the new object handle. Equivalent to FollowMeTool's face-path commit
-   * (`follow_me_around_face`).
+   * (`follow_me_around_face`). `group` births the result inside that group
+   * (design §2f) instead of top-level.
    */
-  followMeAroundFace(sketch: string, region: string, object: string, face: string): string
+  followMeAroundFace(sketch: string, region: string, object: string, face: string, group?: string): string
+
+  /**
+   * Follow Me around a face reached THROUGH a component instance (design
+   * §2e): the definition face's loop rides the instance's pose into world
+   * space. Equivalent to FollowMeTool's instanced-face-path commit
+   * (`follow_me_around_instance_face`).
+   */
+  followMeAroundInstanceFace(
+    sketch: string,
+    region: string,
+    instance: string,
+    pathObject: string,
+    pathFace: string,
+  ): string
+
+  /**
+   * `followMeAroundFace` that MERGES the swept molding with the path's own
+   * solid in one gesture and one undo step (design §3b) — Subtract when the
+   * sweep overlaps the solid's interior, Union when it only rides the
+   * surface, decided by the kernel itself. Equivalent to FollowMeTool's
+   * Ctrl/Cmd-click commit (`follow_me_merged_around_face`).
+   */
+  followMeMergedAroundFace(sketch: string, region: string, pathObject: string, pathFace: string): string
+
+  /**
+   * Follow Me with a solid FACE as the profile (design §3a), along a chain
+   * of sketch edges: the face's boundary (holes become tunnels) sweeps into
+   * a NEW object; the source solid is untouched unless the profile face
+   * belongs to the path's own solid, which auto-merges (design §3b) — see
+   * `followMeFaceAroundFace`. Equivalent to FollowMeTool's face-profile
+   * commit (`follow_me_face_along_edges`).
+   */
+  followMeFaceAlongEdges(
+    profileObject: string,
+    profileFace: string,
+    pathSketch: string,
+    edges: string[],
+  ): string
+
+  /**
+   * Follow Me with a solid FACE as the profile around another face's outer
+   * boundary loop — `followMeFaceAlongEdges`'s face-path sibling
+   * (`follow_me_face_around_face`). Auto-merges with the path's own solid
+   * when the profile face belongs to it (design §3b) — no separate call for
+   * that case, the kernel decides from object identity alone.
+   */
+  followMeFaceAroundFace(
+    profileObject: string,
+    profileFace: string,
+    pathObject: string,
+    pathFace: string,
+  ): string
 
   // -------- tags --------
 
@@ -703,10 +768,17 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     pickFace: (o, d) =>
       query((s) => {
-        // FacePickJs exposes object()/face() as methods returning bigint;
+        // FacePickJs exposes object()/face()/instance() as methods; the
+        // first two return bigint always, instance() is bigint|undefined.
         // pick_face returns undefined on a miss.
         const p = s.pick_face(o[0], o[1], o[2], d[0], d[1], d[2])
-        return p ? { object: p.object().toString(), face: p.face().toString() } : null
+        if (!p) return null
+        const instance = p.instance()
+        return {
+          object: p.object().toString(),
+          face: p.face().toString(),
+          instance: instance === undefined ? null : instance.toString(),
+        }
       }),
 
     pushPull: (object, face, distance) => {
@@ -1222,7 +1294,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     getSketchRegionCount: (sketch) => query((s) => s.sketch_regions(BigInt(sketch)).length),
 
-    followMeAlongEdges: (sketch, region, pathSketch, edges) =>
+    followMeAlongEdges: (sketch, region, pathSketch, edges, group, stopLen) =>
       act((s) =>
         s
           .follow_me_along_edges(
@@ -1230,14 +1302,67 @@ export function installTestHarness(deps: HarnessDeps): () => void {
             BigInt(region),
             BigInt(pathSketch),
             new BigUint64Array(edges.map((e) => BigInt(e))),
+            stopLen,
+            group === undefined ? undefined : BigInt(group),
           )
           .toString(),
       ),
 
-    followMeAroundFace: (sketch, region, object, face) =>
+    followMeAroundFace: (sketch, region, object, face, group) =>
       act((s) =>
         s
-          .follow_me_around_face(BigInt(sketch), BigInt(region), BigInt(object), BigInt(face))
+          .follow_me_around_face(
+            BigInt(sketch),
+            BigInt(region),
+            BigInt(object),
+            BigInt(face),
+            undefined,
+            group === undefined ? undefined : BigInt(group),
+          )
+          .toString(),
+      ),
+
+    followMeAroundInstanceFace: (sketch, region, instance, pathObject, pathFace) =>
+      act((s) =>
+        s
+          .follow_me_around_instance_face(
+            BigInt(sketch),
+            BigInt(region),
+            BigInt(instance),
+            BigInt(pathObject),
+            BigInt(pathFace),
+          )
+          .toString(),
+      ),
+
+    followMeMergedAroundFace: (sketch, region, pathObject, pathFace) =>
+      act((s) =>
+        s
+          .follow_me_merged_around_face(BigInt(sketch), BigInt(region), BigInt(pathObject), BigInt(pathFace))
+          .toString(),
+      ),
+
+    followMeFaceAlongEdges: (profileObject, profileFace, pathSketch, edges) =>
+      act((s) =>
+        s
+          .follow_me_face_along_edges(
+            BigInt(profileObject),
+            BigInt(profileFace),
+            BigInt(pathSketch),
+            new BigUint64Array(edges.map((e) => BigInt(e))),
+          )
+          .toString(),
+      ),
+
+    followMeFaceAroundFace: (profileObject, profileFace, pathObject, pathFace) =>
+      act((s) =>
+        s
+          .follow_me_face_around_face(
+            BigInt(profileObject),
+            BigInt(profileFace),
+            BigInt(pathObject),
+            BigInt(pathFace),
+          )
           .toString(),
       ),
 

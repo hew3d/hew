@@ -220,7 +220,14 @@ pub enum FollowMeError {
     /// when a closed sweep's transported ring fails to land back on the
     /// profile ring within [`tol::POINT_MERGE`](crate::tol::POINT_MERGE)
     /// (the seam does not close — the profile was only *nearly*
-    /// perpendicular). Hew does not re-orient the profile (rule 4).
+    /// perpendicular). `Object::from_follow_me`/`from_follow_me_to` catch
+    /// exactly this variant and retry once against a rigidly folded copy of
+    /// the profile (`from_follow_me_auto`, design §2c) — Follow Me is an
+    /// explicit manipulation, not a silent geometry repair (rule 4 governs
+    /// the kernel inventing or nudging geometry to paper over an invalid
+    /// result, not orienting an input the caller handed it), so this variant
+    /// now surfaces only when the fold cannot help (a degenerate path) or a
+    /// second, unrelated failure follows it.
     ProfileNotPerpendicular,
     /// Perpendicularity holds but the profile plane cannot be attached to
     /// the path. An open path never raises this: a detached open path is
@@ -1004,7 +1011,7 @@ impl Object {
         closed: bool,
         path_curves: &[Option<crate::sketch::CurveGeom>],
     ) -> Result<Object, FollowMeError> {
-        Self::from_follow_me_impl(profile, path, closed, path_curves, None)
+        Self::from_follow_me_auto(profile, path, closed, path_curves, None)
     }
 
     /// [`Object::from_follow_me`], stopped after `stop_len` of arc length
@@ -1015,7 +1022,11 @@ impl Object {
     /// segment being cut, capped like any open end — a stop within
     /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) of a joint truncates
     /// at the joint). A stop at or beyond the full path length is the
-    /// full sweep, closed seam and all. A stop of nothing at all
+    /// full sweep, closed seam and all. A NEGATIVE stop sweeps |stop|
+    /// the OTHER way around a closed loop (the drag direction; design
+    /// §10a) — an open path has one direction from its seam and refuses,
+    /// and a corner seam closes in one direction only and refuses through
+    /// the anchor ladder. A stop of nothing at all
     /// (`<= POINT_MERGE`) is [`FollowMeError::EmptyPath`]. A pole-closing
     /// lathe (a profile touching its revolution axis) cannot be cut open
     /// — the poles exist only in the closed revolution — and refuses
@@ -1027,7 +1038,59 @@ impl Object {
         path_curves: &[Option<crate::sketch::CurveGeom>],
         stop_len: f64,
     ) -> Result<Object, FollowMeError> {
-        Self::from_follow_me_impl(profile, path, closed, path_curves, Some(stop_len))
+        Self::from_follow_me_auto(profile, path, closed, path_curves, Some(stop_len))
+    }
+
+    /// Auto-orientation (design §2c): a profile whose plane is nowhere
+    /// perpendicular to the path is FOLDED into perpendicularity and the
+    /// sweep retried exactly once, instead of refusing. Follow Me is an
+    /// explicit manipulation like Rotate or Scale — orienting the swept
+    /// copy is expected; the SOURCE profile (sketch region or face) is
+    /// never touched. The fold never runs when the pipeline already
+    /// succeeds, so every previously-legal placement keeps its
+    /// bit-identical result, and a second failure surfaces that failure's
+    /// own error untouched (a fold cannot fix a branch, a fold, or a
+    /// detached closed path — only non-perpendicularity).
+    fn from_follow_me_auto(
+        profile: &Profile,
+        path: &[Point3],
+        closed: bool,
+        path_curves: &[Option<crate::sketch::CurveGeom>],
+        stop_len: Option<f64>,
+    ) -> Result<Object, FollowMeError> {
+        let ladder = |profile: &Profile| -> Result<Object, FollowMeError> {
+            // Anchor retry ladder (design §2d): walk candidates nearest-
+            // first, stepping past one whose transport folds — a straddled
+            // corner beside the profile must not shadow a clean crossing
+            // farther along. The first candidate's own error is what
+            // surfaces if every rung refuses.
+            let mut first_err = None;
+            for skip in 0..64usize {
+                match Self::from_follow_me_impl(profile, path, closed, path_curves, stop_len, skip)
+                {
+                    Err(e @ (FollowMeError::PathTooTight | FollowMeError::PathReverses)) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                    Err(FollowMeError::PathDetachedFromProfile) if skip > 0 => {
+                        return Err(first_err.unwrap_or(FollowMeError::PathDetachedFromProfile));
+                    }
+                    r => return r,
+                }
+            }
+            Err(first_err.unwrap_or(FollowMeError::PathTooTight))
+        };
+        match ladder(profile) {
+            Err(FollowMeError::ProfileNotPerpendicular) => {
+                let Some(oriented) = orient_profile_to_path(profile, path, closed, path_curves)
+                else {
+                    return Err(FollowMeError::ProfileNotPerpendicular);
+                };
+                ladder(&oriented)
+            }
+            r => r,
+        }
     }
 
     fn from_follow_me_impl(
@@ -1036,7 +1099,17 @@ impl Object {
         closed: bool,
         path_curves: &[Option<crate::sketch::CurveGeom>],
         stop_len: Option<f64>,
+        skip_anchors: usize,
     ) -> Result<Object, FollowMeError> {
+        // A NEGATIVE stop (design §10a) sweeps |stop| the OTHER way from
+        // the seam — the closed-loop drag direction. An open path has one
+        // direction from its seam end; a reversed stop there is a sweep
+        // of nothing.
+        let reverse = stop_len.is_some_and(|s| s < 0.0);
+        let stop_len = stop_len.map(f64::abs);
+        if reverse && !closed {
+            return Err(FollowMeError::EmptyPath);
+        }
         let plane = profile.plane();
         let n = plane.normal();
 
@@ -1098,7 +1171,12 @@ impl Object {
         // corner's own miter plane — with the wedge between them as the
         // wrap band. Set when the chosen anchor is a corner.
         let mut corner_seam = false;
-        let pts: Vec<Point3> = if closed {
+        // `band_curves`: per-BAND analytic attribution of the working
+        // path (design §7a) — the anchor arms carry the original
+        // per-segment curves through rotation/reversal/split so the wall
+        // stamps and soft joints downstream can ask what curve a band
+        // belongs to. The corner wedge band is honestly None.
+        let (pts, band_curves): (Vec<Point3>, Vec<Option<crate::sketch::CurveGeom>>) = if closed {
             let m = path.len();
             /// Where the seam sits on the rotated path.
             enum Anchor {
@@ -1265,56 +1343,143 @@ impl Object {
             // centered on the axis — which the advance check refuses anyway)
             // break to the lowest path index, keeping the choice
             // deterministic (bit-for-bit reproducibility, §7).
-            let anchor = candidates
-                .into_iter()
-                .min_by(|(anchor_a, pt_a), (anchor_b, pt_b)| {
-                    let da = (*pt_a - profile_centroid).length_squared();
-                    let db = (*pt_b - profile_centroid).length_squared();
-                    da.partial_cmp(&db)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| anchor_a.index().cmp(&anchor_b.index()))
-                })
-                .map(|(anchor, _)| anchor);
-            let Some(anchor) = anchor else {
-                return Err(if any_perp {
+            let mut ranked = candidates;
+            ranked.sort_by(|(anchor_a, pt_a), (anchor_b, pt_b)| {
+                let da = (*pt_a - profile_centroid).length_squared();
+                let db = (*pt_b - profile_centroid).length_squared();
+                da.partial_cmp(&db)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| anchor_a.index().cmp(&anchor_b.index()))
+            });
+            // The (skip_anchors)-nth nearest candidate: the retry ladder
+            // (design §2d) walks past a candidate whose transport folds —
+            // a straddled corner beside the profile must not shadow a
+            // clean crossing farther along. Selection stays deterministic:
+            // distance, then path index.
+            let Some((anchor, _)) = ranked.into_iter().nth(skip_anchors) else {
+                return Err(if skip_anchors > 0 {
+                    // Exhausted the ladder: reported to the retry loop,
+                    // which surfaces the FIRST candidate's own error.
+                    FollowMeError::PathDetachedFromProfile
+                } else if any_perp {
                     FollowMeError::PathDetachedFromProfile
                 } else {
                     FollowMeError::ProfileNotPerpendicular
                 });
             };
-            let mut rotated = match anchor {
-                Anchor::Split(k, q) => {
-                    let mut r = Vec::with_capacity(m + 1);
-                    r.push(q);
-                    for i in 1..=m {
-                        r.push(path[(k + i) % m]);
-                    }
-                    r
-                }
-                Anchor::Vertex(k) => (0..m).map(|i| path[(k + i) % m]).collect(),
-                Anchor::Corner { vertex, forward } => {
-                    // The corner appears at BOTH ends of the working path:
-                    // pts[0] carries station 0 (the seam ring on the
-                    // profile plane), the final entry carries the corner's
-                    // miter station, and the zero-length wrap between them
-                    // is the wedge (its transport direction is overridden
-                    // to the first leg's below). Orientation is forced —
-                    // the sweep must leave along the perpendicular flank —
-                    // so the generic leave-along-+n flip is skipped.
-                    corner_seam = true;
-                    if forward {
-                        (0..=m).map(|i| path[(vertex + i) % m]).collect()
-                    } else {
-                        (0..=m).map(|i| path[(vertex + m - (i % m)) % m]).collect()
-                    }
-                }
+            // The FORWARD orientation reference ("leave the seam along +n" —
+            // design §1/§2b), computed from the anchor's FORWARD first
+            // direction regardless of whether THIS call is building the
+            // forward walk or the reversed one. A reversed walk's own raw
+            // first direction is NOT reliably the forward direction's exact
+            // negation (true by colinearity for a `Split` seam, but NOT for
+            // a `Vertex` seam, whose two flanks are two different edges
+            // meeting at a real corner) — testing each branch's OWN raw
+            // direction independently flips the WRONG one of the pair when
+            // the reversed branch's own direction happens to disagree with
+            // the forward branch's, which is exactly the case this
+            // reference avoids: `rotated_reverse` is always, by
+            // construction, the fixed permutation `flip(rotated_forward)`
+            // (every element after the first walked in the opposite order —
+            // true for `Split` and `Vertex` alike, a pure index identity
+            // independent of geometry), so flipping BOTH branches on the
+            // SAME shared condition is what keeps "reverse" the genuine
+            // opposite of whichever orientation forward settles on.
+            let forward_ref_dir: Option<Vec3> = match anchor {
+                Anchor::Split(k, q) => Some(path[(k + 1) % m] - q),
+                Anchor::Vertex(k) => Some(path[(k + 1) % m] - path[k]),
+                Anchor::Corner { .. } => None,
             };
-            if !corner_seam && n.dot(rotated[1] - rotated[0]) < 0.0 {
+            let (mut rotated, mut bands): (Vec<Point3>, Vec<Option<crate::sketch::CurveGeom>>) =
+                match anchor {
+                    Anchor::Split(k, q) => {
+                        let mut r = Vec::with_capacity(m + 1);
+                        r.push(q);
+                        if reverse {
+                            // Walk the loop the other way: q back through
+                            // the split band's first half, then the loop
+                            // reversed.
+                            for i in 0..m {
+                                r.push(path[(k + m - i) % m]);
+                            }
+                        } else {
+                            for i in 1..=m {
+                                r.push(path[(k + i) % m]);
+                            }
+                        }
+                        // Both halves of the split band keep its curve.
+                        let mut b: Vec<Option<crate::sketch::CurveGeom>> = if reverse {
+                            std::iter::once(seg_curve(k))
+                                .chain((0..m - 1).map(|i| seg_curve((k + m - 1 - i) % m)))
+                                .collect()
+                        } else {
+                            (0..m).map(|i| seg_curve((k + i) % m)).collect()
+                        };
+                        b.push(seg_curve(k));
+                        (r, b)
+                    }
+                    Anchor::Vertex(k) => {
+                        if reverse {
+                            (
+                                (0..m).map(|i| path[(k + m - i) % m]).collect(),
+                                (0..m).map(|i| seg_curve((k + m - 1 - i) % m)).collect(),
+                            )
+                        } else {
+                            (
+                                (0..m).map(|i| path[(k + i) % m]).collect(),
+                                (0..m).map(|i| seg_curve((k + i) % m)).collect(),
+                            )
+                        }
+                    }
+                    Anchor::Corner { vertex, forward } => {
+                        // A corner seam closes in ONE direction only: the
+                        // walk must LEAVE along the perpendicular flank
+                        // (the wedge closes the far side). A reversed stop
+                        // cannot use this anchor — refuse as the fold it
+                        // would be and let the ladder try the next
+                        // candidate (design §10a).
+                        if reverse {
+                            return Err(FollowMeError::PathTooTight);
+                        }
+                        // The corner appears at BOTH ends of the working path:
+                        // pts[0] carries station 0 (the seam ring on the
+                        // profile plane), the final entry carries the corner's
+                        // miter station, and the zero-length wrap between them
+                        // is the wedge (its transport direction is overridden
+                        // to the first leg's below). Orientation is forced —
+                        // the sweep must leave along the perpendicular flank —
+                        // so the generic leave-along-+n flip is skipped.
+                        corner_seam = true;
+                        if forward {
+                            let mut b: Vec<Option<crate::sketch::CurveGeom>> =
+                                (0..m).map(|i| seg_curve((vertex + i) % m)).collect();
+                            b.push(None); // the wedge band is honestly sharp
+                            ((0..=m).map(|i| path[(vertex + i) % m]).collect(), b)
+                        } else {
+                            let mut b: Vec<Option<crate::sketch::CurveGeom>> = (0..m)
+                                .map(|i| seg_curve((vertex + m - 1 - i) % m))
+                                .collect();
+                            b.push(None);
+                            (
+                                (0..=m).map(|i| path[(vertex + m - (i % m)) % m]).collect(),
+                                b,
+                            )
+                        }
+                    }
+                };
+            if !corner_seam
+                && let Some(fwd_dir) = forward_ref_dir
+                && n.dot(fwd_dir) < 0.0
+            {
                 let tail: Vec<Point3> = rotated[1..].iter().rev().copied().collect();
                 rotated.truncate(1);
                 rotated.extend(tail);
+                bands.reverse();
             }
-            rotated
+            (rotated, bands)
+        } else if skip_anchors > 0 {
+            // An open path has one anchoring; past it the ladder is done.
+            return Err(FollowMeError::PathDetachedFromProfile);
         } else {
             let first = (path[1] - path[0])
                 .normalized()
@@ -1345,10 +1510,18 @@ impl Object {
             let leave_last = end_leave(path[path.len() - 1], last, seg_curve(raw_segs - 1));
             let sd_first = plane.signed_distance(path[0]);
             let sd_last = plane.signed_distance(path[path.len() - 1]);
+            let fwd_bands = |rev: bool| -> Vec<Option<crate::sketch::CurveGeom>> {
+                let mut b: Vec<Option<crate::sketch::CurveGeom>> =
+                    (0..raw_segs).map(seg_curve).collect();
+                if rev {
+                    b.reverse();
+                }
+                b
+            };
             if leave_first.is_some() && sd_first.abs() <= tol::PLANE_DIST {
-                path.to_vec()
+                (path.to_vec(), fwd_bands(false))
             } else if leave_last.is_some() && sd_last.abs() <= tol::PLANE_DIST {
-                path.iter().rev().copied().collect()
+                (path.iter().rev().copied().collect(), fwd_bands(true))
             } else if let Some((dir, sd, use_first)) = match (leave_first, leave_last) {
                 // Perpendicular but detached: the sweep starts where the
                 // PROFILE is (design §2a) — the path's shape is carried to
@@ -1370,10 +1543,20 @@ impl Object {
             } {
                 let delta = dir * (-sd / n.dot(dir));
                 let carried = path.iter().map(|&p| p + delta);
+                // Attribution centers ride the same carry (design §2a).
+                let mut b: Vec<Option<crate::sketch::CurveGeom>> = (0..raw_segs)
+                    .map(|i| {
+                        seg_curve(i).map(|g| crate::sketch::CurveGeom {
+                            center: g.center + delta,
+                            radius: g.radius,
+                        })
+                    })
+                    .collect();
                 if use_first {
-                    carried.collect()
+                    (carried.collect(), b)
                 } else {
-                    carried.rev().collect()
+                    b.reverse();
+                    (carried.rev().collect(), b)
                 }
             } else {
                 return Err(FollowMeError::ProfileNotPerpendicular);
@@ -1386,79 +1569,84 @@ impl Object {
         // everything downstream (stations, caps, advance, assembly)
         // already handles it, including a corner seam losing its wedge.
         let mut closed = closed;
-        let pts: Vec<Point3> = if let Some(stop) = stop_len {
-            if stop <= tol::POINT_MERGE {
-                return Err(FollowMeError::EmptyPath);
-            }
-            let bands = if closed { pts.len() } else { pts.len() - 1 };
-            // A CLOSED path's bands include the wrap-around band back to
-            // its own seam (`pts[bands - 1] → pts[0]`), so a stop landing
-            // exactly on the full perimeter is found by the per-band scan
-            // below as a "cut" whose point IS the seam — building an open
-            // sweep with two coincident caps at the same plane/position
-            // (caught downstream as `SweepSelfIntersects`, never bad
-            // geometry, but not the full closed sweep the stop asked for).
-            // Checking the total length first, exactly the same joint-snap
-            // tolerance the per-band clamp already uses elsewhere, keeps
-            // the documented contract — "a stop at or beyond the full path
-            // length is the full sweep, closed seam and all" — true at the
-            // boundary instead of only strictly beyond it. Harmless no-op
-            // for an open path: its own last band already reproduces `pts`
-            // unchanged when `stop` reaches the far end (no wrap-around
-            // band to alias against).
-            let total: f64 = (0..bands)
-                .map(|i| (pts[(i + 1) % pts.len()] - pts[i]).length())
-                .sum();
-            if stop >= total - tol::POINT_MERGE {
-                pts
+        let (pts, band_curves): (Vec<Point3>, Vec<Option<crate::sketch::CurveGeom>>) =
+            if let Some(stop) = stop_len {
+                if stop <= tol::POINT_MERGE {
+                    return Err(FollowMeError::EmptyPath);
+                }
+                let bands = if closed { pts.len() } else { pts.len() - 1 };
+                // A CLOSED path's bands include the wrap-around band back to
+                // its own seam (`pts[bands - 1] → pts[0]`), so a stop landing
+                // exactly on the full perimeter is found by the per-band scan
+                // below as a "cut" whose point IS the seam — building an open
+                // sweep with two coincident caps at the same plane/position
+                // (caught downstream as `SweepSelfIntersects`, never bad
+                // geometry, but not the full closed sweep the stop asked for).
+                // Checking the total length first, exactly the same joint-snap
+                // tolerance the per-band clamp already uses elsewhere, keeps
+                // the documented contract — "a stop at or beyond the full path
+                // length is the full sweep, closed seam and all" — true at the
+                // boundary instead of only strictly beyond it. Harmless no-op
+                // for an open path: its own last band already reproduces `pts`
+                // unchanged when `stop` reaches the far end (no wrap-around
+                // band to alias against).
+                let total: f64 = (0..bands)
+                    .map(|i| (pts[(i + 1) % pts.len()] - pts[i]).length())
+                    .sum();
+                if stop >= total - tol::POINT_MERGE {
+                    (pts, band_curves)
+                } else {
+                    let mut acc = 0.0f64;
+                    let mut cut: Option<(usize, Point3)> = None;
+                    for i in 0..bands {
+                        let a = pts[i];
+                        let b = pts[(i + 1) % pts.len()];
+                        let len = (b - a).length();
+                        if len <= tol::POINT_MERGE {
+                            continue; // a corner seam's zero-length wedge wrap
+                        }
+                        if acc + len >= stop {
+                            let remain = stop - acc;
+                            // A stop within POINT_MERGE of either joint truncates
+                            // at that joint — a parameter clamp, so no sliver
+                            // segment is ever built from a continuous drag value.
+                            let q = if remain <= tol::POINT_MERGE {
+                                a
+                            } else if (len - remain).abs() <= tol::POINT_MERGE {
+                                b
+                            } else {
+                                a + (b - a) * (remain / len)
+                            };
+                            cut = Some((i, q));
+                            break;
+                        }
+                        acc += len;
+                    }
+                    match cut {
+                        // Unreachable given the total-length check above, but
+                        // kept as the honest fallback rather than an unwrap.
+                        None => (pts, band_curves),
+                        Some((i, q)) => {
+                            closed = false;
+                            corner_seam = false;
+                            let mut kept: Vec<Point3> = pts[..=i].to_vec();
+                            let kept_bands: Vec<Option<crate::sketch::CurveGeom>> =
+                                if !q.approx_eq(kept[kept.len() - 1], tol::POINT_MERGE) {
+                                    kept.push(q);
+                                    band_curves[..=i].to_vec()
+                                } else {
+                                    band_curves[..i].to_vec()
+                                };
+                            if kept.len() < 2 {
+                                return Err(FollowMeError::EmptyPath);
+                            }
+                            (kept, kept_bands)
+                        }
+                    }
+                }
             } else {
-                let mut acc = 0.0f64;
-                let mut cut: Option<(usize, Point3)> = None;
-                for i in 0..bands {
-                    let a = pts[i];
-                    let b = pts[(i + 1) % pts.len()];
-                    let len = (b - a).length();
-                    if len <= tol::POINT_MERGE {
-                        continue; // a corner seam's zero-length wedge wrap
-                    }
-                    if acc + len >= stop {
-                        let remain = stop - acc;
-                        // A stop within POINT_MERGE of either joint truncates
-                        // at that joint — a parameter clamp, so no sliver
-                        // segment is ever built from a continuous drag value.
-                        let q = if remain <= tol::POINT_MERGE {
-                            a
-                        } else if (len - remain).abs() <= tol::POINT_MERGE {
-                            b
-                        } else {
-                            a + (b - a) * (remain / len)
-                        };
-                        cut = Some((i, q));
-                        break;
-                    }
-                    acc += len;
-                }
-                match cut {
-                    // Unreachable given the total-length check above, but
-                    // kept as the honest fallback rather than an unwrap.
-                    None => pts,
-                    Some((i, q)) => {
-                        closed = false;
-                        corner_seam = false;
-                        let mut kept: Vec<Point3> = pts[..=i].to_vec();
-                        if !q.approx_eq(kept[kept.len() - 1], tol::POINT_MERGE) {
-                            kept.push(q);
-                        }
-                        if kept.len() < 2 {
-                            return Err(FollowMeError::EmptyPath);
-                        }
-                        kept
-                    }
-                }
-            }
-        } else {
-            pts
-        };
+                (pts, band_curves)
+            };
 
         let m = pts.len();
         let seg_count = if closed { m } else { m - 1 };
@@ -1660,6 +1848,78 @@ impl Object {
             Option<crate::topo::SurfaceRef>,
         )> = Vec::new();
 
+        // ---- joint softening (design §7) --------------------------------
+        // Two adjacent bands of one drawn curve meet at a facet seam of a
+        // smooth surface, not a real crease: their transverse joint edges
+        // are marked SOFT (§7b), and a wall swept by a straight profile
+        // edge along an attributed band lies on a true cylinder about the
+        // band's own axis — stamped when the claim verifies (§7a). Free
+        // polyline elbows and the corner wedge stay hard.
+        let same_band_curve = |a: usize, b: usize| -> bool {
+            match (
+                band_curves.get(a).copied().flatten(),
+                band_curves.get(b).copied().flatten(),
+            ) {
+                (Some(x), Some(y)) => {
+                    x.center.approx_eq(y.center, tol::POINT_MERGE)
+                        && (x.radius - y.radius).abs() <= tol::POINT_MERGE
+                }
+                _ => false,
+            }
+        };
+        let band_cylinder =
+            |sidx: usize, a: Point3, b: Point3| -> Option<crate::topo::SurfaceRef> {
+                let g = band_curves.get(sidx).copied().flatten()?;
+                let axis = dirs[sidx].cross(pts[sidx] - g.center).normalized().ok()?;
+                let dist = |p: Point3| {
+                    let d = p - g.center;
+                    (d - axis * d.dot(axis)).length()
+                };
+                let (ra, rb) = (dist(a), dist(b));
+                ((ra - rb).abs() <= tol::POINT_MERGE).then_some(crate::topo::SurfaceRef::Cylinder {
+                    axis_point: g.center,
+                    axis,
+                    radius: ra,
+                })
+            };
+        // Soft transverse joints, as global position-index pairs (the
+        // profile-edge ring edge at each station whose two adjacent bands
+        // share one curve). Wrap joint included for closed sweeps.
+        let mut soft_pairs: Vec<(usize, usize)> = Vec::new();
+        // The LONGITUDINAL mirror (design §7c): the joint between two
+        // adjacent walls of one band is a facet seam of the PROFILE's own
+        // drawn curve — soft when the two profile edges share a CurveGeom.
+        // This is what smooths a swept circle's circumference where the
+        // walls are toroidal and no cylinder stamp can apply.
+        let same_geom =
+            |a: Option<crate::sketch::CurveGeom>, b: Option<crate::sketch::CurveGeom>| -> bool {
+                match (a, b) {
+                    (Some(x), Some(y)) => {
+                        x.center.approx_eq(y.center, tol::POINT_MERGE)
+                            && (x.radius - y.radius).abs() <= tol::POINT_MERGE
+                    }
+                    _ => false,
+                }
+            };
+        let soft_after: Vec<bool> = {
+            let mut v = Vec::with_capacity(wall_edges.len());
+            for k in 0..n_outer {
+                v.push(same_geom(
+                    profile.outer_curve(k),
+                    profile.outer_curve((k + 1) % n_outer),
+                ));
+            }
+            for (i, hole) in holes.iter().enumerate() {
+                for k in 0..hole.len() {
+                    v.push(same_geom(
+                        profile.hole_curve(i, k),
+                        profile.hole_curve(i, (k + 1) % hole.len()),
+                    ));
+                }
+            }
+            v
+        };
+
         let positions: Vec<Point3> = if has_poles {
             // Pole-aware closed assembly (design §9). On-axis vertices are
             // one shared position each (station 0's, since a pole is fixed);
@@ -1695,7 +1955,7 @@ impl Object {
 
             for s in 0..seg_count {
                 let s_next = (s + 1) % m;
-                for we in &wall_edges {
+                for (wei, we) in wall_edges.iter().enumerate() {
                     let quad = [
                         gidx(s, we.a),
                         gidx(s, we.b),
@@ -1722,19 +1982,37 @@ impl Object {
                         .map_err(|_| FollowMeError::SweepDegenerate)?;
                     // Cylinder stamps apply only to a full, un-collapsed quad.
                     let surface = if ring.len() == 4 {
-                        we.curve.and_then(|(center_idx, radius)| {
-                            let surface = crate::topo::SurfaceRef::Cylinder {
-                                axis_point: stations[s][center_idx],
-                                axis: dirs[s],
-                                radius,
-                            };
-                            cylinder_claim_holds(&ring_pts, &wall_plane, &surface)
-                                .then_some(surface)
-                        })
+                        we.curve
+                            .and_then(|(center_idx, radius)| {
+                                let surface = crate::topo::SurfaceRef::Cylinder {
+                                    axis_point: stations[s][center_idx],
+                                    axis: dirs[s],
+                                    radius,
+                                };
+                                cylinder_claim_holds(&ring_pts, &wall_plane, &surface)
+                                    .then_some(surface)
+                            })
+                            .or_else(|| {
+                                band_cylinder(s, ring_pts[0], ring_pts[1])
+                                    .filter(|sr| cylinder_claim_holds(&ring_pts, &wall_plane, sr))
+                            })
                     } else {
                         None
                     };
                     face_specs.push((ring, vec![], wall_plane, surface));
+                    let (ga, gb) = (gidx(s, we.a), gidx(s, we.b));
+                    if ga != gb && s > 0 && same_band_curve(s - 1, s) {
+                        soft_pairs.push((ga, gb));
+                    }
+                    if ga != gb && s == 0 && same_band_curve(seg_count - 1, 0) {
+                        soft_pairs.push((ga, gb));
+                    }
+                    if soft_after[wei] {
+                        let (la, lb) = (gidx(s, we.b), gidx(s_next, we.b));
+                        if la != lb {
+                            soft_pairs.push((la, lb));
+                        }
+                    }
                 }
             }
             positions
@@ -1765,7 +2043,7 @@ impl Object {
             }
             for s in 0..seg_count {
                 let s_next = (s + 1) % m;
-                for we in &wall_edges {
+                for (wei, we) in wall_edges.iter().enumerate() {
                     let quad = [
                         gid[s][we.a],
                         gid[s][we.b],
@@ -1793,19 +2071,34 @@ impl Object {
                         .map_err(|_| FollowMeError::SweepDegenerate)?;
                     // Cylinder stamps apply only to a full, un-collapsed quad.
                     let surface = if ring.len() == 4 {
-                        we.curve.and_then(|(center_idx, radius)| {
-                            let surface = crate::topo::SurfaceRef::Cylinder {
-                                axis_point: stations[s][center_idx],
-                                axis: dirs[s],
-                                radius,
-                            };
-                            cylinder_claim_holds(&ring_pts, &wall_plane, &surface)
-                                .then_some(surface)
-                        })
+                        we.curve
+                            .and_then(|(center_idx, radius)| {
+                                let surface = crate::topo::SurfaceRef::Cylinder {
+                                    axis_point: stations[s][center_idx],
+                                    axis: dirs[s],
+                                    radius,
+                                };
+                                cylinder_claim_holds(&ring_pts, &wall_plane, &surface)
+                                    .then_some(surface)
+                            })
+                            .or_else(|| {
+                                band_cylinder(s, ring_pts[0], ring_pts[1])
+                                    .filter(|sr| cylinder_claim_holds(&ring_pts, &wall_plane, sr))
+                            })
                     } else {
                         None
                     };
                     face_specs.push((ring, vec![], wall_plane, surface));
+                    let (ga, gb) = (gid[s][we.a], gid[s][we.b]);
+                    if ga != gb && s > 0 && same_band_curve(s - 1, s) {
+                        soft_pairs.push((ga, gb));
+                    }
+                    if soft_after[wei] {
+                        let (la, lb) = (gid[s][we.b], gid[s_next][we.b]);
+                        if la != lb {
+                            soft_pairs.push((la, lb));
+                        }
+                    }
                 }
             }
             positions
@@ -1854,7 +2147,7 @@ impl Object {
 
             for s in 0..seg_count {
                 let s_next = (s + 1) % m;
-                for we in &wall_edges {
+                for (wei, we) in wall_edges.iter().enumerate() {
                     let quad = vec![
                         idx(s, we.a),
                         idx(s, we.b),
@@ -1864,14 +2157,30 @@ impl Object {
                     let quad_pts: Vec<Point3> = quad.iter().map(|&j| positions[j]).collect();
                     let wall_plane = Plane::from_polygon(&quad_pts)
                         .map_err(|_| FollowMeError::SweepDegenerate)?;
-                    let surface = we.curve.and_then(|(center_idx, radius)| {
-                        let surface = crate::topo::SurfaceRef::Cylinder {
-                            axis_point: stations[s][center_idx],
-                            axis: dirs[s],
-                            radius,
-                        };
-                        cylinder_claim_holds(&quad_pts, &wall_plane, &surface).then_some(surface)
-                    });
+                    let surface = we
+                        .curve
+                        .and_then(|(center_idx, radius)| {
+                            let surface = crate::topo::SurfaceRef::Cylinder {
+                                axis_point: stations[s][center_idx],
+                                axis: dirs[s],
+                                radius,
+                            };
+                            cylinder_claim_holds(&quad_pts, &wall_plane, &surface)
+                                .then_some(surface)
+                        })
+                        .or_else(|| {
+                            band_cylinder(s, positions[quad[0]], positions[quad[1]])
+                                .filter(|sr| cylinder_claim_holds(&quad_pts, &wall_plane, sr))
+                        });
+                    if s > 0 && same_band_curve(s - 1, s) {
+                        soft_pairs.push((idx(s, we.a), idx(s, we.b)));
+                    }
+                    if closed && s == 0 && same_band_curve(seg_count - 1, 0) {
+                        soft_pairs.push((idx(0, we.a), idx(0, we.b)));
+                    }
+                    if soft_after[wei] {
+                        soft_pairs.push((idx(s, we.b), idx(s_next, we.b)));
+                    }
                     face_specs.push((quad, vec![], wall_plane, surface));
                 }
             }
@@ -1906,7 +2215,13 @@ impl Object {
             .into_iter()
             .map(|(o, i, p, surf)| (o, i, p, None, None, surf))
             .collect();
-        let obj = Object::from_faces_with_holes(&positions, &face_specs);
+        let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
+        // Mark the collected soft transverse joints (design §7b) on the
+        // freshly built topology. Vertex ids map 1:1 to the positions
+        // array by insertion order (the builder inserts them in order and
+        // a fresh slotmap iterates insertion-first — the determinism lane).
+        mark_soft_edges(&mut obj, &soft_pairs);
+        let obj = obj;
         obj.validate().map_err(|_| FollowMeError::SweepDegenerate)?;
         if obj.watertight() != crate::topo::WatertightState::Watertight {
             return Err(FollowMeError::SweepDegenerate);
@@ -3093,6 +3408,7 @@ impl Object {
                 half_edge: h_sub[k],
                 twin_half_edge: Some(h_hole[k]),
                 curve,
+                soft: false,
             });
             obj.half_edges[h_sub[k]].edge = edge;
             obj.half_edges[h_hole[k]].edge = edge;
@@ -3562,6 +3878,7 @@ impl Object {
                 half_edge: h_sub[k],
                 twin_half_edge: Some(wa[k]),
                 curve: None,
+                soft: false,
             });
             obj.half_edges[h_sub[k]].edge = e_top;
             obj.half_edges[wa[k]].edge = e_top;
@@ -3580,6 +3897,7 @@ impl Object {
                 half_edge: wb[k],
                 twin_half_edge: Some(wd[prev]),
                 curve: None,
+                soft: false,
             });
             obj.half_edges[wb[k]].edge = e_vert;
             obj.half_edges[wd[prev]].edge = e_vert;
@@ -4719,6 +5037,35 @@ impl Object {
         nearest.is_finite().then_some(nearest)
     }
 
+    /// A face's boundary as a [`Profile`] — outer + hole rings in the
+    /// winding `Profile::new` expects (the face outer loop is CCW and
+    /// inner loops CW seen from the normal), carrying the analytic circle
+    /// each boundary edge is a chord facet of (stamped at imprint /
+    /// extrusion) so downstream sweeps re-stamp true-curve walls. The
+    /// loop half-edges walk in the same order as `loop_positions`, so the
+    /// attribution stays parallel to the profile boundaries. `None` when
+    /// the face is stale or its boundary fails profile validation.
+    pub(crate) fn profile_from_face(&self, face: FaceId) -> Option<Profile> {
+        let f = self.faces.get(face)?;
+        let outer: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
+        let holes: Vec<Vec<Point3>> = f
+            .inner_loops
+            .iter()
+            .map(|&il| self.loop_positions(il).collect())
+            .collect();
+        let loop_curves = |lid: crate::ids::LoopId| -> Vec<Option<crate::sketch::CurveGeom>> {
+            self.loop_half_edges(lid)
+                .map(|h| self.edges[self.half_edges[h].edge].curve)
+                .collect()
+        };
+        let outer_curves = loop_curves(f.outer_loop);
+        let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
+            f.inner_loops.iter().map(|&il| loop_curves(il)).collect();
+        let mut profile = Profile::new(f.plane, outer, holes).ok()?;
+        profile.set_curve_attribution(outer_curves, hole_curves);
+        Some(profile)
+    }
+
     /// Push `face` inward by `distance` (negative) past opposing material,
     /// realized as a subtract: the face's profile swept inward by
     /// `distance` is removed from the solid — a recess that breaks the far wall
@@ -4738,37 +5085,15 @@ impl Object {
         if self.watertight != WatertightState::Watertight {
             return Err(PushPullError::ObjectNotSolid);
         }
-        let f = self.faces.get(face).ok_or(PushPullError::UnknownFace)?;
+        if !self.faces.contains_key(face) {
+            return Err(PushPullError::UnknownFace);
+        }
         if distance.abs() < tol::POINT_MERGE {
             return Err(PushPullError::DistanceTooSmall);
         }
-        // Swept prism: the face's loops extruded inward by `distance`. The face
-        // outer loop is CCW and inner loops CW seen from the normal — exactly the
-        // winding Profile::new expects for outer + holes.
-        let outer: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
-        let holes: Vec<Vec<Point3>> = f
-            .inner_loops
-            .iter()
-            .map(|&il| self.loop_positions(il).collect())
-            .collect();
-        // Carry the analytic circle each boundary edge is a chord facet of
-        // (stamped at imprint / extrusion) into the tool profile, so
-        // `from_extrusion` re-stamps the cut's tunnel walls as
-        // `SurfaceRef::Cylinder` — otherwise a circular hole's walls are flat
-        // facets and refuse whole-wall push/pull (true-curves C3). The loop
-        // half-edges walk in the same order as `loop_positions`, so the
-        // attribution stays parallel to the profile boundaries.
-        let loop_curves = |lid: crate::ids::LoopId| -> Vec<Option<crate::sketch::CurveGeom>> {
-            self.loop_half_edges(lid)
-                .map(|h| self.edges[self.half_edges[h].edge].curve)
-                .collect()
-        };
-        let outer_curves = loop_curves(f.outer_loop);
-        let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
-            f.inner_loops.iter().map(|&il| loop_curves(il)).collect();
-        let mut profile =
-            Profile::new(f.plane, outer, holes).map_err(|_| PushPullError::NonManifoldResult)?;
-        profile.set_curve_attribution(outer_curves, hole_curves);
+        let profile = self
+            .profile_from_face(face)
+            .ok_or(PushPullError::NonManifoldResult)?;
         let tool = Object::from_extrusion(&profile, distance)
             .map_err(|_| PushPullError::NonManifoldResult)?;
         match Object::boolean(BooleanOp::Subtract, self, &tool, &Transform::IDENTITY) {
@@ -5784,6 +6109,223 @@ fn circular_path_axis(
     })
 }
 
+/// Auto-orientation's fold (design §2c): the minimal rigid rotation that
+/// lands the profile plane's normal on the path tangent at the path's
+/// nearest approach to the profile, hinged on the CREASE — the line in the
+/// profile plane through the projection of that nearest point, along
+/// `normal × tangent`. A flat flap touching the path folds up hinged where
+/// it touches; a detached profile folds about the crease nearest the path
+/// and the carry (design §2a) then re-attaches it.
+///
+/// When the nearest segment carries a [`CurveGeom`], the tangent and
+/// nearest point are taken from the ANALYTIC circle, not the chord — the
+/// folded plane then contains the circle's center exactly (the
+/// `(center − Q) · tangent = 0` identity), which the radial anchor's
+/// 1e-9 gates demand; a chord-based fold would miss by the facet sagitta
+/// and still refuse.
+///
+/// Returns `None` when no fold can help: a degenerate path, a normal
+/// already parallel to the tangent (the refusal was not about
+/// orientation), or a rebuild the [`Profile`] validator refuses.
+fn orient_profile_to_path(
+    profile: &Profile,
+    path: &[Point3],
+    closed: bool,
+    path_curves: &[Option<crate::sketch::CurveGeom>],
+) -> Option<Profile> {
+    let plane = profile.plane();
+    let n = plane.normal();
+    let outer = profile.outer();
+    if path.len() < 2 || outer.is_empty() {
+        return None;
+    }
+    let centroid = {
+        let mut acc = Vec3::ZERO;
+        for p in outer {
+            acc = acc + p.to_vec();
+        }
+        Point3::ORIGIN + acc / outer.len() as f64
+    };
+
+    // Nearest CANDIDATE band of the path to the profile centroid, wrap
+    // included for a closed path. The candidate set must match what
+    // `from_follow_me_impl`'s own anchor test can actually re-validate after
+    // the fold, or the retry silently reproduces the original refusal:
+    //  - CLOSED path: the anchor scan tests every segment, so every band is
+    //    a fair candidate here too.
+    //  - OPEN path: the anchor scan only ever attaches at the path's two
+    //    ENDS (design §2a) — an interior band's own tangent has no bearing
+    //    on either end's perpendicularity, so folding onto one leaves the
+    //    retry checking the same two ends against an orientation the fold
+    //    never touched. Restricting the search to the two end bands makes
+    //    the fold's target congruent with what the retry actually re-tests,
+    //    so it succeeds exactly when a fold legitimately can.
+    let bands = if closed { path.len() } else { path.len() - 1 };
+    let candidates: Vec<usize> = if closed {
+        (0..bands).collect()
+    } else {
+        // A single-band open path has one candidate, counted once.
+        let mut ks = vec![0];
+        if bands > 1 {
+            ks.push(bands - 1);
+        }
+        ks
+    };
+    let mut best: Option<(f64, usize, Point3, Vec3)> = None;
+    for k in candidates {
+        let a = path[k];
+        let b = path[(k + 1) % path.len()];
+        let ab = b - a;
+        let len2 = ab.length_squared();
+        if len2 <= tol::POINT_MERGE * tol::POINT_MERGE {
+            continue;
+        }
+        let t = ((centroid - a).dot(ab) / len2).clamp(0.0, 1.0);
+        let q = a + ab * t;
+        let d2 = (centroid - q).length_squared();
+        if best.is_none_or(|(bd, ..)| d2 < bd) {
+            let dir = (ab / len2.sqrt()).normalized().ok()?;
+            best = Some((d2, k, q, dir));
+        }
+    }
+    let (_, k, mut q, mut tangent) = best?;
+
+    // Analytic upgrade for an attributed nearest segment: Q on the drawn
+    // circle at the centroid's own radial, T the exact tangent there. The
+    // folded plane must contain the circle's CENTER (the radial family),
+    // which constrains the hinge below.
+    let mut center = None;
+    if let Some(g) = path_curves.get(k).copied().flatten() {
+        let a = path[k];
+        if let Ok(curve_normal) = tangent.cross(a - g.center).normalized() {
+            let off = centroid - g.center;
+            let in_plane = off - curve_normal * off.dot(curve_normal);
+            if let Ok(radial) = in_plane.normalized()
+                && let Ok(t_exact) = curve_normal.cross(radial).normalized()
+            {
+                q = g.center + radial * g.radius;
+                center = Some(g.center);
+                // Keep the chord's sense so the fold sign is stable.
+                tangent = if t_exact.dot(tangent) >= 0.0 {
+                    t_exact
+                } else {
+                    -t_exact
+                };
+            }
+        }
+    }
+
+    // Minimal rotation n → ±tangent about the crease.
+    let target = if n.dot(tangent) >= 0.0 {
+        tangent
+    } else {
+        -tangent
+    };
+    let cos = n.dot(target).clamp(-1.0, 1.0);
+    if cos >= 1.0 - tol::NORMAL_DIRECTION {
+        // Orientation is already perpendicular. For a plain path the
+        // refusal was not about orientation and no fold can help; on an
+        // attributed circle the plane may still be perpendicular-but-
+        // OFF-CENTER — a pure slide along the normal onto the radial
+        // plane through the center is the minimal rigid fix.
+        let c = center?;
+        let shift = n * plane.signed_distance(c);
+        return rebuild_profile(profile, n, |p| p + shift);
+    }
+    // Fold about the crease through the projection of Q onto the profile
+    // plane — local to where the profile sits, so a touching flap hinges
+    // where it touches. For an attributed circle, follow the fold with a
+    // translation along the folded normal by whatever residual the local
+    // hinge left, landing the plane EXACTLY on the circle's center (the
+    // radial family's gate is 1e-9); the residual is zero for a
+    // perpendicular fold and grows only as the fold shrinks, degenerating
+    // smoothly into the pure slide above.
+    let axis = n.cross(target).normalized().ok()?;
+    let sin = (1.0 - cos * cos).max(0.0).sqrt();
+    let hinge = q + n * -plane.signed_distance(q);
+    let rotate = move |p: Point3| -> Point3 {
+        let v = p - hinge;
+        hinge + v * cos + axis.cross(v) * sin + axis * (axis.dot(v) * (1.0 - cos))
+    };
+    let shift = match center {
+        Some(c) => target * -((rotate(outer[0]) - c).dot(target)),
+        None => Vec3::ZERO,
+    };
+    rebuild_profile(profile, target, move |p| rotate(p) + shift)
+}
+
+/// Rebuilds a [`Profile`] under a rigid point map with a known resulting
+/// plane `normal`, carrying every [`CurveGeom`] attribution through the
+/// same map. `None` when the rebuilt boundary fails [`Profile::new`]'s
+/// validation (it should not — the map is rigid).
+fn rebuild_profile(
+    profile: &Profile,
+    normal: Vec3,
+    map: impl Fn(Point3) -> Point3,
+) -> Option<Profile> {
+    let outer_r: Vec<Point3> = profile.outer().iter().map(|&p| map(p)).collect();
+    let holes_r: Vec<Vec<Point3>> = profile
+        .holes()
+        .iter()
+        .map(|h| h.iter().map(|&p| map(p)).collect())
+        .collect();
+    let new_plane = Plane::from_point_normal(outer_r[0], normal).ok()?;
+    let mut rebuilt = Profile::new(new_plane, outer_r, holes_r).ok()?;
+    let map_curve = |g: crate::sketch::CurveGeom| crate::sketch::CurveGeom {
+        center: map(g.center),
+        radius: g.radius,
+    };
+    let outer_curves: Vec<Option<crate::sketch::CurveGeom>> = (0..profile.outer().len())
+        .map(|i| profile.outer_curve(i).map(map_curve))
+        .collect();
+    let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> = profile
+        .holes()
+        .iter()
+        .enumerate()
+        .map(|(hi, h)| {
+            (0..h.len())
+                .map(|i| profile.hole_curve(hi, i).map(map_curve))
+                .collect()
+        })
+        .collect();
+    rebuilt.set_curve_attribution(outer_curves, hole_curves);
+    Some(rebuilt)
+}
+
+/// Marks the given global-position-index pairs SOFT on a freshly built
+/// object's edges (design §7b). Pairs must be vertex-index pairs of edges
+/// that exist; a pair whose edge is absent (a wall the assembly suppressed)
+/// is skipped silently — the mark is cosmetic-honest, never structural.
+fn mark_soft_edges(obj: &mut Object, soft_pairs: &[(usize, usize)]) {
+    if soft_pairs.is_empty() {
+        return;
+    }
+    let vids: Vec<crate::ids::VertexId> = obj.vertices().keys().collect();
+    let mut by_pair: std::collections::BTreeMap<
+        (crate::ids::VertexId, crate::ids::VertexId),
+        crate::ids::EdgeId,
+    > = std::collections::BTreeMap::new();
+    for (eid, e) in obj.edges() {
+        let he = &obj.half_edges()[e.half_edge];
+        let a = he.origin;
+        let b = match e.twin_half_edge {
+            Some(t) => obj.half_edges()[t].origin,
+            None => obj.half_edges()[he.next].origin,
+        };
+        let key = if a < b { (a, b) } else { (b, a) };
+        by_pair.insert(key, eid);
+    }
+    for &(gi, gj) in soft_pairs {
+        let (Some(&va), Some(&vb)) = (vids.get(gi), vids.get(gj)) else {
+            continue;
+        };
+        let key = if va < vb { (va, vb) } else { (vb, va) };
+        if let Some(&eid) = by_pair.get(&key) {
+            obj.edges[eid].soft = true;
+        }
+    }
+}
+
 /// Whether `plane` contains the revolution `axis` line: the profile is radial
 /// (its normal perpendicular to the axis, the axis point on the plane). Only
 /// a radial profile can reach the axis to form a pole (design §9).
@@ -5921,9 +6463,33 @@ fn split_profile_for_pole(
     if twice_area.dot(n) < 0.0 {
         half.reverse();
     }
-    Profile::new(plane, half, vec![])
-        .map(Some)
-        .map_err(|_| FollowMeError::ProfileCrossesAxis)
+    let mut split =
+        Profile::new(plane, half, vec![]).map_err(|_| FollowMeError::ProfileCrossesAxis)?;
+    // Carry the parent circle's identity onto the half-profile (design
+    // §7c): the split's gate guarantees the outer ring IS one attributed
+    // axis-centered circle, so every surviving edge — including the two
+    // CLIPPED partial chords at the poles — belongs to it; without this
+    // the longitudinal softening sees no shared curve and a sphere keeps
+    // hard latitude seams per facet. The identity is a smoothness/
+    // adjacency claim only: wall stamps still verify-or-drop, and profile
+    // attribution is never written as a validated edge claim on result
+    // edges. The closing edge that LIES ALONG the axis is honestly
+    // unattributed (it is straight, and its wall is the suppressed
+    // interior).
+    let parent = (0..profile.outer().len()).find_map(|k| profile.outer_curve(k));
+    if let Some(g) = parent {
+        let ring = split.outer().to_vec();
+        let on_axis = |q: Point3| axis.distance(q) <= tol::POINT_MERGE;
+        let curves: Vec<Option<crate::sketch::CurveGeom>> = (0..ring.len())
+            .map(|k| {
+                let a = ring[k];
+                let b = ring[(k + 1) % ring.len()];
+                (!(on_axis(a) && on_axis(b))).then_some(g)
+            })
+            .collect();
+        split.set_curve_attribution(curves, Vec::new());
+    }
+    Ok(Some(split))
 }
 
 /// Whether a swept wall quad genuinely lies on the cylinder it is about to
@@ -6288,6 +6854,7 @@ fn twin_half_edges(obj: &mut Object, a: HalfEdgeId, b: HalfEdgeId) {
         half_edge: a,
         twin_half_edge: Some(b),
         curve: None,
+        soft: false,
     });
     obj.half_edges[a].twin = Some(b);
     obj.half_edges[a].edge = edge;
@@ -6408,6 +6975,7 @@ fn build_coplanar_wall(
         half_edge: h_sub,
         twin_half_edge: Some(wa),
         curve: None,
+        soft: false,
     });
     obj.half_edges[h_sub].edge = e_top;
     obj.half_edges[wa].edge = e_top;
@@ -6736,6 +7304,7 @@ fn do_split_face(
             half_edge: h_fwd,
             twin_half_edge: Some(h_bwd),
             curve: None,
+            soft: false,
         });
         obj.half_edges[h_fwd].edge = edge_id;
         obj.half_edges[h_bwd].edge = edge_id;
@@ -6970,6 +7539,13 @@ fn split_boundary_edge(
     let edge_id = h.edge;
     let loop_id = h.loop_id;
     let dest_v = obj.half_edges[next_he].origin;
+    // Unlike `curve` (dropped below — a chord midpoint sits inside the
+    // circle, so a split fragment is no longer a valid chord), `soft` is a
+    // pure adjacency/shading classification a mid-edge split doesn't
+    // invalidate: both fragments still join the exact same pair of faces
+    // along the exact same drawn curve the whole edge did. Read it before
+    // the original `Edge` is removed below and carry it to both fragments.
+    let was_soft = obj.edges[edge_id].soft;
 
     // Insert the new vertex.
     let new_v = obj.vertices.insert(Vertex {
@@ -7044,11 +7620,13 @@ fn split_boundary_edge(
             half_edge: h_a,
             twin_half_edge: Some(t_b),
             curve: None,
+            soft: was_soft,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
             twin_half_edge: Some(t_a),
             curve: None,
+            soft: was_soft,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[t_b].edge = edge_a_id;
@@ -7076,16 +7654,21 @@ fn split_boundary_edge(
         // Boundary edge (no twin). A split at an interior point puts the new
         // vertex INSIDE any circle the edge was a chord of (a chord midpoint
         // is nearer the center than the radius), so the fragments are no
-        // longer valid chords — drop the claim (map-or-drop).
+        // longer valid chords — drop the claim (map-or-drop). `was_soft` is
+        // always `false` here in practice (the validator requires a soft
+        // edge to have a twin — see `validate.rs`), but it's carried anyway
+        // for the same reason as the twin branch above rather than assumed.
         edge_a_id = obj.edges.insert(Edge {
             half_edge: h_a,
             twin_half_edge: None,
             curve: None,
+            soft: was_soft,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
             twin_half_edge: None,
             curve: None,
+            soft: was_soft,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[h_b].edge = edge_b_id;

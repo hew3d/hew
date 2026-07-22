@@ -140,6 +140,11 @@ impl Object {
                     return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
                 }
             }
+            // A SOFT mark (design §7b) claims the edge is an interior facet
+            // seam — a boundary edge cannot be one.
+            if edge.soft && edge.twin_half_edge.is_none() {
+                return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
+            }
             // A present analytic circle claim must agree with the geometry it
             // describes (map-or-drop's enforcement half): both endpoints are
             // chord facets of the circle, so each lies within tolerance of

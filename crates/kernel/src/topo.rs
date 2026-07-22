@@ -64,6 +64,21 @@ pub struct Edge {
     /// `IMPORT_PLANE_DIST` for imported) of `radius` from `center`. Persisted
     /// in geometry buffer v5.
     pub curve: Option<crate::sketch::CurveGeom>,
+    /// SOFT edge (design §7b): the transverse joint between two sweep wall
+    /// facets of one drawn curve — a facet seam of a smooth surface, not a
+    /// real crease. The tessellator smooths shading across it and routes
+    /// its line to the suppressed soft buffer. Marked only at sweep birth
+    /// where the adjacent path bands share one [`CurveGeom`] (never a
+    /// dihedral guess); survives ANY transform that keeps the edge itself
+    /// (`apply_transform` never reads or resets it — not only rigid maps,
+    /// since a swept curve's smooth-shading claim stays true under a
+    /// non-uniform scale too), and survives splitting the edge (a mid-edge
+    /// split is still the same drawn-curve joint on both fragments — unlike
+    /// `curve` above, whose chord claim a split genuinely invalidates).
+    /// Dropped only where the edge itself does not survive: booleans
+    /// rebuild edges fresh. A soft edge must be interior (have a twin) —
+    /// pinned by the validator. Persisted in geometry buffer v6.
+    pub soft: bool,
 }
 
 /// Whether a loop is a face's outer boundary or a hole.

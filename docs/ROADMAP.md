@@ -76,21 +76,25 @@ below.
   whose walls would ram a distant part of a non-convex solid still refuses,
   since that is a real self-intersection.) Undo of a wall-building push is
   exact, recorded as data
-- Follow Me: sweep a closed sketch profile along a path — a connected
-  chain of sketch edges (lines and arcs, open or closed) or a solid
-  face's outer boundary — into a new watertight solid, mitered at every
-  path corner. The profile must sit perpendicular across the path (Hew
-  never re-orients it); closed loops weld their seam exactly (frames,
-  faceted-lathe rings). A radial profile that reaches the axis of a drawn
-  circle path closes a pole rather than refusing — the SketchUp sphere
-  (a circle profile crossing the axis splits and revolves one half),
-  goblets, and cones, each a single watertight genus-0 solid. A drawn
-  circle swept along a straight run stays a true stamped cylinder, while
-  walls around a path's turns keep honest facets (no toroidal surface
-  identity yet). Ineligible sweeps — non-perpendicular or detached
-  profiles, branching or disconnected selections, bends tighter than the
-  profile, an on-axis profile on a non-circular path, self-intersecting
-  results — refuse typed with the document untouched
+- Follow Me: sweep a closed sketch profile — or any face of a solid —
+  along a path (a connected chain of sketch edges, a solid face's
+  boundary, or a face reached through a component instance) into a new
+  watertight solid, mitered at every path corner, with corner seams and
+  detached paths handled. A profile that is not perpendicular is stood
+  upright automatically (the swept copy folds into place, hinged where it
+  meets the path; the source is untouched), so flat-drawn profiles lathe
+  and frame directly. Partial sweeps drag to a stop in either direction
+  around a closed loop; a Ctrl/Cmd-click merges the molding with the
+  path's own solid in one gesture and one undo step (carving where it
+  overlaps, adding where it rides the surface). Sweeps committed inside a
+  group land in that group. Facet seams of drawn curves — along the path
+  and around the profile — render soft (smoothed shading, no seam lines);
+  a drawn circle swept along a straight run stays a true stamped
+  cylinder, while walls around a path's turns keep honest facets (no
+  toroidal surface identity yet — see Planned). Ineligible sweeps —
+  branching or disconnected selections, bends tighter than the profile,
+  straddled corner starts, an on-axis profile on a non-circular path,
+  self-intersecting results — refuse typed with the document untouched
 - Move and rotate with axis-locked inference snapping; tapping Option/Alt
   durably toggles Move between moving and copying (so an exact copy
   distance can be typed), and a committed copy refines into an array:
@@ -320,6 +324,13 @@ below.
 
 ### Longer-term
 
+- **True toroidal surfaces** (`SurfaceRef::Torus`): sweep walls around a
+  turning path currently carry no analytic surface claim — a cylinder
+  claim there would be false, so the verifier refuses it and push/pull
+  and refacet on such walls stay facet-level (rendering is already
+  smooth via soft seams). A torus surface class through the validator,
+  tessellation, and serialization (a geometry-buffer bump) restores
+  analytic behavior for pipes and lathe rings
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
 - **Nested component definitions** (a component containing other

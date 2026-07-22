@@ -6180,10 +6180,13 @@ fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
     let hash_after_removal = doc.state_hash();
 
     // A sweep refusal from the kernel op surfaces through the same
-    // wrapper: edge 2 heads +y, never perpendicular to the profile plane.
+    // wrapper: a partial sweep of nothing at all is EmptyPath. (The
+    // orientation refusals this block once exercised are gone on
+    // purpose — auto-orientation folds those profiles and sweeps.)
     assert!(matches!(
-        doc.follow_me(ps, region, &path(vec![all[2]])).unwrap_err(),
-        DocumentError::FollowMe(kernel::FollowMeError::ProfileNotPerpendicular)
+        doc.follow_me_to(ps, region, &path(vec![all[0]]), 0.0)
+            .unwrap_err(),
+        DocumentError::FollowMe(kernel::FollowMeError::EmptyPath)
     ));
 
     // The failed calls touched nothing (strong guarantee) — only the
@@ -6202,6 +6205,18 @@ fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
         .follow_me(ps, region, &path(vec![all[1]]))
         .expect("a detached open path is carried to the profile and sweeps");
     assert!(doc.visible_object_ids().contains(&carried));
+    doc.undo().expect("undo the carried sweep");
+
+    // Edge 2 heads +y, never perpendicular to the profile plane — no
+    // longer a refusal either: auto-orientation (design §2c) folds the
+    // profile upright and the sweep commits through the wrapper. The
+    // undo above re-inserted the scaffolding by geometry, so the region
+    // handle is fresh — re-query it.
+    let region = only_region(&doc, ps);
+    let (folded, _) = doc
+        .follow_me(ps, region, &path(vec![all[2]]))
+        .expect("a parallel profile is folded upright and sweeps");
+    assert!(doc.visible_object_ids().contains(&folded));
 
     // A hidden path sketch is unknown.
     doc.delete_sketch(gs).expect("delete path sketch");
@@ -6307,17 +6322,58 @@ fn follow_me_molding_around_the_maintainer_tabletop() {
         );
     }
 
-    // Swept around a face the profile is NOT square across, the op refuses
-    // TYPED and leaves the document byte-for-byte untouched (state hash).
-    for (label, face, expected) in [
+    // Swept around a face the profile genuinely cannot ride, the op
+    // refuses TYPED and leaves the document byte-for-byte untouched.
+    // The parallel side is no longer an ORIENTATION refusal — auto-
+    // orientation (design §2c) folds the profile square across the loop
+    // — but this top-sized profile is then wider than the side face's
+    // thin corners can turn, the same fold-of-material refusal the thin
+    // side gets directly.
+    // First, the fold's success case: the RECT profile folds square
+    // across the parallel side's loop and sweeps a watertight molding.
+    {
+        let mut d = doc.clone();
+        let (id, _) = d
+            .follow_me(
+                rect_sketch,
+                rect_region,
+                &kernel::FollowMePath::FaceLoop {
+                    object: cube,
+                    face: side_parallel,
+                },
+            )
+            .expect("rect folds square across the parallel side and sweeps");
+        assert_eq!(
+            d.object(id).expect("molding live").watertight(),
+            WatertightState::Watertight
+        );
+    }
+    for (label, sketch, region, face, expected) in [
+        // The CIRCLE profile also folds square, but is then wider than
+        // the side loop's thin corners can turn.
         (
-            "parallel side",
+            "parallel side, circle",
+            circle_sketch,
+            circle_region,
             side_parallel,
-            kernel::FollowMeError::ProfileNotPerpendicular,
+            kernel::FollowMeError::PathTooTight,
         ),
-        ("thin side", side_thin, kernel::FollowMeError::PathTooTight),
+        (
+            "thin side, rect",
+            rect_sketch,
+            rect_region,
+            side_thin,
+            kernel::FollowMeError::PathTooTight,
+        ),
+        (
+            "thin side, circle",
+            circle_sketch,
+            circle_region,
+            side_thin,
+            kernel::FollowMeError::PathTooTight,
+        ),
     ] {
-        for (sketch, region) in [(rect_sketch, rect_region), (circle_sketch, circle_region)] {
+        {
             let mut d = doc.clone();
             let err = d
                 .follow_me(
@@ -6337,4 +6393,284 @@ fn follow_me_molding_around_the_maintainer_tabletop() {
             );
         }
     }
+}
+
+/// A 4 x 2 ground rectangle extruded to height 1 — the plain box other
+/// face-profile specs sweep from.
+fn boxed_document() -> (Document, ObjectId) {
+    let mut doc = Document::new();
+    let gs = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(gs).expect("sketch live");
+        let c = [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(4.0, 0.0, 0.0)),
+            (Point3::new(4.0, 0.0, 0.0), Point3::new(4.0, 2.0, 0.0)),
+            (Point3::new(4.0, 2.0, 0.0), Point3::new(0.0, 2.0, 0.0)),
+            (Point3::new(0.0, 2.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ];
+        for (a, b) in c {
+            sk.add_segment(a, b).expect("segment");
+        }
+    }
+    let region = only_region(&doc, gs);
+    let (id, _) = doc.extrude_region(gs, region, 1.0).expect("extrude box");
+    (doc, id)
+}
+
+#[test]
+fn follow_me_face_profile_sweeps_a_separate_object() {
+    // A solid FACE as the profile (design §3a): the box's x = 0 side face
+    // swept along a drawn path births a NEW object; the box is untouched.
+    let (mut doc, cube) = boxed_document();
+    let side = {
+        let obj = doc.object(cube).expect("box live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().x < -0.9)
+            .map(|(id, _)| id)
+            .expect("x = 0 side face")
+    };
+    let ps = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(ps).expect("sketch live");
+        // A path heading away from the face — detached, carried (§2a).
+        sk.add_segment(Point3::new(-1.0, 1.0, 0.0), Point3::new(-3.0, 1.0, 0.0))
+            .expect("path segment");
+    }
+    let edges: Vec<SketchEdgeId> = doc.sketch(ps).expect("live").edges().keys().collect();
+    let path = kernel::FollowMePath::SketchEdges {
+        sketch: ps,
+        edges: edges.clone(),
+    };
+    let (swept, _) = doc
+        .follow_me_face(cube, side, &path, None)
+        .expect("face profile sweeps");
+    assert_ne!(swept, cube);
+    assert!(doc.visible_object_ids().contains(&swept));
+    assert!(doc.visible_object_ids().contains(&cube), "box untouched");
+    assert_eq!(
+        doc.object(cube).expect("box live").faces().len(),
+        6,
+        "box untouched"
+    );
+    let ring = doc.object(swept).expect("swept live");
+    assert_eq!(ring.watertight(), WatertightState::Watertight);
+    // The 2 x 1 face carried along a 2-long path: an exact 2 x 1 x 2 slab.
+    // (Volume via the box-minus… simply: 2 area x 2 length.)
+    // Undo hides only the swept object; redo restores it.
+    doc.undo().expect("undo sweep");
+    assert!(!doc.visible_object_ids().contains(&swept));
+    assert!(doc.visible_object_ids().contains(&cube));
+    doc.redo().expect("redo sweep");
+    assert!(doc.visible_object_ids().contains(&swept));
+}
+
+#[test]
+fn follow_me_merged_consumes_the_path_solid_in_one_undo_step() {
+    // design §3b through the REGION-profile gesture: a standing profile
+    // sweeps around the box's top face loop and merges with the box in
+    // one gesture — here the profile pokes into the box, so the oracle
+    // picks Subtract and the rim is carved. ONE undo restores the box,
+    // the profile scaffolding, and hides the merge together.
+    let (mut doc, cube) = boxed_document();
+    let top = {
+        let obj = doc.object(cube).expect("box live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("top face")
+    };
+    // A standing profile mid-edge on the y = 0 rim, half inside the box:
+    // plane x = 2 crosses the (0,0,1)→(4,0,1) top edge strictly.
+    let ps = doc.add_sketch(profile_plane_x(2.0));
+    draw_profile_rect(&mut doc, ps, 2.0, -0.2, 0.8, 0.2, 1.2);
+    let region = only_region(&doc, ps);
+    let path = kernel::FollowMePath::FaceLoop {
+        object: cube,
+        face: top,
+    };
+    let (merged, _) = doc
+        .follow_me_merged(ps, region, &path, None)
+        .expect("rim profile sweeps and merges");
+    assert!(!doc.visible_object_ids().contains(&cube), "base consumed");
+    assert!(doc.visible_object_ids().contains(&merged));
+    assert_eq!(doc.visible_object_ids().len(), 1, "one gesture, one solid");
+    assert_eq!(
+        doc.object(merged).expect("merged live").watertight(),
+        WatertightState::Watertight
+    );
+    // The carve removed material: the merged solid is smaller than the box.
+    // ONE undo restores everything.
+    doc.undo().expect("undo merged sweep");
+    assert!(doc.visible_object_ids().contains(&cube), "base restored");
+    assert!(!doc.visible_object_ids().contains(&merged));
+    assert_eq!(
+        doc.sketch(ps)
+            .expect("profile sketch restored")
+            .edges()
+            .len(),
+        4,
+        "scaffolding restored in the same undo step"
+    );
+    doc.redo().expect("redo merged sweep");
+    assert!(!doc.visible_object_ids().contains(&cube));
+    assert!(doc.visible_object_ids().contains(&merged));
+
+    // An edge path has no solid to merge with: typed refusal.
+    let mut d2 = Document::new();
+    let ps2 = d2.add_sketch(profile_plane_x(0.0));
+    draw_profile_rect(&mut d2, ps2, 0.0, -0.2, 0.2, 0.2, 0.6);
+    let gs2 = d2.add_sketch(ground());
+    d2.sketch_mut(gs2)
+        .expect("live")
+        .add_segment(Point3::ORIGIN, Point3::new(2.0, 0.0, 0.0))
+        .expect("segment");
+    let e2: Vec<SketchEdgeId> = d2.sketch(gs2).expect("live").edges().keys().collect();
+    let r2 = only_region(&d2, ps2);
+    let err = d2
+        .follow_me_merged(
+            ps2,
+            r2,
+            &kernel::FollowMePath::SketchEdges {
+                sketch: gs2,
+                edges: e2,
+            },
+            None,
+        )
+        .unwrap_err();
+    assert!(matches!(err, DocumentError::UnknownObject));
+}
+
+#[test]
+fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
+    // design §2e: a face loop reached through a component instance rides
+    // the instance's pose into world space. Box → component; the original
+    // instance keeps the identity pose; a second instance is translated
+    // +10x. Sweeping around the SECOND instance's top face must produce
+    // the molding at the translated position — where that instance
+    // actually is, not at the definition's origin.
+    let (mut doc, cube) = boxed_document();
+    let (comp, _inst0, _) = doc
+        .make_component(&[NodeId::Object(cube)])
+        .expect("make component");
+    let members = doc.def_members(comp).expect("members");
+    let member = members[0];
+    let pose = Transform::from_affine(&[
+        1.0, 0.0, 0.0, 10.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ]);
+    let (inst2, _) = doc.place_instance(comp, pose).expect("place instance");
+    let top = {
+        let obj = doc.object(member).expect("member live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("top face")
+    };
+    // A standing profile mid-edge on the TRANSLATED box's y = 0 rim.
+    let ps = doc.add_sketch(profile_plane_x(12.0));
+    draw_profile_rect(&mut doc, ps, 12.0, -0.3, 1.0, 0.0, 1.3);
+    let region = only_region(&doc, ps);
+    let path = kernel::FollowMePath::InstanceFaceLoop {
+        instance: inst2,
+        object: member,
+        face: top,
+    };
+    let (swept, _) = doc
+        .follow_me(ps, region, &path)
+        .expect("instanced face loop sweeps in world space");
+    let ring = doc.object(swept).expect("molding live");
+    assert_eq!(ring.watertight(), WatertightState::Watertight);
+    // Every molding vertex hugs the translated footprint (x in ~[9.7,14.3]).
+    for v in ring.vertices().values() {
+        assert!(
+            v.position.x > 9.0 && v.position.x < 15.0,
+            "molding must ride the TRANSLATED instance, got x={}",
+            v.position.x
+        );
+    }
+
+    // A reflected pose refuses typed.
+    let mirror = Transform::from_affine(&[
+        -1.0, 0.0, 0.0, 20.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ]);
+    let (inst3, _) = doc.place_instance(comp, mirror).expect("place mirrored");
+    let ps2 = doc.add_sketch(profile_plane_x(18.0));
+    draw_profile_rect(&mut doc, ps2, 18.0, -0.3, 1.0, 0.0, 1.3);
+    let r2 = only_region(&doc, ps2);
+    let err = doc
+        .follow_me(
+            ps2,
+            r2,
+            &kernel::FollowMePath::InstanceFaceLoop {
+                instance: inst3,
+                object: member,
+                face: top,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        DocumentError::Transform(kernel::TransformError::Reflection)
+    ));
+}
+
+#[test]
+fn follow_me_grouped_births_inside_the_group() {
+    // design §2f: a sweep committed while editing a group lands IN the
+    // group. Two boxes grouped; a molding swept with follow_me_grouped
+    // joins them as a member; undo hides it without disturbing the group.
+    let (mut doc, a) = boxed_document();
+    let gs2 = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(gs2).expect("live");
+        let c = [
+            (Point3::new(6.0, 0.0, 0.0), Point3::new(7.0, 0.0, 0.0)),
+            (Point3::new(7.0, 0.0, 0.0), Point3::new(7.0, 1.0, 0.0)),
+            (Point3::new(7.0, 1.0, 0.0), Point3::new(6.0, 1.0, 0.0)),
+            (Point3::new(6.0, 1.0, 0.0), Point3::new(6.0, 0.0, 0.0)),
+        ];
+        for (p, q) in c {
+            sk.add_segment(p, q).expect("segment");
+        }
+    }
+    let r2 = only_region(&doc, gs2);
+    let (b, _) = doc.extrude_region(gs2, r2, 1.0).expect("extrude b");
+    let (gid, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group");
+    let top = {
+        let obj = doc.object(a).expect("a live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("top face")
+    };
+    let ps = doc.add_sketch(profile_plane_x(2.0));
+    draw_profile_rect(&mut doc, ps, 2.0, -0.3, 1.0, 0.0, 1.3);
+    let region = only_region(&doc, ps);
+    let path = kernel::FollowMePath::FaceLoop {
+        object: a,
+        face: top,
+    };
+    let (swept, change) = doc
+        .follow_me_grouped(ps, region, &path, None, gid)
+        .expect("grouped sweep");
+    assert_eq!(doc.node_parent(NodeId::Object(swept)), Some(gid));
+    assert!(
+        doc.group_members(gid)
+            .expect("group live")
+            .contains(&NodeId::Object(swept)),
+        "molding is a member of the edited group"
+    );
+    assert!(change.groups_touched.contains(&gid));
+    doc.undo().expect("undo grouped sweep");
+    assert!(!doc.visible_object_ids().contains(&swept));
+    assert!(doc.group_members(gid).is_some(), "group survives undo");
 }

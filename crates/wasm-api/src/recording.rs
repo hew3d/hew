@@ -115,6 +115,10 @@ pub enum RecordedCall {
         region: u64,
         path_sketch: u64,
         path_edges: Vec<u64>,
+        /// Group-context birth (design §2f), absent for top-level. Same
+        /// additive posture as `stop_len`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<u64>,
         /// Partial-sweep stop (arc length from the seam), absent for a
         /// full sweep. `skip_serializing_if` keeps a full sweep's record
         /// byte-identical to what it was before the field existed, so no
@@ -134,6 +138,51 @@ pub enum RecordedCall {
         path_face: u64,
         /// Partial-sweep stop, exactly as on
         /// [`RecordedCall::FollowMeAlongEdges`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+        /// Group-context birth (design §2f), absent for top-level.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<u64>,
+    },
+    /// `follow_me_around_instance_face(...)` — a face loop reached through
+    /// a component instance (design §2e). Additive variant.
+    FollowMeAroundInstanceFace {
+        sketch: u64,
+        region: u64,
+        instance: u64,
+        path_object: u64,
+        path_face: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `follow_me_merged_around_face(...)` — the merged molding gesture
+    /// (design §3b). Additive variant, same posture as
+    /// [`RecordedCall::FollowMeAlongEdges`].
+    FollowMeMergedAroundFace {
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `follow_me_face_along_edges(...)` — a solid face as the profile
+    /// (design §3a). Additive variant.
+    FollowMeFaceAlongEdges {
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `follow_me_face_around_face(...)` — a solid face as the profile,
+    /// swept around a face loop. Additive variant.
+    FollowMeFaceAroundFace {
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
     },

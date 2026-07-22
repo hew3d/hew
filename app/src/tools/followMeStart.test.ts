@@ -4,8 +4,9 @@
  * These pin the property that matters most: the cue must never say "legal
  * here" where the kernel refuses. So every affirmative case is a placement the
  * kernel's own scan in `Object::from_follow_me` accepts, every refusal case is
- * one it rejects, and the three-valued contract (no `'ok'` on an f32 face
- * loop, `'unknown'` inside the slop band) is pinned explicitly.
+ * one it rejects, and the four-valued contract (no `'ok'` on an f32 face loop,
+ * `'unknown'` inside the slop band, `'orient'` where auto-orientation now
+ * folds a placement the kernel used to refuse outright) is pinned explicitly.
  *
  * The end-to-end cross-check against the REAL kernel — the same lathe scene,
  * driven with real pointer input, wrong placement warned about and right
@@ -14,9 +15,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   evaluateStart,
-  startAffordance,
   chainPath,
   refusalGuidance,
+  orientGuidance,
   type PathPolyline,
   type PathSegment,
   type PlaneDef,
@@ -85,71 +86,19 @@ describe('followMeStart — circle path', () => {
     expect(evaluateStart(circlePath(), plane([0, 0, 0], n))).toEqual({ kind: 'ok' })
   })
 
-  it('refuses a profile lying FLAT on the circle plane (the classic mistake)', () => {
-    expect(evaluateStart(circlePath(), plane([0, 0, 0], GROUND_NORMAL))).toEqual({
-      kind: 'refused',
-      reason: 'not-radial',
-    })
+  it('informs (not warns) about a profile lying FLAT on the circle plane — auto-orientation folds it up', () => {
+    // Used to be the decisive "not radial" refusal; the kernel now folds a
+    // flat profile up into the lathe instead of refusing (design §2c), so
+    // the cue is informational, not a red warning.
+    expect(evaluateStart(circlePath(), plane([0, 0, 0], GROUND_NORMAL))).toEqual({ kind: 'orient' })
   })
 
-  it('refuses an upright profile whose plane MISSES the circle centre', () => {
+  it('informs about an upright profile whose plane MISSES the circle centre — the fold recentres it', () => {
     // Correctly oriented, but offset — the placement a user lands on when the
-    // quadrant snap was not taken.
-    expect(evaluateStart(circlePath(), plane([0, 0.3, 0], [0, 1, 0]))).toEqual({
-      kind: 'refused',
-      reason: 'not-radial',
-    })
-  })
-
-  it('marks the four quadrants, phased exactly as the inference engine phases them', () => {
-    // The expected points are worked out BY HAND from the kernel's
-    // `geom2d::plane_axes`, NOT by calling this module's `planeAxes` — routing
-    // the expectation through the implementation would make a phase error
-    // invisible (swap u and v and such a test still passes, because every
-    // orthonormal basis puts the markers on the same circle). For n = (0,0,1)
-    // the reference vector is (1,0,0) (smallest |component|, ties to x), so
-    // u = n × ref = (0,1,0) and v = n × u = (-1,0,0); the quadrants at
-    // 0, π/2, π, 3π/2 are therefore +u, +v, -u, -v in that order.
-    const { legal, blocked } = startAffordance(circlePath(), GROUND_NORMAL)
-    expect(blocked).toHaveLength(0) // a circle has facet joints, not corners
-    const expected: Vec3[] = [
-      [0, 1, 0],
-      [-1, 0, 0],
-      [0, -1, 0],
-      [1, 0, 0],
-    ]
-    expect(legal).toHaveLength(4)
-    legal.forEach((p, i) => {
-      p.forEach((c, j) => expect(c).toBeCloseTo(expected[i][j], 12))
-    })
-  })
-
-  it('derives that phase from the plane normal, so a standing circle is phased too', () => {
-    // n = (0,1,0): the reference vector is (1,0,0) again (|x| = |z| = 0, ties
-    // to x), so u = n × ref = (0,0,-1) and v = n × u = (-1,0,0). Hand-derived
-    // for the same reason, and with a DIFFERENT basis, so a u/v swap cannot
-    // satisfy both this case and the previous one.
-    const flat = circlePath()
-    const standing: PathPolyline = {
-      segments: flat.segments.map((s) => ({
-        a: [s.a[0], 0, s.a[1]] as Vec3,
-        b: [s.b[0], 0, s.b[1]] as Vec3,
-        curve: { center: [0, 0, 0], radius: 1 },
-      })),
-      closed: true,
-      exact: true,
-    }
-    const { legal } = startAffordance(standing, [0, 1, 0])
-    const expected: Vec3[] = [
-      [0, 0, -1],
-      [-1, 0, 0],
-      [0, 0, 1],
-      [1, 0, 0],
-    ]
-    expect(legal).toHaveLength(4)
-    legal.forEach((p, i) => {
-      p.forEach((c, j) => expect(c).toBeCloseTo(expected[i][j], 12))
-    })
+    // quadrant snap was not taken. Auto-orientation's off-center slide (the
+    // "already perpendicular" branch of `orient_profile_to_path`) recentres
+    // it instead of refusing.
+    expect(evaluateStart(circlePath(), plane([0, 0.3, 0], [0, 1, 0]))).toEqual({ kind: 'orient' })
   })
 
   it('accepts a joint shared by two SEPARATELY drawn arcs of one circle', () => {
@@ -164,33 +113,7 @@ describe('followMeStart — circle path', () => {
       // identity-based test would see corners here.
       segments: path.segments.map((s) => ({ ...s, curve: { ...s.curve! } })),
     }
-    const { legal, blocked } = startAffordance(twoArcs, GROUND_NORMAL)
-    expect(blocked).toHaveLength(0)
-    expect(legal).toHaveLength(4)
     expect(evaluateStart(twoArcs, plane([0, 0, 0], [0, 1, 0]))).toEqual({ kind: 'ok' })
-  })
-
-  it('offsets the quadrants with the circle, not with the world origin', () => {
-    const { legal } = startAffordance(circlePath(2, 24, [5, -1, 0]), GROUND_NORMAL)
-    for (const p of legal) {
-      expect(Math.hypot(p[0] - 5, p[1] + 1)).toBeCloseTo(2, 9)
-    }
-  })
-
-  it('treats a curve chain with no analytic definition as plain segments — now all POTENTIAL corner seams', () => {
-    // The kernel's every curve branch is gated on the CurveGeom being present,
-    // so a chain without one is plain segments all the way round — and design
-    // §2b's corner seam reaches any vertex with a plain flank, so every one of
-    // them is now a legal-to-AIM-AT position (the fold test still judges the
-    // actual profile per hover; this marker is position-only, same as always).
-    const path = circlePath()
-    const stripped: PathPolyline = {
-      ...path,
-      segments: path.segments.map((s) => ({ ...s, curve: null })),
-    }
-    const { legal, blocked } = startAffordance(stripped, GROUND_NORMAL)
-    expect(blocked).toHaveLength(0)
-    expect(legal).toHaveLength(24)
   })
 })
 
@@ -237,12 +160,18 @@ describe('followMeStart — closed polyline path (the rectangle)', () => {
     expect(refusalGuidance('corner-overhang')).toContain('corner')
   })
 
-  it('refuses a profile square to nothing', () => {
+  it('orientGuidance is informational — no "refused" vocabulary', () => {
+    const copy = orientGuidance()
+    expect(copy.toLowerCase()).not.toContain('refus')
+    expect(copy.toLowerCase()).toContain('upright')
+  })
+
+  it('informs (not warns) about a profile square to nothing — auto-orientation folds it upright', () => {
+    // Used to be the decisive "not square" refusal; the kernel now folds a
+    // profile square to nothing into a legal placement (design §2c) — see
+    // `follow_me_auto_orients_a_flat_profile_around_a_frame` in op_specs.rs.
     const d = Math.SQRT1_2
-    expect(evaluateStart(rectPath(), plane([1, 0.5, 0], [d, d, 0]))).toEqual({
-      kind: 'refused',
-      reason: 'not-square',
-    })
+    expect(evaluateStart(rectPath(), plane([1, 0.5, 0], [d, d, 0]))).toEqual({ kind: 'orient' })
   })
 
   it('refuses a profile square to the path but not touching it', () => {
@@ -250,15 +179,6 @@ describe('followMeStart — closed polyline path (the rectangle)', () => {
       kind: 'refused',
       reason: 'detached',
     })
-  })
-
-  it('marks every corner as a potential start and offers no permanently blocked point', () => {
-    // Every vertex has at least one plain flank, so every one is a potential
-    // corner-seam start now (design §2b) — position-only, contingent on the
-    // profile actually hovering there (judged per-hover by `evaluateStart`).
-    const { legal, blocked } = startAffordance(rectPath(), GROUND_NORMAL)
-    expect(blocked).toHaveLength(0)
-    expect(legal).toHaveLength(4)
   })
 })
 
@@ -285,22 +205,11 @@ describe('followMeStart — open path', () => {
     })
   })
 
-  it('refuses a profile square to neither end', () => {
-    expect(evaluateStart(lPath(), plane([0, 0, 0], [0, 0, 1]))).toEqual({
-      kind: 'refused',
-      reason: 'not-square',
-    })
-  })
-
-  it('marks both ends as legal starts and marks nothing as blocked', () => {
-    // An interior vertex of an open path is no more illegal than the straight
-    // run beside it, so blocking only the vertex would mislead.
-    const { legal, blocked } = startAffordance(lPath(), GROUND_NORMAL)
-    expect(blocked).toHaveLength(0)
-    expect(legal).toHaveLength(2)
-    expect(legal.map((p) => p.join(','))).toEqual(
-      expect.arrayContaining(['0,0,0', '2,2,0']),
-    )
+  it('informs (not warns) about a profile square to neither end — auto-orientation folds it onto the nearer one', () => {
+    // Used to be the decisive "not square" refusal; the kernel now folds the
+    // profile onto whichever end it's nearest and retries (design §2c) — see
+    // `follow_me_auto_orient_hinges_at_a_touching_flap` in op_specs.rs.
+    expect(evaluateStart(lPath(), plane([0, 0, 0], [0, 0, 1]))).toEqual({ kind: 'orient' })
   })
 })
 
@@ -375,11 +284,10 @@ describe('followMeStart — what it refuses to claim', () => {
       kind: 'refused',
       reason: 'corner-overhang',
     })
+    // Square to nothing is 'orient' now (auto-orientation), not a refusal —
+    // even on an f32 face loop, which never earns the affirmative 'ok'.
     const d = Math.SQRT1_2
-    expect(evaluateStart(rectPath(false), plane([1, 0.5, 0], [d, d, 0]))).toEqual({
-      kind: 'refused',
-      reason: 'not-square',
-    })
+    expect(evaluateStart(rectPath(false), plane([1, 0.5, 0], [d, d, 0]))).toEqual({ kind: 'orient' })
   })
 
   it('says unknown, not refused, for a placement inside the slop band', () => {

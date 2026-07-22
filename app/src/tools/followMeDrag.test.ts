@@ -11,6 +11,7 @@ import {
   nearestOnWalk,
   subWalkTo,
   pointAtArcLength,
+  reverseWalk,
   type PathPolyline,
   type PathSegment,
   type PlaneDef,
@@ -125,5 +126,26 @@ describe('followMeDrag — subWalkTo / pointAtArcLength', () => {
   it('a sub-walk to the full total reproduces every vertex', () => {
     const walk = seamWalk(lPath(), plane([0, 0, 0], [0, 1, 0]), [1, 1, 0])!
     expect(subWalkTo(walk, walk.total)).toEqual(walk.points)
+  })
+})
+
+describe('followMeDrag — reverseWalk (K2 — direction-aware drag)', () => {
+  it('keeps the seam in place but re-orients cumulative arc length the other way', () => {
+    const walk = seamWalk(squarePath(), plane([0, 0, 0], [1, 0, 0]), [0.01, 0.01, 0])!
+    const rev = reverseWalk(walk)
+    expect(rev.points[0]).toEqual(walk.points[walk.points.length - 1])
+    expect(rev.points[rev.points.length - 1]).toEqual(walk.points[0])
+    expect(rev.total).toBeCloseTo(walk.total, 9)
+    // A point `s` meters before the seam on the FORWARD walk (arc length
+    // `total - s`) is `s` meters from the seam on the REVERSE walk — the
+    // same physical point, reached the other way (float-close: the two
+    // sides accumulate their arc lengths in opposite order).
+    for (const s of [1, 3]) {
+      const a = pointAtArcLength(rev, s)
+      const b = pointAtArcLength(walk, walk.total - s)
+      expect(a[0]).toBeCloseTo(b[0], 9)
+      expect(a[1]).toBeCloseTo(b[1], 9)
+      expect(a[2]).toBeCloseTo(b[2], 9)
+    }
   })
 })

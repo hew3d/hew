@@ -1818,3 +1818,106 @@ fn curves_entry_in_a_gap_is_rejected() {
         "a curves[] definition in an index gap must be a typed load failure"
     );
 }
+
+#[test]
+fn soft_edges_round_trip_v6() {
+    // A smooth-ring sweep's SOFT joints (geometry buffer v6) survive a
+    // save/load round trip exactly — same count, all interior — and the
+    // canonical bytes are stable across a re-save.
+    let mut doc = kernel::Document::new();
+    let gs = doc.add_sketch(
+        kernel::Plane::from_point_normal(kernel::Point3::ORIGIN, kernel::Vec3::new(0.0, 0.0, 1.0))
+            .unwrap(),
+    );
+    {
+        let sk = doc.sketch_mut(gs).expect("sketch live");
+        sk.begin_curve_with(kernel::CurveGeom {
+            center: kernel::Point3::ORIGIN,
+            radius: 2.0,
+        })
+        .expect("curve begin");
+        let n = 24;
+        let pt = |i: usize| {
+            let a = i as f64 / n as f64 * std::f64::consts::TAU;
+            kernel::Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)
+        };
+        for i in 0..n {
+            sk.add_segment(pt(i), pt((i + 1) % n)).expect("facet");
+        }
+        sk.end_curve();
+    }
+    let path_edges: Vec<kernel::SketchEdgeId> =
+        doc.sketch(gs).expect("live").edges().keys().collect();
+    let ps = doc.add_sketch(
+        kernel::Plane::from_point_normal(
+            kernel::Point3::new(0.0, 0.0, 0.0),
+            kernel::Vec3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap(),
+    );
+    {
+        let sk = doc.sketch_mut(ps).expect("sketch live");
+        let c = [
+            (
+                kernel::Point3::new(1.7, 0.0, -0.25),
+                kernel::Point3::new(2.3, 0.0, -0.25),
+            ),
+            (
+                kernel::Point3::new(2.3, 0.0, -0.25),
+                kernel::Point3::new(2.3, 0.0, 0.25),
+            ),
+            (
+                kernel::Point3::new(2.3, 0.0, 0.25),
+                kernel::Point3::new(1.7, 0.0, 0.25),
+            ),
+            (
+                kernel::Point3::new(1.7, 0.0, 0.25),
+                kernel::Point3::new(1.7, 0.0, -0.25),
+            ),
+        ];
+        for (a, b) in c {
+            sk.add_segment(a, b).expect("profile");
+        }
+    }
+    let region = doc
+        .sketch(ps)
+        .expect("live")
+        .regions()
+        .keys()
+        .next()
+        .expect("one region");
+    let (ring, _) = doc
+        .follow_me(
+            ps,
+            region,
+            &kernel::FollowMePath::SketchEdges {
+                sketch: gs,
+                edges: path_edges,
+            },
+        )
+        .expect("smooth ring sweeps");
+    let soft_before = doc
+        .object(ring)
+        .expect("ring live")
+        .edges()
+        .values()
+        .filter(|e| e.soft)
+        .count();
+    assert!(soft_before >= 24, "ring is soft-jointed, got {soft_before}");
+
+    let bytes = doc.save();
+    let loaded = kernel::Document::load(&bytes).expect("load v6");
+    let loaded_ring = *loaded
+        .visible_object_ids()
+        .first()
+        .expect("ring survives the trip");
+    let soft_after = loaded
+        .object(loaded_ring)
+        .expect("live")
+        .edges()
+        .values()
+        .filter(|e| e.soft)
+        .count();
+    assert_eq!(soft_before, soft_after, "soft marks round-trip exactly");
+    assert_eq!(loaded.save(), bytes, "canonical bytes stable");
+}

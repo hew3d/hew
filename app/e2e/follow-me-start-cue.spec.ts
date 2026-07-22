@@ -7,19 +7,28 @@ import {
 } from './helpers/projectWorldToScreen'
 
 /**
- * Follow Me's START AFFORDANCE, cross-checked against the REAL kernel.
+ * Follow Me's profile-hover START VERDICT, cross-checked against the REAL
+ * kernel. (An earlier version of this cue also drew markers on the path
+ * itself before a profile was picked; that layer was removed — see
+ * `followMeStart.ts`'s module docs — and this file now only exercises the
+ * hover verdict that remains.)
  *
- * The affordance predicts, while the cursor is still hovering, whether the
+ * The verdict predicts, while the cursor is still hovering, whether the
  * profile under it can start a sweep on the picked path. The only failure mode
  * that actually matters is a prediction that DISAGREES with the kernel — a cue
- * saying "legal here" where the sweep then refuses is worse than no cue. So
- * both tests below assert the prediction AND then let the kernel answer the
- * same question for real, in the same scene, with real pointer input:
+ * saying "legal here" where the sweep then refuses is worse than no cue, and
+ * (since auto-orientation, design §2c) a cue saying "refused" where the kernel
+ * quietly fixes the placement and sweeps anyway is the same lie in the other
+ * direction. So every test below asserts the prediction AND then lets the
+ * kernel answer the same question for real, in the same scene, with real
+ * pointer input:
  *
- *   1. Predicted refusal ⟹ actual refusal. A profile circle left lying flat
- *      on the ground beside a ground circle path: the tool warns during the
- *      hover, and the click that follows really does come back
- *      `[ProfileNotPerpendicular]`.
+ *   1. Predicted auto-orient ⟹ actual auto-orient success. A profile circle
+ *      left lying flat on the ground beside a ground circle path — the
+ *      textbook first-attempt mistake, and pre-§2c an inevitable post-click
+ *      `[ProfileNotPerpendicular]` refusal. The tool now says it will be
+ *      stood upright automatically, and the click really does sweep a
+ *      watertight lathe, no refusal at all.
  *   2. Predicted acceptance ⟹ actual acceptance. The same profile stood up
  *      and moved onto the path's rim (the lathe build from
  *      `follow-me.spec.ts`, whose camera and steps this reuses): the tool says
@@ -161,7 +170,7 @@ async function pickPathAndActivate(page: Page, ctx: Ctx): Promise<void> {
   await expect(page.getByText('Click the profile to sweep along')).toBeVisible()
 }
 
-test('Follow Me start cue: a warned-about placement is one the kernel really refuses', async ({
+test('Follow Me start cue: a flat profile beside a circular path is auto-oriented into a lathe, not refused', async ({
   page,
 }) => {
   const ctx = await setup(page)
@@ -169,18 +178,28 @@ test('Follow Me start cue: a warned-about placement is one the kernel really ref
   await pickPathAndActivate(page, ctx)
 
   // Hover the profile circle while it is still lying FLAT on the ground — the
-  // placement that used to teach nothing until the click came back refused.
+  // textbook first attempt, and (pre-auto-orientation) the placement that
+  // used to teach nothing until the click came back refused. Auto-
+  // orientation (design §2c) folds it upright instead, so the cue is
+  // INFORMATIONAL now, never the old red "refused" warning.
   await hoverWorld(page, ctx, 0.35, 0, 0)
-  await expect(page.getByText('Move it onto a marked quadrant')).toBeVisible()
+  await expect(page.getByText('will stand it upright automatically')).toBeVisible()
   // Nothing has been committed, so nothing has been refused yet either.
   await expect(page.getByText('[ProfileNotPerpendicular]')).toHaveCount(0)
 
-  // Now let the kernel answer the same question. The warning is only worth
-  // anything if the kernel agrees, so this click MUST refuse.
+  // Now let the kernel answer the same question. The cue is only honest if
+  // the kernel agrees, so this click MUST sweep a real, watertight lathe —
+  // never refuse.
   await page.mouse.down()
   await page.mouse.up()
-  await expect(page.getByText('[ProfileNotPerpendicular]')).toBeVisible()
-  expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(0)
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+  await expect(page.getByText('[ProfileNotPerpendicular]')).toHaveCount(0)
+  expect(
+    await page.evaluate(() => {
+      const h = window.__hew_test!
+      return h.isObjectSolid(h.getObjectIds()[0])
+    }),
+  ).toBe(true)
 })
 
 test('Follow Me start cue: a confirmed placement is one the kernel really sweeps', async ({

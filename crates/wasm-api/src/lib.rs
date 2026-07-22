@@ -1996,8 +1996,12 @@ impl Scene {
     /// sketch is never touched.
     /// The optional trailing `stop_len` is a PARTIAL sweep: arc length
     /// from the seam at which the sweep is cut and capped (see
-    /// [`kernel::Object::from_follow_me_to`]); `undefined`/`None` sweeps
-    /// the full path exactly as before.
+    /// [`kernel::Object::from_follow_me_to`]); NEGATIVE sweeps |stop| the
+    /// other way around a closed loop (the drag direction);
+    /// `undefined`/`None` sweeps the full path exactly as before.
+    /// The optional trailing `group` births the swept solid INSIDE that
+    /// group (design §2f) — the sweep committed while editing it;
+    /// `undefined`/`None` births top-level exactly as before.
     pub fn follow_me_along_edges(
         &mut self,
         sketch: u64,
@@ -2005,6 +2009,7 @@ impl Scene {
         path_sketch: u64,
         path_edges: Vec<u64>,
         stop_len: Option<f64>,
+        group: Option<u64>,
     ) -> Result<u64, ApiError> {
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
@@ -2016,9 +2021,18 @@ impl Scene {
             edges,
         };
         let sid = sketch_id(sketch);
-        let (id, change) = match stop_len {
-            None => self.doc.follow_me(sid, region_id, &path),
-            Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
+        let (id, change) = match group {
+            Some(g) => self.doc.follow_me_grouped(
+                sid,
+                region_id,
+                &path,
+                stop_len,
+                GroupId::from(KeyData::from_ffi(g)),
+            ),
+            None => match stop_len {
+                None => self.doc.follow_me(sid, region_id, &path),
+                Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
+            },
         }
         .map_err(doc_err)?;
         self.reconcile(&change);
@@ -2028,6 +2042,7 @@ impl Scene {
             path_sketch,
             path_edges,
             stop_len,
+            group,
         });
         Ok(id.data().as_ffi())
     }
@@ -2046,9 +2061,167 @@ impl Scene {
         path_object: u64,
         path_face: u64,
         stop_len: Option<f64>,
+        group: Option<u64>,
     ) -> Result<u64, ApiError> {
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
+            object: object_id(path_object),
+            face: FaceId::from(KeyData::from_ffi(path_face)),
+        };
+        let sid = sketch_id(sketch);
+        let (id, change) = match group {
+            Some(g) => self.doc.follow_me_grouped(
+                sid,
+                region_id,
+                &path,
+                stop_len,
+                GroupId::from(KeyData::from_ffi(g)),
+            ),
+            None => match stop_len {
+                None => self.doc.follow_me(sid, region_id, &path),
+                Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
+            },
+        }
+        .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeAroundFace {
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            group,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::follow_me_around_face`] that MERGES the swept molding with
+    /// the path's own solid in one gesture and ONE undo step (design §3b):
+    /// a sweep overlapping the solid's interior carves it (Subtract), one
+    /// that only rides its surface adds to it (Union) — decided by the
+    /// boolean engine on clones. Returns the merged solid's handle; the
+    /// path solid is consumed exactly like a boolean operand.
+    pub fn follow_me_merged_around_face(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let path = kernel::FollowMePath::FaceLoop {
+            object: object_id(path_object),
+            face: FaceId::from(KeyData::from_ffi(path_face)),
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_merged(sketch_id(sketch), region_id, &path, stop_len)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeMergedAroundFace {
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Follow Me with a solid FACE as the profile (design §3a), along a
+    /// chain of sketch edges: the face's boundary (holes become tunnels)
+    /// sweeps into a NEW object and the source solid is untouched. The
+    /// optional trailing `stop_len` is the partial sweep, exactly as on
+    /// [`Scene::follow_me_along_edges`].
+    pub fn follow_me_face_along_edges(
+        &mut self,
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let edges: Vec<SketchEdgeId> = path_edges
+            .iter()
+            .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
+            .collect();
+        let path = kernel::FollowMePath::SketchEdges {
+            sketch: sketch_id(path_sketch),
+            edges,
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_face(
+                object_id(profile_object),
+                FaceId::from(KeyData::from_ffi(profile_face)),
+                &path,
+                stop_len,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeFaceAlongEdges {
+            profile_object,
+            profile_face,
+            path_sketch,
+            path_edges,
+            stop_len,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Follow Me with a solid FACE as the profile around another face's
+    /// outer boundary loop — [`Scene::follow_me_face_along_edges`]'s
+    /// face-path sibling.
+    pub fn follow_me_face_around_face(
+        &mut self,
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let path = kernel::FollowMePath::FaceLoop {
+            object: object_id(path_object),
+            face: FaceId::from(KeyData::from_ffi(path_face)),
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_face(
+                object_id(profile_object),
+                FaceId::from(KeyData::from_ffi(profile_face)),
+                &path,
+                stop_len,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeFaceAroundFace {
+            profile_object,
+            profile_face,
+            path_object,
+            path_face,
+            stop_len,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Follow Me around a face reached THROUGH a component instance
+    /// (design §2e): the definition face's loop rides the instance's pose
+    /// into world space and the profile region sweeps around it. The
+    /// instance and its definition are untouched; a reflected pose
+    /// refuses typed.
+    pub fn follow_me_around_instance_face(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        instance: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let path = kernel::FollowMePath::InstanceFaceLoop {
+            instance: InstanceId::from(KeyData::from_ffi(instance)),
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
@@ -2059,9 +2232,10 @@ impl Scene {
         }
         .map_err(doc_err)?;
         self.reconcile(&change);
-        recording::record(recording::RecordedCall::FollowMeAroundFace {
+        recording::record(recording::RecordedCall::FollowMeAroundInstanceFace {
             sketch,
             region,
+            instance,
             path_object,
             path_face,
             stop_len,
@@ -4433,6 +4607,7 @@ impl Scene {
                         path_sketch,
                         path_edges,
                         stop_len,
+                        group,
                     } => {
                         self.follow_me_along_edges(
                             sketch,
@@ -4440,6 +4615,7 @@ impl Scene {
                             path_sketch,
                             path_edges,
                             stop_len,
+                            group,
                         )?;
                     }
                     FollowMeAroundFace {
@@ -4448,10 +4624,74 @@ impl Scene {
                         path_object,
                         path_face,
                         stop_len,
+                        group,
                     } => {
                         self.follow_me_around_face(
                             sketch,
                             region,
+                            path_object,
+                            path_face,
+                            stop_len,
+                            group,
+                        )?;
+                    }
+                    FollowMeAroundInstanceFace {
+                        sketch,
+                        region,
+                        instance,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    } => {
+                        self.follow_me_around_instance_face(
+                            sketch,
+                            region,
+                            instance,
+                            path_object,
+                            path_face,
+                            stop_len,
+                        )?;
+                    }
+                    FollowMeMergedAroundFace {
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    } => {
+                        self.follow_me_merged_around_face(
+                            sketch,
+                            region,
+                            path_object,
+                            path_face,
+                            stop_len,
+                        )?;
+                    }
+                    FollowMeFaceAlongEdges {
+                        profile_object,
+                        profile_face,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                    } => {
+                        self.follow_me_face_along_edges(
+                            profile_object,
+                            profile_face,
+                            path_sketch,
+                            path_edges,
+                            stop_len,
+                        )?;
+                    }
+                    FollowMeFaceAroundFace {
+                        profile_object,
+                        profile_face,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    } => {
+                        self.follow_me_face_around_face(
+                            profile_object,
+                            profile_face,
                             path_object,
                             path_face,
                             stop_len,

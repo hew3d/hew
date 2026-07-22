@@ -154,6 +154,49 @@ pub fn tessellate(
             ))
         });
 
+        // SOFT-edge smoothing (design §7b): a vertex on a marked soft
+        // edge shades with the average of the incident faces' plane
+        // normals, so both walls of a smooth sweep joint agree at their
+        // shared vertices and the facet crease disappears. Accumulated by
+        // exact endpoint position; the analytic cylinder path above takes
+        // precedence where it applies.
+        let mut soft_at: Vec<(kernel::Point3, kernel::Vec3)> = Vec::new();
+        {
+            let mut visit = |loop_id| {
+                let first = object.loops()[loop_id].first_half_edge;
+                let mut h = first;
+                loop {
+                    let he = &object.half_edges()[h];
+                    let edge = &object.edges()[he.edge];
+                    if edge.soft
+                        && let Some(twin_h) = edge.twin_half_edge
+                    {
+                        let other = if twin_h == h { edge.half_edge } else { twin_h };
+                        let nb_loop = object.half_edges()[other].loop_id;
+                        let nb_face = &object.faces()[object.loops()[nb_loop].face];
+                        let nb_n = nb_face.plane.normal();
+                        let a = object.vertices()[he.origin].position;
+                        let b = object.vertices()[object.half_edges()[he.next].origin].position;
+                        for p in [a, b] {
+                            if let Some(entry) = soft_at.iter_mut().find(|(q, _)| *q == p) {
+                                entry.1 = entry.1 + nb_n;
+                            } else {
+                                soft_at.push((p, nb_n));
+                            }
+                        }
+                    }
+                    h = he.next;
+                    if h == first {
+                        break;
+                    }
+                }
+            };
+            visit(face.outer_loop);
+            for &il in &face.inner_loops {
+                visit(il);
+            }
+        }
+
         // Build the orthonormal 2D basis (u, v) such that u × v = normal.
         let (u_ax, v_ax) = plane_basis(normal);
 
@@ -222,7 +265,16 @@ pub fn tessellate(
                         Err(_) => n,
                     }
                 }
-                None => n,
+                None => {
+                    let p = kernel::Point3::new(x, y, z);
+                    match soft_at.iter().find(|(q, _)| *q == p) {
+                        Some((_, acc)) => match (normal + *acc).normalized() {
+                            Ok(avg) => [avg.x as f32, avg.y as f32, avg.z as f32],
+                            Err(_) => n, // opposed normals: honest flat
+                        },
+                        None => n,
+                    }
+                }
             };
             mesh.normals.extend(vertex_normal);
             mesh.colors.extend([cr, cg, cb]);
@@ -293,6 +345,10 @@ pub fn tessellate(
         let from = object.vertices()[he.origin].position;
         let to = object.vertices()[object.half_edges()[he.next].origin].position;
         let soft = edge.twin_half_edge.is_some_and(|twin_h| {
+            // A birth-marked soft joint (design §7b) is soft outright.
+            if edge.soft {
+                return true;
+            }
             let face_of = |h| {
                 let loop_id = object.half_edges()[h].loop_id;
                 &object.faces()[object.loops()[loop_id].face]

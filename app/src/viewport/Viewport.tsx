@@ -2336,17 +2336,25 @@ export default function Viewport({
         // The path may be preselected (SketchUp's primary Follow Me idiom).
         [...selectedIdsRef.current],
       )
-      // Put Follow Me's FACE path on the same face-eligibility system as every
-      // other face tool: `face_boundary`/`follow_me_around_face` are
-      // coordinate-correct only for a plain, top-level, non-instanced object,
-      // and there is no `follow_me_in_component` surface, so no component
-      // context is wired (an instanced/in-context face is refused, not swept).
+      // Put Follow Me's FACE path/profile on the same face-eligibility system
+      // as every other face tool (`faceDrawEligible` already understands the
+      // full group/instance context path — see the tool's FACE FRAME GUARD
+      // doc). Two Follow-Me-specific additions on top: a component
+      // DEFINITION context (`setComponentContext`, mirroring PushPullTool's
+      // wiring but with the opposite effect — Follow Me has no
+      // birth-into-definition surface) refuses wholesale; a GROUP context
+      // (`setActiveGroup`) births the sweep inside the group being edited
+      // instead of at top level.
       const ctx = activeContextRef.current
-      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
-        ? ctx[ctx.length - 1].id : null
+      const deepest = ctx.length > 0 ? ctx[ctx.length - 1] : null
+      const ctxId = deepest?.kind === 'object' ? deepest.id : null
       tool.setActiveContext(ctxId)
       tool.setFaceEligibility(faceDrawEligible)
       tool.setContextScoped(ctx.length > 0)
+      tool.setComponentContext(
+        deepest?.kind === 'instance' ? (wasmScene.instance_def(deepest.id) ?? null) : null,
+      )
+      tool.setActiveGroup(deepest?.kind === 'group' ? deepest.id : null)
       return tool
     }
 
@@ -3448,6 +3456,16 @@ export default function Viewport({
       if (activeTool instanceof PaintTool) {
         activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
       }
+      // ⌘/Ctrl-click on Follow Me's profile commits the MERGED sweep (design
+      // §3b) — a live read of the real event, same precedent as Paint's
+      // whole-object fill above; Move's own copy modifier is a durable TAP
+      // with no live "held right now" signal to reuse (see FollowMeTool's
+      // MERGE GESTURE doc note). Also read at the drag RELEASE (`onPointerUp`
+      // below) so a press-drag-release commit sees the modifier at commit
+      // time, not whatever was held at the arming press.
+      if (activeTool instanceof FollowMeTool) {
+        activeTool.setMergeModifier(ev.metaKey || ev.ctrlKey)
+      }
       // (Move's copy mode is a durable Alt TOGGLE handled in MoveTool.onKey —
       // no live Alt-modifier tracking here.)
 
@@ -3643,6 +3661,12 @@ export default function Viewport({
       if (ev.button !== 0) return
       if (!cameraModeRef.current) {
         const activeTool = toolController.activeTool
+        // A live read at the RELEASE too (see the onPointerDown wiring's doc)
+        // — a press-drag-release's merge decision is whatever is held at the
+        // commit, not the arming press.
+        if (activeTool instanceof FollowMeTool) {
+          activeTool.setMergeModifier(ev.metaKey || ev.ctrlKey)
+        }
         if ('onPointerUp' in activeTool) {
           const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
           const ray = makeWorldRay(ndcX, ndcY, camera)
@@ -3842,6 +3866,12 @@ export default function Viewport({
       // context leaves both null — signal "scoped" explicitly (hint wording
       // only; eligibility comes from the injected predicate).
       ;(tool as { setContextScoped: (scoped: boolean) => void }).setContextScoped(activeContext.length > 0)
+    }
+    if (tool !== undefined && 'setActiveGroup' in tool) {
+      // FollowMeTool only (design §2f): births the next sweep inside the
+      // group being edited instead of at top level.
+      const groupId = deepestCtx?.kind === 'group' ? deepestCtx.id : null
+      ;(tool as { setActiveGroup: (id: bigint | null) => void }).setActiveGroup(groupId)
     }
     // A drawing-plane cue rendered for the OUTGOING context no longer
     // applies (e.g. a tool's non-ground plane cue from before entering/

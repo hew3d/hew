@@ -253,6 +253,11 @@ enum DocAction {
         /// the sketch itself from view (it fully became the solid). Undo
         /// brings it back; redo removes it again.
         emptied: bool,
+        /// A merged sweep ([`Document::follow_me_merged`]) consumed the
+        /// path's own solid into `id` exactly as a boolean operand. Undo
+        /// restores it alongside the scaffolding; redo consumes it again.
+        /// `None` for every plain extrusion/sweep.
+        merged_base: Option<ObjectId>,
     },
     /// A per-Object op (push/pull, split, merge) ran; undo/redo delegate to that
     /// Object's [`History`].
@@ -611,6 +616,16 @@ enum DocAction {
         /// Per-node tag lists: `(node, tags before, tags after)`.
         nodes: Vec<TagListTransition>,
     },
+    /// [`Document::follow_me_face`] swept a solid FACE profile into a new
+    /// object (design §3a). The source solid is untouched unless the sweep
+    /// MERGED with it — the profile face belonged to the path's own solid
+    /// (design §3b) — in which case `merged_base` is that solid, consumed
+    /// into the result exactly as a boolean operand. Undo hides the result
+    /// and restores the base; redo re-applies both.
+    FollowMeFace {
+        result: ObjectId,
+        merged_base: Option<ObjectId>,
+    },
     /// `Document::ingest` merged an imported scene into this document.
     /// Undo hides every created node/object/group/instance/component (ids
     /// stay stable — hide-not-delete); redo unhides them. Materials added to
@@ -653,6 +668,20 @@ pub enum FollowMePath {
     /// itself is untouched.
     FaceLoop {
         /// The path object.
+        object: ObjectId,
+        /// The face whose outer boundary is the path.
+        face: FaceId,
+    },
+    /// The outer boundary loop of a face reached THROUGH a component
+    /// instance (design §2e): the definition member's loop mapped through
+    /// the instance's pose into world space. The instance and its
+    /// definition are untouched; a reflected pose (determinant < 0) is
+    /// refused typed — the mirrored loop would sweep with inverted
+    /// winding.
+    InstanceFaceLoop {
+        /// The placed instance the face was picked through.
+        instance: InstanceId,
+        /// The definition-member object owning the face.
         object: ObjectId,
         /// The face whose outer boundary is the path.
         face: FaceId,
@@ -2948,7 +2977,7 @@ impl Document {
         let object = Object::from_extrusion(&profile, distance).map_err(DocumentError::Extrude)?;
 
         // Everything that can fail has succeeded; commit.
-        Ok(self.commit_region_object(sketch, &scaffolding, object))
+        Ok(self.commit_region_object(sketch, &scaffolding, object, None, None))
     }
 
     /// Follow Me (the follow-me design): sweeps the closed profile
@@ -2973,7 +3002,7 @@ impl Document {
         region: SketchRegionId,
         path: &FollowMePath,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
-        self.follow_me_impl(sketch, region, path, None)
+        self.follow_me_impl(sketch, region, path, None, None)
     }
 
     /// [`Document::follow_me`] stopped after `stop_len` of arc length from
@@ -2987,7 +3016,22 @@ impl Document {
         path: &FollowMePath,
         stop_len: f64,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
-        self.follow_me_impl(sketch, region, path, Some(stop_len))
+        self.follow_me_impl(sketch, region, path, Some(stop_len), None)
+    }
+
+    /// [`Document::follow_me`] whose result is born INSIDE `group`
+    /// (design §2f) — the sweep a user commits while editing that group.
+    /// Same behavior otherwise, including the optional partial-sweep stop.
+    /// [`DocumentError::UnknownGroup`] for a stale or hidden group.
+    pub fn follow_me_grouped(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        group: GroupId,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_impl(sketch, region, path, stop_len, Some(group))
     }
 
     fn follow_me_impl(
@@ -2996,7 +3040,15 @@ impl Document {
         region: SketchRegionId,
         path: &FollowMePath,
         stop_len: Option<f64>,
+        parent_group: Option<GroupId>,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        if let Some(gid) = parent_group {
+            // Birth into a group the user is editing (design §2f): the
+            // group must be live and visible.
+            if !self.groups.contains_key(gid) || self.groups[gid].hidden {
+                return Err(DocumentError::UnknownGroup);
+            }
+        }
         info!(target: "kernel::op", op = "follow_me");
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
@@ -3018,7 +3070,182 @@ impl Document {
         .map_err(DocumentError::FollowMe)?;
 
         // Everything that can fail has succeeded; commit.
-        Ok(self.commit_region_object(sketch, &scaffolding, object))
+        Ok(self.commit_region_object(sketch, &scaffolding, object, None, parent_group))
+    }
+
+    /// [`Document::follow_me`] that MERGES its result with the path's own
+    /// solid in one gesture (design §3b): the profile region sweeps around
+    /// the face loop, then a sweep whose body overlaps the solid's
+    /// interior carves it (Subtract — a chamfer, a dado) and one that only
+    /// rides its surface adds to it (Union — a molding), decided by the
+    /// boolean engine itself on clones (a nonempty intersection means
+    /// overlap). ONE undo step: the region's scaffolding, the consumed
+    /// base, and the merged result all restore together. Only a
+    /// [`FollowMePath::FaceLoop`] has a solid to merge with; an edge path
+    /// refuses [`DocumentError::UnknownObject`].
+    pub fn follow_me_merged(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "follow_me_merged");
+        let FollowMePath::FaceLoop {
+            object: base_id, ..
+        } = *path
+        else {
+            return Err(DocumentError::UnknownObject);
+        };
+        if self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        let s = self
+            .sketches
+            .get(sketch)
+            .ok_or(DocumentError::UnknownSketch)?;
+        let profile = s.profile(region).map_err(DocumentError::Sketch)?;
+        let scaffolding = s
+            .region_scaffolding(region)
+            .map_err(DocumentError::Sketch)?;
+        let (points, closed, curves) = self.resolve_follow_me_path(path)?;
+        let swept = match stop_len {
+            None => Object::from_follow_me(&profile, &points, closed, &curves),
+            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
+        }
+        .map_err(DocumentError::FollowMe)?;
+
+        let base_rec = self
+            .objects
+            .get(base_id)
+            .filter(|r| !r.hidden && r.is_world())
+            .ok_or(DocumentError::UnknownObject)?;
+        if base_rec.group_parent().is_some() {
+            return Err(DocumentError::GroupedOperand);
+        }
+        let base = &base_rec.object;
+        let op = match Object::boolean(BooleanOp::Intersect, base, &swept, &Transform::IDENTITY) {
+            Ok(_) => BooleanOp::Subtract,
+            Err(_) => BooleanOp::Union,
+        };
+        let mut result = Object::boolean(op, base, &swept, &Transform::IDENTITY)
+            .map_err(DocumentError::Boolean)?;
+        // Dissolve the merge's coplanar seams, preserving the base's
+        // pre-existing imprints (`Document::boolean`'s treatment; the
+        // swept tool is fresh and contributes none).
+        let preserve = base.coplanar_edge_segments();
+        result.merge_coplanar_faces(&preserve);
+
+        // Everything that can fail has succeeded; one compound commit.
+        Ok(self.commit_region_object(sketch, &scaffolding, result, Some(base_id), None))
+    }
+
+    /// Follow Me with a solid FACE as the profile (design §3a): sweeps the
+    /// face's boundary (holes become tunnels) along `path` into a NEW
+    /// top-level object, leaving the source solid untouched — unless the
+    /// profile face belongs to the path's own solid (design §3b), in which
+    /// case the sweep MERGES with it in one gesture and one undo step: a
+    /// sweep whose body overlaps the solid's interior carves it (Subtract —
+    /// a chamfer, a dado), one that only rides its surface adds to it
+    /// (Union — a molding). The overlap question is answered by the boolean
+    /// engine itself on clones: a nonempty intersection means overlap.
+    /// `stop_len` is the partial-sweep stop, exactly as on
+    /// [`Document::follow_me_to`]. Every fallible step runs before the
+    /// document is touched (the strong exception guarantee).
+    pub fn follow_me_face(
+        &mut self,
+        object: ObjectId,
+        face: FaceId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "follow_me_face");
+        let rec = self
+            .objects
+            .get(object)
+            .filter(|r| !r.hidden && r.is_world())
+            .ok_or(DocumentError::UnknownObject)?;
+        let profile = rec
+            .object
+            .profile_from_face(face)
+            .ok_or(DocumentError::UnknownFace)?;
+        let (points, closed, curves) = self.resolve_follow_me_path(path)?;
+        let swept = match stop_len {
+            None => Object::from_follow_me(&profile, &points, closed, &curves),
+            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
+        }
+        .map_err(DocumentError::FollowMe)?;
+
+        let merges = matches!(path, FollowMePath::FaceLoop { object: po, .. } if *po == object);
+        if !merges {
+            let id = self.objects.insert(ObjectRecord {
+                object: swept,
+                history: History::new(),
+                hidden: false,
+                owner: ObjectOwner::World { parent: None },
+                name: None,
+                tags: Vec::new(),
+            });
+            self.undo.push(DocAction::FollowMeFace {
+                result: id,
+                merged_base: None,
+            });
+            self.redo.clear();
+            self.debug_validate();
+            let change = DocChange {
+                objects_touched: vec![id],
+                sketches_touched: Vec::new(),
+                groups_touched: Vec::new(),
+                instances_touched: Vec::new(),
+                components_touched: Vec::new(),
+                guides_touched: Vec::new(),
+            };
+            return Ok((id, change));
+        }
+
+        // Merge with the path's own solid. The base follows the boolean's
+        // operand rules; the swept body never enters the document.
+        let base_rec = &self.objects[object];
+        if base_rec.group_parent().is_some() {
+            return Err(DocumentError::GroupedOperand);
+        }
+        let base = &base_rec.object;
+        let op = match Object::boolean(BooleanOp::Intersect, base, &swept, &Transform::IDENTITY) {
+            Ok(_) => BooleanOp::Subtract,
+            Err(_) => BooleanOp::Union,
+        };
+        let mut result = Object::boolean(op, base, &swept, &Transform::IDENTITY)
+            .map_err(DocumentError::Boolean)?;
+        // Dissolve the coplanar seams the merge introduced, preserving the
+        // base's pre-existing imprints; the swept tool is fresh and
+        // contributes none (exactly `Document::boolean`'s treatment).
+        let preserve = base.coplanar_edge_segments();
+        result.merge_coplanar_faces(&preserve);
+
+        let id = self.objects.insert(ObjectRecord {
+            object: result,
+            history: History::new(),
+            hidden: false,
+            owner: ObjectOwner::World { parent: None },
+            name: None,
+            tags: Vec::new(),
+        });
+        self.objects[object].hidden = true;
+        self.undo.push(DocAction::FollowMeFace {
+            result: id,
+            merged_base: Some(object),
+        });
+        self.redo.clear();
+        self.debug_validate();
+        let change = DocChange {
+            objects_touched: vec![object, id],
+            sketches_touched: Vec::new(),
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        };
+        Ok((id, change))
     }
 
     /// Resolves a [`FollowMePath`] into the polyline
@@ -3057,6 +3284,39 @@ impl Document {
                 let points: Vec<Point3> = rec.object.loop_positions(f.outer_loop).collect();
                 Ok((points, true, Vec::new()))
             }
+            FollowMePath::InstanceFaceLoop {
+                instance,
+                object,
+                face,
+            } => {
+                // The member is definition-owned (NOT world); its loop is
+                // definition-local and rides the instance's pose into
+                // world space (design §2e). A reflected pose would hand
+                // the sweep a mirrored winding — refused typed, matching
+                // the explode gate.
+                let pose = self
+                    .instance_pose(*instance)
+                    .ok_or(DocumentError::UnknownInstance)?;
+                if pose.determinant() < 0.0 {
+                    return Err(DocumentError::Transform(TransformError::Reflection));
+                }
+                let rec = self
+                    .objects
+                    .get(*object)
+                    .filter(|r| !r.hidden && !r.is_world())
+                    .ok_or(DocumentError::UnknownObject)?;
+                let f = rec
+                    .object
+                    .faces()
+                    .get(*face)
+                    .ok_or(DocumentError::UnknownFace)?;
+                let points: Vec<Point3> = rec
+                    .object
+                    .loop_positions(f.outer_loop)
+                    .map(|p| pose.apply_point(p))
+                    .collect();
+                Ok((points, true, Vec::new()))
+            }
         }
     }
 
@@ -3073,6 +3333,8 @@ impl Document {
         sketch: SketchId,
         scaffolding: &BTreeSet<SketchEdgeId>,
         object: Object,
+        merged_base: Option<ObjectId>,
+        parent_group: Option<GroupId>,
     ) -> (ObjectId, DocChange) {
         let s = self
             .sketches
@@ -3102,24 +3364,41 @@ impl Document {
             object,
             history: History::new(),
             hidden: false,
-            owner: ObjectOwner::World { parent: None },
+            owner: ObjectOwner::World {
+                parent: parent_group,
+            },
             name: None,
             tags: Vec::new(),
         });
+        let mut groups_touched = Vec::new();
+        if let Some(gid) = parent_group {
+            // Birth INSIDE the group the user is editing (design §2f):
+            // membership is structural; undo's hide-not-delete leaves the
+            // hidden member harmlessly listed, like any hidden node.
+            self.groups[gid].members.push(NodeId::Object(id));
+            groups_touched.push(gid);
+        }
+        let mut objects_touched = vec![id];
+        if let Some(base) = merged_base {
+            // The merged sweep consumed the path's own solid (design §3b).
+            self.objects[base].hidden = true;
+            objects_touched.push(base);
+        }
 
         self.undo.push(DocAction::CreatedObject {
             id,
             sketch,
             removed,
             emptied,
+            merged_base,
         });
         self.redo.clear();
         self.debug_validate();
 
         let change = DocChange {
-            objects_touched: vec![id],
+            objects_touched,
             sketches_touched: vec![sketch],
-            groups_touched: Vec::new(),
+            groups_touched,
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
@@ -5259,6 +5538,7 @@ impl Document {
             sketch,
             removed,
             emptied,
+            merged_base,
         } = action
         else {
             unreachable!("dispatched on CreatedObject");
@@ -5276,6 +5556,7 @@ impl Document {
                 sketch,
                 removed,
                 emptied,
+                merged_base,
             });
             return Err(DocumentError::Sketch(e));
         }
@@ -5285,17 +5566,35 @@ impl Document {
         if let Some(rec) = self.objects.get_mut(id) {
             rec.hidden = true;
         }
+        let mut groups_touched = Vec::new();
+        // A group-born sweep (design §2f) must leave the member list too —
+        // the tree invariant forbids hidden members; the owner field keeps
+        // the group so redo can relink.
+        if let Some(ObjectOwner::World { parent: Some(gid) }) =
+            self.objects.get(id).map(|r| r.owner)
+            && let Some(grec) = self.groups.get_mut(gid)
+        {
+            grec.members.retain(|m| *m != NodeId::Object(id));
+            groups_touched.push(gid);
+        }
+        let mut objects_touched = vec![id];
+        if let Some(base) = merged_base {
+            // The merged sweep consumed the path's solid; undo restores it.
+            self.objects[base].hidden = false;
+            objects_touched.push(base);
+        }
         self.redo.push(DocAction::CreatedObject {
             id,
             sketch,
             removed,
             emptied,
+            merged_base,
         });
         self.debug_validate();
         Ok(DocChange {
-            objects_touched: vec![id],
+            objects_touched,
             sketches_touched: vec![sketch],
-            groups_touched: Vec::new(),
+            groups_touched,
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
@@ -5316,6 +5615,7 @@ impl Document {
             sketch,
             removed,
             emptied: _,
+            merged_base,
         } = action
         else {
             unreachable!("dispatched on CreatedObject");
@@ -5336,17 +5636,34 @@ impl Document {
         if let Some(rec) = self.objects.get_mut(id) {
             rec.hidden = false;
         }
+        let mut groups_touched = Vec::new();
+        // Relink a group-born sweep's membership (design §2f).
+        if let Some(ObjectOwner::World { parent: Some(gid) }) =
+            self.objects.get(id).map(|r| r.owner)
+            && let Some(grec) = self.groups.get_mut(gid)
+            && !grec.members.contains(&NodeId::Object(id))
+        {
+            grec.members.push(NodeId::Object(id));
+            groups_touched.push(gid);
+        }
+        let mut objects_touched = vec![id];
+        if let Some(base) = merged_base {
+            // Redo consumes the merged base again.
+            self.objects[base].hidden = true;
+            objects_touched.push(base);
+        }
         self.undo.push(DocAction::CreatedObject {
             id,
             sketch,
             removed,
             emptied,
+            merged_base,
         });
         self.debug_validate();
         Ok(DocChange {
-            objects_touched: vec![id],
+            objects_touched,
             sketches_touched: vec![sketch],
-            groups_touched: Vec::new(),
+            groups_touched,
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
@@ -5488,6 +5805,29 @@ impl Document {
                 }
                 DocChange {
                     objects_touched: vec![object],
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            &DocAction::FollowMeFace {
+                result,
+                merged_base,
+            } => {
+                // Undo a face-profile sweep: hide the result; a merged
+                // base comes back like a boolean operand.
+                if let Some(rec) = self.objects.get_mut(result) {
+                    rec.hidden = true;
+                }
+                let mut touched = vec![result];
+                if let Some(base) = merged_base {
+                    self.objects[base].hidden = false;
+                    touched.push(base);
+                }
+                DocChange {
+                    objects_touched: touched,
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
@@ -6133,6 +6473,29 @@ impl Document {
                 }
                 DocChange {
                     objects_touched: vec![object],
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            &DocAction::FollowMeFace {
+                result,
+                merged_base,
+            } => {
+                // Redo a face-profile sweep: show the result; a merged
+                // base is consumed again.
+                if let Some(rec) = self.objects.get_mut(result) {
+                    rec.hidden = false;
+                }
+                let mut touched = vec![result];
+                if let Some(base) = merged_base {
+                    self.objects[base].hidden = true;
+                    touched.push(base);
+                }
+                DocChange {
+                    objects_touched: touched,
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),

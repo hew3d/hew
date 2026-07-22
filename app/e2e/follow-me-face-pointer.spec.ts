@@ -20,11 +20,15 @@ import {
  *
  *   1. MISS FEEDBACK — a path-stage click on nothing says what to aim at
  *      instead of doing nothing silently.
- *   2. WRONG-FACE REFUSAL — picking a face parallel to the profile is refused
- *      with FACE-specific copy ("that face is parallel to the profile"), not
- *      the generic drawn-path wording.
+ *   2. A WRONG-SIZED FACE REFUSAL still has FACE-specific copy ("that face is
+ *      thinner than the profile is deep"), not the generic drawn-path
+ *      wording — auto-orientation (design §2c) means a merely-parallel face
+ *      no longer refuses at all (it folds the profile upright and retries),
+ *      so this now needs a face too NARROW for the folded profile to fit.
  *   3. SUCCESS — hovering previews the face-loop that will be swept, and a
  *      direct top-face click + profile click commits a watertight molding.
+ *   4. AN INSTANCED FACE (design §2e) is a legal PATH now too, unconditionally
+ *      — no double-click into the component first — swept the same way.
  *
  * The scene is built through the harness at meter scale (deterministic, and
  * NOT what is under test — a solid's face clicks the same whatever built it);
@@ -142,47 +146,73 @@ test('Follow Me: a path-stage click on nothing says what to aim at (no silent no
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 })
 
-test('Follow Me: a face parallel to the profile is refused with face-specific guidance', async ({
+test('Follow Me: a face too narrow for the folded profile is refused with face-specific guidance', async ({
   page,
 }) => {
   const ctx = await aim(page)
   await buildScene(page)
   await activateFollowMe(page)
 
-  // Pick the FRONT face (y = 0) — parallel to the profile's plane, so no rim of
-  // it is perpendicular to the profile. Then click the profile to attempt the
-  // sweep.
+  // Pick the FRONT face (y = 0) — parallel to the profile's plane, so no rim
+  // of it was perpendicular to the profile AS DRAWN. Before auto-orientation
+  // (design §2c) this refused outright as [ProfileNotPerpendicular]; the
+  // kernel now folds the profile upright and retries — but the folded
+  // profile is wider than the tabletop's 0.2 m front-face rim is thin, so
+  // the retried sweep still refuses, now as [PathTooTight] (confirmed
+  // against the real kernel, not assumed).
   await clickAt(page, ctx, 1, 0, 0.1)
   await expect(page.getByText('Click the profile to sweep along')).toBeVisible()
   await clickAt(page, ctx, 2, 0.3, 0.2)
 
-  // Face-context copy, not the generic drawn-path perpendicularity message.
-  await expect(page.getByText('That face is parallel to the profile', { exact: false })).toBeVisible()
-  await expect(page.getByText('[ProfileNotPerpendicular]')).toBeVisible()
+  // Face-context copy, not the generic drawn-path wording.
+  await expect(page.getByText('That face is thinner than the profile is deep', { exact: false })).toBeVisible()
+  await expect(page.getByText('[PathTooTight]')).toBeVisible()
   // Refused → the tabletop stands alone, untouched.
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 })
 
-test("Follow Me refuses a component instance's face (frame guard, real pointer)", async ({
+test('Follow Me: an INSTANCED face is now a legal PATH (design §2e), swept with a real pointer', async ({
   page,
 }) => {
   const ctx = await aim(page)
   // A plain box folded into a component: its top face is now instanced
-  // (definition-local geometry + a separate placement pose), which
-  // face_boundary/follow_me_around_face — taking only (object, face) — cannot
-  // place. The Viewport wires faceDrawEligible into Follow Me, so this must be
-  // refused rather than swept in the wrong coordinate frame.
+  // (definition-local geometry + a separate placement pose). Sweeping AROUND
+  // an instance's face is a read-only geometric reference — never an edit —
+  // so unlike push/pull or drawing directly on it, no double-click into the
+  // component is needed first: `follow_me_around_instance_face` poses the
+  // definition-local loop into world space kernel-side.
   await page.evaluate(() => {
     const h = window.__hew_test!
     const id = h.drawBox([0, 0, 0], [2, 1, 0], 0.2)
     h.makeComponent([id])
+    const prof = h.drawRectangle([1.9, 0.4, 0], [2.1, 0.6, 0])
+    h.rotateSketch(prof.sketch, -90, [1, 0, 0], [0, 0.5, 0.2])
   })
+  // The box is now a component member, not a world Object — object_ids()
+  // (kind 0 "Object", filtered to `is_world()`) no longer counts it.
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
   await activateFollowMe(page)
 
-  await clickAt(page, ctx, 0.5, 0.5, 0.2) // click the instanced top face
-  await expect(page.getByText('belongs to a component', { exact: false })).toBeVisible()
-  // No path was locked — the tool is still choosing a path, nothing swept.
-  await expect(page.getByText('Click the path to follow')).toBeVisible()
+  // Click the instanced top face directly — it becomes the PATH, previewed
+  // (pose-mapped into world space) before any click.
+  await clickAt(page, ctx, 0.5, 0.5, 0.2)
+  await expect(page.getByText('Click the profile to sweep along')).toBeVisible()
+
+  // Click the standing profile → immediate commit around the instanced face.
+  await clickAt(page, ctx, 2, 0.3, 0.2)
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+
+  const after = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const id = h.getObjectIds()[0]
+    return { solid: h.isObjectSolid(id), bounds: h.getObjectBounds(id) }
+  })
+  expect(after.solid).toBe(true)
+  // The molding sits around the x = 2 rim, where the box (and its instanced
+  // top face) actually is — proof the pose mapping landed it in the right
+  // place, not at the definition-local origin or some other frame.
+  expect(after.bounds[3]).toBeGreaterThan(1.8) // maxX
+  await expect(page.getByText('[ProfileNotPerpendicular]')).toHaveCount(0)
 })
 
 test('Follow Me: hovering then clicking the top face molds a watertight solid around it', async ({

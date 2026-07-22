@@ -651,16 +651,19 @@ fn follow_me_cone_revolve_touching_the_axis() {
 }
 
 /// Pole closure is gated on a recognized circle path: the identical sphere
-/// profile on a path WITHOUT analytic attribution refuses, exactly as any
-/// radial profile on an unattributed facet ring does (a polyline is
-/// perpendicular to no chord). No silent guess at a circle.
+/// profile on a path WITHOUT analytic attribution still refuses — no
+/// silent guess at a circle. Auto-orientation (design §2c) changes the
+/// variant, not the outcome: the fold makes the plane chord-perpendicular,
+/// but an axis-centered profile's folded plane attaches to no chord
+/// strictly between its endpoints, and without attribution there is no
+/// revolution to close the poles.
 #[test]
 fn follow_me_sphere_refuses_without_circle_attribution() {
     let (r, cz, n) = (1.0, 1.0, 24usize);
     let profile = axis_circle_profile(cz, r, n, 0.0);
     let (path, _) = attributed_ground_circle(1.0, n, 0.0);
     let err = Object::from_follow_me(&profile, &path, true, &[]).unwrap_err();
-    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+    assert_eq!(err, kernel::FollowMeError::PathDetachedFromProfile);
 }
 
 proptest! {
@@ -987,22 +990,39 @@ fn follow_me_lathe_accepts_a_radial_seam_a_hair_off_a_rim_vertex() {
     }
 }
 
-/// Attribution is the gate: the SAME 24-gon ring without curve attribution
-/// keeps the polyline semantics — a radial profile plane is perpendicular
-/// to no chord, and the sweep refuses rather than guessing.
+/// Attribution still matters without being a refusal gate: the SAME
+/// 24-gon ring without curve attribution keeps polyline semantics — a
+/// radial profile plane is perpendicular to no chord — but auto-
+/// orientation (design §2c) now folds the profile the half-facet angle
+/// onto the nearest chord and the ring sweeps, instead of refusing.
 #[test]
-fn follow_me_unattributed_facet_ring_keeps_chord_perpendicularity() {
+fn follow_me_unattributed_facet_ring_folds_onto_the_chord() {
     let (path, _) = circle_path(2.0, 24);
+    // Mid-facet placement: the fold's crease lands strictly inside the
+    // nearest chord and the ring sweeps.
+    let mid = std::f64::consts::PI / 24.0;
+    let solid = Object::from_follow_me(&radial_profile(mid), &path, true, &[]).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&solid), 0, "a ring: genus one");
+    assert!(signed_volume(&solid) > 0.0);
+
+    // Vertex-aligned placement: the crease lands exactly on a path
+    // corner and the profile straddles it — the corner-seam wedge folds
+    // back over the incoming chord, the same honest refusal a straddling
+    // corner profile gets everywhere (design §2b).
     let err = Object::from_follow_me(&radial_profile(0.0), &path, true, &[]).unwrap_err();
-    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+    assert_eq!(err, kernel::FollowMeError::PathTooTight);
 }
 
-/// The analytic rule is exactly "radial plane": on an attributed circle a
-/// profile plane parallel to the path plane, or one offset off the
-/// circle's center, is perpendicular to the drawn curve nowhere and
-/// refuses typed.
+/// The analytic rule is exactly "radial plane" — and auto-orientation
+/// (design §2c) now FOLDS a non-radial plane onto the drawn circle's
+/// radial family instead of refusing: a profile parallel to the path
+/// plane, or one offset off the center, sweeps the lathe it visibly
+/// suggests. The fold's crease is at the analytic rim point nearest the
+/// profile, so the folded plane contains the center exactly.
 #[test]
-fn follow_me_attributed_circle_refuses_non_radial_planes() {
+fn follow_me_folds_non_radial_planes_onto_the_radial_family() {
     let (path, curves) = circle_path(2.0, 24);
 
     // Parallel to the path plane (normal +z): never perpendicular.
@@ -1022,10 +1042,11 @@ fn follow_me_attributed_circle_refuses_non_radial_planes() {
         vec![],
     )
     .unwrap();
-    assert_eq!(
-        Object::from_follow_me(&flat, &path, true, &curves).unwrap_err(),
-        kernel::FollowMeError::ProfileNotPerpendicular
-    );
+    let from_flat = Object::from_follow_me(&flat, &path, true, &curves).unwrap();
+    from_flat.validate().unwrap();
+    assert_eq!(from_flat.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&from_flat), 0);
+    assert!(signed_volume(&from_flat) > 0.0);
 
     // In the path plane's directions but OFF the center: a chord-crossing
     // plane that is radial to no point of the drawn circle.
@@ -1045,10 +1066,11 @@ fn follow_me_attributed_circle_refuses_non_radial_planes() {
         vec![],
     )
     .unwrap();
-    assert_eq!(
-        Object::from_follow_me(&offset, &path, true, &curves).unwrap_err(),
-        kernel::FollowMeError::ProfileNotPerpendicular
-    );
+    let from_offset = Object::from_follow_me(&offset, &path, true, &curves).unwrap();
+    from_offset.validate().unwrap();
+    assert_eq!(from_offset.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&from_offset), 0);
+    assert!(signed_volume(&from_offset) > 0.0);
 }
 
 /// An OPEN attributed path measures its end the same way: the profile must
@@ -1080,8 +1102,20 @@ fn follow_me_open_arc_end_uses_the_analytic_tangent() {
     // 2 caps + 6 segments x 4 walls.
     assert_eq!(solid.faces().len(), 26);
 
-    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
-    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+    // WITHOUT attribution the same placement is perpendicular to no
+    // chord. It no longer refuses — auto-orientation (design §2c) folds
+    // it the half-facet angle onto the end chord — but the result is a
+    // genuinely different solid from the attributed sweep, which used
+    // the placement EXACTLY and never folded. The contrast is the spec:
+    // attribution buys exactness, the fold buys success.
+    let folded = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
+    folded.validate().unwrap();
+    assert_eq!(folded.watertight(), WatertightState::Watertight);
+    assert!(
+        !objects_equivalent(&folded, &solid),
+        "the fold must have rotated the profile; identical solids would \
+         mean the chord rule silently adopted the analytic tangent"
+    );
 }
 
 #[test]
@@ -1231,14 +1265,25 @@ proptest! {
 }
 
 #[test]
-fn follow_me_refuses_parallel_profile() {
+fn follow_me_folds_a_parallel_profile_upright() {
     // Profile in the ground plane, path in the ground plane: nowhere
-    // perpendicular.
+    // perpendicular — which used to refuse and now auto-orients (design
+    // §2c). The rect spans x,y in [0,1]; the crease is the x-parallel
+    // line through the path's nearest point to the centroid, (0, 0.5, 0),
+    // so the fold maps the y-extent onto z and the carry re-attaches the
+    // path at the folded plane: a 1 x 1 x 5 prism from y = 0.5 to 5.5.
     let profile = rect_profile(1.0, 1.0);
     let path = [Point3::ORIGIN, Point3::new(0.0, 5.0, 0.0)];
-    // Path along +y, profile normal +z: not perpendicular to the plane.
-    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
-    assert_eq!(err, kernel::FollowMeError::ProfileNotPerpendicular);
+    let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert!((signed_volume(&solid) - 5.0).abs() < 1e-9);
+    let (mut ymin, mut ymax) = (f64::MAX, f64::MIN);
+    for v in solid.vertices().values() {
+        ymin = ymin.min(v.position.y);
+        ymax = ymax.max(v.position.y);
+    }
+    assert!((ymin - 0.5).abs() < 1e-9 && (ymax - 5.5).abs() < 1e-9);
 }
 
 #[test]
@@ -4487,5 +4532,489 @@ fn transform_refuses_anisotropic_reflection_and_singular_leaving_object_untouche
         exact_snapshot(&wedge),
         before,
         "refused singular transform leaves geometry untouched"
+    );
+}
+
+/// A rectangle profile lying FLAT on the ground plane (normal +z),
+/// x in [x0, x1], y in [y0, y1] — the shape auto-orientation folds up.
+fn ground_flat_profile(x0: f64, y0: f64, x1: f64, y1: f64) -> Profile {
+    let plane = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+    Profile::new(
+        plane,
+        vec![
+            Point3::new(x0, y0, 0.0),
+            Point3::new(x1, y0, 0.0),
+            Point3::new(x1, y1, 0.0),
+            Point3::new(x0, y1, 0.0),
+        ],
+        vec![],
+    )
+    .unwrap()
+}
+
+#[test]
+fn follow_me_auto_orients_a_flat_profile_into_a_lathe() {
+    // The classic SketchUp first attempt: circle path on the ground,
+    // profile ALSO drawn flat on the ground beside it. Auto-orientation
+    // (design §2c) folds the profile up about the crease at the analytic
+    // rim point nearest it — the fold's plane contains the circle's
+    // center exactly, so the radial anchor accepts it — and the lathe
+    // sweeps. Volume: the folded rect spans x in [1.2, 1.5], z in
+    // [-0.15, 0.15]; Pappus gives 2π · 1.35 · (0.3 · 0.3).
+    let profile = ground_flat_profile(1.2, -0.15, 1.5, 0.15);
+    let (path, curves) = attributed_ground_circle(1.0, 24, 0.0);
+    let solid = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    // Faceted revolution: compare against the same fold done by hand.
+    let stood = yz_profile(1.2, -0.15, 1.5, 0.15); // x=0 plane, y as radius arm
+    // yz_profile puts the rect on the x = 0 plane spanning y/z — the same
+    // radial arm rotated 90° around the axis; the revolved volume is
+    // identical by symmetry of the revolution.
+    let reference = Object::from_follow_me(&stood, &path, true, &curves).unwrap();
+    let v = signed_volume(&solid);
+    assert!((v - signed_volume(&reference)).abs() < 1e-9);
+    assert!(v > 0.0);
+}
+
+#[test]
+fn follow_me_auto_orient_hinges_at_a_touching_flap() {
+    // A flat flap whose edge touches the open path's start folds up
+    // HINGED where it touches (the crease passes through the contact
+    // point), then sweeps the path's full length: the SketchUp feel.
+    let profile = ground_flat_profile(0.0, -0.2, 0.5, 0.2);
+    let path = [Point3::ORIGIN, Point3::new(0.0, 2.0, 0.0)];
+    let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    let v = signed_volume(&solid);
+    assert!((v - 0.5 * 0.4 * 2.0).abs() < 1e-9);
+    // Hinge preserved: the fold keeps x in [0, 0.5] (rotation about a
+    // crease along x through the origin maps y-extent to z-extent).
+    let (mut xmin, mut xmax) = (f64::MAX, f64::MIN);
+    for vtx in solid.vertices().values() {
+        xmin = xmin.min(vtx.position.x);
+        xmax = xmax.max(vtx.position.x);
+    }
+    assert!((xmin - 0.0).abs() < 1e-9 && (xmax - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn follow_me_auto_orients_a_flat_profile_around_a_frame() {
+    // Flat molding profile on the ground OUTSIDE a ground rectangle path:
+    // folds up perpendicular to the nearest edge and sweeps the mitered
+    // frame. Outward band offsets 0.2..0.5: V = (3² − 2.4²) · 0.3.
+    let profile = ground_flat_profile(0.85, -0.5, 1.15, -0.2);
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&solid), 0);
+    let expected = (3.0f64 * 3.0 - 2.4 * 2.4) * 0.3;
+    assert!((signed_volume(&solid) - expected).abs() < 1e-9);
+}
+
+#[test]
+fn follow_me_auto_orient_open_path_folds_onto_an_end_not_a_useless_interior_band() {
+    // A regression the adversarial review caught: `orient_profile_to_path`
+    // used to pick its fold band by nearest-to-centroid over EVERY band,
+    // interior segments included — but an OPEN path's own anchor test
+    // (`from_follow_me_impl`) only ever re-validates the path's two ENDS
+    // (design §2a). Folding onto an interior band the retry can never
+    // re-check just reproduced the original refusal. Here the profile
+    // centroid sits nearest the path's INTERIOR leg (x in [0,5] at y=5,
+    // z=0) while both ends (the y-leg and the z-leg) are off-axis; the fold
+    // must restrict itself to the two ends and succeed against one of them,
+    // not dead-end on the interior leg.
+    let profile = yz_profile_at(2.5, 4.8, -0.2, 5.2, 0.2);
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(0.0, 5.0, 0.0),
+        Point3::new(5.0, 5.0, 0.0),
+        Point3::new(5.0, 5.0, 5.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+    #[test]
+    fn follow_me_auto_orientation_restores_any_tilt(
+        tilt in 0.05..1.4f64,
+        leg in 1.0..5.0f64,
+    ) {
+        // Tilt a perpendicular profile by an arbitrary angle about an
+        // in-plane axis; the fold restores perpendicularity and the sweep
+        // covers the full path — the swept volume is the perpendicular
+        // reference's, independent of tilt (design §2c).
+        let reference = yz_profile(-0.2, 0.1, 0.2, 0.5);
+        let (s, c) = tilt.sin_cos();
+        // Rotate about the y axis through the origin: x' = c·x + s·z,
+        // z' = -s·x + c·z (points start at x = 0).
+        let tilted_pts: Vec<Point3> = reference
+            .outer()
+            .iter()
+            .map(|p| Point3::new(s * p.z, p.y, c * p.z))
+            .collect();
+        let normal = Vec3::new(c, 0.0, -s).normalized().unwrap();
+        let plane = Plane::from_point_normal(tilted_pts[0], normal).unwrap();
+        let tilted = Profile::new(plane, tilted_pts, vec![]).unwrap();
+        let path = [Point3::ORIGIN, Point3::new(leg, 0.0, 0.0)];
+        let solid = Object::from_follow_me(&tilted, &path, false, &[]).unwrap();
+        solid.validate().unwrap();
+        prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
+        let v = signed_volume(&solid);
+        prop_assert!((v - 0.4 * 0.4 * leg).abs() < 1e-6, "volume {v}");
+    }
+}
+
+#[test]
+fn follow_me_marks_soft_joints_and_stamps_band_cylinders() {
+    // Joint softening (design §7): the transverse joints between wall
+    // facets of one drawn-circle path are SOFT — facet seams of a smooth
+    // ring, not creases — while an unattributed L elbow stays hard. The
+    // ring's axis-parallel walls also pick up the path-band cylinder
+    // stamp (§7a) even though the profile is a plain rect.
+    let profile = radial_profile(std::f64::consts::PI / 24.0);
+    let (path, curves) = circle_path(2.0, 24);
+    let ring = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    ring.validate().unwrap();
+    let soft_count = ring.edges().values().filter(|e| e.soft).count();
+    assert!(
+        soft_count >= 24,
+        "every station joint of the smooth ring is soft, got {soft_count}"
+    );
+    for e in ring.edges().values() {
+        if e.soft {
+            assert!(e.twin_half_edge.is_some(), "soft edges are interior");
+        }
+    }
+    // The outer/inner walls (profile edges parallel to the revolution
+    // axis) ride true cylinders about the circle's own axis.
+    let stamped = ring
+        .faces()
+        .values()
+        .filter(|f| f.surface.is_some())
+        .count();
+    assert!(
+        stamped >= 24,
+        "axis-parallel walls carry the path-band cylinder, got {stamped}"
+    );
+
+    // An unattributed L path: a genuine elbow, nothing soft.
+    let l_profile = yz_profile(-0.2, 0.1, 0.2, 0.5);
+    let l_path = [
+        Point3::ORIGIN,
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+    ];
+    let l = Object::from_follow_me(&l_profile, &l_path, false, &[]).unwrap();
+    assert_eq!(
+        l.edges().values().filter(|e| e.soft).count(),
+        0,
+        "a free polyline elbow stays hard"
+    );
+}
+
+/// Splitting a face through one of a smooth ring's SOFT joints must not
+/// silently harden it — an everyday gesture (a sketch line, or a section
+/// cut, landing on an existing model edge) routes through
+/// `Object::split_face` → `split_boundary_edge`, which map-or-drops `curve`
+/// (a chord midpoint sits inside the circle, so a fragment is no longer a
+/// valid chord — a real geometric reason) but has no equivalent reason to
+/// drop `soft`: both fragments are still the exact same drawn-curve joint.
+#[test]
+fn follow_me_split_face_preserves_soft_edges() {
+    let profile = radial_profile(std::f64::consts::PI / 24.0);
+    let (path, curves) = circle_path(2.0, 24);
+    let mut ring = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    ring.validate().unwrap();
+
+    // A soft edge and the loop of the face on its `half_edge` side.
+    let (a, b, loop_id) = ring
+        .edges()
+        .values()
+        .find(|e| e.soft)
+        .map(|e| {
+            let he = ring.half_edges()[e.half_edge];
+            let a = ring.vertices()[he.origin].position;
+            let b = ring.vertices()[ring.half_edges()[he.next].origin].position;
+            (a, b, he.loop_id)
+        })
+        .expect("the smooth ring has soft edges");
+    let face = ring.loops()[loop_id].face;
+    let soft_mid = a + (b - a) * 0.5;
+
+    // The wall is a quad; find which side is the soft edge and cut straight
+    // across to the midpoint of its opposite side — an ordinary bisecting
+    // split, landing squarely mid-edge on both ends.
+    let corners: Vec<Point3> = ring
+        .loop_half_edges(loop_id)
+        .map(|h| ring.vertices()[ring.half_edges()[h].origin].position)
+        .collect();
+    assert_eq!(corners.len(), 4, "a follow-me wall is a quad");
+    let i = (0..4)
+        .find(|&k| {
+            let (p, q) = (corners[k], corners[(k + 1) % 4]);
+            (p.approx_eq(a, tol::POINT_MERGE) && q.approx_eq(b, tol::POINT_MERGE))
+                || (p.approx_eq(b, tol::POINT_MERGE) && q.approx_eq(a, tol::POINT_MERGE))
+        })
+        .expect("the soft edge is one of the quad's four sides");
+    let (oa, ob) = (corners[(i + 2) % 4], corners[(i + 3) % 4]);
+    let opp_mid = oa + (ob - oa) * 0.5;
+
+    ring.split_face(face, &[soft_mid, opp_mid]).unwrap();
+    ring.validate().unwrap();
+
+    // Both fragments of the original soft edge — the two new edges touching
+    // `soft_mid` on the split side — must still read soft.
+    let fragments_at_split: Vec<_> = ring
+        .edges()
+        .values()
+        .filter(|e| {
+            let he = ring.half_edges()[e.half_edge];
+            let p = ring.vertices()[he.origin].position;
+            let q = ring.vertices()[ring.half_edges()[he.next].origin].position;
+            (p.approx_eq(soft_mid, tol::POINT_MERGE) || q.approx_eq(soft_mid, tol::POINT_MERGE))
+                && (p.approx_eq(a, tol::POINT_MERGE)
+                    || p.approx_eq(b, tol::POINT_MERGE)
+                    || q.approx_eq(a, tol::POINT_MERGE)
+                    || q.approx_eq(b, tol::POINT_MERGE))
+        })
+        .collect();
+    assert_eq!(
+        fragments_at_split.len(),
+        2,
+        "the split soft edge has exactly two fragments"
+    );
+    for e in fragments_at_split {
+        assert!(e.soft, "a split fragment of a soft edge must stay soft");
+    }
+}
+
+#[test]
+fn follow_me_negative_stop_sweeps_the_other_way() {
+    // design §10a: a NEGATIVE stop is the closed-loop drag in the other
+    // direction — |stop| of arc length from the same seam, walked the
+    // other way around. Same swept volume for a symmetric profile, but
+    // genuinely different geometry (the two partial arms leave the seam
+    // toward opposite sides).
+    // Mid-edge seam (a Split anchor): plane x = 1 crosses the bottom and
+    // top edges strictly; corner seams are one-directional by design and
+    // refuse a reversed stop instead.
+    let plane =
+        Plane::from_point_normal(Point3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    let profile = Profile::new(
+        plane,
+        vec![
+            Point3::new(1.0, -0.4, -0.2),
+            Point3::new(1.0, 0.0, -0.2),
+            Point3::new(1.0, 0.0, 0.2),
+            Point3::new(1.0, -0.4, 0.2),
+        ],
+        vec![],
+    )
+    .unwrap();
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let fwd = Object::from_follow_me_to(&profile, &path, true, &[], 3.0).unwrap();
+    fwd.validate().unwrap();
+    let rev = Object::from_follow_me_to(&profile, &path, true, &[], -3.0).unwrap();
+    rev.validate().unwrap();
+    assert_eq!(rev.watertight(), WatertightState::Watertight);
+    assert!((signed_volume(&fwd) - signed_volume(&rev)).abs() < 1e-9);
+    assert!(
+        !objects_equivalent(&fwd, &rev),
+        "the reversed sweep must cover the other side of the loop"
+    );
+    // The forward arm reaches y = 1 on the x = 2 edge; the reversed arm
+    // reaches x = 1 on the y = 2 edge — check one distinguishing extent.
+    let fwd_max_x = fwd
+        .vertices()
+        .values()
+        .map(|v| v.position.x)
+        .fold(f64::MIN, f64::max);
+    let rev_max_x = rev
+        .vertices()
+        .values()
+        .map(|v| v.position.x)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        fwd_max_x > 2.0 && rev_max_x < 1.5,
+        "the two arms leave the seam toward opposite sides \
+         (fwd_max_x {fwd_max_x}, rev_max_x {rev_max_x})"
+    );
+
+    // A full-length negative stop is still the full closed sweep.
+    let full_rev = Object::from_follow_me_to(&profile, &path, true, &[], -99.0).unwrap();
+    let full_fwd = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
+    assert!((signed_volume(&full_rev) - signed_volume(&full_fwd)).abs() < 1e-9);
+
+    // An open path has one direction from its seam: negative refuses.
+    let open_path = [Point3::ORIGIN, Point3::new(0.0, 3.0, 0.0)];
+    let flat = ground_flat_profile(0.0, -0.2, 0.5, 0.2);
+    let err = Object::from_follow_me_to(&flat, &open_path, false, &[], -1.0).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::EmptyPath);
+}
+
+#[test]
+fn follow_me_negative_stop_sweeps_the_other_way_regardless_of_path_winding() {
+    // Regression for a defect caught in review of the negative-stop feature
+    // above: the "leave the seam along +n" orientation correction (design
+    // §1/§2b) used to run ONLY while building the forward walk, gated on
+    // `!reverse`. But a REVERSED walk's raw (uncorrected) index construction
+    // is, by a pure index-permutation identity, always exactly the FLIP of
+    // the forward walk's raw construction — true for both a `Split` (mid-
+    // edge) and a `Vertex` (facet-vertex) anchor, regardless of geometry.
+    // So whenever the profile's stored plane normal happened to be the
+    // antiparallel choice relative to the path's stored winding — an
+    // entirely arbitrary authoring detail, not a geometric one — the
+    // uncorrected reversed walk was ALREADY the flip of the (about-to-be-
+    // corrected) forward walk, and the two ended up identical: `stop_len <
+    // 0` silently swept the SAME side as `stop_len > 0` instead of the
+    // other one. This test is the exact opposite-winding twin of
+    // `follow_me_negative_stop_sweeps_the_other_way` above — same seam,
+    // same profile, only the stored path/profile orientation differs — and
+    // must show the same "genuinely different, opposite-side" result.
+    //
+    // Split anchor: the SAME square/profile as the test above, but the path
+    // array wound the OTHER way (CW instead of CCW) starting from a
+    // different corner. The seam still lands at the same physical point
+    // (1, 0, 0) via the segment nearest the profile's centroid, but the
+    // raw forward direction there now points toward (0,0,0) instead of
+    // (2,0,0) — the flip-needed ("Case B") condition this bug missed.
+    {
+        let plane =
+            Plane::from_point_normal(Point3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        let profile = Profile::new(
+            plane,
+            vec![
+                Point3::new(1.0, -0.4, -0.2),
+                Point3::new(1.0, 0.0, -0.2),
+                Point3::new(1.0, 0.0, 0.2),
+                Point3::new(1.0, -0.4, 0.2),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let path = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 2.0, 0.0),
+            Point3::new(2.0, 2.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+        ];
+        let fwd = Object::from_follow_me_to(&profile, &path, true, &[], 3.0).unwrap();
+        fwd.validate().unwrap();
+        let rev = Object::from_follow_me_to(&profile, &path, true, &[], -3.0).unwrap();
+        rev.validate().unwrap();
+        assert!((signed_volume(&fwd) - signed_volume(&rev)).abs() < 1e-9);
+        assert!(
+            !objects_equivalent(&fwd, &rev),
+            "Split anchor, opposite winding: the reversed sweep must still \
+             cover the other side of the loop, not silently match forward"
+        );
+    }
+    // Vertex anchor: a lathe seam (design §1) on an 8-facet drawn circle,
+    // wound the OTHER way (decreasing angle) from the tools' usual CCW
+    // `circle_path`/`attributed_ground_circle` output — the same
+    // "arbitrary stored winding" flip, this time on a curve-attributed
+    // path rather than a straight-edged one.
+    {
+        let n = 8;
+        let radius = 2.0;
+        let geom = kernel::CurveGeom {
+            center: Point3::ORIGIN,
+            radius,
+        };
+        let path: Vec<Point3> = (0..n)
+            .map(|i| {
+                let a = -(i as f64) / n as f64 * std::f64::consts::TAU;
+                Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+            })
+            .collect();
+        let curves = vec![Some(geom); n];
+        let profile = radial_profile(0.0);
+        let fwd = Object::from_follow_me_to(&profile, &path, true, &curves, 4.0).unwrap();
+        fwd.validate().unwrap();
+        let rev = Object::from_follow_me_to(&profile, &path, true, &curves, -4.0).unwrap();
+        rev.validate().unwrap();
+        assert!((signed_volume(&fwd) - signed_volume(&rev)).abs() < 1e-9);
+        assert!(
+            !objects_equivalent(&fwd, &rev),
+            "Vertex anchor, opposite winding: the reversed sweep must still \
+             cover the other side of the loop, not silently match forward"
+        );
+    }
+}
+
+#[test]
+fn follow_me_softens_the_profile_circumference_on_turns() {
+    // design §7c: a swept CIRCLE profile's own facet seams (the
+    // "latitude" lines) are soft wherever the profile edges share the
+    // drawn circle — including toroidal turn walls where no cylinder
+    // stamp can apply. A torus (circle profile around a circle path) is
+    // smooth in BOTH directions.
+    let profile = circle_profile_yz(2.0, 0.0, 0.4);
+    let (path, curves) = attributed_ground_circle(2.0, 24, 0.0);
+    let torus = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    torus.validate().unwrap();
+    let interior = torus
+        .edges()
+        .values()
+        .filter(|e| e.twin_half_edge.is_some())
+        .count();
+    let soft = torus.edges().values().filter(|e| e.soft).count();
+    assert_eq!(
+        soft, interior,
+        "every interior edge of a smooth torus is soft ({soft}/{interior})"
+    );
+
+    // A rectangle profile on the same path keeps its own edges hard in
+    // the longitudinal direction (a real cross-section crease), while the
+    // transverse station joints stay soft.
+    let rect = radial_profile(std::f64::consts::PI / 24.0);
+    let ring = Object::from_follow_me(&rect, &path, true, &curves).unwrap();
+    let ring_soft = ring.edges().values().filter(|e| e.soft).count();
+    let ring_interior = ring
+        .edges()
+        .values()
+        .filter(|e| e.twin_half_edge.is_some())
+        .count();
+    assert!(
+        ring_soft < ring_interior,
+        "a rectangular cross-section keeps hard longitudinal creases"
+    );
+    assert!(ring_soft >= 24, "station joints remain soft");
+}
+
+#[test]
+fn follow_me_sphere_is_smooth_in_both_directions() {
+    // design §7c through the pole split: the half-profile keeps its
+    // parent circle's identity, so a sphere's latitude seams soften
+    // exactly like a torus's — every interior edge is soft.
+    let profile = axis_circle_profile(1.0, 1.0, 24, 0.0);
+    let (path, curves) = attributed_ground_circle(1.0, 24, 0.0);
+    let sphere = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
+    sphere.validate().unwrap();
+    let interior = sphere
+        .edges()
+        .values()
+        .filter(|e| e.twin_half_edge.is_some())
+        .count();
+    let soft = sphere.edges().values().filter(|e| e.soft).count();
+    assert_eq!(
+        soft, interior,
+        "every interior edge of a sphere is soft ({soft}/{interior})"
     );
 }

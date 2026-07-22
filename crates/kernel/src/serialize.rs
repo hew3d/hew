@@ -51,7 +51,7 @@ use crate::transform::Transform;
 /// 4×f64 center xyz + radius when present). Absent in v1-v4 files → all
 /// `Edge::curve = None`. An imprinted circle awaiting its push-through
 /// persists its identity here (the true-curves design, playtest fix C3).
-pub const GEOMETRY_FORMAT_VERSION: u32 = 5;
+pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
@@ -426,6 +426,11 @@ impl Object {
             /// Per-hole-edge circle claims (v5), one list per hole in the
             /// same sorted order as `holes`.
             hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>>,
+            /// Per-outer-edge SOFT flags (v6), canonical order as
+            /// `outer_curves`. Participates in the sort key.
+            outer_soft: Vec<bool>,
+            /// Per-hole-edge SOFT flags (v6), paired like `hole_curves`.
+            hole_soft: Vec<Vec<bool>>,
             /// Ordinal of the owning connected component (derived from twin
             /// adjacency, NOT the stored shell list, which may lump
             /// disconnected components together); replaced by the
@@ -520,6 +525,8 @@ impl Object {
                 .then_with(|| uv_frame_cmp(&a.uv_frame, &b.uv_frame))
                 .then_with(|| surface_cmp(&a.surface, &b.surface))
                 .then_with(|| curve_seq_cmp(&a.outer_curves, &b.outer_curves))
+                .then_with(|| a.outer_soft.cmp(&b.outer_soft))
+                .then_with(|| a.hole_soft.cmp(&b.hole_soft))
                 .then_with(|| {
                     for (ha, hb) in a.hole_curves.iter().zip(&b.hole_curves) {
                         let c = curve_seq_cmp(ha, hb);
@@ -602,6 +609,17 @@ impl Object {
                 })
                 .collect()
         };
+        let loop_edge_soft =
+            |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<bool> {
+                verts
+                    .iter()
+                    .map(|&v| {
+                        self.loop_half_edges(loop_id)
+                            .find(|&h| self.half_edges[h].origin == v)
+                            .is_some_and(|h| self.edges[self.half_edges[h].edge].soft)
+                    })
+                    .collect()
+            };
 
         let mut canonical_faces: Vec<CanonicalFace> = self
             .faces
@@ -609,12 +627,14 @@ impl Object {
             .map(|(fid, face)| {
                 let (outer_verts, outer_ring) = canonical_loop(face.outer_loop);
                 let outer_curves = loop_edge_curves(face.outer_loop, &outer_verts);
+                let outer_soft = loop_edge_soft(face.outer_loop, &outer_verts);
                 // Build each hole with its edge-curves, then sort the whole
                 // triple by ring so the curves stay paired with their hole.
                 type HoleFull = (
                     Vec<crate::ids::VertexId>,
                     Vec<Point3>,
                     Vec<Option<crate::sketch::CurveGeom>>,
+                    Vec<bool>,
                 );
                 let mut holes_full: Vec<HoleFull> = face
                     .inner_loops
@@ -622,16 +642,21 @@ impl Object {
                     .map(|&il| {
                         let (hv, hr) = canonical_loop(il);
                         let hc = loop_edge_curves(il, &hv);
-                        (hv, hr, hc)
+                        let hs = loop_edge_soft(il, &hv);
+                        (hv, hr, hc, hs)
                     })
                     .collect();
                 holes_full.sort_by(|a, b| ring_cmp(&a.1, &b.1));
                 let holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)> = holes_full
                     .iter()
-                    .map(|(v, r, _)| (v.clone(), r.clone()))
+                    .map(|(v, r, _, _)| (v.clone(), r.clone()))
                     .collect();
                 let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
-                    holes_full.into_iter().map(|(_, _, c)| c).collect();
+                    holes_full.iter().map(|(_, _, c, _)| c.clone()).collect();
+                let hole_soft: Vec<Vec<bool>> = holes_full
+                    .into_iter()
+                    .map(|(_, _, _, sflags)| sflags)
+                    .collect();
                 CanonicalFace {
                     outer_verts,
                     outer_ring,
@@ -644,6 +669,8 @@ impl Object {
                     surface: face.surface,
                     outer_curves,
                     hole_curves,
+                    outer_soft,
+                    hole_soft,
                     shell: component_ordinal[fid],
                 }
             })
@@ -805,6 +832,30 @@ impl Object {
             // in CANONICAL loop order — entry k is the edge originating at the
             // k-th canonical vertex emitted above, captured on `cf`. Decode
             // re-attaches by the same rule against the rebuilt loop.
+            // per-face SOFT flags (v6): a u8 "any" flag; when 1, one u8
+            // per outer edge then per hole edge, same canonical order as
+            // the edge-curve block below. Written FIRST so decode order is
+            // version-monotonic (v5 readers never see it — they refuse the
+            // v6 buffer outright).
+            let any_soft = cf
+                .outer_soft
+                .iter()
+                .chain(cf.hole_soft.iter().flatten())
+                .any(|&f| f);
+            if !any_soft {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                for &f in &cf.outer_soft {
+                    buf.push(u8::from(f));
+                }
+                for hole in &cf.hole_soft {
+                    for &f in hole {
+                        buf.push(u8::from(f));
+                    }
+                }
+            }
+
             let any = cf
                 .outer_curves
                 .iter()
@@ -933,10 +984,14 @@ impl Object {
         // stamps them back after the build). `(outer_edge_curves, per-hole
         // edge_curves)`.
         #[allow(clippy::type_complexity)]
-        let mut edge_curves: Vec<(
+        /// Per-face `(outer, per-hole)` decode collectors.
+        type FaceFlags = (Vec<bool>, Vec<Vec<bool>>);
+        type FaceCurves = (
             Vec<Option<crate::sketch::CurveGeom>>,
             Vec<Vec<Option<crate::sketch::CurveGeom>>>,
-        )> = Vec::with_capacity(face_count);
+        );
+        let mut edge_soft: Vec<FaceFlags> = Vec::new();
+        let mut edge_curves: Vec<FaceCurves> = Vec::with_capacity(face_count);
 
         for _ in 0..face_count {
             let mat_raw = r.read_u32()?;
@@ -1071,6 +1126,48 @@ impl Object {
                 holes.push(hole);
             }
 
+            // v6: per-face SOFT flags, appended after the hole loops and
+            // BEFORE the edge-curve block (write order). A u8 "any" flag;
+            // when 1, one u8 per outer edge then per hole edge.
+            let (outer_soft, hole_soft) = if version >= 6 {
+                let any = r.read_u8()?;
+                if any == 0 {
+                    (Vec::new(), Vec::new())
+                } else if any == 1 {
+                    let read_flag = |r: &mut ByteReader<'_>| -> Result<bool, DecodeError> {
+                        match r.read_u8()? {
+                            0 => Ok(false),
+                            1 => Ok(true),
+                            _ => Err(DecodeError::Corrupt {
+                                offset: r.pos - 1,
+                                what: "soft edge flag must be 0 or 1",
+                            }),
+                        }
+                    };
+                    let mut os = Vec::with_capacity(outer.len());
+                    for _ in 0..outer.len() {
+                        os.push(read_flag(&mut r)?);
+                    }
+                    let mut hs = Vec::with_capacity(holes.len());
+                    for hole in &holes {
+                        let mut this = Vec::with_capacity(hole.len());
+                        for _ in 0..hole.len() {
+                            this.push(read_flag(&mut r)?);
+                        }
+                        hs.push(this);
+                    }
+                    (os, hs)
+                } else {
+                    return Err(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "soft-edges flag must be 0 or 1",
+                    });
+                }
+            } else {
+                (Vec::new(), Vec::new()) // pre-v6: nothing soft
+            };
+            edge_soft.push((outer_soft, hole_soft));
+
             // v5: per-face edge-curve claims, appended after the hole loops.
             // A u8 "any" flag; when 1, one (flag + optional 4×f64) entry per
             // outer edge then per hole edge, matching the loop vertex counts.
@@ -1175,6 +1272,27 @@ impl Object {
                         }
                     }
                     obj.edges[e].curve = Some(g);
+                }
+            }
+        }
+
+        // Restore per-edge SOFT flags (v6), positionally like the curve
+        // claims above. Shared edges were written by both faces; both
+        // carried the same flag at save (one edge record), so simply OR —
+        // a disagreement can only make an edge soft that one face claimed,
+        // which the validator's twin gate still bounds.
+        for (fid, (outer_soft, hole_soft)) in face_ids.iter().copied().zip(&edge_soft) {
+            let outer_loop = obj.faces[fid].outer_loop;
+            let inner_loops = obj.faces[fid].inner_loops.clone();
+            let loops = std::iter::once((outer_loop, outer_soft))
+                .chain(inner_loops.iter().copied().zip(hole_soft.iter()));
+            for (loop_id, flags) in loops {
+                let hes: Vec<_> = obj.loop_half_edges(loop_id).collect();
+                for (k, h) in hes.into_iter().enumerate() {
+                    if flags.get(k).copied().unwrap_or(false) {
+                        let e = obj.half_edges[h].edge;
+                        obj.edges[e].soft = true;
+                    }
                 }
             }
         }

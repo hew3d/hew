@@ -1,13 +1,26 @@
 /**
- * followMeStart — where a Follow Me profile may legally START on a path, and
- * whether the profile the cursor is over would be refused.
+ * followMeStart — whether the profile a Follow Me cursor is hovering would be
+ * accepted as a legal START for the picked path, and — since auto-orientation
+ * (design §2c) — whether it will simply be stood upright automatically
+ * instead.
  *
  * WHY THIS EXISTS. Follow Me's start rule is invisible: the kernel accepts a
  * profile only when the profile's PLANE meets the path in a very particular
- * way, and every other placement comes back as a post-click
- * `[ProfileNotPerpendicular]` / `[PathDetachedFromProfile]` toast. This module
- * is the app-side mirror of that rule, so the tool can mark the legal starts
- * on the path and warn while the user is still hovering.
+ * way, or else it FOLDS the profile upright and retries once (design §2c) —
+ * and only a decisively wrong placement (a corner fold-back, or a closed
+ * path the plane never touches) still comes back as a post-click
+ * `[PathTooTight]` / `[PathDetachedFromProfile]` toast. This module is the
+ * app-side mirror of that rule, so the tool can warn — or inform — while the
+ * user is still hovering a profile, before any click commits to it.
+ *
+ * (An earlier version of this module also mapped out every legal start on the
+ * path itself — quadrant rings on a circle, end rings on an open path, and,
+ * once corner seams landed, almost every polyline/face-loop vertex — and drew
+ * them on the path before a profile was even chosen. Using the tool in
+ * practice showed that cue answers the wrong question: by the time Follow Me
+ * is invoked the profile is already placed, and what the user wants to know
+ * is whether THIS profile will work, not where one could go. That path-marker
+ * layer was removed; only the profile-hover verdict below remains.)
  *
  * THE RULE, as `Object::from_follow_me` (crates/kernel/src/ops.rs) actually
  * implements it — every branch below cites the code it mirrors:
@@ -18,9 +31,7 @@
  *   its normal lies in the circle's plane (|n·axis| ≤ NORMAL_DIRECTION) and it
  *   passes through the center (|plane·center| ≤ PLANE_DIST). So for a circle
  *   path the legal placements are the whole one-parameter family of planes
- *   containing the circle's axis — and the ones a user can actually reach by
- *   drawing on an axis-aligned plane are the four QUADRANTS. That is what the
- *   tool marks.
+ *   containing the circle's axis.
  *
  *   Closed path, plain segment. The plane's normal must be parallel to the
  *   segment (|n·dir| ≥ 1 − NORMAL_DIRECTION) AND the plane must either cross
@@ -38,11 +49,7 @@
  *   Closed path, facet joint of ONE drawn curve. A vertex shared by two
  *   segments of the SAME curve chain IS a legal start (the joint's miter plane
  *   is the profile plane) — unconditionally, no fold test, since the joint's
- *   own tangent already IS the miter plane. Combined with the corner-seam
- *   capability above, `startAffordance` now marks almost every closed-path
- *   vertex as a POTENTIAL start (position-only — see its own doc comment):
- *   the only vertex left permanently blocked is a joint between two
- *   DIFFERENT drawn curves, which no kernel anchor covers at all.
+ *   own tangent already IS the miter plane.
  *
  *   Open path. Only the two ENDS can start a sweep: the profile plane must be
  *   perpendicular to the end segment (against the analytic tangent when the
@@ -54,26 +61,42 @@
  *   implying the path itself sits there.
  *
  * WHAT IT REFUSES TO GUESS. A cue that says "legal here" where the kernel then
- * refuses is worse than no cue, so the verdict is deliberately three-valued:
+ * refuses is worse than no cue, so the verdict is deliberately FOUR-valued:
  *
  *   - `'ok'` is claimed ONLY for f64-exact paths (sketch edges, whose
  *     coordinates cross the WASM boundary as f64 and so reproduce the kernel's
  *     arithmetic) and only under the kernel's own tolerances. A face-loop path
  *     arrives as f32 (`face_boundary`), far coarser than the 1e-9 tolerances,
  *     so `'ok'` is never claimed for one.
- *   - `'refused'` is claimed only when the placement is DECISIVELY wrong —
- *     outside a slop band far wider than either the kernel tolerance or f32
- *     noise. A placement that is merely a hair off reports `'unknown'`.
+ *   - `'orient'` is what a placement that is square to NOTHING on the path
+ *     used to earn as a `'refused'` (`ProfileNotPerpendicular`) verdict —
+ *     before auto-orientation (design §2c). The kernel now folds a non-
+ *     perpendicular profile upright and retries before ever refusing, and
+ *     that fold succeeds for essentially any placement near the path (see
+ *     `crates/kernel/src/ops.rs`'s `orient_profile_to_path` and its specs),
+ *     so a red "this will be refused" cue would now be a LIE for the common
+ *     case it used to correctly warn about. `'orient'` is informational, not
+ *     a warning: "not square yet, but Follow Me will stand it up for you."
+ *   - `'refused'` is claimed only when the placement is DECISIVELY wrong in a
+ *     way auto-orientation cannot fix — a corner fold-back (`PathTooTight`,
+ *     still a real refusal after the fold) or a closed path the profile's
+ *     plane is exactly perpendicular to but does not touch anywhere
+ *     (`PathDetachedFromProfile` — item 5 of the SketchUp-parity gap
+ *     analysis, explicitly out of scope: "a closed path missed entirely by
+ *     the plane"). Both are outside a slop band far wider than either the
+ *     kernel tolerance or f32 noise; a placement that is merely a hair off
+ *     reports `'unknown'`.
  *   - `'unknown'` is the honest answer in the band between, and for anything
  *     this module cannot chain (a branching or disconnected path).
  *
- * And even `'ok'` means only "the START is valid". The sweep can still refuse
- * for reasons that depend on the whole transport — `PathReverses`, the closed
- * seam's exact re-landing check — that are not decidable from the start
- * placement alone. The tool's copy says "ready to sweep", never "this will
- * work". (A corner seam's own fold refusal, `PathTooTight`, IS decidable from
- * the start placement — see the corner-seam paragraph above — and is the one
- * exception this module predicts.)
+ * And even `'ok'` (or `'orient'`) means only "the START is valid". The sweep
+ * can still refuse for reasons that depend on the whole transport —
+ * `PathReverses`, the closed seam's exact re-landing check — that are not
+ * decidable from the start placement alone. The tool's copy says "ready to
+ * sweep", never "this will work". (A corner seam's own fold refusal,
+ * `PathTooTight`, IS decidable from the start placement — see the
+ * corner-seam paragraph above — and is the one exception this module
+ * predicts.)
  */
 
 /** A world point / direction. */
@@ -144,21 +167,17 @@ export interface PlaneDef {
   normal: Vec3
 }
 
-/** Markers the tool draws on the picked path. */
-export interface StartAffordance {
-  /** Points a profile may start at — the four quadrants of a circle path, or
-   *  the two ends of an open path. */
-  legal: Vec3[]
-  /** Path vertices a profile may NOT start at (real corners). */
-  blocked: Vec3[]
-}
-
-/** Why a placement is refused — drives the tool's guidance copy. */
+/**
+ * Why a placement is refused — drives the tool's guidance copy. Neither
+ * variant here is fixed by auto-orientation (design §2c): a corner fold-back
+ * is refused again after the fold (the fold cannot un-straddle a corner), and
+ * a closed path's plane that is ALREADY exactly perpendicular but touches
+ * nowhere never triggers the fold in the first place (the kernel only folds
+ * on `ProfileNotPerpendicular`, and this is `PathDetachedFromProfile`). A
+ * placement merely not-yet-square earns `'orient'` now, not a `RefusalReason`
+ * — see the module docs.
+ */
 export type RefusalReason =
-  /** Circle path: the profile's plane does not contain the circle's axis. */
-  | 'not-radial'
-  /** The profile plane is square to no part of the path. */
-  | 'not-square'
   /** Closed path, sitting on a CORNER, decisively hanging back over the
    *  corner's non-perpendicular flank — the fold `PathTooTight` refuses (see
    *  the module docs' corner-seam paragraph). A corner is NOT refused merely
@@ -171,6 +190,11 @@ export type RefusalReason =
 
 export type StartVerdict =
   | { kind: 'ok'; carried?: boolean }
+  /** Square to nothing on the path YET — auto-orientation (design §2c) folds
+   *  the profile upright and retries before the kernel would refuse, and that
+   *  fold succeeds for essentially any placement near the path. Informational,
+   *  not a warning — see the module docs. */
+  | { kind: 'orient' }
   | { kind: 'refused'; reason: RefusalReason }
   | { kind: 'unknown' }
 
@@ -225,23 +249,6 @@ function signedDistance(plane: PlaneDef, p: Vec3): number {
   return dot(plane.normal, sub(p, plane.point))
 }
 
-/**
- * The kernel's `geom2d::plane_axes` — the deterministic in-plane basis a
- * sketch's analytic rims are expressed in. Reproduced exactly so the quadrant
- * markers land on the SAME points the inference engine offers as
- * `SnapKind::Quadrant` snaps (which carry extra snap gravity), rather than on
- * a differently-phased set the cursor would not stick to.
- */
-export function planeAxes(normal: Vec3): { u: Vec3; v: Vec3 } | null {
-  const [nx, ny, nz] = [Math.abs(normal[0]), Math.abs(normal[1]), Math.abs(normal[2])]
-  const reference: Vec3 = nx <= ny && nx <= nz ? [1, 0, 0] : ny <= nz ? [0, 1, 0] : [0, 0, 1]
-  const u = unit(cross(normal, reference))
-  if (u === null) return null
-  const v = unit(cross(normal, u))
-  if (v === null) return null
-  return { u, v }
-}
-
 // ------------------------------------------------------------ path structure
 
 /** A path vertex key. Shared vertices come from one kernel vertex record, so
@@ -250,30 +257,6 @@ function vkey(p: Vec3): string {
   return `${p[0]},${p[1]},${p[2]}`
 }
 
-
-/**
- * Whether the path is one closed loop of segments all attributed to the SAME
- * analytic circle — the kernel's `circular_path_axis` precondition. Returns
- * the revolution axis (center + the loop's plane normal, supplied by the
- * caller from the path sketch's plane) or null.
- */
-export function circlePath(
-  path: PathPolyline,
-  sketchNormal: Vec3,
-): { center: Vec3; axis: Vec3; radius: number } | null {
-  if (!path.closed || path.segments.length < 3) return null
-  const first = path.segments[0].curve
-  if (first === null || !Number.isFinite(first.radius) || first.radius <= POINT_MERGE) return null
-  for (const s of path.segments) {
-    const g = s.curve
-    if (g === null) return null
-    if (length(sub(g.center, first.center)) > POINT_MERGE) return null
-    if (Math.abs(g.radius - first.radius) > POINT_MERGE) return null
-  }
-  const axis = unit(sketchNormal)
-  if (axis === null) return null
-  return { center: first.center, axis, radius: first.radius }
-}
 
 /**
  * Chain `segments` into one walked, consistently ORIENTED path, or null for
@@ -337,77 +320,6 @@ export function chainPath(
   }
   if (visited.size !== segments.length) return null
   return { segments: walked, closed }
-}
-
-/**
- * The markers to draw on a picked path.
- *
- * - A closed circle path → its four quadrant points, phased exactly as the
- *   inference engine's `Quadrant` snaps are (see `planeAxes`).
- * - Any other closed path → every vertex is now a POTENTIAL corner-seam start
- *   (design §2b), EXCEPT one where both adjacent flanks are curve-attributed
- *   and belong to different curves — the kernel's `Anchor::Corner` candidate
- *   only ever comes from a PLAIN (non-curve) flank being perpendicular and
- *   touching the vertex (`ops.rs`: the corner branch lives inside the
- *   plain-segment scan only), so a vertex with at least one plain flank, or
- *   with two flanks of the SAME curve (a facet joint), can always be reached
- *   by *some* profile placement and is marked legal; a joint between two
- *   DIFFERENT curves has no kernel anchor at all and stays blocked. This is a
- *   POSITION-only marker, exactly like the quadrants/ends below — it says
- *   "you can aim here", not "any orientation here works"; the per-hover
- *   verdict (`evaluateStart`) still judges the actual profile.
- * - An open path → its two ends, the only points a sweep can start from.
- */
-export function startAffordance(path: PathPolyline, sketchNormal: Vec3 | null): StartAffordance {
-  const legal: Vec3[] = []
-  const blocked: Vec3[] = []
-  if (path.segments.length === 0) return { legal, blocked }
-
-  if (sketchNormal !== null) {
-    const circle = circlePath(path, sketchNormal)
-    if (circle !== null) {
-      const basis = planeAxes(circle.axis)
-      if (basis !== null) {
-        for (const q of [0, 0.5, 1, 1.5]) {
-          const a = q * Math.PI
-          legal.push(
-            add(
-              circle.center,
-              add(scale(basis.u, circle.radius * Math.cos(a)), scale(basis.v, circle.radius * Math.sin(a))),
-            ),
-          )
-        }
-      }
-      return { legal, blocked }
-    }
-  }
-
-  const m = path.segments.length
-  if (!path.closed) {
-    // An OPEN path can only be swept from an end, so the ends are the whole
-    // story — and no vertex gets a blocked marker, because an interior vertex
-    // is no more illegal than the straight run beside it. Marking only the
-    // vertices would wrongly imply the runs were fair game.
-    legal.push(path.segments[0].a, path.segments[m - 1].b)
-    return { legal, blocked }
-  }
-  for (let k = 0; k < m; k++) {
-    // The joint at this segment's start, between it and its chain predecessor.
-    const prev = path.segments[(k + m - 1) % m]
-    const cur = path.segments[k]
-    // Same drawn curve on both sides → a facet joint, which the kernel accepts
-    // as a seam (its miter plane IS the profile plane) — legal regardless of
-    // where the profile stands. Otherwise, a vertex with at least one PLAIN
-    // flank is a potential corner seam (design §2b) — legal, contingent on
-    // the profile's own placement (judged per-hover by `evaluateStart`).
-    // Only a joint between two DIFFERENT curves has no anchor at all.
-    if (sameCurve(prev.curve, cur.curve) || prev.curve === null || cur.curve === null) {
-      legal.push(cur.a)
-      continue
-    }
-    blocked.push(cur.a)
-  }
-  return { legal, blocked }
 }
 
 // ----------------------------------------------------------------- verdict
@@ -576,7 +488,13 @@ function evaluateClosed(
   // whose fold test is itself too close to call) — never warn either way.
   if (maybeCandidate || maybeCornerAmbiguous) return { kind: 'unknown' }
   if (!maybeSquare) {
-    return { kind: 'refused', reason: circleLike(path) ? 'not-radial' : 'not-square' }
+    // Square to nothing — this used to be the decisive `ProfileNotPerpendicular`
+    // refusal; auto-orientation (design §2c) now folds the profile upright and
+    // retries before the kernel would ever refuse for this reason, and that
+    // fold succeeds for essentially any placement near the path (a flat profile
+    // beside a circle, a molding profile outside a frame — see `ops.rs`'s specs
+    // for `orient_profile_to_path`). Informational, not a warning.
+    return { kind: 'orient' }
   }
   // Square, sitting on a corner, and decisively folded back over the
   // non-perpendicular flank — the refusal the kernel's advance check makes
@@ -639,26 +557,28 @@ function evaluateOpen(path: PathPolyline, plane: PlaneDef): StartVerdict {
 
   if (path.exact && exactSquare) return { kind: 'ok', carried: !exactOnPlane }
   if (maybeSquare) return { kind: 'unknown' }
-  return { kind: 'refused', reason: 'not-square' }
-}
-
-/** Whether every segment carries an analytic circle — used only to pick the
- *  right wording for a "not square anywhere" refusal. */
-function circleLike(path: PathPolyline): boolean {
-  return path.segments.length > 0 && path.segments.every((s) => s.curve !== null)
+  // Square to neither end — used to be the decisive refusal; auto-orientation
+  // (design §2c) now folds the profile onto whichever end it is nearest and
+  // retries (see `follow_me_auto_orient_hinges_at_a_touching_flap` and
+  // `follow_me_folds_a_parallel_profile_upright` in `op_specs.rs`), so this is
+  // informational now, not a warning.
+  return { kind: 'orient' }
 }
 
 /** Plain-language guidance for a hover-time refusal — what the user must do,
  *  not what the kernel called it. */
 export function refusalGuidance(reason: RefusalReason): string {
   switch (reason) {
-    case 'not-radial':
-      return 'This profile will be refused: it must stand on a plane through the circle’s centre. Move it onto a marked quadrant.'
-    case 'not-square':
-      return 'This profile will be refused: it is not square to the path. Stand it across the path where the sweep should start.'
     case 'corner-overhang':
       return 'This profile will be refused: it hangs back over the corner, folding into its own material. Slide it fully past the corner.'
     case 'detached':
       return 'This profile will be refused: it is square to the path but does not touch it. Move it onto the path.'
   }
+}
+
+/** Plain-language guidance for the `'orient'` verdict — informational, not a
+ *  warning: the profile isn't square to the path yet, but Follow Me will
+ *  stand it upright automatically before sweeping (design §2c). */
+export function orientGuidance(): string {
+  return 'This profile isn’t square to the path yet — Follow Me will stand it upright automatically before sweeping.'
 }

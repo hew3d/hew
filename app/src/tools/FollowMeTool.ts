@@ -14,43 +14,75 @@
  *      solid's face, which cannot be preselected, is discoverable and picked
  *      directly rather than through whatever the ray happens to hit.
  *   3. Click the profile region → immediate commit. The profile outline is
- *      consumed exactly like an extrusion's; the path stays. Clicking a
- *      solid FACE here re-picks the path instead — but only while the path
- *      is a leftover preselection (faces are never profiles in this
- *      release, so that stale-selection recovery is unambiguous). Once a
- *      path is picked deliberately in-tool, a stray face graze is ignored,
- *      never a silent substitution of the swept face; Esc re-picks.
+ *      consumed exactly like an extrusion's; the path stays. A sketch region
+ *      is always the PRIMARY profile pick; when the click misses every
+ *      region, an eligible SOLID FACE under the cursor is the fallback
+ *      profile (design §3a — `follow_me_face_along_edges`/
+ *      `follow_me_face_around_face`; holes tunnel through). Clicking a solid
+ *      FACE instead re-picks the PATH — but only while the path is a
+ *      leftover preselection (the stale-selection recovery); once a path is
+ *      picked deliberately in-tool, a face click there is the profile
+ *      fallback instead, never a silent path substitution. When the profile
+ *      face belongs to the SAME solid the (face-loop) path runs on, the
+ *      kernel merges the sweep into it automatically, in one undo step — no
+ *      gesture needed, the object identity says it all. A SKETCH-REGION
+ *      profile has no such identity to read, so merging one into a face-loop
+ *      path's solid instead, deliberately, needs Ctrl/Cmd-click (design §3b —
+ *      see the MERGE GESTURE note below); a plain click always births a
+ *      separate object.
  *   Esc steps back one stage. Kernel refusals surface as toasts; because the
  *   path source (a solid face) changes what "no good" means, the two face-
  *   specific refusals are re-worded against the FACE the user picked
  *   ("that face is parallel to the profile" / "…thinner than the profile is
  *   deep") rather than the generic drawn-path copy.
  *
+ * MERGE GESTURE. Sweeping a sketch-region profile around a face-loop path
+ * (the "molding around a tabletop" scenario) normally births a separate
+ * object — the user unions or subtracts it explicitly. Holding Ctrl/Cmd at
+ * the profile click instead commits `follow_me_merged_around_face` (design
+ * §3b): the kernel decides Subtract (the sweep carved into the solid's
+ * interior — a chamfer, a dado) or Union (it only rides the surface — a
+ * molding) itself, on clones, and the whole thing lands as ONE undo step.
+ * Move's own copy-toggle modifier (Alt/Option) is a durable TAP, read only in
+ * `onKey` — there is no live "is Alt held right now" signal to reuse, so this
+ * follows `PaintTool`'s whole-object-fill precedent instead: the Viewport
+ * reads the real `PointerEvent`'s `ctrlKey`/`metaKey` directly and calls
+ * `setMergeModifier` immediately before dispatching `onPointerDown`/
+ * `onPointerUp` (`activeTool instanceof FollowMeTool`) — a live read, not a
+ * toggle, so the modifier at the actual commit (a plain click, or a drag's
+ * release) is what decides. Merging only exists for a face-loop path from a
+ * PLAIN (non-instanced) object — the modifier is a no-op on an edge path or
+ * an instanced-face path, neither of which has a merged wasm entry point.
+ *
  * The kernel owns every geometric eligibility decision (perpendicularity,
  * chain validity, tight bends, self-intersection); this tool only gathers
  * the two picks, previews the target, and relays the typed error copy —
  * never a silent no-op when a pick lands on nothing.
  *
- * START AFFORDANCE. Where a profile may legally BEGIN on a path used to be
- * invisible: every wrong placement came back as a post-click
- * `[ProfileNotPerpendicular]` toast. Once a path is picked, the tool now
- * marks the legal starts on it — a circle path's four QUADRANTS (which is
- * where a profile drawn on an axis-aligned plane can actually meet the
- * kernel's radial-plane rule, and which carry extra snap gravity), an open
- * path's two ends, and — since the kernel grew corner-seam support — almost
- * every vertex of a polyline or face-loop path, since a profile CAN now
- * legally start right at a corner (a picture-frame's mitered corner) as long
- * as it stands past it; only a joint between two different drawn curves has
- * no kernel anchor at all and stays marked as truly blocked. Hovering a
- * profile region then outlines it in a verdict color and replaces the status
- * hint with what is wrong and where to move it. `followMeStart.ts` holds that
- * logic, mirrors the kernel branch by branch, and is deliberately
- * three-valued: it claims a placement is fine only for f64-exact sketch-edge
- * paths under the kernel's own tolerances, claims a refusal only when
- * decisively wrong (including the corner's own fold refusal, which — unlike
- * most sweep-wide refusals — IS decidable from the start placement alone),
- * and otherwise says nothing. The kernel remains the only authority — a
- * predicted refusal warns, it never blocks the click.
+ * START VERDICT. Where a profile may legally BEGIN on a path used to be
+ * invisible: every wrong placement came back as a post-click toast. Hovering
+ * a profile region now outlines it in a verdict color, badges its centre, and
+ * replaces the status hint with what is wrong (or, now, what will be fixed
+ * automatically) and where to move it. `followMeStart.ts` holds that logic,
+ * mirrors the kernel branch by branch, and is deliberately FOUR-valued since
+ * auto-orientation (design §2c): it claims a placement is fine only for
+ * f64-exact sketch-edge paths under the kernel's own tolerances, claims an
+ * INFO verdict (not a warning — auto-orientation will stand the profile up
+ * before sweeping) for a placement square to nothing on the path, claims a
+ * refusal only when decisively wrong in a way the fold cannot fix (including
+ * the corner's own fold-back refusal, which — unlike most sweep-wide
+ * refusals — IS decidable from the start placement alone, given the hovered
+ * profile's own boundary), and otherwise says nothing. The kernel remains the
+ * only authority — a predicted refusal warns, it never blocks the click.
+ *
+ * (An earlier version of this affordance also marked every legal start ON
+ * the path itself, before a profile was even picked — a circle's four
+ * quadrants, an open path's two ends, almost every polyline/face-loop vertex
+ * once corner seams landed. Using it in practice showed that answers the
+ * wrong question: by the time Follow Me is invoked, the profile is already
+ * placed, and the question is whether THIS profile works, not where one
+ * could go. That marker layer was removed; the hover verdict above is what
+ * remains.)
  *
  * DRAG FOR A PARTIAL SWEEP. Past the profile stage, a plain click still
  * commits the full sweep; pressing and then moving along the highlighted path
@@ -66,22 +98,43 @@
  * `onPointerUp` commits: full sweep when the release lands within
  * `MIN_PARTIAL_SWEEP_LEN` of arc length from the press (a plain click),
  * partial otherwise. Typing a length and pressing Enter commits a partial
- * sweep directly, with or without a drag first; Esc during a drag cancels
- * back to the profile stage, keeping the picked path.
+ * sweep directly, with or without a drag first — always FORWARD, regardless
+ * of drag direction (see K2 below); Esc during a drag cancels back to the
+ * profile stage, keeping the picked path.
+ *
+ * DIRECTION-AWARE DRAG (K2). A closed loop's seam has two directions; the
+ * kernel's `stop_len` accepts NEGATIVE to mean "sweep |stop| the OTHER way
+ * around the loop" (design §10a). Which way the user dragged can only be
+ * read from the drag's own frame-to-frame HISTORY, not a single cursor
+ * sample (a point just behind the seam and a point almost a full lap ahead
+ * of it can be neighbors in world space) — `_advanceDragLen` accumulates a
+ * signed arc length from wrapped per-frame deltas; see its doc and
+ * `DraggingStage`'s. The VCB stays a plain positive length with a "reverse "
+ * prefix rather than a signed number the user has to parse. A reversed stop
+ * can refuse `PathTooTight` for either of two kernel-side reasons sharing
+ * one code (a corner-only-seam refusing outright, or a genuine tight bend
+ * folding under the reversed walk) — `_refusalMessage` reframes a negative-
+ * stop `PathTooTight` to cover both honestly rather than naming "corner"
+ * specifically.
  *
  * FACE FRAME GUARD. `face_boundary` and `follow_me_around_face` take only
  * (object, face): they are coordinate-correct ONLY for a plain, identity-
- * placed, top-level world object. A face on a component INSTANCE is stored in
- * definition-local space (its world pose lives on the placement), and a face
- * reached inside a group/instance/object editing context is likewise out of
- * frame — there is no `follow_me_in_component` surface (cf.
- * `push_pull_in_component`). So the face branch is gated to the same
- * plain-top-level set every other face tool uses (faceDraw's
- * `defaultFaceEligible`, injected as `faceDrawEligible`), and any in-context
- * or instanced face is refused with copy rather than swept in the wrong
- * frame. Molding a face of an actively-edited component is a KNOWN
- * LIMITATION pending a kernel/wasm surface. Sketch-EDGE paths carry their own
- * world coordinates and are not gated.
+ * placed, top-level (or group-member — a Group has no pose of its own,
+ * ARCHITECTURE.md §2.7, so a group member's coordinates are already world
+ * coordinates) object. A face on a component INSTANCE used to be refused
+ * outright (its geometry is stored in definition-local space); it is now a
+ * legal PATH — `follow_me_around_instance_face` (design §2e) takes the
+ * instance handle too and poses the loop into world space kernel-side, a
+ * reflected placement refusing typed — but never a legal PROFILE (no
+ * `follow_me_face_*` variant takes an instance either). A face reached while
+ * editing a component INSTANCE's shared DEFINITION (`setComponentContext`,
+ * mirroring `PushPullTool`) stays refused wholesale — there is no
+ * `follow_me_in_component`/birth-into-definition surface (a scoped gap,
+ * unlike push/pull's `push_pull_in_component`) — but a GROUP editing context
+ * is fully legal now: `follow_me_grouped`/the trailing `group` arg births the
+ * result inside the group being edited (design §2f), threaded from the
+ * Viewport's active-context stack via `setActiveGroup`. Sketch-EDGE paths
+ * carry their own world coordinates and are not gated at all.
  */
 
 import * as THREE from 'three'
@@ -99,9 +152,9 @@ import { EDGE_COLOR_SELECTED } from '../viewport/SceneRenderer'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import {
-  startAffordance,
   evaluateStart,
   refusalGuidance,
+  orientGuidance,
   chainPath,
   type PathPolyline,
   type PathSegment,
@@ -109,15 +162,26 @@ import {
   type StartVerdict,
   type Vec3,
 } from './followMeStart'
-import { seamWalk, nearestOnWalk, subWalkTo, type SeamWalk } from './followMeDrag'
+import { seamWalk, nearestOnWalk, subWalkTo, reverseWalk, type SeamWalk } from './followMeDrag'
 
 export type PathTarget =
   | { kind: 'edges'; sketchHandle: bigint; edgeHandles: bigint[] }
-  // `instance` is carried only to keep the hover-dedup key distinct per
-  // placement; a followable face is always a plain world object (instance
-  // `undefined`) — `face_boundary`/`follow_me_around_face` take just
-  // (object, face) and are coordinate-correct for nothing else.
+  // `instance` is `undefined` for a plain, top-level (or group-member) face —
+  // coordinate-correct for `face_boundary`/`follow_me_around_face` as-is —
+  // and defined for a face reached through a component placement (design
+  // §2e): definition-local geometry that only `follow_me_around_instance_face`
+  // (which takes the instance handle too, and poses the loop into world space
+  // kernel-side) can sweep AS A PATH — never as a PROFILE, which has no
+  // instance-aware entry point at all.
   | { kind: 'face'; objectHandle: bigint; faceHandle: bigint; instance: bigint | undefined }
+
+/** A solid face picked as the PROFILE (design §3a) — always a plain,
+ *  non-instanced object (`_faceFollowable`'s frame guard); holes tunnel
+ *  through via `follow_me_face_along_edges`/`follow_me_face_around_face`. */
+interface ProfileFaceTarget {
+  objectHandle: bigint
+  faceHandle: bigint
+}
 
 /**
  * The outcome of resolving a path-stage pick: a usable target, a real face
@@ -145,8 +209,25 @@ type PathSource = 'preselection' | 'in-tool'
  * path). `walk` is fixed for the whole gesture (computed once at arm time from
  * the profile's plane + centroid — see `followMeDrag.ts`); `armLen` is the
  * arc length at the press, used only to tell a plain click (negligible
- * movement) from a real drag at commit time; `liveLen` is the current arc
- * length under the cursor, updated every move.
+ * movement) from a real drag at commit time; `liveLen` is the current SIGNED
+ * arc length under the cursor (K2 — see its doc below), updated every move.
+ *
+ * K2 — DIRECTION-AWARE DRAG. The kernel's `stop_len` (design §10a) now
+ * accepts NEGATIVE, meaning "sweep |stop| the OTHER way around a closed
+ * loop from the seam" — the shape a clockwise-vs-counterclockwise drag
+ * needs. A single unsigned `nearestOnWalk` query per frame can't supply
+ * that sign: the forward walk covers the WHOLE loop once, so a point one
+ * step BEHIND the seam and a point nearly a full lap AHEAD of it can sit
+ * right next to each other in world space while reading arc lengths near
+ * `total` and near `0` respectively — reporting the former as `stopLen ≈
+ * total` (see the historical bug this fixes: a small reverse drag
+ * committing an almost-full-loop forward sweep). The fix has to be
+ * direction-aware from the drag's own HISTORY, not a static split of the
+ * loop (e.g. "past the halfway point = reverse", which is just as wrong
+ * for a sweep genuinely meant to cover most of the loop) — `liveLen` is
+ * therefore built incrementally: `lastRawU`/`_advanceDragLen` track the
+ * shortest-arc delta between successive raw forward-walk positions and
+ * accumulate it, unwrapped, from `armLen`. See `_advanceDragLen`'s doc.
  */
 interface DraggingStage {
   kind: 'dragging'
@@ -155,8 +236,26 @@ interface DraggingStage {
   sketchHandle: bigint
   regionHandle: bigint
   walk: SeamWalk
+  /** `walk` re-oriented to run the OTHER way from the seam (K2 —
+   *  `followMeDrag.reverseWalk`), built once at arm time; non-null only for
+   *  a CLOSED path (`closed`) — an open path has no "other way" to walk
+   *  (the kernel refuses a negative stop there outright). Consulted by
+   *  `_drawDragPreview` whenever `liveLen < 0`. */
+  reverse: SeamWalk | null
+  /** Whether the picked path is a closed loop. K2's direction accumulator
+   *  (`_advanceDragLen`) and the negative-arc-length preview both apply
+   *  only here — an open path's walk is already monotonic end-to-end and
+   *  needs neither; its `liveLen` just tracks the raw unsigned query,
+   *  exactly as before K2. */
+  closed: boolean
   armLen: number
   liveLen: number
+  /** The raw, UNSIGNED forward-walk arc length (`nearestOnWalk(walk, …)`,
+   *  always in `[0, walk.total]`) as of the last processed pointer event —
+   *  `_advanceDragLen`'s only frame-to-frame memory, letting it recover the
+   *  true direction of travel from a wrapped delta. Never itself read
+   *  anywhere outside that method; `liveLen` is the value with meaning. */
+  lastRawU: number
 }
 
 type Stage =
@@ -193,48 +292,45 @@ export function pathHoverColors(): { path: number; hover: number; sweep: number 
 }
 
 /**
- * Start-affordance colors: "may start here" (circle quadrants, open-path ends,
- * a profile that checks out) and "may not" (a real path corner, a profile that
- * will be refused).
+ * Verdict colors for the hovered profile: "may start here" (a profile that
+ * checks out), "will be stood upright automatically" (a profile square to
+ * nothing on the path — informational, not a warning, since auto-orientation
+ * folds it up before sweeping — design §2c), and "may not" (a profile that
+ * will be refused even after the fold).
  *
  * Theme-forked the way `axisColors.ts` forks the world axes, and for the same
  * reason: the light theme's canvas is near-white, so the bright greens that
  * read well on the dark canvas lose most of their contrast there. Colors are
- * chosen at build time (a path pick / a hover), matching how ScaleTool reads
+ * chosen at build time (each hover), matching how ScaleTool reads
  * `axisColorsForTheme(getResolvedTheme())` when it draws its gizmo.
  *
- * Color is never the only encoding — a legal start is an open RING and a
- * blocked one a solid X, so the two read apart without it.
+ * Color is never the only encoding — the verdict badge is an open RING for
+ * "ok"/"orient" and a solid X for "refused", so the two read apart without it.
  */
 const CUE_COLORS = {
-  dark: { ok: 0x33dd77, blocked: 0xff5544 },
-  light: { ok: 0x0f8f4d, blocked: 0xd0311f },
+  dark: { ok: 0x33dd77, orient: 0x4db8ff, blocked: 0xff5544 },
+  light: { ok: 0x0f8f4d, orient: 0x1f6fb2, blocked: 0xd0311f },
 } as const
 
-export function cueColors(): { ok: number; blocked: number } {
+export function cueColors(): { ok: number; orient: number; blocked: number } {
   return CUE_COLORS[getResolvedTheme() === 'light' ? 'light' : 'dark']
 }
 
-/** Start markers hold a constant on-screen size: they are handles/annotations,
- *  not model geometry, so a world-sized marker would vanish on a 100 m path
- *  and swamp a 10 cm one. Same perspective inverse ScaleTool's grips use —
- *  `worldHalf = px · dist · tan(fov/2) / viewportHeight` — driven from the
- *  Viewport render loop through the shared `updateGripScale` hook. */
-const START_MARKER_PX = 14
-/** The verdict badge on the hovered profile is deliberately LARGER than a
- *  start marker: it lands on the profile's centre, which is exactly where the
- *  inference cursor's own snap indicator sits, so anything smaller is simply
- *  covered by it. At this size the badge reads as a ring/X around that dot. */
+/** The verdict badge on the hovered profile (and the drag gesture's own live
+ *  station marker) hold a constant on-screen size: they are handles/
+ *  annotations, not model geometry, so a world-sized marker would vanish on a
+ *  100 m path and swamp a 10 cm one. Same perspective inverse ScaleTool's
+ *  grips use — `worldHalf = px · dist · tan(fov/2) / viewportHeight` — driven
+ *  from the Viewport render loop through the shared `updateGripScale` hook.
+ *  It lands on the profile's centre, which is exactly where the inference
+ *  cursor's own snap indicator sits, so anything smaller is simply covered by
+ *  it — at this size the badge reads as a ring/X around that dot. */
 const VERDICT_BADGE_PX = 24
 /** Floor on a marker's world half-size; guards a degenerate viewport only. */
 const MIN_MARKER_WORLD_HALF = 1e-5
 /** Half-size a marker renders at for the one frame before the render loop
  *  first calls `updateGripScale` (and in unit tests, which never drive one). */
 const FALLBACK_MARKER_HALF_M = 0.02
-/** Cap on blocked-corner markers. A hand-drawn path has a handful; a dense
- *  imported outline could have hundreds, at which point the markers stop
- *  informing and start hiding the path they annotate. */
-const MAX_BLOCKED_MARKERS = 64
 
 /**
  * The two marker shapes, built once and SHARED by every marker — the same
@@ -256,7 +352,7 @@ function markerGeometry(shape: 'ring' | 'cross'): THREE.BufferGeometry {
 }
 
 /** A unit-sized solid "X" in the XY plane — two crossing bars, as four
- *  triangles. Used for the "cannot start here" marker. */
+ *  triangles. Used for the "will be refused" verdict badge. */
 function crossGeometry(): THREE.BufferGeometry {
   const w = 0.2 // bar half-width
   const d = Math.SQRT1_2
@@ -334,19 +430,11 @@ export class FollowMeTool implements Tool {
    *  or not — appears under the cursor, or a pick lands). */
   private missNotified = false
 
-  /** Start-affordance markers for the picked path (quadrants/ends in the
-   *  "may start here" color, real corners in the refusal color). Screen-
-   *  constant — see `updateGripScale`. */
-  private startMarkers: THREE.Object3D[] = []
   /** The picked path as this tool understands it geometrically, resolved once
    *  per path pick and reused for every hover verdict. Null when the path
    *  cannot be chained (branching/disconnected — the kernel refuses it too, so
    *  no cue is offered rather than a cue for one component). */
   private pathPoly: PathPolyline | null = null
-  /** The path sketch's plane normal — the frame the quadrant markers are
-   *  phased in, matching the inference engine's own quadrant snaps. Null for a
-   *  face-loop path. */
-  private pathSketchNormal: Vec3 | null = null
   /** Identity of the profile region the last hover verdict was computed for,
    *  so a still cursor doesn't re-query the kernel every move. */
   private profileHoverKey: string | null = null
@@ -356,6 +444,11 @@ export class FollowMeTool implements Tool {
    *  kept live so typing a length + Enter can commit a partial sweep against
    *  it WITHOUT requiring a drag to have armed first (E4). */
   private hoveredRegion: { sketchHandle: bigint; regionHandle: bigint } | null = null
+  /** The eligible solid face currently under the cursor at the profile stage,
+   *  when no sketch region is hit (design §3a's fallback profile) — drives
+   *  the hover highlight and status hint. Only ever set while `pathSource`
+   *  is `'in-tool'` (see `_hoverProfileFace`'s doc). */
+  private hoveredProfileFace: ProfileFaceTarget | null = null
 
   /** VCB buffer — raw string being typed by the user, live at the profile
    *  stage and while dragging (see `capturesKey`). */
@@ -374,9 +467,34 @@ export class FollowMeTool implements Tool {
    *  group/instance context path); null = the shared default policy. */
   private _faceEligible: FaceEligible | null = null
   /** True while ANY editing context is entered (object, group, or instance) —
-   *  Follow Me runs at the top level only, so this refuses in-context face
-   *  molding wholesale (see the FACE FRAME GUARD note). */
+   *  affects only the ineligible-face hint's wording (a generic "step out"),
+   *  matching `PushPullTool`'s own `_contextScoped`; eligibility itself comes
+   *  from `_faceEligible`/`_componentContext` below, which already understand
+   *  the full context path (see the FACE FRAME GUARD note). */
   private _contextScoped = false
+  /** The component DEFINITION being edited (double-click into an instance),
+   *  or null; mirrors `PushPullTool.setComponentContext` but with the
+   *  OPPOSITE effect — push/pull can operate inside one
+   *  (`push_pull_in_component`), Follow Me has no equivalent
+   *  birth-into-definition surface, so this refuses every face interaction
+   *  (path AND profile) wholesale while set (a scoped gap, not a policy
+   *  choice — see the FACE FRAME GUARD note). */
+  private _componentContext: bigint | null = null
+  /** The group being edited (double-click into a group), or null; threaded as
+   *  the trailing `group` arg on `follow_me_along_edges`/`follow_me_around_face`
+   *  so the sweep births inside it (design §2f) instead of at top level. The
+   *  other follow-me entry points (merged, face-profile, instance-face path)
+   *  have no group-birth surface yet and always land top-level regardless. */
+  private _activeGroup: bigint | null = null
+  /** Live Ctrl/Cmd modifier state at the moment of commit — read fresh by the
+   *  Viewport from the real `PointerEvent` right before dispatching
+   *  `onPointerDown`/`onPointerUp` (`activeTool instanceof FollowMeTool`,
+   *  matching `PaintTool`'s whole-object-fill precedent), because Move's own
+   *  copy modifier is a durable TAP with no live "is it held right now"
+   *  signal to reuse (see the MERGE GESTURE doc note). Only ever consulted
+   *  for a sketch-region profile swept around a face-loop path from a plain
+   *  object — a no-op everywhere else. */
+  private _mergeModifier = false
 
   constructor(
     wasmScene: WasmScene,
@@ -406,12 +524,12 @@ export class FollowMeTool implements Tool {
    * FIRST and only then calls the OUTGOING tool's `cancel()` — and most tools'
    * `cancel()` runs `clearPreview()`, which empties the whole shared preview
    * group. So a preselected path picked up in the constructor had its
-   * highlight, and now its start markers, silently wiped whenever Follow Me
-   * was entered from a tool with a preview to clear (Push/Pull, Move, Offset…)
-   * — exactly the bounce-between-tools flow the affordance has to survive.
-   * `ToolController` documents this hook for precisely that case; ScaleTool's
-   * always-on gizmo was the only other user. Idempotent: `_highlightPath`
-   * clears before it draws, and three.js disposal is safe to repeat.
+   * highlight silently wiped whenever Follow Me was entered from a tool with
+   * a preview to clear (Push/Pull, Move, Offset…) — exactly the
+   * bounce-between-tools flow the highlight has to survive. `ToolController`
+   * documents this hook for precisely that case; ScaleTool's always-on gizmo
+   * was the only other user. Idempotent: `_highlightPath` clears before it
+   * draws, and three.js disposal is safe to repeat.
    */
   activate(): void {
     if (this.stage.kind === 'pick-profile') this._highlightPath(this.stage.path)
@@ -425,30 +543,98 @@ export class FollowMeTool implements Tool {
     if (this.stage.kind === 'dragging') {
       return 'Drag along the path for a partial sweep, or type a length — release to commit. Esc backs up.'
     }
-    // A predicted refusal outranks the generic stage copy: the whole point of
-    // the start affordance is that being wrong is legible BEFORE the click,
-    // not as a toast after it. `unknown` deliberately says nothing extra —
-    // this tool never claims certainty it cannot compute (see followMeStart).
+    // A predicted verdict outranks the generic stage copy: the whole point of
+    // the start verdict is that a wrong (or auto-fixed) placement is
+    // legible BEFORE the click, not as a toast after it. `unknown`
+    // deliberately says nothing extra — this tool never claims certainty it
+    // cannot compute (see followMeStart).
     if (this.profileVerdict !== null) {
       if (this.profileVerdict.kind === 'refused') {
         return refusalGuidance(this.profileVerdict.reason)
+      }
+      if (this.profileVerdict.kind === 'orient') {
+        return `${orientGuidance()} Click to sweep it, or drag along the path for a partial sweep.${this._mergeHintSuffix()}${this._groupGapSuffix()}`
       }
       if (this.profileVerdict.kind === 'ok') {
         // A carried (perpendicular-but-detached) open-path end is honest
         // about what the sweep will actually do: it does NOT start on the
         // path as drawn — the path's shape is carried to wherever the
         // profile stands (design §2a).
-        return this.profileVerdict.carried === true
+        const base = this.profileVerdict.carried === true
           ? 'The sweep starts at the profile and follows the path’s shape — click to sweep it, or drag along the path for a partial sweep.'
           : 'This profile starts cleanly on the path — click to sweep it, or drag along the path for a partial sweep.'
+        return base + this._mergeHintSuffix() + this._groupGapSuffix()
       }
+    }
+    // The fallback SOLID-FACE profile (design §3a) — offered only once a
+    // path is deliberately picked in-tool (see `_hoverProfileFace`'s doc).
+    // The merge happens automatically (kernel-side, from object identity)
+    // when the face belongs to the SAME solid the path runs on — no
+    // modifier to advertise here, unlike the sketch-region flow below.
+    // `_commitFaceProfile` has no group-birth surface at all (see
+    // `_groupGapSuffix`'s doc), so this branch always appends it.
+    if (this.hoveredProfileFace !== null) {
+      const path = this.stage.path
+      const autoMerges =
+        path.kind === 'face' &&
+        path.instance === undefined &&
+        path.objectHandle === this.hoveredProfileFace.objectHandle
+      const base = autoMerges
+        ? 'Click this face to sweep it as the profile — it merges straight into the solid the path runs on.'
+        : 'Click this face to use it as the profile.'
+      return base + this._groupGapSuffix(true)
     }
     // The face-click re-pick is offered only while the path is a leftover
     // preselection (the recovery); once a path is deliberately picked, the
-    // hint stops promising a face click will retarget it.
+    // hint stops promising a face click will retarget it and instead offers
+    // the fallback face-profile pick (see the `hoveredProfileFace` branch
+    // above) plus, for a face-loop path, the merge gesture.
     return this.stage.pathSource === 'preselection'
       ? 'Click the profile to sweep along the highlighted path — a solid-face click follows that face instead; Esc re-picks the path.'
-      : 'Click the profile to sweep along the highlighted path, or drag along it for a partial sweep. Esc re-picks the path.'
+      : `Click the profile to sweep along the highlighted path, or drag along it for a partial sweep.${this._mergeHintSuffix()} Esc re-picks the path.`
+  }
+
+  /** " Ctrl/Cmd-click to merge with the solid." when the picked path is a
+   *  face loop from a plain (non-instanced) object — the only shape
+   *  `follow_me_merged_around_face` accepts — else empty (the MERGE GESTURE
+   *  doc note). */
+  private _mergeHintSuffix(): string {
+    if (
+      this.stage.kind === 'pick-profile' &&
+      this.stage.path.kind === 'face' &&
+      this.stage.path.instance === undefined
+    ) {
+      return ' Ctrl/Cmd-click to merge with the solid.'
+    }
+    return ''
+  }
+
+  /**
+   * " — will land at the top level, not inside the group you're editing"
+   * when a group IS being edited (`_activeGroup !== null`) but the commit
+   * this hint is describing has no group-birth surface at all: the
+   * instance-face-path route (`follow_me_around_instance_face`) and the
+   * solid-face-profile fallback (`follow_me_face_along_edges`/
+   * `follow_me_face_around_face`, via `_commitFaceProfile`) — unlike the
+   * plain sketch-region-profile routes, which correctly thread
+   * `_activeGroup` (see that field's doc) and need no disclosure here.
+   * The merge gesture (`follow_me_merged_around_face`) needs no equivalent
+   * either: the kernel already refuses a grouped path solid outright
+   * (`GroupedOperand`), so there is nothing silent left to disclose there.
+   * `forFaceProfile` is true for the `hoveredProfileFace` call site, which
+   * has no group surface unconditionally; false for the verdict call
+   * sites, which only lack one when the PATH itself is an instance face.
+   */
+  private _groupGapSuffix(forFaceProfile = false): string {
+    if (this._activeGroup === null) return ''
+    const noGroupSurface =
+      forFaceProfile ||
+      (this.stage.kind === 'pick-profile' &&
+        this.stage.path.kind === 'face' &&
+        this.stage.path.instance !== undefined)
+    return noGroupSurface
+      ? ' — will land at the top level, not inside the group you’re editing'
+      : ''
   }
 
   /**
@@ -497,38 +683,84 @@ export class FollowMeTool implements Tool {
   }
 
   /** True while any editing context is entered — the Viewport sets it (the
-   *  object/instance id channels don't cover a GROUP context). Follow Me is a
-   *  top-level act, so this makes in-context face molding refuse. */
+   *  object/instance id channels don't cover a GROUP context). Hint wording
+   *  only; see the field doc. */
   setContextScoped(scoped: boolean): void {
     this._contextScoped = scoped
   }
 
-  /** Whether the face on `object` (hit through `instance`) may become a path.
-   *  Only a plain, top-level, non-instanced world object is coordinate-correct
-   *  for `follow_me_around_face` (see the FACE FRAME GUARD note). */
-  private _faceFollowable(object: bigint, instance: bigint | undefined): boolean {
-    // No in-component variant: an instanced face is definition-local and would
-    // sweep in the wrong frame.
-    if (instance !== undefined) return false
-    // Follow Me runs at the top level; refuse any in-context face for now
-    // (known limitation) rather than sweep a face the profile can't meet.
-    if (this._contextScoped || this._activeContext !== null) return false
-    // The shared plain-top-level policy (grouped faces refused, etc.).
+  /** Set the component DEFINITION being edited, or null — mirrors
+   *  `PushPullTool.setComponentContext`'s wiring (the Viewport's generic
+   *  per-context-change effect duck-types this the same way for every tool
+   *  that implements it), but Follow Me refuses wholesale instead of routing
+   *  through an in-component surface (see the field doc). */
+  setComponentContext(componentId: bigint | null): void {
+    this._componentContext = componentId
+  }
+
+  /** Set the group being edited, or null — births the next sweep inside it
+   *  (design §2f). See the field doc. */
+  setActiveGroup(groupId: bigint | null): void {
+    this._activeGroup = groupId
+  }
+
+  /** Live Ctrl/Cmd modifier read, called by the Viewport right before
+   *  dispatching a pointer event — see the field doc. */
+  setMergeModifier(held: boolean): void {
+    this._mergeModifier = held
+  }
+
+  /**
+   * Whether the face on `object` (hit through `instance`) may become a PATH
+   * (`forProfile: false`) or a PROFILE (`forProfile: true`) — see the FACE
+   * FRAME GUARD note. A component-DEFINITION context refuses EVERYTHING (no
+   * birth-into-definition surface), instance or not.
+   *
+   * An instanced face is a legal PATH unconditionally otherwise (never a
+   * legal PROFILE — no kernel surface takes one): unlike every other face
+   * interaction here, sweeping AROUND an instance's face never touches the
+   * instance or its definition — it is a read-only geometric reference, the
+   * same as clicking any other visible face — so it deliberately BYPASSES
+   * the injected `_faceEligible` policy (`faceDrawEligible`), which exists
+   * to gate DIRECT EDITS (draw/push-pull) behind having entered the
+   * component first. Routing an instance path through that policy would
+   * refuse it at the top level (`resolvePickToSelectable` resolves an
+   * un-entered instanced pick to the INSTANCE node, never `'object'`),
+   * defeating the whole point of the relaxation.
+   *
+   * A PLAIN face (no instance) keeps the shared context-path-aware policy
+   * every other face tool uses — Follow Me adds no separate group/top-level
+   * logic of its own for that case (a GROUP editing context already resolves
+   * correctly through it once the blanket `_contextScoped` refusal — see
+   * that field's doc — no longer overrides it).
+   */
+  private _faceFollowable(object: bigint, instance: bigint | undefined, forProfile: boolean): boolean {
+    if (this._componentContext !== null) return false
+    if (instance !== undefined) return !forProfile
     return this._faceEligible !== null
       ? this._faceEligible(object, instance)
       : defaultFaceEligible(this.wasmScene, this._activeContext, object, instance)
   }
 
-  /** Why an ineligible face refused, directing the user to a plain object's
-   *  face (Follow Me can't mold instanced/grouped/in-context geometry). */
-  private _ineligibleFaceHint(instance: bigint | undefined): string {
+  /** Why an ineligible face refused, phrased as the way in — mirrors
+   *  `PushPullTool._ineligibleFaceHint`'s shape, with Follow Me's
+   *  component-definition refusal (a scoped gap, not a "step out" scope
+   *  question) checked first. */
+  private _ineligibleFaceHint(instance: bigint | undefined, forProfile: boolean): string {
+    if (this._componentContext !== null) {
+      return 'Follow Me can’t sweep while editing a component’s definition — press Esc to step out first.'
+    }
     if (this._contextScoped || this._activeContext !== null) {
-      return 'Follow Me runs at the top level — press Esc to step out of what you are editing first.'
+      return 'That face isn’t part of what you’re editing — press Esc to step out first.'
     }
     if (instance !== undefined) {
-      return 'That face belongs to a component — Follow Me needs a plain object. Explode the instance, then follow the face.'
+      // Only reachable for a PROFILE pick — a PATH pick never refuses an
+      // instanced face for being one (see `_faceFollowable`).
+      return 'That face belongs to a component — Follow Me can only use a plain face as the profile. Pick a sketch region instead, or explode the instance.'
     }
-    return 'That face is inside a group — Follow Me needs a plain object. Ungroup it, then follow the face.'
+    return forProfile
+      ? 'That face is inside a group — enter the group to use it as the profile, or ungroup it first.'
+      : 'That face is inside a group — enter the group first, or ungroup it, then follow the face.'
   }
 
   onPointerMove(_snap: Snap | null, ray: Ray): void {
@@ -536,10 +768,16 @@ export class FollowMeTool implements Tool {
     // partial-sweep length (E4) — update the station marker, the brightened
     // "swept so far" overlay, and the VCB readout.
     if (this.stage.kind === 'dragging') {
-      const { arcLen } = nearestOnWalk(this.stage.walk, ray.origin, ray.direction)
-      this.stage = { ...this.stage, liveLen: arcLen }
-      this._drawDragPreview(arcLen)
-      this._reportDragMeasurement(arcLen)
+      const { arcLen: rawU } = nearestOnWalk(this.stage.walk, ray.origin, ray.direction)
+      // `liveLen` stores the TRUE, UNCLAMPED accumulated total — see
+      // `_advanceDragLen`'s doc for why clamping it here (rather than only
+      // at display/commit time, in `_clampedDragLen`) would desync it from
+      // `lastRawU`'s own always-unclamped sensor reading.
+      const signedLen = this._advanceDragLen(rawU)
+      this.stage = { ...this.stage, liveLen: signedLen, lastRawU: rawU }
+      const clamped = this._clampedDragLen(signedLen)
+      this._drawDragPreview(clamped)
+      this._reportDragMeasurement(clamped)
       return
     }
     // At the profile stage the picked path stays highlighted and the hover
@@ -596,45 +834,47 @@ export class FollowMeTool implements Tool {
       return
     }
 
-    // pick-profile: a region click commits. A solid-face click instead
-    // RE-PICKS the path, but ONLY when the current path is a leftover
-    // preselection — the recovery that matters when a stale selection from
-    // placing the profile silently became the path: the user "clicks the
-    // box's top face" expecting to pick it, and before this fallback that
-    // click was a dead no-op. A path the user picked deliberately in-tool
-    // is NEVER retargeted by a stray face graze: doing so would silently
-    // swap the swept face out from under the very next profile click. A
-    // near-miss of a small profile's interior lands here constantly, so an
-    // in-tool region miss stays quiet (the picked path is highlighted; the
-    // user simply clicks again) — surfacing a toast on every near-miss would
-    // be noise, not guidance.
+    // pick-profile: a region click commits (the primary profile pick). A
+    // solid-face click's meaning depends on where the path came from:
+    //  - `pathSource === 'preselection'`: RE-PICKS the path — the recovery
+    //    that matters when a stale selection from placing the profile
+    //    silently became the path: the user "clicks the box's top face"
+    //    expecting to pick it, and before this fallback that click was a dead
+    //    no-op. Faces are never profiles while the recovery is still live —
+    //    unambiguous.
+    //  - `pathSource === 'in-tool'`: a deliberately-picked path is NEVER
+    //    retargeted by a stray face graze, so a face click here is instead
+    //    the FALLBACK PROFILE (design §3a) — a solid face swept as-is,
+    //    holes tunneling through. A near-miss of a small profile's interior
+    //    (no region AND no eligible face) stays quiet either way; surfacing
+    //    a toast on every near-miss would be noise, not guidance.
     const regionPick = this.wasmScene.pick_sketch_region(
       ray.origin[0], ray.origin[1], ray.origin[2],
       ray.direction[0], ray.direction[1], ray.direction[2],
     )
     if (regionPick === undefined) {
-      if (this.stage.pathSource !== 'preselection') return
       const facePick = this.wasmScene.pick_face(
         ray.origin[0], ray.origin[1], ray.origin[2],
         ray.direction[0], ray.direction[1], ray.direction[2],
       )
-      if (facePick !== undefined) {
-        let object: bigint
-        let face: bigint
-        let instance: bigint | undefined
-        try {
-          object = facePick.object()
-          face = facePick.face()
-          instance = facePick.instance()
-        } finally {
-          facePick.free()
-        }
+      if (facePick === undefined) return
+      let object: bigint
+      let face: bigint
+      let instance: bigint | undefined
+      try {
+        object = facePick.object()
+        face = facePick.face()
+        instance = facePick.instance()
+      } finally {
+        facePick.free()
+      }
+      if (this.stage.pathSource === 'preselection') {
         // Same frame guard as the path stage: a stale-preselection recovery
         // must not adopt an instanced/in-context face the sweep can't place.
         // Route through _notifyMiss so repeated clicks on the same ineligible
         // face don't stack toasts, matching the path stage's anti-spam dedup.
-        if (!this._faceFollowable(object, instance)) {
-          this._notifyMiss(this._ineligibleFaceHint(instance))
+        if (!this._faceFollowable(object, instance, false)) {
+          this._notifyMiss(this._ineligibleFaceHint(instance, false))
           return
         }
         // The recovered face is now a deliberate pick — mark it in-tool so a
@@ -642,7 +882,18 @@ export class FollowMeTool implements Tool {
         const path: PathTarget = { kind: 'face', objectHandle: object, faceHandle: face, instance }
         this.stage = { kind: 'pick-profile', path, pathSource: 'in-tool' }
         this._highlightPath(path)
+        return
       }
+      // in-tool: try the face as a PROFILE instead. No kernel entry point
+      // combines a face profile with an instance-face PATH — that specific
+      // pairing stays quiet (a near-miss) rather than a confusing toast for
+      // an edge case with no home yet.
+      if (this.stage.path.kind === 'face' && this.stage.path.instance !== undefined) return
+      if (!this._faceFollowable(object, instance, true)) {
+        this._notifyMiss(this._ineligibleFaceHint(instance, true))
+        return
+      }
+      this._commitFaceProfile(object, face, this.stage.path, this.stage.pathSource)
       return
     }
     let sketchHandle: bigint
@@ -670,9 +921,19 @@ export class FollowMeTool implements Tool {
   onPointerUp(_snap: Snap | null, ray: Ray): void {
     if (this.stage.kind !== 'dragging') return
     const { path, sketchHandle, regionHandle, walk, armLen } = this.stage
-    const { arcLen } = nearestOnWalk(walk, ray.origin, ray.direction)
-    const stopLen = Math.abs(arcLen - armLen) < MIN_PARTIAL_SWEEP_LEN ? undefined : arcLen
-    this._commit(path, sketchHandle, regionHandle, stopLen)
+    const { arcLen: rawU } = nearestOnWalk(walk, ray.origin, ray.direction)
+    // Same signed accumulator as every `onPointerMove` frame (K2) — the
+    // release is just one more sample of the same drag history, not a
+    // fresh unsigned query that would re-introduce the direction ambiguity
+    // `_advanceDragLen` exists to resolve. Clamped for the actual commit —
+    // see `_clampedDragLen`'s doc for why the STORED accumulator must stay
+    // unclamped while only the value sent onward is bounded.
+    const signedLen = this._clampedDragLen(this._advanceDragLen(rawU))
+    const stopLen = Math.abs(signedLen - armLen) < MIN_PARTIAL_SWEEP_LEN ? undefined : signedLen
+    // The Viewport reads the real release event's Ctrl/Cmd state into
+    // `_mergeModifier` immediately before calling this (see its doc) — a
+    // fresh, commit-time read, not whatever was held at the arming press.
+    this._commit(path, sketchHandle, regionHandle, stopLen, this._mergeModifier)
   }
 
   /**
@@ -693,10 +954,14 @@ export class FollowMeTool implements Tool {
   ): void {
     const walk = this._buildWalk(sketchHandle, regionHandle)
     if (walk === null) {
-      this._commit(path, sketchHandle, regionHandle)
+      // No drag preview possible — commit outright, exactly as a plain click
+      // would. `_mergeModifier` was just set by the Viewport from this same
+      // press event (see its doc), so this is still a live, commit-time read.
+      this._commit(path, sketchHandle, regionHandle, undefined, this._mergeModifier)
       return
     }
     const { arcLen } = nearestOnWalk(walk, ray.origin, ray.direction)
+    const closed = this.pathPoly?.closed ?? false
     this.typed = ''
     this.stage = {
       kind: 'dragging',
@@ -705,8 +970,11 @@ export class FollowMeTool implements Tool {
       sketchHandle,
       regionHandle,
       walk,
+      reverse: closed ? reverseWalk(walk) : null,
+      closed,
       armLen: arcLen,
       liveLen: arcLen,
+      lastRawU: arcLen,
     }
     // The profile-region verdict outline/badge is retired the moment the
     // gesture starts — the picked-path highlight (undisturbed) and the new
@@ -734,6 +1002,63 @@ export class FollowMeTool implements Tool {
     }
   }
 
+  /**
+   * K2 — advance the drag's SIGNED arc-length accumulator to the walk
+   * position nearest `ray`, from the current `dragging` stage (a no-op,
+   * returning `rawU` itself, outside that stage). `rawU` is this frame's
+   * raw, UNSIGNED forward-walk arc length (`nearestOnWalk`, always in
+   * `[0, walk.total]`).
+   *
+   * OPEN path: returned unchanged — `nearestOnWalk` is already monotonic
+   * end-to-end, so there is no reverse direction to disambiguate (the
+   * kernel refuses a negative stop on an open path outright).
+   *
+   * CLOSED path: `rawU` alone can't tell "just started dragging backward"
+   * from "dragged almost an entire lap forward" — both land near the same
+   * raw value on the WRONG side of the loop from the seam (see the
+   * `DraggingStage` doc's worked example). The fix is the drag's own
+   * HISTORY: take the SHORTEST-arc delta between this frame's `rawU` and
+   * last frame's (`lastRawU`) — wrapped by `±walk.total` so a delta that
+   * would exceed half the loop is read the other way around instead —
+   * and accumulate it onto the running signed total (`liveLen`). A real
+   * drag never jumps more than a small fraction of the loop between two
+   * consecutive pointer-move frames, so the shortest-arc reading is the
+   * true one; the accumulated total can legitimately exceed a single
+   * `nearestOnWalk` query's range, which is exactly the point — it is a
+   * running position, not a fresh snapshot.
+   *
+   * DELIBERATELY UNCLAMPED. A drag that goes past a full lap and then
+   * reverses needs to remember HOW FAR past — clamping the returned value
+   * here (and feeding that clamped value back in as next frame's `liveLen`)
+   * would silently discard that overshoot, desyncing the stored
+   * accumulator from `lastRawU` (which always keeps the true, unclamped
+   * sensor reading): a tiny reverse tick right after a big overshoot would
+   * then read as a real, large partial-sweep shortfall instead of staying
+   * pinned at "still past a full lap." `_clampedDragLen` is the only place
+   * that bounds the value, applied once at each point of USE (the VCB
+   * readout, the preview, the committed `stop_len`) — never baked back into
+   * the stored state this method's own `liveLen + delta` builds on.
+   */
+  private _advanceDragLen(rawU: number): number {
+    if (this.stage.kind !== 'dragging') return rawU
+    const { walk, closed, lastRawU, liveLen } = this.stage
+    if (!closed || !(walk.total > 1e-9)) return rawU
+    let delta = rawU - lastRawU
+    if (delta > walk.total / 2) delta -= walk.total
+    else if (delta < -walk.total / 2) delta += walk.total
+    return liveLen + delta
+  }
+
+  /** Bound a (possibly past-a-full-lap) signed drag length to `±walk.total`
+   *  for display/commit — see `_advanceDragLen`'s doc for why the STORED
+   *  accumulator must stay unclamped while only the value sent onward here
+   *  is bounded. A no-op outside `dragging` (returns `signedLen` as-is). */
+  private _clampedDragLen(signedLen: number): number {
+    if (this.stage.kind !== 'dragging') return signedLen
+    const total = this.stage.walk.total
+    return Math.max(-total, Math.min(total, signedLen))
+  }
+
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
       if (this.stage.kind === 'dragging') {
@@ -753,6 +1078,7 @@ export class FollowMeTool implements Tool {
         this.missNotified = false
         this.typed = ''
         this.hoveredRegion = null
+        this.hoveredProfileFace = null
         this._clearPath()
         this._clearHover()
         this.onMeasurementCb('')
@@ -768,8 +1094,25 @@ export class FollowMeTool implements Tool {
     if (ev.key === 'Enter') {
       const meters = parseLengthToMeters(this.typed)
       if (meters === null) return
+      // K2: typed entry always commits FORWARD. The signed drag-direction
+      // concept (see `_advanceDragLen`) only exists for the pointer
+      // gesture's own history — a typed length has no direction to read a
+      // sign from, and the length grammar happens to accept a leading `-`
+      // (`editLengthBuffer`) for other tools' sake; that must not silently
+      // reach the kernel's reverse-sweep meaning here.
+      const stopLen = Math.abs(meters)
+      // A KeyboardEvent carries its own live modifier state — no need to
+      // route this through `_mergeModifier` (that field exists only because
+      // `onPointerDown`/`onPointerUp` don't carry the raw DOM event).
+      const merge = ev.ctrlKey || ev.metaKey
       if (this.stage.kind === 'dragging') {
-        this._commit(this.stage.path, this.stage.sketchHandle, this.stage.regionHandle, meters)
+        this._commit(
+          this.stage.path,
+          this.stage.sketchHandle,
+          this.stage.regionHandle,
+          stopLen,
+          merge,
+        )
         return
       }
       // pick-profile: a typed length commits a partial sweep directly
@@ -781,7 +1124,8 @@ export class FollowMeTool implements Tool {
           this.stage.path,
           this.hoveredRegion.sketchHandle,
           this.hoveredRegion.regionHandle,
-          meters,
+          stopLen,
+          merge,
         )
       }
       return
@@ -798,6 +1142,7 @@ export class FollowMeTool implements Tool {
     this.missNotified = false
     this.typed = ''
     this.hoveredRegion = null
+    this.hoveredProfileFace = null
     // Route every live overlay through its own proper disposal FIRST — a fat
     // line (`LineSegments2`) needs `disposeFatSegments` to drop its material
     // from the resolution registry (`fatLine.ts`), which the generic
@@ -918,8 +1263,8 @@ export class FollowMeTool implements Tool {
       } finally {
         facePick.free()
       }
-      if (!this._faceFollowable(object, instance)) {
-        return { kind: 'ineligible-face', message: this._ineligibleFaceHint(instance) }
+      if (!this._faceFollowable(object, instance, false)) {
+        return { kind: 'ineligible-face', message: this._ineligibleFaceHint(instance, false) }
       }
       return { kind: 'target', path: { kind: 'face', objectHandle: object, faceHandle: face, instance } }
     }
@@ -927,8 +1272,12 @@ export class FollowMeTool implements Tool {
   }
 
   /**
-   * Commit a sweep. `stopLen` is the optional partial-sweep arc length (E4)
-   * — `undefined` sweeps the full path exactly as before.
+   * Commit a sketch-region-profile sweep. `stopLen` is the optional
+   * partial-sweep arc length (E4) — `undefined` sweeps the full path exactly
+   * as before. `merge` (the live Ctrl/Cmd read — see `_mergeModifier`'s doc)
+   * only ever changes anything for a face-loop path from a plain object (the
+   * MERGE GESTURE); it is silently a no-op on an edge path or an
+   * instance-face path, neither of which has a merged wasm entry point.
    *
    * `fallback` is computed BEFORE the kernel call from whatever stage this
    * commit is running from (`pick-profile` or `dragging`), so a refusal drops
@@ -940,46 +1289,169 @@ export class FollowMeTool implements Tool {
     sketchHandle: bigint,
     regionHandle: bigint,
     stopLen?: number,
+    merge = false,
   ): void {
     const fallback: Stage =
       this.stage.kind === 'dragging' || this.stage.kind === 'pick-profile'
         ? { kind: 'pick-profile', path: this.stage.path, pathSource: this.stage.pathSource }
         : { kind: 'pick-path' }
     try {
+      const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, merge)
+      this._finishCommit(objectId)
+    } catch (err) {
+      // MERGE FALLBACK (K4): a corner/edge-only contact refuses the MERGE
+      // itself (`DegenerateContact` — the boolean step found no real
+      // overlap to subtract or union), but the plain separate-birth sweep
+      // this same profile/path pair would otherwise commit is still
+      // perfectly valid. Retry it once, silently, before giving up — the
+      // same "try the other thing" instinct the kernel's own
+      // `Document::follow_me_merged` already applies one layer in (an
+      // Intersect probe failing falls back to Union), just applied one
+      // layer OUT, at the gesture the merge flag controls. `merge` being
+      // true is what guarantees this branch is even reachable: a plain
+      // commit never calls the merged wasm entry point at all (see
+      // `_invokeFollowMe`), so it can never produce this code in the first
+      // place.
+      const code = parseKernelErrorCode(err)
+      if (merge && code === 'DegenerateContact') {
+        try {
+          const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, false)
+          this._finishCommit(objectId)
+          this.onToast(
+            'The profile only touches the solid at an edge or corner — left as a separate object.',
+          )
+          return
+        } catch (fallbackErr) {
+          // The separate-birth sweep failed too — ITS refusal is what the
+          // user needs to hear now, the merge's is superseded.
+          this._refuseCommit(path, fallback, fallbackErr, stopLen)
+          return
+        }
+      }
+      // Typed refusal: keep the picked path so the user can adjust the
+      // profile and click (or drag/type) again.
+      this._refuseCommit(path, fallback, err, stopLen)
+    }
+  }
+
+  /** Shared success cleanup for every commit path (`_commit`,
+   *  `_commitFaceProfile`, and the K4 merge fallback above): drop back to
+   *  `pick-path`, clear every live overlay, and fire the caller's commit
+   *  callback. */
+  private _finishCommit(objectId: bigint): void {
+    this.stage = { kind: 'pick-path' }
+    this.missNotified = false
+    this.typed = ''
+    this.hoveredRegion = null
+    this.hoveredProfileFace = null
+    this._clearPath()
+    this._clearHover()
+    this._clearDragPreview()
+    this.onMeasurementCb('')
+    this.onCommit(objectId)
+  }
+
+  /** Shared refusal cleanup: drop back to `fallback` (the picked path stays
+   *  live) and toast the typed error. `stopLen` is threaded through to
+   *  `_refusalMessage` — K2's negative-stop corner refusal reads it. */
+  private _refuseCommit(path: PathTarget, fallback: Stage, err: unknown, stopLen?: number): void {
+    this.stage = fallback
+    this.typed = ''
+    this._clearDragPreview()
+    this.onMeasurementCb('')
+    const code = parseKernelErrorCode(err)
+    const rawMsg = err instanceof Error ? err.message : String(err)
+    this.onToast(this._refusalMessage(path, code, rawMsg, stopLen), code ?? undefined)
+  }
+
+  /** The actual wasm call for a sketch-region profile, routed by what kind of
+   *  path it is — see the PathTarget/FACE FRAME GUARD/MERGE GESTURE docs for
+   *  why each branch calls what it does. */
+  private _invokeFollowMe(
+    path: PathTarget,
+    sketchHandle: bigint,
+    regionHandle: bigint,
+    stopLen: number | undefined,
+    merge: boolean,
+  ): bigint {
+    if (path.kind === 'edges') {
+      return this.wasmScene.follow_me_along_edges(
+        sketchHandle,
+        regionHandle,
+        path.sketchHandle,
+        new BigUint64Array(path.edgeHandles),
+        stopLen,
+        this._activeGroup,
+      )
+    }
+    if (path.instance !== undefined) {
+      // No group-birth surface on the instance-face entry point — always
+      // top-level, regardless of `_activeGroup` (the kernel scoped it that
+      // way; see the field doc).
+      return this.wasmScene.follow_me_around_instance_face(
+        sketchHandle,
+        regionHandle,
+        path.instance,
+        path.objectHandle,
+        path.faceHandle,
+        stopLen,
+      )
+    }
+    if (merge) {
+      return this.wasmScene.follow_me_merged_around_face(
+        sketchHandle,
+        regionHandle,
+        path.objectHandle,
+        path.faceHandle,
+        stopLen,
+      )
+    }
+    return this.wasmScene.follow_me_around_face(
+      sketchHandle,
+      regionHandle,
+      path.objectHandle,
+      path.faceHandle,
+      stopLen,
+      this._activeGroup,
+    )
+  }
+
+  /**
+   * Commit a SOLID-FACE profile (design §3a) — the fallback pick when a
+   * profile-stage click misses every sketch region. Never carries a `merge`
+   * flag: when the profile face belongs to the SAME solid the (face-loop)
+   * path runs on, `follow_me_face_around_face`/`follow_me_face_along_edges`
+   * merge automatically, kernel-side, from the object identity alone (design
+   * §3b) — there is no modifier to read here. `stopLen` is the optional
+   * partial-sweep arc length, exactly as `_commit`'s.
+   */
+  private _commitFaceProfile(
+    profileObject: bigint,
+    profileFace: bigint,
+    path: PathTarget,
+    pathSource: PathSource,
+    stopLen?: number,
+  ): void {
+    const fallback: Stage = { kind: 'pick-profile', path, pathSource }
+    try {
       const objectId = path.kind === 'edges'
-        ? this.wasmScene.follow_me_along_edges(
-            sketchHandle,
-            regionHandle,
+        ? this.wasmScene.follow_me_face_along_edges(
+            profileObject,
+            profileFace,
             path.sketchHandle,
             new BigUint64Array(path.edgeHandles),
             stopLen,
           )
-        : this.wasmScene.follow_me_around_face(
-            sketchHandle,
-            regionHandle,
+        : this.wasmScene.follow_me_face_around_face(
+            profileObject,
+            profileFace,
             path.objectHandle,
             path.faceHandle,
             stopLen,
           )
-      this.stage = { kind: 'pick-path' }
-      this.missNotified = false
-      this.typed = ''
-      this.hoveredRegion = null
-      this._clearPath()
-      this._clearHover()
-      this._clearDragPreview()
-      this.onMeasurementCb('')
-      this.onCommit(objectId)
+      this._finishCommit(objectId)
     } catch (err) {
-      // Typed refusal: keep the picked path so the user can adjust the
-      // profile and click (or drag/type) again.
-      this.stage = fallback
-      this.typed = ''
-      this._clearDragPreview()
-      this.onMeasurementCb('')
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      this.onToast(this._refusalMessage(path, code, rawMsg), code ?? undefined)
+      this._refuseCommit(path, fallback, err, stopLen)
     }
   }
 
@@ -990,8 +1462,31 @@ export class FollowMeTool implements Tool {
    * perpendicular surface, but here the profile is already placed and the
    * FACE is the wrong one — so name the face. Everything else defers to the
    * shared kernel-error table (kernelErrors.ts), the one surfacing path.
+   *
+   * K2: a NEGATIVE `stopLen` that comes back `PathTooTight` can mean either
+   * of two different things kernel-side (confirmed by reading
+   * `Object::from_follow_me_impl`, not assumed): a CORNER seam refuses a
+   * reversed stop outright (a corner closes in one direction only, by
+   * design — the `Anchor::Corner` arm's own guard), OR the reversed walk
+   * genuinely folds into itself at a bend narrower than the profile (the
+   * SAME generic advance/self-intersection check a forward sweep can also
+   * fail, just now failing on the reversed geometry instead) — the two
+   * share one error code with no way to tell them apart from here. The
+   * copy below is worded to cover BOTH honestly rather than naming
+   * "corner" specifically and risking a wrong explanation for the second
+   * case; it still wins over the generic ("turns tighter") and face-
+   * specific PathTooTight copy below, since a positive `stopLen` can never
+   * hit either kernel cause this covers.
    */
-  private _refusalMessage(path: PathTarget, code: string | null, rawMsg: string): string {
+  private _refusalMessage(
+    path: PathTarget,
+    code: string | null,
+    rawMsg: string,
+    stopLen?: number,
+  ): string {
+    if (stopLen !== undefined && stopLen < 0 && code === 'PathTooTight') {
+      return "This path can't be swept in reverse from here — it either only closes going one direction, or bends too tightly to walk backward. Drag forward instead, or start the profile somewhere with more room to reverse."
+    }
     if (path.kind === 'face') {
       if (code === 'ProfileNotPerpendicular') {
         return 'That face is parallel to the profile — pick the flat face the profile stands across, not one it runs along.'
@@ -1010,15 +1505,14 @@ export class FollowMeTool implements Tool {
     this.onToast(message)
   }
 
-  /** Draw the picked path as the persistent highlight (viewport ephemera),
-   *  and with it the start affordance: the markers saying where on this path
-   *  a profile may (and may not) begin. */
+  /** Draw the picked path as the persistent highlight (viewport ephemera), and
+   *  resolve its geometry for the hover verdict that follows every subsequent
+   *  profile hover (see `_hoverProfile`). */
   private _highlightPath(path: PathTarget): void {
     this._clearPath()
     // Committing to a path retires the pre-click hover preview.
     this._clearHover()
     this._resolvePathGeometry(path)
-    this._buildStartCues()
     const { points } = this._targetHighlight(path)
     if (points.length === 0) return
     this.pathHighlight = this._buildLines(points, pathHoverColors().path, 996)
@@ -1035,7 +1529,7 @@ export class FollowMeTool implements Tool {
     this.hoverKey = key
   }
 
-  // ------------------------------------------------------ start affordance
+  // ----------------------------------------------------------- start verdict
 
   /**
    * Answer, while the cursor is still moving, whether the profile under it
@@ -1056,7 +1550,9 @@ export class FollowMeTool implements Tool {
         this.profileHoverKey = null
         this.profileVerdict = null
         this.hoveredRegion = null
-        this._clearHover()
+        // No sketch region under the cursor — the fallback SOLID-FACE profile
+        // (design §3a) gets its own hover cue instead of a bare clear.
+        this._hoverProfileFace(ray)
         return
       }
       try {
@@ -1072,6 +1568,8 @@ export class FollowMeTool implements Tool {
       this._clearHover()
       return
     }
+    // A sketch region wins over any face fallback — clear its hover state.
+    this.hoveredProfileFace = null
     // Kept live even when the region is unchanged (below), so a typed
     // Enter can commit against it at any moment (E4).
     this.hoveredRegion = { sketchHandle, regionHandle }
@@ -1101,13 +1599,15 @@ export class FollowMeTool implements Tool {
     if (points.length === 0) return
     const verdictColors = cueColors()
     const hoverTint = pathHoverColors().hover
-    const color =
-      this.profileVerdict.kind === 'refused'
-        ? verdictColors.blocked
-        : this.profileVerdict.kind === 'ok'
-          ? verdictColors.ok
-          : hoverTint
-    this.hoverHighlight = this._buildLines(points, color, 995)
+    const badgeColor = (): number => {
+      switch (this.profileVerdict?.kind) {
+        case 'refused': return verdictColors.blocked
+        case 'ok': return verdictColors.ok
+        case 'orient': return verdictColors.orient
+        default: return hoverTint
+      }
+    }
+    this.hoverHighlight = this._buildLines(points, badgeColor(), 995)
     this.preview.add(this.hoverHighlight)
     this.hoverKey = key
     // A verdict badge at the region's centre. The outline alone is a poor
@@ -1126,12 +1626,77 @@ export class FollowMeTool implements Tool {
       const centroid = _centroidOfFlat(ring.flat())
       this.hoverMarker = this._makeMarker(
         centroid,
-        this.profileVerdict.kind === 'ok' ? verdictColors.ok : verdictColors.blocked,
-        this.profileVerdict.kind === 'ok' ? 'ring' : 'cross',
+        badgeColor(),
+        this.profileVerdict.kind === 'refused' ? 'cross' : 'ring',
         VERDICT_BADGE_PX,
       )
       this.preview.add(this.hoverMarker)
     }
+  }
+
+  /**
+   * The fallback SOLID-FACE profile hover (design §3a): when no sketch
+   * region is under the cursor, an eligible face gets its own hover
+   * highlight and a status hint (see `statusHint`'s `hoveredProfileFace`
+   * branch) — the same "show the target before the click" treatment the
+   * path stage gives a face-loop path. Only offered once a path is picked
+   * DELIBERATELY in-tool (a leftover preselection's face click is still the
+   * path-recovery gesture — see `onPointerDown`'s doc), and never for an
+   * instance-face path (no kernel entry point combines the two).
+   */
+  private _hoverProfileFace(ray: Ray): void {
+    if (
+      this.stage.kind !== 'pick-profile' ||
+      this.stage.pathSource !== 'in-tool' ||
+      (this.stage.path.kind === 'face' && this.stage.path.instance !== undefined)
+    ) {
+      this.hoveredProfileFace = null
+      this._clearHover()
+      return
+    }
+    let facePick: ReturnType<WasmScene['pick_face']>
+    try {
+      facePick = this.wasmScene.pick_face(
+        ray.origin[0], ray.origin[1], ray.origin[2],
+        ray.direction[0], ray.direction[1], ray.direction[2],
+      )
+    } catch {
+      facePick = undefined
+    }
+    if (facePick === undefined) {
+      this.hoveredProfileFace = null
+      this._clearHover()
+      return
+    }
+    let object: bigint
+    let face: bigint
+    let instance: bigint | undefined
+    try {
+      object = facePick.object()
+      face = facePick.face()
+      instance = facePick.instance()
+    } finally {
+      facePick.free()
+    }
+    if (!this._faceFollowable(object, instance, true)) {
+      this.hoveredProfileFace = null
+      this._clearHover()
+      return
+    }
+    this.hoveredProfileFace = { objectHandle: object, faceHandle: face }
+    const key = `profile-face:${object}:${face}`
+    if (key === this.hoverKey) return // same face — nothing to rebuild
+    let points: number[] = []
+    try {
+      const loop = this.wasmScene.face_boundary(object, face)
+      for (let i = 0; i < loop.length; i += 3) {
+        const j = (i + 3) % loop.length
+        points.push(loop[i], loop[i + 1], loop[i + 2], loop[j], loop[j + 1], loop[j + 2])
+      }
+    } catch {
+      points = []
+    }
+    this._showHover(key, points)
   }
 
   /** The start verdict for a profile region living in `profileSketch`. The
@@ -1156,9 +1721,9 @@ export class FollowMeTool implements Tool {
   }
 
   /**
-   * Resolve the picked path into the geometry the start affordance reasons
-   * over: segments with their analytic curve attribution, whether the chain
-   * closes, and whether the coordinates are f64-exact.
+   * Resolve the picked path into the geometry the start verdict reasons over:
+   * segments with their analytic curve attribution, whether the chain closes,
+   * and whether the coordinates are f64-exact.
    *
    * Sketch edges come across as f64 (`sketch_edge_endpoints`), reproducing the
    * kernel's own arithmetic; a face loop comes across as f32
@@ -1168,7 +1733,6 @@ export class FollowMeTool implements Tool {
    */
   private _resolvePathGeometry(path: PathTarget): void {
     this.pathPoly = null
-    this.pathSketchNormal = null
     try {
       if (path.kind === 'edges') {
         const geomCache = new Map<string, PathSegment['curve']>()
@@ -1208,13 +1772,9 @@ export class FollowMeTool implements Tool {
         const chained = chainPath(segments)
         if (chained === null) return // branching/disconnected: the kernel refuses it too
         this.pathPoly = { ...chained, exact: true }
-        const pl = this.wasmScene.sketch_plane(path.sketchHandle)
-        if (pl !== undefined && pl.length >= 6) {
-          this.pathSketchNormal = [pl[3], pl[4], pl[5]]
-        }
         return
       }
-      const loop = this.wasmScene.face_boundary(path.objectHandle, path.faceHandle)
+      const loop = this._faceLoopWorld(path.objectHandle, path.faceHandle, path.instance)
       if (loop.length < 9) return
       const segments: PathSegment[] = []
       for (let i = 0; i < loop.length; i += 3) {
@@ -1233,105 +1793,67 @@ export class FollowMeTool implements Tool {
       this.pathPoly = { ...chained, exact: false }
     } catch {
       this.pathPoly = null
-      this.pathSketchNormal = null
     }
   }
 
-  /** Draw the start markers for the picked path: where a profile MAY start
-   *  (a circle's four quadrants, an open path's two ends) and the vertices it
-   *  may NOT (real corners — the refusal the kernel makes on purpose). */
-  private _buildStartCues(): void {
-    this._clearStartCues()
-    if (this.pathPoly === null) return
-    let legal: Vec3[]
-    let blocked: Vec3[]
-    try {
-      ;({ legal, blocked } = startAffordance(this.pathPoly, this.pathSketchNormal))
-    } catch {
-      return // never let a cue failure take the path highlight down with it
-    }
-    const { ok, blocked: blockedColor } = cueColors()
-    const add = (p: Vec3, color: number, shape: 'ring' | 'cross'): void => {
-      const marker = this._makeMarker(p, color, shape)
-      this.preview.add(marker)
-      this.startMarkers.push(marker)
-    }
-    for (const p of legal) add(p, ok, 'ring')
-    // A dense polyline (an imported outline) could carry hundreds of corners;
-    // past a point the markers stop informing and start obscuring the path.
-    for (const p of blocked.slice(0, MAX_BLOCKED_MARKERS)) {
-      add(p, blockedColor, 'cross')
-    }
-  }
-
-  private _makeMarker(
-    p: Vec3,
-    color: number,
-    shape: 'ring' | 'cross',
-    screenPx: number = START_MARKER_PX,
-  ): THREE.Object3D {
-    // Both markers are flat shapes in their own XY plane, turned to face the
-    // camera every frame (see `updateGripScale`). Billboarding is what makes
-    // them legible: a marker sits exactly ON the path highlight it annotates,
-    // and a solid blob there is simply swallowed by the highlight's own
-    // stroke, whereas a screen-space ring or X reads around it.
+  private _makeMarker(p: Vec3, color: number, shape: 'ring' | 'cross', screenPx: number): THREE.Object3D {
+    // A flat shape in its own XY plane, turned to face the camera every frame
+    // (see `updateGripScale`). Billboarding is what makes it legible: the
+    // badge lands at the profile's centre (or, for the drag station marker,
+    // the live point on the path), over the inference cursor's own snap
+    // indicator, and a solid blob there is simply swallowed by it, whereas a
+    // screen-space ring or X reads around it.
     const material = new THREE.MeshBasicMaterial({
       color,
       depthTest: false,
       side: THREE.DoubleSide,
     })
-    // 'ring' is an open ring — "aim here", with the point it marks visible
-    // through the middle rather than covered. 'cross' is a solid X — "not
-    // here", told apart from the ring by shape, not by color alone.
+    // 'ring' is an open ring — "starts cleanly"/"drag position", with the
+    // point it marks visible through the middle rather than covered. 'cross'
+    // is a solid X — "will be refused", told apart from the ring by shape,
+    // not by color alone.
     const obj = new THREE.Mesh(markerGeometry(shape), material)
     obj.userData.sharedGeometry = true
     obj.position.set(p[0], p[1], p[2])
     obj.scale.setScalar(FALLBACK_MARKER_HALF_M)
-    // Above the path/hover highlights (996/995) so a marker on the rim is
-    // never buried under the very line it annotates, and above CueLayer's
-    // inference guide line (998), which is live at the same time and would
-    // otherwise be an undefined tie.
+    // Above the path/hover highlights (996/995) so the badge is never buried
+    // under the very outline it annotates, and above CueLayer's inference
+    // guide line (998), which is live at the same time and would otherwise be
+    // an undefined tie.
     obj.renderOrder = 999
     obj.userData.screenPx = screenPx
     return obj
   }
 
   /**
-   * Hold every start marker at a constant on-screen size. Named to match the
-   * hook the Viewport render loop already feature-detects
-   * (`'updateGripScale' in tool`), and using the same perspective inverse
-   * ScaleTool documents: `worldHalf = px · dist · tan(fov/2) / viewportHeight`,
-   * which is stable under both fov change and viewport resize (unlike the
-   * `K · dist` shorthand, which bakes those in).
+   * Hold the verdict badge and the drag gesture's live station marker at a
+   * constant on-screen size. Named to match the hook the Viewport render loop
+   * already feature-detects (`'updateGripScale' in tool`), and using the same
+   * perspective inverse ScaleTool documents: `worldHalf = px · dist ·
+   * tan(fov/2) / viewportHeight`, which is stable under both fov change and
+   * viewport resize (unlike the `K · dist` shorthand, which bakes those in).
    */
   updateGripScale(camera: THREE.Camera, viewportHeight: number): void {
     if (viewportHeight <= 0) return
     if (!(camera instanceof THREE.PerspectiveCamera)) return
     const tanHalfFov = Math.tan((camera.fov * Math.PI) / 360)
-    const all = [...this.startMarkers]
+    const all: THREE.Object3D[] = []
     if (this.hoverMarker !== null) all.push(this.hoverMarker)
     if (this.stationMarker !== null) all.push(this.stationMarker)
     for (const marker of all) {
       marker.quaternion.copy(camera.quaternion) // face the viewer
       const dist = camera.position.distanceTo(marker.position)
-      const px = (marker.userData.screenPx as number | undefined) ?? START_MARKER_PX
+      const px = (marker.userData.screenPx as number | undefined) ?? VERDICT_BADGE_PX
       marker.scale.setScalar(
         Math.max((px * dist * tanHalfFov) / viewportHeight, MIN_MARKER_WORLD_HALF),
       )
     }
   }
 
-  private _clearStartCues(): void {
-    for (const marker of this.startMarkers) this._dispose(marker)
-    this.startMarkers = []
-  }
-
   private _clearPath(): void {
     this._dispose(this.pathHighlight)
     this.pathHighlight = null
-    this._clearStartCues()
     this.pathPoly = null
-    this.pathSketchNormal = null
     this.profileHoverKey = null
     this.profileVerdict = null
   }
@@ -1355,14 +1877,19 @@ export class FollowMeTool implements Tool {
 
   /**
    * Draw (replacing any previous frame's) the drag-in-progress preview: the
-   * path from the seam up to `arcLen`, brightened over the base path
+   * path from the seam up to `signedLen`, brightened over the base path
    * highlight, and a live station marker at the drag point — E4's "reuse the
    * path highlight, brightening the swept portion up to the drag point".
+   * K2: a NEGATIVE `signedLen` sweeps the OTHER way from the seam — walk the
+   * pre-built `reverse` orientation instead of clamping to 0, so the preview
+   * shows the actual direction the release would commit.
    */
-  private _drawDragPreview(arcLen: number): void {
+  private _drawDragPreview(signedLen: number): void {
     if (this.stage.kind !== 'dragging') return
     this._clearDragPreview()
-    const sub = subWalkTo(this.stage.walk, arcLen)
+    const { walk, reverse } = this.stage
+    const sub =
+      signedLen < 0 && reverse !== null ? subWalkTo(reverse, -signedLen) : subWalkTo(walk, signedLen)
     const points: number[] = []
     for (let i = 0; i < sub.length - 1; i++) {
       const a = sub[i]
@@ -1388,13 +1915,17 @@ export class FollowMeTool implements Tool {
   }
 
   /** Report the live drag length to the VCB — the typed buffer's readout
-   *  when the user is typing, otherwise the formatted live arc length. */
-  private _reportDragMeasurement(arcLen: number): void {
+   *  when the user is typing, otherwise the formatted live arc length. K2:
+   *  `signedLen` can be negative (dragging the other way from the seam),
+   *  but the VCB always reads a plain positive length — direction is its
+   *  own short word prefix, not a sign the readout expects to be parsed. */
+  private _reportDragMeasurement(signedLen: number): void {
     if (this.typed !== '') {
       this.onMeasurementCb(typedReadout(this.typed))
       return
     }
-    this.onMeasurementCb(formatLength(arcLen))
+    const tag = signedLen < 0 ? 'reverse ' : ''
+    this.onMeasurementCb(`${tag}${formatLength(Math.abs(signedLen))}`)
   }
 
   private _dispose(obj: THREE.Object3D | null): void {
@@ -1449,18 +1980,52 @@ export class FollowMeTool implements Tool {
         const key = `edges:${path.sketchHandle}:${[...path.edgeHandles].sort().join(',')}`
         return { key, points }
       }
-      const loop = this.wasmScene.face_boundary(path.objectHandle, path.faceHandle)
+      const loop = this._faceLoopWorld(path.objectHandle, path.faceHandle, path.instance)
       for (let i = 0; i < loop.length; i += 3) {
         const j = (i + 3) % loop.length
         points.push(loop[i], loop[i + 1], loop[i + 2], loop[j], loop[j + 1], loop[j + 2])
       }
-      // The instance is part of the key so it can never collide across two
-      // placements of one definition (defensive — a followable face is always
-      // a plain world object, so this is `world` in practice).
+      // The instance is part of the key so a definition's several placements
+      // — each posing the same face loop to a DIFFERENT world position —
+      // never collide on one cached highlight.
       const at = path.instance === undefined ? 'world' : path.instance.toString()
       return { key: `face:${path.objectHandle}:${path.faceHandle}:${at}`, points }
     } catch {
       return { key: 'stale', points: [] }
     }
+  }
+
+  /**
+   * The world-space boundary loop of a face-loop path's target face, flat
+   * `[x,y,z, x,y,z, …]` triples in boundary order. A face on a plain
+   * (non-instanced) object is already in world space (`face_boundary`); an
+   * instanced face is definition-local and is pose-mapped via `instance_pose`
+   * (design §2e) — the same mapping `follow_me_around_instance_face` applies
+   * kernel-side — so the preview/start-affordance geometry lines up with
+   * where the sweep will actually run. Empty on a stale handle or an
+   * unreadable pose (never a crash — every caller already treats a short
+   * result as "nothing to show").
+   */
+  private _faceLoopWorld(
+    objectHandle: bigint,
+    faceHandle: bigint,
+    instance: bigint | undefined,
+  ): number[] {
+    const loop = this.wasmScene.face_boundary(objectHandle, faceHandle)
+    if (instance === undefined) return Array.from(loop)
+    const pose = this.wasmScene.instance_pose(instance)
+    if (pose === undefined || pose.length < 12) return []
+    const out: number[] = []
+    for (let i = 0; i < loop.length; i += 3) {
+      const x = loop[i]
+      const y = loop[i + 1]
+      const z = loop[i + 2]
+      out.push(
+        pose[0] * x + pose[1] * y + pose[2] * z + pose[3],
+        pose[4] * x + pose[5] * y + pose[6] * z + pose[7],
+        pose[8] * x + pose[9] * y + pose[10] * z + pose[11],
+      )
+    }
+    return out
   }
 }

@@ -1105,12 +1105,17 @@ test('Follow Me: sweep around a solid face boundary leaves the solid untouched',
   expect(result.ids).toContain(result.ringId)
 })
 
-test('Follow Me: a profile parallel to its path refuses typed with the document untouched', async ({
+test('Follow Me: a profile parallel to its path is auto-oriented and sweeps, not refused (design §2c)', async ({
   page,
 }) => {
+  // Used to refuse typed (ProfileNotPerpendicular) — auto-orientation now
+  // folds a profile that starts out parallel to the path upright and
+  // retries before ever refusing, so this same setup commits a real,
+  // watertight solid instead.
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
-    // Profile AND path both on the ground plane: nowhere perpendicular.
+    // Profile AND path both on the ground plane: nowhere perpendicular AS
+    // DRAWN — the fold fixes that before the sweep runs.
     const profile = h.drawRectangle([3, 3, 0], [4, 4, 0])
     const path = h.drawLineChain([
       [0, 0, 0],
@@ -1119,8 +1124,9 @@ test('Follow Me: a profile parallel to its path refuses typed with the document 
     const edges = h.getSketchEdgeIds(path.sketch)
     const hashBefore = h.getStateHash()
     let threw = false
+    let solidId: string | null = null
     try {
-      h.followMeAlongEdges(profile.sketch, profile.region, path.sketch, edges)
+      solidId = h.followMeAlongEdges(profile.sketch, profile.region, path.sketch, edges)
     } catch {
       threw = true
     }
@@ -1130,12 +1136,13 @@ test('Follow Me: a profile parallel to its path refuses typed with the document 
       hashAfter: h.getStateHash(),
       hashBefore,
       count: h.getObjectCount(),
+      solid: solidId ? h.isObjectSolid(solidId) : null,
     }
   })
 
-  expect(result.threw).toBe(true)
-  expect(result.lastError).toContain('ProfileNotPerpendicular')
-  expect(result.count).toBe(0)
-  // Typed refusal, document untouched (strong guarantee).
-  expect(result.hashAfter).toBe(result.hashBefore)
+  expect(result.threw).toBe(false)
+  expect(result.count).toBe(1)
+  expect(result.solid).toBe(true)
+  // The model DID change — a real sweep committed, not a no-op.
+  expect(result.hashAfter).not.toBe(result.hashBefore)
 })

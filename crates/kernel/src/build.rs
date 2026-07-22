@@ -238,6 +238,7 @@ impl Object {
                             half_edge: h,
                             twin_half_edge: Some(t),
                             curve: None,
+                            soft: false,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -250,6 +251,7 @@ impl Object {
                         half_edge: h,
                         twin_half_edge: None,
                         curve: None,
+                        soft: false,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -370,6 +372,7 @@ impl Object {
                             half_edge: h,
                             twin_half_edge: Some(t),
                             curve: None,
+                            soft: false,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -382,6 +385,7 @@ impl Object {
                         half_edge: h,
                         twin_half_edge: None,
                         curve: None,
+                        soft: false,
                     });
                     obj.half_edges[h].edge = edge;
                 }

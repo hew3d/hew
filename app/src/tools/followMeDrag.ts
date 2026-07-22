@@ -198,6 +198,22 @@ function closedSeamWalk(path: PathPolyline, plane: PlaneDef, centroid: Vec3): Se
   return pointsToWalk(points)
 }
 
+/**
+ * `walk` re-oriented to run the OTHER way from the seam — same seam point,
+ * opposite direction (K2 — direction-aware partial-sweep drag). Reversing
+ * `points` keeps the seam endpoints in place (`points[0] === points[last]`,
+ * since a closed walk's array is a full lap starting and ending on the
+ * seam) and the recomputed `cumulative`/`total` measure arc length the
+ * reverse way — the same total, since it's the same segments, just walked
+ * backward. Meaningful only for a CLOSED walk; called once per drag arm
+ * (`FollowMeTool._armOrCommit`), not per frame — the "swept so far" preview
+ * for a NEGATIVE `stop_len` (the kernel's own `stop_len < 0` meaning, design
+ * §10a) is `subWalkTo(reverseWalk(walk), -signedLen)`.
+ */
+export function reverseWalk(walk: SeamWalk): SeamWalk {
+  return pointsToWalk([...walk.points].reverse())
+}
+
 // ------------------------------------------------------------------- query
 
 /**
