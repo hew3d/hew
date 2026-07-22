@@ -6674,3 +6674,104 @@ fn follow_me_grouped_births_inside_the_group() {
     assert!(!doc.visible_object_ids().contains(&swept));
     assert!(doc.group_members(gid).is_some(), "group survives undo");
 }
+
+#[test]
+fn island_transform_undo_survives_a_consume_and_restore_cycle() {
+    // The playtest panic: draw a profile island, MOVE it
+    // (TransformSketchIsland), sweep it (consuming the island's edges),
+    // then undo twice. The sweep's undo restores the edges under FRESH
+    // island ids, so the island-transform undo used to hit its stale id
+    // and panic ("inverse of a validated island transform must
+    // re-apply"). It now re-resolves the island by its recorded anchor
+    // and restores the geometry exactly.
+    let mut doc = Document::new();
+    let gs = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(gs).expect("sketch live");
+        sk.add_segment(Point3::ORIGIN, Point3::new(2.0, 0.0, 0.0))
+            .expect("path");
+    }
+    let path_edges: Vec<SketchEdgeId> = doc.sketch(gs).expect("live").edges().keys().collect();
+    let ps = doc.add_sketch(profile_plane_x(0.0));
+    draw_profile_rect(&mut doc, ps, 0.0, 0.5, 0.5, 1.0, 1.0);
+    let island = doc
+        .sketch(ps)
+        .expect("live")
+        .islands()
+        .keys()
+        .next()
+        .expect("one island");
+    // Move the profile island down-left, THEN sweep it.
+    let shift = Transform::from_affine(&[
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, -0.5, //
+        0.0, 0.0, 1.0, -0.5,
+    ]);
+    doc.transform_sketch_island(ps, island, &shift)
+        .expect("move the profile island");
+    let region = only_region(&doc, ps);
+    let (swept, _) = doc
+        .follow_me(
+            ps,
+            region,
+            &kernel::FollowMePath::SketchEdges {
+                sketch: gs,
+                edges: path_edges,
+            },
+        )
+        .expect("sweep");
+    assert!(doc.visible_object_ids().contains(&swept));
+
+    // Undo #1: the sweep — scaffolding restored under fresh island ids.
+    doc.undo().expect("undo the sweep");
+    // Undo #2: the island move — used to PANIC on the stale island id.
+    doc.undo()
+        .expect("undo the island move re-resolves by anchor");
+    let sk = doc.sketch(ps).expect("profile sketch live");
+    let has_origin_corner = sk.vertices().values().any(|v| {
+        v.position
+            .approx_eq(Point3::new(0.0, 0.5, 0.5), kernel::tol::POINT_MERGE)
+    });
+    assert!(
+        has_origin_corner,
+        "the island is back at its pre-move position"
+    );
+
+    // Redo both: the mirror path re-resolves the same way.
+    doc.redo().expect("redo the island move");
+    doc.redo().expect("redo the sweep");
+    assert!(doc.visible_object_ids().contains(&swept));
+
+    // And the same cycle through EXTRUSION (the pre-existing sibling).
+    let mut d2 = Document::new();
+    let ps2 = d2.add_sketch(ground());
+    {
+        let sk = d2.sketch_mut(ps2).expect("live");
+        let c = [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ];
+        for (a, b) in c {
+            sk.add_segment(a, b).expect("segment");
+        }
+    }
+    let isl2 = d2
+        .sketch(ps2)
+        .expect("live")
+        .islands()
+        .keys()
+        .next()
+        .expect("island");
+    let slide = Transform::from_affine(&[
+        1.0, 0.0, 0.0, 3.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ]);
+    d2.transform_sketch_island(ps2, isl2, &slide).expect("move");
+    let r2 = only_region(&d2, ps2);
+    d2.extrude_region(ps2, r2, 1.0).expect("extrude");
+    d2.undo().expect("undo extrude");
+    d2.undo().expect("undo island move after extrusion cycle");
+}

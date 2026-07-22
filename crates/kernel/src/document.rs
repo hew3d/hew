@@ -332,6 +332,14 @@ enum DocAction {
         island: SketchIslandId,
         forward: Transform,
         inverse: Transform,
+        /// The island's canonical anchor BEFORE the transform (redo's key)
+        /// and AFTER it (undo's key). Island ids are NOT stable across a
+        /// consume-and-restore cycle (a sweep or extrusion eats the
+        /// island's edges; undoing restores them under fresh ids), so
+        /// undo/redo re-resolve the island BY GEOMETRY when the stored id
+        /// is stale — the `restore_edges` philosophy applied to islands.
+        anchor_before: Point3,
+        anchor_after: Point3,
     },
     /// An OUT-OF-PLANE island transform detached the island into its own
     /// new sketch (a sketch is planar; an island leaving the plane cannot
@@ -4006,13 +4014,20 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        let anchor_before = self.sketches[sketch].island_anchor(island);
         match self.sketches[sketch].apply_transform_island(island, t) {
             Ok(()) => {
+                let anchor_after = self.sketches[sketch]
+                    .island_anchor(island)
+                    .expect("island live immediately after its own transform");
                 self.undo.push(DocAction::TransformSketchIsland {
                     sketch,
                     island,
                     forward: *t,
                     inverse,
+                    anchor_before: anchor_before
+                        .expect("island live immediately before its own transform"),
+                    anchor_after,
                 });
                 self.redo.clear();
                 self.debug_validate();
@@ -5935,22 +5950,48 @@ impl Document {
             &DocAction::TransformSketchIsland {
                 sketch,
                 island,
+                forward,
                 inverse,
-                ..
+                anchor_before,
+                anchor_after,
             } => {
-                // Undo an island transform by baking its exact inverse (moving
-                // BACK to a previously valid placement cannot interfere).
-                self.sketches[sketch]
-                    .apply_transform_island(island, &inverse)
-                    .expect("inverse of a validated island transform must re-apply");
-                DocChange {
+                // Undo an island transform by baking its exact inverse.
+                // The stored id can be STALE — a later sweep/extrusion
+                // consumed the island and its own undo restored the edges
+                // under fresh ids — so re-resolve by the recorded anchor
+                // when needed; a typed refusal (action re-pushed, document
+                // untouched) if the geometry itself is gone.
+                let resolved = if self.sketches[sketch].islands().contains_key(island) {
+                    Some(island)
+                } else {
+                    self.sketches[sketch].island_at_anchor(anchor_after)
+                };
+                let action = DocAction::TransformSketchIsland {
+                    sketch,
+                    island: resolved.unwrap_or(island),
+                    forward,
+                    inverse,
+                    anchor_before,
+                    anchor_after,
+                };
+                let Some(resolved) = resolved else {
+                    self.undo.push(action);
+                    return Err(DocumentError::Sketch(SketchError::UnknownIsland));
+                };
+                if let Err(e) = self.sketches[sketch].apply_transform_island(resolved, &inverse) {
+                    self.undo.push(action);
+                    return Err(DocumentError::Sketch(e));
+                }
+                self.redo.push(action);
+                self.debug_validate();
+                return Ok(DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
                     guides_touched: Vec::new(),
-                }
+                });
             }
             &DocAction::TransformSketch {
                 sketch, inverse, ..
@@ -6604,21 +6645,46 @@ impl Document {
                 sketch,
                 island,
                 forward,
-                ..
+                inverse,
+                anchor_before,
+                anchor_after,
             } => {
                 // Redo an island transform by re-baking the forward (the
-                // destination was validated when first applied).
-                self.sketches[sketch]
-                    .apply_transform_island(island, &forward)
-                    .expect("forward of a validated island transform must re-apply");
-                DocChange {
+                // destination was validated when first applied). The id can
+                // be stale for the same reason undo's can — re-resolve by
+                // the pre-transform anchor; typed refusal if the geometry
+                // is gone (action re-pushed, document untouched).
+                let resolved = if self.sketches[sketch].islands().contains_key(island) {
+                    Some(island)
+                } else {
+                    self.sketches[sketch].island_at_anchor(anchor_before)
+                };
+                let action = DocAction::TransformSketchIsland {
+                    sketch,
+                    island: resolved.unwrap_or(island),
+                    forward,
+                    inverse,
+                    anchor_before,
+                    anchor_after,
+                };
+                let Some(resolved) = resolved else {
+                    self.redo.push(action);
+                    return Err(DocumentError::Sketch(SketchError::UnknownIsland));
+                };
+                if let Err(e) = self.sketches[sketch].apply_transform_island(resolved, &forward) {
+                    self.redo.push(action);
+                    return Err(DocumentError::Sketch(e));
+                }
+                self.undo.push(action);
+                self.debug_validate();
+                return Ok(DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
                     guides_touched: Vec::new(),
-                }
+                });
             }
             &DocAction::TransformSketch {
                 sketch, forward, ..

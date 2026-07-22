@@ -767,6 +767,58 @@ impl Sketch {
     }
 
     /// The island `edge` belongs to, or `None` for a stale handle.
+    /// The island's canonical ANCHOR: the lexicographically smallest vertex
+    /// position among its edges (total order over x, then y, then z). Stable
+    /// under island-id churn — the geometric key the undo log uses to
+    /// re-find an island whose id died and was reborn across a
+    /// consume-and-restore cycle. `None` for a stale id or an empty island.
+    pub(crate) fn island_anchor(&self, island: SketchIslandId) -> Option<Point3> {
+        let isl = self.islands.get(island)?;
+        let mut best: Option<Point3> = None;
+        for &eid in &isl.edges {
+            let e = self.edges.get(eid)?;
+            for v in [e.from, e.to] {
+                let p = self.vertices[v].position;
+                let smaller = match best {
+                    None => true,
+                    Some(b) => (p.x, p.y, p.z) < (b.x, b.y, b.z),
+                };
+                if smaller {
+                    best = Some(p);
+                }
+            }
+        }
+        best
+    }
+
+    /// The island whose [`Self::island_anchor`] lies within
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) of `p` — geometric
+    /// re-resolution for a stale island id. `None` when no island's anchor
+    /// matches (the geometry itself is gone or moved) — AND when MORE THAN
+    /// ONE island's anchor matches: two distinct islands sharing the same
+    /// lexicographically-smallest vertex is a real (if narrow) case — e.g.
+    /// two separate shapes both cornered at the same point — and re-
+    /// resolving by anchor alone can't tell them apart. Picking one
+    /// arbitrarily would risk silently re-attaching the undo/redo action to
+    /// the WRONG island; ambiguous is treated the same as absent, the
+    /// existing typed refusal (action re-pushed, document untouched) rather
+    /// than a guess.
+    pub(crate) fn island_at_anchor(&self, p: Point3) -> Option<SketchIslandId> {
+        let mut found: Option<SketchIslandId> = None;
+        for id in self.islands.keys() {
+            if self
+                .island_anchor(id)
+                .is_some_and(|a| a.approx_eq(p, tol::POINT_MERGE))
+            {
+                if found.is_some() {
+                    return None; // ambiguous — more than one match
+                }
+                found = Some(id);
+            }
+        }
+        found
+    }
+
     pub fn island_of_edge(&self, edge: SketchEdgeId) -> Option<SketchIslandId> {
         self.islands
             .iter()
