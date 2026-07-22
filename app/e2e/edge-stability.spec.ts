@@ -108,28 +108,52 @@ test('idle repaints at sub-pixel camera deltas do not flip edge pixels', async (
 
 /**
  * Line-vs-line sibling of the probe above: coincident LINEWORK instead of
- * edge-vs-face. Two defects, two coincidence classes:
+ * edge-vs-face. Two coincidence classes, each checked two ways — repaint
+ * stability (no shimmer) AND which layer actually wins the tie (the origin
+ * axes are reference geometry and must lose every coincidence against model
+ * linework — DEPTH_BIAS.AXES sits behind native edges and sketch lines,
+ * ahead of faces only; see depthPolicy.ts):
  *
- *  - A 1 m cube on the origin shares its vertical edge with the +Z axis and
- *    its bottom edges with +X/+Y (axes visible, grid hidden). The axes are
- *    150 m fat lines (`Line2`), and any half extending behind the camera (or
- *    projecting far off-screen) used to wobble a few tenths of a pixel per
- *    repaint — `LineMaterial`'s float32 near-plane trim and its sloppy
- *    interpolation across extreme quads (see `clampOriginAxes` in
- *    `Viewport.tsx`). Worst where an axis overlays high-contrast coincident
- *    linework: measured 609 hard flips at the far pose (and 20 near) before
- *    the float64 frustum clip + depth-bias ladder, 0 after.
+ *  - A 1 m cube on the origin shares its vertical edge with the +Z axis, and
+ *    a sketch line traces the +Y axis past the cube's footprint (axes
+ *    visible, grid hidden). The axes are 150 m fat lines (`Line2`), and any
+ *    half extending behind the camera (or projecting far off-screen) used to
+ *    wobble a few tenths of a pixel per repaint — `LineMaterial`'s float32
+ *    near-plane trim and its sloppy interpolation across extreme quads (see
+ *    `clampOriginAxes` in `Viewport.tsx`). Worst where an axis overlays
+ *    high-contrast coincident linework: measured 609 hard flips at the far
+ *    pose (and 20 near) before the float64 frustum clip + depth-bias ladder,
+ *    0 after. Separately from stability, `pixelColorAt` pins the *winner* at
+ *    each coincidence — this is the actual behavior the ladder reordering
+ *    (AXES: -3 → +1) was asked to guarantee, not just that repaints are
+ *    self-consistent:
+ *     - the native cube edge is a 1px `GL_LINES` primitive, so a single
+ *       sample can land in its anti-aliased margin instead of its solid
+ *       interior (measured: alternating clean `EDGE_COLOR` and AA-blended
+ *       hits every ~0.1 m stepping up the shared segment); the check scans
+ *       several points along the coincidence and requires at least one
+ *       clean, near-black hit.
+ *     - the sketch line is a several-px-wide fat line, robust to a single
+ *       sample — checked with the camera aimed straight at the sample point
+ *       along a ray that runs parallel to the cube (constant y, clear of its
+ *       x∈[0,1] silhouette): reusing the near/far stability poses here
+ *       under-occludes, since y=1.5 sits almost directly behind the cube
+ *       from both.
  *
  *  - A ground sketch retracing the cube's footprint puts fat sketch lines
  *    exactly over the cube's native bottom edge lines (axes hidden). Native
  *    `GL_LINES` can't be polygon-offset, so the tie is settled by biasing
  *    the fat sketch lines one ladder rung in front (depthPolicy.ts).
- *    Measured 0 hard flips with the ladder.
+ *    Measured 0 hard flips with the ladder. This pairing is unaffected by
+ *    the axes move, so it stays a stability-only check.
  *
  * Same SwiftShader-only caveat as above: counts are bit-stable per machine,
- * not across machines.
+ * not across machines. The dashed (negative) axis halves are transparent —
+ * a different draw-order/blending story than the solid halves this probe
+ * covers — and are checked by hand against the running app instead of here
+ * (dash phase alignment makes a pixel-exact automated probe fragile).
  */
-test('idle repaints do not flip pixels on coincident linework (axes, sketch lines)', async ({ page }) => {
+test('idle repaints do not flip pixels on coincident linework, and axes lose every tie to model linework', async ({ page }) => {
   await page.goto('/')
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, {
     timeout: 15_000,
@@ -157,14 +181,27 @@ test('idle repaints do not flip pixels on coincident linework (axes, sketch line
       return t.frameStability(base, rot)
     }
 
-    // Scene 1 — axes over coincident cube edges. Grid off (its shader
-    // legitimately re-shades with the camera uniform); axes ON: they are the
-    // subject here, unlike the model-only probe above.
+    // Scene 1 — axes over a coincident native cube edge (+Z, x=y=0) and a
+    // coincident sketch line (+Y, drawn past the cube's y∈[0,1] footprint).
+    // Grid off (its shader legitimately re-shades with the camera uniform);
+    // axes ON: they are the subject here, unlike the model-only probe above.
     t.drawBox([0, 0, 0], [1, 1, 0], 1)
+    t.drawLineChain([[0, 0, 0], [0, 2, 0]])
     t.setGridVisible(false)
     t.setAxesVisible(true)
     const axesNear = pair(poses.near)
     const axesFar = pair(poses.far)
+
+    t.setCamera(poses.near)
+    // +Z axis vs. the cube's vertical edge: scan several heights along the
+    // shared segment (the 1px native edge misses a per-pixel sample often
+    // enough that one point is not reliable — see the doc comment above).
+    const edgeVsAxisScan = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8].map((z) => t.pixelColorAt([0, 0, z]))
+
+    // +Y axis vs. the sketch line, from a camera aimed directly at the
+    // sample point along a constant-y ray so the cube never occludes it.
+    t.setCamera({ position: [2, 1.5, 2], target: [0, 1.5, 0] })
+    const sketchVsAxisPixel = t.pixelColorAt([0, 1.5, 0])
 
     // Scene 2 — fat sketch lines retracing the cube's native bottom edges
     // (plus the region fill). Axes off to isolate the sketch-vs-edge pair.
@@ -173,10 +210,15 @@ test('idle repaints do not flip pixels on coincident linework (axes, sketch line
     const sketchNear = pair(poses.near)
     const sketchFar = pair(poses.far)
 
-    return { axesNear, axesFar, sketchNear, sketchFar }
+    return { axesNear, axesFar, sketchNear, sketchFar, edgeVsAxisScan, sketchVsAxisPixel }
   })
 
-  for (const [name, r] of Object.entries(results)) {
+  for (const [name, r] of [
+    ['axesNear', results.axesNear],
+    ['axesFar', results.axesFar],
+    ['sketchNear', results.sketchNear],
+    ['sketchFar', results.sketchFar],
+  ] as const) {
     // Sanity: each probe actually rendered at a real size.
     expect(r.width, name).toBeGreaterThan(100)
     expect(r.height, name).toBeGreaterThan(100)
@@ -187,6 +229,160 @@ test('idle repaints do not flip pixels on coincident linework (axes, sketch line
     // with the fix; 43-859 with the defect).
     expect(r.differing, name).toBeLessThanOrEqual(300)
   }
+
+  // Winner pins: the axis must never win a coincident-linework tie. The
+  // near-black edge overlay (EDGE_COLOR 0x1a1a1a, SceneRenderer.ts) is far
+  // dimmer than either axis color in either theme, so a low-brightness
+  // sample means the edge painted over the axis; the scan's minimum must hit
+  // the edge's solid interior somewhere along the segment (measured: a clean
+  // (26,26,26) hit at z=0.2 on this machine, alternating with AA-blended
+  // samples at other heights — the defect ladder never produced ANY clean
+  // hit, every sample read as axis-blue-ish).
+  const brightnesses = results.edgeVsAxisScan.map((px) => (px === null ? Infinity : (px.r + px.g + px.b) / 3))
+  expect(Math.min(...brightnesses), 'darkest edge-vs-axis sample (low = edge won somewhere on the segment)').toBeLessThan(50)
+
+  // The sketch line color (SKETCH_LINE_COLOR 0x2266cc) is a blue where blue
+  // dominates green; the +Y axis is green in both themes, where green
+  // dominates blue. A positive blue-minus-green margin means the sketch
+  // line painted over the axis.
+  expect(results.sketchVsAxisPixel, 'sketch vs axis pixel').not.toBeNull()
+  const sketch = results.sketchVsAxisPixel!
+  expect(sketch.b - sketch.g, 'sketch-vs-axis blue-over-green margin (positive = sketch line won)').toBeGreaterThan(30)
+})
+
+/**
+ * Screen-stable axis dashing (playtest fix, Viewport.tsx's `buildAxisLine`/
+ * `clampOriginAxes`). The negative axis halves' dash pattern used to be a
+ * flat WORLD constant (dashSize 0.28 m / gapSize 0.22 m) — a whole dash+gap
+ * period dwarfed a cm-scale model, so the visible span never crossed a gap
+ * and read as a solid line; only around 10 m scale did a gap ever land
+ * on-screen. The fix (`axisDashGapWorld`, math.ts) recomputes both every
+ * frame from the camera-to-origin distance so the period is a constant
+ * ~16 px on screen (`AXIS_DASH_SCREEN_PX` + `AXIS_GAP_SCREEN_PX`) at ANY
+ * zoom.
+ *
+ * Probe: frame the -Y axis (green in both themes) from a few-cm camera
+ * distance and scan finely along it. The negative half's DASH fragments are
+ * ~75%-opacity green blended over the ground/grid — a positive
+ * green-over-max(red,blue) margin — while GAP fragments show the plain
+ * background. Classifying every sample this way and requiring BOTH classes
+ * to appear is the direct, cm-scale-specific regression test for the bug:
+ * with the old flat world constant this same scan measured 0 gap hits (pure
+ * solid read); with the fix it measures a clean, repeating dash/gap
+ * alternation (80 samples, ~45 dash / ~35 gap on the reference machine).
+ */
+test('the negative axis half dashes visibly at a cm-scale camera distance (screen-constant dash size)', async ({ page }) => {
+  await page.goto('/')
+  await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, {
+    timeout: 15_000,
+  })
+
+  const result = await page.evaluate(() => {
+    const t = window.__hew_test!
+    t.setGridVisible(true)
+    t.setAxesVisible(true)
+    // ~8 cm from the origin — well inside Hew's cm-scale working range.
+    t.setCamera({ position: [0.05, -0.02, 0.06], target: [0, -0.02, 0], up: [0, 0, 1] })
+
+    const margin = (px: { r: number; g: number; b: number } | null) => (px === null ? null : px.g - Math.max(px.r, px.b))
+
+    let dashCount = 0
+    let gapCount = 0
+    const step = 0.000092 // ~2 px at this camera distance — well under the Nyquist limit of the on-screen dash period
+    for (let i = 0; i < 80; i++) {
+      const y = -0.002 - i * step
+      const m = margin(t.pixelColorAt([0, y, 0]))
+      if (m === null) continue
+      if (m > 25) dashCount++
+      else if (m < 0) gapCount++
+    }
+    return { dashCount, gapCount }
+  })
+
+  // Conservative floors well under the measured 45/35 — this pins genuine
+  // alternation (the bug), not an exact duty cycle (which is free to move
+  // if AXIS_DASH_SCREEN_PX/AXIS_GAP_SCREEN_PX are ever retuned).
+  expect(result.dashCount, 'dash-classified samples').toBeGreaterThanOrEqual(10)
+  expect(result.gapCount, 'gap-classified samples').toBeGreaterThanOrEqual(10)
+})
+
+/**
+ * Grid suppresses its through-origin lines while the axes are visible
+ * (playtest fix, InfiniteGrid.ts's `uAxesVisible`/`originLineFactor`) — the
+ * grid's own x=0/y=0 lines are geometrically coincident with the red/green
+ * axes and, drawn underneath, visually crowded them (worst in Light mode).
+ * "One or the other, never both stacked."
+ *
+ * Isolating the grid's contribution from the axis's own opaque draw is the
+ * hard part (they're coincident everywhere the axis is visible), so this
+ * probe samples a GAP of the dashed -Y half (found the same way the
+ * screen-stable-dashing probe above does, just at a normal, non-cm-scale
+ * pose) — a spot where, if suppression is working, NOTHING draws over the
+ * grid. A small window of x-offsets around that point is sampled in both
+ * axes-visible and axes-hidden states, and each window's CONTRAST (the
+ * largest deviation from the average of its own two edge samples — the
+ * standard fwidth-based grid line is only ~1 px wide, so comparing against
+ * a distant/independent reference point is unreliable — see
+ * edge-stability's own "several points along the segment" rationale above)
+ * is compared: axes hidden must show a clear dip (the grid's own line, back
+ * on) at the window's center; axes visible must not (measured on the
+ * reference machine: on-contrast 7.5, off-contrast 97.6 — a >10x
+ * separation).
+ */
+test('the grid suppresses its through-origin lines while axes are visible, and restores them when hidden', async ({ page }) => {
+  await page.goto('/')
+  await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, {
+    timeout: 15_000,
+  })
+
+  const result = await page.evaluate(() => {
+    const t = window.__hew_test!
+    t.setGridVisible(true)
+    t.setAxesVisible(true)
+    t.setCamera({ position: [3, -3, 3], target: [0, 0, 0], up: [0, 0, 1] })
+
+    const margin = (px: { r: number; g: number; b: number } | null) => (px === null ? null : px.g - Math.max(px.r, px.b))
+    // Clear of the near-origin crowding where the X/Z axes' own screen
+    // projections converge close to the Y axis from this oblique pose.
+    let gapY: number | null = null
+    for (let i = 0; i < 100 && gapY === null; i++) {
+      const y = -0.2 - i * 0.005
+      const m = margin(t.pixelColorAt([0, y, 0]))
+      if (m !== null && m < 0) gapY = y
+    }
+    if (gapY === null) return null
+
+    const xs: number[] = []
+    for (let i = -10; i <= 10; i++) xs.push(i * 0.0015)
+    const contrast = (window: Array<{ r: number; g: number; b: number } | null>) => {
+      const first = window[0]
+      const last = window[window.length - 1]
+      if (first === null || last === null) return null
+      const edgeAvg = { r: (first.r + last.r) / 2, g: (first.g + last.g) / 2, b: (first.b + last.b) / 2 }
+      let max = 0
+      for (const p of window) {
+        if (p === null) continue
+        max = Math.max(max, Math.hypot(p.r - edgeAvg.r, p.g - edgeAvg.g, p.b - edgeAvg.b))
+      }
+      return max
+    }
+
+    const onWindow = xs.map((x) => t.pixelColorAt([x, gapY!, 0]))
+    t.setAxesVisible(false)
+    const offWindow = xs.map((x) => t.pixelColorAt([x, gapY!, 0]))
+
+    return { onContrast: contrast(onWindow), offContrast: contrast(offWindow) }
+  })
+
+  expect(result, 'found a gap in the dashed -Y half to sample').not.toBeNull()
+  const { onContrast, offContrast } = result!
+  expect(onContrast, 'axes-visible window contrast (should be flat — grid line suppressed)').not.toBeNull()
+  expect(offContrast, 'axes-hidden window contrast (should show the restored grid line)').not.toBeNull()
+  // Generous bounds either side of the measured 7.5 / 97.6 — the exact
+  // numbers depend on theme/GL stack, the >2x separation is the contract.
+  expect(onContrast!, 'suppressed: near-flat window').toBeLessThan(30)
+  expect(offContrast!, 'restored: a clear dip at the origin line').toBeGreaterThan(40)
+  expect(offContrast! / onContrast!, 'restored contrast must clearly exceed suppressed contrast').toBeGreaterThan(2)
 })
 
 /**

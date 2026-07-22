@@ -58,6 +58,7 @@ import { EditVertexTool } from '../tools/EditVertexTool'
 import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray } from './math'
+import { axisDashGapWorld, tanHalfFovRad } from './math'
 import type { Snap, Tool } from '../tools/types'
 import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
@@ -534,6 +535,25 @@ const ORIGIN_AXIS_COLORS: Record<'light' | 'dark', { x: [number, number, number]
 const AXIS_WIDTH_POS = 2.6 // px — solid positive halves
 const AXIS_WIDTH_NEG = 1.8 // px — dashed negative halves
 
+/** Desired on-screen dash/gap length (px) for the negative axis halves'
+ * dash pattern, kept SCREEN-constant rather than world-constant —
+ * `LineMaterial.dashSize`/`gapSize` are world-space lengths, so a flat
+ * world constant (the former 0.28/0.22 m) reads solid at cm-scale work (one
+ * dash+gap period dwarfs the whole visible model) and only reads clearly
+ * dashed around 10 m scale. Recomputed every rendered frame in
+ * `clampOriginAxes` via `screenConstantWorldHalf`, using distance from the
+ * camera to the world origin as the reference distance (the same distance
+ * the near-margin calc just below already uses). Ratio kept close to the
+ * original world-constant values (0.28/0.22 ≈ 56/44) — only the sizing
+ * model changes, not the look. Set once here too, as a reasonable initial
+ * value before the first frame's `clampOriginAxes` call overwrites it. */
+const AXIS_DASH_SCREEN_PX = 9
+const AXIS_GAP_SCREEN_PX = 7
+// Floor so dash/gap never collapse to (near) zero world size when the
+// camera sits right on top of the origin — mirrors ScaleTool's
+// MIN_GRIP_WORLD_HALF pattern (viewport/math.ts's screenConstantWorldHalf).
+const AXIS_DASH_MIN_WORLD = 1e-5
+
 function buildAxisLine(
   from: [number, number, number],
   to: [number, number, number],
@@ -546,6 +566,11 @@ function buildAxisLine(
     color: new THREE.Color(color[0], color[1], color[2]).getHex(),
     linewidth: dashed ? AXIS_WIDTH_NEG : AXIS_WIDTH_POS,
     dashed,
+    // Placeholder pre-first-frame values — `clampOriginAxes` overwrites both
+    // to a screen-constant size before the first `renderer.render()` call
+    // ever runs (it's invoked synchronously at the end of mount, not only
+    // from the rAF loop). Only meaningful if this material were ever read
+    // before that, which never happens in practice.
     dashSize: 0.28,
     gapSize: 0.22,
     transparent: dashed,
@@ -614,9 +639,18 @@ function buildAxisLine(
  * portions are off-screen by construction; the dash phase stays anchored at
  * the origin because the distance attributes are rewritten to the clipped
  * parameter range.
+ *
+ * Also recomputes the negative (dashed) halves' `dashSize`/`gapSize` every
+ * frame here, piggybacking on this function's existing per-frame call sites
+ * rather than adding a new one: a screen-constant dash pattern needs the
+ * same camera-distance-to-origin figure this function already derives for
+ * `margin` (see `screenConstantWorldHalf`'s doc comment in `math.ts` for the
+ * general technique — same one `ScaleTool.updateGripScale` uses per-grip).
+ * `dashSize`/`gapSize` are plain `LineMaterial` uniforms (not a `dashed`
+ * flag flip), so writing them every frame recompiles nothing.
  */
 const FRUSTUM_SLACK = 1.5
-function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera): void {
+function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera, viewportHeightPx: number): void {
   // View transform in float64: three stores matrix elements and camera pose
   // as JS numbers, so composing the two matrix-vector products here (rather
   // than in the f32 vertex shader) is what buys the precision. Recompute the
@@ -638,8 +672,29 @@ function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera): v
   const tanV = Math.tan((camera.fov * Math.PI) / 360) * FRUSTUM_SLACK
   const tanH = tanV * camera.aspect
 
+  // Screen-constant dash/gap sizing for the negative halves: same
+  // camera-distance-to-origin reference the near `margin` above uses (see
+  // `axisDashGapWorld`'s doc comment, math.ts, for why).
+  const { dashSize: dashWorld, gapSize: gapWorld } = axisDashGapWorld(
+    AXIS_DASH_SCREEN_PX,
+    AXIS_GAP_SCREEN_PX,
+    camera.position.length(),
+    tanHalfFovRad(camera.fov),
+    viewportHeightPx,
+    AXIS_DASH_MIN_WORLD,
+  )
+
   for (const child of group.children) {
     if (!(child instanceof Line2)) continue
+    // Unconditional every frame (unlike the clip below, which skips once
+    // converged) — the clamp's [t0,t1] can stay unchanged across a pure
+    // dolly that never crosses a clip plane, but the dash pattern must still
+    // rescale with distance.
+    const mat = child.material as LineMaterial
+    if (mat.dashed) {
+      mat.dashSize = dashWorld
+      mat.gapSize = gapWorld
+    }
     const end = child.userData.axisEnd as [number, number, number]
     // View-space direction origin→end (rotation part only — `end` is a
     // position but the origin's translation cancels in the difference).
@@ -1069,7 +1124,10 @@ export default function Viewport({
     updateFatLineResolutions(el.clientWidth, el.clientHeight)
     threeScene.add(originAxes)
     const initialGridColors = GROUND_GRID_COLORS[getResolvedTheme()]
-    const infiniteGrid = new InfiniteGrid(initialGridColors.ground, initialGridColors.minor, initialGridColors.major)
+    // `originAxes.visible` (default true — nothing sets it false before
+    // here) seeds the grid's own through-origin-line suppression so the two
+    // start in sync; `setAxesVisible` below keeps them in sync from then on.
+    const infiniteGrid = new InfiniteGrid(initialGridColors.ground, initialGridColors.minor, initialGridColors.major, originAxes.visible)
     threeScene.add(infiniteGrid.mesh)
 
     function disposeOriginAxes(group: THREE.Group): void {
@@ -1987,7 +2045,7 @@ export default function Viewport({
       // (this renders out-of-band, without going through it) so a captured
       // frame is exactly what the loop would put on screen for this pose.
       infiniteGrid.update(camera.position)
-      clampOriginAxes(originAxes, camera)
+      clampOriginAxes(originAxes, camera, el.clientHeight)
       renderer.render(threeScene, camera)
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
@@ -2043,6 +2101,9 @@ export default function Viewport({
       originAxes.visible = visible
       // Hidden axes must not snap or flash a cue — gate inference too.
       wasmScene.set_axes_snappable(visible)
+      // Keep the grid's own through-origin lines in sync: shown only when
+      // the axes are NOT (InfiniteGrid.ts) — never both stacked.
+      infiniteGrid.setAxesVisible(visible)
       scheduleRender()
     }
 
@@ -3014,7 +3075,7 @@ export default function Viewport({
         // Re-clip the axis halves to the enlarged frustum (float64 — see
         // clampOriginAxes; the fat-line shader's own handling of extreme
         // segments is what shimmered).
-        clampOriginAxes(originAxes, camera)
+        clampOriginAxes(originAxes, camera, el.clientHeight)
         // Fat-line resolutions (sketch edges, tool-preview rubber-bands) are
         // NOT refreshed here: LineMaterial's resolution uniform depends only
         // on the canvas size, so it's set at mount and on resize (see the

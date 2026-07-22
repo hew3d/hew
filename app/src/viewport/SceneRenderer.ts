@@ -1219,7 +1219,7 @@ export class SceneRenderer {
    *
    * Every face material carries `polygonOffset(DEPTH_BIAS.FACE)` — the
    * back rung of the viewport-wide depth-bias ladder (see depthPolicy.ts
-   * for the whole ordering: axes, previews, fills, sketch lines, edges,
+   * for the whole ordering: previews, fills, sketch lines, edges, axes,
    * faces). The edge overlay
    * (`LineSegments` over the exact same vertices) is exactly coplanar with
    * the faces, so edge and face fragments land within one depth-buffer

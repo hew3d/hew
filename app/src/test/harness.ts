@@ -647,6 +647,21 @@ export interface HewTestHarness {
    * grabbing a Scale-gizmo grip by its exact projected position instead of a
    * hard-coded pixel). `behind` true = the point is behind the camera. */
   worldToScreen(world: Vec3): { x: number; y: number; behind: boolean }
+  /**
+   * Render the current camera pose and read back the color of the pixel a
+   * world point projects to — for pinning *which* of two depth-coincident
+   * layers wins a rendering tie (e.g. a sketch line drawn on an origin axis
+   * must show the line's color, not the axis's). `null` when the point is
+   * behind the camera or projects outside the canvas. Renders (via the same
+   * frame capture `frameStability` uses) *before* projecting, deliberately:
+   * `setCamera` leaves `camera.matrixWorld`/`matrixWorldInverse` stale until
+   * the next render traversal recomputes them, so projecting first would
+   * silently use the previous pose in a script that never yields to the
+   * app's own render loop between `setCamera` and this call. Relies on the
+   * chromium project's pinned `deviceScaleFactor: 1` so CSS pixels index the
+   * framebuffer directly (WebGL's bottom-left origin is corrected here).
+   */
+  pixelColorAt(world: Vec3): { r: number; g: number; b: number } | null
 }
 
 declare global {
@@ -1457,6 +1472,34 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.worldToScreen(world)
+    },
+
+    pixelColorAt: (world) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      // Render BEFORE projecting: `setCamera` sets position/target/fov but
+      // (like three.js generally) leaves `camera.matrixWorld` /
+      // `matrixWorldInverse` stale until the next actual render traversal
+      // recomputes them — `worldToScreen` (`Vector3.project`) reads that
+      // cached inverse, so calling it right after `setCamera` with no
+      // intervening render (the normal rAF loop always provides one before
+      // real input lands, but a synchronous test script does not) silently
+      // projects through the PREVIOUS camera pose. `captureFrame` renders,
+      // which refreshes the camera matrices as a side effect; projecting
+      // after it is what makes this method correct standalone.
+      const frame = api.captureFrame()
+      const proj = api.worldToScreen(world)
+      if (proj.behind) return null
+      // floor, not round: proj.x/y are continuous CSS pixel coordinates
+      // where pixel index i covers [i, i+1) — floor is the standard
+      // coordinate-to-index conversion (round would bias half a pixel off).
+      const x = Math.floor(proj.x)
+      // WebGL readPixels is bottom-left-origin; worldToScreen is top-left
+      // (CSS/DOM convention) — flip here so callers stay in screen space.
+      const y = frame.height - 1 - Math.floor(proj.y)
+      if (x < 0 || y < 0 || x >= frame.width || y >= frame.height) return null
+      const idx = (y * frame.width + x) * 4
+      return { r: frame.pixels[idx], g: frame.pixels[idx + 1], b: frame.pixels[idx + 2] }
     },
   }
 

@@ -128,3 +128,32 @@ export function legacyScreenConstantToPixels(
 ): number {
   return (k * refViewportHeightPx) / tanHalfFovRad(refFovYDeg)
 }
+
+/**
+ * World-space `dashSize`/`gapSize` for the origin axes' negative (dashed)
+ * halves (`buildAxisLine`/`clampOriginAxes`, Viewport.tsx), kept
+ * SCREEN-constant via `screenConstantWorldHalf` rather than the flat world
+ * constant it replaces (former 0.28/0.22 m, which read solid at cm-scale
+ * work — a whole dash+gap period dwarfed the visible model — and only read
+ * clearly dashed around 10 m scale, since a fixed world length occupies a
+ * shrinking fraction of the screen as the camera pulls back).
+ *
+ * `dist` should be the Euclidean camera→origin distance (the axes all
+ * emanate from the world origin, so that's the natural single reference
+ * distance for the whole dashed half, mirroring `clampOriginAxes`'s own
+ * near-margin calc). `minWorld` floors both so neither collapses to (near)
+ * zero world size when the camera sits right on top of the origin.
+ */
+export function axisDashGapWorld(
+  dashScreenPx: number,
+  gapScreenPx: number,
+  dist: number,
+  tanHalfFov: number,
+  viewportHeightPx: number,
+  minWorld = 0,
+): { dashSize: number; gapSize: number } {
+  return {
+    dashSize: screenConstantWorldHalf(dashScreenPx, dist, tanHalfFov, viewportHeightPx, minWorld),
+    gapSize: screenConstantWorldHalf(gapScreenPx, dist, tanHalfFov, viewportHeightPx, minWorld),
+  }
+}

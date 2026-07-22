@@ -5,6 +5,7 @@ import {
   tanHalfFovRad,
   screenConstantWorldHalf,
   legacyScreenConstantToPixels,
+  axisDashGapWorld,
   LEGACY_REFERENCE_FOV_DEG,
   LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX,
 } from './math'
@@ -189,5 +190,60 @@ describe('legacyScreenConstantToPixels', () => {
       LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX,
     )
     expect(worldHalf).toBeCloseTo(0.06 * 4, 9)
+  })
+})
+
+describe('axisDashGapWorld', () => {
+  const tanHalf45 = tanHalfFovRad(45)
+
+  it('is exactly screenConstantWorldHalf applied separately to dash and gap pixel targets', () => {
+    const { dashSize, gapSize } = axisDashGapWorld(9, 7, 20, tanHalf45, 800)
+    expect(dashSize).toBeCloseTo(screenConstantWorldHalf(9, 20, tanHalf45, 800), 12)
+    expect(gapSize).toBeCloseTo(screenConstantWorldHalf(7, 20, tanHalf45, 800), 12)
+  })
+
+  it('the fix: dash/gap grow linearly with camera-to-origin distance (screen-constant), unlike a flat world constant', () => {
+    const near = axisDashGapWorld(9, 7, 1, tanHalf45, 800)
+    const far = axisDashGapWorld(9, 7, 100, tanHalf45, 800)
+    // 100x the distance -> 100x the world-space dash/gap, so the apparent
+    // on-screen (pixel) length stays the same at both distances.
+    expect(far.dashSize / near.dashSize).toBeCloseTo(100, 9)
+    expect(far.gapSize / near.gapSize).toBeCloseTo(100, 9)
+    // At a cm-scale distance the world dash length is correspondingly tiny
+    // (many periods fit in view, unlike the old fixed 0.28 m which read
+    // solid at this scale) — sanity bound, not a precise expectation.
+    expect(near.dashSize).toBeLessThan(0.05)
+  })
+
+  it('preserves the dash:gap ratio at every distance (both scale by the same factor)', () => {
+    for (const dist of [0.5, 3, 15, 80]) {
+      const { dashSize, gapSize } = axisDashGapWorld(9, 7, dist, tanHalf45, 800)
+      expect(dashSize / gapSize).toBeCloseTo(9 / 7, 9)
+    }
+  })
+
+  it('is stable under fov and viewport-height changes for the same desired pixel sizes', () => {
+    const dist = 12
+    for (const fov of [20, 45, 90]) {
+      for (const viewportHeight of [480, 900]) {
+        const { dashSize, gapSize } = axisDashGapWorld(9, 7, dist, tanHalfFovRad(fov), viewportHeight)
+        // Invert back to pixels the same way math.test.ts's screenConstantWorldHalf block does.
+        const tanHalf = tanHalfFovRad(fov)
+        expect((dashSize * viewportHeight) / (dist * tanHalf)).toBeCloseTo(9, 9)
+        expect((gapSize * viewportHeight) / (dist * tanHalf)).toBeCloseTo(7, 9)
+      }
+    }
+  })
+
+  it('floors both dash and gap at minWorld for a degenerate (near-zero) distance', () => {
+    const { dashSize, gapSize } = axisDashGapWorld(9, 7, 0, tanHalf45, 800, 1e-5)
+    expect(dashSize).toBe(1e-5)
+    expect(gapSize).toBe(1e-5)
+  })
+
+  it('defaults minWorld to 0 (no floor) when omitted', () => {
+    const { dashSize, gapSize } = axisDashGapWorld(9, 7, 0, tanHalf45, 800)
+    expect(dashSize).toBe(0)
+    expect(gapSize).toBe(0)
   })
 })

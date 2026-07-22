@@ -42,6 +42,7 @@ const FRAGMENT_SHADER = `
   uniform vec3 uGroundColor;
   uniform vec3 uMinorColor;
   uniform vec3 uMajorColor;
+  uniform float uAxesVisible;
 
   // Anti-aliased grid-line intensity at world-space cell size \`cellSize\`
   // (the standard fwidth-based "pristine grid" technique — the derivative
@@ -62,6 +63,22 @@ const FRAGMENT_SHADER = `
     vec2 fw = max(fwidth(coord) / cellSize, vec2(1e-4));
     vec2 g = abs(fract(c - 0.5) - 0.5) / fw;
     return 1.0 - clamp(min(g.x, g.y), 0.0, 1.0);
+  }
+
+  // Anti-aliased intensity of the two THROUGH-ORIGIN grid lines (world x=0
+  // and world y=0) — same fwidth-based technique as gridFactor above, but
+  // against a fixed coordinate (0) instead of the nearest multiple of a
+  // decade cell size, and combined with max (not min): either line alone
+  // should suppress, not just their intersection at the origin point.
+  // AXIS_SUPPRESS_HALF_WIDTH widens the antialiased band a few pixels past
+  // gridFactor's native ~1px line so it fully covers the fat origin-axis
+  // line's own width (2.6px solid / 1.8px dashed, Viewport.tsx) plus its own
+  // antialiased fringe, with a little margin.
+  float originLineFactor(vec2 coord) {
+    const float AXIS_SUPPRESS_HALF_WIDTH = 2.5;
+    vec2 fw = max(fwidth(coord), vec2(1e-4));
+    vec2 d = clamp(abs(coord) / (fw * AXIS_SUPPRESS_HALF_WIDTH), 0.0, 1.0);
+    return max(1.0 - d.x, 1.0 - d.y);
   }
 
   void main() {
@@ -95,6 +112,17 @@ const FRAGMENT_SHADER = `
     // horizon, no ring at any camera angle.
     vec3 color = mix(uGroundColor, mix(uMinorColor, uMajorColor, gMajor), gLine);
 
+    // Suppress the grid's own through-origin lines when the origin axes are
+    // visible — they're geometrically coincident with the red/green axes
+    // (Viewport.tsx draws X/Y through world x=0/y=0 on this same ground
+    // plane) and, drawn underneath, visually crowd the axis line instead of
+    // reading as one clean line. Restored (mix factor 0) the moment the axes
+    // are hidden — "one or the other, never both stacked". Every OTHER grid
+    // line (not through the origin) is untouched either way.
+    if (uAxesVisible > 0.5) {
+      color = mix(color, uGroundColor, originLineFactor(vWorldPos.xy));
+    }
+
     gl_FragColor = vec4(color, 1.0);
   }
 `
@@ -106,7 +134,7 @@ export class InfiniteGrid {
   readonly mesh: THREE.Mesh
   private readonly material: THREE.ShaderMaterial
 
-  constructor(groundColor: number, minorColor: number, majorColor: number) {
+  constructor(groundColor: number, minorColor: number, majorColor: number, axesVisible = true) {
     const geometry = new THREE.PlaneGeometry(PLANE_SIZE, PLANE_SIZE)
     this.material = new THREE.ShaderMaterial({
       vertexShader: VERTEX_SHADER,
@@ -116,6 +144,12 @@ export class InfiniteGrid {
         uGroundColor: { value: new THREE.Color(groundColor) },
         uMinorColor: { value: new THREE.Color(minorColor) },
         uMajorColor: { value: new THREE.Color(majorColor) },
+        // Matches the origin axes' own default visibility (Viewport.tsx's
+        // `originAxes` group is visible=true at construction) — a caller
+        // that constructs the axes hidden should pass `axesVisible: false`
+        // here too, or the grid will suppress lines under axes nobody sees
+        // until the next real `setAxesVisible` call corrects it.
+        uAxesVisible: { value: axesVisible ? 1 : 0 },
       },
       // A BACKDROP, not an occluder: opaque-pass (transparent: false) so it
       // draws before the model, at renderOrder -1 so it's first within that
@@ -157,6 +191,15 @@ export class InfiniteGrid {
     (this.material.uniforms.uGroundColor.value as THREE.Color).set(groundColor)
     ;(this.material.uniforms.uMinorColor.value as THREE.Color).set(minorColor)
     ;(this.material.uniforms.uMajorColor.value as THREE.Color).set(majorColor)
+  }
+
+  /** Call whenever the origin axes' own visibility changes (View ▸ Axes) —
+   * cheap uniform write, no rebuild. When `visible` the grid stops drawing
+   * its through-origin lines (they'd sit directly under the axis lines and
+   * visually crowd them); when not, the grid draws its full pattern again.
+   * One or the other, never both stacked. */
+  setAxesVisible(visible: boolean): void {
+    this.material.uniforms.uAxesVisible.value = visible ? 1 : 0
   }
 
   dispose(): void {
