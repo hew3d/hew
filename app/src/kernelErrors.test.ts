@@ -42,7 +42,8 @@ const KERNEL_ERROR_CODES = [
   // FollowMeError
   'EmptyPath', 'UnknownPathEdge', 'PathBranches', 'PathDisconnected',
   'PathSegmentTooShort', 'ProfileNotPerpendicular', 'PathDetachedFromProfile',
-  'PathReverses', 'PathTooTight', 'SweepSelfIntersects', 'SweepDegenerate',
+  'PathReverses', 'PathTooTight', 'ProfileCrossesAxis', 'PartialSweepOnPole',
+  'SweepSelfIntersects', 'SweepDegenerate',
   // PushPullError
   'ObjectNotSolid', 'WouldVanish', 'NonManifoldResult', 'NotASubFace',
   'RadiusVanishes', 'WallNeighborNonPlanar',

@@ -6180,12 +6180,7 @@ fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
     let hash_after_removal = doc.state_hash();
 
     // A sweep refusal from the kernel op surfaces through the same
-    // wrapper: edge 1 runs perpendicular to the profile plane but starts
-    // at x = 2, detached from it; edge 2 heads +y, never perpendicular.
-    assert!(matches!(
-        doc.follow_me(ps, region, &path(vec![all[1]])).unwrap_err(),
-        DocumentError::FollowMe(kernel::FollowMeError::PathDetachedFromProfile)
-    ));
+    // wrapper: edge 2 heads +y, never perpendicular to the profile plane.
     assert!(matches!(
         doc.follow_me(ps, region, &path(vec![all[2]])).unwrap_err(),
         DocumentError::FollowMe(kernel::FollowMeError::ProfileNotPerpendicular)
@@ -6197,6 +6192,16 @@ fn follow_me_path_resolution_refuses_typed_and_touches_nothing() {
     assert_eq!(doc.state_hash(), hash_after_removal);
     assert!(doc.sketch(ps).is_some(), "profile sketch untouched");
     assert!(doc.visible_object_ids().is_empty());
+
+    // Edge 1 runs perpendicular to the profile plane but starts at x = 2,
+    // detached from it. That is no longer a refusal: the path is carried
+    // rigidly to the profile (design §2a) and the sweep commits — proven
+    // here through the document wrapper, after the untouched-hash
+    // assertions above.
+    let (carried, _) = doc
+        .follow_me(ps, region, &path(vec![all[1]]))
+        .expect("a detached open path is carried to the profile and sweeps");
+    assert!(doc.visible_object_ids().contains(&carried));
 
     // A hidden path sketch is unknown.
     doc.delete_sketch(gs).expect("delete path sketch");

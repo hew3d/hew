@@ -97,6 +97,26 @@ export interface Tool {
   onDoubleClick?(snap: Snap | null, ray: Ray): boolean
 
   /**
+   * (optional) Called on a real pointer-UP (button release). Every OTHER
+   * gesture in this codebase is click-move-click (a press arms a stage, a
+   * SECOND press commits — there is no generic release hook; see
+   * PushPullTool/SectionPlaneTool), which works because "click to commit"
+   * and "press-drag-release to commit a different value" were never both
+   * needed on the SAME first press. A tool that needs exactly that — a
+   * plain click (negligible movement) commits one thing, a real press-drag-
+   * release commits another (Follow Me's drag-to-partial-sweep, E4) —
+   * cannot tell those apart from `onPointerDown` alone, since a press only
+   * ever arms; only the matching release can distinguish "the user let go
+   * without moving" from "the user is still deciding". Viewport feature-
+   * detects with `'onPointerUp' in tool` and calls this on a real DOM
+   * `pointerup` (button 0), AFTER resolving the same snap/ray a move would
+   * get. Most tools should NOT implement this — it exists for the one
+   * gesture shape click-move-click cannot express, not as a general
+   * alternative to it.
+   */
+  onPointerUp?(snap: Snap | null, ray: Ray): void
+
+  /**
    * (optional) A new/loaded document has replaced the Scene. Tools that cache
    * kernel handles across gestures (e.g. a ground-sketch handle) must drop
    * them here — reusing a handle from the previous document throws

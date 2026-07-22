@@ -222,13 +222,14 @@ pub enum FollowMeError {
     /// (the seam does not close — the profile was only *nearly*
     /// perpendicular). Hew does not re-orient the profile (rule 4).
     ProfileNotPerpendicular,
-    /// Perpendicularity holds but the path is not attached to the profile
-    /// plane: an open path's matching end vertex is off the plane (beyond
-    /// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)), or a closed path's
-    /// perpendicular segment is not crossed strictly between its endpoints
-    /// (a profile plane through a path *corner* is refused — the seam would
-    /// sit on a non-miter plane where the ring provably cannot close;
-    /// the follow-me design §2).
+    /// Perpendicularity holds but the profile plane cannot be attached to
+    /// the path. An open path never raises this: a detached open path is
+    /// carried rigidly to the profile instead (design §2a). A closed path
+    /// raises it when the profile plane neither crosses a perpendicular
+    /// segment strictly between its endpoints nor passes through one of
+    /// its endpoints (a corner — a legal seam since design §2b; a
+    /// straddling corner profile refuses as the fold it is, via
+    /// [`FollowMeError::PathTooTight`]).
     PathDetachedFromProfile,
     /// Adjacent path segments double back on each other — exactly
     /// (directions summing below
@@ -251,6 +252,12 @@ pub enum FollowMeError {
     /// discarded side; a multi-lobe crossing would sever into disjoint shells.
     /// Refused rather than split — revolve a one-sided profile instead.
     ProfileCrossesAxis,
+    /// A partial sweep (a stop length) was asked of a pole-closing lathe —
+    /// a profile touching its revolution axis. The poles exist only in the
+    /// closed revolution; cutting it open would leave an uncloseable rim
+    /// through the pole. Sweep the full revolution, or move the profile
+    /// off the axis.
+    PartialSweepOnPole,
     /// The built solid's faces make improper contact away from their
     /// legitimately shared elements (e.g. a U-shaped sweep whose legs
     /// interpenetrate). Refused whole; nothing is committed.
@@ -498,6 +505,10 @@ impl std::fmt::Display for FollowMeError {
             FollowMeError::ProfileCrossesAxis => {
                 "profile crosses the lathe axis and cannot be revolved into one solid; \
                  revolve a one-sided profile instead"
+            }
+            FollowMeError::PartialSweepOnPole => {
+                "a partial sweep cannot cut open a pole-closing lathe; \
+                 sweep the full revolution or move the profile off the axis"
             }
             FollowMeError::SweepSelfIntersects => "swept solid would intersect itself",
             FollowMeError::SweepDegenerate => "sweep produced degenerate or invalid geometry",
@@ -936,11 +947,15 @@ impl Object {
     ///
     /// Anchoring (design §2): the profile plane must be perpendicular to
     /// the path where the sweep starts — an open path's first (or last —
-    /// the path is reversed then) segment, with that end vertex on the
-    /// profile plane; a closed path must have some segment perpendicular to
-    /// the profile plane and crossed by it strictly between its endpoints
-    /// (the path is rotated to start there, splitting the segment in two
-    /// collinear halves). The profile is never re-oriented (rule 4).
+    /// the path is reversed then) segment; a closed path must have some
+    /// segment perpendicular to the profile plane and crossed by it
+    /// strictly between its endpoints (the path is rotated to start there,
+    /// splitting the segment in two collinear halves). An open path whose
+    /// matching end vertex is off the profile plane is not refused: the
+    /// path is carried rigidly along its leave direction until that end
+    /// lands on the plane (design §2a) — the sweep starts where the
+    /// profile is and follows the path's shape, and any lateral offset is
+    /// preserved as-is. The profile itself is never re-oriented (rule 4).
     ///
     /// `path_curves` carries the path's per-segment analytic attribution —
     /// one entry per segment (`path.len() - 1` open, `path.len()` closed
@@ -988,6 +1003,39 @@ impl Object {
         path: &[Point3],
         closed: bool,
         path_curves: &[Option<crate::sketch::CurveGeom>],
+    ) -> Result<Object, FollowMeError> {
+        Self::from_follow_me_impl(profile, path, closed, path_curves, None)
+    }
+
+    /// [`Object::from_follow_me`], stopped after `stop_len` of arc length
+    /// measured from the seam along the resolved path (design §10) — the
+    /// partial sweep behind dragging a profile part-way along its path.
+    /// The anchor rules are exactly `from_follow_me`'s; the sweep is then
+    /// truncated where the stop lands (a cut plane perpendicular to the
+    /// segment being cut, capped like any open end — a stop within
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) of a joint truncates
+    /// at the joint). A stop at or beyond the full path length is the
+    /// full sweep, closed seam and all. A stop of nothing at all
+    /// (`<= POINT_MERGE`) is [`FollowMeError::EmptyPath`]. A pole-closing
+    /// lathe (a profile touching its revolution axis) cannot be cut open
+    /// — the poles exist only in the closed revolution — and refuses
+    /// [`FollowMeError::PartialSweepOnPole`].
+    pub fn from_follow_me_to(
+        profile: &Profile,
+        path: &[Point3],
+        closed: bool,
+        path_curves: &[Option<crate::sketch::CurveGeom>],
+        stop_len: f64,
+    ) -> Result<Object, FollowMeError> {
+        Self::from_follow_me_impl(profile, path, closed, path_curves, Some(stop_len))
+    }
+
+    fn from_follow_me_impl(
+        profile: &Profile,
+        path: &[Point3],
+        closed: bool,
+        path_curves: &[Option<crate::sketch::CurveGeom>],
+        stop_len: Option<f64>,
     ) -> Result<Object, FollowMeError> {
         let plane = profile.plane();
         let n = plane.normal();
@@ -1045,6 +1093,11 @@ impl Object {
         // start at the profile plane's strict-interior crossing of a
         // perpendicular segment (split in two collinear halves) and
         // reversed if needed so the first segment leaves along +n.
+        // A closed corner seam (design §2b) walks the corner twice — as
+        // station 0 on the profile plane and as the final station on the
+        // corner's own miter plane — with the wedge between them as the
+        // wrap band. Set when the chosen anchor is a corner.
+        let mut corner_seam = false;
         let pts: Vec<Point3> = if closed {
             let m = path.len();
             /// Where the seam sits on the rotated path.
@@ -1058,13 +1111,27 @@ impl Object {
                 /// normal, so the profile plane IS that joint's miter
                 /// plane and the seam closes exactly (design §1).
                 Vertex(usize),
+                /// Start at path vertex `vertex` — a genuine CORNER the
+                /// profile plane passes through, perpendicular to one of
+                /// its two flanks (design §2b). The seam ring sits on the
+                /// profile plane; the corner's own miter plane becomes one
+                /// extra station, and the dihedral wedge between the two —
+                /// transported along the perpendicular flank's direction —
+                /// closes the loop exactly (the ε → 0 limit of splitting
+                /// that flank ever nearer the corner). `forward` records
+                /// whether the perpendicular flank leaves the vertex in
+                /// path order (true) or against it (the loop is then
+                /// walked reversed).
+                Corner { vertex: usize, forward: bool },
             }
             impl Anchor {
                 /// The path segment/vertex index this seam sits at — the
                 /// stable tiebreak when two candidates are equidistant.
                 fn index(&self) -> usize {
                     match self {
-                        Anchor::Split(k, _) | Anchor::Vertex(k) => *k,
+                        Anchor::Split(k, _)
+                        | Anchor::Vertex(k)
+                        | Anchor::Corner { vertex: k, .. } => *k,
                     }
                 }
             }
@@ -1151,14 +1218,33 @@ impl Object {
                     continue;
                 }
                 any_perp = true;
-                // Strict interior crossing only: a profile plane through a
-                // path corner is refused — the seam would sit on a
-                // non-miter plane, where the returning ring provably does
-                // not close (design §1/§2).
-                if sd_a.abs() <= tol::POINT_MERGE
-                    || sd_b.abs() <= tol::POINT_MERGE
-                    || sd_a * sd_b > 0.0
-                {
+                // The plane through one of this segment's endpoints is a
+                // CORNER start (design §2b): the seam ring stays on the
+                // profile plane and the corner's miter plane becomes one
+                // extra station, wedged closed. A strict interior crossing
+                // splits the segment as before; a plane that touches the
+                // path only outside the segment offers nothing here.
+                if sd_a.abs() <= tol::POINT_MERGE {
+                    candidates.push((
+                        Anchor::Corner {
+                            vertex: k,
+                            forward: true,
+                        },
+                        a,
+                    ));
+                    continue;
+                }
+                if sd_b.abs() <= tol::POINT_MERGE {
+                    candidates.push((
+                        Anchor::Corner {
+                            vertex: (k + 1) % m,
+                            forward: false,
+                        },
+                        b,
+                    ));
+                    continue;
+                }
+                if sd_a * sd_b > 0.0 {
                     continue;
                 }
                 let t = sd_a / (sd_a - sd_b);
@@ -1206,8 +1292,24 @@ impl Object {
                     r
                 }
                 Anchor::Vertex(k) => (0..m).map(|i| path[(k + i) % m]).collect(),
+                Anchor::Corner { vertex, forward } => {
+                    // The corner appears at BOTH ends of the working path:
+                    // pts[0] carries station 0 (the seam ring on the
+                    // profile plane), the final entry carries the corner's
+                    // miter station, and the zero-length wrap between them
+                    // is the wedge (its transport direction is overridden
+                    // to the first leg's below). Orientation is forced —
+                    // the sweep must leave along the perpendicular flank —
+                    // so the generic leave-along-+n flip is skipped.
+                    corner_seam = true;
+                    if forward {
+                        (0..=m).map(|i| path[(vertex + i) % m]).collect()
+                    } else {
+                        (0..=m).map(|i| path[(vertex + m - (i % m)) % m]).collect()
+                    }
+                }
             };
-            if n.dot(rotated[1] - rotated[0]) < 0.0 {
+            if !corner_seam && n.dot(rotated[1] - rotated[0]) < 0.0 {
                 let tail: Vec<Point3> = rotated[1..].iter().rev().copied().collect();
                 rotated.truncate(1);
                 rotated.extend(tail);
@@ -1224,38 +1326,154 @@ impl Object {
             // the drawn curve's tangent at the end vertex (the chord's
             // component perpendicular to the radial there), the open-path
             // analogue of the closed-path radial rule above; a plain
-            // segment keeps the chord test.
-            let end_perp = |end: Point3, chord: Vec3, g: Option<crate::sketch::CurveGeom>| {
-                let Some(g) = g else {
-                    return n.dot(chord).abs() >= 1.0 - tol::NORMAL_DIRECTION;
+            // segment keeps the chord test. Returns the direction the
+            // sweep leaves the profile plane by at that end (the tangent
+            // for an attributed segment, the chord otherwise), or `None`
+            // when the profile plane is not perpendicular to the path
+            // there.
+            let end_leave =
+                |end: Point3, chord: Vec3, g: Option<crate::sketch::CurveGeom>| -> Option<Vec3> {
+                    let Some(g) = g else {
+                        return (n.dot(chord).abs() >= 1.0 - tol::NORMAL_DIRECTION)
+                            .then_some(chord);
+                    };
+                    let radial = (end - g.center).normalized().ok()?;
+                    let tangent = (chord - radial * chord.dot(radial)).normalized().ok()?;
+                    (n.dot(tangent).abs() >= 1.0 - tol::NORMAL_DIRECTION).then_some(tangent)
                 };
-                let Ok(radial) = (end - g.center).normalized() else {
-                    return false;
-                };
-                let Ok(tangent) = (chord - radial * chord.dot(radial)).normalized() else {
-                    return false;
-                };
-                n.dot(tangent).abs() >= 1.0 - tol::NORMAL_DIRECTION
-            };
-            let perp_first = end_perp(path[0], first, seg_curve(0));
-            let perp_last = end_perp(path[path.len() - 1], last, seg_curve(raw_segs - 1));
-            let on_first = plane.signed_distance(path[0]).abs() <= tol::PLANE_DIST;
-            let on_last = plane.signed_distance(path[path.len() - 1]).abs() <= tol::PLANE_DIST;
-            if perp_first && on_first {
+            let leave_first = end_leave(path[0], first, seg_curve(0));
+            let leave_last = end_leave(path[path.len() - 1], last, seg_curve(raw_segs - 1));
+            let sd_first = plane.signed_distance(path[0]);
+            let sd_last = plane.signed_distance(path[path.len() - 1]);
+            if leave_first.is_some() && sd_first.abs() <= tol::PLANE_DIST {
                 path.to_vec()
-            } else if perp_last && on_last {
+            } else if leave_last.is_some() && sd_last.abs() <= tol::PLANE_DIST {
                 path.iter().rev().copied().collect()
-            } else if perp_first || perp_last {
-                return Err(FollowMeError::PathDetachedFromProfile);
+            } else if let Some((dir, sd, use_first)) = match (leave_first, leave_last) {
+                // Perpendicular but detached: the sweep starts where the
+                // PROFILE is (design §2a) — the path's shape is carried to
+                // the profile rather than refused. A rigid translation
+                // along the leave direction lands the matching end vertex
+                // on the profile plane; lateral offset needs no correction
+                // at all, because station planes are infinite and the ring
+                // sweeps wherever the profile sits. The nearer
+                // perpendicular end anchors the carry (a tie breaks to the
+                // path's first end), keeping the choice deterministic.
+                (Some(df), Some(dl)) => Some(if sd_first.abs() <= sd_last.abs() {
+                    (df, sd_first, true)
+                } else {
+                    (dl, sd_last, false)
+                }),
+                (Some(df), None) => Some((df, sd_first, true)),
+                (None, Some(dl)) => Some((dl, sd_last, false)),
+                (None, None) => None,
+            } {
+                let delta = dir * (-sd / n.dot(dir));
+                let carried = path.iter().map(|&p| p + delta);
+                if use_first {
+                    carried.collect()
+                } else {
+                    carried.rev().collect()
+                }
             } else {
                 return Err(FollowMeError::ProfileNotPerpendicular);
             }
+        };
+
+        // ---- partial sweep: truncate at the stop (design §10) -----------
+        // Runs AFTER anchoring, so the stop is arc length from the seam —
+        // the point the drag starts from. Truncation yields an OPEN path;
+        // everything downstream (stations, caps, advance, assembly)
+        // already handles it, including a corner seam losing its wedge.
+        let mut closed = closed;
+        let pts: Vec<Point3> = if let Some(stop) = stop_len {
+            if stop <= tol::POINT_MERGE {
+                return Err(FollowMeError::EmptyPath);
+            }
+            let bands = if closed { pts.len() } else { pts.len() - 1 };
+            // A CLOSED path's bands include the wrap-around band back to
+            // its own seam (`pts[bands - 1] → pts[0]`), so a stop landing
+            // exactly on the full perimeter is found by the per-band scan
+            // below as a "cut" whose point IS the seam — building an open
+            // sweep with two coincident caps at the same plane/position
+            // (caught downstream as `SweepSelfIntersects`, never bad
+            // geometry, but not the full closed sweep the stop asked for).
+            // Checking the total length first, exactly the same joint-snap
+            // tolerance the per-band clamp already uses elsewhere, keeps
+            // the documented contract — "a stop at or beyond the full path
+            // length is the full sweep, closed seam and all" — true at the
+            // boundary instead of only strictly beyond it. Harmless no-op
+            // for an open path: its own last band already reproduces `pts`
+            // unchanged when `stop` reaches the far end (no wrap-around
+            // band to alias against).
+            let total: f64 = (0..bands)
+                .map(|i| (pts[(i + 1) % pts.len()] - pts[i]).length())
+                .sum();
+            if stop >= total - tol::POINT_MERGE {
+                pts
+            } else {
+                let mut acc = 0.0f64;
+                let mut cut: Option<(usize, Point3)> = None;
+                for i in 0..bands {
+                    let a = pts[i];
+                    let b = pts[(i + 1) % pts.len()];
+                    let len = (b - a).length();
+                    if len <= tol::POINT_MERGE {
+                        continue; // a corner seam's zero-length wedge wrap
+                    }
+                    if acc + len >= stop {
+                        let remain = stop - acc;
+                        // A stop within POINT_MERGE of either joint truncates
+                        // at that joint — a parameter clamp, so no sliver
+                        // segment is ever built from a continuous drag value.
+                        let q = if remain <= tol::POINT_MERGE {
+                            a
+                        } else if (len - remain).abs() <= tol::POINT_MERGE {
+                            b
+                        } else {
+                            a + (b - a) * (remain / len)
+                        };
+                        cut = Some((i, q));
+                        break;
+                    }
+                    acc += len;
+                }
+                match cut {
+                    // Unreachable given the total-length check above, but
+                    // kept as the honest fallback rather than an unwrap.
+                    None => pts,
+                    Some((i, q)) => {
+                        closed = false;
+                        corner_seam = false;
+                        let mut kept: Vec<Point3> = pts[..=i].to_vec();
+                        if !q.approx_eq(kept[kept.len() - 1], tol::POINT_MERGE) {
+                            kept.push(q);
+                        }
+                        if kept.len() < 2 {
+                            return Err(FollowMeError::EmptyPath);
+                        }
+                        kept
+                    }
+                }
+            }
+        } else {
+            pts
         };
 
         let m = pts.len();
         let seg_count = if closed { m } else { m - 1 };
         let mut dirs: Vec<Vec3> = Vec::with_capacity(seg_count);
         for i in 0..seg_count {
+            if corner_seam && i == seg_count - 1 {
+                // The wedge band: a zero-length wrap at the corner. Its
+                // transport direction is the first leg's — the ε → 0 limit
+                // of the split anchor (design §2b) — and with it the
+                // generic bisector below makes the final station exactly
+                // the corner's own miter plane.
+                let first = dirs[0];
+                dirs.push(first);
+                continue;
+            }
             dirs.push(
                 (pts[(i + 1) % m] - pts[i])
                     .normalized()
@@ -1322,6 +1540,11 @@ impl Object {
             None => vec![false; ring_size],
         };
         let has_poles = on_axis.iter().any(|&p| p);
+        // A pole exists only in the closed revolution (design §9); a
+        // truncated one would leave an uncloseable rim through the pole.
+        if has_poles && stop_len.is_some() && !closed {
+            return Err(FollowMeError::PartialSweepOnPole);
+        }
 
         struct WallEdge {
             a: usize,
@@ -1403,6 +1626,7 @@ impl Object {
         for s in 0..seg_count {
             let next = &stations[(s + 1) % m];
             let prev = &stations[s];
+            let wedge = corner_seam && s == seg_count - 1;
             for j in 0..ring_size {
                 // A pole is fixed by the revolution — it legitimately does not
                 // advance (design §9); the advance check would otherwise read
@@ -1410,7 +1634,18 @@ impl Object {
                 if on_axis[j] {
                     continue;
                 }
-                if (next[j] - prev[j]).dot(dirs[s]) <= tol::POINT_MERGE {
+                let adv = (next[j] - prev[j]).dot(dirs[s]);
+                // Across the corner wedge, a ring vertex on the seam HINGE
+                // (the profile-plane ∩ miter-plane line through the corner)
+                // legitimately does not advance: it is welded into one
+                // shared vertex by the assembly (design §2b). A vertex on
+                // the wedge's folding side still refuses — the profile
+                // hangs over the corner's incoming flank, where the sweep
+                // provably overlaps itself.
+                if wedge && adv.abs() <= tol::POINT_MERGE {
+                    continue;
+                }
+                if adv <= tol::POINT_MERGE {
                     return Err(FollowMeError::PathTooTight);
                 }
             }
@@ -1503,6 +1738,77 @@ impl Object {
                 }
             }
             positions
+        } else if corner_seam {
+            // Corner-seam closed assembly (design §2b). Ring vertices on
+            // the seam HINGE — the profile-plane ∩ miter-plane line through
+            // the corner — coincide between the final (miter) station and
+            // station 0; each such pair is ONE topological vertex, shared,
+            // and a wedge quad with a shared corner collapses to a
+            // triangle (or vanishes entirely when its whole profile edge
+            // lies on the hinge). Everything else matches the plain closed
+            // assembly.
+            let last = m - 1;
+            let welded: Vec<bool> = (0..ring_size)
+                .map(|j| stations[last][j].approx_eq(stations[0][j], tol::POINT_MERGE))
+                .collect();
+            let mut positions: Vec<Point3> = Vec::new();
+            let mut gid: Vec<Vec<usize>> = vec![vec![0; ring_size]; m];
+            for s in 0..m {
+                for j in 0..ring_size {
+                    gid[s][j] = if s == last && welded[j] {
+                        gid[0][j]
+                    } else {
+                        positions.push(stations[s][j]);
+                        positions.len() - 1
+                    };
+                }
+            }
+            for s in 0..seg_count {
+                let s_next = (s + 1) % m;
+                for we in &wall_edges {
+                    let quad = [
+                        gid[s][we.a],
+                        gid[s][we.b],
+                        gid[s_next][we.b],
+                        gid[s_next][we.a],
+                    ];
+                    // Drop corners the hinge weld duplicated (consecutive
+                    // and wrap-around), leaving a quad, a hinge triangle,
+                    // or — for a wall whose profile edge lies wholly on
+                    // the hinge — fewer than three vertices.
+                    let mut ring: Vec<usize> = Vec::with_capacity(4);
+                    for &g in &quad {
+                        if ring.last() != Some(&g) {
+                            ring.push(g);
+                        }
+                    }
+                    if ring.len() > 1 && ring.first() == ring.last() {
+                        ring.pop();
+                    }
+                    if ring.len() < 3 {
+                        continue; // fully hinge-welded wall: nothing to emit.
+                    }
+                    let ring_pts: Vec<Point3> = ring.iter().map(|&g| positions[g]).collect();
+                    let wall_plane = Plane::from_polygon(&ring_pts)
+                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    // Cylinder stamps apply only to a full, un-collapsed quad.
+                    let surface = if ring.len() == 4 {
+                        we.curve.and_then(|(center_idx, radius)| {
+                            let surface = crate::topo::SurfaceRef::Cylinder {
+                                axis_point: stations[s][center_idx],
+                                axis: dirs[s],
+                                radius,
+                            };
+                            cylinder_claim_holds(&ring_pts, &wall_plane, &surface)
+                                .then_some(surface)
+                        })
+                    } else {
+                        None
+                    };
+                    face_specs.push((ring, vec![], wall_plane, surface));
+                }
+            }
+            positions
         } else {
             let mut positions: Vec<Point3> = Vec::with_capacity(m * ring_size);
             for st in &stations {
@@ -1573,11 +1879,13 @@ impl Object {
         };
 
         // The construction winds outward for a sweep leaving station 0
-        // ALONG the profile normal; an open path may leave against it (a
-        // closed path was re-oriented above). Flip every loop then, exactly
-        // as from_extrusion does for a negative distance. Cylinder stamps
-        // survive the flip — the claim is unoriented.
-        if !closed && n.dot(dirs[0]) < 0.0 {
+        // ALONG the profile normal; an open path may leave against it, and
+        // so may a closed CORNER seam (its orientation is forced by which
+        // flank is perpendicular — design §2b; every other closed anchor
+        // was re-oriented above and never triggers this). Flip every loop
+        // then, exactly as from_extrusion does for a negative distance.
+        // Cylinder stamps survive the flip — the claim is unoriented.
+        if n.dot(dirs[0]) < 0.0 {
             face_specs = face_specs
                 .into_iter()
                 .map(|(outer_idx, inner_lists, _plane, surface)| {

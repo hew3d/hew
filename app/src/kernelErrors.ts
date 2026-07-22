@@ -113,6 +113,10 @@ const DESCRIPTIONS: Record<string, string> = {
     'The path doubles back on itself — or turns nearly all the way around — so there is no clean corner to turn. Remove the reversal, or soften the corner.',
   PathTooTight:
     'The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.',
+  ProfileCrossesAxis:
+    "This profile crosses the circle's centre axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.",
+  PartialSweepOnPole:
+    "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.",
   SweepSelfIntersects:
     'Following this path would make the shape run into itself. Shorten the path or use a smaller profile.',
   SweepDegenerate:

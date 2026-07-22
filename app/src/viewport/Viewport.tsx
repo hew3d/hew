@@ -2332,6 +2332,7 @@ export default function Viewport({
           onSelectRef.current?.({ kind: 'object', id: objectId }, false)
         },
         handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
         // The path may be preselected (SketchUp's primary Follow Me idiom).
         [...selectedIdsRef.current],
       )
@@ -3630,11 +3631,29 @@ export default function Viewport({
 
     // Pointerup completes the Select tool's deferred press: a no-drag release
     // replays the press as the usual click-pick (guide first, then the tool's
-    // pick chain); a dragged release commits the marquee selection. Other
-    // tools are click-based, so beyond input recording nothing else needs it.
+    // pick chain); a dragged release commits the marquee selection. Every
+    // OTHER tool is click-based (a press arms, a SECOND press commits) and
+    // needs nothing here beyond input recording — EXCEPT a tool that opts in
+    // via the optional `Tool.onPointerUp` hook (Follow Me's drag-to-partial-
+    // sweep, E4 — see the interface doc for why click-move-click alone can't
+    // express that gesture), dispatched first and independently of the
+    // Select-only `dragMove`/`marqueeDrag` state below.
     function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
       if (ev.button !== 0) return
+      if (!cameraModeRef.current) {
+        const activeTool = toolController.activeTool
+        if ('onPointerUp' in activeTool) {
+          const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+          const ray = makeWorldRay(ndcX, ndcY, camera)
+          const constraint = 'snapConstraint' in activeTool
+            ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+            : null
+          const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+          ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
+          scheduleRender()
+        }
+      }
 
       // Drag-to-move release: an ACTIVE drag commits the Move at the release
       // position (the same second click a two-click Move would get, honoring

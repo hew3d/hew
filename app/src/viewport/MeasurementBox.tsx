@@ -17,6 +17,7 @@ const VCB_LABEL: Record<string, string> = {
   'Scale': 'Factor',
   'Tape Measure': 'Distance',
   'Protractor': 'Angle',
+  'Follow Me': 'Swept length',
 }
 
 export interface MeasurementBoxProps {

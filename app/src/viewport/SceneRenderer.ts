@@ -31,8 +31,11 @@ import type { SectionPlane } from './sectionManager'
 const FACE_COLOR_DEFAULT = 0xcccccc
 /** Edge color — dark for readability. */
 const EDGE_COLOR = 0x1a1a1a
-/** Orange highlight for selected object edges (kept for selection; face fill uses material color). */
-const EDGE_COLOR_SELECTED = 0xffaa00
+/** Orange highlight for selected object edges (kept for selection; face fill
+ *  uses material color). Exported so other tools that want the SAME
+ *  selection-highlight semantics (FollowMeTool's picked-path highlight) reuse
+ *  this one color rather than drifting a second copy of it. */
+export const EDGE_COLOR_SELECTED = 0xffaa00
 const SKETCH_LINE_COLOR = 0x2266cc
 /** Sketch line width in px (matches the `makeFatSegments` call in `refreshAllSketches`). */
 const SKETCH_LINE_WIDTH_PX = 2.2

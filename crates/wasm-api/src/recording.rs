@@ -115,6 +115,13 @@ pub enum RecordedCall {
         region: u64,
         path_sketch: u64,
         path_edges: Vec<u64>,
+        /// Partial-sweep stop (arc length from the seam), absent for a
+        /// full sweep. `skip_serializing_if` keeps a full sweep's record
+        /// byte-identical to what it was before the field existed, so no
+        /// golden moves; an absent field deserializes to `None` (default),
+        /// so old recordings replay unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
     },
     /// `follow_me_around_face(sketch, region, path_object, path_face)` —
     /// sweep a profile region around a solid face's outer boundary loop.
@@ -125,6 +132,10 @@ pub enum RecordedCall {
         region: u64,
         path_object: u64,
         path_face: u64,
+        /// Partial-sweep stop, exactly as on
+        /// [`RecordedCall::FollowMeAlongEdges`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
     },
     /// `sketch_offset_region(sketch, region, distance)` — the Offset tool's
     /// sketch commit: the region's whole boundary offset by a uniform

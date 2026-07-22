@@ -239,13 +239,25 @@ fn yz_plane() -> Plane {
 /// Rectangle on the x = 0 plane spanning `[y0, y1] x [z0, z1]`, wound CCW
 /// seen from +x (the plane normal side).
 fn yz_profile(y0: f64, z0: f64, y1: f64, z1: f64) -> Profile {
+    yz_profile_at(0.0, y0, z0, y1, z1)
+}
+
+/// [`yz_profile`], on the x = `x` plane instead of x = 0 — an interior
+/// crossing rather than a corner touch, for a path whose corners sit at
+/// x = 0.
+fn yz_profile_at(x: f64, y0: f64, z0: f64, y1: f64, z1: f64) -> Profile {
     Profile::new(
-        yz_plane(),
+        Plane::from_polygon(&[
+            Point3::new(x, 0.0, 0.0),
+            Point3::new(x, 1.0, 0.0),
+            Point3::new(x, 0.0, 1.0),
+        ])
+        .unwrap(),
         vec![
-            Point3::new(0.0, y0, z0),
-            Point3::new(0.0, y1, z0),
-            Point3::new(0.0, y1, z1),
-            Point3::new(0.0, y0, z1),
+            Point3::new(x, y0, z0),
+            Point3::new(x, y1, z0),
+            Point3::new(x, y1, z1),
+            Point3::new(x, y0, z1),
         ],
         vec![],
     )
@@ -1230,12 +1242,82 @@ fn follow_me_refuses_parallel_profile() {
 }
 
 #[test]
-fn follow_me_refuses_detached_path() {
-    // Perpendicular but starting off the profile plane.
+fn follow_me_detached_open_path_is_carried_to_the_profile() {
+    // Perpendicular but starting off the profile plane: the sweep starts
+    // where the PROFILE is (design §2a) — the path's shape is carried
+    // rigidly to the plane, not refused. Identical to sweeping the same
+    // shape drawn attached.
     let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
     let path = [Point3::new(0.5, 0.0, 0.0), Point3::new(3.0, 0.0, 0.0)];
-    let err = Object::from_follow_me(&profile, &path, false, &[]).unwrap_err();
-    assert_eq!(err, kernel::FollowMeError::PathDetachedFromProfile);
+    let swept = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
+    swept.validate().unwrap();
+    let attached = [Point3::ORIGIN, Point3::new(2.5, 0.0, 0.0)];
+    let reference = Object::from_follow_me(&profile, &attached, false, &[]).unwrap();
+    assert!(objects_equivalent(&swept, &reference));
+}
+
+#[test]
+fn follow_me_carry_anchors_the_nearer_end() {
+    // Both ends perpendicular, both off the plane: the nearer end anchors,
+    // reversing the path when that end is the last one. Here the last
+    // vertex (x = 1) is nearer than the first (x = 4), so the sweep leaves
+    // the profile toward +x and spans the path's length exactly.
+    let profile = yz_profile(0.0, 0.0, 1.0, 1.0);
+    let path = [Point3::new(4.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)];
+    let swept = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
+    swept.validate().unwrap();
+    let reference = Object::from_follow_me(
+        &profile,
+        &[Point3::ORIGIN, Point3::new(3.0, 0.0, 0.0)],
+        false,
+        &[],
+    )
+    .unwrap();
+    assert!(objects_equivalent(&swept, &reference));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+    #[test]
+    fn follow_me_carried_path_matches_the_attached_sweep(
+        along in -6.0..6.0f64,
+        lat_z in -4.0..4.0f64,
+        lat_y in -0.25..4.0f64,
+        leg in 0.5..5.0f64,
+    ) {
+        // The carry cancels a longitudinal offset exactly (design §2a),
+        // and an offset perpendicular to a planar path's plane moves no
+        // station plane at all (every station normal lies in that plane) —
+        // so an L path offset by both sweeps the very solid the attached
+        // original does. An in-path-plane lateral offset is different on
+        // purpose: it legitimately moves the elbow's miter plane relative
+        // to the profile, so it must still SWEEP (the ring is wherever the
+        // profile is), just not the identical solid — pinned by the
+        // watertightness assertion alone.
+        let profile = yz_profile(-0.2, 0.1, 0.2, 0.5);
+        let attached = [
+            Point3::ORIGIN,
+            Point3::new(leg, 0.0, 0.0),
+            Point3::new(leg, leg, 0.0),
+        ];
+        let delta = Vec3::new(along, 0.0, lat_z);
+        let offset: Vec<Point3> = attached.iter().map(|&p| p + delta).collect();
+        let swept = Object::from_follow_me(&profile, &offset, false, &[]).unwrap();
+        swept.validate().unwrap();
+        let reference = Object::from_follow_me(&profile, &attached, false, &[]).unwrap();
+        prop_assert!(objects_equivalent(&swept, &reference));
+
+        // In-plane lateral offset: still a valid sweep whenever every ring
+        // vertex keeps a positive advance at the elbow's miter — i.e.
+        // `leg + lat_y > 0.2` (the ring's largest y), which the ranges
+        // guarantee with margin. Sliding further back is a genuine
+        // PathTooTight fold, not a carry defect.
+        let side = Vec3::new(0.0, lat_y, 0.0);
+        let slid: Vec<Point3> = attached.iter().map(|&p| p + side).collect();
+        let slid_swept = Object::from_follow_me(&profile, &slid, false, &[]).unwrap();
+        slid_swept.validate().unwrap();
+        prop_assert_eq!(slid_swept.watertight(), WatertightState::Watertight);
+    }
 }
 
 #[test]
@@ -1401,10 +1483,177 @@ fn follow_me_refuses_lathe_profile_touching_the_axis() {
 }
 
 #[test]
-fn follow_me_refuses_closed_seam_at_a_corner() {
+fn follow_me_closed_seam_starts_at_a_corner() {
     // The profile plane passes exactly through a corner of the closed
-    // path: the seam would sit on a non-miter plane where the ring cannot
-    // close. Refused, never nudged.
+    // path, perpendicular to the OUTGOING flank, with the profile beyond
+    // the corner (design §2b): the seam ring stays on the profile plane,
+    // the corner's own miter plane becomes one extra station, and the
+    // wedge between them closes the loop. The result is the mitered
+    // picture frame: an outward band of width 0.4 around the 2 x 2 square
+    // extruded z in [-0.2, 0.2] — volume (2.8² − 2²) · 0.4 exactly.
+    let profile = yz_profile(-0.4, -0.2, 0.0, 0.2);
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    // A ring solid: genus one, Euler characteristic zero.
+    assert_eq!(euler_poincare(&solid), 0);
+    let expected = (2.8f64 * 2.8 - 2.0 * 2.0) * 0.4;
+    assert!((signed_volume(&solid) - expected).abs() < 1e-9);
+}
+
+#[test]
+fn follow_me_corner_seam_walks_reversed_when_the_flank_enters_the_corner() {
+    // The perpendicular flank ENTERS the chosen corner in path order, so
+    // the loop is walked against it (design §2b) — the anchor nearest the
+    // profile is the (0, 2, 0) corner, whose perpendicular flank is the
+    // top segment arriving there. Same frame, same exact volume.
+    let profile = yz_profile(2.0, -0.2, 2.4, 0.2);
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let solid = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
+    solid.validate().unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&solid), 0);
+    let expected = (2.8f64 * 2.8 - 2.0 * 2.0) * 0.4;
+    assert!((signed_volume(&solid) - expected).abs() < 1e-9);
+}
+
+#[test]
+fn follow_me_partial_sweep_stops_at_the_arc_length() {
+    // An L path swept only 1.5 of its 3.0 total length: the sweep covers
+    // the whole first leg (2.0 > 1.5? no — 1.5 lands mid-first-leg), so
+    // the result is exactly the straight prism of length 1.5. A stop at
+    // or past the full length is the full L sweep; a stop of nothing is
+    // EmptyPath; a stop within POINT_MERGE of a joint truncates AT the
+    // joint (no sliver segment).
+    let profile = yz_profile(-0.2, -0.2, 0.2, 0.2);
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 3.0, 0.0),
+    ];
+    let partial = Object::from_follow_me_to(&profile, &path, false, &[], 1.5).unwrap();
+    partial.validate().unwrap();
+    let straight = Object::from_follow_me(
+        &profile,
+        &[Point3::ORIGIN, Point3::new(1.5, 0.0, 0.0)],
+        false,
+        &[],
+    )
+    .unwrap();
+    assert!(objects_equivalent(&partial, &straight));
+
+    let full = Object::from_follow_me_to(&profile, &path, false, &[], 99.0).unwrap();
+    let reference = Object::from_follow_me(&profile, &path, false, &[]).unwrap();
+    assert!(objects_equivalent(&full, &reference));
+
+    let err = Object::from_follow_me_to(&profile, &path, false, &[], 0.0).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::EmptyPath);
+
+    let at_joint = Object::from_follow_me_to(&profile, &path, false, &[], 2.0 + 1e-12).unwrap();
+    let leg = Object::from_follow_me(
+        &profile,
+        &[Point3::ORIGIN, Point3::new(2.0, 0.0, 0.0)],
+        false,
+        &[],
+    )
+    .unwrap();
+    assert!(objects_equivalent(&at_joint, &leg));
+}
+
+#[test]
+fn follow_me_partial_sweep_opens_a_closed_path_from_its_seam() {
+    // A closed square loop swept only part-way from the profile's seam:
+    // the result is an OPEN sweep — two caps — covering exactly the first
+    // 3.0 of the loop (the 2.0 first leg plus 1.0 of the second), i.e. an
+    // L band with a mitered elbow. The profile sits entirely OUTSIDE the
+    // turn, so the miter adds the exterior corner square (w²) and removes
+    // nothing: area = (l1 + l2)·w + w², times the profile's z-extent.
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    // The profile plane (x = 0) crosses no segment strictly and passes
+    // through two corners; the nearest-to-profile corner (0,0,0) seams.
+    // Sweep 3.0 of the 8.0 loop.
+    let profile_off = yz_profile(-0.4, -0.2, 0.0, 0.2);
+    let partial = Object::from_follow_me_to(&profile_off, &path, true, &[], 3.0).unwrap();
+    partial.validate().unwrap();
+    assert_eq!(partial.watertight(), WatertightState::Watertight);
+    // Genus zero now — the ring was cut open.
+    assert_eq!(euler_poincare(&partial), 2);
+    let expected = ((2.0 + 1.0) * 0.4 + 0.4 * 0.4) * 0.4;
+    assert!((signed_volume(&partial) - expected).abs() < 1e-9);
+}
+
+#[test]
+fn follow_me_partial_sweep_refuses_a_pole_closing_lathe() {
+    // A sphere profile touching its revolution axis cannot be cut open:
+    // the poles exist only in the closed revolution. Typed refusal.
+    let profile = axis_circle_profile(1.0, 1.0, 24, 0.0);
+    let (path, curves) = attributed_ground_circle(1.0, 24, 0.0);
+    let err = Object::from_follow_me_to(&profile, &path, true, &curves, 1.0).unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::PartialSweepOnPole);
+}
+
+#[test]
+fn follow_me_partial_sweep_at_exactly_the_full_perimeter_is_the_full_sweep() {
+    // A closed path's stop landing exactly on its own full perimeter walks
+    // the last band back to the seam — which must read as the documented
+    // "at or beyond the full path length is the full sweep, closed seam and
+    // all", not as a truncation whose cut point happens to coincide with the
+    // seam (which would build two coincident end caps and self-intersect).
+    // Covers both a plain closed anchor and a corner-seam one, since only
+    // the closed case's wrap-around band can alias against the seam this
+    // way at all.
+    // x = 1 crosses the bottom leg's INTERIOR (an ordinary anchor, not a
+    // corner) — the path's corners all sit at x = 0/x = 2.
+    let profile = yz_profile_at(1.0, -0.2, -0.2, 0.2, 0.2);
+    let path = [
+        Point3::ORIGIN,
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let full = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
+    let at_perimeter = Object::from_follow_me_to(&profile, &path, true, &[], 8.0).unwrap();
+    at_perimeter.validate().unwrap();
+    assert!(objects_equivalent(&full, &at_perimeter));
+    // A hair short still truncates (the ordinary case, unaffected).
+    let short = Object::from_follow_me_to(&profile, &path, true, &[], 8.0 - 1e-6).unwrap();
+    assert_eq!(euler_poincare(&short), 2); // genus zero: still cut open
+
+    // The corner-seam anchor (design §2b) — its own spec fixture. The wedge
+    // is a zero-length band (see `follow_me_partial_sweep_opens_a_closed_
+    // path_from_its_seam`'s "8.0 loop" comment), so the walkable arc length
+    // is still the path's own 8.0 perimeter, not the swept frame's own
+    // outer geometry.
+    let corner_profile = yz_profile(-0.4, -0.2, 0.0, 0.2);
+    let corner_full = Object::from_follow_me(&corner_profile, &path, true, &[]).unwrap();
+    let corner_at_perimeter =
+        Object::from_follow_me_to(&corner_profile, &path, true, &[], 8.0).unwrap();
+    corner_at_perimeter.validate().unwrap();
+    assert!(objects_equivalent(&corner_full, &corner_at_perimeter));
+}
+
+#[test]
+fn follow_me_corner_straddling_profile_refuses_the_fold() {
+    // A profile centered ON the corner hangs over the incoming flank: on
+    // that side the wedge folds back into the flank's own swept material
+    // (the sweep provably overlaps itself), so the advance check refuses
+    // — typed, never nudged (design §2b).
     let profile = yz_profile(-0.2, -0.2, 0.2, 0.2);
     let path = [
         Point3::new(0.0, 0.0, 0.0),
@@ -1413,7 +1662,7 @@ fn follow_me_refuses_closed_seam_at_a_corner() {
         Point3::new(0.0, 2.0, 0.0),
     ];
     let err = Object::from_follow_me(&profile, &path, true, &[]).unwrap_err();
-    assert_eq!(err, kernel::FollowMeError::PathDetachedFromProfile);
+    assert_eq!(err, kernel::FollowMeError::PathTooTight);
 }
 
 #[test]

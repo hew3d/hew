@@ -2973,6 +2973,30 @@ impl Document {
         region: SketchRegionId,
         path: &FollowMePath,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_impl(sketch, region, path, None)
+    }
+
+    /// [`Document::follow_me`] stopped after `stop_len` of arc length from
+    /// the seam — the partial sweep behind dragging a profile part-way
+    /// along its path (see [`Object::from_follow_me_to`] for the stop's
+    /// exact semantics). Same errors, same strong exception guarantee.
+    pub fn follow_me_to(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: f64,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_impl(sketch, region, path, Some(stop_len))
+    }
+
+    fn follow_me_impl(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me");
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
@@ -2987,8 +3011,11 @@ impl Document {
             .map_err(DocumentError::Sketch)?;
 
         let (points, closed, curves) = self.resolve_follow_me_path(path)?;
-        let object = Object::from_follow_me(&profile, &points, closed, &curves)
-            .map_err(DocumentError::FollowMe)?;
+        let object = match stop_len {
+            None => Object::from_follow_me(&profile, &points, closed, &curves),
+            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
+        }
+        .map_err(DocumentError::FollowMe)?;
 
         // Everything that can fail has succeeded; commit.
         Ok(self.commit_region_object(sketch, &scaffolding, object))

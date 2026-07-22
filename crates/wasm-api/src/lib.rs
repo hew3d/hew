@@ -1994,12 +1994,17 @@ impl Scene {
     /// handle. The profile region's scaffolding is consumed exactly as
     /// `extrude_region` consumes its outline (undo restores it); the path
     /// sketch is never touched.
+    /// The optional trailing `stop_len` is a PARTIAL sweep: arc length
+    /// from the seam at which the sweep is cut and capped (see
+    /// [`kernel::Object::from_follow_me_to`]); `undefined`/`None` sweeps
+    /// the full path exactly as before.
     pub fn follow_me_along_edges(
         &mut self,
         sketch: u64,
         region: u64,
         path_sketch: u64,
         path_edges: Vec<u64>,
+        stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
@@ -2010,16 +2015,19 @@ impl Scene {
             sketch: sketch_id(path_sketch),
             edges,
         };
-        let (id, change) = self
-            .doc
-            .follow_me(sketch_id(sketch), region_id, &path)
-            .map_err(doc_err)?;
+        let sid = sketch_id(sketch);
+        let (id, change) = match stop_len {
+            None => self.doc.follow_me(sid, region_id, &path),
+            Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
+        }
+        .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::FollowMeAlongEdges {
             sketch,
             region,
             path_sketch,
             path_edges,
+            stop_len,
         });
         Ok(id.data().as_ffi())
     }
@@ -2029,28 +2037,34 @@ impl Scene {
     /// around the loop into a new watertight Object and returns its handle.
     /// The path solid is untouched — the sweep is a separate Object the
     /// user unions or subtracts explicitly.
+    /// The optional trailing `stop_len` is a PARTIAL sweep, exactly as on
+    /// [`Scene::follow_me_along_edges`].
     pub fn follow_me_around_face(
         &mut self,
         sketch: u64,
         region: u64,
         path_object: u64,
         path_face: u64,
+        stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
-        let (id, change) = self
-            .doc
-            .follow_me(sketch_id(sketch), region_id, &path)
-            .map_err(doc_err)?;
+        let sid = sketch_id(sketch);
+        let (id, change) = match stop_len {
+            None => self.doc.follow_me(sid, region_id, &path),
+            Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
+        }
+        .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::FollowMeAroundFace {
             sketch,
             region,
             path_object,
             path_face,
+            stop_len,
         });
         Ok(id.data().as_ffi())
     }
@@ -4418,16 +4432,30 @@ impl Scene {
                         region,
                         path_sketch,
                         path_edges,
+                        stop_len,
                     } => {
-                        self.follow_me_along_edges(sketch, region, path_sketch, path_edges)?;
+                        self.follow_me_along_edges(
+                            sketch,
+                            region,
+                            path_sketch,
+                            path_edges,
+                            stop_len,
+                        )?;
                     }
                     FollowMeAroundFace {
                         sketch,
                         region,
                         path_object,
                         path_face,
+                        stop_len,
                     } => {
-                        self.follow_me_around_face(sketch, region, path_object, path_face)?;
+                        self.follow_me_around_face(
+                            sketch,
+                            region,
+                            path_object,
+                            path_face,
+                            stop_len,
+                        )?;
                     }
                     SketchOffsetRegion {
                         sketch,
