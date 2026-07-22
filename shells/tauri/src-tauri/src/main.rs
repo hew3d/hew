@@ -369,8 +369,18 @@ fn effective_own_slot(app: &tauri::AppHandle, label: &str) -> String {
 /// an explicit user gesture.
 ///
 /// `read_dirs` approves a directory for listing and for reading its files
-/// (and one subdirectory level below it) — granted only by import picks,
-/// whose texture scan legitimately reads siblings like `textures/wood.png`.
+/// (and one subdirectory level below it) — requested by `pick_open_path`'s
+/// `approve_dir` flag, which every import-format pick sets (their texture
+/// scan legitimately reads siblings like `textures/wood.png`, though only
+/// COLLADA's actually does) and which the unified Open dialog's pick also
+/// sets unconditionally, since the picked extension isn't known until the
+/// dialog resolves — so a plain `.hew` open now grants this too, unlike the
+/// narrower `.hew`-only open path. A real but bounded widening (read-only,
+/// scoped to a directory the user just navigated to via a native dialog);
+/// tightening `pick_open_path` to gate this on the resolved path's own
+/// extension, so a `.hew`/`.skp`/`.glb`/`.gltf`/`.stl` pick never grants it
+/// at all, is a reasonable follow-up but changes this trust boundary and
+/// hasn't been signed off.
 #[derive(Default)]
 struct ApprovedPaths {
     read_files: HashSet<PathBuf>,
@@ -398,6 +408,36 @@ struct MenuHandles {
 
 /// Monotonic counter for extra document windows ("main-2", "main-3", …).
 struct WindowCounter(u32);
+
+/// Path queued by `open_in_new_window` for a not-yet-mounted document
+/// window: `new label -> path`. Claimed once, at mount, via
+/// `take_pending_window_open` — the same one-shot shape as
+/// [`PendingRecovery`], just for a plain open instead of a recovery slot.
+struct PendingWindowOpen(HashMap<String, String>);
+
+/// One entry in the Window menu's "open windows" tail, and in the
+/// `window-list` event the in-app React menu bar (Windows/Linux) renders it
+/// from.
+#[derive(Clone, serde::Serialize)]
+struct WindowInfo {
+    label: String,
+    title: String,
+    focused: bool,
+}
+
+/// Handle to the native Window submenu's dynamic tail (the open-windows
+/// list) plus how many entries it currently holds (a separator + one item
+/// per window) — a rebuild removes exactly that many from the end before
+/// appending the fresh set, leaving the static entries above (minimize /
+/// maximize / pane toggles) undisturbed. Built on every platform (the
+/// submenu itself exists everywhere, for menu parity — see the `set_menu`
+/// note in `main()`), but only actually rebuilt into a visible native menu
+/// on macOS; Windows/Linux read the same list from the `window-list`
+/// broadcast instead.
+struct WindowMenuState {
+    submenu: tauri::menu::Submenu<tauri::Wry>,
+    dynamic_count: usize,
+}
 
 // ---------------------------------------------------------------------------
 // Window state — main-window size/position persisted across launches.
@@ -601,11 +641,287 @@ fn apply_initial_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWin
     }
 }
 
-/// Open a new document window cascaded from the calling window — File → New
-/// when the current model isn't blank, and startup crash recovery when more
-/// than one snapshot exists. With `recover_slot`, the new window claims that
-/// recovery snapshot at mount (via `take_pending_recovery`) instead of
-/// starting blank.
+/// Sort key for document window labels ("main", "main-2", "main-3", …) in
+/// creation order — a lexical sort would put "main-10" before "main-2".
+fn window_sort_key(label: &str) -> u32 {
+    if label == "main" {
+        0
+    } else {
+        label
+            .strip_prefix("main-")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u32::MAX)
+    }
+}
+
+/// Strip Hew's constant " — Hew" title suffix (see `window_list`'s doc
+/// comment) for display in the Window-menu list.
+fn strip_hew_suffix(raw: &str) -> String {
+    raw.strip_suffix(" — Hew").unwrap_or(raw).to_string()
+}
+
+/// A window's title as just applied via `window.set_title`, not yet
+/// reflected by that same window's `w.title()` getter — see
+/// `refresh_window_list_after_retitle`'s doc comment for why the two can
+/// disagree. A named struct rather than a bare `(&str, &str)` tuple so a
+/// `label`/`title` argument-order mistake at a call site is a compile-time
+/// field-name mismatch, not a silent bug an override can mask.
+#[derive(Clone, Copy)]
+struct Retitled<'a> {
+    label: &'a str,
+    title: &'a str,
+}
+
+/// Resolve the display title for the window `label`, whose OS-reported
+/// title is `os_title` — `retitled`, when it names this same `label`,
+/// wins over `os_title` unconditionally. Pure and unit-tested directly
+/// (see the `tests` module below); `window_list_impl` is its only caller
+/// and needs a live `AppHandle` to get an `os_title` to pass in, but the
+/// override-vs-OS-value decision itself needs neither.
+fn resolved_window_title(label: &str, os_title: &str, retitled: Option<Retitled>) -> String {
+    match retitled {
+        Some(r) if r.label == label => strip_hew_suffix(r.title),
+        _ => strip_hew_suffix(os_title),
+    }
+}
+
+/// Snapshot of every open document window (Settings excluded — it manages no
+/// document and was never meant to appear in a document-window list), in
+/// creation order. `title` is whatever the webview last pushed via
+/// `set_window_title` (Hew's "<mark><name> — Hew" format, `deriveTitle` in
+/// App.tsx); stripping the constant " — Hew" suffix here keeps the
+/// Window-menu list — already inside the Hew app — from repeating the app
+/// name on every line. Purely cosmetic: if `deriveTitle`'s format ever
+/// changes this stops matching and the raw title shows instead, so nothing
+/// breaks, it just gets a little more verbose.
+///
+/// `retitled` overrides one window's title with a value the caller already
+/// knows to be authoritative rather than reading it back from `w.title()` —
+/// see `refresh_window_list_after_retitle`'s doc comment for why that
+/// matters right after a `set_title` call specifically.
+fn window_list(app: &tauri::AppHandle) -> Vec<WindowInfo> {
+    window_list_impl(app, None)
+}
+
+fn window_list_impl(app: &tauri::AppHandle, retitled: Option<Retitled>) -> Vec<WindowInfo> {
+    let mut list: Vec<WindowInfo> = app
+        .webview_windows()
+        .values()
+        .filter(|w| w.label() != "settings")
+        .map(|w| {
+            let os_title = w.title().unwrap_or_default();
+            let title = resolved_window_title(w.label(), &os_title, retitled);
+            WindowInfo {
+                label: w.label().to_string(),
+                title,
+                focused: w.is_focused().unwrap_or(false),
+            }
+        })
+        .collect();
+    list.sort_by_key(|w| window_sort_key(&w.label));
+    list
+}
+
+/// Rebuild the native Window submenu's dynamic tail from `list` (macOS only
+/// — see [`WindowMenuState`]). Each entry's id is `win-focus:<label>`,
+/// dispatched in `on_menu_event` below; the focused window's entry is
+/// checked.
+#[cfg(target_os = "macos")]
+fn rebuild_window_menu_tail(app: &tauri::AppHandle, list: &[WindowInfo]) {
+    let Some(state) = app.try_state::<Mutex<WindowMenuState>>() else {
+        return;
+    };
+    let Ok(mut guard) = state.lock() else { return };
+    for _ in 0..guard.dynamic_count {
+        let last = match guard.submenu.items() {
+            Ok(items) if !items.is_empty() => items.len() - 1,
+            _ => break,
+        };
+        let _ = guard.submenu.remove_at(last);
+    }
+    guard.dynamic_count = 0;
+    if list.is_empty() {
+        return;
+    }
+    if let Ok(sep) = PredefinedMenuItem::separator(app) {
+        if guard.submenu.append(&sep).is_ok() {
+            guard.dynamic_count += 1;
+        }
+    }
+    for w in list {
+        let label = if w.title.is_empty() {
+            "Untitled".to_string()
+        } else {
+            w.title.clone()
+        };
+        if let Ok(item) = CheckMenuItemBuilder::with_id(format!("win-focus:{}", w.label), label)
+            .checked(w.focused)
+            .build(app)
+        {
+            if guard.submenu.append(&item).is_ok() {
+                guard.dynamic_count += 1;
+            }
+        }
+    }
+}
+
+/// Refresh every observer of the open-window list after a window is created,
+/// destroyed, focused, or retitled: rebuild the native Window menu's tail
+/// (macOS) and broadcast the list to every webview (all platforms — the
+/// in-app React menu bar on Windows/Linux renders it from here). A plain
+/// `emit` (not `emit_to_active`) is correct: the list is identical for every
+/// window and reading it is never destructive, unlike the targeted commands
+/// `emit_to_active` guards.
+///
+/// The macOS rebuild is dispatched via `run_on_main_thread` rather than
+/// called directly, and deliberately does NOT block waiting for it to run.
+/// `create_document_window` calls this from an async command, which Tauri
+/// runs off the main thread (see that function's doc comment); every
+/// `Submenu` mutation (`items`/`remove_at`/`append`, inside
+/// `rebuild_window_menu_tail`) blocks its calling thread on a main-thread
+/// round trip. Locking `WindowMenuState` for that whole round trip from a
+/// background thread — while `WindowEvent::Focused`/`Destroyed` can lock the
+/// very same mutex synchronously ON the main thread at any moment — is a
+/// real deadlock: the main thread can end up blocked acquiring the mutex
+/// inside its own event dispatch, which is the only place that could ever
+/// service the background thread's queued main-thread task, so neither side
+/// can proceed. Posting the whole rebuild (lock included) as one
+/// `run_on_main_thread` closure keeps the mutex main-thread-only in
+/// practice: `run_on_main_thread` itself never blocks its caller (it either
+/// runs synchronously in place when already on the main thread — the
+/// Focused/Destroyed/set_window_title call sites — or posts the closure and
+/// returns immediately otherwise), so it can never be the far end of a
+/// cross-thread wait cycle.
+///
+/// The closure re-fetches `window_list(app)` itself rather than closing over
+/// the snapshot taken above: back-to-back calls to this function (e.g. a
+/// window's `Focused` handler firing moments after `create_document_window`
+/// posts its own rebuild) can have their `run_on_main_thread` closures
+/// execute out of POST order — a call already on the main thread runs its
+/// closure synchronously in place, while a call from a background thread
+/// only gets its closure queued, so an EARLIER call's rebuild can execute
+/// AFTER a LATER call's. Rebuilding from a snapshot captured at post time
+/// would let that stale, earlier snapshot silently overwrite the menu with
+/// out-of-date window titles/focus state; re-fetching inside the closure
+/// means whichever rebuild runs last always reflects the true state at that
+/// moment, regardless of post order.
+///
+/// `retitled`, when set, is threaded through every re-fetch inside this call
+/// (the broadcast above and the macOS closure's own re-fetch) — see
+/// `refresh_window_list_after_retitle`'s doc comment for why a freshly-set
+/// title can't just be read back from the window.
+fn refresh_window_list(app: &tauri::AppHandle) {
+    refresh_window_list_impl(app, None);
+}
+
+fn refresh_window_list_impl(app: &tauri::AppHandle, retitled: Option<Retitled>) {
+    let list = window_list_impl(app, retitled);
+    let _ = app.emit("window-list", &list);
+    #[cfg(target_os = "macos")]
+    {
+        let app_for_closure = app.clone();
+        let retitled_for_closure = retitled.map(|r| (r.label.to_string(), r.title.to_string()));
+        let _ = app.run_on_main_thread(move || {
+            let retitled_ref = retitled_for_closure
+                .as_ref()
+                .map(|(label, title)| Retitled { label, title });
+            let list = window_list_impl(&app_for_closure, retitled_ref);
+            rebuild_window_menu_tail(&app_for_closure, &list);
+        });
+    }
+}
+
+/// `refresh_window_list`, but for the window that was JUST retitled via
+/// `window.set_title(title)` (called immediately before this) — the only
+/// caller that needs it. On macOS, `tao::window::Window::set_title` never
+/// applies the OS-level title change synchronously, even when already
+/// called from the main thread: it unconditionally marshals through
+/// `DispatchQueue::main().exec_async` (`tao`'s
+/// `platform_impl::macos::util::set_title_async`), which only enqueues the
+/// real `NSWindow.setTitle:` call on the main dispatch queue — it runs once
+/// this whole command handler returns control to the run loop, not before.
+/// `set_window_title`'s own command handler *does* run on the main thread
+/// (it is a non-async `#[tauri::command]`), so re-reading this window's
+/// title via `w.title()` in the very same call — exactly what a plain
+/// `refresh_window_list(app)` would do — reads back the value from BEFORE
+/// this call, not the one just set: a real ordering race, not a threading
+/// one. It self-corrects on the next window-list refresh (any focus/
+/// create/destroy event re-reads the by-then-actually-applied OS title),
+/// which is why the native Window-menu entry and the broadcast list both
+/// showed the stale title until an unrelated focus switch forced another
+/// rebuild. Passing the just-set title through as `retitled` sidesteps the
+/// race entirely instead of trying to wait for the queued dispatch: nothing
+/// downstream needs to ask the OS for a value the caller already knows.
+///
+/// Takes a `Retitled` (named fields) rather than two bare `&str` arguments
+/// on purpose: `set_window_title` is this function's only caller, and a
+/// `label`/`title` argument-order slip at that one call site is exactly the
+/// kind of mistake that would silently defeat the whole fix (the wrong
+/// window would show the wrong title) without failing any test that only
+/// exercises `resolved_window_title` in isolation — see the `tests` module.
+/// Named fields turn that slip into a call site that reads
+/// `Retitled { label: title, title: label }`, which is a lot harder to
+/// write by accident.
+fn refresh_window_list_after_retitle(app: &tauri::AppHandle, retitled: Retitled) {
+    refresh_window_list_impl(app, Some(retitled));
+}
+
+/// Raise and focus the document window with the given label. Shared by the
+/// `focus_window` command (the in-app React Window-menu tail) and the native
+/// macOS Window-menu tail's own `win-focus:<label>` dispatch.
+fn focus_window_by_label(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(label) {
+        let _ = w.unminimize();
+        w.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Focus (raise) an open document window by label — the in-app React
+/// Window-menu tail's click handler (Windows/Linux/web multi-window).
+#[tauri::command]
+fn focus_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    focus_window_by_label(&app, &label)
+}
+
+/// Return the current open-window list. Called once by a freshly-mounted
+/// webview for its initial state; the `window-list` broadcast
+/// (`refresh_window_list`) keeps it fresh after that.
+#[tauri::command]
+fn list_windows(app: tauri::AppHandle) -> Vec<WindowInfo> {
+    window_list(&app)
+}
+
+/// Set this window's OS title and refresh every open-window observer — the
+/// one path the webview uses to push its document title (App.tsx's
+/// `deriveTitle` effect), replacing a bare Tauri `setTitle` call so the
+/// Window-menu list (native and broadcast) never goes stale.
+///
+/// Refreshes via `refresh_window_list_after_retitle`, not a plain
+/// `refresh_window_list(&app)` — see that function's doc comment for why a
+/// freshly-set title can't be read back from `window` in this same call.
+#[tauri::command]
+fn set_window_title(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    title: String,
+) -> Result<(), String> {
+    window.set_title(&title).map_err(|e| e.to_string())?;
+    refresh_window_list_after_retitle(
+        &app,
+        Retitled {
+            label: window.label(),
+            title: &title,
+        },
+    );
+    Ok(())
+}
+
+/// Create a new document window cascaded from the calling window, returning
+/// its label. Shared by `new_window` (File ▸ New / startup crash recovery)
+/// and `open_in_new_window` (File ▸ Open onto a non-pristine window); with
+/// `recover_slot`, the new window claims that recovery snapshot at mount
+/// (via `take_pending_recovery`) instead of starting blank.
 ///
 /// `async` is load-bearing, not style: on Windows, creating a webview inside a
 /// synchronous command deadlocks WebView2 initialization (the sync command
@@ -613,12 +929,11 @@ fn apply_initial_window_state(app: &tauri::AppHandle, window: &tauri::WebviewWin
 /// "Known issues" note on `WebviewWindowBuilder::build`). The result is a
 /// zombie window: a frame with no content whose close button does nothing.
 /// An async command runs off the main thread, so the build can complete.
-#[tauri::command]
-async fn new_window(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
+async fn create_document_window(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
     recover_slot: Option<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let label = {
         let state = app.state::<Mutex<WindowCounter>>();
         let mut guard = state.lock().map_err(|e| e.to_string())?;
@@ -636,7 +951,7 @@ async fn new_window(
     // Standard macOS document-window cascade offset.
     const CASCADE: f64 = 28.0;
     let builder =
-        tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title("Hew")
             .inner_size(
                 f64::from(size.width) / scale,
@@ -651,7 +966,58 @@ async fn new_window(
     #[cfg(target_os = "linux")]
     let builder = builder.decorations(false);
     builder.build().map_err(|e| e.to_string())?;
+    refresh_window_list(app);
+    Ok(label)
+}
+
+/// Open a new document window cascaded from the calling window — File → New
+/// when the current model isn't blank, and startup crash recovery when more
+/// than one snapshot exists. See [`create_document_window`].
+#[tauri::command]
+async fn new_window(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    recover_slot: Option<String>,
+) -> Result<(), String> {
+    create_document_window(&app, &window, recover_slot).await?;
     Ok(())
+}
+
+/// Open `path` in a brand-new document window rather than the calling one —
+/// File ▸ Open (or a recent/dropped/associated path) onto a window that
+/// isn't pristine. Mints the window via [`create_document_window`] and
+/// queues the path for it in [`PendingWindowOpen`]; the new window claims it
+/// at startup via `take_pending_window_open`, reusing the same ready
+/// handshake `deliver_open` already established rather than re-deriving one.
+#[tauri::command]
+async fn open_in_new_window(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    path: String,
+) -> Result<(), String> {
+    let label = create_document_window(&app, &window, None).await?;
+    // Propagate a lock failure (matches the sibling recover_slot insert in
+    // create_document_window) rather than swallowing it: on a poisoned
+    // mutex, silently returning Ok would leave the freshly opened window
+    // blank forever — take_pending_window_open would find nothing to
+    // deliver, and the caller would have no idea the open never happened.
+    let state = app.state::<Mutex<PendingWindowOpen>>();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    guard.0.insert(label, path);
+    Ok(())
+}
+
+/// Claim (remove) the path queued by `open_in_new_window` for this window, if
+/// any — called once at startup by every window, mirroring
+/// `take_pending_recovery`. A window not created via `open_in_new_window`
+/// (the initial `main` window, a File ▸ New window, a recovery window) never
+/// has an entry and this is a no-op `None`.
+#[tauri::command]
+fn take_pending_window_open(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Option<String> {
+    app.state::<Mutex<PendingWindowOpen>>()
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.0.remove(window.label()))
 }
 
 /// Reflect webview state into the native menu bar: `checked` drives check
@@ -1149,8 +1515,11 @@ fn approve_file(app: &tauri::AppHandle, path: &Path, write: bool) {
 }
 
 /// Record read approval for a directory (listing + reading files in it and
-/// one level below it). Granted only by import picks — their texture scan
-/// reads siblings of the picked model and `textures/`-style subfolders.
+/// one level below it). Called by `pick_open_path` whenever its caller sets
+/// `approve_dir` — every import-format pick (whose COLLADA texture scan
+/// reads siblings of the picked model and `textures/`-style subfolders) and,
+/// since the unified Open dialog, every plain `.hew` pick too (see the
+/// `ApprovedPaths::read_dirs` doc comment for why, and the open follow-up).
 fn approve_dir_reads(app: &tauri::AppHandle, dir: &Path) {
     let Ok(canon) = std::fs::canonicalize(dir) else {
         return;
@@ -1565,6 +1934,11 @@ fn main() {
             take_pending_recovery,
             frontend_ready,
             new_window,
+            open_in_new_window,
+            take_pending_window_open,
+            list_windows,
+            focus_window,
+            set_window_title,
             open_settings_window,
             sync_menu_state,
             push_recent,
@@ -2092,14 +2466,6 @@ fn main() {
                 Some("Shift+CmdOrCtrl+O"),
                 Some("Shift+CmdOrCtrl+O"),
             )?;
-            let win_debug_log = check_item(
-                handle,
-                &mut checks,
-                "win-debug-log",
-                "Debug Log",
-                None,
-                None,
-            )?;
 
             let window_menu = SubmenuBuilder::new(handle, "Window")
                 // Standard macOS window management first (HIG: the Window
@@ -2111,16 +2477,27 @@ fn main() {
                 .item(&win_materials)
                 .item(&win_tags)
                 .item(&win_object_info)
-                .item(&win_debug_log)
                 .build()?;
 
             // ----------------------------------------------------------------
             // Help menu
             // ----------------------------------------------------------------
+            // Debug Log lives here rather than among the document panes above
+            // — it isn't a common pane, it's a diagnostic tool.
+            let win_debug_log = check_item(
+                handle,
+                &mut checks,
+                "win-debug-log",
+                "Debug Log",
+                None,
+                None,
+            )?;
             let help_report_bug =
                 MenuItemBuilder::with_id("help-report-bug", "Report Bug…").build(handle)?;
 
             let help_menu = SubmenuBuilder::new(handle, "Help")
+                .item(&win_debug_log)
+                .separator()
                 .item(&help_report_bug)
                 .build()?;
 
@@ -2210,11 +2587,23 @@ fn main() {
             app.manage(Mutex::new(ReadyWindows(HashSet::new())));
             app.manage(Mutex::new(ActiveWindow(None)));
             app.manage(Mutex::new(PendingRecovery(HashMap::new())));
+            app.manage(Mutex::new(PendingWindowOpen(HashMap::new())));
             app.manage(Mutex::new(ProtectedSlots(HashSet::new())));
             app.manage(Mutex::new(WindowStateCache {
                 last_normal: None,
                 last_write: None,
             }));
+            // Handle to the Window submenu's dynamic tail (see
+            // `rebuild_window_menu_tail`) — built on every platform since
+            // `window_menu` itself is (menu parity), even though only macOS
+            // actually attaches and rebuilds it.
+            app.manage(Mutex::new(WindowMenuState {
+                submenu: window_menu,
+                dynamic_count: 0,
+            }));
+            // Seed the Window-menu tail / broadcast with this launch's first
+            // window before anything triggers the usual create/focus refresh.
+            refresh_window_list(handle);
 
             // ----------------------------------------------------------------
             // Main window geometry: restore the persisted size/position, or
@@ -2249,6 +2638,7 @@ fn main() {
                     if let Ok(mut active) = app.state::<Mutex<ActiveWindow>>().lock() {
                         active.0 = Some(window.label().to_string());
                     }
+                    refresh_window_list(app);
                 }
                 // Dropped files are a user gesture — approve them like a
                 // dialog pick (write too: a dropped .hew is opened, and Save
@@ -2273,6 +2663,12 @@ fn main() {
                     if let Ok(mut pending) = app.state::<Mutex<PendingRecovery>>().lock() {
                         pending.0.remove(window.label());
                     }
+                    // Likewise for a window closed before claiming its
+                    // open_in_new_window path — nothing left to deliver it to.
+                    if let Ok(mut pending) = app.state::<Mutex<PendingWindowOpen>>().lock() {
+                        pending.0.remove(window.label());
+                    }
+                    refresh_window_list(app);
                 }
                 _ => {}
             }
@@ -2302,6 +2698,10 @@ fn main() {
             }
             if id == "recent-clear" {
                 let _ = clear_recent(app.clone());
+                return;
+            }
+            if let Some(label) = id.strip_prefix("win-focus:") {
+                let _ = focus_window_by_label(app, label);
                 return;
             }
             // The macOS "Check for Updates…" item runs the whole flow shell-side
@@ -2494,5 +2894,92 @@ mod tests {
         assert_eq!(overlap(0, 10, -5, 3), 3);
         assert_eq!(overlap(0, 10, 20, 30), 0); // disjoint clamps to 0
         assert_eq!(overlap(-10, -2, -8, -4), 4); // fully negative coords
+    }
+
+    // `resolved_window_title` is the fix for the window-title-refresh bug:
+    // `window.set_title` on macOS (`tao`'s `set_title_async`) unconditionally
+    // marshals the real `NSWindow.setTitle:` call through
+    // `DispatchQueue::main().exec_async`, even when the caller is already on
+    // the main thread — so re-reading `w.title()` in the same synchronous
+    // command (`set_window_title` -> `refresh_window_list`) observes the
+    // title from BEFORE the call, not the one just set. These pin the
+    // override that sidesteps that race by using the just-set title
+    // directly instead of asking the OS to confirm it.
+    //
+    // Honest scope note: these tests pin `resolved_window_title` itself —
+    // the override-vs-OS-getter precedence, the per-label targeting, and the
+    // formatting consistency between the two paths. They do NOT exercise
+    // `set_window_title`'s one-line call into `refresh_window_list_after_retitle`
+    // (that would need a live `AppHandle`, which the concrete, non-generic
+    // Tauri command type can't get from a mock runtime without a much larger
+    // refactor of this deadlock-sensitive menu code — considered and
+    // rejected as disproportionate to a one-line wiring call). `Retitled`
+    // being a named-field struct rather than a bare tuple (see its doc
+    // comment) closes the argument-order half of that residual risk at the
+    // type level; whether the call itself still happens is unverifiable by
+    // any test in this repo and is exactly what the maintainer's real
+    // desktop hand-check (already required to prove the fix at all, since
+    // no automated test can drive the native NSMenu) re-confirms.
+
+    #[test]
+    fn resolved_window_title_prefers_override_for_matching_label() {
+        // The retitled window's OS-reported title is stale (this is exactly
+        // the race: the OS hasn't applied the real title yet) — the override
+        // must win regardless.
+        assert_eq!(
+            resolved_window_title(
+                "main",
+                "Untitled — Hew",
+                Some(Retitled {
+                    label: "main",
+                    title: "sketch.hew — Hew"
+                })
+            ),
+            "sketch.hew"
+        );
+    }
+
+    #[test]
+    fn resolved_window_title_ignores_override_for_a_different_label() {
+        // A sibling window's own retitle must never leak into this window's
+        // entry — only an exact label match applies the override.
+        assert_eq!(
+            resolved_window_title(
+                "main-2",
+                "Untitled — Hew",
+                Some(Retitled {
+                    label: "main",
+                    title: "sketch.hew — Hew"
+                })
+            ),
+            "Untitled"
+        );
+    }
+
+    #[test]
+    fn resolved_window_title_falls_back_to_os_title_with_no_override() {
+        assert_eq!(
+            resolved_window_title("main", "• sketch.hew — Hew", None),
+            "• sketch.hew"
+        );
+    }
+
+    #[test]
+    fn resolved_window_title_strips_suffix_on_both_paths_identically() {
+        // The override path and the OS-getter fallback path must format
+        // identically (both go through `strip_hew_suffix`) — a mismatch here
+        // would make the Window-menu list's formatting depend on WHICH path
+        // supplied a given entry, which is exactly the kind of inconsistency
+        // this fix must not introduce.
+        let via_override = resolved_window_title(
+            "main",
+            "ignored",
+            Some(Retitled {
+                label: "main",
+                title: "x.hew — Hew",
+            }),
+        );
+        let via_os = resolved_window_title("main", "x.hew — Hew", None);
+        assert_eq!(via_override, via_os);
     }
 }

@@ -272,6 +272,11 @@ below.
 - Native window chrome per platform — the system menu bar on macOS,
   native decorations on Windows, a custom title bar on Linux (WebKitGTK
   cannot repaint the native caption)
+- Multi-window document editing on desktop: File ▸ New and File ▸ Open both
+  open into a fresh window whenever the current one isn't a blank,
+  untouched "Untitled" document, so an in-progress model is never silently
+  replaced; the Window menu lists every open document window, with a
+  checkmark on the current one, to switch between them
 
 ### Reliability & diagnostics
 

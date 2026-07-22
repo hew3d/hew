@@ -24,7 +24,7 @@ import * as LogStore from './log/LogStore'
 import { installTestHarness } from './test/harness'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
-import { makeFileHost, isTauri, type ImportReport } from './io/fileHost'
+import { makeFileHost, isTauri, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
   INITIAL_SESSION,
   deriveTitle,
@@ -140,6 +140,16 @@ function isSceneEmpty(scene: Scene): boolean {
     scene.instance_ids().length === 0 &&
     scene.sketch_ids().length === 0
   )
+}
+
+/** True when a window holds nothing worth protecting — no named file, no
+ *  unsaved edits, no geometry — so a File ▸ Open or File ▸ New pick may
+ *  reuse it in place instead of opening a fresh window. Stricter than
+ *  `isSceneEmpty` alone: a saved-then-emptied document (currentRef set, but
+ *  the model has since been deleted down to nothing) still has a real file
+ *  behind it and must not be silently abandoned by reusing the window. */
+export function isPristineDocument(session: DocSessionState, scene: Scene): boolean {
+  return session.currentRef === null && !session.dirty && isSceneEmpty(scene)
 }
 
 function isPanicError(message: string): boolean {
@@ -264,6 +274,14 @@ export default function App() {
     const n = raw !== null ? Number(raw) : NaN
     return Number.isFinite(n) ? clampTrayWidth(n) : TRAY_WIDTH_DEFAULT
   })
+  /** Open document windows (Tauri multi-window only) — the Window menu's
+   *  tail of focus-this-window entries. Populated by `list_windows` at
+   *  mount and kept fresh by the shell's `window-list` broadcast (window
+   *  create/destroy/focus/title-change). Always empty on the web build
+   *  (single window, no shell to ask) and on macOS Tauri, where the native
+   *  menu renders its own tail directly — this only feeds the in-app
+   *  MenuBar (Windows/Linux). */
+  const [windowList, setWindowList] = useState<{ label: string; title: string; focused: boolean }[]>([])
 
   /** Imperative handle into the viewport (e.g. running a boolean). */
   const viewportApi = useRef<ViewportApi | null>(null)
@@ -277,11 +295,13 @@ export default function App() {
   // Resolver for the in-flight StlUnitsDialog promise (see promptStlUnits);
   // null when no chooser is open.
   const stlUnitsResolveRef = useRef<((unitScale: number | null) => void) | null>(null)
-  // Guards importDocument against re-entry: a second import started while the
-  // first is mid-flight (e.g. Ctrl+K ▸ "import" ▸ Enter behind the units
-  // modal) would otherwise orphan the first, hanging it forever. A ref (not
-  // state) so the guard is synchronous, before the first await.
-  const importInFlightRef = useRef(false)
+  // Guards openDocument/importDocument against re-entry: a second gesture
+  // started while the first is mid-flight (e.g. Ctrl+K ▸ "import" ▸ Enter
+  // behind the units modal) would otherwise orphan the first, hanging it
+  // forever. Shared between both entry points — they converge on the same
+  // post-pick import steps (runImportPick) and must not race each other. A
+  // ref (not state) so the guard is synchronous, before the first await.
+  const openInFlightRef = useRef(false)
   // Mirror of docSession kept up-to-date so callbacks can read current state
   // without capturing stale closures or causing impure updater functions.
   const docSessionRef = useRef<DocSessionState>(INITIAL_SESSION)
@@ -446,14 +466,18 @@ export default function App() {
   // over, then replace, a document the user explicitly double-clicked.)
 
   // Update document.title whenever session state changes. Under Tauri, also
-  // push the title to the native OS title bar — the in-app MenuBar no longer
-  // renders a title for the native case, so the title now lives solely there.
+  // push the title to the shell via `set_window_title` — the in-app MenuBar
+  // no longer renders a title for the native case, so the title now lives
+  // solely in the OS title bar. `set_window_title` (rather than a bare
+  // window.setTitle) also refreshes the shell's open-window list/menu, so
+  // the Window-menu entry for this window tracks its document name and
+  // dirty mark live.
   useEffect(() => {
     const title = deriveTitle(docSession)
     document.title = title
     if (isTauri) {
-      import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-        getCurrentWindow().setTitle(title).catch(() => { /* ignore */ })
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('set_window_title', { title }).catch(() => { /* ignore */ })
       }).catch(() => { /* ignore */ })
     }
   }, [docSession])
@@ -994,11 +1018,15 @@ export default function App() {
   const newDocument = useCallback(async () => {
     const scene = sceneRef.current
     if (scene === null) return
-    if (!isSceneEmpty(scene)) {
-      // Non-blank model: never overwrite it. On the desktop, File ▸ New opens
-      // a fresh document window (the macOS staple); the current window keeps
-      // its model untouched, so no discard prompt is needed. Only the web
+    if (!isPristineDocument(docSessionRef.current, scene)) {
+      // Non-pristine (a named file, unsaved edits, or existing geometry):
+      // never overwrite it. On the desktop, File ▸ New opens a fresh
+      // document window (the macOS staple); the current window keeps its
+      // state untouched, so no discard prompt is needed. Only the web
       // build, which can't open OS windows, falls back to replace-in-place.
+      // (Note: this is stricter than a bare isSceneEmpty check — a
+      // saved-then-emptied document, currentRef set but nothing left in the
+      // model, is still not pristine and must not be reused silently.)
       if (isTauri) {
         try {
           const { invoke } = await import('@tauri-apps/api/core')
@@ -1010,7 +1038,7 @@ export default function App() {
       }
       if (!(await confirmDiscard())) return
     }
-    // Blank (or web fallback): reset in place — a pristine document is
+    // Pristine (or web fallback): reset in place — a pristine document is
     // reused rather than spawning a second empty one.
     const blank = blankBytesRef.current
     if (blank === null) return
@@ -1021,28 +1049,9 @@ export default function App() {
     }
   }, [confirmDiscard, applyLoadedBytes, clearRecoverySnapshot])
 
-  const openDocument = useCallback(async () => {
-    if (!(await confirmDiscard())) return
-    fileHostRef.current.open().then((result) => {
-      if (result === null) return // user cancelled
-      const discardsUnsaved = docSessionRef.current.dirty
-      const ok = applyLoadedBytes(result.bytes)
-      if (!ok) return
-      setDocSession(afterOpen(result.ref, Date.now()))
-      if (discardsUnsaved) void clearRecoverySnapshot()
-      if (isTauri && typeof result.ref.handle === 'string') {
-        import('@tauri-apps/api/core').then(({ invoke }) =>
-          invoke('push_recent', { path: result.ref.handle as string })
-        ).catch(() => { /* ignore */ })
-      }
-    }).catch((err: unknown) => {
-      handleToast(`Open failed: ${friendlyErrorText(err)}`)
-    })
-  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot])
-
   // Show the STL units-chooser modal and resolve with the chosen unit_scale,
   // or null if the user cancels (Escape / backdrop click / Cancel button).
-  // A promise-plus-ref-resolver bridges the imperative importDocument flow
+  // A promise-plus-ref-resolver bridges the imperative runImportPick flow
   // below to the declarative modal rendered near the bottom of this
   // component (see the `pendingStlImport` block).
   const promptStlUnits = useCallback((fileName: string): Promise<number | null> => {
@@ -1058,60 +1067,25 @@ export default function App() {
     })
   }, [])
 
-  const importDocument = useCallback(async () => {
-    const scene = sceneRef.current
-    if (scene === null) return
-    // Re-entrancy guard: a second import started while the first is mid-flight
-    // (e.g. Ctrl+K ▸ "import" ▸ Enter behind the units modal) would orphan the
-    // first — hanging it forever and silently discarding its work. Refuse it.
-    // A ref (not state) so the check is synchronous, before the first await.
-    if (importInFlightRef.current) return
-    importInFlightRef.current = true
-
-    // Step 1: guard unsaved changes BEFORE showing any file dialog.
-    // If the user cancels the discard prompt, we leave the current document
-    // completely untouched.
-    if (!(await confirmDiscard())) {
-      importInFlightRef.current = false
-      return
-    }
-
-    // Step 2: show the file-open dialog.  If the user cancels (null), we
-    // return immediately without touching the current document.
-    //
-    // Known limitation: openForImport() couples the picker with the file read
-    // (and, for COLLADA on the web, a texture-directory picker AFTER the
-    // read), so reading a large file happens before the overlay below can
-    // appear.  Separating "picker closed" from "bytes read" needs a FileHost
-    // API change; until then the overlay covers everything from here on.
-    let result: Awaited<ReturnType<typeof fileHostRef.current.openForImport>>
-    try {
-      result = await fileHostRef.current.openForImport()
-    } catch (err: unknown) {
-      handleToast(`Import failed: ${friendlyErrorText(err)}`)
-      importInFlightRef.current = false
-      return
-    }
-    if (result === null) {
-      importInFlightRef.current = false
-      return // user cancelled — current document unchanged
-    }
-
-    // Step 2b: STL carries no units of its own — ask before doing any
-    // blocking work (unlike the other formats, which get no prompt at all).
-    // Cancelling here leaves the current document untouched, same as
-    // cancelling the file picker.
+  // The post-pick import steps, shared by openDocument (the unified Open
+  // dialog's non-hew branch) and importDocument (File ▸ Import…'s explicit,
+  // import-only dialog) — both converge here once a pick is in hand. The
+  // caller has already confirmed discard and holds openInFlightRef for the
+  // whole gesture; `scene` is the live Scene it captured at the top of that
+  // gesture.
+  const runImportPick = useCallback(async (scene: Scene, pick: ImportPick) => {
+    // STL carries no units of its own — ask before doing any blocking work
+    // (unlike the other formats, which get no prompt at all). Cancelling
+    // here leaves the current document untouched, same as cancelling the
+    // file picker.
     let stlUnitScale = 0.001 // unused for non-STL kinds
-    if (result.kind === 'stl') {
-      const chosen = await promptStlUnits(result.name)
-      if (chosen === null) {
-        importInFlightRef.current = false
-        return
-      }
+    if (pick.kind === 'stl') {
+      const chosen = await promptStlUnits(pick.name)
+      if (chosen === null) return
       stlUnitScale = chosen
     }
 
-    // Step 3: show the overlay BEFORE any blocking work.
+    // Show the overlay BEFORE any blocking work.
     //
     // flushSync forces a synchronous DOM commit so the overlay card is in the
     // DOM immediately, rather than waiting for React's next async render cycle.
@@ -1127,14 +1101,14 @@ export default function App() {
     // import in a Web Worker (future work — needs a SharedArrayBuffer channel
     // to the WASM module).
     flushSync(() => {
-      setImportingName(result!.name)
+      setImportingName(pick.name)
       setIsImporting(true)
     })
     await nextPaint()
 
     let report: ImportReport
     try {
-      // Step 4: reset to a blank document first (replace semantics).
+      // Reset to a blank document first (replace semantics).
       //
       // applyLoadedBytes(blank) calls scene.load(), clears selection/context,
       // and calls notifyLoaded() under suppressDirtyRef so the dirty mark is
@@ -1149,36 +1123,41 @@ export default function App() {
       // the import below fails) — drop its autosave snapshot with it.
       if (discardsUnsaved) void clearRecoverySnapshot()
 
-      // Step 5: import into the now-empty document, dispatched by format.
-      // STL has no internal object names, so name its Objects from the file
-      // stem (the picked basename minus the .stl extension); a blank stem
-      // falls back to "Imported" in the kernel.
-      const stlStem = result!.name.replace(/\.stl$/i, '').trim() || undefined
+      // Import into the now-empty document, dispatched by format. STL has no
+      // internal object names, so name its Objects from the file stem (the
+      // picked basename minus the .stl extension); a blank stem falls back
+      // to "Imported" in the kernel.
+      const stlStem = pick.name.replace(/\.stl$/i, '').trim() || undefined
       report = (
-        result!.kind === 'gltf'
-          ? scene.import_gltf(result!.bytes)
-          : result!.kind === 'skp'
-            ? scene.import_skp(result!.bytes)
-            : result!.kind === 'stl'
-              ? scene.import_stl(result!.bytes, stlUnitScale, stlStem)
+        pick.kind === 'gltf'
+          ? scene.import_gltf(pick.bytes)
+          : pick.kind === 'skp'
+            ? scene.import_skp(pick.bytes)
+            : pick.kind === 'stl'
+              ? scene.import_stl(pick.bytes, stlUnitScale, stlStem)
               : scene.import_dae(
-                  result!.bytes,
-                  Object.keys(result!.images).length > 0 ? result!.images : null,
+                  pick.bytes,
+                  Object.keys(pick.images).length > 0 ? pick.images : null,
                 )
       ) as ImportReport
     } catch (err: unknown) {
       handleToast(`Import failed: ${friendlyErrorText(err)}`)
+      // The blank-document replace above already committed (applyLoadedBytes
+      // mutates the live scene directly, with no rollback), even though the
+      // import into it just failed — the live scene really is blank now.
+      // Reflect that in docSession (as a fresh untitled document, exactly
+      // like newDocument's blank reset) rather than leaving it pointing at
+      // whatever file/handle was open before this gesture: without this, the
+      // next Save would write the now-blank scene straight to that stale
+      // path with no prompt, silently destroying a perfectly good file.
+      setDocSession(afterOpen(null, Date.now()))
       return
     } finally {
       // Always clear the overlay — even on throw, so it can never get stuck.
       setIsImporting(false)
-      // Release the re-entrancy guard here: everything after this point (the
-      // tessellate/session-commit steps) is synchronous, so there is no async
-      // gap in which a second import could start.
-      importInFlightRef.current = false
     }
 
-    // Step 6: tessellate the imported objects and update session state.
+    // Tessellate the imported objects and update session state.
     //
     // notifyLoaded() calls handleSceneRefresh() which tessellates the new
     // objects and bumps docRev.  suppressDirtyRef is false here so the dirty
@@ -1197,20 +1176,159 @@ export default function App() {
     setHiddenTagPaths(seededHiddenTagPaths)
     pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
 
-    // Step 7: commit the session state.
+    // Commit the session state.
     //
     // afterImport() sets currentRef=null (so Save always prompts — no silent
     // overwrite risk on either WebFileHost or TauriFileHost) and dirty=true.
     // The importedName is used by deriveTitle (window title) and by
     // saveAsDocument's suggested filename.
-    setDocSession(afterImport(result!.name, Date.now()))
+    setDocSession(afterImport(pick.name, Date.now()))
 
     setImportReport(report)
     const fmt =
-      result!.kind === 'gltf' ? 'glTF' : result!.kind === 'skp' ? 'SKP' : result!.kind === 'stl' ? 'STL' : 'DAE'
+      pick.kind === 'gltf' ? 'glTF' : pick.kind === 'skp' ? 'SKP' : pick.kind === 'stl' ? 'STL' : 'DAE'
     LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
-  }, [confirmDiscard, handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits])
+  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits])
+
+  // The unified Open dialog: ONE picker accepting `.hew` plus every import
+  // format, dispatching on the extension the user picked (see
+  // fileHost.ts's openAny doc comment). A `.hew` pick applies directly; every
+  // other kind converges on runImportPick, the same post-pick steps
+  // importDocument's explicit, import-only dialog feeds.
+  const openDocument = useCallback(async () => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    // Re-entrancy guard: shared with importDocument (see openInFlightRef) —
+    // a second gesture started while this one is mid-flight (e.g. Ctrl+K
+    // behind the STL units modal) would otherwise orphan it. A ref (not
+    // state) so the check is synchronous, before the first await.
+    if (openInFlightRef.current) return
+    openInFlightRef.current = true
+    try {
+      // Reuse THIS window only when it's pristine (see isPristineDocument);
+      // otherwise the pick lands in a fresh window on the desktop (Tauri),
+      // leaving the current document completely untouched. Only the web
+      // build, which can't open OS windows, falls back to a guarded
+      // replace-in-place — and only that fallback needs the discard prompt:
+      // a pristine reuse discards nothing (dirty is false by definition),
+      // and the new-window path never touches this window at all.
+      const pristine = isPristineDocument(docSessionRef.current, scene)
+      const opensNewWindow = !pristine && isTauri
+      if (!pristine && !opensNewWindow) {
+        if (!(await confirmDiscard())) return
+      }
+
+      let pick: OpenPick | null
+      try {
+        pick = await fileHostRef.current.openAny()
+      } catch (err: unknown) {
+        handleToast(`Open failed: ${friendlyErrorText(err)}`)
+        return
+      }
+      if (pick === null) return // user cancelled — current document unchanged
+
+      if (opensNewWindow) {
+        // Every Tauri pick (hew or import) carries a real filesystem path —
+        // hew's `handle`, import kinds' `path` — so this should always
+        // resolve; the fallback below only matters against an older shell.
+        const path = pick.kind === 'hew' ? (pick.handle as string | null) : (pick.path ?? null)
+        if (typeof path === 'string') {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core')
+            await invoke('open_in_new_window', { path })
+            return
+          } catch {
+            // fall through to the guarded in-place replace below
+          }
+        }
+        if (!(await confirmDiscard())) return
+      }
+
+      if (pick.kind === 'hew') {
+        const discardsUnsaved = docSessionRef.current.dirty
+        const ok = applyLoadedBytes(pick.bytes)
+        if (!ok) return
+        setDocSession(afterOpen({ name: pick.name, handle: pick.handle }, Date.now()))
+        if (discardsUnsaved) void clearRecoverySnapshot()
+        if (isTauri && typeof pick.handle === 'string') {
+          import('@tauri-apps/api/core').then(({ invoke }) =>
+            invoke('push_recent', { path: pick.handle as string })
+          ).catch(() => { /* ignore */ })
+        }
+        return
+      }
+
+      await runImportPick(scene, pick)
+    } finally {
+      openInFlightRef.current = false
+    }
+  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runImportPick])
+
+  // File ▸ Import…'s explicit, import-only dialog (no `.hew` in its filter) —
+  // kept alongside the unified Open dialog above for users who specifically
+  // want an import-labeled entry point. Converges on the same runImportPick
+  // steps once a pick is in hand.
+  const importDocument = useCallback(async () => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    // Re-entrancy guard: shared with openDocument (see openInFlightRef) — a
+    // second gesture started while this one is mid-flight (e.g. Ctrl+K ▸
+    // "import" ▸ Enter behind the units modal) would otherwise orphan it,
+    // hanging it forever and silently discarding its work. Refuse it. A ref
+    // (not state) so the check is synchronous, before the first await.
+    if (openInFlightRef.current) return
+    openInFlightRef.current = true
+    try {
+      // Same pristine-else-new-window rule as openDocument (see
+      // isPristineDocument): reuse THIS window only when it's pristine;
+      // otherwise the pick lands in a fresh window on the desktop (Tauri),
+      // leaving the current document completely untouched. Only the web
+      // build, which can't open OS windows, falls back to a guarded
+      // replace-in-place — and only that fallback needs the discard prompt
+      // (a pristine reuse discards nothing, and the new-window path never
+      // touches this window at all).
+      const pristine = isPristineDocument(docSessionRef.current, scene)
+      const opensNewWindow = !pristine && isTauri
+      if (!pristine && !opensNewWindow) {
+        if (!(await confirmDiscard())) return
+      }
+
+      // Known limitation: openForImport() couples the picker with the file read
+      // (and, for COLLADA on the web, a texture-directory picker AFTER the
+      // read), so reading a large file happens before the overlay below can
+      // appear.  Separating "picker closed" from "bytes read" needs a FileHost
+      // API change; until then the overlay covers everything from here on.
+      let pick: ImportPick | null
+      try {
+        pick = await fileHostRef.current.openForImport()
+      } catch (err: unknown) {
+        handleToast(`Import failed: ${friendlyErrorText(err)}`)
+        return
+      }
+      if (pick === null) return // user cancelled — current document unchanged
+
+      if (opensNewWindow) {
+        // Every Tauri import pick carries a real filesystem path (see
+        // openDocument's identical comment) — the fallback below only
+        // matters against an older shell.
+        if (typeof pick.path === 'string') {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core')
+            await invoke('open_in_new_window', { path: pick.path })
+            return
+          } catch {
+            // fall through to the guarded in-place replace below
+          }
+        }
+        if (!(await confirmDiscard())) return
+      }
+
+      await runImportPick(scene, pick)
+    } finally {
+      openInFlightRef.current = false
+    }
+  }, [confirmDiscard, handleToast, runImportPick])
 
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
@@ -1258,20 +1376,75 @@ export default function App() {
     })
   }, [docSession.currentRef, docSession.importedName, handleToast, clearRecoverySnapshot])
 
-  // ---------------------------------------------------------------- open by path (Tauri only — used by drag-drop, recents, and file association)
-  // Reads the file at `path` via Tauri invoke, applies it, and sets session state.
-  const openPath = useCallback(async (path: string) => {
-    if (!(await confirmDiscard())) return
+  // ---------------------------------------------------------------- open by path (Tauri only)
+  // Reads the file at `path` and applies it to the CURRENT window
+  // unconditionally — no pristine check, no discard guard. Callers must have
+  // already established it's safe: openPath below (the pristine-else-
+  // new-window branch) after confirming pristine-ness or an explicit discard,
+  // or the guaranteed-fresh window a queued open_in_new_window/take_pending_open
+  // delivery lands in. Drag-drop, recents, and file-association/second-instance
+  // opens only ever hand openPath `.hew` paths (each filters/records only that
+  // extension upstream), but a pick delivered to a new window can be any
+  // format the unified Open dialog accepts, so this dispatches on extension
+  // the same way openDocument does.
+  const openPathInPlace = useCallback(async (path: string) => {
+    const scene = sceneRef.current
+    if (scene === null) return
     const { invoke } = await import('@tauri-apps/api/core')
+    if (/\.hew$/i.test(path)) {
+      const buf = await invoke<ArrayBuffer>('read_file', { path })
+      const bytes = new Uint8Array(buf)
+      const discardsUnsaved = docSessionRef.current.dirty
+      if (applyLoadedBytes(bytes)) {
+        setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
+        if (discardsUnsaved) void clearRecoverySnapshot()
+        invoke('push_recent', { path }).catch(() => { /* ignore */ })
+      }
+      return
+    }
     const buf = await invoke<ArrayBuffer>('read_file', { path })
     const bytes = new Uint8Array(buf)
-    const discardsUnsaved = docSessionRef.current.dirty
-    if (applyLoadedBytes(bytes)) {
-      setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
-      if (discardsUnsaved) void clearRecoverySnapshot()
-      invoke('push_recent', { path }).catch(() => { /* ignore */ })
+    const { resolveImportPickFromPath } = await import('./io/tauriFileHost')
+    const pick = await resolveImportPickFromPath(path, bytes)
+    await runImportPick(scene, pick)
+  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick])
+
+  // Tauri-only. The entry point for every "open this path" gesture that can
+  // land on a window the user may already be working in: native/in-app "Open
+  // Recent", native drag-drop, and a live file-association or second-instance
+  // open delivered via the `menu-open-path` listener below (which also covers
+  // a warm macOS "open document" Apple event and a native recent-file click —
+  // see that listener's own doc comment). It also covers the two
+  // guaranteed-fresh-window deliveries in the startup-handoff effect
+  // (open_in_new_window's queued path, and a cold-start take_pending_open
+  // path): a freshly spawned window is pristine by construction, so the
+  // pristine check below reduces to the same in-place apply those deliveries
+  // always had — this is not a special case, it just falls out of the rule.
+  //
+  // Follows the same pristine-else-new-window rule as openDocument (see
+  // isPristineDocument): a non-pristine window is never silently replaced —
+  // the path opens in a fresh window instead, leaving this window's document
+  // completely untouched. Only a pristine reuse (or an invoke failure against
+  // an older shell) proceeds to replace in place; the discard prompt is
+  // reachable ONLY from that fallback, never from an ordinary new-window open
+  // (nothing is discarded when a new window opens).
+  const openPath = useCallback(async (path: string) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const pristine = isPristineDocument(docSessionRef.current, scene)
+    if (!pristine) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('open_in_new_window', { path })
+        return
+      } catch {
+        // Older shell without the command, or the invoke itself failed —
+        // fall through to a guarded in-place replace, same as openDocument.
+      }
+      if (!(await confirmDiscard())) return
     }
-  }, [confirmDiscard, applyLoadedBytes, clearRecoverySnapshot])
+    await openPathInPlace(path)
+  }, [confirmDiscard, openPathInPlace])
 
   // ---------------------------------------------------------------- Open Recent (in-app menu; Linux web menu,  port)
   // The recents list is owned by the Rust shell (recents.json). The native
@@ -1839,6 +2012,59 @@ export default function App() {
     return () => { cancelled = true; unlisten?.() }
   }, []) // openPath accessed via openPathRef — no dep needed
 
+  // ---------------------------------------------------------------- open-window list (Tauri only)
+  // Feeds the in-app MenuBar's Window-menu tail (Windows/Linux — macOS's
+  // native menu renders its own tail shell-side). `list_windows` seeds this
+  // window's initial view; the shell's `window-list` broadcast (emitted to
+  // every window on create/destroy/focus/title-change — see
+  // refresh_window_list in main.rs) keeps it live after that. A plain
+  // (non-window-scoped) listener is correct here, unlike menu-action/
+  // menu-open-path above: the list is identical for every window and
+  // reading it is never destructive.
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    // Register the listener BEFORE doing any fetch. The reverse order (fetch
+    // and listen started in parallel) raced this window's OWN startup
+    // delivery: a freshly spawned window's docSession-title-push effect
+    // (below) can invoke `set_window_title` — broadcasting the corrected
+    // title — before this window's own `window-list` listener has finished
+    // its dynamic import + subscribe round trip. That broadcast would then
+    // be silently dropped (nobody listening yet), with nothing to correct it
+    // until the next focus/create/destroy event fires a fresh one — exactly
+    // the "stays Untitled until focused" symptom. Listening first means
+    // nothing between mount and "listener ready" can be missed: anything
+    // already committed shell-side by then is picked up by the catch-up
+    // fetch below, and anything after is captured live by the listener.
+    let broadcastSeenSinceListening = false
+    import('@tauri-apps/api/event').then(({ listen }) =>
+      listen<{ label: string; title: string; focused: boolean }[]>('window-list', (event) => {
+        broadcastSeenSinceListening = true
+        setWindowList(event.payload)
+      }),
+    ).then((fn) => {
+      if (cancelled) { fn(); return }
+      unlisten = fn
+      // Catch-up fetch, now that the listener is definitely live. Guarded
+      // the same way a fetch-vs-broadcast race is always guarded here: a
+      // broadcast landing in the gap between "listener registered" and
+      // "this fetch resolves" must win, not be clobbered by a slower,
+      // now-stale snapshot.
+      import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke<{ label: string; title: string; focused: boolean }[]>('list_windows'))
+        .then((list) => { if (!cancelled && !broadcastSeenSinceListening) setWindowList(list) })
+        .catch(() => { /* older shell without the command — ignore */ })
+    }).catch(() => { /* not in Tauri, or registration failed */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, [])
+
+  const focusWindow = useCallback((label: string) => {
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke('focus_window', { label }))
+      .catch(() => { /* ignore */ })
+  }, [])
+
   // ---------------------------------------------------------------- startup handoff: recovery slot, buffered open, recovery prompt
   // Runs once, after the scene first becomes available (adopting a snapshot
   // or opening a buffered path into a still-loading kernel would silently
@@ -1846,14 +2072,17 @@ export default function App() {
   //
   //  1. take_pending_recovery — this window was spawned to recover a
   //     specific crash snapshot; claim it and skip everything else.
-  //  2. take_pending_open — a cold-start file association buffered a path
+  //  2. take_pending_window_open — this window was spawned by
+  //     open_in_new_window (a File ▸ Open pick onto a non-pristine window);
+  //     claim its queued path and skip everything else.
+  //  3. take_pending_open — a cold-start file association buffered a path
   //     before this webview could listen; open it and skip the prompt (the
   //     user explicitly asked for that document).
-  //  3. frontend_ready — from here on the shell delivers opens live (the
+  //  4. frontend_ready — from here on the shell delivers opens live (the
   //     open-path listener registration is awaited above, and the polls
   //     have drained the buffer, so nothing can be delivered twice or lost).
-  //  4. Only then, and only in the primary window with nothing loaded, the
-  //     crash-recovery offer. Ordering it after 1–2 (rather than racing
+  //  5. Only then, and only in the primary window with nothing loaded, the
+  //     crash-recovery offer. Ordering it after 1–3 (rather than racing
   //     them from a separate effect) is what keeps the dialog from
   //     appearing over — and its Recover then replacing — a document the
   //     user just double-clicked.
@@ -1870,11 +2099,20 @@ export default function App() {
           await openListenerReadyRef.current?.promise
           const { invoke } = await import('@tauri-apps/api/core')
           const slot = await invoke<string | null>('take_pending_recovery')
-          const path = slot == null ? await invoke<string | null>('take_pending_open') : null
+          const windowOpenPath =
+            slot == null ? await invoke<string | null>('take_pending_window_open') : null
+          const path =
+            slot == null && windowOpenPath == null
+              ? await invoke<string | null>('take_pending_open')
+              : null
           invoke('frontend_ready').catch(() => { /* older shell — ignore */ })
           if (slot != null) {
             const snapshot = await recoveryStoreRef.current.claim(slot)
             if (snapshot !== null) adoptSnapshotRef.current(snapshot)
+            return
+          }
+          if (windowOpenPath != null) {
+            await openPathRef.current(windowOpenPath)
             return
           }
           if (path != null) {
@@ -2655,6 +2893,8 @@ export default function App() {
         onOpenSettings={openSettings}
         onReportBug={handleReportBug}
         onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
+        windowList={isTauri ? windowList : undefined}
+        onFocusWindow={focusWindow}
       />
 
       {/* Kernel panic sticky banner */}

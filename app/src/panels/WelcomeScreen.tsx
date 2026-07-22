@@ -476,7 +476,7 @@ export function WelcomeScreen({
             <button className="hw-welcome__card" onClick={onOpen}>
               Open a file…
               <span className="hw-welcome__card-desc">
-                .hew, or import SketchUp, COLLADA, and glTF.
+                .hew, or import SketchUp, COLLADA, glTF, or STL.
               </span>
             </button>
           </div>

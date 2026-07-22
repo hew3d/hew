@@ -153,6 +153,9 @@ import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/tr
 import { setShowWelcome } from './settings/welcomeScreen'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
 import { makeFileHost, type FileHost } from './io/fileHost'
+import { isPristineDocument } from './App'
+import type { DocSessionState } from './io/documentSession'
+import type { Scene } from './wasm/loader'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -612,6 +615,7 @@ describe('App — import seeds hidden tags and hidden node keys', () => {
         name: 'theater.skp',
         bytes: new Uint8Array(),
       }),
+      openAny: vi.fn(),
       exportBinary: vi.fn(),
     }
     vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
@@ -698,6 +702,7 @@ describe('App — import overlay lifecycle', () => {
         name: 'guest-house.skp',
         bytes: new Uint8Array(),
       }),
+      openAny: vi.fn(),
       exportBinary: vi.fn(),
     }
     vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
@@ -792,6 +797,7 @@ describe('App — STL import units chooser', () => {
         name: 'bracket.stl',
         bytes: new Uint8Array([1, 2, 3]),
       }),
+      openAny: vi.fn(),
       exportBinary: vi.fn(),
     }
     vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
@@ -886,6 +892,260 @@ describe('App — STL import units chooser', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: /^import$/i }))
     await waitFor(() => expect(mockScene.import_stl).toHaveBeenCalledTimes(1))
     expect(mockScene.import_stl).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), 0.001, 'bracket')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — the unified Open dialog (File ▸ Open… / Welcome's "Open a file…"):
+// ONE dialog (`FileHost.openAny()`) covering `.hew` plus every import format,
+// dispatching by the picked extension. Exercises the actual openDocument()
+// dispatch — not just openForImport()'s pre-existing File ▸ Import… path
+// the tests above cover — including the fix for a stale docSession after a
+// failed import (see runImportPick's catch block in App.tsx).
+// ---------------------------------------------------------------------------
+describe('App — unified Open dialog', () => {
+  const defaultImportStl = mockScene.import_stl
+  const defaultLoad = mockScene.load
+  const emptyReport = {
+    objects_created: 1,
+    watertight: 1,
+    leaky: 0,
+    skipped: [] as { name: string; reason: string }[],
+    textures_missing: [] as string[],
+    warnings: [] as string[],
+  }
+
+  let fakeFileHost: FileHost
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+    resetStlImportUnitForTest()
+    fakeFileHost = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      openForImport: vi.fn(),
+      openAny: vi.fn(),
+      exportBinary: vi.fn(),
+    }
+    vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
+  })
+
+  afterEach(() => {
+    mockScene.import_stl = defaultImportStl
+    mockScene.load = defaultLoad
+    vi.mocked(makeFileHost).mockReset()
+  })
+
+  const triggerOpen = () => {
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Open…'))
+  }
+  const triggerImport = () => {
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Import…'))
+  }
+
+  it('a picked .hew file loads straight through — no STL units chooser, no import report', async () => {
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'my-house.hew',
+      bytes: new Uint8Array([7, 7, 7]),
+      handle: '/tmp/my-house.hew',
+    })
+
+    await renderAndLoad()
+    triggerOpen()
+
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalledWith(new Uint8Array([7, 7, 7])))
+    // The document name now reflects the opened file (proof the hew branch,
+    // not the import branch, ran) — and neither import-only surface appeared.
+    expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /stl import units/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /import report/i })).not.toBeInTheDocument()
+    expect(mockScene.import_stl).not.toHaveBeenCalled()
+  })
+
+  it('a picked .stl file routes through the same units chooser as File ▸ Import…', async () => {
+    mockScene.import_stl = vi.fn(() => emptyReport)
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'stl',
+      name: 'bracket.stl',
+      bytes: new Uint8Array([1, 2, 3]),
+    })
+
+    await renderAndLoad()
+    triggerOpen()
+
+    const dialog = await screen.findByRole('dialog', { name: /stl import units/i })
+    fireEvent.click(within(dialog).getByRole('button', { name: /^import$/i }))
+
+    await waitFor(() => expect(mockScene.import_stl).toHaveBeenCalled())
+    expect(mockScene.import_stl).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), 0.001, 'bracket')
+    expect(await screen.findByRole('dialog', { name: /import report/i })).toBeInTheDocument()
+  })
+
+  it('the re-entrancy guard is shared: File ▸ Open… while File ▸ Import…\'s chooser is open is refused', async () => {
+    mockScene.import_stl = vi.fn(() => emptyReport)
+    vi.mocked(fakeFileHost.openForImport).mockResolvedValue({
+      kind: 'stl',
+      name: 'bracket.stl',
+      bytes: new Uint8Array([1, 2, 3]),
+    })
+
+    await renderAndLoad()
+    triggerImport()
+
+    const dialog = await screen.findByRole('dialog', { name: /stl import units/i })
+    expect(vi.mocked(fakeFileHost.openForImport)).toHaveBeenCalledTimes(1)
+
+    // Fire the UNIFIED Open path (a different entry point) while the first
+    // gesture's chooser is still open — the shared guard must refuse it too.
+    triggerOpen()
+    await Promise.resolve()
+    expect(vi.mocked(fakeFileHost.openAny)).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: /stl import units/i })).toBe(dialog)
+
+    // The first (Import) gesture still completes normally — proof it wasn't
+    // orphaned by the refused cross-entry-point second call.
+    fireEvent.click(within(dialog).getByRole('button', { name: /^import$/i }))
+    await waitFor(() => expect(mockScene.import_stl).toHaveBeenCalledTimes(1))
+  })
+
+  it('a failed import through the unified Open dialog resets the session to Untitled — no silent overwrite of the prior file on the next Save', async () => {
+    // First, a real .hew is open (so currentRef/name point at a real file).
+    vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+      kind: 'hew',
+      name: 'my-house.hew',
+      bytes: new Uint8Array([7, 7, 7]),
+      handle: '/tmp/my-house.hew',
+    })
+    await renderAndLoad()
+    triggerOpen()
+    expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+
+    // Now the same unified dialog picks a corrupt STL — the import throws.
+    mockScene.import_stl = vi.fn(() => {
+      throw new Error('bad data')
+    })
+    vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+      kind: 'stl',
+      name: 'corrupt.stl',
+      bytes: new Uint8Array([9, 9, 9]),
+    })
+    triggerOpen()
+
+    const chooser = await screen.findByRole('dialog', { name: /stl import units/i })
+    fireEvent.click(within(chooser).getByRole('button', { name: /^import$/i }))
+
+    // The failure toasts, AND the session no longer claims "my-house.hew" is
+    // still the open file — it reverts to Untitled, matching the live scene
+    // (which the blank-then-import replace already emptied before the throw).
+    await waitFor(() => expect(screen.getByText(/import failed/i)).toBeInTheDocument())
+    expect(screen.queryByText('my-house.hew')).not.toBeInTheDocument()
+    expect(await screen.findByText('Untitled')).toBeInTheDocument()
+  })
+
+  it('a further File ▸ Open onto an already-open, DIRTY document confirms discarding first (web build — no Tauri window support to fall back to)', async () => {
+    // Open the first document — the window is no longer pristine afterward
+    // (isPristineDocument requires currentRef === null).
+    vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+      kind: 'hew',
+      name: 'my-house.hew',
+      bytes: new Uint8Array([7, 7, 7]),
+      handle: '/tmp/my-house.hew',
+    })
+    await renderAndLoad()
+    triggerOpen()
+    expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+
+    // Dirty it via the semantic harness (a real mutation, not a flag flip) —
+    // confirmDiscard is a no-op-true while clean, so this is what makes the
+    // discard prompt actually fire below. addNodeTag is a convenient
+    // lightweight mutation (mockScene.add_node_tag is already a no-op spy).
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+    act(() => harness.addNodeTag('object', '1', ['tag']))
+
+    vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+      kind: 'hew',
+      name: 'other.hew',
+      bytes: new Uint8Array([1, 1, 1]),
+      handle: '/tmp/other.hew',
+    })
+
+    // Cancelling the prompt leaves the open document completely untouched —
+    // the dialog is never even shown (confirmDiscard runs before it, on the
+    // web fallback path).
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false)
+    triggerOpen()
+    await Promise.resolve()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    // Still just the one call from opening my-house.hew — cancelling the
+    // discard prompt means the dialog for THIS gesture never even opens.
+    expect(vi.mocked(fakeFileHost.openAny)).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('my-house.hew')).toBeInTheDocument()
+    expect(mockScene.load).toHaveBeenCalledTimes(1)
+
+    // Confirming discards it and replaces the document in place — the web
+    // build has no Tauri window to open the pick into instead.
+    confirmSpy.mockReturnValueOnce(true)
+    triggerOpen()
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('other.hew')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isPristineDocument — the predicate File ▸ Open (and, aligned, File ▸ New)
+// use to decide whether the current window may be reused in place. Stricter
+// than a bare "scene is empty" check: a saved-then-emptied document
+// (currentRef set, but every entity since deleted) must NOT be treated as
+// pristine, or reusing the window would silently abandon that file's editing
+// session (undo history, its crash-recovery snapshot, the association
+// itself) with no prompt at all.
+// ---------------------------------------------------------------------------
+describe('isPristineDocument', () => {
+  const emptyIds = () => new BigUint64Array()
+  const oneId = () => BigUint64Array.from([1n])
+  const emptyScene = { object_ids: emptyIds, group_ids: emptyIds, instance_ids: emptyIds, sketch_ids: emptyIds } as unknown as Scene
+  const nonEmptyScene = { object_ids: oneId, group_ids: emptyIds, instance_ids: emptyIds, sketch_ids: emptyIds } as unknown as Scene
+
+  const blankClean: DocSessionState = { currentRef: null, dirty: false, lastEditAt: null, lastSavedAt: null }
+  const blankDirty: DocSessionState = { currentRef: null, dirty: true, lastEditAt: 1, lastSavedAt: null }
+  const namedClean: DocSessionState = {
+    currentRef: { name: 'house.hew', handle: '/tmp/house.hew' },
+    dirty: false,
+    lastEditAt: null,
+    lastSavedAt: 1,
+  }
+  const namedDirty: DocSessionState = {
+    currentRef: { name: 'house.hew', handle: '/tmp/house.hew' },
+    dirty: true,
+    lastEditAt: 1,
+    lastSavedAt: 1,
+  }
+
+  it('a fresh blank document (no file, clean, empty scene) is pristine', () => {
+    expect(isPristineDocument(blankClean, emptyScene)).toBe(true)
+  })
+
+  it('an untitled document with unsaved edits is not pristine, even with an empty scene', () => {
+    expect(isPristineDocument(blankDirty, emptyScene)).toBe(false)
+  })
+
+  it('a document backed by a named file is not pristine, even clean and empty (saved-then-emptied)', () => {
+    expect(isPristineDocument(namedClean, emptyScene)).toBe(false)
+  })
+
+  it('a blank/clean session with geometry in the scene is not pristine', () => {
+    expect(isPristineDocument(blankClean, nonEmptyScene)).toBe(false)
+  })
+
+  it('a named, dirty document with an empty scene is not pristine (both conditions violated at once)', () => {
+    expect(isPristineDocument(namedDirty, emptyScene)).toBe(false)
   })
 })
 

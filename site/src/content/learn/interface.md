@@ -58,7 +58,7 @@ The right-hand tray holds four collapsible panels. Click a panel's header to exp
 - **Materials** (Window ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`) holds the document's material palette.
 - **Tags** (Window ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the tag tree, with visibility toggles per tag.
 
-The Window menu also holds **Debug Log**, which toggles a diagnostics panel docked along the bottom of the window: a timestamped, severity-coded log of app events such as saves, imports, exports, and tool errors.
+On the desktop app, if you have more than one document window open, the Window menu also lists them by name at the bottom, with a checkmark beside whichever one you're in — click another to bring it to the front.
 
 These panels are covered in depth in [Organizing your model](/learn/organizing/) and [Materials](/learn/materials/).
 
@@ -68,7 +68,7 @@ The strip along the bottom always shows the active tool's name and a one-line hi
 
 ## Menus and title bar
 
-The menu bar (system bar on macOS, in-app elsewhere) organizes everything: **File** (new/open/save/import/export), **Edit** (undo, delete, group/component commands, booleans), **View** (axes, guides), **Draw**, **Tools**, **Camera**, **Window**, and **Help ▸ Report Bug…**.
+The menu bar (system bar on macOS, in-app elsewhere) organizes everything: **File** (new/open/save/import/export), **Edit** (undo, delete, group/component commands, booleans), **View** (axes, guides), **Draw**, **Tools**, **Camera**, **Window** (panels, and the open-windows list), and **Help** (Debug Log, Report Bug…).
 
 The window title shows the document name; a `•` in front of it (and an "Edited …" label next to it) means unsaved changes. There is no Save button; save with `⌘S` / `Ctrl+S`. [Files, saving, and recovery](/learn/files-and-saving/) covers how autosave has your back regardless.
 

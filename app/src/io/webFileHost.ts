@@ -17,12 +17,33 @@
  * The hidden <input> is created once lazily and appended to document.body.
  */
 
-import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick } from './fileHost'
+import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
 
 const HEW_FILE_TYPES: FilePickerAcceptType[] = [
   {
     description: 'Hew model',
     accept: { 'application/octet-stream': ['.hew'] },
+  },
+]
+
+/** The import formats' own accept map (COLLADA/SketchUp/glTF/STL), reused
+ * standalone by `openForImport()` and merged with `.hew` by `openAny()`. */
+const IMPORT_ACCEPT = {
+  'model/vnd.collada+xml': ['.dae'],
+  'application/octet-stream': ['.skp'],
+  'model/gltf-binary': ['.glb'],
+  'model/gltf+json': ['.gltf'],
+  'model/stl': ['.stl'],
+}
+
+/** Every format `openAny()`'s single dialog accepts: `.hew` plus every
+ * import extension. `.hew` shares the `application/octet-stream` key with
+ * `.skp` — both are opaque binary formats with no dedicated IANA type, and
+ * the File System Access API accepts multiple extensions per key. */
+const OPEN_FILE_TYPES: FilePickerAcceptType[] = [
+  {
+    description: 'All supported files',
+    accept: { ...IMPORT_ACCEPT, 'application/octet-stream': ['.hew', '.skp'] },
   },
 ]
 
@@ -225,13 +246,7 @@ export class WebFileHost implements FileHost {
     const FILE_TYPES: FilePickerAcceptType[] = [
       {
         description: 'Model files (COLLADA, SketchUp, glTF, STL)',
-        accept: {
-          'model/vnd.collada+xml': ['.dae'],
-          'application/octet-stream': ['.skp'],
-          'model/gltf-binary': ['.glb'],
-          'model/gltf+json': ['.gltf'],
-          'model/stl': ['.stl'],
-        },
+        accept: IMPORT_ACCEPT,
       },
     ]
 
@@ -283,6 +298,18 @@ export class WebFileHost implements FileHost {
       fileName = result.name
     }
 
+    return this.resolveImportPick(bytes, fileName)
+  }
+
+  /**
+   * Given a picked import-format file's bytes and display name, dispatch to
+   * the matching `ImportPick` kind. glTF/SketchUp/STL embed (or lack) their
+   * own resources, so they carry the bytes as-is; COLLADA additionally
+   * offers a best-effort directory-picker texture scan (skipped if the API
+   * is unavailable or the user cancels it — the kernel ImportReport will
+   * list any still-missing textures).
+   */
+  private async resolveImportPick(bytes: Uint8Array, fileName: string): Promise<ImportPick> {
     // glTF embeds its own buffers/images — no external resolution needed.
     if (/\.(glb|gltf)$/i.test(fileName)) {
       return { kind: 'gltf', name: fileName, bytes }
@@ -311,6 +338,69 @@ export class WebFileHost implements FileHost {
       }
     }
     return { kind: 'dae', name: fileName, bytes, images }
+  }
+
+  /**
+   * Prompt with ONE dialog covering `.hew` plus every import format, and
+   * dispatch on the extension the user picked. Mirrors `open()`'s FSAA vs.
+   * hidden-`<input>` fallback shape, and `openForImport()`'s post-pick
+   * dispatch (shared via `resolveImportPick`).
+   */
+  async openAny(): Promise<OpenPick | null> {
+    let bytes: Uint8Array
+    let fileName: string
+    let handle: FileSystemFileHandle | null = null
+
+    if (hasFSAA()) {
+      let handles: FileSystemFileHandle[]
+      try {
+        handles = await showOpenFilePicker({
+          multiple: false,
+          types: OPEN_FILE_TYPES,
+          excludeAcceptAllOption: false,
+        })
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return null
+        throw err
+      }
+      const picked = handles[0]
+      if (picked === undefined) return null
+      const file = await picked.getFile()
+      bytes = new Uint8Array(await file.arrayBuffer())
+      fileName = file.name
+      handle = picked
+    } else {
+      // Fallback: hidden <input type=file>
+      const result = await new Promise<{ bytes: Uint8Array; name: string } | null>((resolve) => {
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.accept = '.hew,.dae,.skp,.glb,.gltf,.stl'
+        input.style.display = 'none'
+        document.body.appendChild(input)
+
+        const onChange = () => {
+          input.removeEventListener('change', onChange)
+          document.body.removeChild(input)
+          const file = input.files?.[0]
+          if (file == null) {
+            resolve(null)
+            return
+          }
+          file.arrayBuffer().then((buf) => resolve({ bytes: new Uint8Array(buf), name: file.name })).catch(() => resolve(null))
+        }
+
+        input.addEventListener('change', onChange)
+        input.click()
+      })
+      if (result === null) return null
+      bytes = result.bytes
+      fileName = result.name
+    }
+
+    if (/\.hew$/i.test(fileName)) {
+      return { kind: 'hew', name: fileName, bytes, handle }
+    }
+    return this.resolveImportPick(bytes, fileName)
   }
 }
 

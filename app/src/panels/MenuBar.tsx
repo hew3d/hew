@@ -118,6 +118,14 @@ export interface MenuBarProps {
   onZoomExtents?: () => void
   /** Reposition the camera to a standard view (Camera → Standard Views). */
   onStandardView?: (view: StandardView) => void
+  /** Open document windows (Tauri multi-window only), rendered as a tail of
+   *  focus-this-window entries at the end of the Window menu — the current
+   *  window's entry is checked. `undefined` on plain web (single window, no
+   *  shell to list from) and on macOS Tauri (the native menu renders its own
+   *  tail shell-side; this only feeds the in-app bar used on Windows/Linux). */
+  windowList?: { label: string; title: string; focused: boolean }[]
+  /** Focus (raise) an open document window by its shell-assigned label. */
+  onFocusWindow?: (label: string) => void
   /** Open the platform's Settings surface (the gear on the bar's trailing
    *  edge + Window → Settings…): the Fluent in-app page on Windows, the
    *  separate settings window on Linux, the modal on web. macOS reaches
@@ -144,6 +152,17 @@ function keyFor(name: ToolName): string | undefined {
 /** Filename portion of a path (handles / and \ separators). */
 function baseName(path: string): string {
   return path.replace(/[/\\]+$/, '').split(/[/\\]/).pop() ?? path
+}
+
+/** Strip the constant " — Hew" app-name suffix a shell-pushed window title
+ *  carries (`deriveTitle` in App.tsx/documentSession.ts) — the Window-menu
+ *  list is already inside the Hew app, so repeating the app name on every
+ *  entry is just noise. Purely cosmetic: if the title format ever changes
+ *  this stops matching and the raw title shows instead (see the matching
+ *  strip in the shell's own native Window-menu tail, main.rs). */
+function windowMenuLabel(title: string): string {
+  const stripped = title.replace(/ — Hew$/, '')
+  return stripped === '' ? 'Untitled' : stripped
 }
 
 // `02_app_shell.md`'s Windows/Linux menu-bar spec: 33px height, surface/bar.
@@ -434,6 +453,8 @@ export function MenuBar({
   onOpenSettings,
   onReportBug,
   onCheckForUpdates,
+  windowList,
+  onFocusWindow,
 }: MenuBarProps) {
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
@@ -846,11 +867,19 @@ export function MenuBar({
               checked={showObjectInfo}
               onClick={withClose(() => onToggleObjectInfo?.())}
             />
-            <CheckMenuItem
-              label="Debug Log"
-              checked={showDebugLog}
-              onClick={withClose(() => onToggleDebugLog?.())}
-            />
+            {windowList !== undefined && windowList.length > 0 && (
+              <>
+                <div style={SEPARATOR_STYLE} />
+                {windowList.map((w) => (
+                  <CheckMenuItem
+                    key={w.label}
+                    label={windowMenuLabel(w.title)}
+                    checked={w.focused}
+                    onClick={withClose(() => onFocusWindow?.(w.label))}
+                  />
+                ))}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -860,6 +889,12 @@ export function MenuBar({
         <MenuTrigger id="help" label="Help" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'help' && (
           <div style={DROPDOWN_STYLE}>
+            <CheckMenuItem
+              label="Debug Log"
+              checked={showDebugLog}
+              onClick={withClose(() => onToggleDebugLog?.())}
+            />
+            <div style={SEPARATOR_STYLE} />
             <MenuItem
               label="Report Bug…"
               onClick={withClose(() => onReportBug?.())}

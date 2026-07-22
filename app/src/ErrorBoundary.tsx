@@ -17,6 +17,14 @@ import { getEntries } from './log/LogStore'
 
 export const LAST_ERROR_KEY = 'hew:lastError'
 
+/** Format the full crash report text — shared by the localStorage record
+ *  (LAST_ERROR_KEY, read after reload) and the dialog's Copy button below, so
+ *  what a user copies to paste into a bug report always matches what actually
+ *  gets persisted. */
+function formatCrashReport(error: Error, componentStack: string, recentErrors: readonly string[]): string {
+  return `${new Date().toISOString()}\n${error.message}\n\n${error.stack ?? ''}\n\n${componentStack}\n\n--- recent console errors ---\n${recentErrors.join('\n')}`
+}
+
 interface Props {
   children: ReactNode
 }
@@ -27,10 +35,13 @@ interface State {
   /** Recent captured console errors — includes the kernel `panicked at …` line
    *  that poisons the wasm instance (the thrown error is only the symptom). */
   recentErrors: string[]
+  /** Brief "Copied" confirmation on the copy-details button, mirroring
+   *  LogPanel's own copy-button feedback. */
+  copied: boolean
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null, componentStack: '', recentErrors: [] }
+  state: State = { error: null, componentStack: '', recentErrors: [], copied: false }
 
   static getDerivedStateFromError(error: Error): Partial<State> {
     return { error }
@@ -57,10 +68,7 @@ export class ErrorBoundary extends Component<Props, State> {
     )
 
     try {
-      localStorage.setItem(
-        LAST_ERROR_KEY,
-        `${new Date().toISOString()}\n${error.message}\n\n${error.stack ?? ''}\n\n${stack}\n\n--- recent console errors ---\n${recentErrors.join('\n')}`,
-      )
+      localStorage.setItem(LAST_ERROR_KEY, formatCrashReport(error, stack, recentErrors))
     } catch {
       /* ignore storage failures */
     }
@@ -69,8 +77,16 @@ export class ErrorBoundary extends Component<Props, State> {
     this.setState({ componentStack: stack, recentErrors })
   }
 
-  render() {
+  private handleCopy = () => {
     const { error, componentStack, recentErrors } = this.state
+    if (error === null) return
+    void navigator.clipboard?.writeText(formatCrashReport(error, componentStack, recentErrors))
+    this.setState({ copied: true })
+    window.setTimeout(() => this.setState({ copied: false }), 1200)
+  }
+
+  render() {
+    const { error, componentStack, recentErrors, copied } = this.state
     if (error === null) return this.props.children
 
     return (
@@ -84,6 +100,12 @@ export class ErrorBoundary extends Component<Props, State> {
           padding: '32px',
           overflow: 'auto',
           zIndex: 100000,
+          // Native-app feel disables text selection app-wide by default
+          // (index.css) — opt this whole dialog back in, so the error
+          // details (a diagnosis/bug-report aid) stay selectable and
+          // copyable like the Debug Log panel's entries already are.
+          WebkitUserSelect: 'text',
+          userSelect: 'text',
         }}
       >
         <h2 style={{ margin: '0 0 8px' }}>Hew hit an error</h2>
@@ -101,10 +123,26 @@ export class ErrorBoundary extends Component<Props, State> {
             border: 'none',
             borderRadius: 4,
             cursor: 'pointer',
+            marginRight: 8,
             marginBottom: 16,
           }}
         >
           Reload
+        </button>
+        <button
+          onClick={this.handleCopy}
+          style={{
+            padding: '6px 16px',
+            fontSize: 13,
+            background: 'var(--surface-input, #111)',
+            color: 'var(--text-primary, #eee)',
+            border: '1px solid var(--border-strong, #333)',
+            borderRadius: 4,
+            cursor: 'pointer',
+            marginBottom: 16,
+          }}
+        >
+          {copied ? 'Copied' : 'Copy details'}
         </button>
         {recentErrors.length > 0 && (
           <>

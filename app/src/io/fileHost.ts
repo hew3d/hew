@@ -43,12 +43,29 @@ export interface ImportReport {
  * resources, so they carry only bytes. STL carries neither resources nor
  * units — the caller (App.tsx) prompts for a unit scale before dispatching
  * to `scene.import_stl`.
+ *
+ * `path` is the absolute filesystem path the pick came from, when the host
+ * can supply one (TauriFileHost always can; WebFileHost never does — the
+ * File System Access API has no real fs path). Used by App.tsx's File ▸
+ * Open to route a pick onto a non-pristine window into a fresh one
+ * (`open_in_new_window`), which needs a path rather than in-memory bytes.
  */
 export type ImportPick =
-  | { kind: 'dae'; name: string; bytes: Uint8Array; images: Record<string, ImageEntry> }
-  | { kind: 'gltf'; name: string; bytes: Uint8Array }
-  | { kind: 'skp'; name: string; bytes: Uint8Array }
-  | { kind: 'stl'; name: string; bytes: Uint8Array }
+  | { kind: 'dae'; name: string; bytes: Uint8Array; images: Record<string, ImageEntry>; path?: string }
+  | { kind: 'gltf'; name: string; bytes: Uint8Array; path?: string }
+  | { kind: 'skp'; name: string; bytes: Uint8Array; path?: string }
+  | { kind: 'stl'; name: string; bytes: Uint8Array; path?: string }
+
+/**
+ * A file picked through the unified Open dialog (`openAny`). `kind: 'hew'`
+ * is the native format — `handle` is the same opaque per-host handle
+ * `FileRef.handle` carries, so a hew pick can be wrapped straight into a
+ * `FileRef` for `afterOpen`/subsequent `save()`. Every other kind is an
+ * `ImportPick`, routed through the same post-pick steps (STL's units
+ * prompt, the blank-then-import replace, the import report) that
+ * `openForImport()` already feeds.
+ */
+export type OpenPick = { kind: 'hew'; name: string; bytes: Uint8Array; handle: unknown } | ImportPick
 
 export interface FileHost {
   /**
@@ -88,6 +105,20 @@ export interface FileHost {
    * importing overlay to show "Importing "<name>"…" while the parse runs.
    */
   openForImport(): Promise<ImportPick | null>
+
+  /**
+   * Prompt the user with ONE dialog that accepts every format Hew can open:
+   * the native `.hew` format plus every import format `openForImport`
+   * accepts (`.dae`, `.skp`, `.glb`/`.gltf`, `.stl`) — the dialog offers a
+   * filter for each, plus one covering all of them together. The format is
+   * chosen by the file the user picks; the returned `kind` tells the caller
+   * whether to treat it as a native open (`'hew'`, applied directly) or an
+   * import (everything else, routed through the same post-pick steps
+   * `openForImport()`'s result feeds — the STL units prompt, the
+   * blank-then-import replace, the import report). Returns null if the
+   * user cancels.
+   */
+  openAny(): Promise<OpenPick | null>
 
   /**
    * Write arbitrary bytes out to a user-chosen location (e.g. a `.glb`).
@@ -142,6 +173,7 @@ export function makeFileHost(): FileHost {
       save: (bytes, ref) => hostPromise.then((h) => h.save(bytes, ref)),
       saveAs: (bytes, name) => hostPromise.then((h) => h.saveAs(bytes, name)),
       openForImport: () => hostPromise.then((h) => h.openForImport()),
+      openAny: () => hostPromise.then((h) => h.openAny()),
       exportBinary: (bytes, name, fileType) =>
         hostPromise.then((h) => h.exportBinary(bytes, name, fileType)),
     }
