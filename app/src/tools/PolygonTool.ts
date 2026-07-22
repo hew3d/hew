@@ -1,15 +1,22 @@
 /**
  * PolygonTool — two-click regular N-gon sketching, center then circumradius.
  *
- * A regular polygon is just N plain straight edges — unlike CircleTool's
- * faceted-circle approximation, it carries NO analytic curve metadata (there
- * is no "true polygon" to approximate; the facets ARE the geometry). It
- * decomposes into N chained `sketch_add_segment` calls (plane mode) or one
- * `split_face_inner` call with N loop points (face mode) — identical to how
- * RectangleTool commits its four corners, and structurally identical to
- * CircleTool's own plane-mode commit path minus the analytic curve chain. No
- * kernel change is needed; push/pull then works for free once a closed loop
- * forms a region.
+ * A regular polygon's N sides ARE its geometry — unlike CircleTool's faceted
+ * circle, there is no "true polygon" underneath that the edges approximate.
+ * But a polygon still HAS a center: the user placed one, and dragged a
+ * circumradius from it. Plane mode therefore commits N chained
+ * `sketch_add_segment` calls inside a POLYGON curve bracket
+ * (`sketch_begin_polygon_with`), which records exactly that center and
+ * radius. The chain then selects and deletes as one unit and offers its
+ * center to inference the way a circle's does — while the kernel's
+ * `SketchCurveKind::Polygon` keeps the circumcircle from being mistaken for
+ * a curve: no quadrant or tangent snaps on points lying on no edge, no
+ * concentric-arc offset, no cylindrical wall swept on extrusion.
+ *
+ * Face mode still imprints with one plain `split_face_inner` call and N loop
+ * points, carrying no analytic identity onto the solid — the same posture it
+ * has always had, and the same one CircleTool's `split_face_inner_with_curve`
+ * deliberately departs from for a real curve.
  *
  * Two modes:
  *
@@ -719,11 +726,17 @@ export class PolygonTool implements Tool {
     }
   }
 
-  /** Commit a polygon (N plain `sketch_add_segment` calls — no curve chain,
-   *  design §4/§8: a polygon's facets are its real geometry, not an
-   *  approximation to suppress) into `target`'s sketch — used by both ground
-   *  and non-ground plane/sketch mode (real face mode instead imprints via
-   *  `split_face_inner`, see `_commitFacePolygon`). */
+  /** Commit a polygon (N `sketch_add_segment` calls bracketed as one POLYGON
+   *  chain) into `target`'s sketch — used by both ground and non-ground
+   *  plane/sketch mode (real face mode instead imprints via
+   *  `split_face_inner`, see `_commitFacePolygon`).
+   *
+   *  The chain carries the drawn center and circumradius, which is what makes
+   *  a polygon's center inferable and selectable the way a circle's is. It
+   *  stays a polygon throughout (design §4/§8: the sides are the real
+   *  geometry, not an approximation to suppress) — the kernel's
+   *  `SketchCurveKind::Polygon` is what keeps the circumcircle from being
+   *  mistaken for a curve. */
   private _commitPlanePolygon(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3): void {
     const verts = plane.ground
       ? circlePolygonGround([center[0], center[1]], [rim[0], rim[1]], this.sides)
@@ -733,20 +746,36 @@ export class PolygonTool implements Tool {
     try {
       runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch) => {
         let lastRegionsCreated: bigint[] = []
-        for (let i = 0; i < verts.length; i++) {
-          const p = verts[i]
-          const q = verts[(i + 1) % verts.length]
-          const report = this.wasmScene.sketch_add_segment(
-            sketch,
-            p[0], p[1], p[2],
-            q[0], q[1], q[2],
-          )
-          try {
-            const rc = report.regions_created()
-            lastRegionsCreated = Array.from(rc)
-          } finally {
-            report.free()
+        // The whole polygon is ONE chain, carrying the center the user
+        // placed and the circumradius they dragged — so clicking a side
+        // later selects the polygon as a unit, and its center is offered to
+        // inference exactly as a circle's is. It is stamped as a POLYGON,
+        // not a circle: `sketch_begin_polygon_with` records that the sides
+        // ARE the geometry, so the chain gets a center and nothing else — no
+        // quadrant or tangent snaps on a circumcircle no edge lies on, no
+        // concentric-arc offset, no cylindrical wall on extrusion.
+        const radius = plane.ground
+          ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
+          : segmentLength(center, rim)
+        this.wasmScene.sketch_begin_polygon_with(sketch, center[0], center[1], center[2], radius)
+        try {
+          for (let i = 0; i < verts.length; i++) {
+            const p = verts[i]
+            const q = verts[(i + 1) % verts.length]
+            const report = this.wasmScene.sketch_add_segment(
+              sketch,
+              p[0], p[1], p[2],
+              q[0], q[1], q[2],
+            )
+            try {
+              const rc = report.regions_created()
+              lastRegionsCreated = Array.from(rc)
+            } finally {
+              report.free()
+            }
           }
+        } finally {
+          this.wasmScene.sketch_end_curve(sketch)
         }
         this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
       })

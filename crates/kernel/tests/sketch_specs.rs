@@ -790,3 +790,459 @@ fn curve_rims_work_on_a_standing_plane() {
         assert!((q.y - 2.0).abs() < 1e-12); // stays in the standing plane
     }
 }
+
+// ------------------------------------------------------- refacet_curve
+//
+// Editing a drawn circle's segment count is a REBUILD of that circle, not a
+// setting for the next one: the chain keeps its handle and its analytic
+// circle, the facets are replaced. These pin the contract in
+// `Sketch::refacet_curve`.
+
+/// Every vertex the chain `curve` touches, as its angle about `center` in the
+/// XY plane, sorted. Used to compare rings independently of edge id order.
+fn ring_angles(s: &Sketch, curve: kernel::SketchCurveId, center: Point3) -> Vec<f64> {
+    let mut vs: std::collections::BTreeSet<SketchVertexId> = std::collections::BTreeSet::new();
+    for eid in s.curve_edges(curve) {
+        let e = s.edges()[eid];
+        vs.insert(e.from);
+        vs.insert(e.to);
+    }
+    let mut angles: Vec<f64> = vs
+        .into_iter()
+        .map(|v| {
+            let p = s.vertices()[v].position;
+            (p.y - center.y).atan2(p.x - center.x)
+        })
+        .collect();
+    angles.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    angles
+}
+
+#[test]
+fn refacet_curve_rebuilds_the_ring_and_preserves_the_circle() {
+    let mut s = xy_sketch();
+    let center = pt(1.0, 2.0);
+    let curve = circle_chain(&mut s, center, 0.75, 24);
+    assert_eq!(s.regions().len(), 1, "the drawn circle closes a region");
+    let before = s.curve_geom(curve).unwrap();
+
+    let report = s.refacet_curve(curve, 48).expect("24 -> 48 re-facets");
+
+    assert_eq!(s.curve_edges(curve).len(), 48, "48 facets now exist");
+    assert_eq!(report.new_edges.len(), 48);
+    assert_eq!(report.removed_edges.len(), 24);
+    assert_eq!(
+        s.curve_geom(curve),
+        Some(before),
+        "the chain keeps its handle AND its exact circle"
+    );
+    assert_eq!(s.regions().len(), 1, "the region still closes");
+    assert_eq!(
+        s.edges().len(),
+        48,
+        "no orphan edges from the old ring survive"
+    );
+    assert_eq!(s.vertices().len(), 48, "nor orphan vertices");
+
+    // Every new vertex is ON the exact circle.
+    for a in ring_angles(&s, curve, center) {
+        let p = pt(center.x + 0.75 * a.cos(), center.y + 0.75 * a.sin());
+        let hit = s
+            .vertices()
+            .values()
+            .any(|v| v.position.approx_eq(p, tol::POINT_MERGE));
+        assert!(hit, "vertex at angle {a} lies on the circle");
+    }
+
+    // And it is still a genuine analytic circle to inference: one full rim.
+    let rims = s.curve_rims();
+    assert_eq!(rims.len(), 1);
+    assert_eq!(rims[0].coverage, None, "still the full circle");
+}
+
+/// The rebuilt ring is ANCHORED on the old one: it reuses one of the old
+/// ring's vertex positions exactly, so a circle whose count is edited does
+/// not appear to spin. Stated as "a vertex survives" rather than "the start
+/// angle survives" because the anchor is chosen in the sketch plane's own
+/// basis frame, which need not agree with world XY.
+#[test]
+fn refacet_curve_anchors_the_new_ring_on_an_old_vertex() {
+    let mut s = xy_sketch();
+    let center = pt(0.0, 0.0);
+    // Drawn deliberately off a cardinal direction, so a rebuild that reset
+    // the phase to zero would be obvious.
+    let n = 24usize;
+    let phase = 0.31_f64;
+    let curve = s
+        .begin_curve_with(kernel::CurveGeom {
+            center,
+            radius: 1.0,
+        })
+        .unwrap();
+    let p = |i: usize| {
+        let a = phase + std::f64::consts::TAU * (i as f64) / (n as f64);
+        pt(a.cos(), a.sin())
+    };
+    for i in 0..n {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+    let old: Vec<Point3> = s.vertices().values().map(|v| v.position).collect();
+
+    s.refacet_curve(curve, 30).expect("re-facets");
+
+    assert!(
+        s.vertices().values().any(|v| old
+            .iter()
+            .any(|o| v.position.approx_eq(*o, tol::POINT_MERGE))),
+        "the rebuilt ring shares a vertex with the ring it replaced"
+    );
+}
+
+#[test]
+fn refacet_curve_refuses_counts_outside_the_allowed_range() {
+    let mut s = xy_sketch();
+    let curve = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+    let before = s.clone();
+
+    for n in [0, 1, 3, kernel::MIN_CIRCLE_SEGMENTS - 1] {
+        assert_eq!(
+            s.refacet_curve(curve, n),
+            Err(SketchError::SegmentsBelowFloor),
+            "{n} is below the floor"
+        );
+    }
+    assert_eq!(
+        s.refacet_curve(curve, kernel::MAX_CIRCLE_SEGMENTS + 1),
+        Err(SketchError::SegmentsAboveCap)
+    );
+    // The floor itself is allowed — the control raises the count, it never
+    // lowers it past the density at which a ring stops being a circle.
+    assert!(
+        s.clone()
+            .refacet_curve(curve, kernel::MIN_CIRCLE_SEGMENTS)
+            .is_ok()
+    );
+    assert_eq!(s, before, "a refused re-facet leaves the sketch untouched");
+}
+
+#[test]
+fn refacet_curve_refuses_unknown_and_identity_only_chains() {
+    let mut s = xy_sketch();
+    let plain = s.begin_curve();
+    s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
+    s.end_curve();
+    assert_eq!(
+        s.refacet_curve(plain, 24),
+        Err(SketchError::CurveNotAnalytic)
+    );
+
+    // A handle naming no chain at all — what a fabricated or stale handle
+    // arriving across the wasm boundary looks like. (A handle borrowed from
+    // ANOTHER sketch is not the test for this: slotmap keys are per-map, so a
+    // foreign key can legitimately name a live local chain.)
+    use slotmap::Key as _;
+    assert_eq!(
+        s.refacet_curve(kernel::SketchCurveId::null(), 24),
+        Err(SketchError::UnknownCurve)
+    );
+}
+
+#[test]
+fn refacet_curve_refuses_a_polygon() {
+    let mut s = xy_sketch();
+    let curve = s
+        .begin_curve_with_kind(
+            kernel::CurveGeom {
+                center: pt(0.0, 0.0),
+                radius: 1.0,
+            },
+            kernel::SketchCurveKind::Polygon,
+        )
+        .unwrap();
+    let p = |i: usize| {
+        let a = std::f64::consts::TAU * (i as f64) / 24.0;
+        pt(a.cos(), a.sin())
+    };
+    for i in 0..24 {
+        s.add_segment(p(i), p(i + 1)).unwrap();
+    }
+    s.end_curve();
+    let before = s.clone();
+
+    // Dense enough to pass every count check — it is refused for WHAT it is,
+    // not for how many sides it has.
+    assert_eq!(
+        s.refacet_curve(curve, 48),
+        Err(SketchError::CurveNotRefacetable)
+    );
+    assert_eq!(s, before);
+}
+
+#[test]
+fn refacet_curve_refuses_a_circle_glued_to_other_geometry() {
+    let mut s = xy_sketch();
+    let curve = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+    // A chord across the circle: both ends land on the ring, splitting two
+    // facets and making four junction vertices.
+    s.add_segment(pt(-1.0, 0.0), pt(1.0, 0.0)).unwrap();
+    let before = s.clone();
+
+    assert_eq!(
+        s.refacet_curve(curve, 48),
+        Err(SketchError::CurveNotRefacetable),
+        "rebuilding would silently destroy the junction"
+    );
+    assert_eq!(s, before, "and leaves the sketch exactly as it was");
+}
+
+#[test]
+fn refacet_curve_refuses_a_partially_erased_circle() {
+    let mut s = xy_sketch();
+    let curve = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+    let victim = s.curve_edges(curve)[0];
+    s.remove_edge(victim).unwrap();
+    let before = s.clone();
+
+    assert_eq!(
+        s.refacet_curve(curve, 48),
+        Err(SketchError::CurveNotRefacetable),
+        "an arc is not a circle to re-facet"
+    );
+    assert_eq!(s, before);
+}
+
+#[test]
+fn refacet_curve_refuses_when_the_denser_ring_would_reach_a_neighbour() {
+    // A denser ring sits CLOSER to the exact circle, so it can meet geometry
+    // the old coarse ring cleared. That has to be seen, not assumed away.
+    let mut s = xy_sketch();
+    let curve = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+    // The 24-gon's apothem is cos(pi/24) ≈ 0.99144; the exact circle is at
+    // 1.0. A segment at x = 0.995 misses every chord of the 24-gon and
+    // crosses the 96-gon (apothem ≈ 0.99946).
+    s.add_segment(pt(0.995, -0.5), pt(0.995, 0.5)).unwrap();
+    let before = s.clone();
+
+    assert_eq!(
+        s.refacet_curve(curve, 96),
+        Err(SketchError::CurveNotRefacetable)
+    );
+    assert_eq!(s, before, "refused, with the sketch untouched");
+}
+
+proptest! {
+    /// The round-trip property: for any n at or above the floor, re-faceting
+    /// to n and back leaves the chain's analytic circle untouched, the ring
+    /// at the density it started at, and the region still closed.
+    #[test]
+    fn refacet_round_trip_preserves_the_circle_and_the_region(
+        n in kernel::MIN_CIRCLE_SEGMENTS..=200usize,
+    ) {
+        let mut s = xy_sketch();
+        let center = pt(0.25, -0.5);
+        let start = 24usize;
+        let curve = circle_chain(&mut s, center, 1.5, start);
+        let geom = s.curve_geom(curve).unwrap();
+
+        s.refacet_curve(curve, n).unwrap();
+        prop_assert_eq!(s.curve_edges(curve).len(), n);
+        prop_assert_eq!(s.regions().len(), 1);
+
+        s.refacet_curve(curve, start).unwrap();
+        prop_assert_eq!(s.curve_edges(curve).len(), start);
+        prop_assert_eq!(s.curve_geom(curve), Some(geom));
+        prop_assert_eq!(s.regions().len(), 1);
+        prop_assert_eq!(s.curve_rims().len(), 1);
+        prop_assert_eq!(s.curve_rims()[0].coverage.clone(), None);
+
+        // Every vertex is ON the exact circle, to the kernel's own point
+        // tolerance — the facets approximate the circle, they never drift
+        // off it.
+        for v in s.vertices().values() {
+            let r = (v.position - geom.center).length();
+            prop_assert!(
+                (r - geom.radius).abs() <= tol::POINT_MERGE,
+                "vertex at radius {} vs {}", r, geom.radius
+            );
+        }
+
+        // The ring is regular: `start` vertices, evenly spaced.
+        let angles = ring_angles(&s, curve, center);
+        prop_assert_eq!(angles.len(), start);
+        let step = std::f64::consts::TAU / (start as f64);
+        for w in angles.windows(2) {
+            prop_assert!((w[1] - w[0] - step).abs() < 1e-9, "even spacing");
+        }
+    }
+
+    /// No-visible-rotation, stated as the property it actually is: ONE
+    /// re-facet reuses one of the old ring's vertex positions, whatever the
+    /// new density. (Ring position is NOT preserved across a round trip and
+    /// is deliberately not claimed — two densities put their vertices on
+    /// different angular lattices, so returning to the original count cannot
+    /// in general return to the original vertices.)
+    #[test]
+    fn refacet_anchors_the_new_ring_on_an_old_vertex(
+        n in kernel::MIN_CIRCLE_SEGMENTS..=200usize,
+    ) {
+        let mut s = xy_sketch();
+        let center = pt(-2.0, 0.5);
+        let curve = circle_chain(&mut s, center, 0.9, 24);
+        let old: Vec<Point3> = s.vertices().values().map(|v| v.position).collect();
+
+        s.refacet_curve(curve, n).unwrap();
+
+        prop_assert!(
+            s.vertices()
+                .values()
+                .any(|v| old.iter().any(|o| v.position.approx_eq(*o, tol::POINT_MERGE))),
+            "the rebuilt {}-gon shares no vertex with the 24-gon it replaced", n
+        );
+    }
+}
+
+#[test]
+fn refacet_curve_refuses_two_disjoint_rings_under_one_chain() {
+    // Degree-2-everywhere admits a disjoint UNION of cycles, and a ring that
+    // closes a wide gap with one long secant already covers the full turn by
+    // itself — leaving the circular segment behind that secant free for a
+    // second, wholly separate ring on the same circle. Without a connectivity
+    // check that state passes every other gate, and the rebuild deletes the
+    // second ring in silence.
+    //
+    // Reachable through the ordinary API: one curve bracket, twelve segments.
+    let mut s = xy_sketch();
+    let on_circle = |deg: f64| {
+        let a = deg.to_radians();
+        pt(a.cos(), a.sin())
+    };
+
+    let curve = s
+        .begin_curve_with(kernel::CurveGeom {
+            center: pt(0.0, 0.0),
+            radius: 1.0,
+        })
+        .unwrap();
+    // Ring A: 0°,30°,…,240°, closed by ONE long secant 240° → 0°.
+    for k in 0..8 {
+        s.add_segment(on_circle(k as f64 * 30.0), on_circle((k + 1) as f64 * 30.0))
+            .unwrap();
+    }
+    s.add_segment(on_circle(240.0), on_circle(0.0)).unwrap();
+    // Ring B: a triangle inscribed inside the segment cut off by that secant.
+    // None of its chords crosses ring A, so the sticky rules insert it clean.
+    for (a, b) in [(280.0, 300.0), (300.0, 320.0), (320.0, 280.0)] {
+        s.add_segment(on_circle(a), on_circle(b)).unwrap();
+    }
+    s.end_curve();
+
+    // The state really is two separate rings under one chain id.
+    assert_eq!(s.curve_edges(curve).len(), 12);
+    assert_eq!(s.islands().len(), 2, "two disjoint rings");
+    let before = s.clone();
+
+    assert_eq!(
+        s.refacet_curve(curve, 24),
+        Err(SketchError::CurveNotRefacetable),
+        "refusing beats silently deleting the second ring"
+    );
+    assert_eq!(s, before, "and the sketch is untouched");
+}
+
+#[test]
+fn refacet_curve_updates_a_region_that_holds_the_circle_as_a_hole() {
+    // A circle drawn inside a rectangle is a hole in the rectangle's region as
+    // well as a region of its own. Re-faceting replaces every vertex of that
+    // hole boundary, so the enclosing region has to be refreshed too — a
+    // region keeps its id when its OUTER cycle is unchanged, which is exactly
+    // this case, so the hole list must be rewritten in place rather than left
+    // pointing at deleted vertices.
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(-5.0, -5.0, 5.0, 5.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    let curve = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+
+    let outer_id = s
+        .regions()
+        .iter()
+        .find(|(_, r)| r.outer.len() == 4)
+        .map(|(id, _)| id)
+        .expect("the rectangle's region");
+    let hole_before = s.regions()[outer_id].holes[0].clone();
+    assert_eq!(hole_before.len(), 24);
+
+    s.refacet_curve(curve, 48).expect("the circle re-facets");
+
+    // The enclosing region survived with its id, and its hole now tracks the
+    // rebuilt ring.
+    let hole_after = s.regions()[outer_id].holes[0].clone();
+    assert_eq!(hole_after.len(), 48, "the hole tracks the rebuilt ring");
+    for v in &hole_after {
+        assert!(
+            s.vertices().contains_key(*v),
+            "the hole must not reference a deleted vertex"
+        );
+    }
+    for v in &hole_before {
+        assert!(
+            !hole_after.contains(v),
+            "no vertex of the old ring may survive in the hole"
+        );
+    }
+}
+
+#[test]
+fn refacet_curve_leaves_no_stale_edge_handle_aliasing_a_new_edge() {
+    // Re-faceting to the SAME count is the adversarial case for handles: it
+    // frees exactly as many edge slots as it then allocates, so the slotmap
+    // reuses every index. Handles are generational, so a handle held across
+    // the rebuild — the app's `sketch-curve` selection holds one — must fail
+    // to resolve rather than silently name a different edge at the same slot.
+    let mut s = xy_sketch();
+    let curve = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+    let old_edges = s.curve_edges(curve);
+
+    s.refacet_curve(curve, 24).expect("re-facets");
+
+    for old in &old_edges {
+        assert!(
+            !s.edges().contains_key(*old),
+            "a stale edge handle resolved to a live edge"
+        );
+    }
+    // Non-vacuous only if the slots really were reused; assert that too, so
+    // this cannot quietly become a test of a case that no longer arises.
+    let slot = |e: &kernel::SketchEdgeId| {
+        use slotmap::Key as _;
+        e.data().as_ffi() & 0xffff_ffff
+    };
+    let old_slots: std::collections::BTreeSet<u64> = old_edges.iter().map(slot).collect();
+    let new_slots: std::collections::BTreeSet<u64> =
+        s.curve_edges(curve).iter().map(slot).collect();
+    assert_eq!(
+        old_slots, new_slots,
+        "the rebuild should reuse the freed slots, or this proves nothing"
+    );
+}
+
+#[test]
+fn refacet_curve_mints_a_new_island_id_as_documented() {
+    // `CurveRefaceted`'s doc comment states island ids do NOT survive a
+    // re-facet and are deliberately unreported. Pin that, so the claim cannot
+    // silently become false — a caller reading the doc is entitled to rely on
+    // re-querying being necessary, and equally on it being sufficient.
+    let mut s = xy_sketch();
+    let curve = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 24);
+    assert_eq!(s.islands().len(), 1);
+    let before = s.islands().keys().next().unwrap();
+
+    s.refacet_curve(curve, 48).expect("re-facets");
+
+    assert_eq!(s.islands().len(), 1, "still exactly one island");
+    let after = s.islands().keys().next().unwrap();
+    assert_ne!(before, after, "the island is a new one, as documented");
+    // And re-querying is sufficient: the fresh id resolves to the whole ring.
+    assert_eq!(s.islands()[after].edges.len(), 48);
+}

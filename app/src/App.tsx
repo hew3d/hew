@@ -2909,6 +2909,7 @@ export default function App() {
               selectedIds={selectedIds}
               onDocumentChanged={handleDocumentChanged}
               onSelectMany={handleReplaceSelection}
+              onToast={handleToast}
             />
           </TraySection>
           <TraySection title="Outliner" collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>

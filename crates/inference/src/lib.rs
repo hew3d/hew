@@ -925,6 +925,17 @@ pub struct InferenceScene {
     /// `sketch_segments`, so a drawn circle's true center snaps BEFORE any
     /// extrusion exists.
     sketch_rims: Vec<(SketchId, SketchCurveRim)>,
+    /// Committed sketch *polygon centers* — the exact drawn center of each
+    /// regular polygon chain ([`kernel::Sketch::polygon_centers`]), keyed by
+    /// `SketchId` like `sketch_segments`.
+    ///
+    /// Separate from `sketch_rims` because a polygon has no rim: its sides
+    /// ARE its geometry, so the circumcircle it was drawn from supplies a
+    /// center and nothing else — no quadrant points (they would lie on no
+    /// edge) and no tangents. Same lifecycle, same provenance-free linear
+    /// walk, same [`SnapKind::Center`] the circle case emits, so nothing
+    /// downstream has to learn a new kind.
+    sketch_polygon_centers: Vec<(SketchId, Point3)>,
     /// Committed sketch *region faces* (closed regions of drawn shapes), keyed
     /// by `SketchId` like `sketch_segments`. Each registers a hoverable,
     /// occluding face so the cursor snaps to a drawn region ([`SnapKind::OnFace`])
@@ -1017,6 +1028,7 @@ impl Default for InferenceScene {
             sketch_segments: Vec::new(),
             sketch_vertices: Vec::new(),
             sketch_rims: Vec::new(),
+            sketch_polygon_centers: Vec::new(),
             sketch_faces: Vec::new(),
             transient_segments: Vec::new(),
             guides_enabled: true,
@@ -1511,6 +1523,27 @@ impl InferenceScene {
             .extend(rims.iter().map(|r| (id, r.clone())));
     }
 
+    /// Registers (or re-registers) the exact drawn centers of sketch `id`'s
+    /// regular polygons ([`kernel::Sketch::polygon_centers`]) as
+    /// [`SnapKind::Center`] candidates, so a drawn polygon snaps at its
+    /// center exactly like a drawn circle does.
+    ///
+    /// Centers only, by design: a polygon's corners are already `Endpoint`
+    /// candidates and its side midpoints already `Midpoint` candidates, so
+    /// cardinal points of its circumcircle would add candidates lying on no
+    /// edge at all. Replace semantics like
+    /// [`InferenceScene::add_sketch_curves`]: drops any prior polygon centers
+    /// for `id` first. Callers register these alongside rims, faces,
+    /// vertices, and segments on every sketch mutation. Circle centers do NOT
+    /// belong here — they arrive with the rest of their rim through
+    /// `add_sketch_curves`, so a caller registering both gets each center
+    /// exactly once.
+    pub fn add_sketch_polygon_centers(&mut self, id: SketchId, centers: &[Point3]) {
+        self.sketch_polygon_centers.retain(|(sid, _)| *sid != id);
+        self.sketch_polygon_centers
+            .extend(centers.iter().map(|&c| (id, c)));
+    }
+
     /// Registers (or re-registers) the committed *region faces* of sketch `id`
     /// — its closed drawn loops ([`kernel::Sketch::regions`]) — as hoverable,
     /// occluding faces, so an unextruded rectangle/circle snaps on its fill
@@ -1533,6 +1566,7 @@ impl InferenceScene {
         self.sketch_segments.retain(|(sid, _, _)| *sid != id);
         self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
         self.sketch_rims.retain(|(sid, _)| *sid != id);
+        self.sketch_polygon_centers.retain(|(sid, _)| *sid != id);
         self.sketch_faces.retain(|(sid, _)| *sid != id);
     }
 
@@ -1774,6 +1808,16 @@ impl InferenceScene {
                 if let Some((ang, depth)) = wcone(q, SnapKind::Quadrant) {
                     candidates.push((SnapKind::Quadrant, ang, depth, q, None, None));
                 }
+            }
+        }
+
+        // --- Polygon centers: a drawn regular polygon's exact center, the
+        //     one analytic point its circumcircle legitimately supplies. Same
+        //     kind, same provenance-free linear walk as the rim centers above
+        //     — a polygon simply contributes no quadrants or tangents. ---
+        for (_, c) in &self.sketch_polygon_centers {
+            if let Some((ang, depth)) = wcone(*c, SnapKind::Center) {
+                candidates.push((SnapKind::Center, ang, depth, *c, None, None));
             }
         }
 

@@ -61,9 +61,10 @@ pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,
 };
 pub use sketch::{
-    CurveGeom, EdgeRemoved, Profile, ProfileError, RegionOffsetAdded, SegmentAdded, Sketch,
-    SketchCurveId, SketchCurveRim, SketchEdge, SketchEdgeId, SketchError, SketchIsland,
-    SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
+    CurveAnalytic, CurveGeom, CurveRefaceted, EdgeRemoved, MAX_CIRCLE_SEGMENTS,
+    MIN_CIRCLE_SEGMENTS, Profile, ProfileError, RegionOffsetAdded, SegmentAdded, Sketch,
+    SketchCurveId, SketchCurveKind, SketchCurveRim, SketchEdge, SketchEdgeId, SketchError,
+    SketchIsland, SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
 };
 pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};

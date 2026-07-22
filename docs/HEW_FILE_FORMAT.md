@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `11`**, and **geometry buffer format version `5`**. Both are covered
+version `12`**, and **geometry buffer format version `5`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 11,
+  "format_version": 12,
   "geometry_version": 5,
   "app": "hew",
   "app_version": "0.1.0",
@@ -97,7 +97,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "vertices": [ {"id":0, "p":[0.0, 0.0, 0.0]} ],
       "edges":    [ {"id":0, "from":0, "to":1, "curve":0} ],
       "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ],
-      "curves":   [ {"id":0, "center":[1.0, 2.0, 0.0], "radius":0.75} ]  // v10+
+      "curves":   [ {"id":0, "center":[1.0, 2.0, 0.0], "radius":0.75,
+                     "kind":"polygon"} ]  // v10+; "kind" is v12+, optional
     }
   ],
   "guides": [
@@ -112,9 +113,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `11`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `12`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `4`.
+  used by every entry under `geometry/` in this file. Current: `5`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
@@ -176,15 +177,16 @@ of the manifest:
 | `objects[].hidden`, `groups[].hidden`, `instances[].hidden` | 6 | `false` (visible) |
 | `sketches[].edges[].curve` | 7 | absent (a plain line, not part of a curve chain) |
 | `sketches[].curves` | 10 | empty list (every curve chain is identity-only, no analytic definition) |
+| `sketches[].curves[].kind` | 12 | `"circle"` — the chain's edges are chord facets approximating the stored circle, which is what a `curves[]` entry meant at v10/v11 |
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
 `objects[].footprints` (v9/v10). They stored the sketch–solid claim data of
 the footprint consumption model; the current model allows re-extruding
 occupied ground outright — solids interpenetrate freely — so there is
-nothing to store, and a v11 writer emits none of them.
+nothing to store, and writers from v11 on emit none of them.
 
-A v11 reader treats them differently on an older file:
+A current reader (v11 and later) treats them differently on an older file:
 
 - **`consumed`** is honored ONE final time, then discarded — and only in
   files whose declared `format_version` is **older than 11** (the gating
@@ -198,7 +200,7 @@ A v11 reader treats them differently on an older file:
   region; a dangling pair is a fatal, typed dangling-reference error like
   any other. The loaded document therefore looks exactly as it did in the
   old build — nothing previously consumed resurrects — and a resave emits
-  clean v11 with no claim fields. A file that declares `format_version`
+  the current version with no claim fields. A file that declares `format_version`
   **11 or newer** and still carries a `consumed` field is malformed for
   its own version and MUST be rejected with a typed error — never acted
   on and never ignored (reject-not-repair; deleting sketch geometry on
@@ -508,9 +510,9 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   `outer` is a vertex-id cycle, counter-clockwise from the plane normal's
   side; each `holes` entry is clockwise (same convention as). This
   winding is a writer guarantee, not something the loader re-validates.
-- `curves[]` (v10+, optional) — `{id, center, radius}`: the **analytic
-  definition** of one curve chain — the exact circle, in the sketch plane,
-  whose facets the chain's edges approximate. `id` is the same dense
+- `curves[]` (v10+, optional) — `{id, center, radius, kind?}`: the
+  **analytic definition** of one curve chain — the exact circle, in the
+  sketch plane, that the chain's edges relate to. `id` is the same dense
   per-sketch curve id `edges[].curve` references. Sparse: a chain with no
   entry is identity-only (selection grouping without geometry — every
   pre-v10 chain). A reader MUST reject an entry whose `radius` is not
@@ -519,6 +521,31 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   to lie on `plane` (like vertex positions, not re-validated on load). A
   reader that ignores `curves` loses only the analytic metadata (exact
   center/radius), never shape.
+
+  `kind` (v12+, optional) says what the circle **claims** about the chain,
+  and the two claims are not interchangeable:
+
+  - `"circle"` (the default when `kind` is absent, and the only meaning
+    `curves[]` had at v10/v11) — the chain's edges are chord facets
+    *approximating* the circle. The circle is the truth and the facets are
+    an artifact, so the circle's centre, its four quadrant points and its
+    tangents are all real points of the drawing, offsetting the chain
+    produces a concentric arc, and extruding a profile bounded by it sweeps
+    a cylindrical surface.
+  - `"polygon"` — the chain is a regular polygon and its edges **are** the
+    geometry; the stored circle is only their circumcircle. The one thing
+    it contributes is the **centre** the author placed. A reader must not
+    derive quadrant points, tangents, concentric offsets or a swept
+    cylindrical surface from it: those describe the circumcircle, not the
+    polygon, and none of them lies on the shape.
+
+  A writer emits `kind` only for `"polygon"`; a circle's entry is written
+  exactly as v10/v11 wrote it, so a document containing no polygon produces
+  a byte-identical `curves[]` across the version bump. A reader MUST reject
+  any other `kind` string rather than fall back to `"circle"` — guessing
+  would hand a shape an analytic identity it does not have. A v11 reader
+  handed a v12 file loses the distinction (it reads a polygon as a circle),
+  which is why the manifest version moves.
 
 ### 4.7 Guides
 

@@ -59,6 +59,11 @@ function makeWasmScene(opts: {
     ),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),
+    // A polygon's plane-mode commit is bracketed as ONE polygon chain,
+    // carrying the drawn centre and circumradius — that is what makes its
+    // centre selectable and inferable.
+    sketch_begin_polygon_with: vi.fn(() => 7n),
+    sketch_end_curve: vi.fn(),
     sketch_add_segment: vi.fn(() => {
       if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
       return {
@@ -110,8 +115,15 @@ describe('PolygonTool — ground mode', () => {
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 42n, regionsCreated: [] })
     expect(onToast).not.toHaveBeenCalled()
-    // No curve chain — a polygon carries no analytic-curve metadata (design §4/§8).
+    // Face mode's curve-carrying imprint is a CircleTool thing; a polygon
+    // never claims an analytic circle on a solid (design §4/§8).
     expect(scene.split_face_inner_with_curve).not.toHaveBeenCalled()
+    // In plane mode the polygon IS one chain, opened as a POLYGON (not a
+    // circle) with the drawn centre (0,0,0) and circumradius 3 — the record
+    // that makes its centre snappable. Bracket closed exactly once.
+    expect(scene.sketch_begin_polygon_with).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_begin_polygon_with).toHaveBeenCalledWith(42n, 0, 0, 0, 3)
+    expect(scene.sketch_end_curve).toHaveBeenCalledTimes(1)
     // The whole N-segment commit is bracketed in exactly one gesture.
     expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
     expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(42n)

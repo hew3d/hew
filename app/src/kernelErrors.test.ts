@@ -35,6 +35,8 @@ const KERNEL_ERROR_CODES = [
   'PointOffPlane', 'DegenerateSegment', 'UnknownEdge', 'UnknownVertex',
   'UnknownRegion', 'WouldRetopologize', 'UnknownIsland', 'MalformedRegion',
   'DegenerateCurve', 'RestoreConflicts', 'OffsetTooSmall', 'OffsetCollapsed',
+  'UnknownCurve', 'CurveNotAnalytic', 'CurveNotRefacetable',
+  'SegmentsBelowFloor', 'SegmentsAboveCap',
   // ExtrudeError
   'DistanceTooSmall', 'DegenerateGeometry',
   // FollowMeError

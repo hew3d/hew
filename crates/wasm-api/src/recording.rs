@@ -76,6 +76,23 @@ pub enum RecordedCall {
         center: [f64; 3],
         radius: f64,
     },
+    /// `sketch_begin_polygon_with(sketch, center, radius)` — a curve bracket
+    /// whose circle is a regular polygon's CIRCUMcircle, not a curve the
+    /// facets approximate. Additive variant, same posture as
+    /// [`RecordedCall::SketchBeginCurveWith`].
+    SketchBeginPolygonWith {
+        sketch: u64,
+        center: [f64; 3],
+        radius: f64,
+    },
+    /// `sketch_refacet_curve(sketch, curve, segments)` — rebuild a drawn
+    /// circle's facets at a new density, in place. Additive variant, same
+    /// posture as [`RecordedCall::SketchBeginCurveWith`].
+    SketchRefacetCurve {
+        sketch: u64,
+        curve: u64,
+        segments: u32,
+    },
     /// `sketch_end_curve(sketch)`.
     SketchEndCurve { sketch: u64 },
     /// `sketch_end_gesture(sketch)`.

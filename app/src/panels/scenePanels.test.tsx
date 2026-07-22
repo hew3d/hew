@@ -32,7 +32,13 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     sketch_ids: () => new BigUint64Array(),
     sketch_island_ids: (sid: bigint) => new BigUint64Array([sid + 100n]),
     sketch_edge_island: () => undefined,
+    sketch_edge_curve: () => undefined as bigint | undefined,
+    sketch_curve_geom: () => undefined as Float64Array | undefined,
     sketch_curve_edges: () => new BigUint64Array(),
+    sketch_curve_chain: () => new BigUint64Array(),
+    sketch_begin_gesture: vi.fn(),
+    sketch_end_gesture: vi.fn(),
+    sketch_refacet_curve: vi.fn(),
     top_level_nodes: () => [],
     object_name: (_id: bigint) => undefined as string | undefined,
     group_name: (_id: bigint) => undefined as string | undefined,
@@ -774,6 +780,245 @@ describe('ObjectInfoPanel', () => {
       ),
     ).not.toThrow()
     expect(screen.queryByText('Bounding Box')).not.toBeInTheDocument()
+  })
+
+  // -------------------------------------------------------------------------
+  // Segments — SketchUp's Entity Info "Segments", for a drawn circle only.
+  // Editing it re-facets the existing circle in place.
+  // -------------------------------------------------------------------------
+
+  /** A scene whose sketch 5 holds one curve chain (id 9) reachable from
+   *  edge 3. `geom` present = a CIRCLE (a polygon answers `undefined`). */
+  function curveScene(opts: {
+    geom?: Float64Array
+    facets?: number
+    refacet?: (...args: unknown[]) => unknown
+  } = {}) {
+    const n = opts.facets ?? 24
+    return makeScene({
+      sketch_ids: () => new BigUint64Array([5n]),
+      sketch_island_ids: () => new BigUint64Array([50n]),
+      sketch_edge_island: () => 50n,
+      sketch_edge_curve: () => 9n,
+      sketch_curve_geom: () =>
+        opts.geom === undefined ? undefined : opts.geom,
+      sketch_curve_edges: () =>
+        new BigUint64Array(Array.from({ length: n }, (_, i) => BigInt(100 + i))),
+      sketch_curve_chain: () => new BigUint64Array([200n, 201n]),
+      sketch_refacet_curve:
+        opts.refacet ??
+        vi.fn(() => ({
+          new_edges: () => new BigUint64Array([210n, 211n]),
+          removed_edges: () => new BigUint64Array(),
+          regions_created: () => new BigUint64Array(),
+          regions_removed: () => new BigUint64Array(),
+          free: vi.fn(),
+        })),
+    })
+  }
+
+  const CURVE_SELECTION = [{ kind: 'sketch-curve' as const, id: 3n, sketch: 5n }]
+
+  it('shows a drawn circle\u2019s current facet count in the Segments field', () => {
+    render(
+      <ObjectInfoPanel
+        scene={curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const input = screen.getByLabelText('Segments') as HTMLInputElement
+    expect(input.value).toBe('24')
+  })
+
+  it('shows no Segments field for a polygon chain \u2014 its sides are its geometry, not facets of a circle', () => {
+    render(
+      <ObjectInfoPanel
+        scene={curveScene({ geom: undefined, facets: 6 })}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.queryByLabelText('Segments')).not.toBeInTheDocument()
+    // It is still recognisably a curve chain.
+    expect(screen.getByText('Curve')).toBeInTheDocument()
+  })
+
+  it('re-facets the circle on Enter, in one gesture, and re-points the selection', () => {
+    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const onSelectMany = vi.fn()
+    const onDocumentChanged = vi.fn()
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={onDocumentChanged}
+        onSelectMany={onSelectMany}
+      />,
+    )
+    const input = screen.getByLabelText('Segments')
+    fireEvent.change(input, { target: { value: '48' } })
+    fireEvent.blur(input)
+
+    expect(scene.sketch_refacet_curve).toHaveBeenCalledWith(5n, 9n, 48)
+    // Bracketed as exactly one undo step.
+    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(5n)
+    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(5n)
+    // Every old edge is dead, including the one the selection named, so the
+    // selection is re-pointed at the rebuilt chain's representative.
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'sketch-curve', id: 200n, sketch: 5n },
+    ])
+    expect(onDocumentChanged).toHaveBeenCalled()
+  })
+
+  it('refuses a count below the floor visibly, without touching the kernel', () => {
+    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const onToast = vi.fn()
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+        onToast={onToast}
+      />,
+    )
+    const input = screen.getByLabelText('Segments') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '3' } })
+    fireEvent.blur(input)
+
+    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
+    expect(scene.sketch_begin_gesture).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe('SegmentsBelowFloor')
+    // The field springs back to the truth rather than showing a value the
+    // model does not have.
+    expect(input.value).toBe('24')
+  })
+
+  it('surfaces a kernel refusal as a toast and restores the field', () => {
+    const scene = curveScene({
+      geom: new Float64Array([0, 0, 0, 1]),
+      facets: 24,
+      refacet: vi.fn(() => {
+        throw new Error('CurveNotRefacetable: only a whole circle')
+      }),
+    })
+    const onToast = vi.fn()
+    const onSelectMany = vi.fn()
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={onSelectMany}
+        onToast={onToast}
+      />,
+    )
+    const input = screen.getByLabelText('Segments') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '96' } })
+    fireEvent.blur(input)
+
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe('CurveNotRefacetable')
+    // The gesture is closed even on the refusal path, so the tools are not
+    // left mid-gesture.
+    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(5n)
+    expect(onSelectMany).not.toHaveBeenCalled()
+    expect(input.value).toBe('24')
+  })
+
+  it('surfaces an above-the-cap refusal from the kernel as a toast', () => {
+    // The panel refuses BELOW the floor itself (no round trip), but the upper
+    // bound is the kernel's alone — the panel forwards the count and must
+    // surface `SegmentsAboveCap` like any other refusal rather than leaving
+    // the field showing a count the model does not have.
+    const scene = curveScene({
+      geom: new Float64Array([0, 0, 0, 1]),
+      facets: 24,
+      refacet: vi.fn(() => {
+        throw new Error('SegmentsAboveCap: a circle allows at most 1024 segments')
+      }),
+    })
+    const onToast = vi.fn()
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+        onToast={onToast}
+      />,
+    )
+    const input = screen.getByLabelText('Segments') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '99999' } })
+    fireEvent.blur(input)
+
+    // It really was forwarded — the panel does not second-guess the cap.
+    expect(scene.sketch_refacet_curve).toHaveBeenCalledWith(5n, 9n, 99999)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe('SegmentsAboveCap')
+    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(5n)
+    expect(input.value).toBe('24')
+  })
+
+  it('does not carry uncommitted text between two circles that share a curve handle', () => {
+    // Curve handles are slotmap keys scoped PER SKETCH, so the first curve on
+    // one plane and the first on another collide. If the field's identity key
+    // ignored the sketch, typed text would survive the selection change and
+    // the next blur would commit it onto the wrong circle.
+    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const view = render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'sketch-curve', id: 3n, sketch: 5n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Segments'), { target: { value: '64' } })
+
+    // A DIFFERENT sketch, same curve handle (9n), same facet count (24).
+    view.rerender(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={1}
+        selectedIds={[{ kind: 'sketch-curve', id: 3n, sketch: 6n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+
+    const input = screen.getByLabelText('Segments') as HTMLInputElement
+    expect(input.value).toBe('24')
+    fireEvent.blur(input)
+    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
+  })
+
+  it('does nothing at all when the count is unchanged', () => {
+    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    fireEvent.blur(screen.getByLabelText('Segments'))
+    expect(scene.sketch_begin_gesture).not.toHaveBeenCalled()
+    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
   })
 })
 

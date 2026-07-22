@@ -562,6 +562,56 @@ impl EdgeRemovedJs {
     }
 }
 
+/// What a circle re-facet did (mirrors `kernel::CurveRefaceted`). The chain's
+/// handle and its analytic circle are absent because re-faceting preserves
+/// them — there is nothing to report about what did not change.
+#[wasm_bindgen]
+pub struct CurveRefacetedJs {
+    inner: kernel::CurveRefaceted,
+}
+
+#[wasm_bindgen]
+impl CurveRefacetedJs {
+    /// The chain's new facet edges, in RING order (not id order). A caller
+    /// holding a now-dead representative edge — a selection — re-points by
+    /// feeding any of these to `sketch_curve_chain`, whose first element is
+    /// the canonical representative.
+    pub fn new_edges(&self) -> Vec<u64> {
+        self.inner
+            .new_edges
+            .iter()
+            .map(|e| e.data().as_ffi())
+            .collect()
+    }
+
+    /// The chain's old facet edges, all now dead.
+    pub fn removed_edges(&self) -> Vec<u64> {
+        self.inner
+            .removed_edges
+            .iter()
+            .map(|e| e.data().as_ffi())
+            .collect()
+    }
+
+    /// Handles of regions that exist now but did not before.
+    pub fn regions_created(&self) -> Vec<u64> {
+        self.inner
+            .regions_created
+            .iter()
+            .map(|r| r.data().as_ffi())
+            .collect()
+    }
+
+    /// Handles of regions that existed before but do not now.
+    pub fn regions_removed(&self) -> Vec<u64> {
+        self.inner
+            .regions_removed
+            .iter()
+            .map(|r| r.data().as_ffi())
+            .collect()
+    }
+}
+
 /// What a region offset did (mirrors `kernel::RegionOffsetAdded`).
 #[wasm_bindgen]
 pub struct RegionOffsetJs {
@@ -1195,6 +1245,12 @@ impl Scene {
         // ray passing through to the ground/box beneath.
         if let Some(s) = self.doc.sketch(id) {
             self.inference.add_sketch_curves(id, &s.curve_rims());
+            // Polygon centers ride the same re-registration. The two sets are
+            // disjoint by construction (`curve_rims` is circles only,
+            // `polygon_centers` is polygons only), so no center is offered
+            // twice.
+            let poly: Vec<Point3> = s.polygon_centers().into_iter().map(|(_, c)| c).collect();
+            self.inference.add_sketch_polygon_centers(id, &poly);
             self.inference
                 .add_sketch_faces(id, &Self::live_sketch_faces(s));
         }
@@ -1539,9 +1595,95 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// [`Scene::sketch_begin_curve_with`] for a regular POLYGON: the circle
+    /// is the polygon's circumcircle, not a curve its sides approximate.
+    /// The chain still selects and deletes as one unit and still carries a
+    /// durable center — but it offers no quadrant or tangent snaps, does not
+    /// offset as concentric arcs, and does not sweep a cylindrical wall on
+    /// extrusion, because none of those describe a polygon
+    /// (`kernel::SketchCurveKind`). Returns the curve handle.
+    pub fn sketch_begin_polygon_with(
+        &mut self,
+        sketch: u64,
+        cx: f64,
+        cy: f64,
+        cz: f64,
+        radius: f64,
+    ) -> Result<u64, ApiError> {
+        let sid = sketch_id(sketch);
+        let s = self
+            .doc
+            .sketch_mut(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let id = s
+            .begin_curve_with_kind(
+                kernel::CurveGeom {
+                    center: Point3::new(cx, cy, cz),
+                    radius,
+                },
+                kernel::SketchCurveKind::Polygon,
+            )
+            .map_err(|e| api_err(&e, &e))?;
+        recording::record(recording::RecordedCall::SketchBeginPolygonWith {
+            sketch,
+            center: [cx, cy, cz],
+            radius,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Rebuilds drawn circle `curve`'s facets at `segments` density, in
+    /// place: the chain keeps its handle and its exact circle, only the
+    /// chords approximating it are replaced, starting at the angle the old
+    /// ring started at so the circle does not visibly rotate. This is what
+    /// editing a circle's segment count in Object Info does — a rebuild of
+    /// the existing circle, not a setting for the next one drawn.
+    ///
+    /// Bracket with `sketch_begin_gesture`/`sketch_end_gesture` like any
+    /// other drawing commit so the re-facet is one undo step.
+    ///
+    /// # Errors
+    /// `UnknownSketch`; `UnknownCurve`; `CurveNotAnalytic` (the chain carries
+    /// no circle); `CurveNotRefacetable` (not a whole, untouched circle — an
+    /// arc, a partially erased circle, a polygon, a circle glued to other
+    /// geometry, or one already consumed by an extrusion, which leaves the
+    /// chain with no live edges); `SegmentsBelowFloor` / `SegmentsAboveCap`.
+    /// On any error the sketch is untouched.
+    pub fn sketch_refacet_curve(
+        &mut self,
+        sketch: u64,
+        curve: u64,
+        segments: u32,
+    ) -> Result<CurveRefacetedJs, ApiError> {
+        let sid = sketch_id(sketch);
+        let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
+        let s = self
+            .doc
+            .sketch_mut(sid)
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let report = s
+            .refacet_curve(cid, segments as usize)
+            .map_err(|e| api_err(&e, &e))?;
+        // Same rationale as `sketch_add_segment`: the sketch is mutated
+        // directly, not through `Document::apply_*`, so no `DocChange` exists
+        // — re-register with inference at the call site.
+        self.register_sketch(sid);
+        recording::record(recording::RecordedCall::SketchRefacetCurve {
+            sketch,
+            curve,
+            segments,
+        });
+        Ok(CurveRefacetedJs { inner: report })
+    }
+
     /// The analytic definition of curve chain `curve` in `sketch` as
     /// `[cx, cy, cz, radius]`, or `undefined` when the chain carries none
     /// (drawn before geometry capture, or a stale handle).
+    ///
+    /// **Circles only** — a polygon chain reports `undefined` here, matching
+    /// `kernel::Sketch::curve_geom`, which is also how a caller tells the two
+    /// apart: a chain with edges but no geom here is a polygon (or predates
+    /// geometry capture), and neither is re-facetable.
     pub fn sketch_curve_geom(&self, sketch: u64, curve: u64) -> Option<Vec<f64>> {
         let s = self.doc.sketch(sketch_id(sketch))?;
         let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
@@ -4238,6 +4380,22 @@ impl Scene {
                         self.sketch_begin_curve_with(
                             sketch, center[0], center[1], center[2], radius,
                         )?;
+                    }
+                    SketchBeginPolygonWith {
+                        sketch,
+                        center,
+                        radius,
+                    } => {
+                        self.sketch_begin_polygon_with(
+                            sketch, center[0], center[1], center[2], radius,
+                        )?;
+                    }
+                    SketchRefacetCurve {
+                        sketch,
+                        curve,
+                        segments,
+                    } => {
+                        self.sketch_refacet_curve(sketch, curve, segments)?;
                     }
                     SketchEndCurve { sketch } => {
                         self.sketch_end_curve(sketch)?;

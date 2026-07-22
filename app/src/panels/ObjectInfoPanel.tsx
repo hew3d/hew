@@ -43,6 +43,18 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
 import { formatLength } from '../settings/units'
+import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
+import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
+
+/**
+ * The fewest facets a circle may have. Mirrors the kernel's
+ * `MIN_CIRCLE_SEGMENTS` — the density floor below which a chord ring is
+ * deliberately not stamped as a circle at all — via the draw tools' own copy
+ * of it in `arcMath`, so this file introduces no third source of truth. The
+ * kernel refuses anything below it (`SegmentsBelowFloor`); the panel says so
+ * before the round trip.
+ */
+const MIN_CIRCLE_SEGMENTS = MIN_SEGMENTS_PER_TURN
 
 interface Props {
   scene: WasmScene
@@ -56,10 +68,18 @@ interface Props {
    */
   onDocumentChanged: () => void
   /**
-   * Replace the selection with `nodes` (the "(N instances)" click). Routed to
-   * the same selection state the viewport and Outliner render from.
+   * Replace the selection with `nodes` — the "(N instances)" click, and the
+   * re-point a re-facet needs once it has replaced the selected curve's
+   * edges. Routed to the same selection state the viewport and Outliner
+   * render from.
    */
   onSelectMany: (nodes: NodeRef[]) => void
+  /**
+   * Surface a refusal. Segments is the panel's first control the kernel can
+   * refuse, and a refusal has to be visible — never a field that silently
+   * springs back. Same signature every tool's toast uses.
+   */
+  onToast?: (message: string, code?: string) => void
 }
 
 /** Human-readable type label for each node kind. */
@@ -105,7 +125,7 @@ const INPUT_STYLE: React.CSSProperties = {
   outline: 'none',
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged, onSelectMany }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged, onSelectMany, onToast }: Props) {
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
@@ -144,7 +164,29 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
       )
       const idx = flat.findIndex((f) => f.sid === sketchId && f.island === islandId)
       const sketchLabel = entityLabel('sketch', idx >= 0 ? idx : 0)
+
+      // Segments — SketchUp's Entity Info "Segments", for a drawn CIRCLE.
+      // Only a chain carrying an analytic circle has one: `sketch_curve_geom`
+      // answers for circles only, so a polygon chain (whose sides are its
+      // real geometry, not facets of anything) and a pre-analytic chain both
+      // fall through to null and the row does not render. The count itself is
+      // just how many facets the chain currently has — nothing stores it.
+      let curveId: bigint | null = null
+      let segments: number | null = null
+      if (kind === 'sketch-curve') {
+        const cid = scene.sketch_edge_curve(sketchId, id)
+        if (cid !== undefined) {
+          curveId = cid
+          if (scene.sketch_curve_geom(sketchId, cid) !== undefined) {
+            segments = scene.sketch_curve_edges(sketchId, cid).length
+          }
+        }
+      }
+
       return {
+        sketchId,
+        curveId,
+        segments,
         node,
         kind,
         id,
@@ -213,6 +255,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     }
 
     return {
+      // Curve-only fields: an Object/Group/Instance never has a Segments row.
+      sketchId: undefined as bigint | undefined,
+      curveId: null as bigint | null,
+      segments: null as number | null,
       node,
       kind,
       kindNum,
@@ -322,6 +368,106 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     if (nodeInfo === null || nodeInfo.instanceIds.length === 0) return
     onSelectMany(nodeInfo.instanceIds.map((id) => ({ kind: 'instance' as const, id })))
   }, [nodeInfo, onSelectMany])
+
+  // --------------------------------------------------------------------------
+  // Segments (drawn circles only) — SketchUp's Entity Info "Segments".
+  //
+  // Editing it RE-FACETS the existing circle: the chain keeps its handle and
+  // its exact centre and radius, and its chords are rebuilt at the new
+  // density. It is not a setting for the next circle drawn.
+  //
+  // Two things the commit has to get right:
+  //   - It is bracketed as one sketch gesture, so the whole rebuild is a
+  //     single undo step (the gesture snapshots the sketch).
+  //   - It invalidates the selection. A `sketch-curve` selection carries a
+  //     representative EDGE handle, and every one of the chain's edges is
+  //     replaced — so the selection is re-pointed at the rebuilt chain's own
+  //     representative before the panel re-renders, or the panel would go
+  //     blank on a stale handle.
+  // --------------------------------------------------------------------------
+  const [localSegments, setLocalSegments] = useState('')
+  // Keyed on SKETCH + curve, not the curve alone. Curve handles are slotmap
+  // keys scoped per sketch, so the first curve drawn on one plane and the
+  // first drawn on another share a handle — keying on it alone would carry
+  // uncommitted text from one circle to another whose facet count happened to
+  // match, and the next blur would commit the first circle's typed value onto
+  // the second. This is the same composite identity `nodeKey` builds for the
+  // Name field above, for the same reason.
+  const segSyncKey =
+    nodeInfo !== null && nodeInfo.curveId !== null
+      ? `${nodeInfo.sketchId}:${nodeInfo.curveId}`
+      : null
+  const prevSegSyncRef = useRef<{ key: string | null; value: number | null }>({
+    key: null,
+    value: null,
+  })
+  useEffect(() => {
+    const next = nodeInfo?.segments ?? null
+    const prev = prevSegSyncRef.current
+    if (segSyncKey !== prev.key || next !== prev.value) {
+      prevSegSyncRef.current = { key: segSyncKey, value: next }
+      setLocalSegments(next === null ? '' : String(next))
+    }
+  }, [nodeInfo?.segments, segSyncKey])
+
+  const commitSegments = useCallback(() => {
+    if (
+      nodeInfo === null ||
+      nodeInfo.curveId === null ||
+      nodeInfo.sketchId === undefined ||
+      nodeInfo.segments === null
+    ) {
+      return
+    }
+    const sketchId = nodeInfo.sketchId
+    const curveId = nodeInfo.curveId
+    const parsed = Number.parseInt(localSegments.trim(), 10)
+    if (!Number.isFinite(parsed)) {
+      setLocalSegments(String(nodeInfo.segments))
+      return
+    }
+    if (parsed === nodeInfo.segments) return // nothing to do
+    if (parsed < MIN_CIRCLE_SEGMENTS) {
+      // Refused HERE rather than clamped silently: substituting 24 for what
+      // was typed would build a different circle than the one asked for. The
+      // kernel refuses this too (`SegmentsBelowFloor`) — this is the same
+      // refusal, said before the round trip.
+      onToast?.(kernelErrorMessage('SegmentsBelowFloor', ''), 'SegmentsBelowFloor')
+      setLocalSegments(String(nodeInfo.segments))
+      return
+    }
+
+    let repointTo: bigint | null = null
+    try {
+      scene.sketch_begin_gesture(sketchId)
+      try {
+        const report = scene.sketch_refacet_curve(sketchId, curveId, parsed)
+        try {
+          const edges = report.new_edges()
+          if (edges.length > 0) {
+            // Any member resolves to the chain's canonical representative.
+            const chain = scene.sketch_curve_chain(sketchId, edges[0])
+            repointTo = chain.length > 0 ? chain[0] : edges[0]
+          }
+        } finally {
+          report.free()
+        }
+      } finally {
+        scene.sketch_end_gesture(sketchId)
+      }
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const raw = err instanceof Error ? err.message : String(err)
+      onToast?.(kernelErrorMessage(code ?? 'Unknown', raw), code ?? undefined)
+      setLocalSegments(String(nodeInfo.segments))
+      return
+    }
+
+    if (repointTo !== null) {
+      onSelectMany([{ kind: 'sketch-curve', id: repointTo, sketch: sketchId }])
+    }
+    onDocumentChanged()
+  }, [nodeInfo, localSegments, scene, onDocumentChanged, onSelectMany, onToast])
 
   // --------------------------------------------------------------------------
   // Tag add state — hidden behind a "+" affordance (HIG-style disclosure).
@@ -477,6 +623,35 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
           )}
         </div>
       </div>
+
+      {/* Segments — a drawn circle only. Editing it re-facets that circle in
+       * place (one undo step); the circle itself, its centre and its radius
+       * are unchanged. Commits on Enter or blur, like the name fields. */}
+      {nodeInfo.segments !== null && (
+        <div>
+          <div style={LABEL_STYLE}>Segments</div>
+          <input
+            style={INPUT_STYLE}
+            aria-label="Segments"
+            type="number"
+            min={MIN_CIRCLE_SEGMENTS}
+            step={1}
+            value={localSegments}
+            onChange={(e) => setLocalSegments(e.target.value)}
+            onBlur={commitSegments}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur()
+              } else if (e.key === 'Escape') {
+                setLocalSegments(String(nodeInfo.segments))
+                e.currentTarget.blur()
+              }
+            }}
+            title={`How many straight facets this circle is drawn with (minimum ${MIN_CIRCLE_SEGMENTS}). Changing it rebuilds the circle.`}
+            spellCheck={false}
+          />
+        </div>
+      )}
 
       {/* Solid / Leaky — only for objects */}
       {nodeInfo.solid !== null && (

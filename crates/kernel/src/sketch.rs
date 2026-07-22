@@ -62,7 +62,18 @@ new_key_type! {
 /// not. The kernel legitimately owns "what density counts as a circle": an
 /// analytic claim on a coarser ring would sweep a secant into a cylinder
 /// wall, and stamp-wrong is worse than don't-stamp (map-or-drop).
-pub(crate) const MIN_CIRCLE_SEGMENTS: usize = 24;
+pub const MIN_CIRCLE_SEGMENTS: usize = 24;
+
+/// The most facets [`Sketch::refacet_curve`] will build a circle from.
+///
+/// Not a geometric tolerance — a policy bound on a user-typed count. Past a
+/// few hundred facets the chords are far below any display or manufacturing
+/// resolution while the edge, vertex and region-tracing cost keeps growing,
+/// so an accidental extra digit would hang the app rather than draw anything
+/// a user could see. Refused typed ([`SketchError::SegmentsAboveCap`])
+/// rather than clamped, because silently building a different circle than the
+/// one asked for is the kind of quiet substitution rule 4 exists to prevent.
+pub const MAX_CIRCLE_SEGMENTS: usize = 1024;
 
 /// The analytic definition a curve chain was drawn from: the exact circle
 /// (or circular arc) whose facets the chain's edges are. The circle lies in
@@ -77,6 +88,41 @@ pub struct CurveGeom {
     pub center: Point3,
     /// Circle radius in meters, > [`tol::POINT_MERGE`](crate::tol::POINT_MERGE).
     pub radius: f64,
+}
+
+/// What a chain's [`CurveGeom`] actually *claims* — the difference between a
+/// circle a chain approximates and a polygon a chain simply is.
+///
+/// A faceted circle's chords are an approximation: the analytic circle is the
+/// truth and the facets are an artifact, so the circle's quadrants, tangents
+/// and smooth-shaded sweeps are all legitimate. A regular polygon's sides are
+/// the geometry itself; the only thing its circumcircle legitimately supplies
+/// is the **center** the user placed. Keeping the two apart is what lets a
+/// polygon have a center without acquiring quadrant points that lie on no
+/// edge, concentric-arc offsets, or a cylindrical wall on extrusion — the
+/// same "stamp-wrong is worse than don't-stamp" judgment
+/// [`MIN_CIRCLE_SEGMENTS`] makes for coarse rings, made once, explicitly,
+/// where the drawing tool already knows the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SketchCurveKind {
+    /// The chain's edges are chord facets approximating the exact circle.
+    /// Every analytic consumer applies: rims (center, quadrants, tangents),
+    /// concentric offset, and the analytic surface an extrusion sweeps.
+    Circle,
+    /// The chain's edges ARE the geometry — a regular polygon, drawn from a
+    /// center and a circumradius. Only the center is offered analytically.
+    Polygon,
+}
+
+/// A curve chain's analytic record: the circle it was drawn from, plus what
+/// that circle claims about the chain ([`SketchCurveKind`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveAnalytic {
+    /// The exact circle: for [`SketchCurveKind::Circle`] the curve the facets
+    /// approximate, for [`SketchCurveKind::Polygon`] its circumcircle.
+    pub geom: CurveGeom,
+    /// What the chain is.
+    pub kind: SketchCurveKind,
 }
 
 /// The exact circle of one drawn curve chain with the angular range its
@@ -217,6 +263,41 @@ pub struct RegionOffsetAdded {
     pub regions_removed: Vec<SketchRegionId>,
 }
 
+/// What [`Sketch::refacet_curve`] did. The chain's own id and its analytic
+/// [`CurveGeom`] are deliberately absent: they are what re-faceting
+/// *preserves*, so there is nothing to report about them.
+///
+/// **Island ids are NOT preserved and are not reported.** Rebuilding replaces
+/// every edge of the chain, and [`SketchIsland`] identity is anchored on an
+/// island's edges, so the re-faceted circle's island is a new one afterwards
+/// even when nothing else about the drawing changed. That is deliberately not
+/// listed here, unlike the region churn: regions are handed to callers as
+/// durable references (a region is what an extrusion consumes), whereas an
+/// island is a derived selection/labelling unit that every caller re-queries
+/// from the sketch after a mutation rather than holding across one. A caller
+/// that ever does hold an island id across a re-facet must re-query it —
+/// there is no report field that will tell it to.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CurveRefaceted {
+    /// The chain's old facet edges, all now dead.
+    pub removed_edges: Vec<SketchEdgeId>,
+    /// Vertices deleted with them (the whole old ring, since a re-facetable
+    /// chain by definition shares no vertex with anything else).
+    pub removed_vertices: Vec<SketchVertexId>,
+    /// The chain's new facet edges, in ring order from the preserved start
+    /// angle.
+    pub new_edges: Vec<SketchEdgeId>,
+    /// Vertices created for them, ascending by id.
+    pub new_vertices: Vec<SketchVertexId>,
+    /// Regions that exist now but did not before (a region whose boundary
+    /// cycle is unchanged keeps its id and appears in neither list — but a
+    /// re-facet always reshapes the cycle, so the circle's own region is
+    /// always replaced).
+    pub regions_created: Vec<SketchRegionId>,
+    /// Regions that existed before but do not now.
+    pub regions_removed: Vec<SketchRegionId>,
+}
+
 /// What [`Sketch::remove_edge`] did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EdgeRemoved {
@@ -261,6 +342,29 @@ pub enum SketchError {
     /// A [`CurveGeom`] is degenerate: its radius is not finite or not larger
     /// than [`tol::POINT_MERGE`](crate::tol::POINT_MERGE).
     DegenerateCurve,
+    /// The given curve-chain handle is not in this sketch.
+    UnknownCurve,
+    /// The chain carries no analytic definition, so there is no circle to
+    /// re-facet from: it was committed through the plain
+    /// [`Sketch::begin_curve`], loaded from a pre-v10 file, or had its
+    /// geometry dropped by a deforming edit ([`Sketch::move_vertex`], a
+    /// non-similarity [`Sketch::apply_transform`]).
+    CurveNotAnalytic,
+    /// The chain is not a re-facetable circle. Re-faceting replaces every
+    /// facet, so it is only defined on a chain that is a WHOLE, untouched
+    /// circle: a [`SketchCurveKind::Circle`] whose live edges form one closed
+    /// ring covering the full turn, none of whose vertices carries anything
+    /// but that chain's own edges. A partially erased circle, an arc, a
+    /// polygon, or a circle glued to other geometry (a T-junction, a rounded
+    /// corner, a boundary shared with another region) is refused — rebuilding
+    /// it would silently destroy those relationships (rule 4).
+    CurveNotRefacetable,
+    /// The requested facet count is below
+    /// [`MIN_CIRCLE_SEGMENTS`] — the density floor at which a chord ring
+    /// stops being a circle at all.
+    SegmentsBelowFloor,
+    /// The requested facet count is above [`MAX_CIRCLE_SEGMENTS`].
+    SegmentsAboveCap,
     /// Undoing an extrusion could not re-insert the scaffolding it had
     /// deleted: geometry drawn since then crosses or overlaps where the
     /// outline was ([`Sketch::restore_edges`]). The sketch is untouched —
@@ -300,6 +404,19 @@ impl std::fmt::Display for SketchError {
             SketchError::DegenerateCurve => {
                 write!(f, "curve radius is degenerate")
             }
+            SketchError::UnknownCurve => write!(f, "no such curve chain in this sketch"),
+            SketchError::CurveNotAnalytic => {
+                write!(f, "the curve chain carries no analytic circle")
+            }
+            SketchError::CurveNotRefacetable => {
+                write!(f, "only a whole, untouched circle can be re-faceted")
+            }
+            SketchError::SegmentsBelowFloor => {
+                write!(f, "a circle needs at least {MIN_CIRCLE_SEGMENTS} segments")
+            }
+            SketchError::SegmentsAboveCap => {
+                write!(f, "a circle allows at most {MAX_CIRCLE_SEGMENTS} segments")
+            }
             SketchError::RestoreConflicts => {
                 write!(
                     f,
@@ -330,7 +447,7 @@ pub struct Sketch {
     /// supplied one ([`Sketch::begin_curve_with`]). `None` for chains
     /// committed before geometry capture existed (pre-v10 files) or through
     /// the plain [`Sketch::begin_curve`].
-    curves: SlotMap<SketchCurveId, Option<CurveGeom>>,
+    curves: SlotMap<SketchCurveId, Option<CurveAnalytic>>,
     /// Current connected components (derived; see [`SketchIsland`]).
     islands: SlotMap<SketchIslandId, SketchIsland>,
     /// Curve id applied to edges inserted by `add_segment` while a
@@ -393,21 +510,66 @@ impl Sketch {
     /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE). On error no curve is
     /// minted and no bracket opens (strong guarantee).
     pub fn begin_curve_with(&mut self, geom: CurveGeom) -> Result<SketchCurveId, SketchError> {
+        self.begin_curve_with_kind(geom, SketchCurveKind::Circle)
+    }
+
+    /// [`Sketch::begin_curve_with`] naming what the chain's circle *claims*
+    /// (see [`SketchCurveKind`]): `Circle` for a faceted circle or arc,
+    /// `Polygon` for a regular polygon whose sides are its real geometry and
+    /// whose circumcircle contributes only a center.
+    ///
+    /// # Errors
+    /// Same as [`Sketch::begin_curve_with`]: [`SketchError::PointOffPlane`]
+    /// (`which: 0`) for an off-plane center, [`SketchError::DegenerateCurve`]
+    /// for a non-finite or too-small radius. On error no curve is minted and
+    /// no bracket opens (strong guarantee).
+    pub fn begin_curve_with_kind(
+        &mut self,
+        geom: CurveGeom,
+        kind: SketchCurveKind,
+    ) -> Result<SketchCurveId, SketchError> {
         if self.plane.signed_distance(geom.center).abs() > tol::PLANE_DIST {
             return Err(SketchError::PointOffPlane { which: 0 });
         }
         if !geom.radius.is_finite() || geom.radius <= tol::POINT_MERGE {
             return Err(SketchError::DegenerateCurve);
         }
-        let id = self.curves.insert(Some(geom));
+        let id = self.curves.insert(Some(CurveAnalytic { geom, kind }));
         self.active_curve = Some(id);
         Ok(id)
     }
 
-    /// The analytic definition of `curve`, or `None` when the chain carries
-    /// none (plain [`Sketch::begin_curve`], pre-v10 file, or a stale handle).
+    /// The analytic circle of `curve` **when the chain is a circle** — `None`
+    /// for a chain carrying no geometry (plain [`Sketch::begin_curve`],
+    /// pre-v10 file, geometry dropped by a deforming edit, or a stale handle)
+    /// AND for a [`SketchCurveKind::Polygon`] chain.
+    ///
+    /// Polygons are excluded deliberately: every caller of this method feeds
+    /// an analytic *circle* consumer — profile curve attribution and the
+    /// cylindrical walls extrusion sweeps from it, concentric offset, the
+    /// Follow Me path's analytic tangent, the serializer's circle record — and
+    /// a polygon's circumcircle describes none of them. Use
+    /// [`Sketch::curve_analytic`] to see a polygon's record, or
+    /// [`Sketch::curve_center`] for the one thing it does supply.
     pub fn curve_geom(&self, curve: SketchCurveId) -> Option<CurveGeom> {
+        self.curve_analytic(curve)
+            .filter(|a| a.kind == SketchCurveKind::Circle)
+            .map(|a| a.geom)
+    }
+
+    /// The full analytic record of `curve` — circle *and* what it claims —
+    /// regardless of kind. `None` when the chain carries none, or the handle
+    /// is stale.
+    pub fn curve_analytic(&self, curve: SketchCurveId) -> Option<CurveAnalytic> {
         self.curves.get(curve).copied().flatten()
+    }
+
+    /// The exact drawn center of `curve`, whatever kind it is — the one
+    /// analytic fact a polygon chain contributes, and the same point a circle
+    /// chain's rim reports. `None` when the chain carries no geometry or the
+    /// handle is stale.
+    pub fn curve_center(&self, curve: SketchCurveId) -> Option<Point3> {
+        self.curve_analytic(curve).map(|a| a.geom.center)
     }
 
     /// Closes the open curve bracket (no-op when none is open).
@@ -479,8 +641,8 @@ impl Sketch {
 
     /// Registers a curve id (with its optional analytic definition) during
     /// structural (file-load) reconstruction.
-    pub(crate) fn insert_curve_raw(&mut self, geom: Option<CurveGeom>) -> SketchCurveId {
-        self.curves.insert(geom)
+    pub(crate) fn insert_curve_raw(&mut self, analytic: Option<CurveAnalytic>) -> SketchCurveId {
+        self.curves.insert(analytic)
     }
 
     /// The exact circles of this sketch's drawn curves, one rim per curve
@@ -504,8 +666,18 @@ impl Sketch {
         let axis = self.plane.normal();
         let (u, v) = plane_axes(axis);
         let mut out = Vec::new();
-        for (cid, geom) in &self.curves {
-            let Some(geom) = *geom else { continue };
+        for (cid, analytic) in &self.curves {
+            // Circles only. A polygon's sides are its geometry, so its
+            // circumcircle has no rim to offer — no quadrant points (they lie
+            // on no edge) and no tangents. Its center is published separately
+            // by `curve_centers`.
+            let Some(CurveAnalytic {
+                geom,
+                kind: SketchCurveKind::Circle,
+            }) = *analytic
+            else {
+                continue;
+            };
             let mut intervals: Vec<[f64; 2]> = Vec::new();
             let mut live = false;
             for (_, e) in self.edges.iter().filter(|(_, e)| e.curve == Some(cid)) {
@@ -552,6 +724,39 @@ impl Sketch {
             });
         }
         out
+    }
+
+    /// The exact drawn centers of this sketch's [`SketchCurveKind::Polygon`]
+    /// chains that still have at least one live edge — the polygon analogue
+    /// of the center [`Sketch::curve_rims`] publishes for a circle, and the
+    /// ONLY analytic point a polygon offers (its vertices are already
+    /// endpoints and its side midpoints already midpoints; cardinal points of
+    /// the circumcircle would lie on no edge at all).
+    ///
+    /// Circles are not listed here — their center arrives with the rest of
+    /// their rim through [`Sketch::curve_rims`], so a caller registering both
+    /// gets each center exactly once.
+    ///
+    /// Deterministic: curves in slotmap order.
+    pub fn polygon_centers(&self) -> Vec<(SketchCurveId, Point3)> {
+        self.curves
+            .iter()
+            .filter_map(|(cid, analytic)| {
+                let CurveAnalytic {
+                    geom,
+                    kind: SketchCurveKind::Polygon,
+                } = (*analytic)?
+                else {
+                    return None;
+                };
+                // A chain whose every edge has been erased is gone as far as
+                // the user is concerned — matching `curve_rims`' `live` gate.
+                self.edges
+                    .values()
+                    .any(|e| e.curve == Some(cid))
+                    .then_some((cid, geom.center))
+            })
+            .collect()
     }
 
     /// Current islands — connected components of the edge graph (read-only).
@@ -761,9 +966,12 @@ impl Sketch {
                 continue; // untouched chain
             }
             s.curves[cid] = match (s.curves[cid], scale, inside == members.len()) {
-                (Some(g), Some(sc), true) => Some(CurveGeom {
-                    center: t.apply_point(g.center),
-                    radius: g.radius * sc,
+                (Some(a), Some(sc), true) => Some(CurveAnalytic {
+                    geom: CurveGeom {
+                        center: t.apply_point(a.geom.center),
+                        radius: a.geom.radius * sc,
+                    },
+                    kind: a.kind,
                 }),
                 _ => None,
             };
@@ -863,11 +1071,14 @@ impl Sketch {
                         // One bracket per source chain, so the fresh edges are
                         // one selectable unit again.
                         match (self.curves.get(cid).copied().flatten(), scale) {
-                            (Some(g), Some(sc)) => {
-                                fresh.begin_curve_with(CurveGeom {
-                                    center: t.apply_point(g.center),
-                                    radius: g.radius * sc,
-                                })?;
+                            (Some(a), Some(sc)) => {
+                                fresh.begin_curve_with_kind(
+                                    CurveGeom {
+                                        center: t.apply_point(a.geom.center),
+                                        radius: a.geom.radius * sc,
+                                    },
+                                    a.kind,
+                                )?;
                             }
                             _ => {
                                 fresh.begin_curve();
@@ -929,11 +1140,14 @@ impl Sketch {
         // stops claiming an analytic ancestry it no longer has
         // (the true-curves design). Chain identity always survives.
         let scale = in_plane_similarity_scale(transform, self.plane.normal());
-        for geom in self.curves.values_mut() {
-            *geom = match (*geom, scale) {
-                (Some(g), Some(s)) => Some(CurveGeom {
-                    center: transform.apply_point(g.center),
-                    radius: g.radius * s,
+        for analytic in self.curves.values_mut() {
+            *analytic = match (*analytic, scale) {
+                (Some(a), Some(s)) => Some(CurveAnalytic {
+                    geom: CurveGeom {
+                        center: transform.apply_point(a.geom.center),
+                        radius: a.geom.radius * s,
+                    },
+                    kind: a.kind,
                 }),
                 _ => None,
             };
@@ -985,6 +1199,291 @@ impl Sketch {
         let report = s.remove_edge_inner(edge);
         *self = s;
         Ok(report)
+    }
+
+    /// Rebuilds a drawn circle's facets at a new density, in place.
+    ///
+    /// The chain's identity and its analytic [`CurveGeom`] are the fixed
+    /// points: `curve` still names the same chain afterwards and still
+    /// describes the same exact circle. Only the facets change — the chords
+    /// approximating that circle are discarded and `segments` fresh ones are
+    /// built in their place, evenly spaced and starting at the angle the old
+    /// ring started at, so a re-faceted circle does not visibly rotate under
+    /// the user. Regions and islands re-derive through the ordinary sticky
+    /// machinery, exactly as they would for freshly drawn geometry.
+    ///
+    /// This is the whole of "editing the segment count of an existing
+    /// circle": it is a rebuild, not a setting for the next circle drawn.
+    ///
+    /// **Only a whole, untouched circle qualifies.** Re-faceting replaces
+    /// every facet, so anything holding onto a particular facet would be
+    /// silently broken by it. The chain must therefore be a
+    /// [`SketchCurveKind::Circle`] whose live edges form ONE closed ring
+    /// covering the full turn, every vertex of which is incident to exactly
+    /// two edges and both of them members. A partially erased circle, an arc,
+    /// a polygon, or a circle glued to other geometry (a T-junction, a
+    /// rounded corner, a boundary shared with a neighbouring region) is
+    /// refused rather than rebuilt (rule 4 — no silent repair).
+    ///
+    /// Note that a circle already consumed by an extrusion cannot reach this
+    /// path at all: extrusion deletes the region's exclusive scaffolding
+    /// ([`Sketch::region_scaffolding`]), so the chain has no live edges left
+    /// and refuses here as [`SketchError::CurveNotRefacetable`]. Re-faceting
+    /// a *solid's* cylindrical wall is a different operation entirely and is
+    /// not this one.
+    ///
+    /// # Errors
+    /// - [`SketchError::UnknownCurve`] — stale chain handle.
+    /// - [`SketchError::CurveNotAnalytic`] — the chain carries no circle.
+    /// - [`SketchError::CurveNotRefacetable`] — the chain is not a whole,
+    ///   untouched circle (see above), or the rebuilt ring would interact
+    ///   with geometry drawn since (a denser ring sits closer to the exact
+    ///   circle, so it can reach a neighbour the old one did not): any split,
+    ///   crossing or collinear overlap refuses the whole operation.
+    /// - [`SketchError::SegmentsBelowFloor`] / [`SketchError::SegmentsAboveCap`]
+    ///   — `segments` outside `[MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS]`.
+    ///
+    /// On any error the sketch is unchanged (strong guarantee).
+    pub fn refacet_curve(
+        &mut self,
+        curve: SketchCurveId,
+        segments: usize,
+    ) -> Result<CurveRefaceted, SketchError> {
+        let analytic = self
+            .curves
+            .get(curve)
+            .copied()
+            .ok_or(SketchError::UnknownCurve)?
+            .ok_or(SketchError::CurveNotAnalytic)?;
+        if analytic.kind != SketchCurveKind::Circle {
+            return Err(SketchError::CurveNotRefacetable);
+        }
+        if segments < MIN_CIRCLE_SEGMENTS {
+            return Err(SketchError::SegmentsBelowFloor);
+        }
+        if segments > MAX_CIRCLE_SEGMENTS {
+            return Err(SketchError::SegmentsAboveCap);
+        }
+        let geom = analytic.geom;
+
+        let members: Vec<SketchEdgeId> = self.curve_edges(curve);
+        if members.is_empty() {
+            return Err(SketchError::CurveNotRefacetable);
+        }
+        let member_set: std::collections::BTreeSet<SketchEdgeId> =
+            members.iter().copied().collect();
+
+        // --- Isolation: every vertex the chain touches must carry exactly
+        //     this chain's two edges. That single test rules out both a
+        //     junction with foreign geometry (degree > 2, or a neighbour of
+        //     another owner) and an open end (degree 1) in one pass.
+        let mut incidence: std::collections::BTreeMap<SketchVertexId, usize> =
+            std::collections::BTreeMap::new();
+        let mut foreign: std::collections::BTreeSet<SketchVertexId> =
+            std::collections::BTreeSet::new();
+        for (eid, e) in &self.edges {
+            for v in [e.from, e.to] {
+                if member_set.contains(&eid) {
+                    *incidence.entry(v).or_insert(0) += 1;
+                } else {
+                    foreign.insert(v);
+                }
+            }
+        }
+        if incidence.len() != members.len() {
+            // A closed ring has as many vertices as edges; anything else is
+            // an open chain or several pieces.
+            return Err(SketchError::CurveNotRefacetable);
+        }
+        for (&v, &deg) in &incidence {
+            if deg != 2 || foreign.contains(&v) {
+                return Err(SketchError::CurveNotRefacetable);
+            }
+        }
+
+        // --- ONE ring, not several.
+        //
+        // Degree-2-everywhere only makes the member set a disjoint UNION of
+        // cycles, and neither the on-circle test nor the full-turn test below
+        // closes that gap. A ring whose edges are not all short chords can
+        // cover the whole turn by itself: one long secant spanning a wide
+        // gap contributes that gap's whole arc to the coverage, while the
+        // circular segment BEHIND it stays empty. A second, wholly separate
+        // ring inscribed inside that segment then shares no vertex with the
+        // first, crosses none of its chords, adds only arcs the first already
+        // claimed — and passes every other test here. Rebuilding would delete
+        // it without a word, which is exactly the silent repair rule 4
+        // forbids. So walk the member graph and require one component.
+        {
+            let mut adjacency: std::collections::BTreeMap<SketchVertexId, Vec<SketchEdgeId>> =
+                std::collections::BTreeMap::new();
+            for &eid in &members {
+                let e = self.edges[eid];
+                adjacency.entry(e.from).or_default().push(eid);
+                adjacency.entry(e.to).or_default().push(eid);
+            }
+            let mut seen: std::collections::BTreeSet<SketchEdgeId> =
+                std::collections::BTreeSet::new();
+            seen.insert(members[0]);
+            let mut frontier = vec![members[0]];
+            while let Some(cur) = frontier.pop() {
+                let e = self.edges[cur];
+                for v in [e.from, e.to] {
+                    for &n in &adjacency[&v] {
+                        if seen.insert(n) {
+                            frontier.push(n);
+                        }
+                    }
+                }
+            }
+            if seen.len() != members.len() {
+                return Err(SketchError::CurveNotRefacetable);
+            }
+        }
+
+        // --- The ring must be the WHOLE circle, and actually lie on it.
+        let axis = self.plane.normal();
+        let (u, v) = plane_axes(axis);
+        let angle_of = |vid: SketchVertexId| -> Option<f64> {
+            let d = self.vertices[vid].position - geom.center;
+            let radial = d - axis * d.dot(axis);
+            if (radial.length() - geom.radius).abs() > tol::POINT_MERGE {
+                return None; // not on the exact circle
+            }
+            if radial.length() <= tol::NORMALIZE_MIN_LENGTH {
+                return None;
+            }
+            Some(radial.dot(v).atan2(radial.dot(u)))
+        };
+        let mut intervals: Vec<[f64; 2]> = Vec::with_capacity(members.len());
+        for &eid in &members {
+            let e = self.edges[eid];
+            let (Some(a), Some(b)) = (angle_of(e.from), angle_of(e.to)) else {
+                return Err(SketchError::CurveNotRefacetable);
+            };
+            let mut offset = b - a;
+            while offset > std::f64::consts::PI {
+                offset -= 2.0 * std::f64::consts::PI;
+            }
+            while offset <= -std::f64::consts::PI {
+                offset += 2.0 * std::f64::consts::PI;
+            }
+            intervals.push([a.min(a + offset), a.max(a + offset)]);
+        }
+        // `None` from the shared merger IS "the full circle" — the same
+        // notion `curve_rims` publishes, so the two agree by construction.
+        if crate::topo::merge_angular_intervals(&intervals, geom.radius).is_some() {
+            return Err(SketchError::CurveNotRefacetable);
+        }
+
+        // --- Start angle: the ring's SMALLEST vertex angle in the basis
+        //     frame. The new ring is built from it, so it survives the
+        //     rebuild and the circle does not appear to spin when the count
+        //     changes.
+        //
+        //     Chosen geometrically rather than from the lowest-id member,
+        //     which would be equally deterministic but not equally STABLE:
+        //     edge ids depend on insertion history and on slotmap slot reuse,
+        //     so the lowest-id edge of a rebuilt ring is not the one the ring
+        //     starts at, and a circle re-faceted twice — or one whose ids
+        //     were re-minted by a save/load — would drift a fraction of a
+        //     facet each time. An angle read off the geometry drifts for
+        //     nobody.
+        let start = members
+            .iter()
+            .flat_map(|&eid| {
+                let e = self.edges[eid];
+                [angle_of(e.from), angle_of(e.to)]
+            })
+            .flatten()
+            .fold(f64::INFINITY, f64::min);
+        if !start.is_finite() {
+            return Err(SketchError::CurveNotRefacetable);
+        }
+
+        let ring: Vec<Point3> = (0..segments)
+            .map(|k| {
+                let a = start + std::f64::consts::TAU * (k as f64) / (segments as f64);
+                geom.center + u * (geom.radius * a.cos()) + v * (geom.radius * a.sin())
+            })
+            .collect();
+
+        // --- Commit on a clone (strong guarantee).
+        let mut s = self.clone();
+        let regions_before: std::collections::BTreeSet<SketchRegionId> = s.regions.keys().collect();
+
+        let mut removed_vertices: Vec<SketchVertexId> = Vec::new();
+        for &eid in &members {
+            s.edges.remove(eid);
+        }
+        for &vid in incidence.keys() {
+            if !s.vertex_has_edges(vid) {
+                s.vertices.remove(vid);
+                removed_vertices.push(vid);
+            }
+        }
+        // Bring regions/islands back in step with the now-smaller edge set
+        // before replaying, so the sketch is never observed holding a region
+        // whose boundary vertices are gone. (`add_segment_inner` recomputes
+        // both itself, so this is about the state *between* the two halves.)
+        let stale_regions: Vec<(SketchRegionId, SketchRegion)> =
+            s.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        s.recompute_regions_with_diff(&stale_regions);
+        s.recompute_islands();
+
+        // Replay the new facets through the ordinary sticky machinery under
+        // this chain's bracket, so the chain keeps its id and any interaction
+        // with geometry drawn since is SEEN rather than assumed away. A clean
+        // insert is exactly one new edge and no split; anything else means the
+        // ring met something, and the whole operation refuses (`restore_edges`
+        // holds itself to the same bar).
+        let saved_bracket = s.active_curve;
+        s.active_curve = Some(curve);
+        let mut new_edges: Vec<SketchEdgeId> = Vec::with_capacity(segments);
+        for k in 0..segments {
+            let report = s
+                .add_segment_inner(ring[k], ring[(k + 1) % segments])
+                .map_err(|_| SketchError::CurveNotRefacetable)?;
+            if !report.split_edges.is_empty() || report.new_edges.len() != 1 {
+                return Err(SketchError::CurveNotRefacetable);
+            }
+            new_edges.push(report.new_edges[0]);
+        }
+        s.active_curve = saved_bracket;
+        if s.curve_edges(curve).len() != segments {
+            return Err(SketchError::CurveNotRefacetable);
+        }
+
+        let new_vertices: Vec<SketchVertexId> = {
+            let mut vs: std::collections::BTreeSet<SketchVertexId> =
+                std::collections::BTreeSet::new();
+            for &eid in &new_edges {
+                let e = s.edges[eid];
+                vs.insert(e.from);
+                vs.insert(e.to);
+            }
+            vs.into_iter().collect()
+        };
+
+        // Region diff over the WHOLE operation: `add_segment_inner` keeps
+        // regions current step by step, so the only honest report is the
+        // before/after id difference (a region that appeared and vanished
+        // mid-replay is in neither list, matching `RegionOffsetAdded`).
+        let regions_after: std::collections::BTreeSet<SketchRegionId> = s.regions.keys().collect();
+        let regions_created: Vec<SketchRegionId> =
+            regions_after.difference(&regions_before).copied().collect();
+        let regions_removed: Vec<SketchRegionId> =
+            regions_before.difference(&regions_after).copied().collect();
+
+        *self = s;
+        Ok(CurveRefaceted {
+            removed_edges: members,
+            removed_vertices,
+            new_edges,
+            new_vertices,
+            regions_created,
+            regions_removed,
+        })
     }
 
     /// Repositions vertex `v` to `new_pos`, dragging its incident edges with

@@ -128,7 +128,16 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 5;
 /// readers of any older version ignore them entirely. Geometry the older
 /// versions kept hidden under a standing solid loads visible. Geometry
 /// buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 4).
-pub const MANIFEST_FORMAT_VERSION: u32 = 11;
+/// v12: `sketches[].curves[].kind` — what a chain's analytic circle claims
+/// about it. Absent (the only thing v10/v11 writers emit) means `"circle"`,
+/// the pre-existing meaning, so older files load unchanged and a document
+/// with no polygon still writes a byte-identical `curves[]`. `"polygon"` says
+/// the chain's edges ARE the geometry and the circle is only their
+/// circumcircle, supplying a center and nothing else. Back-compatible in the
+/// read direction; a v11 reader given a v12 file loses only the distinction
+/// (it would read a polygon as a circle), which is why the version moves.
+/// Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 5).
+pub const MANIFEST_FORMAT_VERSION: u32 = 12;
 
 /// The manifest version at which the stored sketch–solid claim fields
 /// (`consumed`, `objects[].footprints`, `objects[].source`) were retired.
@@ -1379,7 +1388,24 @@ pub(crate) struct SketchCurveDto {
     pub center: [f64; 3],
     /// Circle radius in meters (> 0).
     pub radius: f64,
+    /// What the circle claims about the chain (manifest v12+): absent or
+    /// `"circle"` — the chain's edges are chord facets approximating it — or
+    /// `"polygon"` — the edges ARE the geometry and the circle is only their
+    /// circumcircle, contributing a center and nothing else. Absent in
+    /// v10/v11 files, which predate a polygon carrying a center at all, so
+    /// the default is exactly right for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
+
+/// The `SketchCurveDto::kind` token for [`crate::sketch::SketchCurveKind::Polygon`].
+/// Circles write no token at all, so v12 files are byte-identical to v11 for
+/// every document that contains no polygon.
+pub(crate) const CURVE_KIND_POLYGON: &str = "polygon";
+/// The explicit token for [`crate::sketch::SketchCurveKind::Circle`]. Never
+/// written (absence means circle), but accepted on load so a hand-written or
+/// third-party manifest can be explicit.
+pub(crate) const CURVE_KIND_CIRCLE: &str = "circle";
 
 /// A reference to a node in the document tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1802,10 +1828,17 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
     let mut curve_dtos: Vec<SketchCurveDto> = curve_to_dense
         .iter()
         .filter_map(|(&cid, &dense)| {
-            sk.curve_geom(cid).map(|g| SketchCurveDto {
+            // `curve_analytic`, NOT `curve_geom`: the latter is circle-only
+            // by contract, and a polygon's center is exactly what this record
+            // has to carry across a save/load.
+            sk.curve_analytic(cid).map(|a| SketchCurveDto {
                 id: dense,
-                center: [g.center.x, g.center.y, g.center.z],
-                radius: g.radius,
+                center: [a.geom.center.x, a.geom.center.y, a.geom.center.z],
+                radius: a.geom.radius,
+                kind: match a.kind {
+                    crate::sketch::SketchCurveKind::Circle => None,
+                    crate::sketch::SketchCurveKind::Polygon => Some(CURVE_KIND_POLYGON.to_string()),
+                },
             })
         })
         .collect();
@@ -2177,7 +2210,7 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
     // Analytic curve definitions (manifest v10+), keyed by dense curve id.
     // Validated up front: a non-positive radius, or an entry for a dense id
     // no edge references (checked after the edge pass), is a malformed file.
-    let mut curve_geoms: std::collections::BTreeMap<u32, crate::sketch::CurveGeom> =
+    let mut curve_geoms: std::collections::BTreeMap<u32, crate::sketch::CurveAnalytic> =
         std::collections::BTreeMap::new();
     for c in &dto.curves {
         if !c.radius.is_finite() || c.radius <= crate::tol::POINT_MERGE {
@@ -2188,12 +2221,32 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                 ),
             });
         }
+        // An unrecognized `kind` is a malformed manifest, not a silent
+        // fallback to circle: guessing here would stamp a polygon as a curve
+        // and hand it quadrants, tangents and a swept cylinder it has no
+        // claim to (the very substitution `SketchCurveKind` exists to
+        // prevent).
+        let kind = match c.kind.as_deref() {
+            None | Some(CURVE_KIND_CIRCLE) => crate::sketch::SketchCurveKind::Circle,
+            Some(CURVE_KIND_POLYGON) => crate::sketch::SketchCurveKind::Polygon,
+            Some(other) => {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "sketch {} curve {} has unknown kind {:?}",
+                        dto.id, c.id, other
+                    ),
+                });
+            }
+        };
         if curve_geoms
             .insert(
                 c.id,
-                crate::sketch::CurveGeom {
-                    center: Point3::new(c.center[0], c.center[1], c.center[2]),
-                    radius: c.radius,
+                crate::sketch::CurveAnalytic {
+                    geom: crate::sketch::CurveGeom {
+                        center: Point3::new(c.center[0], c.center[1], c.center[2]),
+                        radius: c.radius,
+                    },
+                    kind,
                 },
             )
             .is_some()

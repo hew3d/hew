@@ -1105,7 +1105,13 @@ fn older_files_consumed_claims_become_deletion_on_load() {
     );
 
     // Nothing resurrected: no region overlapping the old consumed areas
-    // exists, and no stored claim survived — resaving emits clean v11.
+    // exists, and no stored claim survived — resaving emits clean v12.
+    //
+    // The version is a LITERAL on purpose. Writing it as
+    // `MANIFEST_FORMAT_VERSION` would make the assertion tautological — the
+    // writer emits that same constant — and would quietly retire the
+    // forcing-function this line also serves: a schema change that forgets to
+    // bump the version has to fail something, and this is that something.
     let resaved = loaded.save();
     let resaved_manifest = {
         use std::io::Read as _;
@@ -1117,13 +1123,13 @@ fn older_files_consumed_claims_become_deletion_on_load() {
             .unwrap();
         s
     };
-    assert!(resaved_manifest.contains("\"format_version\": 11"));
+    assert!(resaved_manifest.contains("\"format_version\": 12"));
     assert!(!resaved_manifest.contains("\"consumed\""));
     assert!(!resaved_manifest.contains("\"footprints\""));
     assert!(!resaved_manifest.contains("\"source\""));
 
     // And the resave is byte-stable: load(save) reproduces the bytes.
-    let reloaded = Document::load(&resaved).expect("clean v11 reloads");
+    let reloaded = Document::load(&resaved).expect("the clean resave reloads");
     assert_eq!(reloaded.save(), resaved, "deterministic clean-v11 resave");
 }
 
@@ -1515,6 +1521,166 @@ fn curve_geometry_round_trips_through_save_load() {
     assert_eq!((with_geom, without_geom), (1, 1));
 
     assert_eq!(doc2.save(), bytes, "deterministic re-save");
+}
+
+/// The manifest of a saved document, parsed.
+fn manifest_json(bytes: &[u8]) -> serde_json::Value {
+    use std::io::Read as _;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut raw = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut raw)
+        .unwrap();
+    serde_json::from_slice(&raw).unwrap()
+}
+
+/// A document holding one circle chain and one polygon chain, for the
+/// `sketches[].curves[].kind` tests (manifest v12).
+fn circle_and_polygon_doc() -> Document {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    let sk = doc.sketch_mut(s).unwrap();
+
+    // A circle chain (two facets is enough — the record, not the density, is
+    // what is being serialized).
+    sk.begin_curve_with(kernel::CurveGeom {
+        center: Point3::new(1.0, 2.0, 0.0),
+        radius: 0.75,
+    })
+    .unwrap();
+    sk.add_segment(Point3::new(1.75, 2.0, 0.0), Point3::new(1.0, 2.75, 0.0))
+        .unwrap();
+    sk.end_curve();
+
+    // A polygon chain: an equilateral triangle about (10, 0) with
+    // circumradius 1.
+    sk.begin_curve_with_kind(
+        kernel::CurveGeom {
+            center: Point3::new(10.0, 0.0, 0.0),
+            radius: 1.0,
+        },
+        kernel::SketchCurveKind::Polygon,
+    )
+    .unwrap();
+    let corner = |k: i32| {
+        let a = std::f64::consts::TAU * (k as f64) / 3.0;
+        Point3::new(10.0 + a.cos(), a.sin(), 0.0)
+    };
+    for k in 0..3 {
+        sk.add_segment(corner(k), corner(k + 1)).unwrap();
+    }
+    sk.end_curve();
+    doc
+}
+
+/// The kind discriminant round-trips, and only a polygon writes a token:
+/// a circle's record is byte-identical to what v10/v11 wrote, which is what
+/// makes the absent-means-circle default honest rather than convenient.
+#[test]
+fn curve_kind_round_trips_and_only_polygons_write_a_token() {
+    let doc = circle_and_polygon_doc();
+    let bytes = doc.save();
+
+    let manifest = manifest_json(&bytes);
+    let text = serde_json::to_string(&manifest).unwrap();
+    assert_eq!(
+        text.matches("\"kind\":\"polygon\"").count(),
+        1,
+        "exactly the one polygon chain writes a kind token"
+    );
+    assert!(
+        !text.contains("\"kind\":\"circle\""),
+        "a circle writes no token at all, so its record stays v11-shaped"
+    );
+
+    let loaded = Document::load(&bytes).expect("round-trip");
+    let sk = loaded.sketch(loaded.sketch_ids()[0]).unwrap();
+
+    let mut circles = 0;
+    let mut polygons = 0;
+    let mut seen: std::collections::BTreeSet<kernel::SketchCurveId> =
+        std::collections::BTreeSet::new();
+    for e in sk.edges().values() {
+        let Some(cid) = e.curve else { continue };
+        if !seen.insert(cid) {
+            continue;
+        }
+        match sk
+            .curve_analytic(cid)
+            .expect("both chains carry geometry")
+            .kind
+        {
+            kernel::SketchCurveKind::Circle => {
+                circles += 1;
+                assert!(sk.curve_geom(cid).is_some(), "a circle answers curve_geom");
+            }
+            kernel::SketchCurveKind::Polygon => {
+                polygons += 1;
+                assert!(
+                    sk.curve_geom(cid).is_none(),
+                    "a polygon must NOT answer the circle-only accessor"
+                );
+            }
+        }
+    }
+    assert_eq!((circles, polygons), (1, 1));
+
+    // The polygon's center survives, exactly, and it is the only one
+    // published as a polygon center (the circle's rides its rim instead).
+    let centers = sk.polygon_centers();
+    assert_eq!(centers.len(), 1);
+    assert!(centers[0].1.approx_eq(Point3::new(10.0, 0.0, 0.0), 1e-12));
+    assert_eq!(sk.curve_rims().len(), 1, "and the circle still has its rim");
+
+    assert_eq!(loaded.save(), bytes, "deterministic re-save");
+}
+
+/// A v11 manifest — no `kind` anywhere — loads with every chain a circle.
+/// This is the back-compatibility claim of the v12 bump, stated as a test
+/// rather than as a comment.
+#[test]
+fn manifest_without_curve_kind_loads_every_chain_as_a_circle() {
+    let bytes = circle_and_polygon_doc().save();
+    let downgraded = with_patched_manifest(&bytes, |m| {
+        m["format_version"] = serde_json::json!(11);
+        for sk in m["sketches"].as_array_mut().unwrap() {
+            for c in sk["curves"].as_array_mut().unwrap() {
+                c.as_object_mut().unwrap().remove("kind");
+            }
+        }
+    });
+
+    let loaded = Document::load(&downgraded).expect("a v11-shaped manifest still loads");
+    let sk = loaded.sketch(loaded.sketch_ids()[0]).unwrap();
+    assert!(
+        sk.polygon_centers().is_empty(),
+        "no chain claims to be a polygon"
+    );
+    assert_eq!(
+        sk.curve_rims().len(),
+        2,
+        "both chains read back as circles, so both have rims"
+    );
+}
+
+/// An unrecognized `kind` is a malformed manifest, not a silent fall back to
+/// circle: guessing would hand a shape quadrants, tangents and a swept
+/// cylinder it has no claim to (rule 4).
+#[test]
+fn unknown_curve_kind_is_rejected() {
+    let bytes = circle_and_polygon_doc().save();
+    let tampered = with_patched_manifest(&bytes, |m| {
+        for sk in m["sketches"].as_array_mut().unwrap() {
+            for c in sk["curves"].as_array_mut().unwrap() {
+                c["kind"] = serde_json::json!("ellipse");
+            }
+        }
+    });
+    assert!(
+        Document::load(&tampered).is_err(),
+        "an unknown curve kind must refuse the load"
+    );
 }
 
 /// A saved two-chain document for the curve tamper tests below: chain 0 has

@@ -1928,6 +1928,35 @@ fn gravity_reaches_past_the_plain_aperture() {
     );
 }
 
+/// A polygon center is a bare `Center` — no rim, no quadrants — registered
+/// through its own scene channel, and it carries the same analytic-point
+/// gravity a circle's center does: it reaches past the plain aperture. Pins
+/// the polygon-center walk on the weighted cone; an unweighted cone here
+/// offers nothing at this distance.
+#[test]
+fn a_polygon_center_reaches_past_the_plain_aperture() {
+    let center = Point3::new(2.0, 3.0, 0.0);
+    let mut scene = InferenceScene::new();
+    scene.add_sketch_polygon_centers(SketchId::default(), &[center]);
+
+    // 0.075 m off at 3 m overhead is 0.025 rad — past the 0.02 aperture,
+    // inside the 2.5x analytic-point reach.
+    let aim = center + Vec3::new(0.075, 0.0, 0.0);
+    let q = query(overhead(aim), 0.02);
+    let snap = scene.resolve(&q).expect("the center is within its gravity");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(snap.position.approx_eq(center, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+
+    let mut precise = q;
+    precise.weights = SnapWeights::uniform();
+    assert_eq!(
+        scene.resolve(&precise),
+        None,
+        "unweighted, nothing is inside the cone at all"
+    );
+}
+
 /// Reach never steals. A quadrant admitted ONLY by its gravity — past the
 /// query's own aperture — must lose to anything inside the plain aperture,
 /// however weak its kind: otherwise hovering a face near a circle would yank

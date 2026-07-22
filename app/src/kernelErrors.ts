@@ -57,6 +57,15 @@ const DESCRIPTIONS: Record<string, string> = {
     "This profile's outline couldn't be traced. Redraw the shape; if it keeps failing, use Report Bug.",
   DegenerateCurve:
     'That circle or arc is too small to keep. Drag a larger radius, or type an exact one.',
+  UnknownCurve: stale('curve'),
+  CurveNotAnalytic:
+    "This shape has no circle behind it, so there's nothing to re-build. Only a circle drawn with the Circle tool has a segment count.",
+  CurveNotRefacetable:
+    "Only a whole, untouched circle can have its segment count changed — not a part-erased one, and not one other lines run into. Redraw the circle at the count you want.",
+  SegmentsBelowFloor:
+    'A circle needs at least 24 segments — below that it stops being a circle and becomes a polygon. Use the Polygon tool for a coarser shape.',
+  SegmentsAboveCap:
+    'That is more segments than a circle can hold. Enter a smaller count.',
   RestoreConflicts:
     'Undo needs to put the original outline back, but newer drawing is in its way. Erase the overlapping lines and undo again.',
   OffsetTooSmall:
@@ -279,6 +288,10 @@ const ERROR_LEVEL_CODES: ReadonlySet<string> = new Set([
   'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
   'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
   'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
+  // A refusal to rebuild geometry the user asked to rebuild. Its sibling
+  // segment-count codes stay at warn: those are an out-of-range number, not a
+  // refusal of the shape.
+  'CurveNotRefacetable',
   // App-emitted refusal (no kernel enum): structural verbs on a sketch selection.
   'InvalidSelection',
 ])
