@@ -86,9 +86,39 @@ export class SnapService {
   private scene: Scene
   /** The last resolved snap, kept for magnetic hysteresis (see `resolve`). */
   private lastSnap: Snap | null = null
+  /** Precision mode — see `setPrecision`. */
+  private precision = false
 
   constructor(scene: Scene) {
     this.scene = scene
+  }
+
+  /**
+   * Turn precision snapping on or off for every subsequent query.
+   *
+   * Off (the default) the kernel applies its gravity profile: a drawn
+   * circle's exact center and quadrant points pull harder than the endpoints
+   * and midpoints of the facets crowding around them, so they win even when
+   * the cursor is slightly nearer a facet point. On, every kind pulls equally
+   * and the nearest candidate wins again — which is how a facet point stays
+   * reachable at all. The *weighting* lives in the kernel; only this boolean
+   * crosses the boundary (the kernel never learns which key is held).
+   *
+   * Toggling drops the held sticky snap: hysteresis exists to resist letting
+   * go of a target the user is still on, and the whole point of the toggle is
+   * that the target should change. Returns whether the mode actually changed,
+   * so callers can skip a re-query when it did not.
+   */
+  setPrecision(on: boolean): boolean {
+    if (this.precision === on) return false
+    this.precision = on
+    this.lastSnap = null
+    return true
+  }
+
+  /** Whether precision snapping is currently on. */
+  isPrecision(): boolean {
+    return this.precision
   }
 
   /** One kernel snap query at a given pixel aperture; null if the kernel
@@ -113,6 +143,7 @@ export class SnapService {
         anchorArr,
         lockAxis ?? null,
         constraintPlaneArr,
+        this.precision,
       )
       return result !== undefined ? snapJsToSnap(result) : null
     } catch (err) {

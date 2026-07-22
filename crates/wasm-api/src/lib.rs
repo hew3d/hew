@@ -27,6 +27,7 @@ mod recording;
 use dae_import::ImageMap;
 use inference::{
     Axis, ElementRef, InferenceScene, PickRay, SketchRegionFace, SnapKind, SnapLock, SnapQuery,
+    SnapWeights,
 };
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
@@ -3301,6 +3302,14 @@ impl Scene {
     /// drawing on a face never snaps through the solid to occluded, off-plane
     /// geometry. Returns `undefined` when nothing snaps (tools fall back to
     /// their own plane intersection).
+    ///
+    /// `precision`, when true, selects [`SnapWeights::uniform`] — every snap
+    /// kind pulls equally, so ranking falls back to raw angular distance and a
+    /// point the default gravity would swallow (a circle facet's endpoint
+    /// beside a quadrant) becomes reachable. Omitted/false selects the shipped
+    /// gravity profile. It is a plain boolean because the *kernel* owns the
+    /// weighting and the *app* owns the gesture that selects it: which key is
+    /// held never crosses this boundary (DEVELOPMENT.md rule 1).
     // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
@@ -3315,6 +3324,7 @@ impl Scene {
         anchor: Option<Box<[f64]>>,
         lock_axis: Option<u8>,
         constraint_plane: Option<Box<[f64]>>,
+        precision: Option<bool>,
     ) -> Result<Option<SnapJs>, ApiError> {
         let anchor = match anchor {
             None => None,
@@ -3365,6 +3375,11 @@ impl Scene {
             lock,
             aperture,
             constraint_plane,
+            weights: if precision.unwrap_or(false) {
+                SnapWeights::uniform()
+            } else {
+                SnapWeights::default()
+            },
         };
         Ok(self.inference.resolve(&query).map(|snap| SnapJs { snap }))
     }
@@ -4653,13 +4668,13 @@ mod tests {
         // A facet vertex snaps as Endpoint…
         let (vx, vy) = p(0);
         let snap = loaded
-            .snap(vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .snap(vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None)
             .unwrap()
             .expect("loaded sketch vertex snaps");
         assert_eq!(snap.kind(), "endpoint");
         // …and the drawn circle's exact center snaps as Center.
         let snap = loaded
-            .snap(1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .snap(1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None)
             .unwrap()
             .expect("loaded circle center snaps");
         assert_eq!(snap.kind(), "center");
@@ -4711,7 +4726,19 @@ mod tests {
 
         // Snap straight down at the copy's center.
         let snap = scene
-            .snap(cx + 0.08, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .snap(
+                cx + 0.08,
+                cy,
+                3.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.002,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap()
             .expect("something snaps at the copy center");
         assert_eq!(snap.kind(), "center");
@@ -4719,7 +4746,7 @@ mod tests {
         assert!((snap.y() - cy).abs() < 1e-12);
         // And the original center still snaps too.
         let snap0 = scene
-            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None)
+            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None)
             .unwrap()
             .expect("original center snaps");
         assert_eq!(snap0.kind(), "center");
@@ -4845,6 +4872,95 @@ mod tests {
         );
     }
 
+    /// The `precision` flag on `Scene::snap` is the ONLY thing that crosses
+    /// the boundary for snap gravity — the weighting itself stays in the
+    /// kernel, and which key selects it stays in the app (DEVELOPMENT.md
+    /// rule 1). This pins that the flag is actually wired: the same ray, the
+    /// same aperture, two different answers.
+    #[test]
+    fn the_precision_flag_selects_uniform_snap_weights() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        let (cx, cy, r, n) = (1.0f64, 1.0f64, 0.1f64, 24usize);
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_begin_curve_with(sketch, cx, cy, 0.0, r)
+            .unwrap();
+        // Half-facet phase: no vertex lands on a cardinal, so the +X quadrant
+        // and the facet vertex beside it are distinct competing candidates.
+        let p = |i: usize| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
+            (cx + r * a.cos(), cy + r * a.sin())
+        };
+        for i in 0..n {
+            let (ax, ay) = p(i);
+            let (bx, by) = p(i + 1);
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_curve(sketch).unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+
+        // Aim 65% of the way from the +X quadrant to the facet vertex beside
+        // it — NEARER the vertex, and both inside the plain aperture.
+        let (qx, qy) = (cx + r, cy);
+        let (vx, vy) = p(0);
+        let (ax, ay) = (qx + 0.65 * (vx - qx), qy + 0.65 * (vy - qy));
+
+        let default_snap = scene
+            .snap(ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None)
+            .unwrap()
+            .expect("something snaps");
+        assert_eq!(
+            default_snap.kind(),
+            "quadrant",
+            "default gravity: the quadrant out-pulls the nearer facet vertex"
+        );
+
+        let precise = scene
+            .snap(
+                ax,
+                ay,
+                3.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.004,
+                None,
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap()
+            .expect("something snaps");
+        assert_eq!(
+            precise.kind(),
+            "endpoint",
+            "precision: uniform weights, so the nearer facet vertex wins"
+        );
+        assert!((precise.x() - vx).abs() < 1e-9 && (precise.y() - vy).abs() < 1e-9);
+
+        // An explicit `false` must behave exactly like an omitted flag.
+        let explicit_off = scene
+            .snap(
+                ax,
+                ay,
+                3.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.004,
+                None,
+                None,
+                None,
+                Some(false),
+            )
+            .unwrap()
+            .expect("something snaps");
+        assert_eq!(explicit_off.kind(), "quadrant");
+    }
+
     /// FIX A, against the maintainer's real file (`follow-me-2.hew`): hovering
     /// the fill of a standing sketch region resolves to an `OnFace` snap ON the
     /// region's plane, instead of the ray passing through to the ground/box
@@ -4863,6 +4979,7 @@ mod tests {
         // +Y side, close enough that its own edges fall outside the aperture
         // cone (the maintainer's zoom) — so only a face candidate can win.
         let q = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(0.11, 0.30, 0.015),
                 direction: kernel::Vec3::new(0.0, -1.0, 0.0),
@@ -4941,6 +5058,7 @@ mod tests {
         // The hover-consistent resolve ranks OnEdge above OnFace, so the click
         // (which now routes through resolve) selects the partition EDGE.
         let q = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(ox, oy, oz),
                 direction: kernel::Vec3::new(dx, dy, dz),
@@ -5005,6 +5123,7 @@ mod tests {
 
         // The occlusion-aware resolve returns the nearer region.
         let q = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(ox, oy, oz),
                 direction: kernel::Vec3::new(dx, dy, dz),
@@ -5047,6 +5166,7 @@ mod tests {
 
         let (ox, oy, oz, dx, dy, dz) = (0.0, 0.0, 5.0, 0.0, 0.0, -1.0);
         let q = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(ox, oy, oz),
                 direction: kernel::Vec3::new(dx, dy, dz),
@@ -7040,7 +7160,7 @@ mod tests {
             .snap(
                 5.0, 5.0, 3.0, // ray origin
                 0.0, 0.0, -1.0, // ray direction (-Z)
-                0.05, None, None, None,
+                0.05, None, None, None, None,
             )
             .unwrap()
             .expect("ray crosses the guide line");
@@ -7055,7 +7175,7 @@ mod tests {
         scene.delete_all_guides().unwrap();
 
         let snap = scene
-            .snap(5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None)
+            .snap(5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None)
             .unwrap();
         assert!(
             snap.is_none(),
@@ -7075,7 +7195,7 @@ mod tests {
         let snaps = |scene: &Scene| {
             scene
                 .snap(
-                    ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None,
+                    ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None, None,
                 )
                 .unwrap()
         };
@@ -7107,7 +7227,7 @@ mod tests {
         scene.add_guide_point(2.0, 3.0, 0.0).unwrap();
 
         let snap = scene
-            .snap(2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None)
+            .snap(2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None)
             .unwrap()
             .expect("ray points straight at the guide point");
         assert_eq!(snap.kind(), "endpoint");

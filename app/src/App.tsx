@@ -154,6 +154,9 @@ export default function App() {
   /** Live stage-aware guidance from the active tool (Tool.statusHint);
    *  null = fall back to the palette's static tool description. */
   const [toolStageHint, setToolStageHint] = useState<string | null>(null)
+  /** Precision snapping (the Ctrl/⌘+Alt chord held) — modal state, so it
+   * gets a status-bar chip rather than living only in the viewport. */
+  const [precisionSnap, setPrecisionSnap] = useState(false)
   const [snapKind, setSnapKind] = useState<string | null>(null)
   const [measurement, setMeasurement] = useState<string>('')
   /** Live inference-cursor info for the tooltip chip. */
@@ -2724,6 +2727,7 @@ export default function App() {
             onSceneChange={handleSceneChange}
             onToast={handleToast}
             onToolHint={setToolStageHint}
+            onPrecisionChange={setPrecisionSnap}
             activeTool={activeTool}
             activeContext={activeContext}
             selectedIds={selectedIds}
@@ -2979,6 +2983,28 @@ export default function App() {
           <>
             <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
             <span style={{ color: 'var(--text-faint)' }}>{toolStageHint ?? toolHint(toolName)}</span>
+          </>
+        )}
+        {/* Precision-snapping chip — the only cue that the chord is doing
+            anything, and the mode is invisible otherwise (it changes which
+            candidate wins, not what is drawn). Sits with the tool guidance
+            rather than right-aligned with the document-level watertight badge,
+            because it is about the gesture in progress. */}
+        {precisionSnap && (
+          <>
+            <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
+            <span
+              style={{
+                padding: '2px 8px',
+                fontSize: 'var(--font-size-dock-chip, 11px)',
+                borderRadius: 4,
+                background: 'var(--surface-raised, rgba(127,127,127,0.18))',
+                color: 'var(--text-primary)',
+                fontWeight: 600,
+              }}
+            >
+              Precision snap ({isMac ? '⌘⌥' : 'Ctrl+Alt'})
+            </span>
           </>
         )}
         {/* Watertight badge — aggregate solids feedback; no other single-glance

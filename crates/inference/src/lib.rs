@@ -13,10 +13,50 @@
 //! # Priority model
 //!
 //! When several candidates fall inside the pick cone, the strongest
-//! [`SnapKind`] wins (the enum's declaration order IS the priority order,
-//! strongest first — `SnapKind`'s `Ord` reflects it and tools may rely on
-//! that). Among candidates of equal kind, the one nearest the ray wins; ties
-//! break toward the one nearest the ray origin (closest to camera).
+//! [`SnapKind::rank_group`] wins (the enum's declaration order IS the
+//! priority order, strongest first — `SnapKind`'s `Ord` reflects it and tools
+//! may rely on that; the rank group collapses only the three *exact named
+//! point* kinds, see below). Within one rank group the candidate with the
+//! smallest **normalized** angular distance wins; equal-distance ties break
+//! toward the stronger `SnapKind`, then toward the one nearest the ray origin
+//! (closest to camera).
+//!
+//! # Gravity (per-kind weighting)
+//!
+//! Not every kind deserves the same pull. A drawn circle's exact center and
+//! its four quadrant points are what a user aims at; the many endpoints and
+//! midpoints of the facets approximating that circle are noise around them.
+//! [`SnapWeights`] gives each kind a *weight* `w` that scales the pick cone
+//! for that kind alone: the kind is admitted out to `w * aperture` from the
+//! ray axis, and its angular distance is divided by `w` before ranking. The
+//! normalized distance every candidate is ranked by is therefore "the
+//! aperture at which this candidate would just have been admitted" — one
+//! scale, directly comparable across kinds, and `w = 1` is exactly the
+//! unweighted behavior.
+//!
+//! Two guards keep that from turning into a land grab.
+//!
+//! *Reach never steals.* A candidate admitted only because its weight widened
+//! the cone — angular distance past the query's own `aperture` — ranks behind
+//! **every** candidate inside the plain aperture, whatever its kind. Gravity
+//! reaches into space nothing else was competing for; it never overrules the
+//! thing the cursor is actually on. Without this, a circle quadrant two
+//! apertures away would beat the face directly under the cursor, and hovering
+//! a surface near a circle would yank the cursor off it.
+//!
+//! *Weighting cannot invert the coarse priority order.* A face would beat a
+//! vertex, since an on-face hit is at angular distance zero by construction.
+//! So kinds are ranked by [`SnapKind::rank_group`] before distance, and
+//! weights trade places only *within* a group. Exactly one group holds more
+//! than one kind: `Endpoint`/`Center`/`Quadrant`, the three kinds that name an
+//! exact point of the geometry rather than a derived one. That is the group
+//! the ask is about, and it is the only place the ordering moves.
+//!
+//! [`SnapWeights::uniform`] is "precision mode": every weight 1.0, so ranking
+//! falls back to raw angular distance and a user working inside a dense
+//! cluster can reach a point the default gravity would otherwise swallow.
+//! Which key (if any) selects it is entirely the caller's business — this
+//! crate knows nothing about keyboards (DEVELOPMENT.md rule 1).
 //!
 //! # Occlusion
 //!
@@ -89,15 +129,24 @@ pub enum SnapKind {
     /// On the true center of a drawn circle or arc, derived from the
     /// solid's analytic surface references (`kernel::SurfaceRef`,
     /// the true-curves design) — the exact drawn center, not a facet
-    /// artifact. Ranked just below Endpoint: a real vertex at the same spot
-    /// still wins, but a center beats everything derived (midpoints,
+    /// artifact. A center beats everything derived (midpoints,
     /// intersections, edges, faces).
+    ///
+    /// Against an `Endpoint` it is a **peer**, not a subordinate: both sit in
+    /// rank group 0 (see [`SnapKind::rank_group`]), so which one wins is
+    /// decided by weighted angular distance. A real vertex at the same spot
+    /// still wins — equal distance breaks toward the stronger declared kind —
+    /// but a center the cursor is merely *near* out-pulls a facet endpoint it
+    /// is nearer to, which is the whole point of the gravity model (crate
+    /// docs, *Gravity*).
     Center,
     /// On a quadrant point of a drawn circle or arc's rim — the four
     /// cardinal points of the exact analytic circle, offered only over the
     /// angular range the facets actually cover. Derived from the same
-    /// surface references as [`SnapKind::Center`]; ranked with it (a
-    /// center at the same spot still wins on order).
+    /// surface references as [`SnapKind::Center`], and ranked exactly as it
+    /// is: a peer of `Endpoint` in rank group 0, carrying the same gravity
+    /// weight, with a center at the same spot still winning on declared
+    /// order.
     Quadrant,
     /// On the midpoint of an edge.
     Midpoint,
@@ -125,6 +174,206 @@ pub enum SnapKind {
     Parallel,
     /// Direction perpendicular to a reference edge (M2; needs a reference).
     Perpendicular,
+}
+
+impl SnapKind {
+    /// Every kind, in declaration (priority) order. This is the index space
+    /// [`SnapWeights`] stores its weights in.
+    pub const ALL: [SnapKind; SnapKind::COUNT] = [
+        SnapKind::Endpoint,
+        SnapKind::Center,
+        SnapKind::Quadrant,
+        SnapKind::Midpoint,
+        SnapKind::Intersection,
+        SnapKind::Tangent,
+        SnapKind::OnEdge,
+        SnapKind::OnFace,
+        SnapKind::OnGuide,
+        SnapKind::OnAxis,
+        SnapKind::Parallel,
+        SnapKind::Perpendicular,
+    ];
+
+    /// How many kinds exist (the length of [`SnapKind::ALL`]).
+    pub const COUNT: usize = 12;
+
+    /// This kind's slot in [`SnapKind::ALL`]. The `match` is exhaustive, so a
+    /// new variant cannot be added without visiting this.
+    const fn index(self) -> usize {
+        match self {
+            SnapKind::Endpoint => 0,
+            SnapKind::Center => 1,
+            SnapKind::Quadrant => 2,
+            SnapKind::Midpoint => 3,
+            SnapKind::Intersection => 4,
+            SnapKind::Tangent => 5,
+            SnapKind::OnEdge => 6,
+            SnapKind::OnFace => 7,
+            SnapKind::OnGuide => 8,
+            SnapKind::OnAxis => 9,
+            SnapKind::Parallel => 10,
+            SnapKind::Perpendicular => 11,
+        }
+    }
+
+    /// The coarse priority band this kind competes in (smaller = stronger).
+    ///
+    /// Ranking is by group first, so gravity ([`SnapWeights`]) can only trade
+    /// places *within* a group — it can never let a face outrank a vertex.
+    /// Every group holds exactly one kind except the first, which holds the
+    /// three kinds naming an **exact point of the geometry**: a vertex
+    /// ([`SnapKind::Endpoint`]), a circle's true center
+    /// ([`SnapKind::Center`]), and a circle's cardinal points
+    /// ([`SnapKind::Quadrant`]). Those three are peers — which one the user
+    /// meant is a question of how close they aimed, weighted by how much each
+    /// is worth — whereas everything below is derived geometry whose ordering
+    /// is a fixed editorial decision (a midpoint beats an edge beats a face,
+    /// always).
+    ///
+    /// Within a group, equal normalized distance still breaks toward the
+    /// stronger `SnapKind`, so a real vertex at the same spot as a center
+    /// keeps winning (the invariant [`SnapKind::Center`]'s docs promise).
+    pub const fn rank_group(self) -> u8 {
+        match self {
+            // The exact-named-point band.
+            SnapKind::Endpoint | SnapKind::Center | SnapKind::Quadrant => 0,
+            SnapKind::Midpoint => 1,
+            SnapKind::Intersection => 2,
+            SnapKind::Tangent => 3,
+            SnapKind::OnEdge => 4,
+            SnapKind::OnFace => 5,
+            SnapKind::OnGuide => 6,
+            SnapKind::OnAxis => 7,
+            SnapKind::Parallel => 8,
+            SnapKind::Perpendicular => 9,
+        }
+    }
+}
+
+/// The neutral gravity weight: the kind behaves exactly as it did before
+/// weighting existed (admitted within `aperture`, ranked on raw angular
+/// distance).
+pub const GRAVITY_NEUTRAL: f64 = 1.0;
+
+/// The standard gravity of a drawn curve's analytic center and quadrant
+/// points ([`SnapKind::Center`], [`SnapKind::Quadrant`]).
+///
+/// Two and a half pick radii: against the app's 8 px acquire radius that is a
+/// 20 px reach, close to the 16 px radius at which an already-held snap is
+/// released — a circle's center and quadrants pull about as far as a held
+/// snap resists, which is the "sticky" feel this is after. Large enough to
+/// swallow the facet endpoints crowding a quadrant on a 24-segment circle,
+/// small enough that aiming squarely at a facet endpoint still gets it (that
+/// endpoint's normalized distance is then ~0, and nothing beats zero).
+pub const GRAVITY_ANALYTIC_POINT: f64 = 2.5;
+
+/// The largest weight [`SnapWeights::with`] accepts. Weights widen the pick
+/// cone, and the spatial index's prune cone widens with them (see
+/// `SnapWeights::max_indexed`); past a point that stops being a prune. It is
+/// a policy bound on a ranking parameter, not a geometric tolerance.
+pub const GRAVITY_MAX: f64 = 8.0;
+
+/// Per-kind snap gravity — see the crate docs' *Gravity* section.
+///
+/// A weight `w` for a kind means: admit that kind out to `w * aperture` from
+/// the ray axis, and divide its angular distance by `w` before ranking.
+/// [`GRAVITY_NEUTRAL`] is the unweighted behavior.
+///
+/// [`SnapWeights::default`] is the shipped profile (analytic centers and
+/// quadrants boosted, everything else neutral); [`SnapWeights::uniform`] is
+/// precision mode.
+///
+/// Weights are a *ranking* parameter, not geometry, and a snap query has no
+/// error channel (it answers `Option<Snap>`), so [`SnapWeights::with`]
+/// **clamps** its argument into `[GRAVITY_NEUTRAL, GRAVITY_MAX]` (mapping a
+/// non-finite value to `GRAVITY_NEUTRAL`) rather than refusing it. That is
+/// deliberately not a breach of DEVELOPMENT.md rule 4, which forbids nudging
+/// *geometry* to make an operation succeed: no coordinate is touched here,
+/// only how far a preference reaches.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapWeights {
+    /// Indexed by `SnapKind::index`.
+    by_kind: [f64; SnapKind::COUNT],
+}
+
+impl SnapWeights {
+    /// Every kind neutral — **precision mode**. Ranking within a rank group
+    /// falls back to raw angular distance, so the nearest candidate wins and
+    /// a point the default gravity would swallow becomes reachable.
+    pub const fn uniform() -> SnapWeights {
+        SnapWeights {
+            by_kind: [GRAVITY_NEUTRAL; SnapKind::COUNT],
+        }
+    }
+
+    /// The shipped gravity profile: analytic curve centers and quadrant
+    /// points pull at [`GRAVITY_ANALYTIC_POINT`], every other kind neutral.
+    ///
+    /// Only those two kinds are boosted, deliberately. They are the only
+    /// kinds that exist *because* an exact analytic curve was drawn, so
+    /// boosting them promotes the points a user aims at without demoting
+    /// anything: the facet endpoints and midpoints they have to out-pull are
+    /// precisely the candidates crowded around them. Demoting facet points
+    /// directly would need a per-candidate "is this a curve facet?" flag the
+    /// scene does not carry, and would also weaken a plain line's endpoints,
+    /// which nothing asked for.
+    pub const fn standard() -> SnapWeights {
+        let mut w = SnapWeights::uniform();
+        w.by_kind[SnapKind::Center.index()] = GRAVITY_ANALYTIC_POINT;
+        w.by_kind[SnapKind::Quadrant.index()] = GRAVITY_ANALYTIC_POINT;
+        w
+    }
+
+    /// This profile with `kind`'s weight replaced, clamped into
+    /// `[GRAVITY_NEUTRAL, GRAVITY_MAX]` (non-finite → [`GRAVITY_NEUTRAL`]).
+    pub fn with(mut self, kind: SnapKind, weight: f64) -> SnapWeights {
+        let w = if weight.is_finite() {
+            weight.clamp(GRAVITY_NEUTRAL, GRAVITY_MAX)
+        } else {
+            GRAVITY_NEUTRAL
+        };
+        self.by_kind[kind.index()] = w;
+        self
+    }
+
+    /// `kind`'s weight.
+    pub fn weight(&self, kind: SnapKind) -> f64 {
+        self.by_kind[kind.index()]
+    }
+
+    /// The largest weight among the kinds the spatial index prunes for.
+    ///
+    /// The index prunes points and segments with a cone of half-angle
+    /// `aperture`; a weighted kind is admitted out to `w * aperture`, so the
+    /// prune cone must be widened by this factor or a boosted candidate the
+    /// exact test would have accepted is discarded before it is ever tested —
+    /// and `resolve` would stop agreeing with `resolve_linear`.
+    ///
+    /// The kinds concerned are exactly those sourced from indexed candidate
+    /// sets: [`SnapKind::Endpoint`] (points), [`SnapKind::Midpoint`] and
+    /// [`SnapKind::OnEdge`] (segments), and [`SnapKind::Intersection`]
+    /// (guide × indexed-segment crossings). `OnFace` is absent on purpose:
+    /// faces are pruned by ray crossing, not by the cone, so no aperture
+    /// scales them. Centers, quadrants, tangents, guides and axes are absent
+    /// because they are never indexed — they are walked linearly, which is
+    /// why the shipped profile's boost costs the prune nothing.
+    fn max_indexed(&self) -> f64 {
+        [
+            SnapKind::Endpoint,
+            SnapKind::Midpoint,
+            SnapKind::OnEdge,
+            SnapKind::Intersection,
+        ]
+        .into_iter()
+        .map(|k| self.weight(k))
+        .fold(GRAVITY_NEUTRAL, f64::max)
+    }
+}
+
+impl Default for SnapWeights {
+    fn default() -> SnapWeights {
+        SnapWeights::standard()
+    }
 }
 
 /// The scene element a snap derives from, for highlighting.
@@ -264,6 +513,14 @@ pub struct SnapQuery {
     /// then naturally collapse to the coplanar (active) face. `None` keeps the
     /// unconstrained behavior (free-space / ground drawing).
     pub constraint_plane: Option<Plane>,
+    /// Per-kind snap gravity for this query (see the crate docs' *Gravity*
+    /// section). [`SnapWeights::default`] is the shipped profile;
+    /// [`SnapWeights::uniform`] is precision mode. It lives on the query, not
+    /// on the scene, because it is a property of the gesture in progress — a
+    /// held modifier key, a tool that wants quadrants emphasized — and two
+    /// queries against one scene may legitimately want different answers.
+    /// This crate never learns what selects it (DEVELOPMENT.md rule 1).
+    pub weights: SnapWeights,
 }
 
 /// A snappable point with provenance.
@@ -1331,6 +1588,20 @@ impl InferenceScene {
         };
         let origin = query.ray.origin;
         let aperture = query.aperture;
+        let weights = query.weights;
+
+        // Per-kind gravity (crate docs, *Gravity*): a candidate of `kind` is
+        // ADMITTED within `w * aperture` instead of `aperture`. The angular
+        // distance is stored raw — the ranking pass below is where the weight
+        // divides it, so that both the plain-aperture reach test and the
+        // weighted ranking read the same untouched number. With every weight
+        // at GRAVITY_NEUTRAL these are exactly the old cone tests.
+        let wcone = |point: Point3, kind: SnapKind| -> Option<(f64, f64)> {
+            cone_test(origin, dir, point, aperture * weights.weight(kind))
+        };
+        let wsegment = |a: Point3, b: Point3, kind: SnapKind| -> Option<(Point3, f64, f64)> {
+            segment_cone_hit(origin, dir, a, b, aperture * weights.weight(kind))
+        };
 
         // tan(aperture) bounds the cone's radius growth per unit depth for
         // the index's conservative node test. At or past a 90° half-angle
@@ -1341,9 +1612,17 @@ impl InferenceScene {
         // (see `Aabb::maybe_in_cone`) could no longer provably cover the
         // exact test's rounding, so those cones are treated as the whole
         // front half-space too. Only pruning strength is affected — the
-        // exact tests always use `aperture` itself.
-        let tan_aperture =
-            (aperture < std::f64::consts::FRAC_PI_2 - tol::CONE_SLACK).then(|| aperture.tan());
+        // exact tests always use their own kind's weighted aperture.
+        //
+        // The prune cone is widened by the largest weight among the kinds the
+        // index serves (`SnapWeights::max_indexed`): a boosted kind is
+        // admitted further off-axis than `aperture`, so pruning at `aperture`
+        // would discard candidates the exact test accepts and `resolve` would
+        // stop agreeing with `resolve_linear`. The shipped profile boosts only
+        // linear-walked kinds, so it leaves this factor at 1.0.
+        let prune_aperture = aperture * weights.max_indexed();
+        let tan_aperture = (prune_aperture < std::f64::consts::FRAC_PI_2 - tol::CONE_SLACK)
+            .then(|| prune_aperture.tan());
 
         // Candidate index sets. The spatial index prunes to a conservative
         // superset (the exact tests below re-filter); the linear reference
@@ -1421,7 +1700,7 @@ impl InferenceScene {
         //     break identically) ---
         let world_points = point_ids.iter().map(|&pi| &self.points[pi]);
         for sp in world_points.chain(placed_points.iter()) {
-            if let Some((ang, depth)) = cone_test(origin, dir, sp.position, aperture) {
+            if let Some((ang, depth)) = wcone(sp.position, SnapKind::Endpoint) {
                 candidates.push((
                     SnapKind::Endpoint,
                     ang,
@@ -1455,7 +1734,7 @@ impl InferenceScene {
         //     scene and deliberately outside the spatial index, so the
         //     indexed and reference paths see the identical set). ---
         for cp in self.centers.iter().chain(placed_centers.iter()) {
-            if let Some((ang, depth)) = cone_test(origin, dir, cp.position, aperture) {
+            if let Some((ang, depth)) = wcone(cp.position, SnapKind::Center) {
                 candidates.push((
                     SnapKind::Center,
                     ang,
@@ -1470,7 +1749,7 @@ impl InferenceScene {
         // --- Quadrant candidates: covered cardinal points of the rim
         //     circles. Same linear-walk rationale as centers. ---
         for qp in self.quadrants.iter().chain(placed_quadrants.iter()) {
-            if let Some((ang, depth)) = cone_test(origin, dir, qp.position, aperture) {
+            if let Some((ang, depth)) = wcone(qp.position, SnapKind::Quadrant) {
                 candidates.push((
                     SnapKind::Quadrant,
                     ang,
@@ -1488,11 +1767,11 @@ impl InferenceScene {
         //     provenance — like guides and axes, sketch curves aren't
         //     `SnapSource` elements. Linear walk, like `centers`. ---
         for (_, rim) in &self.sketch_rims {
-            if let Some((ang, depth)) = cone_test(origin, dir, rim.center, aperture) {
+            if let Some((ang, depth)) = wcone(rim.center, SnapKind::Center) {
                 candidates.push((SnapKind::Center, ang, depth, rim.center, None, None));
             }
             for q in rim.quadrant_points() {
-                if let Some((ang, depth)) = cone_test(origin, dir, q, aperture) {
+                if let Some((ang, depth)) = wcone(q, SnapKind::Quadrant) {
                     candidates.push((SnapKind::Quadrant, ang, depth, q, None, None));
                 }
             }
@@ -1516,7 +1795,7 @@ impl InferenceScene {
                         continue;
                     }
                     let pos = rim.point_at(angle);
-                    if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                    if let Some((ang, depth)) = wcone(pos, SnapKind::Tangent) {
                         candidates.push((
                             SnapKind::Tangent,
                             ang,
@@ -1548,7 +1827,7 @@ impl InferenceScene {
                     let pos = rim.center
                         + rim.basis_u * (rim.radius * angle.cos())
                         + rim.basis_v * (rim.radius * angle.sin());
-                    if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                    if let Some((ang, depth)) = wcone(pos, SnapKind::Tangent) {
                         candidates.push((SnapKind::Tangent, ang, depth, pos, None, None));
                     }
                 }
@@ -1561,7 +1840,7 @@ impl InferenceScene {
             let mid = midpoint(seg.a, seg.b);
 
             // Midpoint candidate: emitted when the midpoint itself is in the cone.
-            if let Some((ang, depth)) = cone_test(origin, dir, mid, aperture) {
+            if let Some((ang, depth)) = wcone(mid, SnapKind::Midpoint) {
                 candidates.push((
                     SnapKind::Midpoint,
                     ang,
@@ -1575,7 +1854,7 @@ impl InferenceScene {
             // OnEdge candidate: the closest point on the segment to the ray,
             // if it lies within the cone. Emit even when the midpoint is also
             // in the cone — priority ranking handles "Midpoint beats OnEdge".
-            if let Some((pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture) {
+            if let Some((pos, ang, depth)) = wsegment(seg.a, seg.b, SnapKind::OnEdge) {
                 // Skip if this is the same point as the midpoint (it would be
                 // a duplicate; the Midpoint candidate already covers it with
                 // the stronger kind).
@@ -1604,17 +1883,17 @@ impl InferenceScene {
             .chain(self.transient_segments.iter().map(|seg| (None, seg)));
         for (prov, seg) in bare_segments {
             for endpoint in [seg.a, seg.b] {
-                if let Some((ang, depth)) = cone_test(origin, dir, endpoint, aperture) {
+                if let Some((ang, depth)) = wcone(endpoint, SnapKind::Endpoint) {
                     candidates.push((SnapKind::Endpoint, ang, depth, endpoint, None, None));
                 }
             }
 
             let mid = midpoint(seg.a, seg.b);
-            if let Some((ang, depth)) = cone_test(origin, dir, mid, aperture) {
+            if let Some((ang, depth)) = wcone(mid, SnapKind::Midpoint) {
                 candidates.push((SnapKind::Midpoint, ang, depth, mid, prov, None));
             }
 
-            if let Some((pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
+            if let Some((pos, ang, depth)) = wsegment(seg.a, seg.b, SnapKind::OnEdge)
                 && !pos.approx_eq(mid, tol::POINT_MERGE)
             {
                 candidates.push((SnapKind::OnEdge, ang, depth, pos, prov, None));
@@ -1622,6 +1901,12 @@ impl InferenceScene {
         }
 
         // --- Face candidates: OnFace (world, then placed) ---
+        // Gravity does not apply here: `face_cone_hit` is a ray-vs-face
+        // intersection that ignores the aperture entirely and reports angular
+        // distance 0 (the face IS under the cursor), so scaling an aperture it
+        // never reads, and dividing a zero, would both be no-ops. An `OnFace`
+        // weight is therefore inert by construction — the same reason
+        // `SnapWeights::max_indexed` leaves OnFace out.
         let world_faces = face_ids.iter().map(|&fi| &self.faces[fi]);
         for face in world_faces.chain(placed_faces.iter()) {
             if let Some((pos, ang, depth)) = face_cone_hit(
@@ -1678,13 +1963,13 @@ impl InferenceScene {
         // Suppressed when axes are hidden (View ▸ Axes off) so a hidden axis
         // never snaps or flashes a cue.
         if self.axes_enabled {
-            if let Some((ang, depth)) = cone_test(origin, dir, Point3::ORIGIN, aperture) {
+            if let Some((ang, depth)) = wcone(Point3::ORIGIN, SnapKind::Endpoint) {
                 candidates.push((SnapKind::Endpoint, ang, depth, Point3::ORIGIN, None, None));
             }
             for axis in [Axis::X, Axis::Y, Axis::Z] {
                 let adir = axis.unit();
                 let pos = closest_point_on_line_to_ray(Point3::ORIGIN, adir, origin, dir);
-                if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                if let Some((ang, depth)) = wcone(pos, SnapKind::OnAxis) {
                     candidates.push((SnapKind::OnAxis, ang, depth, pos, None, Some(adir)));
                 }
             }
@@ -1700,7 +1985,7 @@ impl InferenceScene {
             for guide in &self.guides {
                 match guide.geom {
                     SceneGuideGeom::Point { position } => {
-                        if let Some((ang, depth)) = cone_test(origin, dir, position, aperture) {
+                        if let Some((ang, depth)) = wcone(position, SnapKind::Endpoint) {
                             candidates.push((SnapKind::Endpoint, ang, depth, position, None, None));
                         }
                     }
@@ -1709,7 +1994,7 @@ impl InferenceScene {
                         direction: gd,
                     } => {
                         let pos = closest_point_on_line_to_ray(go, gd, origin, dir);
-                        if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture) {
+                        if let Some((ang, depth)) = wcone(pos, SnapKind::OnGuide) {
                             candidates.push((SnapKind::OnGuide, ang, depth, pos, None, Some(gd)));
                         }
                     }
@@ -1737,7 +2022,7 @@ impl InferenceScene {
             // alike — plus every live sketch segment; sketch candidates stay
             // on the linear walk).
             let emit = |p: Point3, candidates: &mut Vec<Candidate>| {
-                if let Some((ang, depth)) = cone_test(origin, dir, p, aperture) {
+                if let Some((ang, depth)) = wcone(p, SnapKind::Intersection) {
                     candidates.push((SnapKind::Intersection, ang, depth, p, None, None));
                 }
             };
@@ -1775,11 +2060,46 @@ impl InferenceScene {
             candidates.retain(|c| plane.signed_distance(c.3).abs() <= tol::PLANE_DIST);
         }
 
-        // --- Rank: strongest SnapKind first, then smallest angular distance,
-        //     then nearest ray origin (smallest depth). ---
+        // --- Rank (crate docs, *Gravity*): candidates inside the plain
+        //     aperture first, then strongest rank group, then smallest
+        //     WEIGHTED angular distance, then the stronger SnapKind, then
+        //     nearest the ray origin (smallest depth).
+        //
+        //     `extended` is the "reach never steals" guard. A candidate only
+        //     admitted because its weight widened the cone ranks behind
+        //     everything inside the plain aperture, whatever its kind — so a
+        //     circle quadrant two apertures away can never yank the cursor
+        //     off the face it is sitting on. With uniform weights nothing is
+        //     ever extended and the key vanishes.
+        //
+        //     The rank group is what stops gravity inverting the coarse
+        //     priority order: an on-face hit sits at angular distance zero by
+        //     construction, so a purely distance-first rank would let a face
+        //     beat a vertex. Only the first group holds more than one kind
+        //     (Endpoint/Center/Quadrant), so that is the sole place a weight
+        //     can reorder anything; every other group is a single kind, where
+        //     dividing by one constant leaves the old (ang, depth) order
+        //     untouched.
+        //
+        //     Dividing by the weight puts every candidate's distance on one
+        //     comparable scale — "the aperture at which this candidate would
+        //     just have been admitted".
+        //
+        //     The SnapKind tie-break sits *between* distance and depth so two
+        //     candidates at equal weighted distance still resolve to the
+        //     stronger kind — a real vertex exactly on a circle's center keeps
+        //     winning, as `SnapKind::Center`'s docs promise. ---
+        let rank_key = |c: &Candidate| {
+            let extended = u8::from(c.1 > aperture);
+            (extended, c.0.rank_group(), c.1 / weights.weight(c.0))
+        };
         candidates.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            let (ea, ga, da) = rank_key(a);
+            let (eb, gb, db) = rank_key(b);
+            ea.cmp(&eb)
+                .then(ga.cmp(&gb))
+                .then(da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal))
+                .then(a.0.cmp(&b.0))
                 .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
         });
 
@@ -2098,6 +2418,11 @@ impl InferenceScene {
 
 /// Internal candidate tuple used inside `resolve`:
 /// `(kind, angular_dist, depth, position, source, direction)`.
+///
+/// The angular distance is the raw angle off the ray axis; gravity weighting
+/// (crate docs, *Gravity*) is applied in the ranking pass, not here, so the
+/// same number serves both the "is this inside the plain aperture?" reach test
+/// and the weighted comparison.
 type Candidate = (SnapKind, f64, f64, Point3, Option<Provenance>, Option<Vec3>);
 
 // ---------------------------------------------------------------------------
@@ -2423,7 +2748,10 @@ mod tests {
 
     #[test]
     fn snap_kind_priority_is_declaration_order() {
-        // Strongest first; tools sort by this.
+        // Strongest first; tools sort by this, and it is `resolve`'s
+        // within-rank-group tie-break. The coarse resolution order is
+        // `SnapKind::rank_group`, which coarsens this without contradicting it
+        // (see `rank_groups_coarsen_the_declaration_order_without_reordering_it`).
         assert!(SnapKind::Endpoint < SnapKind::Center);
         assert!(SnapKind::Center < SnapKind::Quadrant);
         assert!(SnapKind::Quadrant < SnapKind::Midpoint);
@@ -2435,6 +2763,137 @@ mod tests {
         assert!(SnapKind::OnGuide < SnapKind::OnAxis);
         assert!(SnapKind::OnAxis < SnapKind::Parallel);
         assert!(SnapKind::Parallel < SnapKind::Perpendicular);
+    }
+
+    #[test]
+    fn snap_kind_all_is_a_complete_bijection_onto_its_index_space() {
+        assert_eq!(SnapKind::ALL.len(), SnapKind::COUNT);
+        for (i, kind) in SnapKind::ALL.iter().enumerate() {
+            assert_eq!(kind.index(), i, "{kind:?} is out of place in ALL");
+        }
+    }
+
+    /// Rank groups may only coarsen the declaration order, never contradict
+    /// it: a stronger kind can share a weaker one's group, but can never land
+    /// in a later one. Otherwise `SnapKind`'s `Ord` — which tools rely on and
+    /// which is still the within-group tie-break — would disagree with the
+    /// order candidates actually resolve in.
+    #[test]
+    fn rank_groups_coarsen_the_declaration_order_without_reordering_it() {
+        for a in SnapKind::ALL {
+            for b in SnapKind::ALL {
+                if a < b {
+                    assert!(
+                        a.rank_group() <= b.rank_group(),
+                        "{a:?} is declared stronger than {b:?} but ranks lower"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Exactly one group holds more than one kind, and it is the
+    /// exact-named-point band. Gravity can reorder candidates ONLY inside a
+    /// group, so this is precisely the blast radius of the whole feature —
+    /// worth pinning so widening it is a deliberate act.
+    #[test]
+    fn only_the_exact_point_kinds_share_a_rank_group() {
+        for kind in SnapKind::ALL {
+            let peers: Vec<SnapKind> = SnapKind::ALL
+                .into_iter()
+                .filter(|k| k.rank_group() == kind.rank_group())
+                .collect();
+            let expected: Vec<SnapKind> = match kind {
+                SnapKind::Endpoint | SnapKind::Center | SnapKind::Quadrant => {
+                    vec![SnapKind::Endpoint, SnapKind::Center, SnapKind::Quadrant]
+                }
+                other => vec![other],
+            };
+            assert_eq!(peers, expected, "unexpected rank-group membership");
+        }
+    }
+
+    #[test]
+    fn uniform_weights_are_neutral_everywhere() {
+        let w = SnapWeights::uniform();
+        for kind in SnapKind::ALL {
+            assert_eq!(w.weight(kind), GRAVITY_NEUTRAL);
+        }
+    }
+
+    /// The shipped profile boosts the analytic curve points and nothing else
+    /// — in particular nothing the spatial index prunes for, which is why it
+    /// leaves the prune cone untouched.
+    #[test]
+    fn the_standard_profile_boosts_only_the_analytic_points() {
+        let w = SnapWeights::default();
+        assert_eq!(w, SnapWeights::standard());
+        for kind in SnapKind::ALL {
+            let expected = match kind {
+                SnapKind::Center | SnapKind::Quadrant => GRAVITY_ANALYTIC_POINT,
+                _ => GRAVITY_NEUTRAL,
+            };
+            assert_eq!(w.weight(kind), expected, "{kind:?}");
+        }
+        assert_eq!(w.max_indexed(), GRAVITY_NEUTRAL);
+    }
+
+    #[test]
+    fn max_indexed_tracks_indexed_kinds_and_ignores_linear_walked_ones() {
+        let base = SnapWeights::default();
+        for kind in [
+            SnapKind::Endpoint,
+            SnapKind::Midpoint,
+            SnapKind::OnEdge,
+            SnapKind::Intersection,
+        ] {
+            assert_eq!(base.with(kind, 4.0).max_indexed(), 4.0, "{kind:?}");
+        }
+        for kind in [
+            SnapKind::Center,
+            SnapKind::Quadrant,
+            SnapKind::Tangent,
+            SnapKind::OnFace,
+            SnapKind::OnGuide,
+            SnapKind::OnAxis,
+            SnapKind::Parallel,
+            SnapKind::Perpendicular,
+        ] {
+            assert_eq!(
+                base.with(kind, GRAVITY_MAX).max_indexed(),
+                GRAVITY_NEUTRAL,
+                "{kind:?} is never indexed, so it must not widen the prune"
+            );
+        }
+    }
+
+    /// Weights are a ranking parameter with no error channel, so out-of-range
+    /// values are clamped rather than refused (see `SnapWeights`'s docs).
+    #[test]
+    fn out_of_range_weights_are_clamped_not_refused() {
+        let base = SnapWeights::uniform();
+        assert_eq!(
+            base.with(SnapKind::Center, 1e9).weight(SnapKind::Center),
+            GRAVITY_MAX
+        );
+        assert_eq!(
+            base.with(SnapKind::Center, 0.0).weight(SnapKind::Center),
+            GRAVITY_NEUTRAL
+        );
+        assert_eq!(
+            base.with(SnapKind::Center, -3.0).weight(SnapKind::Center),
+            GRAVITY_NEUTRAL
+        );
+        assert_eq!(
+            base.with(SnapKind::Center, f64::NAN)
+                .weight(SnapKind::Center),
+            GRAVITY_NEUTRAL
+        );
+        assert_eq!(
+            base.with(SnapKind::Center, f64::INFINITY)
+                .weight(SnapKind::Center),
+            GRAVITY_NEUTRAL
+        );
     }
 
     #[test]
@@ -2456,6 +2915,7 @@ mod tests {
         // never panic in normalize.
         let scene = InferenceScene::new();
         let query = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::ORIGIN,
                 direction: Vec3::ZERO,
@@ -2545,6 +3005,7 @@ mod tests {
         let eye = Point3::new(4.0, 4.0, 4.0);
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: eye,
                     direction: Point3::new(1.0, 1.0, 1.0) - eye,
@@ -2613,6 +3074,7 @@ mod tests {
         // behind the top face along the ray to it), so the snap stays at z = 1.
         let free = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray,
                 anchor: None,
                 lock: None,
@@ -2632,6 +3094,7 @@ mod tests {
             Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
         let constrained = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray,
                 anchor: None,
                 lock: None,
@@ -2661,6 +3124,7 @@ mod tests {
         // must win — proving the hover lands ON the face, not through it.
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(0.5, 0.5, 4.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -2701,6 +3165,7 @@ mod tests {
         let target = Point3::new(1.0, 0.5, 0.5);
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: eye,
                     direction: target - eye,
@@ -2761,6 +3226,7 @@ mod tests {
 
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(0.5, 0.5, 4.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -2790,6 +3256,7 @@ mod tests {
             Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: eye,
                     direction: Point3::new(1.0, 1.0, 1.0) - eye,
@@ -2939,6 +3406,7 @@ mod tests {
         // all, and the result should be OnAxis along +X.
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(5.0, 3.0, 0.05),
                     direction: Vec3::new(0.0, -1.0, 0.0),
@@ -2966,6 +3434,7 @@ mod tests {
 
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(10.0, 0.0, 0.0),
                     direction: Vec3::new(-1.0, 0.0, 0.0),
@@ -2994,6 +3463,7 @@ mod tests {
 
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(5.0, 0.0, 0.0),
                     direction: Vec3::new(-1.0, 0.0, 0.0),
@@ -3038,6 +3508,7 @@ mod tests {
         // Ray crosses the guide line (the Y axis through x=2, z=0) from the side.
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(2.0, 5.0, 3.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3070,6 +3541,7 @@ mod tests {
 
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(3.0, 4.0, 10.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3103,6 +3575,7 @@ mod tests {
         // the guide line: the vertex Endpoint must win over OnGuide.
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(1.0, 1.0, 5.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3126,6 +3599,7 @@ mod tests {
         // very different angles from the vertices) compete.
         let mid_snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(1.5, 1.0, 0.5),
                     direction: Vec3::new(-1.0, 0.0, 0.0),
@@ -3166,6 +3640,7 @@ mod tests {
         // Unconstrained: the guide line snaps.
         let free = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray,
                 anchor: None,
                 lock: None,
@@ -3179,6 +3654,7 @@ mod tests {
         // filtered out, leaving nothing to snap to.
         let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
         let constrained = scene.resolve(&SnapQuery {
+            weights: SnapWeights::default(),
             ray,
             anchor: None,
             lock: None,
@@ -3210,6 +3686,7 @@ mod tests {
         assert_eq!(scene.guide_count(), 1);
 
         let query = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(20.0, 20.0, 10.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3255,6 +3732,7 @@ mod tests {
         // Ray straight at endpoint `b`.
         let endpoint_snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(2.0, 0.0, 5.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3272,6 +3750,7 @@ mod tests {
         // Ray straight at the midpoint (1, 0, 0).
         let mid_snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(1.0, 0.0, 5.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3305,6 +3784,7 @@ mod tests {
         scene.add_sketch(sid, &[(eid, a, b)]);
 
         let query_at = |target: Point3| SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(target.x, target.y, 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3355,6 +3835,7 @@ mod tests {
         scene.add_sketch(id, &[(SketchEdgeId::default(), a, b)]);
 
         let query = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(20.0, 20.0, 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3402,6 +3883,7 @@ mod tests {
         );
 
         let query_at = |x: f64, y: f64| SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(x, y, 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3471,6 +3953,7 @@ mod tests {
 
         let snap = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(0.3, 0.7, 5.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3590,6 +4073,7 @@ mod tests {
         // the endpoint behind it, so the region's OnFace wins.
         let over_fill = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(0.0, 0.0, 5.0),
                     direction: Vec3::new(0.0, 0.0, -1.0),
@@ -3623,6 +4107,7 @@ mod tests {
         // endpoint still wins, proving occlusion is bounded to the polygon.
         let past_edge = scene
             .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
                 ray: PickRay {
                     origin: Point3::new(0.0, 0.0, 5.0),
                     direction: Vec3::new(3.0, 0.0, -5.0),
@@ -3738,6 +4223,7 @@ mod tests {
         scene.add_transient_segment(a, b);
 
         let query = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(7.0, 5.0, 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),

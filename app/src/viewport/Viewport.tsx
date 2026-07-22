@@ -58,7 +58,7 @@ import { EditVertexTool } from '../tools/EditVertexTool'
 import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray } from './math'
-import type { Snap } from '../tools/types'
+import type { Snap, Tool } from '../tools/types'
 import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
@@ -182,6 +182,10 @@ interface Props {
    * `null` = the tool has no stage hint; the status bar falls back to the
    * palette's static tool description. */
   onToolHint?: (hint: string | null) => void
+  /** Called when precision snapping (the Ctrl/Cmd+Alt chord held) turns on or
+   * off, so the status bar can surface it the way it surfaces other modal
+   * state. */
+  onPrecisionChange?: (active: boolean) => void
   /** Active tool name from parent (undefined = parent doesn't control) */
   activeTool?: string
   /** Active context path. Empty = top level. */
@@ -830,6 +834,7 @@ export default function Viewport({
   onSceneChange,
   onToast,
   onToolHint,
+  onPrecisionChange,
   activeTool: activeToolProp,
   activeContext = [],
   selectedIds = [],
@@ -861,6 +866,8 @@ export default function Viewport({
   onToastRef.current = onToast
   const onToolHintRef = useRef(onToolHint)
   onToolHintRef.current = onToolHint
+  const onPrecisionChangeRef = useRef(onPrecisionChange)
+  onPrecisionChangeRef.current = onPrecisionChange
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
   const onSelectManyRef = useRef(onSelectMany)
@@ -2857,6 +2864,86 @@ export default function Viewport({
     window.addEventListener('keydown', onCtrlKeyDown)
     window.addEventListener('keyup', onCtrlKeyUp)
 
+    // Ctrl+Alt (⌘+⌥ on macOS) held = PRECISION SNAPPING. The kernel's default
+    // snap gravity makes a circle's center and quadrant points out-pull the
+    // facet endpoints crowding them; holding the chord flattens every weight
+    // so the nearest candidate wins again and a facet point is reachable.
+    //
+    // Why a CHORD and not a bare modifier: all four bare modifiers are taken,
+    // and a bare Alt would be actively wrong. Shift is the axis lock across
+    // Move/Rotate/Scale/Line (`onShiftKeyDown` above) plus OrbitControls' pan
+    // inversion; a bare Control keydown arms Scale's center-anchor tap
+    // (`onCtrlKeyDown` above); a bare Alt keydown is MoveTool's durable copy
+    // toggle (`MoveTool.onKey`) and ArcTool's completion-mode cycle
+    // (`ArcTool.onKey`), both reached through onKeyDown's unconditional
+    // `if (!isMod) activeTool.onKey(ev)` fallback; and the arrow keys are the
+    // draw-plane / axis locks.
+    //
+    // Adding Ctrl/Cmd is exactly what makes the chord safe: `isMod` is
+    // `metaKey || ctrlKey`, so with it held onKeyDown never forwards the key
+    // to a tool at all, and the Control keydown's own clean-tap arming is
+    // disarmed by the Alt that follows it — so neither Move's copy mode nor
+    // Scale's anchor is touched. (One residual: pressing Alt *before*
+    // Ctrl/Cmd does land a bare Alt on the active tool first. That is the
+    // tool's own existing binding firing on its own key, it is visible in the
+    // tool's readout, and it is undone by tapping Alt again. Typing the chord
+    // in its written order — Ctrl/Cmd first — avoids it entirely.)
+    //
+    // The state is derived from the modifier flags every key event carries
+    // rather than tracked per key, so press/release order never matters and no
+    // swallowed keyup can wedge the mode on.
+    function precisionHeld(ev: KeyboardEvent): boolean {
+      // Never while a text field owns the keyboard: the rename box and the
+      // command palette do not stop propagation, and a chord typed in one of
+      // them must not flip a viewport mode.
+      const target = ev.target as HTMLElement | null
+      if (
+        target !== null &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return false
+      }
+      return ev.altKey && (ev.ctrlKey || ev.metaKey)
+    }
+
+    // `setPrecision` is idempotent and reports whether anything changed, so
+    // keydown autorepeat costs nothing. On a real change the snap is
+    // re-resolved at the LAST ray immediately: the mode has to visibly take
+    // effect while the cursor is standing still, exactly like the live re-lock
+    // after an axis-lock key. The re-resolve is skipped in the states where
+    // the pointer path itself skips snapping and leaves `lastRayRef` stale —
+    // camera navigation and an in-flight marquee/drag — so the toggle can
+    // never repaint a cue at a ray the user has since moved away from.
+    function applyPrecision(on: boolean): void {
+      if (!snapService.setPrecision(on)) return
+      onPrecisionChangeRef.current?.(on)
+      const cached = lastRayRef.current
+      const snapPathLive = !cameraModeRef.current && marqueeDrag === null && dragMove === null
+      if (cached !== null && snapPathLive) {
+        const activeTool = toolController.activeTool
+        const constraint = 'snapConstraint' in activeTool
+          ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(cached.ray)
+          : null
+        const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+        activeTool.onPointerMove(snap, cached.ray)
+        cueLayer.update(snap)
+        drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+        publishSnapCues(snap, activeTool)
+      }
+      scheduleRender()
+    }
+    function onPrecisionKey(ev: KeyboardEvent): void {
+      applyPrecision(precisionHeld(ev))
+    }
+    function onWindowBlurClearsPrecision(): void {
+      // A blur (Cmd-Tab, devtools, another window) swallows the keyup that
+      // would otherwise release the chord.
+      applyPrecision(false)
+    }
+    window.addEventListener('keydown', onPrecisionKey)
+    window.addEventListener('keyup', onPrecisionKey)
+    window.addEventListener('blur', onWindowBlurClearsPrecision)
+
     // ------------------------------------------------------------------ animation loop
     let rafId = 0
     let needsRender = true
@@ -3141,6 +3228,15 @@ export default function Viewport({
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
       scheduleRender()
 
+      publishSnapCues(snap, activeTool)
+    }
+
+    /** Status-bar text + the cursor-anchored inference chip/dot for a freshly
+     * resolved snap. Shared by the pointer-move path and by anything that
+     * re-resolves at the cached ray without a pointer move (the precision-mode
+     * toggle) — those must refresh the readouts too, or the chip goes stale
+     * and reports a snap that is no longer the winner. */
+    function publishSnapCues(snap: Snap | null, activeTool: Tool): void {
       const snapKind = 'lastSnap' in activeTool && (activeTool as { lastSnap: unknown }).lastSnap !== null
         ? ((activeTool as { lastSnap: { kind: string } }).lastSnap).kind
         : (snap !== null ? snap.kind : null)
@@ -3622,6 +3718,9 @@ export default function Viewport({
       window.removeEventListener('keyup', onShiftKeyUp)
       window.removeEventListener('keydown', onCtrlKeyDown)
       window.removeEventListener('keyup', onCtrlKeyUp)
+      window.removeEventListener('keydown', onPrecisionKey)
+      window.removeEventListener('keyup', onPrecisionKey)
+      window.removeEventListener('blur', onWindowBlurClearsPrecision)
       window.removeEventListener('keydown', onKeyDownRecord)
       window.removeEventListener('keyup', onKeyUpRecord)
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost)

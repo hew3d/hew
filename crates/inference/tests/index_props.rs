@@ -6,7 +6,7 @@
 //! reference scan (`resolve_linear` / `pick_face_linear`) — the index may
 //! only prune, never decide.
 
-use inference::{Axis, InferenceScene, PickRay, SnapLock, SnapQuery};
+use inference::{Axis, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery, SnapWeights};
 use kernel::{Guide, InstanceId, Object, ObjectId, Plane, Point3, SketchId, Transform, Vec3};
 use proptest::prelude::*;
 
@@ -217,6 +217,45 @@ struct QuerySpec {
     anchor: Option<Point3>,
     lock: Option<SnapLock>,
     plane: Option<(Axis, f64)>,
+    /// Per-kind snap gravity. Randomized (not pinned to the shipped profile)
+    /// because a weight is what widens both the exact cone test AND the
+    /// index's prune cone: if the two ever fall out of step — most obviously
+    /// by boosting a kind `SnapWeights::max_indexed` forgets to account for —
+    /// the indexed path throws away a candidate the linear reference keeps,
+    /// and only a boosted-weight case can catch it.
+    weights: SnapWeights,
+}
+
+/// Random gravity: the shipped profile, precision mode, or an arbitrary kind
+/// boosted to an arbitrary weight (including the indexed kinds, which are the
+/// ones that stress the prune).
+fn arb_weights() -> impl Strategy<Value = SnapWeights> {
+    prop_oneof![
+        Just(SnapWeights::default()),
+        Just(SnapWeights::uniform()),
+        // Any kind, any weight.
+        ((0..SnapKind::COUNT), 1.0..inference::GRAVITY_MAX)
+            .prop_map(|(i, w)| { SnapWeights::default().with(SnapKind::ALL[i], w) }),
+        // An arm dedicated to the kinds the index actually prunes for: these
+        // are the only weights that can put the prune cone and the exact test
+        // out of step, so they get their own share of the cases rather than
+        // one-in-twelve of the arm above. This is breadth, not a guarantee —
+        // whether a pruned candidate would also have WON is geometry-dependent,
+        // so a broken `max_indexed` only trips this property some of the time.
+        // The deterministic guard for that coupling is
+        // `boosting_an_indexed_kind_still_matches_the_linear_reference` in
+        // `inference_specs.rs`, which is built to fail every run.
+        (
+            prop_oneof![
+                Just(SnapKind::Endpoint),
+                Just(SnapKind::Midpoint),
+                Just(SnapKind::OnEdge),
+                Just(SnapKind::Intersection),
+            ],
+            1.0..inference::GRAVITY_MAX,
+        )
+            .prop_map(|(k, w)| SnapWeights::default().with(k, w)),
+    ]
 }
 
 fn arb_query() -> impl Strategy<Value = QuerySpec> {
@@ -237,10 +276,11 @@ fn arb_query() -> impl Strategy<Value = QuerySpec> {
             prop_oneof![Just(Axis::X), Just(Axis::Y), Just(Axis::Z)],
             -10.0..10.0f64,
         )),
+        arb_weights(),
     )
         .prop_filter_map(
             "ray direction too short",
-            |(origin, target, aperture, anchor, lock, plane)| {
+            |(origin, target, aperture, anchor, lock, plane, weights)| {
                 if (target - origin).length_squared() < MIN_RAY_LEN_SQ {
                     return None;
                 }
@@ -251,6 +291,7 @@ fn arb_query() -> impl Strategy<Value = QuerySpec> {
                     anchor,
                     lock,
                     plane,
+                    weights,
                 })
             },
         )
@@ -258,6 +299,7 @@ fn arb_query() -> impl Strategy<Value = QuerySpec> {
 
 fn to_query(spec: &QuerySpec) -> SnapQuery {
     SnapQuery {
+        weights: spec.weights,
         ray: PickRay {
             origin: spec.origin,
             direction: spec.target - spec.origin,
@@ -413,6 +455,7 @@ fn intersection_snaps_agree_between_indexed_and_linear_paths() {
     ];
     for (p, what) in crossings {
         let query = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(p.x, p.y, p.z + 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),

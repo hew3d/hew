@@ -54,3 +54,71 @@ describe('SnapService — fallback tier', () => {
     expect(snap).toBeNull()
   })
 })
+
+describe('SnapService — precision mode', () => {
+  it('passes the precision flag through to Scene.snap() as the trailing argument', () => {
+    const scene = fakeScene()
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+
+    svc.resolve(DOWN, 800, 45)
+    // The kernel owns the weighting; only this boolean crosses the boundary.
+    expect(snapFn.mock.calls[0].at(-1)).toBe(false)
+
+    expect(svc.setPrecision(true)).toBe(true)
+    expect(svc.isPrecision()).toBe(true)
+    svc.resolve(DOWN, 800, 45)
+    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(true)
+
+    expect(svc.setPrecision(false)).toBe(true)
+    svc.resolve(DOWN, 800, 45)
+    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(false)
+  })
+
+  it('setting the same mode again is a no-op (keydown autorepeat must be free)', () => {
+    const svc = new SnapService(fakeScene())
+    expect(svc.setPrecision(false)).toBe(false)
+    expect(svc.setPrecision(true)).toBe(true)
+    expect(svc.setPrecision(true)).toBe(false)
+  })
+
+  it('toggling drops the held sticky snap, so hysteresis cannot pin the old target', () => {
+    // A sticky snap is normally held across a miss: the acquire query losing
+    // it triggers a second, wider "resist release" query. After a mode change
+    // there is nothing to hold — the whole point of the toggle is that a
+    // different candidate should win — so only the acquire query runs.
+    const held = {
+      x: () => 1, y: () => 2, z: () => 3,
+      kind: () => 'endpoint',
+      direction: () => undefined,
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => 7n,
+      element_kind: () => 'vertex',
+      sketch: () => undefined,
+      sketch_region: () => undefined,
+      free: () => {},
+    }
+    let hit = true
+    const snapFn = vi.fn(() => (hit ? held : undefined))
+    const scene = { snap: snapFn } as unknown as Scene
+    const svc = new SnapService(scene)
+    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('endpoint')
+
+    // Control: with the mode unchanged, losing the endpoint costs TWO queries
+    // (acquire, then the wider release-resisting one).
+    hit = false
+    snapFn.mockClear()
+    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('ground')
+    expect(snapFn.mock.calls.length).toBe(2)
+
+    // Re-acquire, then toggle: the held snap is gone, so one query only.
+    hit = true
+    svc.resolve(DOWN, 800, 45)
+    svc.setPrecision(true)
+    hit = false
+    snapFn.mockClear()
+    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('ground')
+    expect(snapFn.mock.calls.length).toBe(1)
+  })
+})

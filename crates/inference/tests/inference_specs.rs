@@ -6,7 +6,9 @@
 //! `ObjectId::default()` (the null key) is a legitimate tag here — the scene
 //! treats ids as opaque labels.
 
-use inference::{ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery};
+use inference::{
+    ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
+};
 use kernel::{
     Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId, Transform,
     Vec3, tol,
@@ -55,6 +57,7 @@ fn ray_at(eye: Point3, target: Point3) -> PickRay {
 
 fn query(ray: PickRay, aperture: f64) -> SnapQuery {
     SnapQuery {
+        weights: SnapWeights::default(),
         ray,
         anchor: None,
         lock: None,
@@ -192,6 +195,7 @@ fn axis_lock_projects_onto_the_locked_line() {
     let anchor = Point3::new(0.0, 0.0, 0.0);
     // Cursor drifts off-axis toward the cube; lock to X.
     let q = SnapQuery {
+        weights: SnapWeights::default(),
         ray: ray_at(Point3::new(0.7, 0.4, 3.0), Point3::new(0.7, 0.4, 0.0)),
         anchor: Some(anchor),
         lock: Some(SnapLock::Axis(inference::Axis::X)),
@@ -538,6 +542,7 @@ fn index_invalidation_tracks_every_mutation() {
     // Probes a corner with a tight cone; also asserts indexed == linear.
     fn probe(scene: &InferenceScene, target: Point3) -> Option<Snap> {
         let q = SnapQuery {
+            weights: SnapWeights::default(),
             ray: PickRay {
                 origin: Point3::new(target.x, target.y, target.z + 5.0),
                 direction: Vec3::new(0.0, 0.0, -1.0),
@@ -1777,5 +1782,438 @@ fn sketch_arc_offers_center_but_only_covered_quadrants() {
         scene.resolve(&qm).map(|s| s.kind),
         None,
         "uncovered cardinal offers nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Snap gravity (per-kind weighting) and precision mode
+// ---------------------------------------------------------------------------
+//
+// A drawn circle's exact center and quadrant points are what a user aims at;
+// the endpoints and midpoints of the many facets approximating that circle
+// are noise crowded around them. `SnapWeights` gives Center/Quadrant a larger
+// effective aperture and divides their angular distance before ranking, so
+// they out-pull a facet point the cursor happens to be slightly nearer.
+// `SnapWeights::uniform()` — precision mode — turns that off, restoring
+// nearest-wins so a facet point stays reachable.
+
+/// The center of the gravity fixture's circle. Deliberately off every world
+/// axis and away from the origin: an ambient `OnAxis` candidate through a
+/// quadrant point would otherwise stand in for the "nothing is in the cone"
+/// case these specs rely on.
+const GRAVITY_CIRCLE_CENTER: Point3 = Point3 {
+    x: 2.0,
+    y: 3.0,
+    z: 0.0,
+};
+
+/// A ground-plane sketch holding one 24-gon circle chain, plus the rim's
+/// first quadrant point and the facet vertex nearest that quadrant. The
+/// half-facet phase in `sketch_with_circle` guarantees no vertex lands ON a
+/// cardinal, so the quadrant and the facet endpoint are genuinely distinct
+/// competing candidates.
+fn circle_gravity_fixture() -> (InferenceScene, Point3, Point3) {
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let center = GRAVITY_CIRCLE_CENTER;
+    let s = sketch_with_circle(plane, center, 0.5, 24);
+    let mut scene = InferenceScene::new();
+    register_sketch_full(&mut scene, SketchId::default(), &s);
+
+    let quadrant = s.curve_rims()[0].quadrant_points()[0];
+    // The facet vertex nearest that quadrant — the candidate gravity has to
+    // out-pull. Taken from the sketch itself rather than recomputed, so the
+    // spec cannot drift from the geometry actually registered.
+    let vertex = s
+        .vertices()
+        .iter()
+        .map(|(_, v)| v.position)
+        .min_by(|a, b| {
+            (*a - quadrant)
+                .length()
+                .partial_cmp(&(*b - quadrant).length())
+                .unwrap()
+        })
+        .expect("the circle chain has vertices");
+    (scene, quadrant, vertex)
+}
+
+/// An eye 3 m above `target`, looking straight down at it. Every candidate in
+/// these fixtures lies in the z = 0 plane, so angular distance from the ray
+/// axis is (in-plane distance) / 3 to well under a percent.
+fn overhead(target: Point3) -> PickRay {
+    ray_at(target + Vec3::new(0.0, 0.0, 3.0), target)
+}
+
+/// Gravity's whole point: a quadrant wins from the neighborhood of a facet
+/// endpoint the cursor is *nearer* to. Aim 60% of the way from the quadrant
+/// to the adjacent facet vertex — the vertex is 1.5x closer, and still loses,
+/// because the quadrant's weighted distance (÷ 2.5) is smaller.
+#[test]
+fn a_quadrant_out_pulls_the_facet_endpoint_beside_it() {
+    let (scene, quadrant, vertex) = circle_gravity_fixture();
+    let aim = quadrant + (vertex - quadrant) * 0.6;
+    assert!(
+        (aim - vertex).length() < (aim - quadrant).length(),
+        "the fixture must aim NEARER the facet vertex, or it proves nothing"
+    );
+
+    let q = query(overhead(aim), 0.02);
+    let snap = scene.resolve(&q).expect("something snaps");
+    assert_eq!(
+        snap.kind,
+        SnapKind::Quadrant,
+        "the quadrant's gravity beats the nearer facet endpoint"
+    );
+    assert!(snap.position.approx_eq(quadrant, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// The same aim in precision mode resolves to the facet endpoint: uniform
+/// weights restore nearest-wins, which is exactly what the modifier is for.
+#[test]
+fn precision_mode_gives_the_nearer_facet_endpoint_back() {
+    let (scene, quadrant, vertex) = circle_gravity_fixture();
+    let aim = quadrant + (vertex - quadrant) * 0.6;
+
+    let mut q = query(overhead(aim), 0.02);
+    q.weights = SnapWeights::uniform();
+    let snap = scene.resolve(&q).expect("something snaps");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert!(snap.position.approx_eq(vertex, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// Gravity is a preference, not a capture: aiming squarely AT a facet
+/// endpoint still returns that endpoint. Its normalized distance is zero, and
+/// nothing divided by a weight beats zero.
+#[test]
+fn aiming_squarely_at_a_facet_endpoint_still_gets_the_endpoint() {
+    let (scene, _quadrant, vertex) = circle_gravity_fixture();
+    let q = query(overhead(vertex), 0.02);
+    let snap = scene.resolve(&q).expect("something snaps");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert!(snap.position.approx_eq(vertex, tol::POINT_MERGE));
+}
+
+/// A weighted kind reaches BEYOND the plain pick cone: the quadrant snaps
+/// from 1.25 apertures away (inside its 2.5x reach) where the unweighted
+/// query has nothing at all to offer.
+#[test]
+fn gravity_reaches_past_the_plain_aperture() {
+    let (scene, quadrant, _vertex) = circle_gravity_fixture();
+    // Radially outward from the circle, away from every facet: at 0.075 m the
+    // aim is 0.025 rad off-axis — past the 0.02 aperture, inside 2.5 x 0.02.
+    let outward = (quadrant - GRAVITY_CIRCLE_CENTER).normalized().unwrap();
+    let aim = quadrant + outward * 0.075;
+
+    let q = query(overhead(aim), 0.02);
+    let snap = scene
+        .resolve(&q)
+        .expect("the quadrant is within its gravity");
+    assert_eq!(snap.kind, SnapKind::Quadrant);
+    assert!(snap.position.approx_eq(quadrant, tol::POINT_MERGE));
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+
+    let mut precise = q;
+    precise.weights = SnapWeights::uniform();
+    assert_eq!(
+        scene.resolve(&precise),
+        None,
+        "unweighted, nothing is inside the cone at all"
+    );
+}
+
+/// Reach never steals. A quadrant admitted ONLY by its gravity — past the
+/// query's own aperture — must lose to anything inside the plain aperture,
+/// however weak its kind: otherwise hovering a face near a circle would yank
+/// the cursor a couple of apertures away onto the rim, which is exactly the
+/// regression `standing_sketch_region_is_a_hoverable_face` (wasm-api, over
+/// the maintainer's real file) caught.
+#[test]
+fn gravity_reach_never_steals_from_a_candidate_inside_the_aperture() {
+    let (mut scene, quadrant, _vertex) = circle_gravity_fixture();
+    // A transient segment straight through the aim point gives an `OnEdge` —
+    // the weakest positional kind that can sit right under the cursor.
+    let outward = (quadrant - GRAVITY_CIRCLE_CENTER).normalized().unwrap();
+    let aim = quadrant + outward * 0.075; // 0.025 rad: past 0.02, inside 2.5x
+    // Deliberately lopsided: a symmetric segment would put its Midpoint — a
+    // stronger kind — exactly under the cursor and prove less.
+    scene.add_transient_segment(
+        aim + Vec3::new(0.0, -0.1, 0.0),
+        aim + Vec3::new(0.0, 0.5, 0.0),
+    );
+
+    let q = query(overhead(aim), 0.02);
+    let snap = scene.resolve(&q).expect("the segment is under the cursor");
+    assert_eq!(
+        snap.kind,
+        SnapKind::OnEdge,
+        "a gravity-extended quadrant must not outrank what the cursor is on"
+    );
+    assert!(snap.position.approx_eq(aim, tol::POINT_MERGE));
+
+    // Take the segment away and the quadrant's reach is uncontested again —
+    // proving the guard is about *competition*, not about suppressing reach.
+    scene.clear_transient();
+    assert_eq!(scene.resolve(&q).map(|s| s.kind), Some(SnapKind::Quadrant));
+}
+
+/// The invariant `SnapKind::Center`'s docs promise, kept through weighting:
+/// a real vertex sitting exactly on a circle's center still wins. Equal
+/// normalized distance (both zero) breaks toward the stronger kind.
+#[test]
+fn a_vertex_exactly_on_the_center_still_wins() {
+    let (mut scene, _quadrant, _vertex) = circle_gravity_fixture();
+    let center = GRAVITY_CIRCLE_CENTER;
+    // A transient segment starting exactly at the center contributes an
+    // Endpoint candidate there, with no provenance — the cheapest way to put
+    // a real vertex on top of a center.
+    scene.add_transient_segment(center, center + Vec3::new(0.0, 0.2, 0.0));
+
+    let q = query(overhead(center), 0.02);
+    let snap = scene.resolve(&q).expect("something snaps");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert!(snap.position.approx_eq(center, tol::POINT_MERGE));
+}
+
+/// Weights trade places only inside a rank group. Boosting `Midpoint` and
+/// `OnFace` to the maximum cannot lift either over an `Endpoint`, however
+/// much nearer the cursor is to them — otherwise a face (angular distance
+/// zero by construction) would beat every vertex in the model.
+#[test]
+fn gravity_never_lifts_a_weaker_rank_group_over_a_stronger_one() {
+    let scene = cube_scene();
+    // Straight down onto the top face, 60% of the way from the (1,1,1) corner
+    // toward the (0.5,1,1) midpoint of the +y top edge, nudged just inside
+    // the face (a ray lying exactly in the y = 1 side face's plane is a
+    // degenerate occlusion test, not the thing under test). Overhead, so
+    // angular distance is horizontal distance / 3: the midpoint sits at
+    // 0.067 rad, the corner at 0.101, nothing else inside the 0.12 aperture.
+    let corner = Point3::new(1.0, 1.0, 1.0);
+    let mid = Point3::new(0.5, 1.0, 1.0);
+    let aim = Point3::new(0.7, 0.97, 1.0);
+    assert!(
+        (aim - mid).length() < (aim - corner).length(),
+        "the fixture must aim NEARER the midpoint, or it proves nothing"
+    );
+
+    let mut q = query(overhead(aim), 0.12);
+    q.weights = SnapWeights::default()
+        .with(SnapKind::Midpoint, inference::GRAVITY_MAX)
+        .with(SnapKind::OnFace, inference::GRAVITY_MAX);
+    let snap = scene.resolve(&q).expect("something snaps");
+    assert_eq!(
+        snap.kind,
+        SnapKind::Endpoint,
+        "rank group beats gravity: a boosted midpoint/face never outranks a vertex"
+    );
+    assert!(snap.position.approx_eq(corner, tol::POINT_MERGE));
+}
+
+/// The boundary of the whole feature, stated as a test: gravity and precision
+/// mode change outcomes ONLY inside rank group 0 (Endpoint vs Center vs
+/// Quadrant). A `Midpoint` sits in a weaker group, so a center already beat it
+/// at any distance before weighting existed — and precision mode, which only
+/// flattens weights, cannot hand it back. Worth pinning: the obvious reading
+/// of "precision mode lets you pick the other thing" is wrong here, and a
+/// future change that made it true would be a real (and unrequested) change in
+/// the priority model.
+#[test]
+fn a_nearer_midpoint_loses_to_a_center_with_or_without_gravity() {
+    let (mut scene, _quadrant, _vertex) = circle_gravity_fixture();
+    let center = GRAVITY_CIRCLE_CENTER;
+    // A segment whose MIDPOINT lands 0.06 m from the center, laid along the
+    // aim direction so its own OnEdge cannot sit nearer than the midpoint.
+    let dir = Vec3::new(0.8, 0.6, 0.0).normalized().unwrap();
+    let mid = center + dir * 0.06;
+    scene.add_transient_segment(mid - dir * 0.25, mid + dir * 0.25);
+
+    // 65% of the way from the center to that midpoint: NEARER the midpoint.
+    let aim = center + dir * 0.039;
+    let q = query(overhead(aim), 0.02);
+    assert_eq!(
+        scene.resolve(&q).map(|s| s.kind),
+        Some(SnapKind::Center),
+        "the center outranks a nearer midpoint by rank group"
+    );
+
+    let mut precise = q;
+    precise.weights = SnapWeights::uniform();
+    assert_eq!(
+        scene.resolve(&precise).map(|s| s.kind),
+        Some(SnapKind::Center),
+        "precision mode flattens weights; it does not re-order rank groups"
+    );
+}
+
+/// An `OnFace` weight is inert by construction: `face_cone_hit` is a
+/// ray-vs-face intersection that never reads the aperture and always reports
+/// angular distance zero, so there is nothing for a multiplier to scale and
+/// nothing for it to divide. Pinned because `SnapWeights` accepts a weight for
+/// every kind, and a caller who sets one here deserves to find it documented
+/// as a no-op rather than to discover it silently does nothing.
+#[test]
+fn an_on_face_weight_is_inert() {
+    let scene = cube_scene();
+    // Straight down at the middle of the top face: OnFace is the winner, and
+    // no vertex or edge is anywhere near the cone.
+    let q = query(overhead(Point3::new(0.5, 0.5, 1.0)), 0.02);
+    let baseline = scene.resolve(&q).expect("the top face is under the ray");
+    assert_eq!(baseline.kind, SnapKind::OnFace);
+
+    for w in [inference::GRAVITY_NEUTRAL, 2.5, inference::GRAVITY_MAX] {
+        let mut boosted = q;
+        boosted.weights = SnapWeights::default().with(SnapKind::OnFace, w);
+        assert_eq!(
+            scene.resolve(&boosted),
+            Some(baseline),
+            "an OnFace weight of {w} changed the answer"
+        );
+    }
+}
+
+/// Gravity keys on `SnapKind` ALONE, never on `(kind, provenance)`: a
+/// `Center` with no quadrant or tangent companions gets exactly the same pull
+/// as a circle's. That matters beyond arcs — a polygon's center registers as
+/// an ordinary `Center` `ScenePoint` with no rim beside it at all, and must
+/// not quietly lose its gravity for want of one.
+#[test]
+fn a_center_with_no_quadrant_companions_still_has_full_gravity() {
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let center = GRAVITY_CIRCLE_CENTER;
+    let mut s = sketch_with_circle(plane, center, 0.5, 24);
+    let rim_before = &s.curve_rims()[0];
+    let (bu, bv) = (rim_before.basis_u, rim_before.basis_v);
+
+    // Keep only the wedge between ~10 and ~80 degrees, so NO cardinal is
+    // covered: the rim offers a center and nothing else.
+    let curve = s
+        .edges()
+        .values()
+        .find_map(|e| e.curve)
+        .expect("circle chain");
+    for eid in s.curve_edges(curve) {
+        let e = s.edges()[eid];
+        let a = s.vertices()[e.from].position;
+        let b = s.vertices()[e.to].position;
+        let mid = Point3::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);
+        let d = mid - center;
+        let angle = d.dot(bv).atan2(d.dot(bu));
+        if !(angle > 0.17 && angle < 1.40) {
+            s.remove_edge(eid).unwrap();
+        }
+    }
+    let mut scene = InferenceScene::new();
+    register_sketch_full(&mut scene, SketchId::default(), &s);
+
+    // No quadrant survives anywhere on this rim.
+    for q in s.curve_rims()[0].quadrant_points() {
+        let qq = query(overhead(q), 0.02);
+        assert_ne!(
+            scene.resolve(&qq).map(|snap| snap.kind),
+            Some(SnapKind::Quadrant),
+            "the fixture must offer no quadrant, or it proves nothing"
+        );
+    }
+
+    // A bare vertex 0.06 m from the center — nearer the cursor than the
+    // center is, and it still loses to the center's gravity.
+    scene.add_transient_segment(
+        center + Vec3::new(0.06, 0.0, 0.0),
+        center + Vec3::new(0.5, 0.0, 0.0),
+    );
+    let aim = center + Vec3::new(0.039, 0.0, 0.0); // 65% of the way across
+    let q = query(overhead(aim), 0.02);
+    let snap = scene.resolve(&q).expect("something snaps");
+    assert_eq!(
+        snap.kind,
+        SnapKind::Center,
+        "a companion-less center must pull exactly like a circle's"
+    );
+    assert!(snap.position.approx_eq(center, tol::POINT_MERGE));
+
+    // ...and precision mode gives the vertex back, same as anywhere else.
+    let mut precise = q;
+    precise.weights = SnapWeights::uniform();
+    assert_eq!(
+        scene.resolve(&precise).map(|snap| snap.kind),
+        Some(SnapKind::Endpoint)
+    );
+}
+
+/// Weighting an INDEXED kind must widen the index's prune cone too
+/// (`SnapWeights::max_indexed`): a boosted kind is admitted further off-axis
+/// than `aperture`, so pruning at the bare `aperture` throws candidates away
+/// before the exact test can see them, and `resolve` stops agreeing with
+/// `resolve_linear`.
+///
+/// Pinning that needs a query where the boosted candidate would BOTH win and
+/// be pruned. A BVH node box is only rejected when the whole box clears the
+/// cone, so the ray has to pass wide of the object — about 1.5 m from a unit
+/// cube's centre at 10 m, with a 0.02 rad aperture: the cube's node box is
+/// 0.63 m outside the plain cone (0.22 m at that depth) and well inside the
+/// 8x one (1.74 m), while the nearest vertex sits at ~0.11 rad — outside the
+/// plain aperture, inside 8x it, and with nothing nearer to beat it. Reverting
+/// `prune_aperture` to a bare `aperture` fails this test.
+#[test]
+fn boosting_an_indexed_kind_still_matches_the_linear_reference() {
+    let cube = unit_cube();
+    let mut scene = InferenceScene::new();
+    scene.set_def_member(ObjectId::default(), &cube);
+    // A 6x6 grid spaced far enough apart that only the cube at the origin is
+    // anywhere near the ray, but with enough placements for the index to have
+    // real structure rather than collapsing to a single leaf.
+    for gx in 0..6 {
+        for gy in 0..6 {
+            scene.add_placement(
+                InstanceId::default(),
+                ObjectId::default(),
+                &Transform::translation(Vec3::new(12.0 * gx as f64, 12.0 * gy as f64, 0.0)),
+            );
+        }
+    }
+
+    // Straight down at (2, 0.5), 1.5 m clear of the origin cube in +x.
+    let ray = PickRay {
+        origin: Point3::new(2.0, 0.5, 10.5),
+        direction: Vec3::new(0.0, 0.0, -1.0),
+    };
+    let plain = query(ray, 0.02);
+    assert_eq!(
+        scene.resolve(&plain).map(|s| s.kind),
+        None,
+        "unweighted, nothing is inside the cone"
+    );
+
+    let mut boosted = plain;
+    boosted.weights = SnapWeights::default().with(SnapKind::Endpoint, inference::GRAVITY_MAX);
+    let snap = scene
+        .resolve(&boosted)
+        .expect("a +x corner is inside 8x the aperture");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    // All four +x corners are the same in-plane distance from this vertical
+    // ray, so the deeper (bottom) pair are marginally nearer the axis in
+    // ANGLE and win on that; which of them is a depth question the test does
+    // not care about. What it pins is that a vertex on that face is reachable
+    // at all, and that the indexed answer is the reference answer.
+    assert!(
+        snap.position.x == 1.0 && (snap.position.y == 0.0 || snap.position.y == 1.0),
+        "expected a +x corner of the origin cube, got {:?}",
+        snap.position
+    );
+    assert_eq!(
+        scene.resolve(&boosted),
+        scene.resolve_linear(&boosted),
+        "the prune cone must widen with the weight"
     );
 }
