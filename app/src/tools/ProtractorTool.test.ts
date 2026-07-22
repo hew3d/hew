@@ -228,23 +228,66 @@ describe('ProtractorTool — apex/baseline/sweep/commit with plane locking', () 
 })
 
 describe('ProtractorTool — screen-constant disk scaling', () => {
-  const DISK_SCREEN_K = 0.03
+  // The disk's screen size at the app's reference fov/viewport (45°, 720px
+  // tall) — carried over from the old DISK_SCREEN_K = 0.03 constant so the
+  // migration doesn't change how big the protractor looks at that baseline.
+  // worldScale = desiredPixels * dist * tan(fov/2) / viewportHeight.
+  const REF_FOV_DEG = 45
+  const REF_VIEWPORT_H = 720
+  const tanHalf = (fovDeg: number) => Math.tan((fovDeg * Math.PI) / 360)
+  const expectedScale = (dist: number, fovDeg: number, viewportH: number) => {
+    const desiredPixels = (0.03 * REF_VIEWPORT_H) / tanHalf(REF_FOV_DEG)
+    return (desiredPixels * dist * tanHalf(fovDeg)) / viewportH
+  }
 
-  it('updateDiskScale sets the disk group scale to DISK_SCREEN_K * camera distance', () => {
+  it('updateDiskScale matches the old DISK_SCREEN_K * dist size at the reference fov/viewport', () => {
     const { tool, preview } = makeTool()
     tool.onPointerMove(makeSnap({ kind: 'ground', x: 1, y: 2, z: 0 }), RAY)
 
     const disk = preview.children[0]
-    const camera = new THREE.PerspectiveCamera()
+    const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
     camera.position.set(1, 2, 10) // 10 m straight up from the disk center (1,2,0)
 
-    tool.updateDiskScale(camera)
+    tool.updateDiskScale(camera, REF_VIEWPORT_H)
 
     const dist = camera.position.distanceTo(disk.position)
     expect(dist).toBeCloseTo(10, 9)
-    expect(disk.scale.x).toBeCloseTo(DISK_SCREEN_K * dist, 9)
-    expect(disk.scale.y).toBeCloseTo(DISK_SCREEN_K * dist, 9)
-    expect(disk.scale.z).toBeCloseTo(DISK_SCREEN_K * dist, 9)
+    const expected = expectedScale(dist, REF_FOV_DEG, REF_VIEWPORT_H)
+    // Old K * dist at the reference baseline, for a sanity cross-check.
+    expect(expected).toBeCloseTo(0.03 * dist, 9)
+    expect(disk.scale.x).toBeCloseTo(expected, 9)
+    expect(disk.scale.y).toBeCloseTo(expected, 9)
+    expect(disk.scale.z).toBeCloseTo(expected, 9)
+  })
+
+  it('holds its on-screen size across a FOV change, unlike the old K * dist form', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), RAY)
+    const disk = preview.children[0]
+
+    for (const fov of [20, 45, 70, 100]) {
+      const camera = new THREE.PerspectiveCamera(fov)
+      camera.position.set(0, 0, 10)
+      tool.updateDiskScale(camera, REF_VIEWPORT_H)
+      const dist = camera.position.distanceTo(disk.position)
+      const expected = expectedScale(dist, fov, REF_VIEWPORT_H)
+      expect(disk.scale.x).toBeCloseTo(expected, 9)
+    }
+  })
+
+  it('holds its on-screen size across a viewport resize, unlike the old K * dist form', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), RAY)
+    const disk = preview.children[0]
+    const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
+    camera.position.set(0, 0, 10)
+
+    for (const viewportH of [400, 720, 1200]) {
+      tool.updateDiskScale(camera, viewportH)
+      const dist = camera.position.distanceTo(disk.position)
+      const expected = expectedScale(dist, REF_FOV_DEG, viewportH)
+      expect(disk.scale.x).toBeCloseTo(expected, 9)
+    }
   })
 
   it('updateDiskScale is a no-op when no disk is currently shown', () => {
@@ -252,6 +295,23 @@ describe('ProtractorTool — screen-constant disk scaling', () => {
     const camera = new THREE.PerspectiveCamera()
     camera.position.set(0, 0, 10)
     // No pointer move yet -> previewDisk is null. Should not throw.
-    expect(() => tool.updateDiskScale(camera)).not.toThrow()
+    expect(() => tool.updateDiskScale(camera, REF_VIEWPORT_H)).not.toThrow()
+  })
+
+  it('updateDiskScale is a no-op for a non-perspective camera or a degenerate viewport height', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), RAY)
+    const disk = preview.children[0]
+    const before = disk.scale.x
+
+    const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
+    ortho.position.set(0, 0, 10)
+    tool.updateDiskScale(ortho, REF_VIEWPORT_H)
+    expect(disk.scale.x).toBe(before)
+
+    const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
+    camera.position.set(0, 0, 10)
+    tool.updateDiskScale(camera, 0)
+    expect(disk.scale.x).toBe(before)
   })
 })

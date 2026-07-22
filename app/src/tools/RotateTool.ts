@@ -53,6 +53,13 @@
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
+import {
+  screenConstantWorldHalf,
+  tanHalfFovRad,
+  legacyScreenConstantToPixels,
+  LEGACY_REFERENCE_FOV_DEG,
+  LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX,
+} from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   rotateAboutPivotAxis,
@@ -115,15 +122,24 @@ const BASELINE_ARM_COLOR = 0x888888
 /** Axis-color tolerance: within ~2° of a world axis, expressed as cos(θ). */
 const AXIS_SNAP_TOL_DOT = Math.cos((2 * Math.PI) / 180)
 /** Local radius the ring/arm geometry is built at; the group is scaled to keep
- * it a constant on-screen size (see DISK_SCREEN_K / updateDiskScale). */
+ * it a constant on-screen size (see DISK_SCREEN_PX / updateDiskScale). */
 const DISK_UNIT_RADIUS = 1.0
 /** Sample count for the protractor ring. */
 const DISK_SEGMENTS = 64
 /** Length of the locked-axis normal tick, as a fraction of the unit radius. */
 const DISK_TICK_LENGTH = DISK_UNIT_RADIUS * 0.5
-/** Screen-constant scale factor: worldRadius = DISK_SCREEN_K * cameraDistance.
- * ~0.06 sizes the protractor to roughly the Slicer's section-plane gizmo. */
-const DISK_SCREEN_K = 0.06
+/**
+ * Screen-constant disk radius in pixels, fed to `screenConstantWorldHalf`
+ * (`viewport/math.ts`) every frame in `updateDiskScale` — replaces a former
+ * `worldRadius = DISK_SCREEN_K * cameraDistance` constant (K = 0.06) that
+ * baked `tan(fov/2)/viewportHeight` into a single number and so drifted
+ * whenever the fov changed or the viewport was resized. `legacyScreenConstantToPixels`
+ * converts that old K, evaluated at the app's reference fov/viewport, into an
+ * equivalent pixel size — unchanged from before at that baseline, and now
+ * ACTUALLY constant everywhere else too. ~104px sizes the protractor to
+ * roughly the Slicer's section-plane gizmo (same source K).
+ */
+const DISK_SCREEN_PX = legacyScreenConstantToPixels(0.06, LEGACY_REFERENCE_FOV_DEG, LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX)
 
 interface Spoke {
   dir: Vec3
@@ -210,13 +226,19 @@ export class RotateTool implements Tool {
 
   /**
    * Keep the protractor a constant on-screen size regardless of camera
-   * distance — called from the Viewport render loop every frame (feature-
-   * detected via `'updateDiskScale' in tool`). No-op when no disk is shown.
+   * distance, fov, or viewport resize — called from the Viewport render loop
+   * every frame (feature-detected via `'updateDiskScale' in tool`), passing
+   * the live viewport height alongside the camera (see
+   * `ScaleTool.updateGripScale`'s doc comment for the shared derivation).
+   * No-op when no disk is shown, the camera isn't a `PerspectiveCamera`, or
+   * `viewportHeight` is degenerate.
    */
-  updateDiskScale(camera: THREE.Camera): void {
-    if (this.previewDisk === null) return
+  updateDiskScale(camera: THREE.Camera, viewportHeight: number): void {
+    if (this.previewDisk === null || viewportHeight <= 0) return
+    if (!(camera instanceof THREE.PerspectiveCamera)) return
     const dist = camera.position.distanceTo(this.previewDisk.position)
-    this.previewDisk.scale.setScalar(DISK_SCREEN_K * dist)
+    const scale = screenConstantWorldHalf(DISK_SCREEN_PX, dist, tanHalfFovRad(camera.fov), viewportHeight)
+    this.previewDisk.scale.setScalar(scale)
   }
 
   // ── Tool interface ──────────────────────────────────────────────────────────
@@ -613,8 +635,10 @@ export class RotateTool implements Tool {
     group.position.set(center[0], center[1], center[2])
     // Placeholder scale — updateDiskScale() corrects it next render frame
     // (avoids a one-frame flash at the unit radius before the screen-constant
-    // size is applied).
-    group.scale.setScalar(DISK_SCREEN_K * 4) // ~4 m fallback distance
+    // size is applied). ~4 m fallback distance, at the reference fov/viewport.
+    group.scale.setScalar(
+      screenConstantWorldHalf(DISK_SCREEN_PX, 4, tanHalfFovRad(LEGACY_REFERENCE_FOV_DEG), LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX),
+    )
     group.add(ring)
 
     if (locked) {

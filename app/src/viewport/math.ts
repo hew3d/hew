@@ -59,3 +59,72 @@ export function intersectGroundPlane(ray: Ray): Vec3 | null {
     z: 0,
   }
 }
+
+// ── screen-constant sizing ───────────────────────────────────────────────────
+//
+// Shared math for widgets that must keep a fixed apparent PIXEL size on screen
+// regardless of camera distance, field of view, or viewport resize (grip
+// markers, rotate/protractor disks, slice/section-plane preview quads). See
+// ScaleTool.updateGripScale's doc comment for the full derivation and the
+// off-axis `1/cosθ` approximation every caller of this helper accepts (`dist`
+// should be the real Euclidean camera→point distance, not view-space depth).
+//
+// Do NOT go back to a `k · dist` constant that bakes `tanHalfFov /
+// viewportHeight` into a single number — it silently drifts the moment either
+// the fov changes or the viewport is resized, which is exactly the bug this
+// helper exists to fix.
+
+/** tan(halfFovY) in radians, for a vertical field of view given in degrees. */
+export function tanHalfFovRad(fovYDeg: number): number {
+  return Math.tan((fovYDeg * Math.PI) / 360)
+}
+
+/**
+ * World-space half-extent (or radius) that renders as `desiredPixels` pixels
+ * on screen for a point at Euclidean camera distance `dist`, under a
+ * perspective camera whose vertical fov gives `tanHalfFov` (pass
+ * `tanHalfFovRad(camera.fov)`) and whose viewport is `viewportHeightPx` pixels
+ * tall. The standard perspective-projection inverse:
+ *
+ *   worldHalf = desiredPixels · dist · tanHalfFov / viewportHeightPx
+ *
+ * Clamped to `minWorldHalf` — pass a nonzero floor (as `ScaleTool` does) so a
+ * degenerate viewport height or a point very near the camera never collapses
+ * a widget below a usable size; the default of 0 applies no floor.
+ */
+export function screenConstantWorldHalf(
+  desiredPixels: number,
+  dist: number,
+  tanHalfFov: number,
+  viewportHeightPx: number,
+  minWorldHalf = 0,
+): number {
+  if (viewportHeightPx <= 0) return minWorldHalf
+  return Math.max((desiredPixels * dist * tanHalfFov) / viewportHeightPx, minWorldHalf)
+}
+
+/**
+ * Baseline (fov, viewport height) used to migrate this app's older `k · dist`
+ * screen-constant widgets onto `screenConstantWorldHalf` without changing
+ * their on-screen size at that baseline: the app's own default camera fov
+ * (`new THREE.PerspectiveCamera(45, …)` in Viewport.tsx) and Playwright's
+ * Desktop Chrome default project viewport height. Only meaningful to
+ * `legacyScreenConstantToPixels` callers — a new widget should pick a
+ * `desiredPixels` value directly instead of reaching for these.
+ */
+export const LEGACY_REFERENCE_FOV_DEG = 45
+export const LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX = 720
+
+/**
+ * Converts a superseded `worldSize = k · dist` screen-constant factor into the
+ * equivalent `desiredPixels` for `screenConstantWorldHalf`, evaluated at a
+ * reference fov/viewport — so a widget migrating off the old form keeps its
+ * current apparent size at that baseline, rather than an invented new one.
+ */
+export function legacyScreenConstantToPixels(
+  k: number,
+  refFovYDeg: number,
+  refViewportHeightPx: number,
+): number {
+  return (k * refViewportHeightPx) / tanHalfFovRad(refFovYDeg)
+}

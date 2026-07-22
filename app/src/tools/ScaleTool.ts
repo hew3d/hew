@@ -63,6 +63,7 @@
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
+import { screenConstantWorldHalf, tanHalfFovRad } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { nonUniformScaleAboutPivot, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
@@ -687,27 +688,29 @@ export class ScaleTool implements Tool {
    *
    * Each grip's local geometry is a unit cube (half-extent 1); its world
    * half-extent is set to `GRIP_SCREEN_PX` pixels' worth of world space AT
-   * ITS OWN DISTANCE from the camera — the standard perspective-projection
-   * inverse: `worldHalf = desiredPixels · dist · tan(fov/2) / viewportHeight`.
-   * `dist` is the Euclidean camera→grip distance, not view-space depth, so a
-   * grip off the view axis by angle θ renders ≈1/cosθ oversized (~8% worst
-   * case at 45° fov) — a deliberate approximation, exact on-axis, and
+   * ITS OWN DISTANCE from the camera via `screenConstantWorldHalf`
+   * (`viewport/math.ts`) — the standard perspective-projection inverse:
+   * `worldHalf = desiredPixels · dist · tan(fov/2) / viewportHeight`. `dist`
+   * is the Euclidean camera→grip distance, not view-space depth, so a grip
+   * off the view axis by angle θ renders ≈1/cosθ oversized (~8% worst case
+   * at 45° fov) — a deliberate approximation, exact on-axis, and
    * self-consistent with `_pickToleranceAt` (render and pick share it, so
    * grips feel exactly as big as they look). Every grip ends up (near) the
    * same apparent size on screen no matter how far it is from the camera or
    * how big the selection's box is. No-op when the gizmo isn't showing or
    * the camera isn't a `PerspectiveCamera` (the only kind this app ever
-   * creates — see Viewport.tsx).
+   * creates — see Viewport.tsx). RotateTool/ProtractorTool/SliceTool/
+   * SectionPlaneTool's single-disk widgets share this same helper.
    */
   updateGripScale(camera: THREE.Camera, viewportHeight: number): void {
     if (this.gizmoGripMeshes === null || viewportHeight <= 0) return
     if (!(camera instanceof THREE.PerspectiveCamera)) return
-    const tanHalfFov = Math.tan((camera.fov * Math.PI) / 360)
+    const tanHalfFov = tanHalfFovRad(camera.fov)
     this._pickTanHalfFov = tanHalfFov
     this._pickViewportHeight = viewportHeight
     for (const mesh of this.gizmoGripMeshes) {
       const dist = camera.position.distanceTo(mesh.position)
-      const half = Math.max((GRIP_SCREEN_PX * dist * tanHalfFov) / viewportHeight, MIN_GRIP_WORLD_HALF)
+      const half = screenConstantWorldHalf(GRIP_SCREEN_PX, dist, tanHalfFov, viewportHeight, MIN_GRIP_WORLD_HALF)
       mesh.scale.setScalar(half)
     }
   }
@@ -728,8 +731,11 @@ export class ScaleTool implements Tool {
     }
     const dx = pos[0] - ray.origin[0], dy = pos[1] - ray.origin[1], dz = pos[2] - ray.origin[2]
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-    const half = Math.max(
-      (GRIP_SCREEN_PX * dist * this._pickTanHalfFov) / this._pickViewportHeight,
+    const half = screenConstantWorldHalf(
+      GRIP_SCREEN_PX,
+      dist,
+      this._pickTanHalfFov,
+      this._pickViewportHeight,
       MIN_GRIP_WORLD_HALF,
     )
     return half * GRIP_PICK_MULTIPLIER

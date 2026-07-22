@@ -69,6 +69,13 @@
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
+import {
+  screenConstantWorldHalf,
+  tanHalfFovRad,
+  legacyScreenConstantToPixels,
+  LEGACY_REFERENCE_FOV_DEG,
+  LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX,
+} from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { facePlaneBasis, projectRayOntoAxis, rayPlaneIntersect, type V3 } from '../viewport/geoHelpers'
 import { createSectionPlane, offsetSectionPlane, type SectionPlane } from '../viewport/sectionManager'
@@ -100,10 +107,20 @@ export const OFFSET_DRAG_THRESHOLD_M = 0.001
  * preview so the two tools never look like the same feature. */
 const PREVIEW_COLOR = 0x00bcd4
 const PREVIEW_FILL_OPACITY = 0.22
-/** Screen-constant scale for the PLACEMENT preview quad (not the committed
- * widget, which SceneRenderer sizes to the real scene bounds) — mirrors
- * SliceTool's PLANE_SCREEN_K so a hover preview reads at a steady size. */
-const PREVIEW_SCREEN_K = 0.06
+/**
+ * Screen-constant scale for the PLACEMENT preview quad (not the committed
+ * widget, which SceneRenderer sizes to the real scene bounds), fed to
+ * `screenConstantWorldHalf` (`viewport/math.ts`) every frame in
+ * `updateDiskScale` — replaces a former `worldHalf = PREVIEW_SCREEN_K *
+ * cameraDistance` constant (K = 0.06) that baked `tan(fov/2)/viewportHeight`
+ * into a single number and so drifted whenever the fov changed or the
+ * viewport was resized. `legacyScreenConstantToPixels` converts that old K,
+ * evaluated at the app's reference fov/viewport, into an equivalent pixel
+ * size — unchanged from before at that baseline (mirrors SliceTool's
+ * PLANE_SCREEN_PX, same source K) and now ACTUALLY constant everywhere else
+ * too.
+ */
+const PREVIEW_SCREEN_PX = legacyScreenConstantToPixels(0.06, LEGACY_REFERENCE_FOV_DEG, LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX)
 const PREVIEW_BASE_HALF = 1
 
 function normalizeOrZ(v: V3): V3 {
@@ -501,18 +518,31 @@ export class SectionPlaneTool implements Tool {
     group.add(fillMesh)
     group.add(outline)
     group.position.set(center[0], center[1], center[2])
-    group.scale.setScalar(PREVIEW_SCREEN_K * 4)
+    // Placeholder scale — updateDiskScale() corrects it next render frame,
+    // same convention as ProtractorTool/SliceTool/RotateTool's own disk
+    // widgets. ~4 m fallback distance, at the reference fov/viewport.
+    group.scale.setScalar(
+      screenConstantWorldHalf(PREVIEW_SCREEN_PX, 4, tanHalfFovRad(LEGACY_REFERENCE_FOV_DEG), LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX),
+    )
     this.preview.add(group)
     this.previewPlane = group
   }
 
-  /** Keep the preview quad a constant on-screen size regardless of zoom —
-   * called once per frame by the Viewport render loop (feature-detected,
-   * matching ProtractorTool/SliceTool's own `updateDiskScale`). */
-  updateDiskScale(camera: THREE.Camera): void {
-    if (this.previewPlane === null) return
+  /**
+   * Keep the preview quad a constant on-screen size regardless of zoom, fov,
+   * or viewport resize — called once per frame by the Viewport render loop
+   * (feature-detected, matching ProtractorTool/SliceTool's own
+   * `updateDiskScale`), passing the live viewport height alongside the
+   * camera (see `ScaleTool.updateGripScale`'s doc comment for the shared
+   * derivation). No-op when no preview plane is shown, the camera isn't a
+   * `PerspectiveCamera`, or `viewportHeight` is degenerate.
+   */
+  updateDiskScale(camera: THREE.Camera, viewportHeight: number): void {
+    if (this.previewPlane === null || viewportHeight <= 0) return
+    if (!(camera instanceof THREE.PerspectiveCamera)) return
     const dist = camera.position.distanceTo(this.previewPlane.position)
-    this.previewPlane.scale.setScalar(PREVIEW_SCREEN_K * dist)
+    const scale = screenConstantWorldHalf(PREVIEW_SCREEN_PX, dist, tanHalfFovRad(camera.fov), viewportHeight)
+    this.previewPlane.scale.setScalar(scale)
   }
 
   private _clearPreview(): void {

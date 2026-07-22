@@ -2954,11 +2954,17 @@ export default function Viewport({
       if (changed || needsRender) {
         // Keep guide-line dashes screen-constant too (see updateGuideDashScale).
         sceneRenderer.updateGuideDashScale(controls.getDistance())
-        // Protractor's plane-preview disk is a virtual construct too — keep
-        // it screen-constant the same way (see ProtractorTool.updateDiskScale).
+        // Rotate/Protractor/Slice/SectionPlane's single-position preview
+        // disks are virtual constructs too — keep them screen-constant the
+        // same way (see RotateTool/ProtractorTool/SliceTool/
+        // SectionPlaneTool.updateDiskScale, all built on
+        // viewport/math.ts's screenConstantWorldHalf). viewportHeight is
+        // passed alongside the camera — the old K·dist form baked it into a
+        // constant and silently drifted on resize; this doesn't.
         const activeToolForScale = toolController.activeTool
         if ('updateDiskScale' in activeToolForScale) {
-          ;(activeToolForScale as { updateDiskScale(c: THREE.Camera): void }).updateDiskScale(camera)
+          ;(activeToolForScale as { updateDiskScale(c: THREE.Camera, viewportHeight: number): void })
+            .updateDiskScale(camera, el.clientHeight)
         }
         // ScaleTool's grip markers are screen-constant size too, but each
         // grip needs its OWN world-space size (they sit at different
