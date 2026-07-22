@@ -49,7 +49,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
 import { editDimsBuffer, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
-import { groundDrawPlane, planeFromSketch, pointOnPlane, axisDrawPlane, drawPlaneCue, isGroundPlane, SketchPickCache, type DrawPlane } from './drawPlane'
+import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
 import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
 
 export type RectangleCommitResult = {
@@ -195,15 +195,7 @@ export class RectangleTool implements Tool {
    * re-check is needed here.
    */
   private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    const sketchHandle = this._sketchPickCache.pickFor(this.wasmScene, ray)
-    if (sketchHandle !== null) {
-      const plane = planeFromSketch(this.wasmScene, sketchHandle)
-      if (plane !== null && !plane.ground) {
-        return { plane, target: { kind: 'existing', handle: sketchHandle } }
-      }
-    }
-    const plane = groundDrawPlane()
-    return { plane, target: { kind: 'plane', plane } }
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray)
   }
 
   /**
@@ -217,13 +209,7 @@ export class RectangleTool implements Tool {
    * point yet (nothing to click through).
    */
   private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
-    if (this.idlePlaneLock !== null) {
-      if (snap === null) return null
-      const clickedPoint: V3 = [snap.x, snap.y, snap.z]
-      const plane = axisDrawPlane(this.idlePlaneLock, clickedPoint)
-      return { plane, target: { kind: 'plane', plane } }
-    }
-    return this._resolveIdleTarget(ray)
+    return resolveClickDrawTarget(this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray)
   }
 
   /** The cursor's position on `plane`. On the ground plane this is EXACTLY

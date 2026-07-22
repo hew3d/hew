@@ -13,7 +13,24 @@ import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
-const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
+/**
+ * A ray that genuinely PIERCES the tilted sketch's plane on the sketch
+ * itself — what the pick cone models and what `rayLandsOnSketch` (the
+ * sketch-mode adoption gate in `drawPlane.ts`) measures. It pierces y = 0 at
+ * (1, 0, 0), a point on `SKETCH_LINES`'s bottom edge. A ray lying IN the
+ * plane (the old `[0,0,5] → -Z` fixture) can never pick that plane's sketch
+ * in the real app: it has no pierce point at all.
+ */
+const RAY: Ray = { origin: [1, 5, 0], direction: [0, -1, 0] }
+
+/** The tilted sketch's own geometry: a 4 m square on the y = 0 plane, the
+ *  shape `RAY` lands on. `Scene.sketch_lines` reports xyz endpoint pairs. */
+const SKETCH_LINES = new Float32Array([
+  0, 0, 0, 4, 0, 0,
+  4, 0, 0, 4, 0, 4,
+  4, 0, 4, 0, 0, 4,
+  0, 0, 4, 0, 0, 0,
+])
 
 function makeSnap(overrides: Partial<Snap> = {}): Snap {
   return { x: 0, y: 0, z: 0, kind: 'plane', ...overrides }
@@ -52,6 +69,12 @@ function makeWasmScene(opts: {
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => opts.sketchPick),
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
+    // Mirrors the real `Scene.sketch_lines`: the sketch's segments, and a
+    // throw for a sketch that is no longer there.
+    sketch_lines: vi.fn((h: bigint) => {
+      if (planes.get(h) === undefined) throw new Error('UnknownSketch')
+      return SKETCH_LINES
+    }),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(),
     sketch_add_segment: vi.fn(
@@ -99,6 +122,25 @@ describe('RectangleTool — sketch mode (drawing on a hovered non-ground sketch)
     expect(tool.capturingInput()).toBe(true)
     expect(scene.pick_sketch).toHaveBeenCalled()
     expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+  })
+
+  it('a GRAZING pick the ray does not land on draws on the ground, not the tilted sketch', () => {
+    // The regression behind the Follow Me L-path spec: `pick_sketch`'s cone
+    // measures perpendicular distance to the ray, so a standing sketch seen
+    // near edge-on "hits" for a click aimed at the ground half a metre away.
+    // `rayLandsOnSketch` (drawPlane.ts) rejects it — this ray pierces y = 0
+    // at (1, 0, -20), nowhere near SKETCH_LINES. Pinned per tool so a wrapper
+    // that stopped delegating to the shared resolver would be caught here and
+    // not only in drawPlane.test.ts.
+    const grazing: Ray = { origin: [1, 5, 0], direction: [0, -1, -4] }
+    const { scene } = makeWasmScene({ sketchPick: TILTED_SKETCH })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), grazing) // anchor
+    tool.onPointerDown(makeSnap({ x: 3, y: 2, z: 0 }), grazing) // opposite corner — commits
+
+    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(scene.sketch_begin_gesture).not.toHaveBeenCalledWith(TILTED_SKETCH)
   })
 
   it('the second click commits four segments into the hovered sketch with on-plane world coordinates, and a closing commit fires onCommit', () => {

@@ -8,6 +8,9 @@ import {
   isGroundPlane,
   drawPlaneCue,
   SketchPickCache,
+  rayLandsOnSketch,
+  resolveIdleDrawTarget,
+  resolveClickDrawTarget,
   type DrawPlane,
 } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -243,5 +246,147 @@ describe('SketchPickCache', () => {
     expect(cache.pickFor(scene, RAY)).toBeNull()
     expect(cache.pickFor(scene, RAY)).toBeNull()
     expect(scene.pick_sketch).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ------------------------------------------------- sketch-mode adoption gate
+
+/**
+ * The regression this gate exists for, in numbers. A vertical sketch (y = 0)
+ * seen from a 3/4 camera at (8, 6, 8) is met at ~28° incidence, so
+ * `pick_sketch`'s cone — which measures the PERPENDICULAR distance from the
+ * ray axis — reports a 0.245 m miss for an edge that is 0.52 m away IN THE
+ * PLANE. The cone's half-angle is 0.02 rad, so the pick "hits" (0.245 / 12.8
+ * = 0.0192 rad) even though the user is pointing half a metre off the sketch,
+ * at the world origin on the ground.
+ */
+describe('rayLandsOnSketch', () => {
+  const WALL_SKETCH = 7n
+  /** The y = 0 wall plane, +Y normal. */
+  const WALL: DrawPlane = { origin: [0, 0, 0], normal: [0, 1, 0], u: [0, 0, 1], v: [1, 0, 0], ground: false }
+  /** A 0.6 m square standing on the wall plane, spanning x ∈ [-0.3, 0.3], z ∈ [0.4, 1]. */
+  const SQUARE = new Float32Array([
+    -0.3, 0, 0.4, 0.3, 0, 0.4,
+    0.3, 0, 0.4, 0.3, 0, 1,
+    0.3, 0, 1, -0.3, 0, 1,
+    -0.3, 0, 1, -0.3, 0, 0.4,
+  ])
+
+  function wallScene(lines: Float32Array | (() => never) = SQUARE): WasmScene {
+    return {
+      sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 1, 0])),
+      pick_sketch: vi.fn(() => WALL_SKETCH),
+      sketch_lines: vi.fn(() => (typeof lines === 'function' ? lines() : lines)),
+    } as unknown as WasmScene
+  }
+
+  /** A ray from the 3/4 camera through `target`. */
+  function rayThrough(target: [number, number, number]): Ray {
+    const o: [number, number, number] = [8, 6, 8]
+    return { origin: o, direction: [target[0] - o[0], target[1] - o[1], target[2] - o[2]] }
+  }
+
+  it('rejects the grazing near-miss: aiming at the world origin does NOT land on the standing square', () => {
+    expect(rayLandsOnSketch(wallScene(), WALL_SKETCH, WALL, rayThrough([0, 0, 0]))).toBe(false)
+  })
+
+  it('accepts a ray aimed at the square\'s own edge', () => {
+    // Distance is measured to the sketch's EDGES, matching what
+    // `pick_sketch`'s cone tests — a ray through the middle of a closed
+    // loop is never a pick_sketch hit in the first place, so the gate never
+    // sees it.
+    expect(rayLandsOnSketch(wallScene(), WALL_SKETCH, WALL, rayThrough([0, 0, 0.4]))).toBe(true)
+  })
+
+  it('accepts a ray just outside an edge but within the cone radius at that depth', () => {
+    // Pierce point (0, 0, 0.35) — 0.05 m below the bottom edge. The cone
+    // radius at ~12.9 m is 0.02 × 12.9 ≈ 0.26 m, so this still lands.
+    expect(rayLandsOnSketch(wallScene(), WALL_SKETCH, WALL, rayThrough([0, 0, 0.35]))).toBe(true)
+  })
+
+  it('rejects a ray PARALLEL to the plane — it never pierces it at all', () => {
+    const parallel: Ray = { origin: [5, 0, 0.4], direction: [-1, 0, 0] }
+    expect(rayLandsOnSketch(wallScene(), WALL_SKETCH, WALL, parallel)).toBe(false)
+  })
+
+  it('rejects a sketch whose handle went stale (sketch_lines throws)', () => {
+    const stale = wallScene(() => { throw new Error('UnknownSketch') })
+    expect(rayLandsOnSketch(stale, WALL_SKETCH, WALL, rayThrough([0, 0, 0.4]))).toBe(false)
+  })
+
+  it('rejects an empty sketch — no geometry to land on', () => {
+    expect(rayLandsOnSketch(wallScene(new Float32Array([])), WALL_SKETCH, WALL, rayThrough([0, 0, 0.4]))).toBe(false)
+  })
+})
+
+describe('resolveIdleDrawTarget', () => {
+  const WALL_SKETCH = 7n
+  const SQUARE = new Float32Array([
+    -0.3, 0, 0.4, 0.3, 0, 0.4,
+    0.3, 0, 0.4, 0.3, 0, 1,
+    0.3, 0, 1, -0.3, 0, 1,
+    -0.3, 0, 1, -0.3, 0, 0.4,
+  ])
+
+  /** `pick: null` means `pick_sketch` MISSES (returns undefined). */
+  function scene(plane: Float64Array, pick: bigint | null = WALL_SKETCH): WasmScene {
+    return {
+      sketch_plane: vi.fn(() => plane),
+      pick_sketch: vi.fn(() => pick ?? undefined),
+      sketch_lines: vi.fn(() => SQUARE),
+    } as unknown as WasmScene
+  }
+
+  function rayThrough(target: [number, number, number]): Ray {
+    const o: [number, number, number] = [8, 6, 8]
+    return { origin: o, direction: [target[0] - o[0], target[1] - o[1], target[2] - o[2]] }
+  }
+
+  const WALL_PLANE_ARR = new Float64Array([0, 0, 0, 0, 1, 0])
+
+  it('adopts the hovered sketch when the ray lands on it', () => {
+    const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0.4]))
+    expect(resolved.target).toEqual({ kind: 'existing', handle: WALL_SKETCH })
+    expect(resolved.plane.ground).toBe(false)
+  })
+
+  it('falls back to the GROUND plane on a grazing pick the ray does not land on', () => {
+    const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0]))
+    expect(resolved.plane).toEqual(groundDrawPlane())
+    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane() })
+  })
+
+  it('falls back to the ground plane when nothing is picked', () => {
+    const resolved = resolveIdleDrawTarget(
+      scene(WALL_PLANE_ARR, null), new SketchPickCache(), rayThrough([0, 0, 0.4]),
+    )
+    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane() })
+  })
+
+  it('never adopts a sketch that is itself on the ground plane', () => {
+    const groundArr = new Float64Array([0, 0, 0, 0, 0, 1])
+    const resolved = resolveIdleDrawTarget(scene(groundArr), new SketchPickCache(), rayThrough([0, 0, 0]))
+    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane() })
+  })
+})
+
+describe('resolveClickDrawTarget', () => {
+  const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
+  const scene = { pick_sketch: vi.fn(() => undefined) } as unknown as WasmScene
+
+  it('an active idle plane lock beats sketch/ground resolution', () => {
+    const resolved = resolveClickDrawTarget(
+      scene, new SketchPickCache(), 1, { x: 2, y: 3, z: 4, kind: 'endpoint' }, RAY,
+    )
+    expect(resolved).toEqual({ plane: axisDrawPlane(1, [2, 3, 4]), target: { kind: 'plane', plane: axisDrawPlane(1, [2, 3, 4]) } })
+  })
+
+  it('a lock with no snap yet resolves to null — nothing to click through', () => {
+    expect(resolveClickDrawTarget(scene, new SketchPickCache(), 1, null, RAY)).toBeNull()
+  })
+
+  it('with no lock it defers to resolveIdleDrawTarget', () => {
+    const resolved = resolveClickDrawTarget(scene, new SketchPickCache(), null, null, RAY)
+    expect(resolved).toEqual({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane() } })
   })
 })

@@ -15,6 +15,8 @@ import type { V3 } from '../viewport/geoHelpers'
 import { facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
+import type { SketchTarget } from './sketchGesture'
+import type { Snap } from './types'
 
 /** A drawing plane: any point on it, its unit normal, and a right-handed
  *  in-plane basis (u, v) with `cross(u, v) === normal`. */
@@ -181,13 +183,25 @@ export function drawPlaneCue(params: {
 }
 
 /**
- * Memoizes the single `pick_sketch` raycast for the CURRENT pointer event —
+ * Memoizes the sketch-mode resolution for the CURRENT pointer event —
  * mirrors `FacePickCache` in faceDraw.ts. Keyed by reference equality on the
  * `Ray` passed in (the Viewport builds one Ray object per event); a miss
- * just falls back to a fresh pick.
+ * just recomputes.
+ *
+ * Two memos, because both halves are paid more than once per event. The
+ * Viewport calls `snapConstraint(ray)` before EVERY pointer event and then,
+ * on a click, the tool's `onPointerDown` resolves the same ray again — so
+ * without this, one click runs the whole resolution twice, and every idle
+ * move runs it once. `pickFor` memoizes the `pick_sketch` raycast;
+ * `targetFor` memoizes the full resolved `{plane, target}` including
+ * `rayLandsOnSketch`'s `sketch_lines` marshal and per-segment scan, which
+ * is the expensive half on a dense sketch (a 96-facet circle, a hand-traced
+ * profile).
  */
 export class SketchPickCache {
   private cache: { ray: Ray; handle: bigint | null } | null = null
+  private targetCache: { ray: Ray; resolved: { plane: DrawPlane; target: SketchTarget } } | null =
+    null
 
   pickFor(wasmScene: WasmScene, ray: Ray): bigint | null {
     if (this.cache !== null && this.cache.ray === ray) {
@@ -202,7 +216,158 @@ export class SketchPickCache {
     return handle
   }
 
+  /** Memoized `resolve` for `ray`, computed via `compute` on a miss. Only
+   *  `resolveIdleDrawTarget` calls this; it is a method rather than a free
+   *  memo so the whole per-event cache clears as one (`clear`). */
+  targetFor(
+    ray: Ray,
+    compute: () => { plane: DrawPlane; target: SketchTarget },
+  ): { plane: DrawPlane; target: SketchTarget } {
+    if (this.targetCache !== null && this.targetCache.ray === ray) {
+      return this.targetCache.resolved
+    }
+    const resolved = compute()
+    this.targetCache = { ray, resolved }
+    return resolved
+  }
+
   clear(): void {
     this.cache = null
+    this.targetCache = null
   }
+}
+
+/**
+ * Half-angle (radians) of the pick cone `Scene::pick_sketch` uses —
+ * `SKETCH_PICK_APERTURE` in `crates/wasm-api/src/lib.rs`, mirrored here so
+ * `raysLandsOnSketch` can measure the cone's radius in world units. Keep the
+ * two in step.
+ */
+export const SKETCH_PICK_APERTURE = 0.02
+
+/** Squared distance from `p` to the segment `a`–`b`. */
+function distSqToSegment(p: V3, a: V3, b: V3): number {
+  const abx = b[0] - a[0]
+  const aby = b[1] - a[1]
+  const abz = b[2] - a[2]
+  const lenSq = abx * abx + aby * aby + abz * abz
+  let t = 0
+  if (lenSq > 0) {
+    t = ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby + (p[2] - a[2]) * abz) / lenSq
+    t = t < 0 ? 0 : t > 1 ? 1 : t
+  }
+  const dx = p[0] - (a[0] + abx * t)
+  const dy = p[1] - (a[1] + aby * t)
+  const dz = p[2] - (a[2] + abz * t)
+  return dx * dx + dy * dy + dz * dz
+}
+
+/**
+ * True iff the ray genuinely LANDS ON `sketch` — the gate that turns a
+ * `pick_sketch` hit into sketch-mode adoption.
+ *
+ * `pick_sketch` models the pick as a cone around the ray axis, measuring the
+ * PERPENDICULAR distance from the axis to a sketch edge. That measure is
+ * blind to the angle the ray meets the sketch's plane at: on a plane seen at
+ * incidence θ, a perpendicular miss of `d` is an IN-PLANE miss of `d/sin θ`.
+ * A vertical sketch viewed from a typical 3/4 camera runs θ ≈ 30°, so an edge
+ * a comfortable half-metre away in its own plane still falls inside the cone
+ * — and the tool would silently adopt that plane for a click the user aimed
+ * at the ground half a metre away, sending every later point in the gesture
+ * off to wherever the ray happens to pierce the adopted plane.
+ *
+ * So: adopt only when the point the ray actually PIERCES the sketch's plane
+ * at is within the pick cone's own radius (`SKETCH_PICK_APERTURE × distance
+ * along the ray`) of the sketch's geometry. Measuring at the pierce point
+ * puts the tolerance in the plane the user would be drawing on, which is the
+ * plane the question is about; scaling it by distance keeps the gate
+ * screen-sized, matching how the cone itself behaves. A ray parallel to the
+ * plane (no pierce point) never lands on it.
+ */
+export function rayLandsOnSketch(
+  wasmScene: WasmScene,
+  sketch: bigint,
+  plane: DrawPlane,
+  ray: Ray,
+): boolean {
+  const hit = pointOnPlane(ray, plane)
+  if (hit === null) return false
+
+  let lines: ArrayLike<number>
+  try {
+    lines = wasmScene.sketch_lines(sketch)
+  } catch {
+    return false // stale handle — nothing to land on
+  }
+  if (lines.length < 6) return false
+
+  const dx = hit[0] - ray.origin[0]
+  const dy = hit[1] - ray.origin[1]
+  const dz = hit[2] - ray.origin[2]
+  const alongRay = Math.sqrt(dx * dx + dy * dy + dz * dz)
+  const toleranceSq = (SKETCH_PICK_APERTURE * alongRay) ** 2
+
+  for (let i = 0; i + 5 < lines.length; i += 6) {
+    const a: V3 = [lines[i], lines[i + 1], lines[i + 2]]
+    const b: V3 = [lines[i + 3], lines[i + 4], lines[i + 5]]
+    if (distSqToSegment(hit, a, b) <= toleranceSq) return true
+  }
+  return false
+}
+
+/**
+ * Resolve the plane/target an IDLE gesture would anchor onto at `ray`
+ * (design §1/§4) — the one implementation the five plane-mode draw tools
+ * (Line/Rectangle/Circle/Polygon/Arc) share.
+ *
+ * A top-level `pick_sketch` hit whose plane is non-ground adopts that sketch
+ * (SKETCH MODE) — but only if the ray really lands on it (`rayLandsOnSketch`,
+ * which see); otherwise the ground plane (PLANE MODE, the default). Callers
+ * reach this only once face mode has been ruled out (face mode takes
+ * priority), so there is no `activeContext` re-check here.
+ */
+export function resolveIdleDrawTarget(
+  wasmScene: WasmScene,
+  sketchPickCache: SketchPickCache,
+  ray: Ray,
+): { plane: DrawPlane; target: SketchTarget } {
+  return sketchPickCache.targetFor(ray, () => {
+    const sketchHandle = sketchPickCache.pickFor(wasmScene, ray)
+    if (sketchHandle !== null) {
+      const plane = planeFromSketch(wasmScene, sketchHandle)
+      if (plane !== null && !plane.ground && rayLandsOnSketch(wasmScene, sketchHandle, plane, ray)) {
+        return { plane, target: { kind: 'existing', handle: sketchHandle } }
+      }
+    }
+    const plane = groundDrawPlane()
+    return { plane, target: { kind: 'plane', plane } }
+  })
+}
+
+/**
+ * Resolve the plane/target the FIRST click of a gesture anchors onto
+ * (design §5.2) — shared by the same five draw tools.
+ *
+ * An ACTIVE idle plane lock beats face pick and sketch-hover adoption: the
+ * locked plane passes through `snap`'s point (free/unconstrained, per each
+ * tool's `snapConstraint` idle-lock branch), so clicking a solid's corner
+ * starts a vertical sketch at that corner. Falls back to
+ * `resolveIdleDrawTarget` (sketch/ground) when no lock is active. Returns
+ * `null` only when a lock is active but there is no snap point yet (nothing
+ * to click through).
+ */
+export function resolveClickDrawTarget(
+  wasmScene: WasmScene,
+  sketchPickCache: SketchPickCache,
+  idlePlaneLock: 0 | 1 | 2 | null,
+  snap: Snap | null,
+  ray: Ray,
+): { plane: DrawPlane; target: SketchTarget } | null {
+  if (idlePlaneLock !== null) {
+    if (snap === null) return null
+    const clickedPoint: V3 = [snap.x, snap.y, snap.z]
+    const plane = axisDrawPlane(idlePlaneLock, clickedPoint)
+    return { plane, target: { kind: 'plane', plane } }
+  }
+  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray)
 }
