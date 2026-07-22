@@ -1635,18 +1635,21 @@ fn sketch_with_circle(plane: Plane, center: Point3, radius: f64, n: usize) -> ke
 }
 
 fn register_sketch_full(scene: &mut InferenceScene, id: SketchId, s: &kernel::Sketch) {
+    // Mirror the production path (`Scene::register_sketch`): segments carry
+    // their owning curve so a facet vertex's Endpoint snap names the curve.
     let segments: Vec<_> = s
         .edges()
         .iter()
         .map(|(eid, e)| {
             (
                 eid,
+                e.curve,
                 s.vertices()[e.from].position,
                 s.vertices()[e.to].position,
             )
         })
         .collect();
-    scene.add_sketch(id, &segments);
+    scene.add_sketch_edges(id, &segments);
     scene.add_sketch_curves(id, &s.curve_rims());
 }
 
@@ -1665,8 +1668,11 @@ fn sketch_circle_center_snaps_before_any_extrusion() {
     let s = sketch_with_circle(plane, center, 0.5, 24);
     register_sketch_full(&mut scene, SketchId::default(), &s);
 
-    // The exact center resolves as Center with no provenance (a sketch
-    // curve is not a SnapSource element — like a guide, source is None).
+    // The exact center resolves as Center. No Object provenance (a sketch
+    // curve is not a SnapSource element — like a guide, source is None) and
+    // no EDGE provenance (the center lies on no edge), but it does name the
+    // curve chain it belongs to; see
+    // `drawn_curve_analytic_points_name_their_curve`.
     let cq = query(ray_at(Point3::new(1.0, 2.0, 3.0), center), NARROW);
     let snap = scene.resolve(&cq).expect("drawn circle center resolves");
     assert_eq!(snap.kind, SnapKind::Center);
@@ -1702,6 +1708,298 @@ fn sketch_circle_center_snaps_before_any_extrusion() {
         gone.map(|s| s.kind),
         Some(SnapKind::Center),
         "removed sketch must not keep offering its center"
+    );
+}
+
+// --------------------------------------------------- sketch-curve provenance
+//
+// The analytic points a drawn curve publishes about itself — a circle's or
+// arc's exact center, its covered quadrants, an anchored tangent, a regular
+// polygon's drawn center — plus the endpoints of the facets it is built from,
+// must name the CURVE CHAIN they belong to. Without it the app's selection
+// resolver has nothing to select and falls through to a ray re-probe, which
+// lands on whatever region happens to be under the cursor: clicking a drawn
+// circle at (or near) a quadrant or centre selected the sketch's island
+// instead of the circle. It is deliberately its own field, not a
+// `sketch_source` with some stand-in facet edge: a center lies on no edge at
+// all, and `sketch_source` is read as a DIRECTION reference by Tape Measure's
+// parallel guides, so a stand-in there would mislead a real consumer.
+
+/// The sketch handle every curve fixture below registers under. A distinct
+/// non-default id, so a test cannot pass by comparing two null keys.
+fn curve_sketch_id() -> SketchId {
+    let mut sm: slotmap::SlotMap<SketchId, ()> = slotmap::SlotMap::with_key();
+    sm.insert(());
+    sm.insert(()) // the second key: never `SketchId::default()`
+}
+
+#[test]
+fn drawn_curve_analytic_points_name_their_curve() {
+    let mut scene = InferenceScene::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let center = Point3::new(1.0, 2.0, 0.0);
+    let s = sketch_with_circle(plane, center, 0.5, 24);
+    let sid = curve_sketch_id();
+    register_sketch_full(&mut scene, sid, &s);
+
+    let rims = s.curve_rims();
+    let rim = &rims[0];
+    let want = Some((sid, rim.curve));
+
+    // Center.
+    let cq = query(ray_at(Point3::new(1.0, 2.0, 3.0), center), NARROW);
+    let snap = scene.resolve(&cq).expect("drawn circle center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert_eq!(snap.sketch_curve_source, want);
+    // Mutually exclusive with every other provenance field.
+    assert_eq!(snap.source, None);
+    assert_eq!(snap.sketch_source, None);
+    assert_eq!(snap.sketch_region_source, None);
+    assert_eq!(scene.resolve(&cq), scene.resolve_linear(&cq));
+
+    // Every covered quadrant, not just the first — the reported bug was
+    // angle-dependent, so no quadrant may be the odd one out.
+    for q in rim.quadrant_points() {
+        let qq = query(ray_at(q + Vec3::new(0.0, 0.0, 3.0), q), PIN);
+        let snap = scene.resolve(&qq).expect("drawn circle quadrant resolves");
+        assert_eq!(snap.kind, SnapKind::Quadrant);
+        assert_eq!(snap.sketch_curve_source, want);
+        assert_eq!(snap.sketch_source, None);
+        assert_eq!(scene.resolve(&qq), scene.resolve_linear(&qq));
+    }
+
+    // An anchored tangent point lies exactly ON the curve, so it names it too.
+    let anchor = center + rim.basis_u * 1.5;
+    let alpha = (0.5f64 / 1.5).acos();
+    let tan = center + rim.basis_u * (0.5 * alpha.cos()) + rim.basis_v * (0.5 * alpha.sin());
+    let mut tq = query(ray_at(tan + Vec3::new(0.0, 0.0, 3.0), tan), PIN);
+    tq.anchor = Some(anchor);
+    let snap = scene.resolve(&tq).expect("drawn circle tangent resolves");
+    assert_eq!(snap.kind, SnapKind::Tangent);
+    assert_eq!(snap.sketch_curve_source, want);
+
+    // The curve's own EDGE snaps are unchanged: still sketch-edge provenance,
+    // and never curve provenance — the two never collide.
+    let (eid, e) = s.edges().iter().next().expect("the circle has facets");
+    let mid = Point3::new(
+        (s.vertices()[e.from].position.x + s.vertices()[e.to].position.x) * 0.5,
+        (s.vertices()[e.from].position.y + s.vertices()[e.to].position.y) * 0.5,
+        (s.vertices()[e.from].position.z + s.vertices()[e.to].position.z) * 0.5,
+    );
+    let mq = query(ray_at(mid + Vec3::new(0.0, 0.0, 3.0), mid), PIN);
+    let snap = scene.resolve(&mq).expect("a facet midpoint resolves");
+    assert_eq!(snap.kind, SnapKind::Midpoint);
+    assert_eq!(snap.sketch_source, Some((sid, eid)));
+    assert_eq!(
+        snap.sketch_curve_source, None,
+        "an edge snap keeps naming its edge — the new field never displaces it"
+    );
+
+    // The facet VERTEX (Endpoint), by contrast, names the CURVE, not the
+    // edge: a vertex is not a direction reference, and this is what makes a
+    // click landing exactly on a facet vertex select the curve rather than
+    // fall through to the region. It carries NO `sketch_source`, so Tape
+    // Measure never treats it as a parallel reference.
+    let v = s.vertices()[e.from].position;
+    let vq = query(ray_at(v + Vec3::new(0.0, 0.0, 3.0), v), PIN);
+    let snap = scene.resolve(&vq).expect("a facet vertex resolves");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert_eq!(snap.sketch_curve_source, want);
+    assert_eq!(
+        snap.sketch_source, None,
+        "a facet vertex is not a direction reference — no sketch_source"
+    );
+    assert_eq!(scene.resolve(&vq), scene.resolve_linear(&vq));
+}
+
+#[test]
+fn a_drawn_arc_names_its_curve_like_a_circle() {
+    // An arc is the same analytic record with partial coverage, so it gets
+    // the same treatment by construction: its center is equally the point the
+    // user placed, and its chain is equally the thing a click selects.
+    let mut scene = InferenceScene::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let center = Point3::new(-2.0, 1.0, 0.0);
+    let radius = 0.4;
+    let mut s = kernel::Sketch::on_plane(plane);
+    let cid = s
+        .begin_curve_with(kernel::CurveGeom { center, radius })
+        .unwrap();
+    // Six facets of a 24-gon, on the same half-facet phase
+    // `sketch_with_circle` uses, so no vertex lands on a cardinal and the
+    // covered range is a proper subset of the circle: angles
+    // [0.5, 6.5] * 2pi/24, which contains the pi/2 cardinal and excludes 0.
+    let (u, v) = (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    let step = 2.0 * std::f64::consts::PI / 24.0;
+    for i in 0..6 {
+        let a0 = (i as f64 + 0.5) * step;
+        let a1 = (i as f64 + 1.5) * step;
+        let p0 = center + u * (radius * a0.cos()) + v * (radius * a0.sin());
+        let p1 = center + u * (radius * a1.cos()) + v * (radius * a1.sin());
+        s.add_segment(p0, p1).unwrap();
+    }
+    s.end_curve();
+
+    let sid = curve_sketch_id();
+    register_sketch_full(&mut scene, sid, &s);
+
+    let cq = query(ray_at(center + Vec3::new(0.0, 0.0, 3.0), center), NARROW);
+    let snap = scene.resolve(&cq).expect("drawn arc center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert_eq!(snap.sketch_curve_source, Some((sid, cid)));
+
+    // Exactly one cardinal falls on this arc's covered span; the other three
+    // are not offered at all — arc coverage still gates the candidates.
+    let rims = s.curve_rims();
+    let rim = &rims[0];
+    let qs = rim.quadrant_points();
+    assert_eq!(qs.len(), 1, "this quarter arc covers exactly one cardinal");
+    for q in &qs {
+        let qq = query(ray_at(*q + Vec3::new(0.0, 0.0, 3.0), *q), PIN);
+        let snap = scene.resolve(&qq).expect("arc quadrant resolves");
+        assert_eq!(snap.sketch_curve_source, Some((sid, cid)));
+    }
+
+    // A partial arc DOES offer tangents — but only where the tangent point
+    // falls on its covered span (the inference tangent walk gates each on
+    // `rim.covers`). Find one and confirm its Tangent snap names the curve
+    // too. Self-calibrating on the rim's OWN basis (for +Z, `plane_axes` gives
+    // basis_u = +Y, basis_v = -X, so the covered span is not aligned with the
+    // authoring frame). An anchor along basis_u places the two tangents at
+    // ±acos(r/D); scan for a covered one clear of every cardinal (so a
+    // Quadrant can't shadow it) and every facet vertex (so an Endpoint can't).
+    let pi = std::f64::consts::PI;
+    let ang_dist = |a: f64, b: f64| {
+        let d = (a - b).rem_euclid(2.0 * pi);
+        d.min(2.0 * pi - d)
+    };
+    // Every competing positional snap the dense facets offer, in the rim's
+    // basis: each facet VERTEX (an Endpoint) and each facet CHORD-MIDPOINT (a
+    // Midpoint). The chosen tangent target must sit clear of all of them, or a
+    // stronger-kinded candidate at the same spot would win the pin.
+    let basis_angle = |p: Point3| -> f64 {
+        let d = p - center;
+        d.dot(rim.basis_v).atan2(d.dot(rim.basis_u))
+    };
+    let mut competitors: Vec<f64> = Vec::new();
+    for (_, e) in s.edges().iter() {
+        let a = s.vertices()[e.from].position;
+        let b = s.vertices()[e.to].position;
+        competitors.push(basis_angle(a));
+        competitors.push(basis_angle(b));
+        competitors.push(basis_angle(Point3::new(
+            (a.x + b.x) * 0.5,
+            (a.y + b.y) * 0.5,
+            (a.z + b.z) * 0.5,
+        )));
+    }
+    // A 0.5 m eye height keeps the pin cone (aperture PIN = 0.003 rad) tiny at
+    // the target — ~0.0015 m radius — so a competitor 1.7° of arc away
+    // (r·0.03 ≈ 0.012 m) is well outside it; the clearance only picks a clean
+    // target, the eye height guarantees nothing else contends for the pin.
+    let clear = |theta: f64| {
+        [0.0, 0.5 * pi, pi, -0.5 * pi]
+            .iter()
+            .all(|&c| ang_dist(theta, c) > 0.2)
+            && competitors.iter().all(|&ca| ang_dist(theta, ca) > 0.03)
+    };
+    let mut chosen: Option<(f64, f64)> = None; // (alpha, theta)
+    let mut a_deg: f64 = 25.0;
+    while a_deg <= 80.0 && chosen.is_none() {
+        let alpha = a_deg.to_radians();
+        for theta in [alpha, -alpha] {
+            if rim.covers(theta) && clear(theta) {
+                chosen = Some((alpha, theta));
+                break;
+            }
+        }
+        a_deg += 0.5;
+    }
+    let (alpha, theta) =
+        chosen.expect("the arc must offer a covered tangent clear of its facet snaps");
+    let d = radius / alpha.cos();
+    let anchor = center + rim.basis_u * d;
+    let tan = center + rim.basis_u * (radius * theta.cos()) + rim.basis_v * (radius * theta.sin());
+    let mut tq = query(ray_at(tan + Vec3::new(0.0, 0.0, 0.5), tan), PIN);
+    tq.anchor = Some(anchor);
+    let snap = scene.resolve(&tq).expect("arc tangent resolves");
+    assert_eq!(
+        snap.kind,
+        SnapKind::Tangent,
+        "the covered tangent point snaps as Tangent"
+    );
+    assert_eq!(
+        snap.sketch_curve_source,
+        Some((sid, cid)),
+        "an arc's tangent names its curve chain, just like a circle's"
+    );
+}
+
+#[test]
+fn a_polygon_center_names_its_curve_too() {
+    // Same defect, different hat: a polygon's center rides its own scene
+    // channel but is the same kind of analytic point, so it names its chain
+    // the same way — a polygon's center selects the polygon.
+    let mut scene = InferenceScene::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let center = Point3::new(3.0, -1.0, 0.0);
+    let radius = 0.6;
+    let mut s = kernel::Sketch::on_plane(plane);
+    let cid = s
+        .begin_curve_with_kind(
+            kernel::CurveGeom { center, radius },
+            kernel::SketchCurveKind::Polygon,
+        )
+        .unwrap();
+    let (u, v) = (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    for i in 0..6 {
+        let a0 = 2.0 * std::f64::consts::PI * (i as f64) / 6.0;
+        let a1 = 2.0 * std::f64::consts::PI * (i as f64 + 1.0) / 6.0;
+        let p0 = center + u * (radius * a0.cos()) + v * (radius * a0.sin());
+        let p1 = center + u * (radius * a1.cos()) + v * (radius * a1.sin());
+        s.add_segment(p0, p1).unwrap();
+    }
+    s.end_curve();
+
+    let sid = curve_sketch_id();
+    register_sketch_full(&mut scene, sid, &s);
+    let centers = s.polygon_centers();
+    assert_eq!(centers, vec![(cid, center)]);
+    scene.add_sketch_polygon_centers(sid, &centers);
+    assert!(
+        s.curve_rims().is_empty(),
+        "a polygon publishes no rim — only its center"
+    );
+
+    let cq = query(ray_at(center + Vec3::new(0.0, 0.0, 3.0), center), NARROW);
+    let snap = scene.resolve(&cq).expect("drawn polygon center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert_eq!(snap.sketch_curve_source, Some((sid, cid)));
+    assert_eq!(snap.source, None);
+    assert_eq!(snap.sketch_source, None);
+    assert_eq!(scene.resolve(&cq), scene.resolve_linear(&cq));
+
+    // Removal still clears the channel (the id now rides alongside the point).
+    scene.remove_sketch(sid);
+    assert_ne!(
+        scene.resolve(&cq).map(|s| s.kind),
+        Some(SnapKind::Center),
+        "removed sketch must not keep offering its polygon center"
     );
 }
 
@@ -1937,7 +2235,10 @@ fn gravity_reaches_past_the_plain_aperture() {
 fn a_polygon_center_reaches_past_the_plain_aperture() {
     let center = Point3::new(2.0, 3.0, 0.0);
     let mut scene = InferenceScene::new();
-    scene.add_sketch_polygon_centers(SketchId::default(), &[center]);
+    scene.add_sketch_polygon_centers(
+        SketchId::default(),
+        &[(kernel::SketchCurveId::default(), center)],
+    );
 
     // 0.075 m off at 3 m overhead is 0.025 rad — past the 0.02 aperture,
     // inside the 2.5x analytic-point reach.

@@ -51,7 +51,12 @@ function sameTarget(a: Snap, b: Snap): boolean {
     a.object === b.object &&
     a.element === b.element &&
     a.elementKind === b.elementKind &&
-    a.sketch === b.sketch
+    a.sketch === b.sketch &&
+    // Two DIFFERENT drawn curves in one sketch are different targets: their
+    // analytic points carry no `element`, so without this the held snap on
+    // one circle's center would be treated as still-current over a
+    // neighbouring circle's.
+    a.sketchCurve === b.sketchCurve
   )
 }
 
@@ -76,6 +81,7 @@ function snapJsToSnap(s: SnapJs): Snap {
       elementKind: elemKind,
       sketch: s.sketch(),
       sketchRegion: s.sketch_region(),
+      sketchCurve: s.sketch_curve(),
     }
   } finally {
     s.free()

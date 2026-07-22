@@ -20,13 +20,21 @@ export interface Snap {
   element?: bigint
   elementKind?: string
   /** Owning sketch handle when the snap derives from a committed sketch
-   *  edge (`elementKind === 'sketch-edge'`; `element` is the edge) OR a drawn
+   *  edge (`elementKind === 'sketch-edge'`; `element` is the edge), a drawn
    *  region's fill (`elementKind === 'sketch-region'`; `sketchRegion` is the
-   *  region). */
+   *  region), or a drawn curve's analytic point (`elementKind ===
+   *  'sketch-curve'`; `sketchCurve` is the chain). */
   sketch?: bigint
   /** Region handle when the snap is on a drawn sketch region's fill
    *  (`elementKind === 'sketch-region'`). */
   sketchRegion?: bigint
+  /** Curve-chain handle when the snap is an analytic point of a drawn
+   *  (unextruded) curve — a circle's/arc's exact center, one of its covered
+   *  quadrant points, an anchored tangent, or a regular polygon's drawn
+   *  center (`elementKind === 'sketch-curve'`). `element` is undefined for
+   *  these: the point belongs to the CHAIN, and a center lies on no edge at
+   *  all, so there is no honest edge handle to report. */
+  sketchCurve?: bigint
 }
 
 /**

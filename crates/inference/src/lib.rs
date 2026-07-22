@@ -103,8 +103,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
     AnalyticRim, EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3,
-    SketchCurveRim, SketchEdgeId, SketchId, SketchRegionId, SketchVertexId, Transform, Vec3,
-    VertexId, tol,
+    SketchCurveId, SketchCurveRim, SketchEdgeId, SketchId, SketchRegionId, SketchVertexId,
+    Transform, Vec3, VertexId, tol,
 };
 
 mod index;
@@ -425,37 +425,60 @@ pub struct Snap {
     /// Select tool's click can match the occlusion-aware hover cue (interior
     /// fill → that region; nearer region beats a solid behind it).
     pub sketch_region_source: Option<(SketchId, SketchRegionId)>,
+    /// Committed sketch-CURVE provenance: which drawn curve chain a
+    /// Center/Quadrant/Tangent snap derives from — the analytic points a
+    /// drawn (unextruded) circle, arc, or regular polygon publishes about
+    /// itself. Mutually exclusive with the three fields above.
+    ///
+    /// Deliberately its own field rather than a
+    /// [`sketch_source`](Snap::sketch_source) with some representative facet
+    /// edge attached: a circle's CENTER lies on no edge at all, and
+    /// `sketch_source` is consumed as a *direction* reference (Tape Measure's
+    /// parallel guides), so a stand-in edge there would be a lie with a
+    /// real consumer. Sitting alongside `sketch_region_source` as its own
+    /// thing is the established pattern.
+    ///
+    /// Lets the Select tool resolve a center/quadrant click to the curve the
+    /// point belongs to — the same entity clicking the curve's rim selects —
+    /// instead of falling through to a ray re-probe that lands on whatever
+    /// region happens to be under the cursor.
+    pub sketch_curve_source: Option<(SketchId, SketchCurveId)>,
     /// The inference direction for directional snaps (axis / parallel /
     /// perpendicular), for drawing the dashed guide line.
     pub direction: Option<Vec3>,
 }
 
 /// Internal candidate provenance: an Object element, a committed sketch edge,
-/// or a committed sketch region. Split back into the [`Snap`] provenance
-/// fields when the winning candidate becomes a snap.
+/// a committed sketch region, or a committed sketch curve chain. Split back
+/// into the [`Snap`] provenance fields when the winning candidate becomes a
+/// snap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provenance {
     Object(SnapSource),
     SketchEdge(SketchId, SketchEdgeId),
     SketchRegion(SketchId, SketchRegionId),
+    SketchCurve(SketchId, SketchCurveId),
 }
 
-/// The three mutually-exclusive [`Snap`] provenance fields.
+/// The four mutually-exclusive [`Snap`] provenance fields.
 type SplitProvenance = (
     Option<SnapSource>,
     Option<(SketchId, SketchEdgeId)>,
     Option<(SketchId, SketchRegionId)>,
+    Option<(SketchId, SketchCurveId)>,
 );
 
 impl Provenance {
     /// Split into the public [`Snap`] provenance fields (object, sketch edge,
-    /// sketch region) — exactly one is `Some` for a real candidate.
+    /// sketch region, sketch curve) — exactly one is `Some` for a real
+    /// candidate.
     fn split(this: Option<Provenance>) -> SplitProvenance {
         match this {
-            Some(Provenance::Object(s)) => (Some(s), None, None),
-            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None),
-            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid))),
-            None => (None, None, None),
+            Some(Provenance::Object(s)) => (Some(s), None, None, None),
+            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None, None),
+            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid)), None),
+            Some(Provenance::SketchCurve(sid, cid)) => (None, None, None, Some((sid, cid))),
+            None => (None, None, None, None),
         }
     }
 }
@@ -910,7 +933,18 @@ pub struct InferenceScene {
     /// Objects): keyed by `SketchId` so a caller can replace one sketch's
     /// segments without touching another's. No `SnapSource` provenance —
     /// sketch elements aren't selectable in this phase.
-    sketch_segments: Vec<(SketchId, SketchEdgeId, BareSegment)>,
+    ///
+    /// The optional `SketchCurveId` is the drawn curve chain this segment is a
+    /// facet of (a circle's/arc's chord), `None` for a plain line or a
+    /// rectangle side. It gives a facet VERTEX's [`SnapKind::Endpoint`] snap
+    /// the curve chain it belongs to via [`Snap::sketch_curve_source`] — so
+    /// clicking a circle exactly on a facet vertex selects the curve, the same
+    /// as clicking its rim edge — WITHOUT giving that vertex a
+    /// [`Snap::sketch_source`] (a facet vertex is not a direction reference,
+    /// and `sketch_source` is consumed as one by Tape Measure). The facet
+    /// EDGE's Midpoint/OnEdge keep their [`Provenance::SketchEdge`]: an edge
+    /// genuinely is a direction reference.
+    sketch_segments: Vec<(SketchId, SketchEdgeId, Option<SketchCurveId>, BareSegment)>,
     /// Committed sketch *vertices*, keyed by `SketchId`, carrying their
     /// `SketchVertexId` so the per-vertex edit tool (Phase D) can pick an exact
     /// vertex to drag. Registered/cleared alongside `sketch_segments`.
@@ -919,11 +953,12 @@ pub struct InferenceScene {
     /// analytic [`kernel::CurveGeom`]), keyed by `SketchId` like
     /// `sketch_segments`: each offers its exact center, covered quadrant
     /// points, and anchor-based tangents — the sketch-level analogue of
-    /// `centers`/`quadrants`/`rims`, resolved on the same linear walk, but
-    /// with no provenance (sketch curves aren't `SnapSource` elements; like
-    /// guides they snap with `source: None`). Registered/cleared alongside
-    /// `sketch_segments`, so a drawn circle's true center snaps BEFORE any
-    /// extrusion exists.
+    /// `centers`/`quadrants`/`rims`, resolved on the same linear walk. They
+    /// are not `SnapSource` elements (a sketch curve is not an Object), so
+    /// they snap with `source: None`, but they DO carry
+    /// [`Snap::sketch_curve_source`] — the curve chain the point belongs to.
+    /// Registered/cleared alongside `sketch_segments`, so a drawn circle's
+    /// true center snaps BEFORE any extrusion exists.
     sketch_rims: Vec<(SketchId, SketchCurveRim)>,
     /// Committed sketch *polygon centers* — the exact drawn center of each
     /// regular polygon chain ([`kernel::Sketch::polygon_centers`]), keyed by
@@ -932,10 +967,11 @@ pub struct InferenceScene {
     /// Separate from `sketch_rims` because a polygon has no rim: its sides
     /// ARE its geometry, so the circumcircle it was drawn from supplies a
     /// center and nothing else — no quadrant points (they would lie on no
-    /// edge) and no tangents. Same lifecycle, same provenance-free linear
-    /// walk, same [`SnapKind::Center`] the circle case emits, so nothing
-    /// downstream has to learn a new kind.
-    sketch_polygon_centers: Vec<(SketchId, Point3)>,
+    /// edge) and no tangents. Same lifecycle, same linear walk, same
+    /// [`SnapKind::Center`] and same [`Snap::sketch_curve_source`] provenance
+    /// the circle case emits, so nothing downstream has to learn a new kind
+    /// or a second way of naming a drawn curve.
+    sketch_polygon_centers: Vec<(SketchId, SketchCurveId, Point3)>,
     /// Committed sketch *region faces* (closed regions of drawn shapes), keyed
     /// by `SketchId` like `sketch_segments`. Each registers a hoverable,
     /// occluding face so the cursor snaps to a drawn region ([`SnapKind::OnFace`])
@@ -1490,12 +1526,39 @@ impl InferenceScene {
     /// drops any prior candidates for `id` first, so callers can call this on
     /// every sketch mutation (add/remove segment, extrude) without tracking
     /// whether `id` was already registered.
+    ///
+    /// Plain-line convenience: every segment is registered with no owning
+    /// curve chain. Callers that have curve-facet segments (a drawn circle's
+    /// or arc's chords) use [`InferenceScene::add_sketch_edges`] so a facet
+    /// vertex's Endpoint snap can name its curve.
     pub fn add_sketch(&mut self, id: SketchId, segments: &[(SketchEdgeId, Point3, Point3)]) {
         self.remove_sketch(id);
         self.sketch_segments.extend(
             segments
                 .iter()
-                .map(|&(eid, a, b)| (id, eid, BareSegment { a, b })),
+                .map(|&(eid, a, b)| (id, eid, None, BareSegment { a, b })),
+        );
+    }
+
+    /// Like [`InferenceScene::add_sketch`], but each segment also names the
+    /// drawn curve chain it is a facet of (`None` for a plain line or a
+    /// rectangle side). The curve id rides onto that segment's endpoints as
+    /// [`Snap::sketch_curve_source`], so clicking a drawn circle/arc exactly
+    /// on a facet VERTEX selects the curve, the same as clicking a facet edge
+    /// — closing the other half of the provenance-less-analytic-point gap
+    /// (the rim's Center/Quadrant are handled by
+    /// [`InferenceScene::add_sketch_curves`]). Replace semantics, same as
+    /// `add_sketch`.
+    pub fn add_sketch_edges(
+        &mut self,
+        id: SketchId,
+        segments: &[(SketchEdgeId, Option<SketchCurveId>, Point3, Point3)],
+    ) {
+        self.remove_sketch(id);
+        self.sketch_segments.extend(
+            segments
+                .iter()
+                .map(|&(eid, cid, a, b)| (id, eid, cid, BareSegment { a, b })),
         );
     }
 
@@ -1538,10 +1601,19 @@ impl InferenceScene {
     /// belong here — they arrive with the rest of their rim through
     /// `add_sketch_curves`, so a caller registering both gets each center
     /// exactly once.
-    pub fn add_sketch_polygon_centers(&mut self, id: SketchId, centers: &[Point3]) {
-        self.sketch_polygon_centers.retain(|(sid, _)| *sid != id);
+    ///
+    /// Each center arrives with its owning curve chain
+    /// ([`kernel::Sketch::polygon_centers`]'s own return shape), so the
+    /// resulting [`SnapKind::Center`] carries [`Snap::sketch_curve_source`]
+    /// exactly like a circle's does — a polygon's center selects the polygon.
+    pub fn add_sketch_polygon_centers(
+        &mut self,
+        id: SketchId,
+        centers: &[(SketchCurveId, Point3)],
+    ) {
+        self.sketch_polygon_centers.retain(|(sid, _, _)| *sid != id);
         self.sketch_polygon_centers
-            .extend(centers.iter().map(|&c| (id, c)));
+            .extend(centers.iter().map(|&(cid, c)| (id, cid, c)));
     }
 
     /// Registers (or re-registers) the committed *region faces* of sketch `id`
@@ -1563,10 +1635,10 @@ impl InferenceScene {
     /// [`InferenceScene::remove_object`]) so callers can remove-then-add
     /// freely.
     pub fn remove_sketch(&mut self, id: SketchId) {
-        self.sketch_segments.retain(|(sid, _, _)| *sid != id);
+        self.sketch_segments.retain(|(sid, _, _, _)| *sid != id);
         self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
         self.sketch_rims.retain(|(sid, _)| *sid != id);
-        self.sketch_polygon_centers.retain(|(sid, _)| *sid != id);
+        self.sketch_polygon_centers.retain(|(sid, _, _)| *sid != id);
         self.sketch_faces.retain(|(sid, _)| *sid != id);
     }
 
@@ -1797,27 +1869,39 @@ impl InferenceScene {
 
         // --- Sketch-curve candidates: a drawn (unextruded) circle or arc
         //     offers its exact center and covered quadrant points, so
-        //     Center/Quadrant snapping exists BEFORE any extrusion. No
-        //     provenance — like guides and axes, sketch curves aren't
-        //     `SnapSource` elements. Linear walk, like `centers`. ---
-        for (_, rim) in &self.sketch_rims {
+        //     Center/Quadrant snapping exists BEFORE any extrusion. They carry
+        //     `Provenance::SketchCurve` — not an Object `SnapSource` (a sketch
+        //     curve is not an Object element) and not a `SketchEdge` (a
+        //     center lies on no edge), but the curve CHAIN they describe, so a
+        //     click on one selects the same curve clicking its rim does.
+        //     Linear walk, like `centers`. ---
+        for (sid, rim) in &self.sketch_rims {
+            let prov = Some(Provenance::SketchCurve(*sid, rim.curve));
             if let Some((ang, depth)) = wcone(rim.center, SnapKind::Center) {
-                candidates.push((SnapKind::Center, ang, depth, rim.center, None, None));
+                candidates.push((SnapKind::Center, ang, depth, rim.center, prov, None));
             }
             for q in rim.quadrant_points() {
                 if let Some((ang, depth)) = wcone(q, SnapKind::Quadrant) {
-                    candidates.push((SnapKind::Quadrant, ang, depth, q, None, None));
+                    candidates.push((SnapKind::Quadrant, ang, depth, q, prov, None));
                 }
             }
         }
 
         // --- Polygon centers: a drawn regular polygon's exact center, the
         //     one analytic point its circumcircle legitimately supplies. Same
-        //     kind, same provenance-free linear walk as the rim centers above
-        //     — a polygon simply contributes no quadrants or tangents. ---
-        for (_, c) in &self.sketch_polygon_centers {
+        //     kind, same curve-chain provenance, same linear walk as the rim
+        //     centers above — a polygon simply contributes no quadrants or
+        //     tangents. ---
+        for (sid, cid, c) in &self.sketch_polygon_centers {
             if let Some((ang, depth)) = wcone(*c, SnapKind::Center) {
-                candidates.push((SnapKind::Center, ang, depth, *c, None, None));
+                candidates.push((
+                    SnapKind::Center,
+                    ang,
+                    depth,
+                    *c,
+                    Some(Provenance::SketchCurve(*sid, *cid)),
+                    None,
+                ));
             }
         }
 
@@ -1851,9 +1935,11 @@ impl InferenceScene {
                     }
                 }
             }
-            // Sketch-curve rims tangent-snap identically, just with no
-            // provenance (see the sketch-curve Center/Quadrant walk above).
-            for (_, rim) in &self.sketch_rims {
+            // Sketch-curve rims tangent-snap identically, carrying the same
+            // curve-chain provenance (see the Center/Quadrant walk above) —
+            // a tangent point lies exactly ON the drawn curve, so it names
+            // the same curve its center and quadrants do.
+            for (sid, rim) in &self.sketch_rims {
                 let Some(angles) = tangent_angles(
                     anchor,
                     rim.center,
@@ -1872,7 +1958,14 @@ impl InferenceScene {
                         + rim.basis_u * (rim.radius * angle.cos())
                         + rim.basis_v * (rim.radius * angle.sin());
                     if let Some((ang, depth)) = wcone(pos, SnapKind::Tangent) {
-                        candidates.push((SnapKind::Tangent, ang, depth, pos, None, None));
+                        candidates.push((
+                            SnapKind::Tangent,
+                            ang,
+                            depth,
+                            pos,
+                            Some(Provenance::SketchCurve(*sid, rim.curve)),
+                            None,
+                        ));
                     }
                 }
             }
@@ -1918,29 +2011,45 @@ impl InferenceScene {
         // --- Sketch and transient segment candidates: Endpoint, Midpoint,
         //     and OnEdge. A committed sketch segment's Midpoint/OnEdge carry
         //     its (SketchId, SketchEdgeId) so tools can use the edge as a
-        //     reference (Tape Measure parallel guides); endpoints are vertex
-        //     snaps and carry none. Transient segments carry none at all. ---
+        //     direction reference (Tape Measure parallel guides). Its
+        //     ENDPOINTS instead carry the drawn CURVE they facet, when there
+        //     is one (a circle/arc chord): a vertex is not a direction
+        //     reference, but it IS part of the curve, so clicking a circle on
+        //     a facet vertex selects the curve — the vertex-side analogue of
+        //     the Center/Quadrant fix above. A plain line's endpoints, and
+        //     transient segments, carry nothing. ---
         let bare_segments = self
             .sketch_segments
             .iter()
-            .map(|&(sid, eid, ref seg)| (Some(Provenance::SketchEdge(sid, eid)), seg))
-            .chain(self.transient_segments.iter().map(|seg| (None, seg)));
-        for (prov, seg) in bare_segments {
+            .map(|&(sid, eid, cid, ref seg)| {
+                let edge_prov = Some(Provenance::SketchEdge(sid, eid));
+                let endpoint_prov = cid.map(|c| Provenance::SketchCurve(sid, c));
+                (edge_prov, endpoint_prov, seg)
+            })
+            .chain(self.transient_segments.iter().map(|seg| (None, None, seg)));
+        for (edge_prov, endpoint_prov, seg) in bare_segments {
             for endpoint in [seg.a, seg.b] {
                 if let Some((ang, depth)) = wcone(endpoint, SnapKind::Endpoint) {
-                    candidates.push((SnapKind::Endpoint, ang, depth, endpoint, None, None));
+                    candidates.push((
+                        SnapKind::Endpoint,
+                        ang,
+                        depth,
+                        endpoint,
+                        endpoint_prov,
+                        None,
+                    ));
                 }
             }
 
             let mid = midpoint(seg.a, seg.b);
             if let Some((ang, depth)) = wcone(mid, SnapKind::Midpoint) {
-                candidates.push((SnapKind::Midpoint, ang, depth, mid, prov, None));
+                candidates.push((SnapKind::Midpoint, ang, depth, mid, edge_prov, None));
             }
 
             if let Some((pos, ang, depth)) = wsegment(seg.a, seg.b, SnapKind::OnEdge)
                 && !pos.approx_eq(mid, tol::POINT_MERGE)
             {
-                candidates.push((SnapKind::OnEdge, ang, depth, pos, prov, None));
+                candidates.push((SnapKind::OnEdge, ang, depth, pos, edge_prov, None));
             }
         }
 
@@ -2076,7 +2185,7 @@ impl InferenceScene {
                         emit(p, &mut candidates);
                     }
                 }
-                for (_, _, seg) in &self.sketch_segments {
+                for (_, _, _, seg) in &self.sketch_segments {
                     if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b) {
                         emit(p, &mut candidates);
                     }
@@ -2184,13 +2293,15 @@ impl InferenceScene {
                 if let Some((kind, _ang, _depth, pos, prov, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
-                    let (source, sketch_source, sketch_region_source) = Provenance::split(*prov);
+                    let (source, sketch_source, sketch_region_source, sketch_curve_source) =
+                        Provenance::split(*prov);
                     Some(Snap {
                         position: projected,
                         kind: *kind,
                         source,
                         sketch_source,
                         sketch_region_source,
+                        sketch_curve_source,
                         direction: Some(lock_dir),
                     })
                 } else {
@@ -2203,6 +2314,7 @@ impl InferenceScene {
                         source: None,
                         sketch_source: None,
                         sketch_region_source: None,
+                        sketch_curve_source: None,
                         direction: Some(lock_dir),
                     })
                 }
@@ -2211,13 +2323,15 @@ impl InferenceScene {
                 // No lock (or lock with no anchor): return the top-ranked
                 // candidate that is actually visible (see the occlusion cull above).
                 winner.map(|(kind, _ang, _depth, pos, prov, snap_dir)| {
-                    let (source, sketch_source, sketch_region_source) = Provenance::split(prov);
+                    let (source, sketch_source, sketch_region_source, sketch_curve_source) =
+                        Provenance::split(prov);
                     Snap {
                         position: pos,
                         kind,
                         source,
                         sketch_source,
                         sketch_region_source,
+                        sketch_curve_source,
                         direction: snap_dir,
                     }
                 })
@@ -2420,7 +2534,7 @@ impl InferenceScene {
         let origin = ray.origin;
         // (angular_dist, depth, sketch, edge)
         let mut best: Option<(f64, f64, SketchId, SketchEdgeId)> = None;
-        for &(id, eid, ref seg) in &self.sketch_segments {
+        for &(id, eid, _cid, ref seg) in &self.sketch_segments {
             if let Some((_pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
                 && best
                     .as_ref()

@@ -992,8 +992,14 @@ impl SnapJs {
             .or_else(|| self.snap.sketch_source.map(|(_, e)| e.data().as_ffi()))
     }
 
-    /// "vertex" | "edge" | "face" | "sketch-edge" | "sketch-region" for
-    /// interpreting `element` / `sketch_region`.
+    /// "vertex" | "edge" | "face" | "sketch-edge" | "sketch-region" |
+    /// "sketch-curve" for interpreting `element` / `sketch_region` /
+    /// `sketch_curve`.
+    ///
+    /// "sketch-curve" carries NO `element`: the analytic points of a drawn
+    /// curve (a circle's center, its quadrants, an anchored tangent) belong
+    /// to the curve CHAIN, not to any one facet edge — a center lies on no
+    /// edge at all. Read `sketch_curve` (plus `sketch`) for it.
     pub fn element_kind(&self) -> Option<String> {
         self.snap
             .source
@@ -1011,12 +1017,18 @@ impl SnapJs {
                     .sketch_region_source
                     .map(|_| "sketch-region".to_string())
             })
+            .or_else(|| {
+                self.snap
+                    .sketch_curve_source
+                    .map(|_| "sketch-curve".to_string())
+            })
     }
 
     /// The owning sketch handle when this snap derives from a committed sketch
-    /// EDGE (`element_kind` == "sketch-edge", `element` is the edge) or a sketch
+    /// EDGE (`element_kind` == "sketch-edge", `element` is the edge), a sketch
     /// REGION fill (`element_kind` == "sketch-region", `sketch_region` is the
-    /// region); `undefined` otherwise.
+    /// region), or a drawn CURVE's analytic point (`element_kind` ==
+    /// "sketch-curve", `sketch_curve` is the chain); `undefined` otherwise.
     pub fn sketch(&self) -> Option<u64> {
         self.snap
             .sketch_source
@@ -1026,6 +1038,30 @@ impl SnapJs {
                     .sketch_region_source
                     .map(|(s, _)| s.data().as_ffi())
             })
+            .or_else(|| {
+                self.snap
+                    .sketch_curve_source
+                    .map(|(s, _)| s.data().as_ffi())
+            })
+    }
+
+    /// The curve-chain handle when this snap is an analytic point of a drawn
+    /// (unextruded) curve — a circle's or arc's exact center, one of its
+    /// covered quadrant points, an anchored tangent point, or a regular
+    /// polygon's drawn center (`element_kind` == "sketch-curve");
+    /// `undefined` otherwise.
+    ///
+    /// Deliberately not folded into `element`: those points belong to the
+    /// chain, and a center belongs to no edge at all, so reporting a
+    /// stand-in edge handle would mislead every consumer that treats
+    /// `element` as a real sketch edge (Tape Measure's parallel guides read
+    /// it as a direction reference). Lets the Select tool resolve a
+    /// center/quadrant click to the curve the point describes, matching what
+    /// clicking the curve's own rim selects.
+    pub fn sketch_curve(&self) -> Option<u64> {
+        self.snap
+            .sketch_curve_source
+            .map(|(_, c)| c.data().as_ffi())
     }
 
     /// The region handle when this snap is on a drawn sketch region's fill
@@ -1230,7 +1266,7 @@ impl Scene {
     fn register_sketch(&mut self, id: SketchId) {
         self.inference.remove_sketch(id);
         if let Some(segments) = Self::live_sketch_segments(&self.doc, id) {
-            self.inference.add_sketch(id, &segments);
+            self.inference.add_sketch_edges(id, &segments);
         }
         if let Some(vertices) = Self::live_sketch_vertices(&self.doc, id) {
             self.inference.add_sketch_vertices(id, &vertices);
@@ -1249,8 +1285,8 @@ impl Scene {
             // disjoint by construction (`curve_rims` is circles only,
             // `polygon_centers` is polygons only), so no center is offered
             // twice.
-            let poly: Vec<Point3> = s.polygon_centers().into_iter().map(|(_, c)| c).collect();
-            self.inference.add_sketch_polygon_centers(id, &poly);
+            self.inference
+                .add_sketch_polygon_centers(id, &s.polygon_centers());
             self.inference
                 .add_sketch_faces(id, &Self::live_sketch_faces(s));
         }
@@ -1307,16 +1343,20 @@ impl Scene {
     /// triples, or `None` if the sketch is unknown/gone. Shared by
     /// [`Scene::register_sketch`] and [`Scene::sketch_lines`];
     /// the edge id becomes snap provenance (Tape Measure parallel guides).
+    #[allow(clippy::type_complexity)]
     fn live_sketch_segments(
         doc: &Document,
         id: SketchId,
-    ) -> Option<Vec<(SketchEdgeId, Point3, Point3)>> {
+    ) -> Option<Vec<(SketchEdgeId, Option<kernel::SketchCurveId>, Point3, Point3)>> {
         let s = doc.sketch(id)?;
         let mut out = Vec::with_capacity(s.edges().len());
         for (eid, edge) in s.edges() {
             let a = s.vertices()[edge.from].position;
             let b = s.vertices()[edge.to].position;
-            out.push((eid, a, b));
+            // `edge.curve` is the drawn curve chain this facet belongs to
+            // (`None` for a plain line / rectangle side), carried so a facet
+            // vertex's Endpoint snap can name its curve for selection.
+            out.push((eid, edge.curve, a, b));
         }
         Some(out)
     }
@@ -1943,7 +1983,7 @@ impl Scene {
         let segments = Self::live_sketch_segments(&self.doc, sketch_id(sketch))
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
         let mut out = Vec::with_capacity(segments.len() * 6);
-        for (_eid, a, b) in segments {
+        for (_eid, _cid, a, b) in segments {
             out.extend([a.x as f32, a.y as f32, a.z as f32]);
             out.extend([b.x as f32, b.y as f32, b.z as f32]);
         }
@@ -5176,6 +5216,170 @@ mod tests {
             .unwrap()
             .expect("original center snaps");
         assert_eq!(snap0.kind(), "center");
+    }
+
+    /// Regression (the reported bug): selecting a drawn circle to edit its
+    /// segment count worked only about half the time — a click that resolved
+    /// to a Center or Quadrant snap carried no selectable provenance, so the
+    /// app fell through to a ray re-probe and selected the sketch's island
+    /// (no Segments field) instead of the curve. This walks a real drawn
+    /// circle's rim BY ANGLE through the real `Scene::snap` boundary and
+    /// asserts EVERY resolved snap names something the selection resolver can
+    /// turn into the curve: a facet's `sketch-edge`, or the curve's own
+    /// `sketch-curve` (center / quadrant / tangent). None may be
+    /// provenance-less, and the center and every quadrant specifically must
+    /// report `sketch-curve` with a real curve handle — the exact cases that
+    /// used to fall through.
+    #[test]
+    fn drawn_circle_rim_snaps_all_select_the_curve() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        let (cx, cy, r, n) = (1.0f64, 2.0f64, 0.5f64, 24usize);
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_begin_curve_with(sketch, cx, cy, 0.0, r)
+            .unwrap();
+        // Half-facet phase, like CircleTool: no facet vertex lands on a
+        // cardinal, so a Quadrant candidate is never shadowed by an Endpoint.
+        let p = |i: usize| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
+            (cx + r * a.cos(), cy + r * a.sin())
+        };
+        for i in 0..n {
+            let (ax, ay) = p(i);
+            let (bx, by) = p(i + 1);
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_curve(sketch).unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+
+        // The one curve chain's handle — what a correct selection must name.
+        let curve = {
+            let s = scene.doc.sketch(sketch_id(sketch)).unwrap();
+            let rim = s.curve_rims().into_iter().next().unwrap();
+            rim.curve.data().as_ffi()
+        };
+
+        // Center: the marquee case. Straight down onto the exact center.
+        let c = scene
+            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None)
+            .unwrap()
+            .expect("center snaps");
+        assert_eq!(c.kind(), "center");
+        assert_eq!(c.element_kind().as_deref(), Some("sketch-curve"));
+        assert_eq!(c.sketch(), Some(sketch));
+        assert_eq!(c.sketch_curve(), Some(curve));
+        assert_eq!(c.element(), None, "a center lies on no edge");
+
+        // Walk the rim by world angle. A modest aperture lets Center/Quadrant
+        // gravity win near a cardinal, exactly as the app runs it.
+        let steps = 180usize;
+        let mut quadrant_hits = 0usize;
+        let mut endpoint_hits = 0usize;
+        for k in 0..steps {
+            let a = 2.0 * std::f64::consts::PI * (k as f64) / (steps as f64);
+            let (wx, wy) = (cx + r * a.cos(), cy + r * a.sin());
+            let snap = scene
+                .snap(wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None)
+                .unwrap()
+                .unwrap_or_else(|| panic!("a point on the rim always snaps (angle {a})"));
+            let ek = snap.element_kind();
+            // Every rim snap must name the curve, one way or the other.
+            assert!(
+                matches!(ek.as_deref(), Some("sketch-edge") | Some("sketch-curve")),
+                "rim snap at angle {a} is provenance-less ({ek:?}, kind {}) — it would fall \
+                 through to the ray re-probe and select the island",
+                snap.kind()
+            );
+            assert_eq!(snap.sketch(), Some(sketch));
+            match snap.kind().as_str() {
+                // The regressed analytic point: a quadrant names the curve.
+                "quadrant" => {
+                    quadrant_hits += 1;
+                    assert_eq!(snap.element_kind().as_deref(), Some("sketch-curve"));
+                    assert_eq!(snap.sketch_curve(), Some(curve));
+                    assert_eq!(snap.element(), None);
+                }
+                // The vertex-side of the same gap: a facet vertex names the
+                // curve via `sketch_curve`, and carries NO `element`
+                // (`sketch_source`) — so Tape Measure never mistakes a vertex
+                // for a direction reference.
+                "endpoint" => {
+                    endpoint_hits += 1;
+                    assert_eq!(snap.element_kind().as_deref(), Some("sketch-curve"));
+                    assert_eq!(snap.sketch_curve(), Some(curve));
+                    assert_eq!(snap.element(), None);
+                }
+                // A facet edge keeps its edge provenance (a real direction
+                // reference) — and still resolves to the curve via its chain.
+                "on-edge" | "midpoint" => {
+                    assert_eq!(snap.element_kind().as_deref(), Some("sketch-edge"));
+                    assert!(snap.element().is_some());
+                }
+                other => panic!("unexpected rim snap kind {other} at angle {a}"),
+            }
+        }
+        assert!(
+            quadrant_hits >= 4,
+            "a full circle walk must pass all four quadrants (saw {quadrant_hits})"
+        );
+        assert!(
+            endpoint_hits > 0,
+            "a fine rim walk must land on facet vertices too (saw {endpoint_hits})"
+        );
+    }
+
+    /// Companion to the circle walk, for the OTHER analytic point that used to
+    /// fall through: a drawn regular polygon's centre. A polygon has no rim
+    /// (no quadrants, no tangents), so its centre rides its own scene channel
+    /// (`add_sketch_polygon_centers`) — and this drives the REAL production
+    /// wiring end to end: build the polygon through the `Scene` API (whose
+    /// per-segment reconcile re-registers the sketch exactly as the app does),
+    /// then snap its centre and confirm it names the polygon's chain, so a
+    /// click on it selects the polygon rather than the island. Reverting the
+    /// `register_sketch` polygon-centre line (which passes
+    /// `s.polygon_centers()` to `add_sketch_polygon_centers`) makes the
+    /// centre snap provenance-less and this test fail.
+    #[test]
+    fn drawn_polygon_center_selects_the_polygon_through_production_wiring() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        let (cx, cy, r, n) = (2.0f64, 1.0f64, 0.6f64, 6usize);
+        scene.sketch_begin_gesture(sketch).unwrap();
+        let curve = scene
+            .sketch_begin_polygon_with(sketch, cx, cy, 0.0, r)
+            .unwrap();
+        // A hexagon's six sides, drawn corner to corner exactly like the tool.
+        let p = |i: usize| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+            (cx + r * a.cos(), cy + r * a.sin())
+        };
+        for i in 0..n {
+            let (ax, ay) = p(i);
+            let (bx, by) = p(i + 1);
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_curve(sketch).unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+
+        // A polygon offers no rim, so the centre is its sole analytic point.
+        let c = scene
+            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None)
+            .unwrap()
+            .expect("polygon center snaps");
+        assert_eq!(c.kind(), "center");
+        assert_eq!(
+            c.element_kind().as_deref(),
+            Some("sketch-curve"),
+            "the polygon centre must name its curve, not fall through to the island"
+        );
+        assert_eq!(c.sketch(), Some(sketch));
+        assert_eq!(c.sketch_curve(), Some(curve));
+        assert_eq!(c.element(), None, "a centre lies on no edge");
     }
 
     use super::*;

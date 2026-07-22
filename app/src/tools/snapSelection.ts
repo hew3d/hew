@@ -24,10 +24,17 @@ export type SnapPick =
   | { kind: 'sketch-region'; sketch: bigint; region: bigint }
   | { kind: 'sketch-edge'; sketch: bigint; edge: bigint }
   /**
+   * A drawn curve's own analytic point: a circle's/arc's exact center, one of
+   * its covered quadrant points, an anchored tangent, or a regular polygon's
+   * drawn center. It names the CHAIN, not an edge — a center lies on no edge
+   * at all — so it resolves through the curve's edges rather than `edge`.
+   */
+  | { kind: 'sketch-curve'; sketch: bigint; curve: bigint }
+  /**
    * No selectable provenance: the snap is a CUE, not a target — the world
-   * origin, a guide point, an axis, a bare sketch vertex, or a drawn curve's
-   * rim center/quadrant/tangent (all outrank OnEdge/OnFace but denote nothing
-   * to select). The caller resolves what is actually under the ray.
+   * origin, a guide point, an axis, or a bare sketch vertex (all outrank
+   * OnEdge/OnFace but denote nothing to select). The caller resolves what is
+   * actually under the ray.
    */
   | { kind: 'fallback' }
 
@@ -56,12 +63,26 @@ export function classifySnapPick(snap: Snap | null): SnapPick {
   ) {
     return { kind: 'sketch-edge', sketch: snap.sketch, edge: snap.element }
   }
+  // A drawn curve's analytic point (center / quadrant / tangent / polygon
+  // center). These outrank the facet edges crowding around them — and, since
+  // Center and Quadrant pull with extra gravity, they win the snap from
+  // noticeably further out than the geometry they describe — so without this
+  // branch a click at or near a drawn circle's rim or center fell through to
+  // the ray re-probe and selected whatever region was under the cursor.
+  if (
+    snap.elementKind === 'sketch-curve' &&
+    snap.sketch !== undefined &&
+    snap.sketchCurve !== undefined
+  ) {
+    return { kind: 'sketch-curve', sketch: snap.sketch, curve: snap.sketchCurve }
+  }
   return { kind: 'fallback' }
 }
 
 /** The subset of the wasm `Scene` the resolver probes for a `fallback` snap. */
 export interface SelectScene {
   sketch_curve_chain(sketch: bigint, edge: bigint): BigUint64Array | bigint[]
+  sketch_curve_edges(sketch: bigint, curve: bigint): BigUint64Array | bigint[]
   sketch_region_island(sketch: bigint, region: bigint): bigint | undefined
   pick_sketch_region(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
@@ -105,6 +126,35 @@ function edgeRef(scene: SelectScene, sketch: bigint, edge: bigint): NodeRef {
   return chain.length > 1
     ? { kind: 'sketch-curve', id: chain[0], sketch }
     : { kind: 'sketch-edge', id: edge, sketch }
+}
+
+/** A drawn curve CHAIN → the ref a click on that curve selects, or null when
+ * the chain has no live edges (a stale handle).
+ *
+ * Routed deliberately through `edgeRef` rather than minting a ref from the
+ * curve handle directly: a `NodeRef{kind: 'sketch-curve'}` is identified by a
+ * representative EDGE everywhere else in the app (the Outliner, Object Info,
+ * transform lifting), so an analytic-point click and a rim-edge click must
+ * produce the *same* ref, not two spellings of one curve. For an intact circle
+ * every facet shares one chain, so any facet's `edgeRef` canonicalizes to the
+ * same representative — but `sketch_curve_edges` returns slotmap order, not id
+ * order, so we pick the chain's LOWEST-id edge explicitly to keep the ref
+ * deterministic and to match the representative `edgeRef` (via
+ * `curve_chain_at`, which returns ascending) settles on.
+ *
+ * When sticky rules have split one curve into several chains that still share
+ * the curve id (a line drawn across a circle), the analytic center is
+ * genuinely shared by both arcs; it resolves to whichever chain holds the
+ * lowest-id edge. A rim click on a different fragment selects that fragment
+ * instead — an accepted ambiguity, since the center belongs to neither arc
+ * more than the other, and both refs expose the same curve's Segments control.
+ * When only one edge survives, `edgeRef` degrades to that `sketch-edge`. */
+function curveRef(scene: SelectScene, sketch: bigint, curve: bigint): NodeRef | null {
+  const edges = scene.sketch_curve_edges(sketch, curve)
+  if (edges.length === 0) return null
+  let lowest = edges[0]
+  for (const e of edges) if (e < lowest) lowest = e
+  return edgeRef(scene, sketch, lowest)
 }
 
 /** Reject a solid hit beyond the render far plane. `depth` is the RADIAL
@@ -168,6 +218,16 @@ export function resolveSelectableRef(
     case 'sketch-edge':
       if (topLevel) return edgeRef(deps.scene, pick.sketch, pick.edge)
       break
+    case 'sketch-curve': {
+      // Same context rule as the other sketch kinds. A curve whose edges are
+      // all gone yields null here and falls through to the ray re-probe,
+      // rather than selecting nothing at all.
+      if (topLevel) {
+        const ref = curveRef(deps.scene, pick.sketch, pick.curve)
+        if (ref !== null) return ref
+      }
+      break
+    }
     case 'fallback':
       break
     default:

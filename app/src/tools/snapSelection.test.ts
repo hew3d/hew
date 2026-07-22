@@ -16,6 +16,10 @@ const base = { x: 0, y: 0, z: 0 }
 const solidSnap = (object: bigint, instance?: bigint): Snap => ({ ...base, kind: 'on-face', object, instance })
 const regionSnap = (sketch: bigint, region: bigint): Snap => ({ ...base, kind: 'on-face', elementKind: 'sketch-region', sketch, sketchRegion: region })
 const edgeSnap = (sketch: bigint, edge: bigint): Snap => ({ ...base, kind: 'on-edge', elementKind: 'sketch-edge', sketch, element: edge })
+/** A drawn curve's analytic point (center / quadrant / tangent / facet vertex
+ * / polygon center): names the CHAIN, carries no `element`. `kind` is cosmetic
+ * here — the resolver keys off `elementKind` + `sketchCurve`. */
+const curveSnap = (sketch: bigint, curve: bigint, kind = 'center'): Snap => ({ ...base, kind, elementKind: 'sketch-curve', sketch, sketchCurve: curve })
 const bareSnap = (): Snap => ({ ...base, kind: 'endpoint' })
 
 /** A ray straight down -Z (dead-centre) unless a direction is given. */
@@ -28,12 +32,14 @@ interface SceneStubs {
   edge?: { sketch: bigint; edge: bigint }
   face?: { object: bigint; instance?: bigint; depth: number }
   curveChain?: (edge: bigint) => bigint[]
+  curveEdges?: (curve: bigint) => bigint[]
   islandOf?: (region: bigint) => bigint | undefined
 }
 
 function fakeScene(s: SceneStubs): SelectScene {
   return {
     sketch_curve_chain: (_sk: bigint, edge: bigint) => (s.curveChain ? s.curveChain(edge) : [edge]),
+    sketch_curve_edges: (_sk: bigint, curve: bigint) => (s.curveEdges ? s.curveEdges(curve) : []),
     sketch_region_island: (_sk: bigint, region: bigint) => (s.islandOf ? s.islandOf(region) : 900n),
     pick_sketch_region: () =>
       s.region && { sketch: () => s.region!.sketch, region: () => s.region!.region, free: vi.fn() },
@@ -68,8 +74,14 @@ describe('classifySnapPick', () => {
     expect(classifySnapPick(solidSnap(7n, 9n))).toEqual({ kind: 'object', object: 7n, instance: 9n })
     expect(classifySnapPick(regionSnap(21n, 5n))).toEqual({ kind: 'sketch-region', sketch: 21n, region: 5n })
     expect(classifySnapPick(edgeSnap(11n, 4n))).toEqual({ kind: 'sketch-edge', sketch: 11n, edge: 4n })
+    expect(classifySnapPick(curveSnap(11n, 8n))).toEqual({ kind: 'sketch-curve', sketch: 11n, curve: 8n })
     expect(classifySnapPick(bareSnap())).toEqual({ kind: 'fallback' })
     expect(classifySnapPick(null)).toEqual({ kind: 'fallback' })
+  })
+
+  it('a sketch-curve snap missing its curve handle degrades to fallback, never a half-built pick', () => {
+    // Defensive: element_kind said "sketch-curve" but the handle is absent.
+    expect(classifySnapPick({ ...base, kind: 'center', elementKind: 'sketch-curve', sketch: 11n })).toEqual({ kind: 'fallback' })
   })
 })
 
@@ -166,6 +178,79 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
       const clickRef = resolveSelectableRef(c.snap, c.ray, deps(c.scene(), c.ctx))
       const dragRef = resolveSelectableRef(c.snap, c.ray, deps(c.scene(), c.ctx))
       expect(clickRef).toEqual(dragRef)
+    }
+  })
+
+  it('a sketch-curve snap → the curve ref (through its representative edge)', () => {
+    // A polygon center has no rim, so its chain is its edges; the resolver
+    // routes through the lowest-id edge, which the chain canonicalizes to a
+    // sketch-curve ref (chain length > 1).
+    const scene = fakeScene({ curveEdges: () => [30n, 31n, 32n], curveChain: () => [30n, 31n, 32n] })
+    expect(resolveSelectableRef(curveSnap(11n, 8n), DOWN, deps(scene, []))).toEqual({ kind: 'sketch-curve', id: 30n, sketch: 11n })
+  })
+
+  it('a sketch-curve snap INSIDE a context is out of scope → the in-context solid, never the curve', () => {
+    const scene = fakeScene({ curveEdges: () => [30n], face: { object: 42n, depth: 8 } })
+    expect(resolveSelectableRef(curveSnap(11n, 8n), DOWN, deps(scene, GROUP_CTX))).toMatchObject({ kind: 'object', id: 42n })
+  })
+
+  it('a sketch-curve snap whose edges are all gone falls through to the ray re-probe, not a dead ref', () => {
+    // The curve was deleted between snap and resolve: no live edges. The
+    // resolver must not mint a ref from the stale handle — it re-probes.
+    const scene = fakeScene({ curveEdges: () => [], region: { sketch: 21n, region: 5n } })
+    expect(resolveSelectableRef(curveSnap(11n, 8n), DOWN, deps(scene, []))).toEqual({ kind: 'sketch-island', id: 900n, sketch: 21n })
+  })
+
+  it('a curve split into disjoint chains resolves its centre to the LOWEST-id edge deterministically, regardless of curve_edges order', () => {
+    // A line drawn across a circle splits its facets into two chains that
+    // still share the curve id. `sketch_curve_edges` returns slotmap order,
+    // NOT id order — so curveRef must pick the lowest id itself. Here the
+    // curve's edges come back unsorted ([5,2,8,3]); edges {2,3} are one chain
+    // and {5,8} the other. The centre must resolve to the chain holding edge
+    // 2 (the global lowest), via that chain's ascending representative — the
+    // SAME ref a rim click on that chain gives — never an arbitrary slotmap
+    // first element.
+    const chainOf = (e: bigint): bigint[] => (e === 2n || e === 3n ? [2n, 3n] : [5n, 8n])
+    const scene = () => fakeScene({ curveEdges: () => [5n, 2n, 8n, 3n], curveChain: chainOf })
+    expect(resolveSelectableRef(curveSnap(11n, 8n), DOWN, deps(scene(), []))).toEqual({ kind: 'sketch-curve', id: 2n, sketch: 11n })
+    // A rim click on that same (lowest-id) chain agrees exactly.
+    expect(resolveSelectableRef(edgeSnap(11n, 3n), DOWN, deps(scene(), []))).toEqual({ kind: 'sketch-curve', id: 2n, sketch: 11n })
+  })
+
+  it('REGRESSION: walking a drawn circle by angle, EVERY snap the rim produces selects the SAME curve — including the centre, the quadrants, the tangents, and the facet vertices', () => {
+    // The reported bug: a click that resolved to a Center or Quadrant snap
+    // (and, at facet vertices, an Endpoint) carried no selectable provenance,
+    // so it fell through to a ray re-probe and selected the sketch ISLAND (no
+    // Segments field) instead of the curve — about half the clicks. Here one
+    // drawn circle is sketch 11, curve 8, whose facet edges are 30..=41; a
+    // rim edge snap names the edge it hit, an analytic-point snap names the
+    // curve. Both must resolve to the ONE curve ref, at every angle.
+    const CURVE_EDGES = Array.from({ length: 12 }, (_v, i) => 30n + BigInt(i))
+    const scene = () => fakeScene({
+      // A rim edge belongs to the circle's chain → sketch-curve ref at its rep.
+      curveChain: () => CURVE_EDGES,
+      curveEdges: () => CURVE_EDGES,
+    })
+    // The canonical ref a rim-EDGE click yields, which every analytic-point
+    // click must match exactly (same id, same kind).
+    const expected = { kind: 'sketch-curve', id: 30n, sketch: 11n }
+
+    // Analytic points around the rim: centre, four quadrants, two tangents,
+    // and several facet vertices — every snap kind the rim can produce that
+    // used to be provenance-less.
+    const analytic: Snap[] = [
+      curveSnap(11n, 8n, 'center'),
+      ...['quadrant', 'quadrant', 'quadrant', 'quadrant'].map((k) => curveSnap(11n, 8n, k)),
+      ...['tangent', 'tangent'].map((k) => curveSnap(11n, 8n, k)),
+      ...CURVE_EDGES.map(() => curveSnap(11n, 8n, 'endpoint')),
+    ]
+    for (const snap of analytic) {
+      expect(resolveSelectableRef(snap, DOWN, deps(scene(), []))).toEqual(expected)
+    }
+    // And a rim-EDGE snap (the ~half of clicks that always worked) lands on
+    // the identical ref — so the two halves of the rim never disagree.
+    for (const e of CURVE_EDGES) {
+      expect(resolveSelectableRef(edgeSnap(11n, e), DOWN, deps(scene(), []))).toEqual(expected)
     }
   })
 })

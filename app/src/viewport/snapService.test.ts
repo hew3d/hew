@@ -6,9 +6,9 @@
  * a supplied `constraintPlane` is the fallback target instead of ground.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { SnapService } from './snapService'
+import { SnapService, SNAP_RADIUS_PX } from './snapService'
 import type { Scene } from '../wasm/pkg/wasm_api.js'
-import type { Ray } from './math'
+import { pixelRadiusToAperture, type Ray } from './math'
 
 /** A ray straight down -Z from above the origin. */
 const DOWN: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
@@ -97,6 +97,7 @@ describe('SnapService — precision mode', () => {
       element_kind: () => 'vertex',
       sketch: () => undefined,
       sketch_region: () => undefined,
+      sketch_curve: () => undefined,
       free: () => {},
     }
     let hit = true
@@ -120,5 +121,52 @@ describe('SnapService — precision mode', () => {
     snapFn.mockClear()
     expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('ground')
     expect(snapFn.mock.calls.length).toBe(1)
+  })
+
+  it('hysteresis does NOT resist-release onto a DIFFERENT drawn circle whose centre shares every field but sketchCurve', () => {
+    // Two circles in one sketch have Centre snaps identical in
+    // kind/object/element/elementKind/sketch — they differ ONLY in
+    // `sketchCurve`. When the cursor drifts off circle A's centre, the narrow
+    // acquire misses and the wider release-resist query finds circle B's
+    // centre. `sameTarget` must reject B (different curve) so the held snap
+    // RELEASES to the ground fallback rather than silently jumping to B.
+    // Remove the `a.sketchCurve === b.sketchCurve` clause and this flips: B is
+    // treated as the same target and grabbed (kind 'center').
+    const centreSnap = (curveId: bigint) => ({
+      x: () => 1, y: () => 2, z: () => 0,
+      kind: () => 'center',
+      direction: () => undefined,
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => undefined,
+      element_kind: () => 'sketch-curve',
+      sketch: () => 10n,
+      sketch_region: () => undefined,
+      sketch_curve: () => curveId,
+      free: () => {},
+    })
+    const A = centreSnap(101n)
+    const B = centreSnap(202n) // a DIFFERENT circle: only sketchCurve differs
+    const narrowAperture = pixelRadiusToAperture(SNAP_RADIUS_PX, 800, 45)
+
+    let phase: 'acquireA' | 'missThenB' = 'acquireA'
+    const snapFn = vi.fn((..._args: unknown[]) => {
+      if (phase === 'acquireA') return A
+      // The 7th positional arg is the aperture; the narrow acquire query
+      // misses, only the wider release-resist query (larger aperture) sees B.
+      const aperture = _args[6] as number
+      return aperture <= narrowAperture ? undefined : B
+    })
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    // Acquire A: a sticky Centre snap becomes the held target.
+    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('center')
+
+    // Cursor drifts off A onto B's neighbourhood. B is not the same target,
+    // so the result RELEASES (ground fallback), and is certainly not B.
+    phase = 'missThenB'
+    const released = svc.resolve(DOWN, 800, 45).snap
+    expect(released?.kind).toBe('ground')
+    expect(released?.sketchCurve).toBeUndefined()
   })
 })
