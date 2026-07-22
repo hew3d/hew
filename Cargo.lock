@@ -117,7 +117,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "dae-import"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dae-parser",
  "kernel",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "gltf-import"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gltf",
  "kernel",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "inference"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proptest",
  "serde",
@@ -439,7 +439,7 @@ checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
 
 [[package]]
 name = "mesh-heal"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -720,7 +720,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "skp-import"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dae-import",
  "kernel",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "stl-import"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kernel",
  "mesh-heal",
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "tessellate"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dae-import",
  "gltf-import",

@@ -1,7 +1,7 @@
 /**
  * Design tokens — "Studio" UI.
  *
- * Source of truth: ~/Source/design_handoff_hew_studio_ui/01_design_tokens.md.
+ * Source of truth: the Studio UI design-token sheet (01_design_tokens.md).
  * This file holds VALUES ONLY (custom properties) — never component-specific
  * selectors. Components consume these vars directly (inline `style={{ ... }}`
  * during the incremental migration, or real CSS classes once a surface has
