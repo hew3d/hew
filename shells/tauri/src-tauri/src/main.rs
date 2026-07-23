@@ -434,6 +434,9 @@ struct WindowInfo {
 /// note in `main()`), but only actually rebuilt into a visible native menu
 /// on macOS; Windows/Linux read the same list from the `window-list`
 /// broadcast instead.
+// The fields' only reader, `rebuild_window_menu_tail`, is compiled on
+// macOS alone, so everywhere else they are (intentionally) never read.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct WindowMenuState {
     submenu: tauri::menu::Submenu<tauri::Wry>,
     dynamic_count: usize,
