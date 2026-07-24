@@ -61,7 +61,8 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import { screenConstantWorldHalf, tanHalfFovRad } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -285,6 +286,20 @@ export class ScaleTool implements Tool {
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
   setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
     this.acquireSelection = acquire
+  }
+
+  /** The current editing context (component-edit-parity.md phase A1). When
+   *  it's an INSTANCE, selected members commit through `transform_def_member`
+   *  instead of the world `transform_selection` (phase A2) — see
+   *  `commitSelectionTransform`'s doc. */
+  private _editContext: EditContext = { kind: 'top' }
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
+    this.cancel()
+  }
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
   }
   /** Keep the cached targets in step with the app selection (Tool.
    * setSelection; see MoveTool) — the next gesture starts from live
@@ -546,21 +561,52 @@ export class ScaleTool implements Tool {
   private _selectionBox(nodes: NodeRef[]): THREE.Box3 | null {
     const box = new THREE.Box3()
     const pt = new THREE.Vector3()
+    const activeInstance = this._activeInstance
+    const activeInstanceGroup =
+      activeInstance !== null && this.instanceGroupGetter !== null
+        ? this.instanceGroupGetter(activeInstance)
+        : null
+    const activePose = activeInstance !== null && typeof this.wasmScene.instance_pose === 'function'
+      ? this.wasmScene.instance_pose(activeInstance)
+      : undefined
+    const activePoseMatrix = activePose !== undefined
+      ? new THREE.Matrix4().set(
+          activePose[0], activePose[1], activePose[2], activePose[3],
+          activePose[4], activePose[5], activePose[6], activePose[7],
+          activePose[8], activePose[9], activePose[10], activePose[11],
+          0, 0, 0, 1,
+        )
+      : null
     for (const node of nodes) {
       if (node.kind === 'sketch-edge' || node.kind === 'sketch-curve') {
         continue // not transformable — contributes nothing to the box
       }
       if (node.kind === 'sketch-island' && node.sketch !== undefined) {
-        const lines = this.wasmScene.sketch_island_lines(node.sketch, node.id)
+        let lines: Float32Array
+        try {
+          lines = this.wasmScene.sketch_island_lines(node.sketch, node.id)
+        } catch {
+          // An out-of-plane transform of one island in a multi-island sketch
+          // detaches it into a new sketch, so the old island handle is stale
+          // immediately after a successful commit. React's selection prune
+          // follows asynchronously; omit that stale node from this one
+          // synchronous gizmo rebuild instead of turning a successful Scale
+          // into an UnknownIsland UI error.
+          continue
+        }
         for (let i = 0; i + 2 < lines.length; i += 3) {
-          box.expandByPoint(pt.set(lines[i], lines[i + 1], lines[i + 2]))
+          pt.set(lines[i], lines[i + 1], lines[i + 2])
+          if (activePoseMatrix !== null) pt.applyMatrix4(activePoseMatrix)
+          box.expandByPoint(pt)
         }
         continue
       }
       if (node.kind === 'sketch') {
         const lines = this.wasmScene.sketch_lines(node.id)
         for (let i = 0; i + 2 < lines.length; i += 3) {
-          box.expandByPoint(pt.set(lines[i], lines[i + 1], lines[i + 2]))
+          pt.set(lines[i], lines[i + 1], lines[i + 2])
+          if (activePoseMatrix !== null) pt.applyMatrix4(activePoseMatrix)
+          box.expandByPoint(pt)
         }
       } else if (node.kind === 'instance') {
         const group = this.instanceGroupGetter !== null ? this.instanceGroupGetter(node.id) : null
@@ -581,8 +627,19 @@ export class ScaleTool implements Tool {
           if (g !== null) box.expandByObject(g)
         }
       } else {
-        const objGroup = this.objectsGroup?.getObjectByName(`Object_${node.id}`)
-        if (objGroup !== undefined) box.expandByObject(objGroup)
+        if (activeInstance !== null && activeInstanceGroup !== null) {
+          const face = activeInstanceGroup.getObjectByName(
+            `InstanceFace_${activeInstance}_${node.id}`,
+          )
+          const edges = activeInstanceGroup.getObjectByName(
+            `InstanceEdge_${activeInstance}_${node.id}`,
+          )
+          if (face !== undefined) box.expandByObject(face)
+          if (edges !== undefined) box.expandByObject(edges)
+        } else {
+          const objGroup = this.objectsGroup?.getObjectByName(`Object_${node.id}`)
+          if (objGroup !== undefined) box.expandByObject(objGroup)
+        }
       }
     }
     if (box.isEmpty()) return null
@@ -949,7 +1006,13 @@ export class ScaleTool implements Tool {
   }
 
   private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
-    return buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
+    return buildSelectionPreview(
+      this.wasmScene,
+      this.objectsGroup,
+      this.instanceGroupGetter,
+      nodes,
+      this._activeInstance,
+    )
   }
 
   private _applyPreviewScale(mesh: THREE.Object3D, pivot: Vec3, factors: Vec3): void {
@@ -1018,7 +1081,7 @@ export class ScaleTool implements Tool {
       try {
         const affine = nonUniformScaleAboutPivot(factors[0], factors[1], factors[2], pivot)
         const affineF64 = affineToFloat64(affine)
-        commitSelectionTransform(this.wasmScene, nodes, affineF64)
+        commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)

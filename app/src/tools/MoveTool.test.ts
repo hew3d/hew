@@ -650,3 +650,28 @@ describe('MoveTool — live selection sync (setSelection)', () => {
     expect(t.tool.capturingInput()).toBe(false)
   })
 })
+
+describe('MoveTool — setEditContext aborts an armed gesture on a genuine change (component-edit-parity.md phase A2)', () => {
+  it('a genuine context change cancels an armed drag instead of silently retargeting its eventual commit', () => {
+    const t = makeTool()
+    t.tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+    beginGestureLockedX(t.tool)
+    expect(t.tool.capturingInput()).toBe(true)
+
+    t.tool.setEditContext({ kind: 'top' })
+
+    expect(t.tool.capturingInput()).toBe(false)
+  })
+
+  it('re-pushing the SAME context is a no-op — an armed drag survives it untouched', () => {
+    const t = makeTool()
+    const ctx = { kind: 'instance' as const, id: 9n, component: 90n }
+    t.tool.setEditContext(ctx)
+    beginGestureLockedX(t.tool)
+    expect(t.tool.capturingInput()).toBe(true)
+
+    t.tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+
+    expect(t.tool.capturingInput()).toBe(true)
+  })
+})

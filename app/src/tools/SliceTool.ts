@@ -42,22 +42,28 @@
  *   - Esc cancels (no multi-stage gesture to unwind — just clears the
  *     preview and typed buffer).
  *
+ * Editing INSIDE a component instance's own definition (component-edit-
+ * parity.md phase A2): a member's face becomes a legal slice target too —
+ * `slice_def_member(instance, object, plane)` takes the plane in WORLD
+ * space (same as the cursor-tracked plane below) and maps it through the
+ * instance's pose⁻¹ kernel-side; both resulting pieces replace the member in
+ * the SAME definition, seen by every instance at once. Only the ENTERED
+ * instance's own members are in scope — a plain world object or a member of
+ * some OTHER instance is not a target while editing this one (`_pickWorldObject`).
+ *
  * Explicitly OUT of scope for this slice (deferrals):
  *   - Free (non-axis-aligned, non-face) plane orientation: / only
  *     calls for axis-aligned-or-on-a-face, so there's no "drag to rotate the
  *     plane" gesture here.
- *   - Slicing instanced geometry directly (would need an
- *     instance-pose-composed plane + a kernel surface to slice *through* a
- *     component definition without affecting sibling instances) — matches
- *     the existing instanced-geometry deferrals elsewhere.
  *   - Multi-object slice (cutting every solid the plane passes through in
- *     one commit): the kernel surface `slice_object` takes a single object
- *     handle, so this tool targets the one solid under the cursor, the same
- *     way Push/Pull targets the one face under the cursor.
+ *     one commit): the kernel surface `slice_object`/`slice_def_member` takes
+ *     a single object handle, so this tool targets the one solid under the
+ *     cursor, the same way Push/Pull targets the one face under the cursor.
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import {
   screenConstantWorldHalf,
@@ -176,8 +182,23 @@ export class SliceTool implements Tool {
   private lastPoint: [number, number, number] | null = null
   /** Last-known plane normal: the locked axis, or a hovered face's normal. */
   private lastNormal: [number, number, number] = AXIS_NORMAL[2]
-  /** World Object under the cursor (via pick_face), or null if none/instanced. Refreshed on every move/down. */
-  private lastPickObject: bigint | null = null
+  /** World Object (or, inside an instance context, a def member) under the
+   *  cursor via pick_face, or null if none/out-of-scope. Refreshed on every
+   *  move/down. */
+  private lastPickObject: { object: bigint; isMember: boolean } | null = null
+
+  /** The current editing context (component-edit-parity.md phase A1). When
+   *  it's an INSTANCE, a member face becomes a legal slice target, routed
+   *  through `slice_def_member` (phase A2) — see the module doc. */
+  private _editContext: EditContext = { kind: 'top' }
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
+    this.cancel()
+  }
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
+  }
 
   constructor(
     wasmScene: WasmScene,
@@ -201,6 +222,21 @@ export class SliceTool implements Tool {
     // tool is active (mirrors Protractor/TapeMeasure capturing during their
     // hover/preview phase).
     return true
+  }
+
+  /**
+   * Unlike `capturingInput` above (deliberately unconditional), this is
+   * precise: only the plane LOCK is a genuinely armed, Escape-cancelable
+   * gesture (`onKey`'s Escape lifts the lock first, matching this exactly).
+   * Consulted by the Viewport's `toolHasArmedGesture` (component-edit-
+   * parity.md phase A2) so Escape can still pop the edit-context path while
+   * Slice is merely hovering — using the blanket `capturingInput()` here
+   * would make Escape never reach the context pop at all while Slice is the
+   * active tool, which is wrong: an unlocked hover has nothing worth
+   * protecting from a context change.
+   */
+  hasArmedGesture(): boolean {
+    return this.lockedNormal !== null
   }
 
   // ── Tool interface ──────────────────────────────────────────────────────
@@ -329,16 +365,26 @@ export class SliceTool implements Tool {
     return AXIS_NORMAL[this.lockedAxis]
   }
 
-  /** Resolve the world Object under the cursor via pick_face; null if none, or the pick is instanced geometry. */
-  private _pickWorldObject(ray: Ray): bigint | null {
+  /** Resolve the slice target under the cursor via pick_face. At the top
+   *  level (or inside an object/group context), only a plain world object
+   *  qualifies — instanced geometry stays out of scope. Editing INSIDE a
+   *  component instance's own definition (component-edit-parity.md phase
+   *  A2), only THAT instance's own members qualify instead (a plain world
+   *  object or a different instance's member is out of scope there). */
+  private _pickWorldObject(ray: Ray): { object: bigint; isMember: boolean } | null {
     const pick = this.wasmScene.pick_face(
       ray.origin[0], ray.origin[1], ray.origin[2],
       ray.direction[0], ray.direction[1], ray.direction[2],
     )
     if (pick === undefined) return null
     try {
-      if (pick.instance() !== undefined) return null // instanced geometry — out of scope
-      return pick.object()
+      const instance = pick.instance()
+      const activeInstance = this._activeInstance
+      if (activeInstance !== null) {
+        return instance === activeInstance ? { object: pick.object(), isMember: true } : null
+      }
+      if (instance !== undefined) return null // instanced geometry — out of scope
+      return { object: pick.object(), isMember: false }
     } finally {
       pick.free()
     }
@@ -382,7 +428,9 @@ export class SliceTool implements Tool {
 
     const plane = new Float64Array([point[0], point[1], point[2], normal[0], normal[1], normal[2]])
     try {
-      const results = this.wasmScene.slice_object(target, plane)
+      const results = target.isMember && this._activeInstance !== null
+        ? this.wasmScene.slice_def_member(this._activeInstance, target.object, plane)
+        : this.wasmScene.slice_object(target.object, plane)
       if (results.length > 0) {
         this.onSliceCommitted(results[0])
       }

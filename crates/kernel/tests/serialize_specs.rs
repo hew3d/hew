@@ -1105,7 +1105,7 @@ fn older_files_consumed_claims_become_deletion_on_load() {
     );
 
     // Nothing resurrected: no region overlapping the old consumed areas
-    // exists, and no stored claim survived — resaving emits clean v12.
+    // exists, and no stored claim survived — resaving emits clean v13.
     //
     // The version is a LITERAL on purpose. Writing it as
     // `MANIFEST_FORMAT_VERSION` would make the assertion tautological — the
@@ -1123,7 +1123,7 @@ fn older_files_consumed_claims_become_deletion_on_load() {
             .unwrap();
         s
     };
-    assert!(resaved_manifest.contains("\"format_version\": 12"));
+    assert!(resaved_manifest.contains("\"format_version\": 13"));
     assert!(!resaved_manifest.contains("\"consumed\""));
     assert!(!resaved_manifest.contains("\"footprints\""));
     assert!(!resaved_manifest.contains("\"source\""));
@@ -1166,6 +1166,47 @@ fn consumed_field_smuggled_into_a_v11_file_is_rejected() {
             Err(kernel::LoadError::MalformedManifest { .. })
         ),
         "a v11 file carrying consumed data is malformed, not repaired"
+    );
+}
+
+/// `sketches[].owner` (`SketchOwner`, component-edit-parity.md phase K1,
+/// manifest v13+) is likewise VERSION-gated, not presence-gated, mirroring
+/// the `consumed` precedent just above: a v12-declared manifest carrying a
+/// smuggled `owner` field — even one resolving to a real component — must be
+/// rejected typed, never silently honored (a pre-v13 writer could never have
+/// produced it).
+#[test]
+fn sketch_owner_smuggled_into_a_v12_file_is_rejected() {
+    let mut doc = Document::new();
+    let base = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.make_component(&[NodeId::Object(base)])
+        .expect("make_component");
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).expect("segment");
+        }
+    }
+    let bytes = doc.save();
+
+    // A resolvable owner (component dense id 0 exists) but rolled back to a
+    // pre-K1 declared version.
+    let smuggled = patch_manifest(&bytes, |m| {
+        m["format_version"] = serde_json::json!(12);
+        m["sketches"][0]["owner"] = serde_json::json!(0);
+    });
+    assert!(
+        matches!(
+            Document::load(&smuggled),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a v12 file carrying a sketch owner is malformed, not honored"
     );
 }
 
@@ -1330,6 +1371,120 @@ fn load_rejects_line_guide_missing_direction() {
     assert!(
         result.is_err(),
         "a line guide missing `dir` must be rejected, not silently repaired"
+    );
+}
+
+/// A non-axis-aligned guide direction must round-trip *bit-exactly*, not just
+/// within tolerance. `add_guide_line` normalizes exactly once at creation and
+/// `decode_guide` must take that stored direction verbatim on load — a
+/// redundant renormalize (the bug this test guards) flips low mantissa bits,
+/// which breaks the exact `state_hash` save/load round trip the format
+/// promises. Mirrors the sketch-plane decode fix for
+/// `Plane::from_unit_normal_offset`.
+#[test]
+fn guide_line_direction_round_trips_bit_exactly_for_non_axis_aligned_directions() {
+    let mut doc = Document::new();
+    let origin = Point3::new(1.0, 2.0, 3.0);
+    // (3, 4, 5) normalized does not land on a bit-exact unit vector: a second
+    // (redundant) normalize of the already-normalized result measurably moves
+    // the last mantissa bit of at least one component, reproducing the
+    // reviewers' repro exactly.
+    doc.add_guide_line(origin, Vec3::new(3.0, 4.0, 5.0))
+        .unwrap();
+    let stored_direction = match doc.guide(doc.guide_ids()[0]).unwrap() {
+        Guide::Line { direction, .. } => *direction,
+        Guide::Point { .. } => unreachable!("just created a line guide"),
+    };
+
+    let before_hash = doc.state_hash();
+    let bytes = doc.save();
+    let loaded = Document::load(&bytes).expect("load");
+
+    let loaded_direction = match loaded.guide(loaded.guide_ids()[0]).unwrap() {
+        Guide::Line { direction, .. } => *direction,
+        Guide::Point { .. } => unreachable!("just created a line guide"),
+    };
+
+    assert_eq!(
+        stored_direction.x.to_bits(),
+        loaded_direction.x.to_bits(),
+        "x component must round-trip bit-exactly"
+    );
+    assert_eq!(
+        stored_direction.y.to_bits(),
+        loaded_direction.y.to_bits(),
+        "y component must round-trip bit-exactly"
+    );
+    assert_eq!(
+        stored_direction.z.to_bits(),
+        loaded_direction.z.to_bits(),
+        "z component must round-trip bit-exactly"
+    );
+
+    assert_eq!(
+        before_hash,
+        loaded.state_hash(),
+        "state_hash must be preserved across the save/load round trip"
+    );
+}
+
+/// A manifest entry for a `"line"` guide whose `dir` is not unit length is a
+/// typed load error, never a silent renormalize-and-repair (DEVELOPMENT.md
+/// rule 4) and never a panic.
+#[test]
+fn load_rejects_line_guide_with_non_unit_direction() {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let mut doc = Document::new();
+    doc.add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let bytes = doc.save();
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let guides = manifest["guides"]
+        .as_array_mut()
+        .expect("guides array present");
+    assert_eq!(guides.len(), 1);
+    guides[0]["dir"] = serde_json::json!([2.0, 0.0, 0.0]);
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    let bytes2 = bytes.clone();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    let patched_bytes = new_zip.finish().unwrap().into_inner();
+
+    // Must be a typed load error, never a panic, never silently renormalized.
+    let result = Document::load(&patched_bytes);
+    assert!(
+        result.is_err(),
+        "a non-unit-length line guide direction must be rejected, not silently repaired"
     );
 }
 

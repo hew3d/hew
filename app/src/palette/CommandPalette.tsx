@@ -91,6 +91,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates }: Co
   const onKeyDown = (ev: React.KeyboardEvent) => {
     if (ev.key === 'Escape') {
       ev.preventDefault()
+      ev.stopPropagation()
       onClose()
       return
     }

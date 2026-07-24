@@ -23,6 +23,25 @@ import { resetStlImportUnitForTest, setLastStlImportUnit } from '../settings/stl
 import type { RecoveryListing } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
 
+/**
+ * Every dialog's Escape handler must `stopPropagation()` alongside its
+ * `preventDefault()` — otherwise the keydown bubbles document → window and
+ * ALSO fires the Viewport's own Escape handling (context-pop or gesture
+ * cancel) underneath the dialog. Attaches a window-level spy, fires Escape
+ * on `document` (mirroring the dialogs' own `document.addEventListener`
+ * registration), and asserts the event never reaches `window`.
+ */
+function expectEscapeStopsPropagationToWindow(): void {
+  const windowKeyDown = vi.fn()
+  window.addEventListener('keydown', windowKeyDown)
+  try {
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(windowKeyDown).not.toHaveBeenCalled()
+  } finally {
+    window.removeEventListener('keydown', windowKeyDown)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // RecoveryDialog
 // ---------------------------------------------------------------------------
@@ -106,6 +125,18 @@ describe('RecoveryDialog', () => {
     expect(onDismiss).toHaveBeenCalledOnce()
     // Escape must NEVER clear the snapshot — that would destroy recoverable work
     expect(onDiscard).not.toHaveBeenCalled()
+  })
+
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
+    render(
+      <RecoveryDialog
+        listings={single}
+        onRecover={vi.fn()}
+        onDiscard={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    expectEscapeStopsPropagationToWindow()
   })
 
   it('has the expected ARIA dialog role and label', () => {
@@ -294,6 +325,11 @@ describe('ImportReportDialog', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
+    render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
+    expectEscapeStopsPropagationToWindow()
+  })
+
   it('has the expected ARIA dialog role and label', () => {
     render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /import report/i })).toBeInTheDocument()
@@ -337,6 +373,11 @@ describe('StlExportDialog', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onCancel).toHaveBeenCalledOnce()
     expect(onExport).not.toHaveBeenCalled()
+  })
+
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
+    expectEscapeStopsPropagationToWindow()
   })
 
   it('has the expected ARIA dialog role and label', () => {
@@ -419,6 +460,11 @@ describe('StlUnitsDialog', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onCancel).toHaveBeenCalledOnce()
     expect(onChoose).not.toHaveBeenCalled()
+  })
+
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
+    render(<StlUnitsDialog fileName="bracket.stl" onChoose={vi.fn()} onCancel={vi.fn()} />)
+    expectEscapeStopsPropagationToWindow()
   })
 
   it('has the expected ARIA dialog role and label', () => {
@@ -507,5 +553,10 @@ describe('ExportDialog', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onCancel).toHaveBeenCalledOnce()
     expect(onExport).not.toHaveBeenCalled()
+  })
+
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
+    render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
+    expectEscapeStopsPropagationToWindow()
   })
 })

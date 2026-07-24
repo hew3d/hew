@@ -34,6 +34,8 @@ interface SceneStubs {
   curveChain?: (edge: bigint) => bigint[]
   curveEdges?: (curve: bigint) => bigint[]
   islandOf?: (region: bigint) => bigint | undefined
+  instanceRegion?: { sketch: bigint; region: bigint; depth?: number }
+  instanceEdge?: { sketch: bigint; edge: bigint; depth?: number }
 }
 
 function fakeScene(s: SceneStubs): SelectScene {
@@ -45,6 +47,20 @@ function fakeScene(s: SceneStubs): SelectScene {
       s.region && { sketch: () => s.region!.sketch, region: () => s.region!.region, free: vi.fn() },
     pick_sketch_edge: () =>
       s.edge && { sketch: () => s.edge!.sketch, edge: () => s.edge!.edge, free: vi.fn() },
+    pick_sketch_region_in_instance: () =>
+      s.instanceRegion && {
+        sketch: () => s.instanceRegion!.sketch,
+        region: () => s.instanceRegion!.region,
+        depth: () => s.instanceRegion!.depth ?? 5,
+        free: vi.fn(),
+      },
+    pick_sketch_edge_in_instance: () =>
+      s.instanceEdge && {
+        sketch: () => s.instanceEdge!.sketch,
+        edge: () => s.instanceEdge!.edge,
+        depth: () => s.instanceEdge!.depth ?? 5,
+        free: vi.fn(),
+      },
     pick_face: () =>
       s.face && {
         object: () => s.face!.object,
@@ -68,6 +84,7 @@ function deps(scene: SelectScene, context: NodeRef[], far = 100): ResolveDeps {
 }
 
 const GROUP_CTX: NodeRef[] = [{ kind: 'group', id: 1n } as unknown as NodeRef]
+const INSTANCE_CTX: NodeRef[] = [{ kind: 'instance', id: 7n }]
 
 describe('classifySnapPick', () => {
   it('maps each provenance (and null) to its kind', () => {
@@ -128,6 +145,50 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     expect(resolveSelectableRef(bareSnap(), DOWN, deps(fakeScene({}), []))).toBeNull()
     // In a context, sketch pickers are skipped — only the in-context solid.
     expect(resolveSelectableRef(bareSnap(), DOWN, deps(fakeScene({ region: { sketch: 21n, region: 5n }, face: { object: 42n, depth: 8 } }), GROUP_CTX))).toMatchObject({ kind: 'object', id: 42n })
+  })
+
+  it('inside an instance, fallback picks its posed definition sketch before the member solid', () => {
+    const regionScene = fakeScene({
+      instanceRegion: { sketch: 31n, region: 5n },
+      face: { object: 42n, instance: 7n, depth: 8 },
+    })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(regionScene, INSTANCE_CTX))).toEqual({
+      kind: 'sketch-island',
+      id: 900n,
+      sketch: 31n,
+    })
+
+    const edgeScene = fakeScene({
+      instanceEdge: { sketch: 31n, edge: 4n },
+      face: { object: 42n, instance: 7n, depth: 8 },
+    })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(edgeScene, INSTANCE_CTX))).toEqual({
+      kind: 'sketch-edge',
+      id: 4n,
+      sketch: 31n,
+    })
+  })
+
+  it('a visible definition sketch beats the member-face snap beneath it', () => {
+    const scene = fakeScene({
+      instanceEdge: { sketch: 31n, edge: 4n },
+    })
+    expect(
+      resolveSelectableRef(
+        solidSnap(42n, 7n),
+        DOWN,
+        deps(scene, INSTANCE_CTX),
+      ),
+    ).toEqual({ kind: 'sketch-edge', id: 4n, sketch: 31n })
+  })
+
+  it('a definition sketch behind the nearest member face is not selectable through it', () => {
+    const scene = fakeScene({
+      instanceEdge: { sketch: 31n, edge: 4n, depth: 9 },
+      face: { object: 42n, instance: 7n, depth: 5 },
+    })
+    expect(resolveSelectableRef(solidSnap(42n, 7n), DOWN, deps(scene, INSTANCE_CTX)))
+      .toMatchObject({ kind: 'object', id: 42n })
   })
 
   it('the fallback solid pick is bounded by the AXIAL far plane, not the radial distance (FIX 2)', () => {

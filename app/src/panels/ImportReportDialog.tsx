@@ -91,6 +91,7 @@ export function ImportReportDialog({ report, onClose }: ImportReportDialogProps)
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopPropagation()
         onClose()
       }
     },

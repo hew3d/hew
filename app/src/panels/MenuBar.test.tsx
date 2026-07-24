@@ -409,6 +409,20 @@ describe('MenuBar', () => {
     expect(screen.queryByText('New')).not.toBeInTheDocument()
   })
 
+  it('stops Escape from bubbling to window while a menu is open (so it does not also fire the Viewport handler)', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.getByText('New')).toBeInTheDocument()
+    const windowKeyDown = vi.fn()
+    window.addEventListener('keydown', windowKeyDown)
+    try {
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(windowKeyDown).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', windowKeyDown)
+    }
+  })
+
   // --- Settings gear ---
 
   it('shows the settings gear when onOpenSettings is provided, and it opens settings', () => {

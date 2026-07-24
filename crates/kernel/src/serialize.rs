@@ -137,7 +137,12 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// read direction; a v11 reader given a v12 file loses only the distinction
 /// (it would read a polygon as a circle), which is why the version moves.
 /// Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 5).
-pub const MANIFEST_FORMAT_VERSION: u32 = 12;
+/// v13: `sketches[].owner` (component-edit-parity.md phase K1) — the
+/// `SketchOwner`: absent means world-owned (the only possibility before this
+/// phase, so every pre-v13 file loads unchanged); present names the dense id
+/// of the owning [`ComponentDto`]. Geometry buffer unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 13;
 
 /// The manifest version at which the stored sketch–solid claim fields
 /// (`consumed`, `objects[].footprints`, `objects[].source`) were retired.
@@ -146,6 +151,14 @@ pub const MANIFEST_FORMAT_VERSION: u32 = 12;
 /// version or newer that still carries `consumed` is malformed for its own
 /// declared version and is rejected (reject-not-repair).
 pub(crate) const MANIFEST_CLAIMS_RETIRED_VERSION: u32 = 11;
+
+/// The manifest version at which `sketches[].owner` (`SketchOwner`,
+/// component-edit-parity.md phase K1) was introduced. Version-gated, not
+/// presence-gated, the mirror image of [`MANIFEST_CLAIMS_RETIRED_VERSION`]:
+/// a file declaring an OLDER version that still carries an `owner` field is
+/// malformed for its own declared version and is rejected, never silently
+/// honored (reject-not-repair).
+pub(crate) const SKETCH_OWNER_MIN_VERSION: u32 = 13;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -1471,6 +1484,13 @@ pub(crate) struct SketchDto {
     /// have no entry. Absent in v1-v9 files → every chain identity-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub curves: Vec<SketchCurveDto>,
+    /// The `SketchOwner` (manifest v13+, component-edit-parity.md phase K1):
+    /// the dense id of the [`ComponentDto`] whose shared geometry this
+    /// sketch belongs to. Absent means world-owned — the only possibility in
+    /// v1-v12 files, so they load unchanged, and a document with no
+    /// def-owned sketch still writes byte-identical output to v12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1618,6 +1638,11 @@ pub(crate) struct DocSaveData {
     pub components: Vec<(ComponentId, Vec<ObjectId>, Option<String>)>,
     pub instances: Vec<InstanceSaveRow>,
     pub sketches: Vec<(SketchId, Sketch)>,
+    /// The `SketchOwner` of each DEFINITION-owned sketch in `sketches`
+    /// (manifest v13+, component-edit-parity.md phase K1). A sketch absent
+    /// from this map is world-owned. Keyed the same way as `obj_names`/
+    /// `obj_tags`.
+    pub sketch_owner: std::collections::BTreeMap<SketchId, ComponentId>,
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
     /// Per-object display name, keyed by id (covers world + def members).
@@ -1803,12 +1828,16 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .iter()
         .map(|(_, sk)| encode_sketch(sk))
         .collect();
-    // Patch the ids to be dense (encode_sketch uses slotmap-iteration indices):
+    // Patch the ids to be dense (encode_sketch uses slotmap-iteration indices)
+    // and the owner (manifest v13+): a sketch absent from `sketch_owner` is
+    // world-owned (`None`); one present names its definition's dense id.
     let sketch_dtos: Vec<SketchDto> = sketch_dtos
         .into_iter()
+        .zip(data.sketches.iter())
         .enumerate()
-        .map(|(i, mut dto)| {
+        .map(|(i, (mut dto, (sid, _)))| {
             dto.id = i as u32;
+            dto.owner = data.sketch_owner.get(sid).map(|cid| comp_to_dense[cid]);
             dto
         })
         .collect();
@@ -1969,6 +1998,7 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         edges: edge_dtos,
         regions: region_dtos,
         curves: curve_dtos,
+        owner: None, // patched by the caller (`encode_document`), like `id`
     }
 }
 
@@ -1991,6 +2021,10 @@ pub(crate) struct DocLoadRaw {
     pub components: Vec<Vec<u32>>,
     pub instances: Vec<(u32, Transform)>,
     pub sketches: Vec<Sketch>,
+    /// Each sketch's `SketchOwner` (manifest v13+): the dense component id it
+    /// belongs to, or `None` for world-owned — parallel to `sketches`, in the
+    /// same dense sketch-id order. All `None` for pre-v13 files.
+    pub sketch_owner: Vec<Option<u32>>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
     /// Pre-v11 stored consumed pairs (dense sketch id, dense region id),
@@ -2087,6 +2121,8 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         let sk = decode_sketch(sk_dto, mat_count)?;
         sketches.push(sk);
     }
+    // `SketchOwner` (manifest v13+; absent/`None` in older files → world).
+    let sketch_owner: Vec<Option<u32>> = manifest.sketches.iter().map(|s| s.owner).collect();
 
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
@@ -2133,6 +2169,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
             .map(|i| (i.def, Transform::from_affine(&i.pose)))
             .collect(),
         sketches,
+        sketch_owner,
         guides,
         consumed: manifest.consumed.clone(),
         def_membership,
@@ -2213,6 +2250,31 @@ fn validate_manifest_references(
         if inst.def as usize >= manifest.components.len() {
             return Err(LoadError::DanglingReference {
                 what: format!("instance {} def id {} out of range", inst.id, inst.def),
+            });
+        }
+    }
+
+    // `SketchOwner` is VERSION-gated, not presence-gated, exactly like the
+    // pre-v11 `consumed` claims list above: it is meaningful only in a
+    // manifest declaring format v13+. A file declaring an older version that
+    // still carries an `owner` field is malformed for its own declared
+    // version (hand-edited or a broken writer) — a smuggled owner would
+    // otherwise be silently honored, attaching a sketch to a definition no
+    // pre-v13 writer could ever have produced.
+    for sk in &manifest.sketches {
+        if sk.owner.is_some() && manifest.format_version < SKETCH_OWNER_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} carries an owner in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, SKETCH_OWNER_MIN_VERSION
+                ),
+            });
+        }
+        if let Some(owner) = sk.owner
+            && owner as usize >= manifest.components.len()
+        {
+            return Err(LoadError::DanglingReference {
+                what: format!("sketch {} owner component id {} out of range", sk.id, owner),
             });
         }
     }
@@ -2307,12 +2369,16 @@ fn materials_count_validate(manifest: &Manifest) -> Result<usize, LoadError> {
 pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch, LoadError> {
     let [nx, ny, nz, offset] = dto.plane;
     let normal = Vec3::new(nx, ny, nz);
-    let plane =
-        Plane::from_point_normal(Point3::ORIGIN + normal * offset, normal).map_err(|_| {
-            LoadError::MalformedManifest {
-                what: format!("sketch {} has degenerate plane normal", dto.id),
-            }
-        })?;
+    // Reconstructed verbatim (not via `from_point_normal`, which renormalizes
+    // and recomputes the offset through a derived point — a few ULPs of
+    // drift on a normal that isn't bit-exactly unit, which a composed
+    // rotation transform routinely produces, and which would otherwise break
+    // the exact `state_hash` round-trip `save`/`load` promises).
+    let plane = Plane::from_unit_normal_offset(normal, offset).map_err(|_| {
+        LoadError::MalformedManifest {
+            what: format!("sketch {} has degenerate plane normal", dto.id),
+        }
+    })?;
 
     let mut sk = Sketch::reconstruct(plane);
 
@@ -2517,11 +2583,19 @@ fn decode_guide(dto: &GuideDto) -> Result<Guide, LoadError> {
                     what: format!("guide {} has a non-finite direction", dto.id),
                 });
             }
-            let direction = direction
-                .normalized()
-                .map_err(|_| LoadError::MalformedManifest {
-                    what: format!("guide {} has a zero-length direction", dto.id),
-                })?;
+            // Taken verbatim, not renormalized: `add_guide_line` normalizes
+            // exactly once at creation and encodes the result as-is, so
+            // renormalizing here would flip low mantissa bits on a direction
+            // that isn't bit-exactly unit (a composed rotation transform
+            // routinely produces such a value) — a few ULPs of drift that
+            // would otherwise break the exact `state_hash` round-trip
+            // `save`/`load` promises. Mirrors the sketch-plane and
+            // cylinder-axis decode paths.
+            if (direction.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("guide {} direction is not a unit vector", dto.id),
+                });
+            }
             Ok(Guide::Line {
                 origin: p,
                 direction,

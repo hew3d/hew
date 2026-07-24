@@ -62,7 +62,8 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { translationAffine, affineToFloat64 } from './transformMath'
@@ -188,6 +189,20 @@ export class MoveTool implements Tool {
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
   setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
     this.acquireSelection = acquire
+  }
+
+  /** The current editing context (component-edit-parity.md phase A1). When
+   *  it's an INSTANCE, selected members commit through `transform_def_member`
+   *  instead of the world `transform_selection` (phase A2) — see
+   *  `commitSelectionTransform`'s doc. */
+  private _editContext: EditContext = { kind: 'top' }
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
+    this.cancel()
+  }
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
   }
   /**
    * Keep the cached targets in step with the app selection (Tool.
@@ -621,7 +636,7 @@ export class MoveTool implements Tool {
           }
         }
       } else {
-        commitSelectionTransform(this.wasmScene, nodes, affineF64)
+        commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
         this.onCommit(nodes)
       }
     } catch (err) {

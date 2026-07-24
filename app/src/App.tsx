@@ -17,7 +17,7 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canBoolean as canBooleanHelper, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, type NodeRef } from './panels/treeModel'
+import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -560,11 +560,17 @@ export default function App() {
 
   const handleExitContext = useCallback(() => {
     setActiveContext((prev) => prev.slice(0, -1))
+    // A definition member is selectable only through the instance context
+    // that poses it. Never carry that scoped handle back to the parent level,
+    // where Delete/transform commands would otherwise retain a route to
+    // geometry that is no longer visibly selected.
+    setSelectedIds([])
   }, [])
 
   /** Truncate the context path to `depth` entries. */
   const handleSetContextDepth = useCallback((depth: number) => {
     setActiveContext((prev) => prev.slice(0, depth))
+    setSelectedIds([])
   }, [])
 
   /** Validate and trim the context path when the document changes. */
@@ -615,7 +621,18 @@ export default function App() {
     setSelectedIds((sel) => {
       const scene = sceneRef.current
       if (scene === null) return sel
-      return pruneDeadSelection(scene, sel)
+      const deepest = activeContext.length > 0
+        ? activeContext[activeContext.length - 1]
+        : undefined
+      if (deepest?.kind !== 'instance') return pruneDeadSelection(scene, sel)
+      const component = scene.instance_def(deepest.id)
+      if (component === undefined) return pruneDeadSelection(scene, sel)
+      return pruneDeadSelection(
+        scene,
+        sel,
+        Array.from(scene.component_member_objects(component)),
+        Array.from(scene.component_member_sketches(component)),
+      )
     })
     // Mark the document dirty on any mutation — but NOT during programmatic
     // loads (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
@@ -623,7 +640,7 @@ export default function App() {
       setDocSession((s) => afterMutation(s, Date.now()))
       dirtySinceAutosaveRef.current = true
     }
-  }, [trimContextPath])
+  }, [activeContext, trimContextPath])
 
   // Re-derive the View ▸ Section Plane menu state from the section
   // manager's own truth (`getSectionState`) — called by the viewport
@@ -820,7 +837,18 @@ export default function App() {
     const isBooleanOperand = (n: NodeRef) =>
       (n.kind === 'object' && objectIdSet.has(n.id)) ||
       (n.kind === 'group' && groupIdSet.has(n.id))
-    const booleanOperands = selectedIds.filter(isBooleanOperand)
+    const deepest = activeContext.length > 0 ? activeContext[activeContext.length - 1] : undefined
+    const activeComponent = deepest?.kind === 'instance'
+      ? scene.instance_def(deepest.id)
+      : undefined
+    const componentMemberIds = activeComponent !== undefined
+      ? new Set(Array.from(scene.component_member_objects(activeComponent)))
+      : null
+    const booleanOperands = selectedIds.filter((n) =>
+      componentMemberIds !== null
+        ? n.kind === 'object' && componentMemberIds.has(n.id)
+        : isBooleanOperand(n),
+    )
     const isSketchKind = (n: NodeRef) =>
       n.kind === 'sketch' ||
       n.kind === 'sketch-island' ||
@@ -838,10 +866,17 @@ export default function App() {
       booleanOperands,
       // Same top-level rule the kernel enforces (GroupedOperand): a nested
       // node picked in the Outliner must not light the commands up only to
-      // be refused on commit.
+      // be refused on commit. Editing INSIDE a component instance's own
+      // definition (component-edit-parity.md phase A2) is the one exception:
+      // two selected members of that SAME definition may boolean together
+      // via `boolean_in_component`, checked with `canBooleanInComponent`.
       canBoolean:
-        activeContext.length === 0 &&
-        canBooleanHelper(selectedIds, parentOf, isBooleanOperand),
+        activeContext.length === 0
+          ? canBooleanHelper(selectedIds, parentOf, isBooleanOperand)
+          : (() => {
+              if (componentMemberIds === null) return false
+              return canBooleanInComponent(selectedIds, (n) => componentMemberIds.has(n.id))
+            })(),
       canGroup: !hasSketch && canGroupHelper(selectedIds, parentOf),
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:

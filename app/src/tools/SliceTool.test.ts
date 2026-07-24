@@ -116,3 +116,195 @@ describe('SliceTool — screen-constant preview-plane scaling', () => {
     expect(quad.scale.x).toBe(before)
   })
 })
+
+function makeFacePick(object: bigint, face: bigint, instance?: bigint) {
+  return {
+    object: () => object,
+    face: () => face,
+    instance: () => instance,
+    free: vi.fn(),
+  }
+}
+
+describe('SliceTool — commit routing', () => {
+  it('a plain world object slices via slice_object', () => {
+    const preview = new THREE.Group()
+    const onSliceCommitted = vi.fn()
+    const onToast = vi.fn()
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => makeFacePick(3n, 4n)),
+      slice_object: vi.fn(() => new BigUint64Array([10n, 11n])),
+    } as unknown as WasmScene
+    const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(wasmScene.slice_object).toHaveBeenCalledTimes(1)
+    expect((wasmScene.slice_object as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(3n)
+    expect(onSliceCommitted).toHaveBeenCalledWith(10n)
+  })
+
+  it('an instanced object is out of scope at the top level (unchanged)', () => {
+    const preview = new THREE.Group()
+    const onSliceCommitted = vi.fn()
+    const onToast = vi.fn()
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)),
+      slice_object: vi.fn(),
+      slice_def_member: vi.fn(),
+    } as unknown as WasmScene
+    const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(wasmScene.slice_object).not.toHaveBeenCalled()
+    expect(wasmScene.slice_def_member).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onSliceCommitted).not.toHaveBeenCalled()
+  })
+
+  // component-edit-parity.md phase A2.
+  describe('inside a component instance context', () => {
+    const INSTANCE = 42n
+    const COMPONENT = 5n
+
+    it('a member face slices via slice_def_member, never the world slice_object', () => {
+      const preview = new THREE.Group()
+      const onSliceCommitted = vi.fn()
+      const onToast = vi.fn()
+      const wasmScene = {
+        face_plane: vi.fn(() => { throw new Error('not a face') }),
+        pick_face: vi.fn(() => makeFacePick(3n, 4n, INSTANCE)),
+        slice_object: vi.fn(),
+        slice_def_member: vi.fn(() => new BigUint64Array([10n, 11n])),
+      } as unknown as WasmScene
+      const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+      tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+      expect(wasmScene.slice_def_member).toHaveBeenCalledTimes(1)
+      const call = (wasmScene.slice_def_member as ReturnType<typeof vi.fn>).mock.calls[0]
+      expect(call[0]).toBe(INSTANCE)
+      expect(call[1]).toBe(3n)
+      expect(wasmScene.slice_object).not.toHaveBeenCalled()
+      expect(onSliceCommitted).toHaveBeenCalledWith(10n)
+    })
+
+    it('a face outside the entered instance is out of scope', () => {
+      const preview = new THREE.Group()
+      const onSliceCommitted = vi.fn()
+      const onToast = vi.fn()
+      const wasmScene = {
+        face_plane: vi.fn(() => { throw new Error('not a face') }),
+        pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)), // a different instance
+        slice_object: vi.fn(),
+        slice_def_member: vi.fn(),
+      } as unknown as WasmScene
+      const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+      tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+      expect(wasmScene.slice_object).not.toHaveBeenCalled()
+      expect(wasmScene.slice_def_member).not.toHaveBeenCalled()
+      expect(onSliceCommitted).not.toHaveBeenCalled()
+    })
+
+    it('a plain WORLD object is out of scope while editing an instance', () => {
+      const preview = new THREE.Group()
+      const onSliceCommitted = vi.fn()
+      const onToast = vi.fn()
+      const wasmScene = {
+        face_plane: vi.fn(() => { throw new Error('not a face') }),
+        pick_face: vi.fn(() => makeFacePick(3n, 4n, undefined)), // plain world object
+        slice_object: vi.fn(),
+        slice_def_member: vi.fn(),
+      } as unknown as WasmScene
+      const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+      tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+      expect(wasmScene.slice_object).not.toHaveBeenCalled()
+      expect(wasmScene.slice_def_member).not.toHaveBeenCalled()
+    })
+  })
+})
+
+function makeKeyEvent(key: string): KeyboardEvent {
+  return { key, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent
+}
+
+describe('SliceTool — hasArmedGesture (distinct from the unconditional capturingInput, component-edit-parity.md phase A2)', () => {
+  function makeTool() {
+    const preview = new THREE.Group()
+    const onSliceCommitted = vi.fn()
+    const onToast = vi.fn()
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => undefined),
+      slice_object: vi.fn(),
+    } as unknown as WasmScene
+    const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+    return { tool }
+  }
+
+  it('capturingInput() is unconditionally true even with no lock engaged', () => {
+    const { tool } = makeTool()
+    expect(tool.capturingInput()).toBe(true)
+    expect(tool.hasArmedGesture()).toBe(false)
+  })
+
+  it('hasArmedGesture() becomes true only once a plane lock is engaged (Shift), and false again once lifted', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // establish a hover normal
+    tool.onKey(makeKeyEvent('Shift')) // engage the lock
+    expect(tool.hasArmedGesture()).toBe(true)
+
+    tool.onKey(makeKeyEvent('Escape')) // first Escape lifts the lock, per the tool's own semantics
+    expect(tool.hasArmedGesture()).toBe(false)
+  })
+})
+
+describe('SliceTool — setEditContext aborts an armed gesture on a genuine change (component-edit-parity.md phase A2)', () => {
+  function makeTool() {
+    const preview = new THREE.Group()
+    const onSliceCommitted = vi.fn()
+    const onToast = vi.fn()
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => undefined),
+      slice_object: vi.fn(),
+    } as unknown as WasmScene
+    const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+    return { tool }
+  }
+
+  it('a genuine context change drops an engaged plane lock instead of silently carrying a stale-frame normal into the new context', () => {
+    const { tool } = makeTool()
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onKey(makeKeyEvent('Shift'))
+    expect(tool.hasArmedGesture()).toBe(true)
+
+    tool.setEditContext({ kind: 'top' })
+
+    expect(tool.hasArmedGesture()).toBe(false)
+  })
+
+  it('re-pushing the SAME context is a no-op — an engaged lock survives it untouched', () => {
+    const { tool } = makeTool()
+    const ctx = { kind: 'instance' as const, id: 9n, component: 90n }
+    tool.setEditContext(ctx)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onKey(makeKeyEvent('Shift'))
+    expect(tool.hasArmedGesture()).toBe(true)
+
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+
+    expect(tool.hasArmedGesture()).toBe(true)
+  })
+})

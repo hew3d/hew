@@ -31,7 +31,8 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { rayPlaneIntersect, type V3 } from '../viewport/geoHelpers'
@@ -144,11 +145,37 @@ export class OffsetTool implements Tool {
     }
   }
 
-  /** Set the active editing context (entered object), or null for top level.
-   * When set, Offset only acts on that object's faces (scoped editing). */
-  private _activeContext: bigint | null = null
-  setActiveContext(objectId: bigint | null): void {
-    this._activeContext = objectId
+  /** The current editing context (component-edit-parity.md phase A1). The
+   *  getters below preserve the old `_activeContext` field's read semantics. */
+  private _editContext: EditContext = { kind: 'top' }
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
+    this.cancel()
+  }
+
+  /** The entered OBJECT id, or null. When set, Offset only acts on that
+   *  object's faces (scoped editing) — unchanged from the old field. */
+  private get _activeContext(): bigint | null {
+    return this._editContext.kind === 'object' ? this._editContext.id : null
+  }
+
+  /**
+   * The entered component INSTANCE id, or null (component-edit-parity.md
+   * phase A2). Offset's REGION path (`sketch_offset_region`) is pure
+   * sketch-to-sketch geometry with no world-frame math (K1's own design
+   * note), but reaching a def-owned sketch still needs the same routing
+   * fix push/pull needed: `pick_sketch_region` only ever walks
+   * `Document::sketch_ids()` (world-tree sketches), so `_pickTarget`'s
+   * Path B calls `pick_sketch_region_in_instance` instead whenever this is
+   * non-null — exactly like `PushPullTool`'s Path B. Offset's FACE path
+   * (`offset_face`) has no `_in_component`/`_in_instance` wasm entry point,
+   * unlike push/pull's — a member face is refused here with a clear hint
+   * instead of reaching the kernel's raw `is_world` refusal (see
+   * `_pickTarget`'s Path A).
+   */
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
@@ -228,6 +255,23 @@ export class OffsetTool implements Tool {
     if (pick !== undefined) {
       try {
         const objectHandle = pick.object()
+        const instanceHandle = pick.instance()
+        // Offset's face path (`offset_face`) has no `_in_component`/
+        // `_in_instance` wasm entry point (component-edit-parity.md phase
+        // A2 — unlike push/pull's) — refuse a member face with a clear hint
+        // rather than reach the kernel's raw `is_world` refusal. ALWAYS
+        // toast, regardless of context: the far more common case is a
+        // top-level click on an ordinary placed instance (`_activeInstance
+        // === null`), which used to hit this same branch and return with
+        // zero feedback — no drag, no toast, nothing — unlike every other
+        // refusal path in this tool and unlike PushPullTool's equivalent
+        // (`_ineligibleFaceHint`), which always surfaces a toast.
+        if (instanceHandle !== undefined) {
+          this.onToast(
+            'Offset can’t cut a component’s member face yet — try a sketch region instead, or explode the instance.',
+          )
+          return
+        }
         if (this._activeContext === null || objectHandle === this._activeContext) {
           const faceHandle = pick.face()
           try {
@@ -249,46 +293,109 @@ export class OffsetTool implements Tool {
       }
     }
 
-    // Path B: no object face — a sketch region (top-level act only).
+    // Path B: no object face — a sketch region (top-level OR instance-
+    // context act — an instance context has its own def-owned regions too,
+    // component-edit-parity.md phase A2). `pick_sketch_region` only ever
+    // walks `Document::sketch_ids()` (world-tree sketches) — it can NEVER
+    // find a region drawn inside a component's own definition, so an
+    // instance context calls the `_in_instance` sibling instead, exactly
+    // like `PushPullTool`'s identical Path B.
     if (this._activeContext !== null) return
-    const regionPick = this.wasmScene.pick_sketch_region(
-      ray.origin[0], ray.origin[1], ray.origin[2],
-      ray.direction[0], ray.direction[1], ray.direction[2],
-    )
+    const activeInstance = this._activeInstance
+    const regionPick =
+      activeInstance !== null
+        ? this.wasmScene.pick_sketch_region_in_instance(
+            activeInstance,
+            ray.origin[0], ray.origin[1], ray.origin[2],
+            ray.direction[0], ray.direction[1], ray.direction[2],
+          )
+        : this.wasmScene.pick_sketch_region(
+            ray.origin[0], ray.origin[1], ray.origin[2],
+            ray.direction[0], ray.direction[1], ray.direction[2],
+          )
     if (regionPick === undefined) {
       // The region pick is interior-only, so a click landing ON the visible
       // boundary line — exactly where Offset invites clicking — always
       // missed (maintainer playtest: "the first click is always swallowed").
       // Fall back to the edge pick (which has the proper pixel tolerance)
-      // and resolve the edge to the region whose boundary carries it.
+      // and resolve the edge to the region whose boundary carries it. This
+      // fallback stays world-only — `pick_sketch_edge`/`sketch_edge_endpoints`
+      // have no `_in_instance` sibling — so a def-owned sketch's BOUNDARY
+      // line still misses inside an instance context; only the interior
+      // click this finding tracks is fixed here. Its find is ALWAYS a WORLD
+      // sketch (never pose-mapped below), even while `activeInstance` is
+      // non-null — a nearby world sketch remains reachable this way while
+      // editing an instance, same as before this fix.
       const viaEdge = this._pickRegionViaEdge(ray)
       if (viaEdge !== null) {
-        this._beginRegionDrag(viaEdge.sketchHandle, viaEdge.regionHandle)
+        this._beginRegionDrag(viaEdge.sketchHandle, viaEdge.regionHandle, false)
       }
       return
     }
     try {
-      this._beginRegionDrag(regionPick.sketch(), regionPick.region())
+      this._beginRegionDrag(regionPick.sketch(), regionPick.region(), activeInstance !== null)
     } finally {
       regionPick.free()
     }
   }
 
-  /** Start the drag on a picked sketch region (both region-pick arms). */
-  private _beginRegionDrag(sketchHandle: bigint, regionHandle: bigint): void {
+  /**
+   * Start the drag on a picked sketch region (both region-pick arms).
+   * `isDefOwned` — true only when `sketchHandle` came back from
+   * `pick_sketch_region_in_instance` (so it is genuinely one of the active
+   * instance's own definition-member sketches) — gates whether `boundary`/
+   * the plane normal need mapping through the pose at all: the edge-pick
+   * fallback above is world-only, so a region it finds is ALREADY in world
+   * space and must NOT be re-mapped, even while `activeInstance` is
+   * non-null (editing an instance doesn't stop a nearby world sketch from
+   * being reachable this way).
+   */
+  private _beginRegionDrag(sketchHandle: bigint, regionHandle: bigint, isDefOwned: boolean): void {
     try {
-      const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
+      let boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
       if (boundary.length < 9) return
       // Anchor the plane at the boundary's first vertex; the normal comes
       // from the sketch's own plane (sketches on any plane — Phase 1) so a
       // rotated sketch still measures its offset in-plane.
       const plane = this.wasmScene.sketch_plane(sketchHandle)
       if (plane === undefined) return // stale handle — stay idle
+      let normal: V3 = [plane[3], plane[4], plane[5]]
+      const activeInstance = this._activeInstance
+      if (isDefOwned && activeInstance !== null) {
+        // A def-owned sketch's `region_boundary`/`sketch_plane` both answer
+        // in DEFINITION-LOCAL space (component-edit-parity.md phase A2) —
+        // `Stage['boundary']` is documented WORLD coords (this drag's own
+        // preview/measurement math needs it), so every boundary vertex is
+        // mapped through the pose here (exact — a point maps unambiguously
+        // under any invertible affine, unlike a normal or a scalar length).
+        // The normal is mapped the same approximate way PushPullTool's
+        // Path B does (linear part, re-normalized): exact for rotation/
+        // uniform-scale/mirror/translation, and even a non-uniform-scale
+        // pose can only skew the drag axis/preview, never the actual
+        // commit — `sketch_offset_region` is pure sketch-local geometry
+        // with no world-frame math at all.
+        const pose = this.wasmScene.instance_pose(activeInstance)
+        if (pose === undefined) return // stale instance — stay idle
+        const mapped = new Float32Array(boundary.length)
+        for (let i = 0; i + 2 < boundary.length; i += 3) {
+          mapped[i] = pose[0] * boundary[i] + pose[1] * boundary[i + 1] + pose[2] * boundary[i + 2] + pose[3]
+          mapped[i + 1] = pose[4] * boundary[i] + pose[5] * boundary[i + 1] + pose[6] * boundary[i + 2] + pose[7]
+          mapped[i + 2] = pose[8] * boundary[i] + pose[9] * boundary[i + 1] + pose[10] * boundary[i + 2] + pose[11]
+        }
+        boundary = mapped
+        const [nx, ny, nz] = normal
+        const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
+        const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
+        const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
+        const len = Math.hypot(rnx, rny, rnz)
+        if (len <= 1e-12) return
+        normal = [rnx / len, rny / len, rnz / len]
+      }
       this._beginDrag(
         { kind: 'region', sketchHandle, regionHandle },
         boundary,
         [boundary[0], boundary[1], boundary[2]],
-        [plane[3], plane[4], plane[5]],
+        normal,
       )
     } catch {
       // Stale region — stay idle.

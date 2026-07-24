@@ -339,9 +339,14 @@ pub enum RecordedCall {
     ExplodeInstance { instance: u64 },
     /// `make_unique(instance)`.
     MakeUnique { instance: u64 },
-    /// `push_pull_in_component(component, object, face, distance)`.
+    /// `push_pull_in_component(instance, object, face, distance)` —
+    /// `instance` (not `component`) since `distance` is a WORLD-space length
+    /// mapped through that specific instance's pose (delta-review fix on
+    /// component-edit-parity.md phase A2: the raw distance previously
+    /// committed diverged from the ghost preview's world-space sweep on a
+    /// scaled instance).
     PushPullInComponent {
-        component: u64,
+        instance: u64,
         object: u64,
         face: u64,
         distance: f64,
@@ -452,6 +457,160 @@ pub enum RecordedCall {
     /// document; embedding the `.hew` bytes keeps everything after it
     /// replayable from a fresh `Scene`.
     Load { bytes: Vec<u8> },
+    // ---------------------------------------------------------------------
+    // component-edit-parity.md phase K1 — additive variants (the
+    // `SketchBeginCurveWith` posture): a recording that never draws/extrudes
+    // inside a component replays unchanged on an older build; one that does
+    // fails to parse there — loudly, never silently divergent.
+    // ---------------------------------------------------------------------
+    /// `begin_sketch_on_plane_in_instance(instance, px, py, pz, nx, ny, nz)`.
+    BeginSketchOnPlaneInInstance {
+        instance: u64,
+        px: f64,
+        py: f64,
+        pz: f64,
+        nx: f64,
+        ny: f64,
+        nz: f64,
+    },
+    /// `extrude_region_in_instance(instance, sketch, region, distance)`.
+    ExtrudeRegionInInstance {
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        distance: f64,
+    },
+    /// `split_face_in_instance(instance, object, face, path)` — `path` is
+    /// xyz triples, in WORLD space (mapped through the instance's pose⁻¹ at
+    /// call time, so replay reproduces the exact same mapping).
+    SplitFaceInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+        path: Vec<f64>,
+    },
+    /// `split_face_inner_in_instance(instance, object, face, loop_pts)` /
+    /// `split_face_inner_with_curve_in_instance(…, center, radius)` — the
+    /// definition-member analog of [`RecordedCall::SplitFaceInner`]
+    /// (Rectangle/Circle/Polygon's face-mode draw inside a component;
+    /// component-edit-parity.md phase A2). `loop_pts` is xyz triples in
+    /// WORLD space (mapped through the instance's pose⁻¹ at call time, same
+    /// as `SplitFaceInInstance`'s `path`).
+    SplitFaceInnerInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+        loop_pts: Vec<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        curve: Option<[f64; 4]>,
+    },
+    /// `delete_def_member(component, object)`.
+    DeleteDefMember { component: u64, object: u64 },
+
+    // ---------------------------------------------------------------------
+    // component-edit-parity.md phase K2 — additive variants (the
+    // `SketchBeginCurveWith` posture): a recording that never sweeps/
+    // combines/slices/transforms inside a component replays unchanged on an
+    // older build; one that does fails to parse there — loudly, never
+    // silently divergent.
+    // ---------------------------------------------------------------------
+    /// `follow_me_along_edges_in_instance(instance, sketch, region,
+    /// path_sketch, path_edges, stop_len)`.
+    FollowMeAlongEdgesInInstance {
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `follow_me_around_face_in_instance(instance, sketch, region,
+    /// path_object, path_face, stop_len)`.
+    FollowMeAroundFaceInInstance {
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `follow_me_merged_around_face_in_instance(instance, sketch, region,
+    /// path_object, path_face, stop_len)`.
+    FollowMeMergedAroundFaceInInstance {
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `follow_me_face_along_edges_in_instance(instance, profile_object,
+    /// profile_face, path_sketch, path_edges, stop_len)`.
+    FollowMeFaceAlongEdgesInInstance {
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `follow_me_face_around_face_in_instance(instance, profile_object,
+    /// profile_face, path_object, path_face, stop_len)`.
+    FollowMeFaceAroundFaceInInstance {
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_len: Option<f64>,
+    },
+    /// `boolean_in_component(component, op, a, b)`.
+    BooleanInComponent {
+        component: u64,
+        op: u8,
+        a: u64,
+        b: u64,
+    },
+    /// `slice_def_member(instance, object, plane)`.
+    SliceDefMember {
+        instance: u64,
+        object: u64,
+        plane: [f64; 6],
+    },
+    /// `transform_def_member(instance, object, affine)`.
+    TransformDefMember {
+        instance: u64,
+        object: u64,
+        affine: [f64; 12],
+    },
+    /// `transform_def_sketch(instance, sketch, affine)`.
+    TransformDefSketch {
+        instance: u64,
+        sketch: u64,
+        affine: [f64; 12],
+    },
+    /// `transform_def_sketch_island(instance, sketch, island, affine)`.
+    TransformDefSketchIsland {
+        instance: u64,
+        sketch: u64,
+        island: u64,
+        affine: [f64; 12],
+    },
+    /// `transform_def_selection(instance, objects, sketches,
+    /// island_sketches, islands, affine)`.
+    TransformDefSelection {
+        instance: u64,
+        objects: Vec<u64>,
+        sketches: Vec<u64>,
+        island_sketches: Vec<u64>,
+        islands: Vec<u64>,
+        affine: [f64; 12],
+    },
 }
 
 /// One image of an [`RecordedCall::ImportDae`] call's image map.

@@ -29,6 +29,7 @@ import {
   buildPreviewClone,
   buildMultiPreviewClone,
   buildInstancePreviewClone,
+  buildInstanceMemberPreviewClone,
   buildSketchPreviewClone,
 } from './transformPreview'
 
@@ -92,12 +93,37 @@ export function planSketchTransforms(
  * `planSketchTransforms`, everything else via a single
  * `transform_selection` call. Kernel errors propagate to the caller's toast
  * handling.
+ *
+ * `activeInstance`, when set (component-edit-parity.md phase A2 — editing
+ * INSIDE a component instance's own definition), routes every selected
+ * 'object' node through `transform_def_member(activeInstance, id, affine)`
+ * instead — `affineF64` is still the WORLD gesture affine; the kernel
+ * conjugates it through the instance's pose itself (never ambiguous under
+ * any pose, unlike a scalar distance — no non-uniform-scale refusal here).
+ * A definition has no nested groups/instances/sketches of its own (the data
+ * model is flat), so this is the only node kind an instance-scoped selection
+ * can ever contain; anything else in the selection is skipped rather than
+ * routed through the world path, which would silently touch the wrong scene.
  */
 export function commitSelectionTransform(
   wasmScene: WasmScene,
   selection: readonly NodeRef[],
   affineF64: Float64Array,
+  activeInstance?: bigint | null,
 ): void {
+  if (activeInstance != null) {
+    const { sketches, islands } = planSketchTransforms(wasmScene, selection)
+    const objects = selection.filter((node) => node.kind === 'object').map((node) => node.id)
+    wasmScene.transform_def_selection(
+      activeInstance,
+      new BigUint64Array(objects),
+      new BigUint64Array(sketches),
+      new BigUint64Array(islands.map(({ sketch }) => sketch)),
+      new BigUint64Array(islands.map(({ island }) => island)),
+      affineF64,
+    )
+    return
+  }
   const kinds: number[] = []
   const ids: bigint[] = []
   for (const node of selection) {
@@ -385,7 +411,25 @@ export function buildNodePreview(
   objectsGroup: THREE.Group | null,
   instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null,
   node: NodeRef,
+  activeInstance?: bigint | null,
 ): THREE.Object3D | null {
+  const poseDefinitionPreview = (preview: THREE.Object3D | null): THREE.Object3D | null => {
+    if (preview === null || activeInstance == null) return preview
+    const pose = wasmScene.instance_pose(activeInstance)
+    if (pose === undefined) return null
+    const posed = new THREE.Group()
+    posed.matrixAutoUpdate = false
+    posed.matrix.set(
+      pose[0], pose[1], pose[2], pose[3],
+      pose[4], pose[5], pose[6], pose[7],
+      pose[8], pose[9], pose[10], pose[11],
+      0, 0, 0, 1,
+    )
+    posed.add(preview)
+    const wrapper = new THREE.Group()
+    wrapper.add(posed)
+    return wrapper
+  }
   if (node.kind === 'group') {
     // A group's renderable leaves are its world objects AND its instances;
     // `node_leaf_objects` stops at instances (kernel `leaf_objects_under`), so
@@ -403,7 +447,7 @@ export function buildNodePreview(
     return buildInstancePreviewClone(group)
   }
   if (node.kind === 'sketch') {
-    return buildSketchPreviewClone(wasmScene.sketch_lines(node.id))
+    return poseDefinitionPreview(buildSketchPreviewClone(wasmScene.sketch_lines(node.id)))
   }
   if (
     node.kind === 'sketch-island' ||
@@ -415,9 +459,15 @@ export function buildNodePreview(
     // with — matching exactly what the commit will move.
     const resolved = resolveSketchIsland(wasmScene, node)
     if (resolved === null) return null // stale — nothing to preview
-    return buildSketchPreviewClone(
-      wasmScene.sketch_island_lines(resolved.sketch, resolved.island),
+    return poseDefinitionPreview(
+      buildSketchPreviewClone(
+        wasmScene.sketch_island_lines(resolved.sketch, resolved.island),
+      ),
     )
+  }
+  if (activeInstance != null) {
+    const group = instanceGroupGetter !== null ? instanceGroupGetter(activeInstance) : null
+    return buildInstanceMemberPreviewClone(group, activeInstance, node.id)
   }
   return buildPreviewClone(objectsGroup, node.id)
 }
@@ -432,14 +482,27 @@ export function buildSelectionPreview(
   objectsGroup: THREE.Group | null,
   instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null,
   selection: readonly NodeRef[],
+  activeInstance?: bigint | null,
 ): THREE.Object3D | null {
   if (selection.length === 1) {
-    return buildNodePreview(wasmScene, objectsGroup, instanceGroupGetter, selection[0])
+    return buildNodePreview(
+      wasmScene,
+      objectsGroup,
+      instanceGroupGetter,
+      selection[0],
+      activeInstance,
+    )
   }
   const group = new THREE.Group()
   group.name = 'SelectionPreview'
   for (const node of selection) {
-    const child = buildNodePreview(wasmScene, objectsGroup, instanceGroupGetter, node)
+    const child = buildNodePreview(
+      wasmScene,
+      objectsGroup,
+      instanceGroupGetter,
+      node,
+      activeInstance,
+    )
     if (child !== null) group.add(child)
   }
   return group.children.length > 0 ? group : null

@@ -26,6 +26,7 @@ import { srgbColorsToLinear } from './colorSpace'
 import { expandByVisibleObject } from './visibleBounds'
 import { facePlaneBasis, type V3 } from './geoHelpers'
 import type { SectionPlane } from './sectionManager'
+import { getResolvedTheme } from '../settings/theme'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -87,8 +88,22 @@ const SECTION_WIDGET_MIN_HALF_EXTENT = 0.5
  * sized to cover (D1: "~5% margin") — keeps the outline clearly outside the
  * model rather than skimming its silhouette. */
 const SECTION_WIDGET_COVERAGE_MARGIN = 0.05
-/** Opacity of entities faded out by the active editing context (isolation). */
-const DIMMED_OPACITY = 0.15
+/**
+ * Opacity of entities faded out by the active editing context (isolation) —
+ * siblings and the rest of the world while something is being edited.
+ * SketchUp-style light dim: clearly present, clearly secondary, NOT the
+ * former flat 0.15 (playtest Finding 2), which read as "both instances
+ * nearly invisible" in light mode and left the edited instance itself
+ * dimmed right alongside its siblings (the separate `_applyInstanceIsolation`
+ * bug fixed alongside this). Tuned per theme, read the same way the rest of
+ * the renderer reads it (`getResolvedTheme`) — a light canvas needs a touch
+ * more opacity than a dark one to hold the same perceived "clearly present"
+ * legibility.
+ */
+const CONTEXT_DIM_OPACITY: Record<'light' | 'dark', number> = {
+  light: 0.65,
+  dark: 0.55,
+}
 /** Muted grey for construction guides — distinct from edges/axes/sketch lines. */
 const GUIDE_COLOR = 0x555555
 /** Half-length of a rendered line guide (meters) — long enough to read as "infinite" at person scale. */
@@ -144,6 +159,25 @@ interface InstanceMeshGroup {
   /** Face meshes, one per member, in the same order as memberIds */
   facesMeshes: THREE.Mesh[]
   edgesLines: THREE.LineSegments[]
+}
+
+/**
+ * One instance's rendered definition-owned sketches (component-edit-
+ * parity.md Finding 1): a THREE.Group transformed by the instance's pose —
+ * exactly like `InstanceMeshGroup` materializes a member object — holding
+ * a merged fat-line for every live def-owned sketch's edges plus one fill
+ * mesh per (sketch, region). Absent for an instance whose component has no
+ * live def-owned sketches. `sketch_lines`/`region_boundary` already answer
+ * in DEFINITION-LOCAL coordinates for a def-owned sketch, same as a member
+ * object's mesh — so the SAME geometry is reused verbatim, only the group's
+ * pose differs per instance.
+ */
+interface DefSketchGroup {
+  group: THREE.Group
+  lines: LineSegments2 | null
+  /** Fill meshes, keyed `${sketchHandle}:${regionHandle}` (region handles
+   *  are per-sketch, so they can collide across sketches). */
+  regionMeshes: Map<string, THREE.Mesh>
 }
 
 /** Shared per-member typed arrays pulled once across the wasm boundary. */
@@ -288,6 +322,10 @@ export class SceneRenderer {
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
   private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
+  /** Rendered definition-owned sketches, one `DefSketchGroup` per instance
+   *  whose component has at least one live def-owned sketch, keyed by
+   *  instance id (component-edit-parity.md Finding 1). */
+  private defSketchGroups: Map<bigint, DefSketchGroup> = new Map()
   /** Merged LineSegments for every dashed line guide. */
   private guideLines: THREE.LineSegments | null = null
   /** Last dash size applied to `guideLines` (screen-constant); -1 = none yet. */
@@ -307,6 +345,9 @@ export class SceneRenderer {
 
   /** Selected islands — the connected-shape selection unit. */
   private selectedSketchIslands: { sketch: bigint; island: bigint }[] = []
+  /** Instance whose pose maps the selected definition-owned sketch geometry
+   * into world space; null for ordinary world sketches. */
+  private selectedSketchInstance: bigint | null = null
   /**
    * Highlight overlay (solid bright lines) for `selectedSketchIds`. A fat
    * `LineSegments2` (not a plain `THREE.LineSegments`) — normal sketch lines
@@ -324,6 +365,8 @@ export class SceneRenderer {
   private selectedObjectIds: bigint[] = []
   /** Currently selected instance ids */
   private selectedInstanceIds: bigint[] = []
+  private selectedMemberInstance: bigint | null = null
+  private selectedMemberIds: bigint[] = []
   /**
    * Active lit set for isolation: null = top level (nothing dimmed);
    * Set<bigint> = the leaf object ids that stay fully lit; all others dim.
@@ -524,7 +567,35 @@ export class SceneRenderer {
         addedInstances.add(iid)
       }
     }
-    for (const iid of touchedInstances) {
+    // A definition can gain (or lose) a member without any instance moving
+    // or the live instance-id set changing at all — an in-instance birth op
+    // (`follow_me_around_face_in_instance`, `extrude_region_in_instance`)
+    // reports only the new member's own object id, not the instance/
+    // component that owns it, so the caller cannot always populate
+    // `componentIds`/`instanceIds`. Detect it generically instead: a touched
+    // object that is neither a live world object nor present in any
+    // currently cached instance's `memberIds` must be a definition member
+    // the renderer has not resolved membership for yet. Every known
+    // instance's record predates the change, so recheck them all here —
+    // cheap (pose + member-id-array pulls, no geometry) — exactly like an
+    // explicitly touched instance below; otherwise `_rebuildMemberBatches`
+    // finds no placements for the brand-new id and silently no-ops (the new
+    // member commits, undoes, and selects fine, but never draws).
+    const touchedComponentSet = new Set(touchedComponents)
+    const unresolvedMemberIds = touchedObjects.filter(
+      (id) =>
+        !liveIds.has(id) &&
+        ![...this.instanceRecords.values()].some((r) => r.memberIds.includes(id)),
+    )
+    const recheckInstances = new Set<bigint>(touchedInstances)
+    if (touchedComponentSet.size > 0 || unresolvedMemberIds.length > 0) {
+      for (const [iid, rec] of this.instanceRecords) {
+        if (unresolvedMemberIds.length > 0 || touchedComponentSet.has(rec.componentId)) {
+          recheckInstances.add(iid)
+        }
+      }
+    }
+    for (const iid of recheckInstances) {
       if (addedInstances.has(iid)) continue
       const prev = this.instanceRecords.get(iid)
       if (prev === undefined) continue
@@ -580,6 +651,14 @@ export class SceneRenderer {
     // in this method — so no separate reassert is needed here.
     this._syncMaterialized()
 
+    // Definition-owned sketches ride instance pose exactly like member
+    // objects (component-edit-parity.md Finding 1) — an instance
+    // transform/pose change, membership change, or component edit can move
+    // or add/remove them, so refresh here too. Cheap: sketch geometry is
+    // lightweight next to mesh batches, and a full rebuild sidesteps a
+    // second incremental-diff to get subtly wrong.
+    this._refreshDefSketches()
+
     // Rebuilt groups start opaque/visible; re-apply isolation + hidden state
     // (cheap CPU-side property writes — no wasm calls, no GPU uploads).
     this._applyIsolation()
@@ -626,15 +705,28 @@ export class SceneRenderer {
       this._rebuildMemberBatches(m)
     }
 
+    // Definition-owned sketches ride instance pose exactly like member
+    // objects — rebuild before the isolation passes below so the freshly
+    // built groups pick up the current fade in the same pass (component-
+    // edit-parity.md Finding 1).
+    this._refreshDefSketches()
+
     // Selected / isolation-lit placements come back out of their batches.
     // `_syncMaterialized` reasserts the active section clip onto every solid
     // material (the batches rebuilt just above included), so no separate
     // reassert is needed here.
     this._syncMaterialized()
     this._applyInstanceIsolation()
+    this._applySketchIsolation()
     // Re-apply hidden visibility for materialized groups (batched placements
-    // read hiddenInstanceIds during the slot writes above).
+    // read hiddenInstanceIds during the slot writes above) and for the
+    // def-sketch groups `_refreshDefSketches` just rebuilt above (delta-review
+    // finding: a rebuilt DefSketch group starts visible regardless of its
+    // instance's hidden state, mirroring the instanceGroups reassertion here).
     for (const [id, g] of this.instanceGroups) {
+      g.group.visible = !this.hiddenInstanceIds.has(id)
+    }
+    for (const [id, g] of this.defSketchGroups) {
       g.group.visible = !this.hiddenInstanceIds.has(id)
     }
     // Instance geometry/membership may have changed — re-size the section
@@ -997,6 +1089,12 @@ export class SceneRenderer {
     for (const id of this.selectedInstanceIds) {
       if (this.instanceRecords.has(id)) desired.add(id)
     }
+    if (
+      this.selectedMemberInstance !== null &&
+      this.instanceRecords.has(this.selectedMemberInstance)
+    ) {
+      desired.add(this.selectedMemberInstance)
+    }
     if (this.activeLitInstanceSet !== null) {
       for (const id of this.activeLitInstanceSet) {
         if (this.instanceRecords.has(id)) desired.add(id)
@@ -1110,12 +1208,16 @@ export class SceneRenderer {
     if (this.selectedInstanceIds.includes(instanceId)) {
       this._applyInstanceColors(instanceId, true)
     }
+    if (this.selectedMemberInstance === instanceId) {
+      this._applyInstanceMemberColors(instanceId)
+    }
     group.visible = !this.hiddenInstanceIds.has(instanceId)
-    const dimmed = this.activeLitSet !== null ||
-      (this.activeLitInstanceSet !== null && !this.activeLitInstanceSet.has(instanceId))
+    const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
+    const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(instanceId)
+    const dimmed = anyContextActive && !isLit
     const g = this.instanceGroups.get(instanceId)
     if (g !== undefined) {
-      this._setInstanceOpacity(g, dimmed ? DIMMED_OPACITY : 1)
+      this._setInstanceOpacity(g, dimmed ? this._dimOpacity() : 1)
     }
   }
 
@@ -1489,11 +1591,124 @@ export class SceneRenderer {
       this.sketchGroup.add(this.sketchLines)
     }
 
+    // Sketches DRAWN INSIDE A COMPONENT (component-edit-parity.md Finding 1)
+    // are a separate document-level list (`component_member_sketches`, per
+    // instance) from the world sketches walked above — rebuild those too so
+    // every sketch mutation/undo/redo keeps both in sync.
+    this._refreshDefSketches()
+
     // Rebuilt sketch geometry starts at full strength; re-apply the fade.
     this._applySketchIsolation()
+    // Rebuilt def-sketch groups also start VISIBLE regardless of their
+    // instance's hidden state — reassert it here too (delta-review finding:
+    // this was the third rebuild path, alongside `refreshTouched`/
+    // `refreshInstances`, that skipped it and let a hidden instance's
+    // def-sketch group come back into view on any sketch mutation/undo/redo).
+    this._applyHidden()
     // Re-assert the selection overlay after a rebuild (a deleted selected
     // sketch's highlight drops out; a surviving one's geometry may have moved).
     this._rebuildSketchHighlight()
+  }
+
+  /**
+   * Rebuild every LIVE instance's rendered definition-owned sketches
+   * (component-edit-parity.md Finding 1): the kernel mints these in
+   * definition-local coordinates and they render/pick through EVERY instance
+   * of their definition, transformed by that instance's pose — exactly like
+   * a definition member OBJECT (`_rebuildMemberBatches`/`_materialize`).
+   * `component_member_sketches` is already filtered to LIVE sketches only
+   * (an undone/deleted one is not returned — hide-not-delete respected at
+   * the wasm boundary, mirroring `component_member_objects`), so nothing
+   * further needs filtering here.
+   *
+   * Called from `refreshAllSketches` (sketch mutation/undo/redo/extrusion),
+   * `refreshInstances` (instance/definition membership or pose changes), and
+   * `refreshTouched` (the incremental per-commit path) — sketch geometry is
+   * lightweight enough that a full rebuild on every one of those call sites
+   * is simpler and safer than diffing, matching `refreshAllSketches`'s own
+   * "clear and rebuild from scratch" posture.
+   */
+  private _refreshDefSketches(): void {
+    this._clearDefSketchGroups()
+    for (const instanceId of this.wasmScene.instance_ids()) {
+      const componentId = this.wasmScene.instance_def(instanceId)
+      if (componentId === undefined) continue
+      const sketchIds = this.wasmScene.component_member_sketches(componentId)
+      if (sketchIds.length === 0) continue
+      const pose = this.wasmScene.instance_pose(instanceId)
+      if (pose === undefined) continue
+      this._buildDefSketchGroup(instanceId, pose, sketchIds)
+    }
+  }
+
+  /** Dispose and clear every rendered def-sketch group. */
+  private _clearDefSketchGroups(): void {
+    for (const g of this.defSketchGroups.values()) {
+      if (g.lines !== null) disposeFatSegments(g.lines)
+      for (const mesh of g.regionMeshes.values()) {
+        mesh.geometry.dispose()
+        ;(mesh.material as THREE.Material).dispose()
+      }
+      this.sketchGroup.remove(g.group)
+    }
+    this.defSketchGroups.clear()
+  }
+
+  /**
+   * Build one instance's `DefSketchGroup`: a Group transformed by `pose`
+   * (row-major 3×4, same convention as `_pullInstanceRecord`) holding a
+   * merged fat-line for every live sketch's edges plus one fill mesh per
+   * region. `sketchIds` are already definition-local and already filtered to
+   * LIVE ones by the caller.
+   */
+  private _buildDefSketchGroup(
+    instanceId: bigint,
+    pose: Float64Array,
+    sketchIds: BigUint64Array | bigint[],
+  ): void {
+    const group = new THREE.Group()
+    group.name = `DefSketch_${instanceId}`
+    group.matrixAutoUpdate = false
+    group.matrix.set(
+      pose[0], pose[1], pose[2],  pose[3],
+      pose[4], pose[5], pose[6],  pose[7],
+      pose[8], pose[9], pose[10], pose[11],
+      0,       0,       0,        1,
+    )
+    group.matrixWorldNeedsUpdate = true
+
+    const allLinePositions: number[] = []
+    const regionMeshes = new Map<string, THREE.Mesh>()
+    for (const sketchHandle of sketchIds) {
+      const linePositions = this.wasmScene.sketch_lines(sketchHandle)
+      for (let i = 0; i < linePositions.length; i++) {
+        allLinePositions.push(linePositions[i])
+      }
+      const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
+      for (let i = 0; i < regionHandles.length; i++) {
+        const regionHandle = regionHandles[i]
+        const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle)
+        if (mesh === null) continue
+        group.add(mesh)
+        regionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
+      }
+    }
+
+    let lines: LineSegments2 | null = null
+    if (allLinePositions.length > 0) {
+      lines = makeFatSegments(new Float32Array(allLinePositions), {
+        color: SKETCH_LINE_COLOR,
+        widthPx: SKETCH_LINE_WIDTH_PX,
+        transparent: true,
+        depthBias: DEPTH_BIAS.SKETCH_LINE,
+      })
+      group.add(lines)
+    }
+
+    if (lines === null && regionMeshes.size === 0) return // nothing to show
+
+    this.sketchGroup.add(group)
+    this.defSketchGroups.set(instanceId, { group, lines, regionMeshes })
   }
 
   /**
@@ -1506,72 +1721,84 @@ export class SceneRenderer {
     const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
     for (let i = 0; i < regionHandles.length; i++) {
       const regionHandle = regionHandles[i]
-      const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
-      // boundary is flat [x0,y0,z0, x1,y1,z1, ...]; n vertices
-      const n = Math.floor(boundary.length / 3)
-      if (n < 3) continue
-
-      const verts3: THREE.Vector3[] = []
-      for (let i = 0; i < n; i++) {
-        verts3.push(new THREE.Vector3(boundary[i * 3], boundary[i * 3 + 1], boundary[i * 3 + 2]))
-      }
-
-      // Robust planar triangulation. The old code fanned from vertex 0, which is
-      // only correct for CONVEX polygons — a non-convex region (an L-shaped or
-      // freehand polyline sketch) produced overlapping/absent triangles, so its
-      // fill "only sometimes" appeared (Refinement pass). Newell's method gives
-      // the polygon normal (works on the ground OR on a face), we project into
-      // that plane, ear-clip via THREE.ShapeUtils, then emit triangles at the
-      // original 3D verts — exactly in the region's plane. (A former +1mm lift
-      // along the normal, there to dodge z-fighting, made ground fills visibly
-      // float at cm scale; the REGION_FILL depth bias below replaces it.)
-      const normal = new THREE.Vector3()
-      for (let i = 0; i < n; i++) {
-        const cur = verts3[i]
-        const nxt = verts3[(i + 1) % n]
-        normal.x += (cur.y - nxt.y) * (cur.z + nxt.z)
-        normal.y += (cur.z - nxt.z) * (cur.x + nxt.x)
-        normal.z += (cur.x - nxt.x) * (cur.y + nxt.y)
-      }
-      if (normal.lengthSq() < 1e-12) continue
-      normal.normalize()
-
-      const u = new THREE.Vector3()
-      if (Math.abs(normal.z) < 0.9) u.set(0, 0, 1).cross(normal).normalize()
-      else u.set(1, 0, 0).cross(normal).normalize()
-      const v = new THREE.Vector3().crossVectors(normal, u).normalize()
-
-      const pts2 = verts3.map((p) => new THREE.Vector2(p.dot(u), p.dot(v)))
-      const tris = THREE.ShapeUtils.triangulateShape(pts2, [])
-
-      const positions: number[] = []
-      for (const tri of tris) {
-        for (const idx of tri) {
-          const p = verts3[idx]
-          positions.push(p.x, p.y, p.z)
-        }
-      }
-      if (positions.length === 0) continue
-
-      const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
-      const mat = new THREE.MeshBasicMaterial({
-        color: SKETCH_REGION_COLOR,
-        transparent: true,
-        opacity: SKETCH_REGION_OPACITY,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        // No depth write (a translucent film never occludes), but it still
-        // depth-TESTS — bias it in front of the coincident native edge lines
-        // and its host face so the test never ties (depthPolicy.ts).
-        polygonOffset: true,
-        polygonOffsetFactor: DEPTH_BIAS.REGION_FILL,
-        polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
-      })
-      const mesh = new THREE.Mesh(geo, mat)
+      const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle)
+      if (mesh === null) continue
       this.sketchGroup.add(mesh)
       this.sketchRegionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
     }
+  }
+
+  /**
+   * Build one sketch region's translucent fill mesh (not yet added to any
+   * group — shared by `_buildRegionFills` for world sketches and
+   * `_buildDefSketchGroup` for definition-owned ones), or `null` for a
+   * degenerate region (fewer than 3 boundary vertices, or a near-zero
+   * polygon normal).
+   */
+  private _buildRegionFillMesh(sketchHandle: bigint, regionHandle: bigint): THREE.Mesh | null {
+    const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
+    // boundary is flat [x0,y0,z0, x1,y1,z1, ...]; n vertices
+    const n = Math.floor(boundary.length / 3)
+    if (n < 3) return null
+
+    const verts3: THREE.Vector3[] = []
+    for (let i = 0; i < n; i++) {
+      verts3.push(new THREE.Vector3(boundary[i * 3], boundary[i * 3 + 1], boundary[i * 3 + 2]))
+    }
+
+    // Robust planar triangulation. The old code fanned from vertex 0, which is
+    // only correct for CONVEX polygons — a non-convex region (an L-shaped or
+    // freehand polyline sketch) produced overlapping/absent triangles, so its
+    // fill "only sometimes" appeared (Refinement pass). Newell's method gives
+    // the polygon normal (works on the ground OR on a face), we project into
+    // that plane, ear-clip via THREE.ShapeUtils, then emit triangles at the
+    // original 3D verts — exactly in the region's plane. (A former +1mm lift
+    // along the normal, there to dodge z-fighting, made ground fills visibly
+    // float at cm scale; the REGION_FILL depth bias below replaces it.)
+    const normal = new THREE.Vector3()
+    for (let i = 0; i < n; i++) {
+      const cur = verts3[i]
+      const nxt = verts3[(i + 1) % n]
+      normal.x += (cur.y - nxt.y) * (cur.z + nxt.z)
+      normal.y += (cur.z - nxt.z) * (cur.x + nxt.x)
+      normal.z += (cur.x - nxt.x) * (cur.y + nxt.y)
+    }
+    if (normal.lengthSq() < 1e-12) return null
+    normal.normalize()
+
+    const u = new THREE.Vector3()
+    if (Math.abs(normal.z) < 0.9) u.set(0, 0, 1).cross(normal).normalize()
+    else u.set(1, 0, 0).cross(normal).normalize()
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize()
+
+    const pts2 = verts3.map((p) => new THREE.Vector2(p.dot(u), p.dot(v)))
+    const tris = THREE.ShapeUtils.triangulateShape(pts2, [])
+
+    const positions: number[] = []
+    for (const tri of tris) {
+      for (const idx of tri) {
+        const p = verts3[idx]
+        positions.push(p.x, p.y, p.z)
+      }
+    }
+    if (positions.length === 0) return null
+
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+    const mat = new THREE.MeshBasicMaterial({
+      color: SKETCH_REGION_COLOR,
+      transparent: true,
+      opacity: SKETCH_REGION_OPACITY,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      // No depth write (a translucent film never occludes), but it still
+      // depth-TESTS — bias it in front of the coincident native edge lines
+      // and its host face so the test never ties (depthPolicy.ts).
+      polygonOffset: true,
+      polygonOffsetFactor: DEPTH_BIAS.REGION_FILL,
+      polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
+    })
+    return new THREE.Mesh(geo, mat)
   }
 
   /**
@@ -1776,6 +2003,22 @@ export class SceneRenderer {
     }
   }
 
+  /** Highlight selected definition members in the placement currently being
+   * edited. Member solids do not have world object groups; their edge lines
+   * live under the materialized instance group. */
+  setSelectedInstanceMembers(instance: bigint | null, memberIds: bigint[]): void {
+    const previous = this.selectedMemberInstance
+    this.selectedMemberInstance = instance
+    this.selectedMemberIds = [...memberIds]
+    if (previous !== null && previous !== instance) {
+      this._applyInstanceMemberColors(previous)
+    }
+    this._syncMaterialized()
+    if (instance !== null) {
+      this._applyInstanceMemberColors(instance)
+    }
+  }
+
   /**
    * Highlight exactly the given sketches as a bright overlay drawn on
    * top of the normal sketch-line color, mirroring `setSelectedGuide`'s
@@ -1801,6 +2044,12 @@ export class SceneRenderer {
     this._rebuildSketchHighlight()
   }
 
+  setSelectedSketchInstance(instance: bigint | null): void {
+    if (this.selectedSketchInstance === instance) return
+    this.selectedSketchInstance = instance
+    this._rebuildSketchHighlight()
+  }
+
   /** (Re)build the bright overlay for the selected sketches — solid lines in
    * the selection color, drawn on top so a selected sketch reads as picked
    * over the normal blue. Cleared if nothing is selected or all selected
@@ -1820,6 +2069,23 @@ export class SceneRenderer {
     }
 
     const positions: number[] = []
+    const pose = this.selectedSketchInstance !== null
+      ? this.wasmScene.instance_pose(this.selectedSketchInstance)
+      : undefined
+    const pushLines = (lines: Float32Array | number[]): void => {
+      for (let i = 0; i + 2 < lines.length; i += 3) {
+        const x = lines[i], y = lines[i + 1], z = lines[i + 2]
+        if (pose === undefined) {
+          positions.push(x, y, z)
+        } else {
+          positions.push(
+            pose[0] * x + pose[1] * y + pose[2] * z + pose[3],
+            pose[4] * x + pose[5] * y + pose[6] * z + pose[7],
+            pose[8] * x + pose[9] * y + pose[10] * z + pose[11],
+          )
+        }
+      }
+    }
     for (const id of this.selectedSketchIds) {
       let linePositions: Float32Array | number[]
       try {
@@ -1827,9 +2093,7 @@ export class SceneRenderer {
       } catch {
         continue // stale/deleted handle — simply contributes nothing
       }
-      for (let i = 0; i < linePositions.length; i++) {
-        positions.push(linePositions[i])
-      }
+      pushLines(linePositions)
     }
     for (const { sketch, island } of this.selectedSketchIslands) {
       if (this.selectedSketchIds.some((s) => s === sketch)) continue
@@ -1839,14 +2103,20 @@ export class SceneRenderer {
       } catch {
         continue // stale handle — contributes nothing
       }
-      for (let i = 0; i < lines.length; i++) positions.push(lines[i])
+      pushLines(lines)
     }
     for (const { sketch, edge } of this.selectedSketchEdges) {
       // The whole sketch already highlighted — skip its edge to avoid a
       // doubled overdrawn segment.
       if (this.selectedSketchIds.some((s) => s === sketch)) continue
       // Stale/consumed edges return undefined and contribute nothing.
-      const seg = this.wasmScene.sketch_edge_endpoints(sketch, edge)
+      const seg = this.selectedSketchInstance !== null
+        ? this.wasmScene.sketch_edge_endpoints_in_instance(
+            this.selectedSketchInstance,
+            sketch,
+            edge,
+          )
+        : this.wasmScene.sketch_edge_endpoints(sketch, edge)
       if (seg === undefined) continue
       for (let i = 0; i < 6; i++) positions.push(seg[i])
     }
@@ -1883,6 +2153,19 @@ export class SceneRenderer {
   }
 
   /**
+   * Re-apply the current isolation fade with today's theme-tuned dim
+   * opacity (`_dimOpacity`) — call after a LIVE theme change (Settings >
+   * Theme, mid-session) so a context already active when the toggle fires
+   * picks up the other theme's constant immediately, exactly like the clear
+   * color / light rig / grid colors the same theme-change handler already
+   * refreshes. A no-op visually when no context is active (every dim write
+   * below only takes effect where `dimmed`/`isLit` says so).
+   */
+  refreshThemeDependentIsolation(): void {
+    this._applyIsolation()
+  }
+
+  /**
    * Update the hidden set and apply visibility. Hidden objects are invisible and
    * non-pickable (Viewport filters them out of pick results). Call after every
    * hiddenKeys change in App.
@@ -1902,14 +2185,22 @@ export class SceneRenderer {
     this._resizeSectionWidget()
   }
 
-  /** Re-apply visibility for all objects and instances. Batched instances
-   * hide by degenerating their slot matrices (no materialization needed);
-   * materialized ones use group.visible. */
+  /** Re-apply visibility for all objects, instances, and definition-owned
+   * sketch groups. Batched instances hide by degenerating their slot
+   * matrices (no materialization needed); materialized ones use
+   * group.visible. A def-sketch group rides its instance's own hidden state
+   * (delta-review finding: hiding an instance left its DefSketch group
+   * rendering at full strength, since this method never touched
+   * `defSketchGroups` — the fat-line/region-fill geometry hides with the
+   * solids it's drawn on top of). */
   private _applyHidden(): void {
     for (const [id, g] of this.objectGroups) {
       g.group.visible = !this.hiddenObjectIds.has(id)
     }
     for (const [id, g] of this.instanceGroups) {
+      g.group.visible = !this.hiddenInstanceIds.has(id)
+    }
+    for (const [id, g] of this.defSketchGroups) {
       g.group.visible = !this.hiddenInstanceIds.has(id)
     }
     for (const id of this.instanceRecords.keys()) {
@@ -2526,27 +2817,42 @@ export class SceneRenderer {
     this.sectionWidget = group
   }
 
+  /** The theme-tuned dim opacity for whatever is NOT the active editing
+   *  context — read the same way the rest of the renderer reads theme
+   *  (`getResolvedTheme`, Viewport.tsx's own light-rig/grid-color pattern). */
+  private _dimOpacity(): number {
+    return CONTEXT_DIM_OPACITY[getResolvedTheme()]
+  }
+
   private _applyIsolation(): void {
+    const dim = this._dimOpacity()
     for (const [id, g] of this.objectGroups) {
       const dimmed = this.activeLitSet !== null && !this.activeLitSet.has(id)
-      this._setObjectOpacity(g, dimmed ? DIMMED_OPACITY : 1)
+      this._setObjectOpacity(g, dimmed ? dim : 1)
     }
     this._applyInstanceIsolation()
     this._applySketchIsolation()
   }
 
   private _applyInstanceIsolation(): void {
-    // Batched placements are never in a lit set (lit instances materialize in
-    // _syncMaterialized), so batch dimming is uniform: dim whenever any
-    // isolation context is active.
-    const batchDimmed = this.activeLitSet !== null || this.activeLitInstanceSet !== null
+    // Batched placements are never individually lit (a lit instance
+    // materializes out of its batch in `_syncMaterialized`), so batch
+    // dimming is uniform: dim whenever any editing context is active.
+    const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
+    const dim = this._dimOpacity()
     for (const batch of this.batches.values()) {
-      this._setBatchOpacity(batch, batchDimmed ? DIMMED_OPACITY : 1)
+      this._setBatchOpacity(batch, anyContextActive ? dim : 1)
     }
     for (const [id, g] of this.instanceGroups) {
-      const dimmed = this.activeLitSet !== null ||
-        (this.activeLitInstanceSet !== null && !this.activeLitInstanceSet.has(id))
-      this._setInstanceOpacity(g, dimmed ? DIMMED_OPACITY : 1)
+      // The instance actually being edited (component-edit-parity.md
+      // Finding 2) stays fully lit even though SOME context is active —
+      // the bug this replaces dimmed every instance, edited one included,
+      // the moment any context (`activeLitSet` is non-null for an instance
+      // context too — it also carries the definition's member OBJECT ids
+      // for the world-object loop above) was active at all.
+      const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(id)
+      const dimmed = anyContextActive && !isLit
+      this._setInstanceOpacity(g, dimmed ? dim : 1)
     }
   }
 
@@ -2614,17 +2920,39 @@ export class SceneRenderer {
     edgeMat.transparent = opacity < 1
   }
 
-  /** Fade sketch lines + region fills whenever any context is active. */
+  /**
+   * Fade WORLD sketch lines + region fills whenever any editing context is
+   * active (a world sketch is never itself "the thing being edited" from
+   * inside an object/group/instance context), and fade each definition-owned
+   * sketch group the same way its instance's member objects fade — full
+   * contrast for the instance actually being edited, light dim for every
+   * other instance's (component-edit-parity.md Finding 2: "sketches inside
+   * the context render full-contrast").
+   */
   private _applySketchIsolation(): void {
-    const inside = this.activeLitSet !== null
+    const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
+    const dim = this._dimOpacity()
     if (this.sketchLines !== null) {
       const mat = this.sketchLines.material as LineMaterial
-      mat.opacity = inside ? DIMMED_OPACITY : 1
-      mat.transparent = inside
+      mat.opacity = anyContextActive ? dim : 1
+      mat.transparent = anyContextActive
     }
     for (const mesh of this.sketchRegionMeshes.values()) {
       const mat = mesh.material as THREE.MeshBasicMaterial
-      mat.opacity = inside ? DIMMED_OPACITY * 0.5 : SKETCH_REGION_OPACITY
+      mat.opacity = anyContextActive ? dim * 0.5 : SKETCH_REGION_OPACITY
+    }
+    for (const [instanceId, g] of this.defSketchGroups) {
+      const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(instanceId)
+      const dimmed = anyContextActive && !isLit
+      if (g.lines !== null) {
+        const mat = g.lines.material as LineMaterial
+        mat.opacity = dimmed ? dim : 1
+        mat.transparent = dimmed
+      }
+      for (const mesh of g.regionMeshes.values()) {
+        const mat = mesh.material as THREE.MeshBasicMaterial
+        mat.opacity = dimmed ? dim * 0.5 : SKETCH_REGION_OPACITY
+      }
     }
   }
 
@@ -2645,6 +2973,21 @@ export class SceneRenderer {
     const edgeColor = selected ? EDGE_COLOR_SELECTED : EDGE_COLOR
     for (const lines of g.edgesLines) {
       ;(lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
+    }
+  }
+
+  private _applyInstanceMemberColors(instanceId: bigint): void {
+    const g = this.instanceGroups.get(instanceId)
+    if (g === undefined) return
+    const selected = instanceId === this.selectedMemberInstance
+      ? new Set(this.selectedMemberIds)
+      : new Set<bigint>()
+    const wholeInstanceSelected = this.selectedInstanceIds.includes(instanceId)
+    for (let i = 0; i < g.edgesLines.length; i++) {
+      const highlighted = wholeInstanceSelected || selected.has(g.memberIds[i])
+      ;(g.edgesLines[i].material as THREE.LineBasicMaterial).color.setHex(
+        highlighted ? EDGE_COLOR_SELECTED : EDGE_COLOR,
+      )
     }
   }
 
@@ -2714,6 +3057,7 @@ export class SceneRenderer {
     this.textureCache.clear()
     this._clearSketchLines()
     this._clearSketchRegions()
+    this._clearDefSketchGroups()
     this._clearGuides()
     this._disposeSectionWidget()
     this.sectionClipPlane = null

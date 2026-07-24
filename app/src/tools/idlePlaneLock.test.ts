@@ -21,7 +21,7 @@ import { RectangleTool } from './RectangleTool'
 import { CircleTool } from './CircleTool'
 import { ArcTool } from './ArcTool'
 import { makeSketchPlaneCache, type SketchPlaneCache } from './sketchGesture'
-import type { Snap } from './types'
+import { toolHasArmedGesture, type EditContext, type Snap, type Tool } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
@@ -107,7 +107,7 @@ interface DrawToolUnderTest {
   statusHint(): string
   cancel(): void
   onDocumentReset(): void
-  setActiveContext(id: bigint | null): void
+  setEditContext(ctx: EditContext): void
   snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null
 }
 
@@ -274,12 +274,12 @@ describe.each(DRIVERS)('$name — idle plane lock', ({ make, commit }) => {
     expect(tool.statusHint()).not.toContain('Locked')
   })
 
-  it('setActiveContext() clears the lock', () => {
+  it('setEditContext() clears the lock', () => {
     const { scene } = makeWasmScene()
     const tool = make(scene)
 
     tool.onKey(makeKeyEvent('ArrowRight'))
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
     expect(tool.statusHint()).not.toContain('Locked')
   })
 
@@ -379,5 +379,30 @@ describe.each(DRIVERS)('$name — idle plane lock', ({ make, commit }) => {
 
     expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
     expect(scene.begin_sketch_on_plane).not.toHaveBeenCalled()
+  })
+
+  // -------------------------------------------------------------- hasArmedGesture (Escape routing)
+
+  it('an idle plane lock arms the tool for toolHasArmedGesture, even though capturingInput() is false', () => {
+    const { scene } = makeWasmScene()
+    const tool = make(scene) as unknown as Tool
+
+    expect(toolHasArmedGesture(tool)).toBe(false)
+    tool.onKey(makeKeyEvent('ArrowRight'))
+    expect((tool as unknown as DrawToolUnderTest).capturingInput()).toBe(false) // idle-locked, not anchored
+    expect(toolHasArmedGesture(tool)).toBe(true)
+  })
+
+  it('one Escape clears an idle plane lock and the tool reports unarmed afterward', () => {
+    const { scene } = makeWasmScene()
+    const tool = make(scene)
+    const asTool = tool as unknown as Tool
+
+    tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(toolHasArmedGesture(asTool)).toBe(true)
+
+    tool.onKey(makeKeyEvent('Escape')) // idle-locked: Escape clears the lock, nothing else
+    expect(tool.statusHint()).not.toContain('Locked')
+    expect(toolHasArmedGesture(asTool)).toBe(false)
   })
 })

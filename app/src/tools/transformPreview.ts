@@ -119,6 +119,50 @@ export function buildInstancePreviewClone(
 }
 
 /**
+ * Clone one definition member as it is rendered through `instanceGroup`.
+ * Member geometry is definition-local while the instance's full affine pose
+ * lives on its parent group, so the filtered clone keeps that parent matrix
+ * and is wrapped in the same identity transform shell as a whole-instance
+ * preview.
+ */
+export function buildInstanceMemberPreviewClone(
+  instanceGroup: THREE.Group | null,
+  instanceId: bigint,
+  memberId: bigint,
+): THREE.Object3D | null {
+  if (instanceGroup === null) return null
+  const posed = new THREE.Group()
+  posed.name = `InstanceMember_${instanceId}_${memberId}`
+  posed.matrixAutoUpdate = false
+  posed.matrix.copy(instanceGroup.matrix)
+  posed.matrixWorldNeedsUpdate = true
+  const wanted = new Set([
+    `InstanceFace_${instanceId}_${memberId}`,
+    `InstanceEdge_${instanceId}_${memberId}`,
+  ])
+  for (const child of instanceGroup.children) {
+    if (!wanted.has(child.name)) continue
+    const clone = child.clone(true)
+    clone.traverse((descendant) => {
+      if (descendant instanceof THREE.Mesh) {
+        descendant.geometry = descendant.geometry.clone()
+        descendant.material = fadePreviewMaterial(descendant.material)
+      }
+      if (descendant instanceof THREE.LineSegments) {
+        descendant.geometry = descendant.geometry.clone()
+        descendant.material = fadePreviewMaterial(descendant.material)
+      }
+    })
+    posed.add(clone)
+  }
+  if (posed.children.length === 0) return null
+  const wrapper = new THREE.Group()
+  wrapper.name = 'InstanceMemberPreview'
+  wrapper.add(posed)
+  return wrapper
+}
+
+/**
  * Clone a materialized instance's THREE.Group as a pose-preserved, faded ghost:
  * `matrixAutoUpdate` off with the instance's world pose copied into the matrix,
  * over cloned (owned) definition-local geometry. Returns null if the source is

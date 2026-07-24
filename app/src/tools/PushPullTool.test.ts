@@ -40,6 +40,9 @@ function makeRegionPick(sketch: bigint, region: bigint) {
 function makeWasmScene(opts: {
   facePick?: ReturnType<typeof makeFacePick>
   regionPick?: ReturnType<typeof makeRegionPick>
+  /** `pick_sketch_region_in_instance`'s own result, when it must differ from
+   *  `regionPick` (defaults to `regionPick` otherwise). */
+  regionPickInInstance?: ReturnType<typeof makeRegionPick>
   /** node_parent(0, id) result per object (a grouped object's group id). */
   parents?: Map<bigint, bigint>
   /** Unit normal `face_normal` reports for the picked face (default +Z). */
@@ -48,23 +51,41 @@ function makeWasmScene(opts: {
    *  (default: ground, point at origin, normal +Z). `undefined` simulates a
    *  stale handle (the pick must then miss, not fall back to ground). */
   sketchPlane?: [number, number, number, number, number, number] | undefined
+  /** Handles `component_member_sketches` should report as live members of
+   *  the active component (component-edit-parity.md phase A2). */
+  memberSketches?: bigint[]
+  componentThroughResults?: bigint[]
 } = {}): WasmScene {
   const faceNormal = opts.faceNormal ?? [0, 0, 1]
   const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
     pick_face: vi.fn(() => opts.facePick),
+    // `pick_sketch_region` only ever walks WORLD-tree sketches — Path B calls
+    // its `_in_instance` sibling instead while inside an instance context, so
+    // the two are seeded independently (`regionPick` covers whichever one the
+    // test actually expects to fire; see the instance-context describe block
+    // below for a `regionPickInInstance`-specific seed).
     pick_sketch_region: vi.fn(() => opts.regionPick),
+    pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
+    instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])), // identity
     node_parent: vi.fn((_kind: number, id: bigint) => opts.parents?.get(id)),
     face_normal: vi.fn(() => new Float64Array(faceNormal)),
     sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
     region_boundary: vi.fn(() => new Float32Array([])),
     face_boundary: vi.fn(() => new Float32Array([])),
     extrude_region: vi.fn(() => 55n),
+    extrude_region_in_instance: vi.fn(() => 55n),
     push_pull: vi.fn(() => ({
       is_through: () => false,
       result_objects: () => new BigUint64Array([]),
       free: vi.fn(),
     })),
+    push_pull_in_component: vi.fn(() => ({
+      is_through: () => opts.componentThroughResults !== undefined,
+      result_objects: () => new BigUint64Array(opts.componentThroughResults ?? []),
+      free: vi.fn(),
+    })),
+    component_member_sketches: vi.fn(() => new BigUint64Array(opts.memberSketches ?? [])),
   } as unknown as WasmScene
 }
 
@@ -167,9 +188,7 @@ describe('PushPullTool — Path A (object face)', () => {
     // Mirror the real Viewport wiring for a deepest 'group' context: the two
     // id channels stay null (they only carry object/instance contexts) and
     // the injected context-path predicate does the rejecting.
-    tool.setActiveContext(null)
-    tool.setComponentContext(null)
-    tool.setContextScoped(true)
+    tool.setEditContext({ kind: 'group', id: 9n })
     tool.setFaceEligibility(() => false)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
@@ -186,7 +205,7 @@ describe('PushPullTool — Path A (object face)', () => {
   it('inside a scoped context an out-of-scope COMPONENT face also gets the scoped hint (double-click cannot enter it from here)', () => {
     const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
     const { tool, onToast } = makeTool(scene)
-    tool.setContextScoped(true)
+    tool.setEditContext({ kind: 'group', id: 9n })
     tool.setFaceEligibility(() => false)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
@@ -198,7 +217,7 @@ describe('PushPullTool — Path A (object face)', () => {
   it('in-context: a foreign face consumes the click with the scoped-editing hint', () => {
     const scene = makeWasmScene({ facePick: makeFacePick(999n, 4n) })
     const { tool, onToast } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
 
@@ -233,7 +252,7 @@ describe('PushPullTool — Path B (sketch region, any live sketch)', () => {
     const regionPick = makeRegionPick(99n, 7n)
     const scene = makeWasmScene({ facePick: undefined, regionPick })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(1n)
+    tool.setEditContext({ kind: 'object', id: 1n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
 
@@ -435,5 +454,235 @@ describe('PushPullTool — status hint', () => {
     expect(tool.statusHint()).toContain('click to commit')
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
     expect(tool.statusHint()).toContain('Click a face')
+  })
+})
+
+describe('PushPullTool — instance editing context (component-edit-parity.md phase A2)', () => {
+  const INSTANCE = 42n
+  const COMPONENT = 5n
+
+  it('a member face routes to push_pull_in_component, never the world push_pull', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, INSTANCE) })
+    const { tool, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+
+    expect(scene.push_pull_in_component).toHaveBeenCalledTimes(1)
+    const call = (scene.push_pull_in_component as ReturnType<typeof vi.fn>).mock.calls[0]
+    // Delta-review fix: the kernel needs the INSTANCE (not the bare
+    // component) to map the WORLD drag distance through its pose — the same
+    // `_in_instance` convention `extrude_region_in_instance` already follows.
+    // This replaces a prior assertion that pinned `component` as the first
+    // argument, which was the raw-distance contract this fix corrects.
+    expect(call[0]).toBe(INSTANCE)
+    expect(call[1]).toBe(3n)
+    expect(call[2]).toBe(4n)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(3n)
+  })
+
+  it('selects the live replacement member after an in-component through-cut', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, INSTANCE),
+      componentThroughResults: [88n],
+    })
+    const { tool, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: -2, kind: 'endpoint' }), RAY)
+
+    expect(onCommit).toHaveBeenCalledWith(88n)
+  })
+
+  it('a def-owned sketch region resolves through pick_sketch_region_in_instance (never the world-only pick_sketch_region) and extrudes via extrude_region_in_instance', () => {
+    // `pick_sketch_region` only ever walks WORLD-tree sketches
+    // (`Document::sketch_ids()` deliberately excludes definition-owned
+    // ones) — it can never see a region drawn inside a component's own
+    // definition, so an instance context must call the scoped, pose-mapping
+    // `_in_instance` sibling instead (proven kernel-side in
+    // `pick_sketch_region_is_blind_to_a_def_owned_sketch_but_the_in_
+    // instance_sibling_finds_it`); this only checks the APP calls the right
+    // one and wires its result through.
+    const regionPick = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({ facePick: undefined, regionPickInInstance: regionPick })
+    const { tool, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 3, kind: 'endpoint' }), RAY)
+
+    expect(scene.pick_sketch_region_in_instance).toHaveBeenCalled()
+    const pickCall = (scene.pick_sketch_region_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(pickCall[0]).toBe(INSTANCE)
+    expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+
+    expect(scene.extrude_region_in_instance).toHaveBeenCalledTimes(1)
+    const call = (scene.extrude_region_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(INSTANCE)
+    expect(call[1]).toBe(99n)
+    expect(call[2]).toBe(7n)
+    expect(scene.extrude_region).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(55n)
+  })
+
+  it('a miss from pick_sketch_region_in_instance (no def-owned region under the cursor) extrudes nothing', () => {
+    const scene = makeWasmScene({ facePick: undefined, regionPickInInstance: undefined })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(scene.extrude_region_in_instance).not.toHaveBeenCalled()
+    expect(scene.extrude_region).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(false)
+  })
+})
+
+// The in-instance ghost preview used to fall straight to the bare arrow +
+// tip-cross fallback — `face_boundary`/`region_boundary` answer in
+// DEFINITION-local coordinates, and drawing that boundary directly (without
+// mapping it through the instance's pose) would draw the swept-prism ghost
+// in the wrong place, so the old code deliberately skipped it whenever
+// `target.instance` was set. That was the only visible difference between an
+// in-instance and a plain-object push/pull drag. The fix pose-maps the
+// boundary instead of skipping the prism (component-edit-parity.md Finding 3).
+describe('PushPullTool — in-instance ghost preview matches the plain-object swept prism (Finding 3)', () => {
+  const INSTANCE = 12n
+  const COMPONENT = 77n
+  /** Translated (not identity) pose — proves the ghost is actually POSE-
+   *  MAPPED, not coincidentally right under a no-op transform. */
+  const TRANSLATED_POSE = new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])
+  /** A definition-local unit square, the kind `face_boundary`/
+   *  `region_boundary` return for a component member/def-owned sketch. */
+  const LOCAL_SQUARE = new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+
+  /** The prism's world-space vertex X extents, or `null` if the preview
+   *  holds no Mesh (i.e. it fell back to the arrow). */
+  function prismXExtent(preview: THREE.Group): { min: number; max: number } | null {
+    const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh | undefined
+    if (mesh === undefined) return null
+    const pos = mesh.geometry.getAttribute('position')
+    let min = Infinity
+    let max = -Infinity
+    for (let i = 0; i < pos.count; i++) {
+      min = Math.min(min, pos.getX(i))
+      max = Math.max(max, pos.getX(i))
+    }
+    return { min, max }
+  }
+
+  it('an in-instance FACE push/pull draws a pose-mapped swept prism, not the bare arrow', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, INSTANCE) })
+    ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockReturnValue(LOCAL_SQUARE)
+    ;(scene.instance_pose as ReturnType<typeof vi.fn>).mockReturnValue(TRANSLATED_POSE)
+    const { tool, preview } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'on-axis' }), RAY)
+
+    // A plain LineSegments arrow+cross is what the old bug drew; the fix
+    // draws the same swept-prism Mesh a plain-object drag gets.
+    expect(preview.children.some((c) => c instanceof THREE.LineSegments)).toBe(false)
+    const extent = prismXExtent(preview)
+    expect(extent).not.toBeNull()
+    // Local x ∈ [0,1] maps through the +5 translation to world x ∈ [5,6] —
+    // proof the boundary was actually mapped, not drawn at its raw local
+    // position (which would extend [0,1], not [5,6]).
+    expect(extent?.min).toBeCloseTo(5)
+    expect(extent?.max).toBeCloseTo(6)
+  })
+
+  it('an in-instance REGION (def-owned sketch) push/pull draws a pose-mapped swept prism, not the bare arrow', () => {
+    const regionPick = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({
+      facePick: undefined,
+      regionPickInInstance: regionPick,
+      sketchPlane: [0, 0, 0, 0, 0, 1],
+    })
+    ;(scene.region_boundary as ReturnType<typeof vi.fn>).mockReturnValue(LOCAL_SQUARE)
+    ;(scene.instance_pose as ReturnType<typeof vi.fn>).mockReturnValue(TRANSLATED_POSE)
+    const { tool, preview } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'on-axis' }), RAY)
+
+    expect(preview.children.some((c) => c instanceof THREE.LineSegments)).toBe(false)
+    const extent = prismXExtent(preview)
+    expect(extent).not.toBeNull()
+    expect(extent?.min).toBeCloseTo(5)
+    expect(extent?.max).toBeCloseTo(6)
+  })
+
+  it('a stale instance pose mid-drag (instance vanished after the click) falls back to the arrow instead of a misplaced ghost', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, INSTANCE) })
+    ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockReturnValue(LOCAL_SQUARE)
+    // A valid pose for onPointerDown's own `worldFaceNormal` lookup (else the
+    // click misses outright — "normal === null ... treated exactly like a
+    // miss"), then gone by the time the ghost preview asks for it again —
+    // the genuine "instance vanished mid-drag" case.
+    ;(scene.instance_pose as ReturnType<typeof vi.fn>).mockReturnValueOnce(TRANSLATED_POSE).mockReturnValue(undefined)
+    const { tool, preview } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    expect(tool.capturingInput()).toBe(true)
+    tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'on-axis' }), RAY)
+
+    // No prism (no pose left to map through) — the arrow fallback, same as a
+    // stale handle does for a plain object.
+    expect(prismXExtent(preview)).toBeNull()
+    expect(preview.children.some((c) => c instanceof THREE.LineSegments)).toBe(true)
+  })
+
+  it('a plain (non-instance) push/pull is unaffected — still the swept prism at its raw (already-world) boundary', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockReturnValue(LOCAL_SQUARE)
+    const { tool, preview } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-axis' }), RAY)
+
+    expect(preview.children.some((c) => c instanceof THREE.LineSegments)).toBe(false)
+    const extent = prismXExtent(preview)
+    expect(extent?.min).toBeCloseTo(0)
+    expect(extent?.max).toBeCloseTo(1)
+  })
+})
+
+describe('PushPullTool — setEditContext aborts an armed gesture on a genuine change (component-edit-parity.md phase A2)', () => {
+  it('a genuine context change cancels an armed drag instead of silently retargeting its eventual commit', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 42n) })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'top' })
+
+    expect(tool.capturingInput()).toBe(false)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(scene.push_pull).not.toHaveBeenCalled() // the cancelled gesture never commits
+  })
+
+  it('re-pushing the SAME context is a no-op — an armed drag survives it untouched', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 42n) })
+    const { tool } = makeTool(scene)
+    const ctx = { kind: 'instance' as const, id: 42n, component: 5n }
+    tool.setEditContext(ctx)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+
+    expect(tool.capturingInput()).toBe(true)
   })
 })

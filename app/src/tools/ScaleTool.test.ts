@@ -32,6 +32,13 @@ function makeSnap(overrides: Partial<Snap> = {}): Snap {
 function makeWasmScene() {
   return {
     transform_selection: vi.fn(),
+    transform_def_member: vi.fn(),
+    transform_def_selection: vi.fn(),
+    instance_pose: vi.fn(() => new Float64Array([
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+    ])),
   }
 }
 
@@ -53,7 +60,11 @@ function makeBoxObjectsGroup(
   return objectsGroup
 }
 
-function makeTool(selection: NodeRef[] = [], objectsGroup: THREE.Group | null = null) {
+function makeTool(
+  selection: NodeRef[] = [],
+  objectsGroup: THREE.Group | null = null,
+  instanceGroupGetter: ((id: bigint) => THREE.Group | null) | null = null,
+) {
   const preview = new THREE.Group()
   const onCommit = vi.fn()
   const onToast = vi.fn()
@@ -66,7 +77,7 @@ function makeTool(selection: NodeRef[] = [], objectsGroup: THREE.Group | null = 
     selection,
     onCommit,
     onToast,
-    null,
+    instanceGroupGetter,
     onMeasurement,
   )
   return { tool, onCommit, onToast, onMeasurement, wasmScene, preview }
@@ -594,6 +605,59 @@ describe('ScaleTool — screen-constant grip markers (updateGripScale)', () => {
     // The fallback pick tolerance (0.02·3 = 0.06) still governs: a 0.05-off
     // ray grabs the grip exactly as the pre-rework tests rely on.
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayMissing([1, 1, 1], 0.05))
+    expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+describe('ScaleTool — setEditContext aborts an armed gesture on a genuine change (component-edit-parity.md phase A2)', () => {
+  const ID = 9n
+  function makeBoxTool(min: [number, number, number], max: [number, number, number]) {
+    return makeTool([{ kind: 'object', id: ID } as NodeRef], makeBoxObjectsGroup(ID, min, max))
+  }
+
+  it('builds and commits from a definition member rendered through the active instance', () => {
+    const instance = 77n
+    const member = 9n
+    const instanceGroup = new THREE.Group()
+    instanceGroup.name = `Instance_${instance}`
+    const memberMesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 1))
+    memberMesh.name = `InstanceFace_${instance}_${member}`
+    memberMesh.position.set(1, 1, 0.5)
+    instanceGroup.add(memberMesh)
+    const { tool, wasmScene } = makeTool(
+      [{ kind: 'object', id: member }],
+      null,
+      (id) => id === instance ? instanceGroup : null,
+    )
+    tool.setEditContext({ kind: 'instance', id: instance, component: 90n })
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1]))
+    expect(tool.capturingInput()).toBe(true)
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 2 }), rayAt([1, 1, 2]))
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2 }), rayAt([1, 1, 2]))
+    expect(wasmScene.transform_def_selection).toHaveBeenCalledTimes(1)
+    expect(wasmScene.transform_selection).not.toHaveBeenCalled()
+  })
+
+  it('a genuine context change cancels an armed grip drag instead of silently retargeting its eventual commit', () => {
+    const { tool } = makeBoxTool([0, 0, 0], [2, 2, 1])
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face grip
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'top' })
+
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('re-pushing the SAME context is a no-op — an armed grip drag survives it untouched', () => {
+    const { tool } = makeBoxTool([0, 0, 0], [2, 2, 1])
+    const ctx = { kind: 'instance' as const, id: 9n, component: 90n }
+    tool.setEditContext(ctx)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face grip
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+
     expect(tool.capturingInput()).toBe(true)
   })
 })

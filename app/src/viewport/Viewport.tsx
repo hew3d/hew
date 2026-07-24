@@ -59,7 +59,8 @@ import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray } from './math'
 import { axisDashGapWorld, tanHalfFovRad } from './math'
-import type { Snap, Tool } from '../tools/types'
+import type { Snap, Tool, EditContext } from '../tools/types'
+import { toolHasArmedGesture } from '../tools/types'
 import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
@@ -890,6 +891,80 @@ export function resolvePickToSelectable(
   return null
 }
 
+/**
+ * The single editing-context channel (component-edit-parity.md phase A1):
+ * reduce the app's `activeContext: NodeRef[]` breadcrumb path to the one
+ * `EditContext` value every tool consults uniformly, replacing the four
+ * ad-hoc duck-typed channels (`setActiveContext`/`setComponentContext`/
+ * `setContextScoped`/`setActiveGroup`) that used to each derive their own
+ * slice of the same path independently. An instance context resolves its
+ * definition (`instance_def`) here once, so tools never have to.
+ *
+ * A stale/hidden deepest instance (definition lookup misses) degrades to
+ * `'top'` rather than throwing — the same defensive posture
+ * `activeLitSet`'s memo already takes for the identical lookup.
+ */
+export function computeEditContext(wasmScene: WasmScene, activeContext: NodeRef[]): EditContext {
+  if (activeContext.length === 0) return { kind: 'top' }
+  const deepest = activeContext[activeContext.length - 1]
+  if (deepest.kind === 'object') return { kind: 'object', id: deepest.id }
+  if (deepest.kind === 'group') return { kind: 'group', id: deepest.id }
+  if (deepest.kind === 'instance') {
+    const component = wasmScene.instance_def(deepest.id)
+    if (component === undefined) return { kind: 'top' }
+    return { kind: 'instance', id: deepest.id, component }
+  }
+  return { kind: 'top' }
+}
+
+/** Push `ctx` to `tool` if it implements the optional `setEditContext` hook
+ *  (component-edit-parity.md phase A1) — a no-op for tools that don't need
+ *  editing-context awareness at all. */
+export function applyEditContext(tool: Tool, ctx: EditContext): void {
+  if ('setEditContext' in tool) {
+    ;(tool as { setEditContext(ctx: EditContext): void }).setEditContext(ctx)
+  }
+}
+
+/**
+ * The instance ids that must stay individually lit (materialized + full
+ * opacity) for the current `activeContext` breadcrumb — passed to
+ * `SceneRenderer.setActiveContext` as `litInstances`.
+ *
+ * Derived from the WHOLE chain, not just the deepest node (delta-review
+ * Finding 2 / Finding 3 on component-edit-parity.md's original Finding 2
+ * fix):
+ * - Every 'instance' node ANYWHERE in the chain stays lit. The original fix
+ *   only checked the deepest node, so double-clicking a definition member
+ *   while already inside an instance context — `[..., instance, object]`,
+ *   deepest is 'object' — lost the enclosing instance's highlight and the
+ *   edited member dimmed right along with everything else.
+ * - When the deepest node is a 'group', the group's own member INSTANCES
+ *   light up too (recursively, through nested groups) — previously only
+ *   leaf OBJECTS were lit for a group context (`activeLitSet`), so a
+ *   component instance placed directly in the entered group rendered
+ *   dimmed as if it were outside the context. Their def-sketch groups
+ *   follow for free: `_applySketchIsolation` keys off this same set.
+ *
+ * Returns `null` (not an empty Set) when no instance qualifies, matching
+ * the "no restriction" convention `SceneRenderer.setActiveContext` expects.
+ */
+export function computeLitInstances(wasmScene: WasmScene, activeContext: NodeRef[]): Set<bigint> | null {
+  if (activeContext.length === 0) return null
+  const lit = new Set<bigint>()
+  for (const node of activeContext) {
+    if (node.kind === 'instance') lit.add(node.id)
+  }
+  const deepest = activeContext[activeContext.length - 1]
+  if (deepest.kind === 'group') {
+    const { instanceIds } = collectLeafIds(deepest, (groupId) =>
+      wasmScene.group_members(groupId).map(nodeRefFromJs),
+    )
+    for (const id of instanceIds) lit.add(id)
+  }
+  return lit.size > 0 ? lit : null
+}
+
 export default function Viewport({
   wasmScene,
   onStatusChange,
@@ -1160,6 +1235,10 @@ export default function Viewport({
       updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
       originAxes.visible = wasVisible
       threeScene.add(originAxes)
+      // The edit-context dim opacity is theme-tuned too (component-edit-
+      // parity.md Finding 2) — re-apply it so a context already active when
+      // the toggle fires reads correctly right away.
+      sceneRendererRef.current?.refreshThemeDependentIsolation()
       scheduleRenderRef.current()
     })
 
@@ -1235,7 +1314,11 @@ export default function Viewport({
     // selectable is under the cursor — clear (context-scoped: `additive` is
     // false inside a context, so an in-context miss deselects without exiting).
     function handleSelect(snap: Snap | null, ray: Ray): void {
-      const additive = selectAdditiveRef.current && activeContextRef.current.length === 0
+      // Selection is scoped by `resolveSelectableRef`, so Shift-additive is
+      // safe inside an editing context too. Component booleans require two
+      // sibling definition members; disabling additive selection here made
+      // that valid kernel operation unreachable from the real UI.
+      const additive = selectAdditiveRef.current
       const ref = resolveSelectableRef(snap, ray, selectionDeps())
       onSelectRef.current?.(ref, additive)
       scheduleRender()
@@ -1634,11 +1717,18 @@ export default function Viewport({
       // the group-ops design). kind: 0=object, 1=group — the same
       // mapping as runGroup; instances are refused typed by the kernel.
       const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
+      // Editing INSIDE a component instance's own definition (component-edit-
+      // parity.md phase A2): both operands are definition members — route
+      // through `boolean_in_component` instead of the world `boolean_nodes`.
+      // The result replaces both members in the SAME definition.
+      const editCtx = computeEditContext(wasmScene, activeContextRef.current)
       let result: NodeRef
       try {
-        result = nodeRefFromJs(
-          wasmScene.boolean_nodes(op, kindNum(a), a.id, kindNum(b), b.id),
-        )
+        result = editCtx.kind === 'instance'
+          ? { kind: 'object', id: wasmScene.boolean_in_component(editCtx.component, op, a.id, b.id) }
+          : nodeRefFromJs(
+              wasmScene.boolean_nodes(op, kindNum(a), a.id, kindNum(b), b.id),
+            )
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -1721,6 +1811,11 @@ export default function Viewport({
       const isSub = (n: NodeRef) =>
         n.kind === 'sketch-edge' || n.kind === 'sketch-curve' || n.kind === 'sketch-island'
       const ordered = [...nodes.filter(isSub), ...nodes.filter((n) => !isSub(n))]
+      // Editing INSIDE a component instance's own definition (component-
+      // edit-parity.md phase A2): every 'object' node in this delete routes
+      // through `delete_def_member` instead — see the loop below.
+      const editCtx = computeEditContext(wasmScene, activeContextRef.current)
+      const activeComponent = editCtx.kind === 'instance' ? editCtx.component : null
       // Dissolve a batch of edges as ONE gesture (one undo step); an emptied
       // sketch husk is removed afterward.
       const removeEdgeBatch = (sketch: bigint, edges: bigint[]): void => {
@@ -1731,7 +1826,12 @@ export default function Viewport({
         } finally {
           wasmScene.sketch_end_gesture(sketch)
         }
-        const stillListed = Array.from(wasmScene.sketch_ids()).includes(sketch)
+        const stillListed =
+          Array.from(wasmScene.sketch_ids()).includes(sketch) ||
+          (
+            activeComponent !== null &&
+            Array.from(wasmScene.component_member_sketches(activeComponent)).includes(sketch)
+          )
         if (stillListed && wasmScene.sketch_lines(sketch).length === 0) {
           wasmScene.delete_sketch(sketch)
         }
@@ -1763,12 +1863,25 @@ export default function Viewport({
             // sketch — remove the husk too (its own undo step). Guarded on
             // sketch_ids: a sketch already removed (e.g. wholly consumed by
             // an extrusion) must not be tombstoned twice.
-            const stillListed = Array.from(wasmScene.sketch_ids()).includes(n.sketch)
+            const stillListed =
+              Array.from(wasmScene.sketch_ids()).includes(n.sketch) ||
+              (
+                activeComponent !== null &&
+                Array.from(wasmScene.component_member_sketches(activeComponent)).includes(n.sketch)
+              )
             if (stillListed && wasmScene.sketch_lines(n.sketch).length === 0) {
               wasmScene.delete_sketch(n.sketch)
             }
           } else if (n.kind === 'sketch') {
             wasmScene.delete_sketch(n.id)
+          } else if (n.kind === 'object' && activeComponent !== null) {
+            // Editing INSIDE a component instance's own definition (component-
+            // edit-parity.md phase A2): an 'object' node here is a definition
+            // member — `delete_def_member` splices it out of the definition
+            // (undo restores it) instead of the world `delete_node`, and
+            // refuses typed (`LastDefinitionMember`) rather than delete a
+            // definition's only member out from under every instance.
+            wasmScene.delete_def_member(activeComponent, n.id)
           } else {
             const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
             wasmScene.delete_node(kind, n.id)
@@ -2218,11 +2331,9 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
         sketchPlaneCache,
       )
-      // Scope the tool to the current editing context, if any.
-      const ctx = activeContextRef.current
-      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
-        ? ctx[ctx.length - 1].id : null
-      tool.setActiveContext(ctxId)
+      // Scope the tool to the current editing context (component-edit-
+      // parity.md phase A1 — the single channel every tool consults).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Plain objects are directly drawable — context-path-aware eligibility.
       tool.setFaceEligibility(faceDrawEligible)
       return tool
@@ -2245,11 +2356,9 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
         sketchPlaneCache,
       )
-      // Scope the tool to the current editing context, if any.
-      const ctx = activeContextRef.current
-      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
-        ? ctx[ctx.length - 1].id : null
-      tool.setActiveContext(ctxId)
+      // Scope the tool to the current editing context (component-edit-
+      // parity.md phase A1 — the single channel every tool consults).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Plain objects are directly drawable — context-path-aware eligibility.
       tool.setFaceEligibility(faceDrawEligible)
       return tool
@@ -2276,11 +2385,9 @@ export default function Viewport({
         (sides) => { polygonSidesRef.current = sides },
       )
       tool.setSideCount(polygonSidesRef.current)
-      // Scope the tool to the current editing context, if any.
-      const ctx = activeContextRef.current
-      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
-        ? ctx[ctx.length - 1].id : null
-      tool.setActiveContext(ctxId)
+      // Scope the tool to the current editing context (component-edit-
+      // parity.md phase A1 — the single channel every tool consults).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Plain objects are directly drawable — context-path-aware eligibility.
       tool.setFaceEligibility(faceDrawEligible)
       return tool
@@ -2303,11 +2410,9 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
         sketchPlaneCache,
       )
-      // Scope the tool to the current editing context, if any.
-      const ctx = activeContextRef.current
-      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
-        ? ctx[ctx.length - 1].id : null
-      tool.setActiveContext(ctxId)
+      // Scope the tool to the current editing context (component-edit-
+      // parity.md phase A1 — the single channel every tool consults).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Plain objects are directly drawable — context-path-aware eligibility.
       tool.setFaceEligibility(faceDrawEligible)
       return tool
@@ -2330,11 +2435,9 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
         sketchPlaneCache,
       )
-      // Scope the tool to the current editing context, if any.
-      const ctx = activeContextRef.current
-      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
-        ? ctx[ctx.length - 1].id : null
-      tool.setActiveContext(ctxId)
+      // Scope the tool to the current editing context (component-edit-
+      // parity.md phase A1 — the single channel every tool consults).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Plain objects are directly drawable — context-path-aware eligibility.
       tool.setFaceEligibility(faceDrawEligible)
       return tool
@@ -2356,27 +2459,15 @@ export default function Viewport({
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
       )
-      // Scope it to the current editing context, if any.
-      const ctx = activeContextRef.current
-      const deepest = ctx.length > 0 ? ctx[ctx.length - 1] : null
-      // For an object context (entered world object), use the object id as-is.
-      const ctxId = deepest?.kind === 'object' ? deepest.id : null
-      tool.setActiveContext(ctxId)
-      // For an instance context (entered component), get the component def id.
-      if (deepest?.kind === 'instance') {
-        const componentId = wasmScene.instance_def(deepest.id)
-        tool.setComponentContext(componentId ?? null)
-      } else {
-        tool.setComponentContext(null)
-      }
+      // Scope it to the current editing context (component-edit-parity.md
+      // phase A1 — the single channel every tool consults; internally
+      // derives the object/instance/component-scoped id checks the old
+      // four-channel wiring used to compute here by hand).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Same context-path-aware eligibility as the draw tools: plain objects
       // are directly push/pullable; group/instance members only from inside
       // their container's editing context.
       tool.setFaceEligibility(faceDrawEligible)
-      // The two id channels above only carry object/instance contexts; a
-      // GROUP context leaves both null, so tell the tool it is scoped
-      // explicitly (drives the refusal hint's wording only).
-      tool.setContextScoped(ctx.length > 0)
       return tool
     }
 
@@ -2400,22 +2491,13 @@ export default function Viewport({
       // Put Follow Me's FACE path/profile on the same face-eligibility system
       // as every other face tool (`faceDrawEligible` already understands the
       // full group/instance context path — see the tool's FACE FRAME GUARD
-      // doc). Two Follow-Me-specific additions on top: a component
-      // DEFINITION context (`setComponentContext`, mirroring PushPullTool's
-      // wiring but with the opposite effect — Follow Me has no
-      // birth-into-definition surface) refuses wholesale; a GROUP context
-      // (`setActiveGroup`) births the sweep inside the group being edited
-      // instead of at top level.
-      const ctx = activeContextRef.current
-      const deepest = ctx.length > 0 ? ctx[ctx.length - 1] : null
-      const ctxId = deepest?.kind === 'object' ? deepest.id : null
-      tool.setActiveContext(ctxId)
+      // doc). The single editing-context channel (component-edit-parity.md
+      // phase A1) also carries Follow-Me-specific behavior: an INSTANCE
+      // context now routes through the `_in_instance` follow-me family
+      // instead of refusing wholesale (phase A2); a GROUP context births the
+      // sweep inside the group being edited instead of at top level.
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       tool.setFaceEligibility(faceDrawEligible)
-      tool.setContextScoped(ctx.length > 0)
-      tool.setComponentContext(
-        deepest?.kind === 'instance' ? (wasmScene.instance_def(deepest.id) ?? null) : null,
-      )
-      tool.setActiveGroup(deepest?.kind === 'group' ? deepest.id : null)
       return tool
     }
 
@@ -2437,11 +2519,9 @@ export default function Viewport({
         },
         (text: string) => { onMeasurementRef.current?.(text) },
       )
-      // Scope the tool to the current editing context, if any.
-      const ctx = activeContextRef.current
-      const ctxId = ctx.length > 0 && ctx[ctx.length - 1].kind === 'object'
-        ? ctx[ctx.length - 1].id : null
-      tool.setActiveContext(ctxId)
+      // Scope the tool to the current editing context (component-edit-
+      // parity.md phase A1).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
 
@@ -2494,6 +2574,7 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
 
@@ -2534,6 +2615,7 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
 
@@ -2554,11 +2636,12 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
 
     function makeTapeMeasureTool(): TapeMeasureTool {
-      return new TapeMeasureTool(
+      const tool = new TapeMeasureTool(
         wasmScene,
         previewGroup,
         () => {
@@ -2569,6 +2652,8 @@ export default function Viewport({
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
       )
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
+      return tool
     }
 
     function makeProtractorTool(): ProtractorTool {
@@ -2586,7 +2671,7 @@ export default function Viewport({
     }
 
     function makeSliceTool(): SliceTool {
-      return new SliceTool(
+      const tool = new SliceTool(
         wasmScene,
         previewGroup,
         // A slice consumes the source object and yields two new ones; refresh
@@ -2600,6 +2685,8 @@ export default function Viewport({
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
       )
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
+      return tool
     }
 
     function makeSectionPlaneTool(): SectionPlaneTool {
@@ -2955,7 +3042,20 @@ export default function Viewport({
         scheduleRender()
       }
     }
-    window.addEventListener('keydown', onCtrlKeyDown)
+    // Capture phase: dialogs/menus/the palette stopPropagation() Escape's
+    // keydown at the bubble phase (see dialogs.test.tsx's
+    // expectEscapeStopsPropagationToWindow) to keep it from ALSO firing the
+    // Viewport's own Escape handling underneath them. That stopPropagation
+    // runs before the event would otherwise reach this bubble-phase listener,
+    // so a Ctrl-tap armed just before an Escape-dismissed dialog would never
+    // see the Escape and never disarm — leaving `ctrlTapClean` true for the
+    // keyup that follows, and firing `toggleCenterAnchor` as a side effect of
+    // dismissing an unrelated overlay. Capture fires window → document →
+    // target, strictly before any bubble-phase stopPropagation downstream, so
+    // this listener sees every keydown regardless of what swallows it later.
+    // Pure bookkeeping (no preventDefault, no dependency on handler order),
+    // so moving it to capture changes nothing else about it.
+    window.addEventListener('keydown', onCtrlKeyDown, true)
     window.addEventListener('keyup', onCtrlKeyUp)
 
     // Ctrl+Alt (⌘+⌥ on macOS) held = PRECISION SNAPPING. The kernel's default
@@ -3600,8 +3700,26 @@ export default function Viewport({
         return
       }
 
-      // Esc pops one level off the context path before tool cancel.
+      // Esc: an armed gesture (Move/Rotate/Scale/PushPull/FollowMe/Offset/
+      // Slice mid-drag, or a draw tool's anchored chain — anything reporting
+      // `capturingInput() === true`) consumes the key itself FIRST, before
+      // the context pop below ever runs. Without this check, popping the
+      // context first would silently retarget an armed gesture: the Viewport
+      // pushes the new (shallower) EditContext into the still-armed tool via
+      // `applyEditContext`/`setEditContext` (which does NOT re-check here —
+      // see `editContextEq` in tools/types.ts), so completing the gesture
+      // would commit under the wrong context instead of being cleanly
+      // cancelled by the Escape the user actually pressed. Only when the
+      // tool has nothing armed does Escape fall through to its traditional
+      // meaning of popping one level off the context path.
       if (ev.key === 'Escape' && activeContextRef.current.length > 0) {
+        const activeTool = toolController.activeTool
+        if (toolHasArmedGesture(activeTool)) {
+          activeTool.onKey(ev)
+          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+          scheduleRender()
+          return
+        }
         onExitContextRef.current?.()
         return
       }
@@ -3850,7 +3968,7 @@ export default function Viewport({
       if (cameraDragActive) onCameraDragChangeRef.current?.(false)
       window.removeEventListener('keydown', onShiftKeyDown)
       window.removeEventListener('keyup', onShiftKeyUp)
-      window.removeEventListener('keydown', onCtrlKeyDown)
+      window.removeEventListener('keydown', onCtrlKeyDown, true)
       window.removeEventListener('keyup', onCtrlKeyUp)
       window.removeEventListener('keydown', onPrecisionKey)
       window.removeEventListener('keyup', onPrecisionKey)
@@ -3903,36 +4021,26 @@ export default function Viewport({
   // active tool (scoped editing) when the parent changes it.
   useEffect(() => {
     activeContextRef.current = activeContext
-    // Compute a lit-instance set for isolation: when inside an instance, light
-    // that instance; at top level no restriction.
-    const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
-    const litInstances: Set<bigint> | null = null  // instances always draw when not isolated
+    const editContext = computeEditContext(wasmSceneRef.current, activeContext)
+    wasmSceneRef.current.set_active_inference_instance(
+      editContext.kind === 'instance' ? editContext.id : undefined,
+    )
+    // Compute the lit-instance set for isolation from the WHOLE context
+    // chain (component-edit-parity.md Finding 2, plus the delta-review
+    // Finding 2/3 fixes on top of it) — member ids alone (`activeLitSet`)
+    // can't tell one instance's placement apart from a sibling instance of
+    // the SAME definition, since they share the exact same member geometry,
+    // and a group context must light its own member instances too. See
+    // `computeLitInstances` for the full rationale.
+    const litInstances = computeLitInstances(wasmSceneRef.current, activeContext)
     sceneRendererRef.current?.setActiveContext(activeLitSet ?? null, litInstances)
     const tool = toolControllerRef.current?.activeTool
-    if (tool !== undefined && 'setActiveContext' in tool) {
-      // For tools that need the entered object id (e.g. RectangleTool, PushPullTool)
-      const ctxId = deepestCtx?.kind === 'object' ? deepestCtx.id : null
-      ;(tool as { setActiveContext: (id: bigint | null) => void }).setActiveContext(ctxId)
-    }
-    if (tool !== undefined && 'setComponentContext' in tool) {
-      // For PushPullTool inside a component context
-      const scene = wasmSceneRef.current
-      const componentId = deepestCtx?.kind === 'instance'
-        ? scene.instance_def(deepestCtx.id) ?? null
-        : null
-      ;(tool as { setComponentContext: (id: bigint | null) => void }).setComponentContext(componentId)
-    }
-    if (tool !== undefined && 'setContextScoped' in tool) {
-      // The id channels above only carry object/instance contexts; a GROUP
-      // context leaves both null — signal "scoped" explicitly (hint wording
-      // only; eligibility comes from the injected predicate).
-      ;(tool as { setContextScoped: (scoped: boolean) => void }).setContextScoped(activeContext.length > 0)
-    }
-    if (tool !== undefined && 'setActiveGroup' in tool) {
-      // FollowMeTool only (design §2f): births the next sweep inside the
-      // group being edited instead of at top level.
-      const groupId = deepestCtx?.kind === 'group' ? deepestCtx.id : null
-      ;(tool as { setActiveGroup: (id: bigint | null) => void }).setActiveGroup(groupId)
+    if (tool !== undefined) {
+      // The single editing-context channel (component-edit-parity.md phase
+      // A1) — replaces the four separate id/boolean channels this effect
+      // used to compute by hand (`setActiveContext`/`setComponentContext`/
+      // `setContextScoped`/`setActiveGroup`).
+      applyEditContext(tool, editContext)
     }
     // A drawing-plane cue rendered for the OUTGOING context no longer
     // applies (e.g. a tool's non-ground plane cue from before entering/
@@ -4004,13 +4112,22 @@ export default function Viewport({
       leafIds.push(...objectIds)
       instanceIds.push(...leafInstanceIds)
     }
-    sceneRendererRef.current?.setSelected(leafIds)
+    const deepest = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
+    const activeInstance = deepest?.kind === 'instance' ? deepest.id : null
+    sceneRendererRef.current?.setSelected(activeInstance === null ? leafIds : [])
     sceneRendererRef.current?.setSelectedInstances(instanceIds)
+    sceneRendererRef.current?.setSelectedInstanceMembers(
+      activeInstance,
+      activeInstance === null ? [] : leafIds,
+    )
     sceneRendererRef.current?.setSelectedSketches(sketchIds)
     sceneRendererRef.current?.setSelectedSketchIslands(sketchIslands)
     sceneRendererRef.current?.setSelectedSketchEdges(sketchEdges)
+    sceneRendererRef.current?.setSelectedSketchInstance(
+      activeInstance,
+    )
     scheduleRenderRef.current()
-  }, [selectedIds])
+  }, [selectedIds, activeContext])
 
   // Reflect the selected construction guide into the renderer highlight.
   useEffect(() => {

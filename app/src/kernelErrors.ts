@@ -151,6 +151,8 @@ const DESCRIPTIONS: Record<string, string> = {
   WouldCorrupt:
     'That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.',
   BadLoop: 'The outline needs at least three points.',
+  BadPath: 'The cut path needs at least two points.',
+  BadCurve: "The circle's center needs an exact x, y, z point.",
 
   // -------------------------------------------------------- booleans
   OperandNotSolid: `Combining needs watertight solids on both sides. ${checkSolid.replace('its', "each object's")}`,
@@ -167,6 +169,7 @@ const DESCRIPTIONS: Record<string, string> = {
     "The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.",
   Degenerate:
     "The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.",
+  BadPlane: "The cutting plane needs an exact point and direction.",
 
   // ------------------------------------------------------- transforms
   Singular:
@@ -175,6 +178,8 @@ const DESCRIPTIONS: Record<string, string> = {
     'The rotation axis needs two distinct points. Pick a second point further from the first.',
   Reflection:
     "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.",
+  BadAffine: 'That move, rotate, or scale was malformed and had to be dropped. Try the gesture again.',
+  BadOp: 'That combine mode is invalid. Retry with Union, Subtract, or Intersect.',
 
   // ------------------------------------------- groups & components
   // App-side refusal (not a kernel code): a selection containing sketch
@@ -204,6 +209,12 @@ const DESCRIPTIONS: Record<string, string> = {
     'Something in that selection is not a watertight solid, so it can\'t be combined. Check each object\'s solid badge in Object Info and fix or remove the leaky one.',
   BooleanOperandEmpty:
     'That selection has no solids to combine. Pick a solid object or a group of solids.',
+
+  // ------------------------------------------- component-edit-parity.md phase K1/K2
+  LastDefinitionMember:
+    "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first.",
+  AmbiguousInstanceScale:
+    "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length.",
 
   // ---------------------------------------------------------- history
   NothingToUndo: 'Nothing to undo.',

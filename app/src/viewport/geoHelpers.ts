@@ -344,3 +344,95 @@ export function pointInPolygonXY(
 
   return inside
 }
+
+/**
+ * A row-major 3x4 affine matrix, the shape `Scene.instance_pose`/
+ * `transform_def_member` use: `[a,b,c,tx, d,e,f,ty, g,h,i,tz]` — a linear 3x3
+ * part plus a translation, applied as `p' = A·p + t`.
+ */
+export type Affine3x4 = ArrayLike<number>
+
+/**
+ * Invert a 3x4 row-major affine matrix. Component-edit-parity's app layer
+ * uses this to map a WORLD-space click back into a component DEFINITION's
+ * local space (the reverse of `instance_pose`'s forward pose) when continuing
+ * a def-owned sketch gesture — every `*_in_instance` wasm surface maps its OWN
+ * inputs kernel-side, but a plain `sketch_add_segment` on an already-created
+ * def-owned sketch takes points in whatever frame the sketch already lives
+ * in (definition-local), with no instance parameter to map them through.
+ *
+ * Block-matrix inverse: for `M = [A|t; 0|1]`, `M⁻¹ = [A⁻¹|-A⁻¹t; 0|1]` — only
+ * the 3x3 linear part `A` needs inverting (via its adjugate/determinant),
+ * exactly mirroring the kernel's own `Singular` refusal (a near-zero
+ * determinant). Returns `null` for a singular (non-invertible) linear part —
+ * unreachable for a live instance's pose in practice, same as the kernel's.
+ */
+export function invertAffine3x4(m: Affine3x4): number[] | null {
+  const a = m[0], b = m[1], c = m[2], tx = m[3]
+  const d = m[4], e = m[5], f = m[6], ty = m[7]
+  const g = m[8], h = m[9], i = m[10], tz = m[11]
+
+  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+  if (Math.abs(det) < 1e-12) return null
+  const invDet = 1 / det
+
+  const ia = (e * i - f * h) * invDet
+  const ib = (c * h - b * i) * invDet
+  const ic = (b * f - c * e) * invDet
+  const id = (f * g - d * i) * invDet
+  const ie = (a * i - c * g) * invDet
+  const ig2 = (c * d - a * f) * invDet
+  const ig = (d * h - e * g) * invDet
+  const ih = (b * g - a * h) * invDet
+  const ii = (a * e - b * d) * invDet
+
+  const itx = -(ia * tx + ib * ty + ic * tz)
+  const ity = -(id * tx + ie * ty + ig2 * tz)
+  const itz = -(ig * tx + ih * ty + ii * tz)
+
+  return [ia, ib, ic, itx, id, ie, ig2, ity, ig, ih, ii, itz]
+}
+
+/** Apply a row-major 3x4 affine matrix to a point: `p' = A·p + t`. */
+export function applyAffine3x4(m: Affine3x4, p: V3): V3 {
+  return [
+    m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
+    m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
+    m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+  ]
+}
+
+/**
+ * Map a unit surface normal from `pose`'s LOCAL frame into WORLD space — the
+ * mapping `face_normal`'s definition-local-frame result needs whenever the
+ * face belongs to a component INSTANCE's own definition (component-edit-
+ * parity.md phase A2: `face_normal` is documented as answering in the
+ * Object's OWN local frame, which only equals world space for an identity-
+ * placed world object or a baked-transform Group member — never for a real
+ * instance pose).
+ *
+ * Normals transform by the **inverse-transpose** of the linear part, not the
+ * linear part itself (`crates/kernel/src/transform.rs`'s own module doc
+ * calls this "a classic correctness trap") — applying the plain linear part
+ * (as `applyAffine3x4` would, minus translation) silently mis-tilts the
+ * normal under any non-uniform scale, even though a ROTATION or uniform
+ * scale/mirror happens to leave the plain linear part correct (which is
+ * exactly why a translation-and-rotation-only test suite would never catch
+ * the bug — see the sibling wasm coverage-gap finding).
+ *
+ * Returns `null` for a singular pose (mirrors `invertAffine3x4`) or a
+ * degenerate result (near-zero length after mapping).
+ */
+export function transformNormalThroughPose(pose: Affine3x4, normal: V3): V3 | null {
+  const inv = invertAffine3x4(pose)
+  if (inv === null) return null
+  const [ia, ib, ic, , id, ie, ig2, , ig, ih, ii] = inv
+  const [nx, ny, nz] = normal
+  // (L⁻¹)ᵀ · n — see this function's doc for why the transpose matters.
+  const rx = ia * nx + id * ny + ig * nz
+  const ry = ib * nx + ie * ny + ih * nz
+  const rz = ic * nx + ig2 * ny + ii * nz
+  const len = Math.hypot(rx, ry, rz)
+  if (len <= 1e-12) return null
+  return [rx / len, ry / len, rz / len]
+}

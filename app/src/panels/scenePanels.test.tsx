@@ -609,6 +609,38 @@ describe('ObjectInfoPanel', () => {
     expect(screen.queryByPlaceholderText('Structure/Roof')).not.toBeInTheDocument()
   })
 
+  // Mirrors dialogs.test.tsx's expectEscapeStopsPropagationToWindow: a
+  // dismiss-on-Escape input must not let the keydown bubble to window, or it
+  // would ALSO fire the Viewport's own Escape handling (context-pop) directly
+  // underneath this field — e.g. canceling the tag while editing inside a
+  // group/component context must not also pop that context.
+  it('stops the tag field’s Escape from bubbling to window', () => {
+    const scene = makeScene({
+      object_name: () => undefined,
+      node_tags: () => [],
+      object_solid: () => true,
+    })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[{ kind: 'object', id: 1n }]}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Add tag' }))
+    const tagInput = screen.getByPlaceholderText('Structure/Roof')
+    const windowKeyDown = vi.fn()
+    window.addEventListener('keydown', windowKeyDown)
+    try {
+      fireEvent.keyDown(tagInput, { key: 'Escape', bubbles: true })
+      expect(windowKeyDown).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', windowKeyDown)
+    }
+  })
+
   it('blurring the empty tag field closes it without committing', () => {
     const scene = makeScene({
       object_name: () => undefined,
@@ -875,6 +907,50 @@ describe('ObjectInfoPanel', () => {
       { kind: 'sketch-curve', id: 200n, sketch: 5n },
     ])
     expect(onDocumentChanged).toHaveBeenCalled()
+  })
+
+  it('Escape reverts the Segments field to the current facet count without committing', () => {
+    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const input = screen.getByLabelText('Segments') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '48' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(input.value).toBe('24')
+    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
+  })
+
+  // Mirrors dialogs.test.tsx's expectEscapeStopsPropagationToWindow: reverting
+  // the Segments field on Escape must not let the keydown bubble to window,
+  // or it would ALSO fire the Viewport's own Escape handling (context-pop)
+  // directly underneath this field.
+  it('stops the Segments field’s Escape from bubbling to window', () => {
+    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={CURVE_SELECTION}
+        onDocumentChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    const input = screen.getByLabelText('Segments')
+    const windowKeyDown = vi.fn()
+    window.addEventListener('keydown', windowKeyDown)
+    try {
+      fireEvent.keyDown(input, { key: 'Escape', bubbles: true })
+      expect(windowKeyDown).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', windowKeyDown)
+    }
   })
 
   it('refuses a count below the floor visibly, without touching the kernel', () => {

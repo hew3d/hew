@@ -45,7 +45,11 @@ function makeWasmScene(faceNormal?: [number, number, number]) {
   }
 }
 
-function makeTool(opts: { faceNormal?: [number, number, number]; selection?: NodeRef[] } = {}) {
+function makeTool(opts: {
+  faceNormal?: [number, number, number]
+  selection?: NodeRef[]
+  instance?: { id: bigint; group: THREE.Group }
+} = {}) {
   const preview = new THREE.Group()
   const onCommit = vi.fn()
   const onToast = vi.fn()
@@ -55,11 +59,13 @@ function makeTool(opts: { faceNormal?: [number, number, number]; selection?: Nod
   const tool = new RotateTool(
     wasmScene as never,
     preview,
-    null, // objectsGroup — null means no ghost mesh is cloned (fine for logic tests)
+    null, // world objectsGroup
     selection,
     onCommit,
     onToast,
-    null,
+    opts.instance === undefined
+      ? null
+      : (id) => id === opts.instance!.id ? opts.instance!.group : null,
     onMeasurement,
   )
   return { tool, preview, onCommit, onToast, onMeasurement, wasmScene }
@@ -405,5 +411,57 @@ describe('RotateTool — screen-constant disk scaling', () => {
     camera.position.set(0, 0, 10)
     tool.updateDiskScale(camera, 0)
     expect(disk.scale.x).toBe(before)
+  })
+})
+
+describe('RotateTool — setEditContext aborts an armed gesture on a genuine change (component-edit-parity.md phase A2)', () => {
+  it('previews and commits a selected definition member through its active instance', () => {
+    const instance = 77n
+    const member = 9n
+    const group = new THREE.Group()
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1))
+    mesh.name = `InstanceFace_${instance}_${member}`
+    group.add(mesh)
+    const { tool, preview, wasmScene } = makeTool({
+      selection: [{ kind: 'object', id: member }],
+      instance: { id: instance, group },
+    })
+    ;(wasmScene as unknown as { transform_def_selection: ReturnType<typeof vi.fn> })
+      .transform_def_selection = vi.fn()
+    tool.setEditContext({ kind: 'instance', id: instance, component: 90n })
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0))
+    tool.onPointerMove(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1))
+    expect(preview.getObjectByName('InstanceMemberPreview')).toBeDefined()
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1))
+    expect(
+      (wasmScene as unknown as { transform_def_selection: ReturnType<typeof vi.fn> })
+        .transform_def_selection,
+    ).toHaveBeenCalledTimes(1)
+  })
+
+  it('a genuine context change cancels an armed pivot/reference gesture instead of silently retargeting its eventual commit', () => {
+    const { tool } = makeTool()
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'top' })
+
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('re-pushing the SAME context is a no-op — an armed gesture survives it untouched', () => {
+    const { tool } = makeTool()
+    const ctx = { kind: 'instance' as const, id: 9n, component: 90n }
+    tool.setEditContext(ctx)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+
+    expect(tool.capturingInput()).toBe(true)
   })
 })

@@ -24,11 +24,11 @@ function makeKeyEvent(key: string): KeyboardEvent {
   return { key, preventDefault: () => {} } as unknown as KeyboardEvent
 }
 
-function makeFacePick(object: bigint, face: bigint) {
+function makeFacePick(object: bigint, face: bigint, instance?: bigint) {
   return {
     object: () => object,
     face: () => face,
-    instance: () => undefined,
+    instance: () => instance,
     free: vi.fn(),
   }
 }
@@ -57,11 +57,18 @@ function makeEdgePick(sketch: bigint, edge: bigint) {
 function makeWasmScene(opts: {
   facePick?: ReturnType<typeof makeFacePick>
   regionPick?: ReturnType<typeof makeRegionPick>
+  /** `pick_sketch_region_in_instance`'s own result, when it must differ
+   *  from `regionPick` (defaults to `regionPick` otherwise) — mirrors
+   *  PushPullTool.test.ts's `makeWasmScene`. */
+  regionPickInInstance?: ReturnType<typeof makeRegionPick>
   edgePick?: ReturnType<typeof makeEdgePick>
   edgeEndpoints?: Float64Array
   /** `sketch_plane` result for the region's sketch — `[px,py,pz,nx,ny,nz]`
    *  (default: ground, normal +Z). `undefined` simulates a stale handle. */
   sketchPlane?: [number, number, number, number, number, number] | undefined
+  /** `instance_pose` result (default identity). `undefined` simulates a
+   *  stale instance. */
+  instancePose?: Float64Array | undefined
 } = {}): WasmScene {
   const offsetReport = {
     new_edges: () => new BigUint64Array([]),
@@ -71,9 +78,13 @@ function makeWasmScene(opts: {
     free: vi.fn(),
   }
   const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
+  const instancePose = 'instancePose' in opts
+    ? opts.instancePose
+    : new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
   return {
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
+    pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
     pick_sketch_edge: vi.fn(() => opts.edgePick),
     sketch_edge_endpoints: vi.fn(() => opts.edgeEndpoints),
     sketch_regions: vi.fn(() => BigUint64Array.from([7n])),
@@ -87,6 +98,7 @@ function makeWasmScene(opts: {
     sketch_offset_region_preview: vi.fn(() => new Float64Array([1, 3, 0.5, 0.5, 0, 1.5, 0.5, 0, 1, 1.5, 0])),
     offset_face: vi.fn(() => 77n),
     offset_face_preview: vi.fn(() => new Float64Array([0.5, 0.5, 1, 1.5, 0.5, 1, 1, 1.5, 1])),
+    instance_pose: vi.fn(() => instancePose),
   } as unknown as WasmScene
 }
 
@@ -197,7 +209,7 @@ describe('OffsetTool — Path B (sketch region)', () => {
     const regionPick = makeRegionPick(9n, 7n)
     const scene = makeWasmScene({ regionPick })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(1n)
+    tool.setEditContext({ kind: 'object', id: 1n })
 
     tool.onPointerDown(null, rayAt(1, 1))
 
@@ -330,7 +342,7 @@ describe('OffsetTool — Path B, click ON a boundary edge (edge fallback)', () =
       edgeEndpoints: new Float64Array([0, 0, 0, 2, 0, 0]),
     })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(1n)
+    tool.setEditContext({ kind: 'object', id: 1n })
     tool.onPointerDown(null, rayAt(1, 0))
     expect(scene.pick_sketch_edge).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
@@ -479,5 +491,169 @@ describe('OffsetTool — cancel and status hint', () => {
     tool.onPointerMove(null, rayAt(1, 0.5))
     tool.onPointerDown(null, rayAt(1, 0.5))
     expect(tool.statusHint()).toContain('Click a face')
+  })
+})
+
+describe('OffsetTool — instance editing context (component-edit-parity.md phase A2)', () => {
+  const INSTANCE = 42n
+  const COMPONENT = 5n
+
+  it('a component member face is refused with a clear hint (no offset_face wasm surface for it)', () => {
+    const facePick = makeFacePick(3n, 4n, INSTANCE)
+    const scene = makeWasmScene({ facePick })
+    const { tool, onToast } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(null, rayAt(1, 1))
+
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.offset_face_preview).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(String(onToast.mock.calls[0][0])).toContain('sketch region')
+  })
+
+  it('a def-owned sketch region is reachable via pick_sketch_region_in_instance, not the world-only pick_sketch_region', () => {
+    // pick_sketch_region only ever walks Document::sketch_ids() (world-tree
+    // sketches) — it can NEVER find a region drawn inside a component's own
+    // definition. Seed it with a hit anyway (the false-confidence mock this
+    // finding calls out) to prove the REAL pick that fires is the
+    // `_in_instance` sibling, exactly like PushPullTool's identical Path B.
+    const regionPickInInstance = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({
+      regionPick: makeRegionPick(999n, 999n), // world-only pick — must be ignored
+      regionPickInInstance,
+    })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    tool.onPointerDown(null, rayAt(1, 0.5))
+
+    expect(scene.pick_sketch_region_in_instance).toHaveBeenCalled()
+    const call = (scene.pick_sketch_region_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(INSTANCE)
+    expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+
+    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
+    expect((scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(99n)
+  })
+
+  it('a miss from pick_sketch_region_in_instance (no def-owned region under the cursor) offsets nothing', () => {
+    const scene = makeWasmScene({ facePick: undefined, regionPickInInstance: undefined, edgePick: undefined })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(null, rayAt(1, 1))
+
+    expect(scene.pick_sketch_region_in_instance).toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.sketch_offset_region).not.toHaveBeenCalled()
+  })
+
+  // The boundary/normal this drag measures against (`region_boundary`/
+  // `sketch_plane`) answer in DEFINITION-LOCAL space for a def-owned sketch
+  // — `_beginRegionDrag` must pose-map them into WORLD space (same fix
+  // class as the region PICK itself) or the drag's signed-distance math
+  // silently measures against the wrong (unposed) boundary location.
+  it('a def-owned region drag is posed into WORLD space under a translated instance', () => {
+    const regionPickInInstance = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({
+      regionPickInInstance,
+      instancePose: new Float64Array([1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0]), // +10 in X
+    })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    // The LOCAL square (0,0)-(2,2) sits at WORLD x∈[10,12], y∈[0,2] under
+    // this pose — anchor/drag at the WORLD position, mirroring the
+    // identity-pose sibling test in "Path B (sketch region)" exactly,
+    // shifted by the pose's +10 in X.
+    tool.onPointerDown(null, rayAt(11, 1))
+    tool.onPointerMove(null, rayAt(11, 0.5))
+    tool.onPointerDown(null, rayAt(11, 0.5))
+
+    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
+    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[2]).toBeCloseTo(-0.5)
+  })
+
+  // The edge-pick fallback (`_pickRegionViaEdge`) has no `_in_instance`
+  // sibling — it can ONLY ever find a WORLD sketch, even while editing an
+  // instance. `_beginRegionDrag` must NOT re-map a region found this way
+  // through the active instance's pose, or an already-correct world
+  // boundary gets silently corrupted.
+  it('a WORLD sketch region found via the edge-pick fallback is NOT re-mapped by the active instance pose', () => {
+    const edgePick = makeEdgePick(9n, 1n)
+    const scene = makeWasmScene({
+      regionPickInInstance: undefined, // interior pick misses — falls to the edge fallback
+      edgePick,
+      edgeEndpoints: new Float64Array([0, 0, 0, 2, 0, 0]),
+      instancePose: new Float64Array([1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0]), // +10 in X
+    })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    // The WORLD square sits at its own raw (0,0)-(2,2) — no instance pose
+    // applies to it — so anchor/drag at the SAME coordinates the identity-
+    // pose sibling test uses, not shifted by the active instance's +10.
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    tool.onPointerDown(null, rayAt(1, 0.5))
+
+    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
+    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[2]).toBeCloseTo(-0.5)
+  })
+})
+
+describe('OffsetTool — top-level click on an instance face (component-edit-parity.md phase A2)', () => {
+  it('an ordinary top-level click on a placed component instance\'s face toasts, instead of silently doing nothing', () => {
+    // The far more common case than the "inside its own edit context" test
+    // above: no edit context entered at all (_activeInstance === null), the
+    // ordinary way a user encounters a placed component. Previously the
+    // early-return only toasted when _activeInstance !== null, so this
+    // exact click armed no drag, showed no toast, and gave zero feedback.
+    const facePick = makeFacePick(3n, 4n, 77n) // instanced geometry, no context entered
+    const scene = makeWasmScene({ facePick })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(null, rayAt(1, 1))
+
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.offset_face_preview).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(String(onToast.mock.calls[0][0])).toContain('sketch region')
+  })
+})
+
+describe('OffsetTool — setEditContext aborts an armed gesture on a genuine change (component-edit-parity.md phase A2)', () => {
+  it('a genuine context change cancels an armed drag instead of silently retargeting its eventual commit', () => {
+    const regionPick = makeRegionPick(9n, 7n)
+    const scene = makeWasmScene({ regionPick })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+    tool.onPointerDown(null, rayAt(1, 1))
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'top' })
+
+    expect(tool.capturingInput()).toBe(false)
+    tool.onPointerDown(null, rayAt(1, 0.5))
+    expect(scene.sketch_offset_region).not.toHaveBeenCalled() // the cancelled gesture never commits
+  })
+
+  it('re-pushing the SAME context is a no-op — an armed drag survives it untouched', () => {
+    const regionPick = makeRegionPick(9n, 7n)
+    const scene = makeWasmScene({ regionPick })
+    const { tool } = makeTool(scene)
+    const ctx = { kind: 'instance' as const, id: 42n, component: 5n }
+    tool.setEditContext(ctx)
+    tool.onPointerDown(null, rayAt(1, 1))
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+
+    expect(tool.capturingInput()).toBe(true)
   })
 })

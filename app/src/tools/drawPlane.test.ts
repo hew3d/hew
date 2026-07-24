@@ -15,6 +15,9 @@ import {
 } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import type { EditContext } from './types'
+
+const TOP: EditContext = { kind: 'top' }
 
 function makeScene(sketchPlanes: Map<bigint, Float64Array | undefined>): WasmScene {
   return {
@@ -93,6 +96,48 @@ describe('planeFromSketch', () => {
     expect(cross[0]).toBeCloseTo(normal[0], 9)
     expect(cross[1]).toBeCloseTo(normal[1], 9)
     expect(cross[2]).toBeCloseTo(normal[2], 9)
+  })
+
+  describe('instance pose mapping (component-edit-parity.md phase A2)', () => {
+    function instanceScene(plane: Float64Array, pose: Float64Array | undefined): WasmScene {
+      return {
+        sketch_plane: vi.fn(() => plane),
+        instance_pose: vi.fn(() => pose),
+      } as unknown as WasmScene
+    }
+
+    it('with no instance, returns the raw local plane unchanged (unchanged behavior)', () => {
+      const scene = instanceScene(new Float64Array([0, 0, 0, 0, -1, 0]), undefined)
+      const plane = planeFromSketch(scene, 7n)
+      expect(plane!.origin).toEqual([0, 0, 0])
+      expect(plane!.normal).toEqual([0, -1, 0])
+    })
+
+    it('with an instance, poses the LOCAL plane forward into WORLD space (translation)', () => {
+      const pose = new Float64Array([1, 0, 0, 10, 0, 1, 0, 20, 0, 0, 1, 5])
+      const scene = instanceScene(new Float64Array([0, 0, 0, 0, -1, 0]), pose)
+      const plane = planeFromSketch(scene, 7n, 42n)
+      expect(plane).not.toBeNull()
+      expect(plane!.ground).toBe(false)
+      expect(plane!.origin).toEqual([10, 20, 5])
+      expect(plane!.normal).toEqual([0, -1, 0]) // translation doesn't rotate the normal
+    })
+
+    it('with an instance, poses the normal through the pose too (rotation)', () => {
+      // 90 deg about Z: local +X normal becomes world +Y.
+      const pose = new Float64Array([0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0])
+      const scene = instanceScene(new Float64Array([0, 0, 0, 1, 0, 0]), pose)
+      const plane = planeFromSketch(scene, 7n, 42n)
+      expect(plane).not.toBeNull()
+      expect(plane!.normal[0]).toBeCloseTo(0, 9)
+      expect(plane!.normal[1]).toBeCloseTo(1, 9)
+      expect(plane!.normal[2]).toBeCloseTo(0, 9)
+    })
+
+    it('returns null (never falls back to the raw local plane) for a stale/unknown instance', () => {
+      const scene = instanceScene(new Float64Array([0, 0, 0, 0, -1, 0]), undefined)
+      expect(planeFromSketch(scene, 7n, 999n)).toBeNull()
+    })
   })
 })
 
@@ -317,6 +362,57 @@ describe('rayLandsOnSketch', () => {
   it('rejects an empty sketch — no geometry to land on', () => {
     expect(rayLandsOnSketch(wallScene(new Float32Array([])), WALL_SKETCH, WALL, rayThrough([0, 0, 0.4]))).toBe(false)
   })
+
+  describe('instance pose mapping (component-edit-parity.md phase A2)', () => {
+    // The SAME square, but `sketch_lines` answers in LOCAL (definition)
+    // space; `plane` (the WORLD-mapped plane the caller already computed via
+    // `planeFromSketch(..., instance)`) is posed by a translation of
+    // (10, 20, 0) — so the WORLD wall plane/square sit at that offset.
+    const POSED_WALL: DrawPlane = {
+      origin: [10, 20, 0],
+      normal: [0, 1, 0],
+      u: [0, 0, 1],
+      v: [1, 0, 0],
+      ground: false,
+    }
+    const POSE = new Float64Array([1, 0, 0, 10, 0, 1, 0, 20, 0, 0, 1, 0])
+
+    // No default: an explicit `undefined` must mean a genuinely stale
+    // instance, not silently substitute POSE (a default parameter would
+    // treat an explicit `undefined` argument the same as an omitted one).
+    function posedScene(pose: Float64Array | undefined): WasmScene {
+      return {
+        sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 1, 0])),
+        pick_sketch: vi.fn(() => WALL_SKETCH),
+        sketch_lines: vi.fn(() => SQUARE), // LOCAL coordinates, unmapped
+        instance_pose: vi.fn(() => pose),
+      } as unknown as WasmScene
+    }
+
+    function rayThroughWorld(target: [number, number, number]): Ray {
+      const o: [number, number, number] = [8 + 10, 6 + 20, 8]
+      return { origin: o, direction: [target[0] - o[0], target[1] - o[1], target[2] - o[2]] }
+    }
+
+    it('maps each LOCAL sketch_lines segment through the pose before measuring against the WORLD hit point', () => {
+      // The square's edge at its posed WORLD position: local (0,0,0.4) + (10,20,0).
+      expect(
+        rayLandsOnSketch(posedScene(POSE), WALL_SKETCH, POSED_WALL, rayThroughWorld([10, 20, 0.4]), 42n),
+      ).toBe(true)
+    })
+
+    it('a ray at the sketch\'s stale LOCAL (unmapped) position misses — proof the pose is genuinely applied', () => {
+      expect(
+        rayLandsOnSketch(posedScene(POSE), WALL_SKETCH, POSED_WALL, rayThroughWorld([0, 0, 0.4]), 42n),
+      ).toBe(false)
+    })
+
+    it('a stale/unknown instance is a miss, never a throw or a silent unmapped fallback', () => {
+      expect(
+        rayLandsOnSketch(posedScene(undefined), WALL_SKETCH, POSED_WALL, rayThroughWorld([10, 20, 0.4]), 42n),
+      ).toBe(false)
+    })
+  })
 })
 
 describe('resolveIdleDrawTarget', () => {
@@ -345,28 +441,121 @@ describe('resolveIdleDrawTarget', () => {
   const WALL_PLANE_ARR = new Float64Array([0, 0, 0, 0, 1, 0])
 
   it('adopts the hovered sketch when the ray lands on it', () => {
-    const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0.4]))
-    expect(resolved.target).toEqual({ kind: 'existing', handle: WALL_SKETCH })
+    const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0.4]), TOP)
+    expect(resolved.target).toEqual({ kind: 'existing', handle: WALL_SKETCH, instance: null })
     expect(resolved.plane.ground).toBe(false)
   })
 
   it('falls back to the GROUND plane on a grazing pick the ray does not land on', () => {
-    const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0]))
+    const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0]), TOP)
     expect(resolved.plane).toEqual(groundDrawPlane())
-    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane() })
+    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane(), instance: null })
   })
 
   it('falls back to the ground plane when nothing is picked', () => {
     const resolved = resolveIdleDrawTarget(
-      scene(WALL_PLANE_ARR, null), new SketchPickCache(), rayThrough([0, 0, 0.4]),
+      scene(WALL_PLANE_ARR, null), new SketchPickCache(), rayThrough([0, 0, 0.4]), TOP,
     )
-    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane() })
+    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane(), instance: null })
   })
 
   it('never adopts a sketch that is itself on the ground plane', () => {
     const groundArr = new Float64Array([0, 0, 0, 0, 0, 1])
-    const resolved = resolveIdleDrawTarget(scene(groundArr), new SketchPickCache(), rayThrough([0, 0, 0]))
-    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane() })
+    const resolved = resolveIdleDrawTarget(scene(groundArr), new SketchPickCache(), rayThrough([0, 0, 0]), TOP)
+    expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane(), instance: null })
+  })
+
+  describe('inside an instance editing context (component-edit-parity.md phase A2)', () => {
+    const INSTANCE = 42n
+    const COMPONENT = 5n
+    const INSTANCE_CTX: EditContext = { kind: 'instance', id: INSTANCE, component: COMPONENT }
+
+    const IDENTITY_POSE = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+
+    function instanceScene(
+      plane: Float64Array,
+      pick: bigint | null,
+      memberSketches: bigint[],
+      pose: Float64Array = IDENTITY_POSE,
+    ): WasmScene {
+      return {
+        sketch_plane: vi.fn(() => plane),
+        pick_sketch: vi.fn(() => pick ?? undefined),
+        sketch_lines: vi.fn(() => SQUARE),
+        component_member_sketches: vi.fn(() => new BigUint64Array(memberSketches)),
+        instance_pose: vi.fn(() => pose),
+      } as unknown as WasmScene
+    }
+
+    it('adopts a hovered sketch that IS a member of the entered definition', () => {
+      const resolved = resolveIdleDrawTarget(
+        instanceScene(WALL_PLANE_ARR, WALL_SKETCH, [WALL_SKETCH]),
+        new SketchPickCache(),
+        rayThrough([0, 0, 0.4]),
+        INSTANCE_CTX,
+      )
+      expect(resolved.target).toEqual({ kind: 'existing', handle: WALL_SKETCH, instance: INSTANCE })
+    })
+
+    it('refuses to adopt a hovered sketch that belongs to a DIFFERENT (or no) definition, falling to a def-owned plane target instead', () => {
+      const resolved = resolveIdleDrawTarget(
+        instanceScene(WALL_PLANE_ARR, WALL_SKETCH, [] /* WALL_SKETCH is not a member */),
+        new SketchPickCache(),
+        rayThrough([0, 0, 0.4]),
+        INSTANCE_CTX,
+      )
+      // Falls through to the plane-mode default — carrying the instance
+      // handle, so `runSketchGesture` mints a NEW def-owned sketch rather
+      // than drawing into the foreign one under the cursor.
+      expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane(), instance: INSTANCE })
+    })
+
+    it('the empty-space plane-mode default carries the instance handle (the fix for plane-mode escaping to the world)', () => {
+      const resolved = resolveIdleDrawTarget(
+        instanceScene(WALL_PLANE_ARR, null, []),
+        new SketchPickCache(),
+        rayThrough([0, 0, 0.4]),
+        INSTANCE_CTX,
+      )
+      expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane(), instance: INSTANCE })
+    })
+
+    // The frame-conversion finding: every test above uses an IDENTITY pose,
+    // where local and world coordinates coincide — a mapping bug would go
+    // unnoticed. These use a genuinely non-identity (translated) pose.
+    const POSED_INSTANCE_POSE = new Float64Array([1, 0, 0, 10, 0, 1, 0, 20, 0, 0, 1, 0])
+
+    it('adopts a hovered MEMBER sketch through a genuinely non-identity (translated) instance pose', () => {
+      const resolved = resolveIdleDrawTarget(
+        instanceScene(WALL_PLANE_ARR, WALL_SKETCH, [WALL_SKETCH], POSED_INSTANCE_POSE),
+        new SketchPickCache(),
+        rayThrough([10, 20, 0.4]), // the sketch's WORLD position under this pose
+        INSTANCE_CTX,
+      )
+      expect(resolved.target).toEqual({ kind: 'existing', handle: WALL_SKETCH, instance: INSTANCE })
+      expect(resolved.plane.ground).toBe(false)
+      // The returned plane is genuinely WORLD-space — posed forward, not
+      // the raw local plane `sketch_plane` reported.
+      expect(resolved.plane.origin).toEqual([10, 20, 0])
+    })
+
+    it('a ray at the sketch\'s stale LOCAL position misses under a posed instance — proof the pose is genuinely applied, not silently skipped', () => {
+      const resolved = resolveIdleDrawTarget(
+        instanceScene(WALL_PLANE_ARR, WALL_SKETCH, [WALL_SKETCH], POSED_INSTANCE_POSE),
+        new SketchPickCache(),
+        // The sketch's RAW local position — no longer where it sits once
+        // posed. Before the fix, `planeFromSketch`/`rayLandsOnSketch` would
+        // test this local-frame plane directly, coincidentally "landing"
+        // regardless of instance pose. After the fix, it correctly misses.
+        rayThrough([0, 0, 0.4]),
+        INSTANCE_CTX,
+      )
+      expect(resolved.target).toEqual({
+        kind: 'plane',
+        plane: groundDrawPlane(),
+        instance: INSTANCE,
+      })
+    })
   })
 })
 
@@ -376,17 +565,28 @@ describe('resolveClickDrawTarget', () => {
 
   it('an active idle plane lock beats sketch/ground resolution', () => {
     const resolved = resolveClickDrawTarget(
-      scene, new SketchPickCache(), 1, { x: 2, y: 3, z: 4, kind: 'endpoint' }, RAY,
+      scene, new SketchPickCache(), 1, { x: 2, y: 3, z: 4, kind: 'endpoint' }, RAY, TOP,
     )
-    expect(resolved).toEqual({ plane: axisDrawPlane(1, [2, 3, 4]), target: { kind: 'plane', plane: axisDrawPlane(1, [2, 3, 4]) } })
+    expect(resolved).toEqual({ plane: axisDrawPlane(1, [2, 3, 4]), target: { kind: 'plane', plane: axisDrawPlane(1, [2, 3, 4]), instance: null } })
   })
 
   it('a lock with no snap yet resolves to null — nothing to click through', () => {
-    expect(resolveClickDrawTarget(scene, new SketchPickCache(), 1, null, RAY)).toBeNull()
+    expect(resolveClickDrawTarget(scene, new SketchPickCache(), 1, null, RAY, TOP)).toBeNull()
   })
 
   it('with no lock it defers to resolveIdleDrawTarget', () => {
-    const resolved = resolveClickDrawTarget(scene, new SketchPickCache(), null, null, RAY)
-    expect(resolved).toEqual({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane() } })
+    const resolved = resolveClickDrawTarget(scene, new SketchPickCache(), null, null, RAY, TOP)
+    expect(resolved).toEqual({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane(), instance: null } })
+  })
+
+  it('an idle-locked click inside an instance context carries the instance handle (THE original axis-lock symptom)', () => {
+    const instanceCtx: EditContext = { kind: 'instance', id: 42n, component: 5n }
+    const resolved = resolveClickDrawTarget(
+      scene, new SketchPickCache(), 1, { x: 2, y: 3, z: 4, kind: 'endpoint' }, RAY, instanceCtx,
+    )
+    expect(resolved).toEqual({
+      plane: axisDrawPlane(1, [2, 3, 4]),
+      target: { kind: 'plane', plane: axisDrawPlane(1, [2, 3, 4]), instance: 42n },
+    })
   })
 })

@@ -127,6 +127,7 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopPropagation()
         onCancel()
       }
     },

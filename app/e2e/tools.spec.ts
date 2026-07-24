@@ -671,6 +671,85 @@ test('Scale: a real Control keypress toggles the center anchor mid-drag', async 
   expect(ctrl[0]).toBeLessThan(-0.5)
 })
 
+// Regression guard for the Viewport's CAPTURE-phase Ctrl-tap listener
+// (`onCtrlKeyDown` registered with `window.addEventListener('keydown',
+// onCtrlKeyDown, true)`). An open MenuBar dropdown's own Escape handler
+// calls `stopPropagation()` at the BUBBLE phase, which would swallow the
+// Escape keydown before it reached a bubble-phase window listener — leaving
+// `ctrlTapClean` armed by the Control keydown and never disarmed, so the
+// Control keyup that follows would spuriously fire `toggleCenterAnchor()`.
+// The capture-phase listener sees the Escape keydown regardless, since
+// capture fires window -> document -> target strictly before any
+// bubble-phase stopPropagation downstream. This test holds Control, presses
+// Escape to dismiss an open File menu (swallowed below window), releases
+// Control, then drags a grip with NO Ctrl involved in the drag itself: if
+// the toggle spuriously fired, the durable center-anchor mode would already
+// be on and this plain drag would show the CENTER-anchor result (left face
+// moves past x=0) instead of the correct opposite-grip result (left face
+// fixed at x=0).
+test('Scale: a Control tap survives an Escape that closes an open menu, without toggling the center anchor', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [7, -7, 5], target: [1, 1, 0.5], fovDeg: 45 })
+    const id = h.drawBox([0, 0, 0], [2, 2, 1], 1) // 2x2x1 box on the ground
+    h.selectObjects([id])
+  })
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.press('s') // real key -> Scale tool; gizmo appears
+  await page.locator('text=Drag a grip').first().waitFor({ timeout: 5000 })
+
+  // Open an overlay whose own Escape handler stopPropagation()s (MenuBar's
+  // File dropdown — see MenuBar.tsx's onKeyDown/close effect).
+  const menuBar = page.getByTestId('menu-bar')
+  await menuBar.getByRole('button', { name: 'File' }).click()
+  await expect(page.getByText('Save As…', { exact: true })).toBeVisible()
+
+  // Hold Control, press Escape (dismisses the menu; the keydown is swallowed
+  // below window by the menu's own stopPropagation), release Control. No
+  // other key joins the Control press, so this is a "clean tap" as far as
+  // `ctrlTapClean` bookkeeping goes.
+  await page.keyboard.down('Control')
+  await page.keyboard.press('Escape')
+  await page.keyboard.up('Control')
+
+  // Sanity: the menu did close via its own Escape handling.
+  await expect(page.getByText('Save As…', { exact: true })).toHaveCount(0)
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+  const grip = await toPage([2, 1, 0.5])
+  const target = await toPage([5, 1, 0])
+
+  // Plain drag — no Ctrl at all during the drag itself.
+  await page.mouse.move(grip.x, grip.y)
+  await page.mouse.down()
+  await page.mouse.move(target.x, target.y, { steps: 10 })
+  await page.mouse.up()
+  await page.mouse.move(target.x, target.y)
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.waitForTimeout(120)
+
+  const bounds = await page.evaluate(() =>
+    window.__hew_test!.getObjectBounds(window.__hew_test!.getObjectIds()[0]),
+  )
+
+  // Opposite-grip anchor — the left (x=0) face stays put. If the Escape had
+  // spuriously toggled the durable center anchor, this would instead read
+  // well below 0 (per the "with Ctrl" case in the sibling test above).
+  expect(bounds[0]).toBeCloseTo(0, 5)
+  expect(bounds[3]).toBeGreaterThan(2) // the box did grow in +X
+})
+
 // Edge grip via a REAL drag (not a scaleObject call): dragging along one of
 // its two driven axes must scale that axis only, leaving the other fixed.
 test('Scale: dragging an edge grip along one axis scales that axis only', async ({ page }) => {

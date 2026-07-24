@@ -82,7 +82,8 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
@@ -94,7 +95,7 @@ import { editPolygonBuffer, isPolygonInputKey, parsePolygonSideCount, nextIdlePl
 import { segmentLength } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
-import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
+import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 
 /** SketchUp parity default (design §1). */
 export const DEFAULT_POLYGON_SIDES = 6
@@ -181,8 +182,21 @@ export class PolygonTool implements Tool {
    *  sketch per plane. */
   private readonly sketchCache: SketchPlaneCache
 
-  /** The currently active editing context (entered object), or null at top level. */
-  private _activeContext: bigint | null = null
+  /** The current editing context (component-edit-parity.md phase A1) — see
+   *  LineTool's identical fields for the full rationale. */
+  private _editContext: EditContext = { kind: 'top' }
+
+  /** The entered OBJECT id, or null — unchanged meaning from the old
+   *  `_activeContext` field. */
+  private get _activeContext(): bigint | null {
+    return this._editContext.kind === 'object' ? this._editContext.id : null
+  }
+
+  /** The entered component INSTANCE id, or null (component-edit-parity.md
+   *  phase A2). */
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
+  }
 
   /** VCB buffer — raw string being typed by the user (radius or `<n>s`, in display units) */
   private typed: string = ''
@@ -199,7 +213,7 @@ export class PolygonTool implements Tool {
    *  sketch-hover adoption on the next click (SketchUp: an explicit lock
    *  beats inference) — see `_currentMode`/`_resolveClickTarget`. Survives a
    *  completed gesture (cleared only by `cancel()`, which
-   *  `onDocumentReset()`/`setActiveContext()` already route through). */
+   *  `onDocumentReset()`/`setEditContext()` already route through). */
   private idlePlaneLock: 0 | 1 | 2 | null = null
 
   /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
@@ -239,10 +253,11 @@ export class PolygonTool implements Tool {
     this.sides = clampSides(n)
   }
 
-  /** Set the active editing context (entered object), or null for top level. */
-  setActiveContext(id: bigint | null): void {
-    if (id === this._activeContext) return  // re-asserting the same context must not abort an in-progress gesture
-    this._activeContext = id
+  /** The single editing-context channel (component-edit-parity.md phase A1;
+   *  replaces `setActiveContext`). */
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
     this.cancel()
   }
 
@@ -281,7 +296,7 @@ export class PolygonTool implements Tool {
    * re-check is needed here.
    */
   private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray)
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
   }
 
   /**
@@ -295,7 +310,9 @@ export class PolygonTool implements Tool {
    * point yet (nothing to click through).
    */
   private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
-    return resolveClickDrawTarget(this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray)
+    return resolveClickDrawTarget(
+      this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+    )
   }
 
   /** The cursor's position on `plane`. On the ground plane this is EXACTLY
@@ -494,6 +511,18 @@ export class PolygonTool implements Tool {
    */
   capturingInput(): boolean {
     return this.planeStage.kind === 'anchored' || this.faceStage.kind === 'anchored'
+  }
+
+  /**
+   * True while a gesture is anchored OR an idle plane lock is armed — Escape
+   * has tool-local work to do (clear the lock, or step the gesture back)
+   * before a context-pop is appropriate (component-edit-parity.md phase A2;
+   * see `toolHasArmedGesture` in tools/types.ts). `capturingInput()` alone
+   * misses the idle-locked case: locked-but-idle is not "capturing input"
+   * but IS armed for Escape's purposes.
+   */
+  hasArmedGesture(): boolean {
+    return this.capturingInput() || this.idlePlaneLock !== null
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -744,7 +773,7 @@ export class PolygonTool implements Tool {
     if (verts === null || verts.length === 0) return // degenerate — ignore
 
     try {
-      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
         let lastRegionsCreated: bigint[] = []
         // The whole polygon is ONE chain, carrying the center the user
         // placed and the circumradius they dragged — so clicking a side
@@ -754,14 +783,30 @@ export class PolygonTool implements Tool {
         // ARE the geometry, so the chain gets a center and nothing else — no
         // quadrant or tangent snaps on a circumcircle no edge lies on, no
         // concentric-arc offset, no cylindrical wall on extrusion.
-        const radius = plane.ground
-          ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
-          : segmentLength(center, rim)
-        this.wasmScene.sketch_begin_polygon_with(sketch, center[0], center[1], center[2], radius)
+        // `toLocal`: identity for a world target, pose⁻¹ for a definition-
+        // owned one (component-edit-parity.md phase A2) — see
+        // `runSketchGesture`'s doc. World target: the exact legacy radius
+        // formula. Definition-owned target: measured LOCALLY (matches
+        // CircleTool's identical fix) so a uniformly-scaled instance's
+        // circumradius snap hint is correct too.
+        const localCenter = toLocal(center)
+        const radius = target.instance === null
+          ? (plane.ground
+              ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
+              : segmentLength(center, rim))
+          : (() => {
+              const localRim = toLocal(rim)
+              return Math.hypot(
+                localRim[0] - localCenter[0],
+                localRim[1] - localCenter[1],
+                localRim[2] - localCenter[2],
+              )
+            })()
+        this.wasmScene.sketch_begin_polygon_with(sketch, localCenter[0], localCenter[1], localCenter[2], radius)
         try {
           for (let i = 0; i < verts.length; i++) {
-            const p = verts[i]
-            const q = verts[(i + 1) % verts.length]
+            const p = toLocal(verts[i])
+            const q = toLocal(verts[(i + 1) % verts.length])
             const report = this.wasmScene.sketch_add_segment(
               sketch,
               p[0], p[1], p[2],
@@ -797,8 +842,8 @@ export class PolygonTool implements Tool {
       const eligible = this._eligiblePickFor(ray)
       if (eligible === null) return
 
-      const normalArr = this.wasmScene.face_normal(eligible.object, eligible.face)
-      const normal: V3 = [normalArr[0], normalArr[1], normalArr[2]]
+      const normal = worldFaceNormal(this.wasmScene, eligible.object, eligible.face, this._activeInstance)
+      if (normal === null) return // stale instance/degenerate pose — treat as no eligible face
       const center: V3 = [snap.x, snap.y, snap.z]
 
       this.faceStage = {
@@ -859,8 +904,14 @@ export class PolygonTool implements Tool {
 
     try {
       // Plain imprint — no curve identity (design §4/§8), unlike Circle's
-      // split_face_inner_with_curve.
-      this.wasmScene.split_face_inner(object, face, loopPts)
+      // split_face_inner_with_curve. Inside a component instance's editing
+      // context (component-edit-parity.md phase A2), `object` is a
+      // definition member — route through the instance-aware wrapper.
+      if (this._activeInstance !== null) {
+        this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, loopPts)
+      } else {
+        this.wasmScene.split_face_inner(object, face, loopPts)
+      }
       this.onFaceImprint(object)
     } catch (err) {
       const code = parseKernelErrorCode(err)

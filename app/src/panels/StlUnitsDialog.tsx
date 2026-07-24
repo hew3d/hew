@@ -119,6 +119,7 @@ export function StlUnitsDialog({ fileName, onChoose, onCancel }: StlUnitsDialogP
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopPropagation()
         onCancel()
       }
     },

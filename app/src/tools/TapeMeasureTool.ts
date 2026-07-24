@@ -62,7 +62,7 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
@@ -118,6 +118,17 @@ function perpComponent(
 
 export class TapeMeasureTool implements Tool {
   readonly name = 'Tape Measure'
+
+  /** The current editing context (component-edit-parity.md phase A1) —
+   *  received for uniformity with every other tool, but not yet consulted:
+   *  guides stay world-space in v1 (see the module doc's OUT-OF-SCOPE note),
+   *  so an instance context changes nothing here today. `edge_endpoints`
+   *  still only resolves live world Objects, so a member-edge snap continues
+   *  to fall back to measure mode exactly as it did before this phase. */
+  private _editContext: EditContext = { kind: 'top' }
+  setEditContext(ctx: EditContext): void {
+    this._editContext = ctx
+  }
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {

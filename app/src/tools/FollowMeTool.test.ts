@@ -36,6 +36,11 @@ function makeWasmScene(opts: {
   edgePick?: ReturnType<typeof makeEdgePick>
   facePick?: ReturnType<typeof makeFacePick>
   regionPick?: ReturnType<typeof makeRegionPick>
+  /** `pick_sketch_region_in_instance`'s own result, when it must differ from
+   *  `regionPick` (defaults to `regionPick` — `pick_sketch_region` only ever
+   *  walks WORLD-tree sketches, so an instance-context profile pick calls
+   *  this sibling instead; most tests want the SAME region either way). */
+  regionPickInInstance?: ReturnType<typeof makeRegionPick>
   islandEdges?: bigint[]
   commitError?: string
   /** Parent node of the picked face's object; `undefined` = plain, top-level
@@ -56,6 +61,7 @@ function makeWasmScene(opts: {
     pick_sketch_edge: vi.fn(() => opts.edgePick),
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
+    pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
     sketch_edge_island: vi.fn(() => 5n),
     sketch_island_edges: vi.fn(() => new BigUint64Array(opts.islandEdges ?? [])),
     sketch_curve_edges: vi.fn(() => new BigUint64Array([])),
@@ -73,6 +79,11 @@ function makeWasmScene(opts: {
     follow_me_merged_around_face: vi.fn(follow),
     follow_me_face_along_edges: vi.fn(follow),
     follow_me_face_around_face: vi.fn(follow),
+    // component-edit-parity.md phase A2 — the def-member routing family.
+    follow_me_around_face_in_instance: vi.fn(follow),
+    follow_me_merged_around_face_in_instance: vi.fn(follow),
+    follow_me_face_along_edges_in_instance: vi.fn(follow),
+    follow_me_face_around_face_in_instance: vi.fn(follow),
   } as unknown as WasmScene
 }
 
@@ -340,16 +351,42 @@ describe('FollowMeTool — face frame guard (only plain top-level faces sweep)',
     expect(onCommit).not.toHaveBeenCalled()
   })
 
-  it('a component-DEFINITION context refuses wholesale (the scoped gap)', () => {
-    const scene = makeWasmScene({ facePick: makeFacePick(30n, 31n) })
+  // component-edit-parity.md phase A2 — the designed behavior change:
+  // editing INSIDE a component instance's own definition no longer refuses
+  // Follow Me wholesale. A member face is a legal PATH, routed through
+  // `follow_me_around_face_in_instance` (replaces the old pinned "scoped
+  // gap" refusal test).
+  it('editing inside a component instance: a member-face path routes to follow_me_around_face_in_instance', () => {
+    const facePick = makeFacePick(30n, 31n, 42n) // a member face, reached through instance 42n
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    const { tool, onCommit, onToast } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
+
+    tool.onPointerDown(null, RAY) // path
+    tool.onPointerDown(null, RAY) // profile → commit
+
+    expect(scene.follow_me_around_face_in_instance).toHaveBeenCalledWith(
+      42n, 20n, 21n, 30n, 31n, undefined,
+    )
+    expect(scene.follow_me_around_face).not.toHaveBeenCalled()
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
+  it('editing inside a component instance: a face OUTSIDE the entered instance is refused (scoped, not the old wholesale gap)', () => {
+    const facePick = makeFacePick(30n, 31n, 99n) // a DIFFERENT instance
+    const scene = makeWasmScene({ facePick })
     const { tool, onToast } = makeTool(scene)
-    tool.setComponentContext(50n) // editing a component's shared definition
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
 
     tool.onPointerDown(null, RAY)
+
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast.mock.calls[0][0]).toMatch(/component.*definition|step out/i)
-    expect(onToast.mock.calls[0][1]).toBeUndefined() // guidance, not a kernel code
-    expect(tool.statusHint()).toContain('Click the path to follow')
+    expect(onToast.mock.calls[0][0]).toMatch(/step out/i)
+    expect(scene.follow_me_around_face_in_instance).not.toHaveBeenCalled()
   })
 
   it('a GROUP editing context is fully legal now (design §2f) — no refusal', () => {
@@ -357,8 +394,7 @@ describe('FollowMeTool — face frame guard (only plain top-level faces sweep)',
     const regionPick = makeRegionPick(20n, 21n)
     const scene = makeWasmScene({ facePick, regionPick })
     const { tool, onToast, onCommit } = makeTool(scene)
-    tool.setContextScoped(true) // hint-wording-only now; not a gate
-    tool.setActiveGroup(70n)
+    tool.setEditContext({ kind: 'group', id: 70n })
 
     tool.onPointerDown(null, RAY) // path
     tool.onPointerDown(null, RAY) // profile → commit
@@ -369,23 +405,45 @@ describe('FollowMeTool — face frame guard (only plain top-level faces sweep)',
     expect(onCommit).toHaveBeenCalledWith(77n)
   })
 
-  it('the stale-preselection face recovery is frame-gated too (a component-definition context refuses)', () => {
-    const facePick = makeFacePick(30n, 31n)
+  it('the stale-preselection face recovery works for a member face too, once inside its own instance', () => {
+    const facePick = makeFacePick(30n, 31n, 42n)
     const regionPick = makeRegionPick(20n, 21n)
     const scene = makeWasmScene({ facePick, regionPick })
     // A leftover single-edge preselection → the tool starts at pick-profile.
     const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
     const { tool, onCommit, onToast } = makeTool(scene, selection)
-    tool.setComponentContext(50n)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
 
-    // "Click the box's top face" while editing a definition → refused, and
-    // the stale preselection is NOT swapped for a wrong-frame face.
-    ;(scene.pick_sketch_region as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined)
+    // "Click the box's top face" while editing the member's own instance →
+    // recovers the path onto it (in-tool) instead of refusing, and a later
+    // profile click commits through the `_in_instance` route. The recovery
+    // click's own region pick (which must miss, to fall through to the face
+    // pick) goes through `pick_sketch_region_in_instance` — this is already
+    // inside the instance context, set above.
+    ;(scene.pick_sketch_region_in_instance as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined)
+    tool.onPointerDown(null, RAY)
+    expect(onToast).not.toHaveBeenCalled()
+    tool.onPointerDown(null, RAY) // profile → commit
+    expect(scene.follow_me_around_face_in_instance).toHaveBeenCalledWith(42n, 20n, 21n, 30n, 31n, undefined)
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
+  it('the stale-preselection face recovery still refuses a face OUTSIDE the entered instance', () => {
+    const facePick = makeFacePick(30n, 31n, 99n) // a different instance
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const { tool, onCommit, onToast } = makeTool(scene, selection)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
+
+    ;(scene.pick_sketch_region_in_instance as ReturnType<typeof vi.fn>).mockReturnValueOnce(undefined)
     tool.onPointerDown(null, RAY)
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast.mock.calls[0][0]).toMatch(/component.*definition|step out/i)
+    expect(onToast.mock.calls[0][0]).toMatch(/step out/i)
     expect(onCommit).not.toHaveBeenCalled()
-    expect(scene.follow_me_around_face).not.toHaveBeenCalled()
+    expect(scene.follow_me_around_face_in_instance).not.toHaveBeenCalled()
   })
 
   it('repeated ineligible-face clicks during stale-preselection recovery do not stack toasts', () => {
@@ -628,6 +686,29 @@ describe('FollowMeTool — merge gesture (Ctrl/Cmd-click, design §3b)', () => {
     expect(onCommit).toHaveBeenCalledWith(77n)
   })
 
+  // component-edit-parity.md phase A2: Ctrl/Cmd-click on a member-face-loop
+  // path, editing INSIDE that same instance, commits the merged sweep via
+  // `follow_me_merged_around_face_in_instance` instead of refusing wholesale.
+  it('Ctrl/Cmd-click on a member-face-loop path (editing inside its own instance) merges via the _in_instance route', () => {
+    const facePick = makeFacePick(30n, 31n, 42n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    const { tool, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
+
+    tool.onPointerDown(null, RAY) // path: member face loop
+    expect(tool.statusHint()).toContain('Ctrl/Cmd-click to merge')
+    tool.setMergeModifier(true)
+    tool.onPointerDown(null, RAY) // profile, merge held
+    expect(scene.follow_me_merged_around_face_in_instance).toHaveBeenCalledWith(
+      42n, 20n, 21n, 30n, 31n, undefined,
+    )
+    expect(scene.follow_me_merged_around_face).not.toHaveBeenCalled()
+    expect(scene.follow_me_around_face_in_instance).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
   it('a live release read (onPointerUp) decides the drag-commit path, not the arming press', () => {
     // The seam-walk needs sketch_plane/region_boundary to build (unlike most
     // fixtures here, which omit them and so fall back to an immediate
@@ -776,18 +857,73 @@ describe('FollowMeTool — solid-face PROFILES (design §3a)', () => {
     expect(scene.follow_me_face_around_face).not.toHaveBeenCalled()
   })
 
-  it('a component-DEFINITION context blocks the fallback too', () => {
+  // component-edit-parity.md phase A2 — replaces the old pinned "a
+  // component-DEFINITION context blocks the fallback too" test: editing
+  // INSIDE a component instance's own definition, the fallback face profile
+  // now routes through `follow_me_face_along_edges_in_instance` when the
+  // hovered face is a member of that SAME instance.
+  it('editing inside a component instance: the fallback face profile routes to follow_me_face_along_edges_in_instance', () => {
     const edgePick = makeEdgePick(9n, 1n)
-    const facePick = makeFacePick(30n, 31n)
+    const facePick = makeFacePick(30n, 31n, 42n) // a member face of the entered instance
     const scene = makeWasmScene({ edgePick, facePick, islandEdges: [1n] })
     const { tool, onToast, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
 
     tool.onPointerDown(null, RAY) // path: edges
-    tool.setComponentContext(50n)
-    tool.onPointerDown(null, RAY) // face under cursor, no region
+    tool.onPointerDown(null, RAY) // face under cursor (member, no region) → fallback profile
+    expect(onToast).not.toHaveBeenCalled()
+    expect(scene.follow_me_face_along_edges_in_instance).toHaveBeenCalledWith(
+      42n, 30n, 31n, 9n, expect.any(BigUint64Array), undefined,
+    )
+    expect(scene.follow_me_face_along_edges).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
+  // The exact regression this phase fixed (`pathIsOutsideInstanceFace` at
+  // FollowMeTool.ts): previously a member-FACE path's fallback-to-solid-
+  // face-profile was refused outright even when editing INSIDE that face's
+  // own instance. The sibling test above only proves this for an EDGES
+  // path (`follow_me_face_along_edges_in_instance`) — this one is a
+  // face-loop PATH instead, which routes through the OTHER kernel entry
+  // point (`follow_me_face_around_face_in_instance`) and is the one the
+  // fixed guard's `path.kind === 'face'` branch actually exists for. A
+  // revert of that guard would pass every other committed test in this
+  // file while silently regressing this exact pairing.
+  it('editing inside a component instance: the fallback face profile ALSO works for a member-FACE path (follow_me_face_around_face_in_instance)', () => {
+    const facePick = makeFacePick(30n, 31n, 42n) // path: a member face's own loop
+    const scene = makeWasmScene({ facePick })
+    const { tool, onToast, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
+
+    tool.onPointerDown(null, RAY) // path: face loop (30n/31n), a member of instance 42n
+    // A second, different member face becomes the profile.
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(40n, 41n, 42n))
+    tool.onPointerDown(null, RAY) // no region under the cursor → face-profile fallback
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(scene.follow_me_face_around_face_in_instance).toHaveBeenCalledWith(
+      42n, 40n, 41n, 30n, 31n, undefined,
+    )
+    expect(scene.follow_me_face_around_face).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(77n)
+  })
+
+  it('editing inside a component instance: the fallback face profile still refuses a face outside the entered instance', () => {
+    const edgePick = makeEdgePick(9n, 1n)
+    const facePick = makeFacePick(30n, 31n, 99n) // a DIFFERENT instance
+    const scene = makeWasmScene({ edgePick, facePick, islandEdges: [1n] })
+    const { tool, onToast, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
+    tool.setFaceEligibility((_object, instance) => instance === 42n)
+
+    tool.onPointerDown(null, RAY) // path: edges
+    tool.onPointerDown(null, RAY) // face under cursor, out of scope
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast.mock.calls[0][0]).toMatch(/component.*definition|step out/i)
+    expect(onToast.mock.calls[0][0]).toMatch(/step out/i)
     expect(onCommit).not.toHaveBeenCalled()
+    expect(scene.follow_me_face_along_edges_in_instance).not.toHaveBeenCalled()
     expect(scene.follow_me_face_along_edges).not.toHaveBeenCalled()
   })
 
@@ -819,7 +955,7 @@ describe('FollowMeTool — solid-face PROFILES (design §3a)', () => {
     const facePick = makeFacePick(30n, 31n)
     const scene = makeWasmScene({ edgePick, facePick, islandEdges: [1n] })
     const { tool } = makeTool(scene)
-    tool.setActiveGroup(70n)
+    tool.setEditContext({ kind: 'group', id: 70n })
     tool.onPointerDown(null, RAY) // path: edges
     tool.onPointerMove(null, RAY) // hover the fallback face profile
     expect(tool.statusHint()).toContain('will land at the top level')
@@ -852,7 +988,7 @@ describe('FollowMeTool — group-birth gap disclosure on an instance-face path',
       () => new Float64Array([0.5, 0.5, 1, 0, 0, 1]),
     )
     const { tool } = makeTool(scene)
-    tool.setActiveGroup(70n)
+    tool.setEditContext({ kind: 'group', id: 70n })
     tool.onPointerDown(null, RAY) // path: instanced face
     tool.onPointerMove(null, RAY) // hover the sketch-region profile
     expect(tool.statusHint()).toContain('upright')
@@ -867,7 +1003,7 @@ describe('FollowMeTool — group-birth gap disclosure on an instance-face path',
       () => new Float64Array([0.5, 0.5, 1, 0, 0, 1]),
     )
     const { tool } = makeTool(scene)
-    tool.setActiveGroup(70n)
+    tool.setEditContext({ kind: 'group', id: 70n })
     tool.onPointerDown(null, RAY) // path: plain face loop
     tool.onPointerMove(null, RAY) // hover the sketch-region profile
     expect(tool.statusHint()).toContain('upright') // same verdict as above…
@@ -1711,6 +1847,47 @@ describe('FollowMeTool — K2 direction-aware drag (signed partial sweep)', () =
 
     expect(onToast.mock.calls[0][0]).toMatch(/turns tighter/i)
     expect(onToast.mock.calls[0][1]).toBe('PathTooTight')
+  })
+})
+
+describe('FollowMeTool — capturingInput (component-edit-parity.md phase A2)', () => {
+  it('is false at the idle pick-path stage, true once a path is picked/preselected', () => {
+    const scene = makeWasmScene({})
+    const { tool: idleTool } = makeTool(scene)
+    expect(idleTool.capturingInput()).toBe(false)
+
+    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const { tool: armedTool } = makeTool(scene, selection)
+    expect(armedTool.capturingInput()).toBe(true) // preselection starts at pick-profile
+  })
+})
+
+describe('FollowMeTool — setEditContext aborts an armed gesture on a genuine change (component-edit-parity.md phase A2)', () => {
+  it('a genuine context change cancels an armed (path-picked) gesture instead of silently retargeting its eventual commit', () => {
+    const edgePick = makeEdgePick(9n, 1n)
+    const scene = makeWasmScene({ edgePick, islandEdges: [1n] })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+    tool.onPointerDown(null, RAY) // pick path → pick-profile (armed)
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'top' })
+
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('re-pushing the SAME context is a no-op — an armed gesture survives it untouched', () => {
+    const edgePick = makeEdgePick(9n, 1n)
+    const scene = makeWasmScene({ edgePick, islandEdges: [1n] })
+    const { tool } = makeTool(scene)
+    const ctx = { kind: 'instance' as const, id: 9n, component: 90n }
+    tool.setEditContext(ctx)
+    tool.onPointerDown(null, RAY) // pick path → pick-profile (armed)
+    expect(tool.capturingInput()).toBe(true)
+
+    tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
+
+    expect(tool.capturingInput()).toBe(true)
   })
 })
 

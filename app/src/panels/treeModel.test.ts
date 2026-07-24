@@ -15,6 +15,7 @@ import {
   canPlaceInstance,
   canExplodeInstance,
   canMakeUnique,
+  canBooleanInComponent,
   stripTagSuffix,
   collectLeafIds,
   buildTreeIndexMap,
@@ -488,6 +489,34 @@ describe('canBoolean', () => {
   })
 })
 
+// component-edit-parity.md phase A2.
+describe('canBooleanInComponent', () => {
+  const a: NodeRef = { kind: 'object', id: 1n }
+  const b: NodeRef = { kind: 'object', id: 2n }
+  const g: NodeRef = { kind: 'group', id: 3n }
+  const inst: NodeRef = { kind: 'instance', id: 4n }
+  const member = (n: NodeRef) => n.id === 1n || n.id === 2n
+
+  it('true for two distinct member objects', () => {
+    expect(canBooleanInComponent([a, b], member)).toBe(true)
+  })
+
+  it('requires exactly two distinct operands', () => {
+    expect(canBooleanInComponent([a], member)).toBe(false)
+    expect(canBooleanInComponent([a, a], member)).toBe(false)
+  })
+
+  it('false for a group or instance operand — a definition has no nested groups/instances', () => {
+    expect(canBooleanInComponent([a, g], member)).toBe(false)
+    expect(canBooleanInComponent([a, inst], member)).toBe(false)
+  })
+
+  it('false when either operand is not a member of the entered definition', () => {
+    const notMember: NodeRef = { kind: 'object', id: 99n }
+    expect(canBooleanInComponent([a, notMember], member)).toBe(false)
+  })
+})
+
 describe('canUngroup', () => {
   const g: NodeRef = { kind: 'group', id: 1n }
   const o: NodeRef = { kind: 'object', id: 2n }
@@ -598,8 +627,8 @@ describe('pruneDeadSelection — drop handles the document no longer holds', () 
       group_ids: () => opts.groups ?? [],
       instance_ids: () => opts.instances ?? [],
       sketch_ids: () => sketches,
-      sketch_edge_endpoints: (s: bigint, e: bigint) =>
-        (opts.edges?.[s.toString()] ?? []).includes(e) ? new Float64Array(6) : undefined,
+      sketch_edge_island: (s: bigint, e: bigint) =>
+        (opts.edges?.[s.toString()] ?? []).includes(e) ? 1n : undefined,
       sketch_curve_chain: (s: bigint, e: bigint) => {
         if (!sketches.includes(s)) throw new Error('UnknownSketch')
         const live = opts.edges?.[s.toString()] ?? []
@@ -630,6 +659,17 @@ describe('pruneDeadSelection — drop handles the document no longer holds', () 
     const v = view({ objects: [1n, 2n] })
     const sel = [obj(1n), obj(2n)]
     expect(pruneDeadSelection(v, sel)).toBe(sel)
+  })
+
+  it('keeps live component-definition objects and sketches supplied by the active scope', () => {
+    const v = view({ edges: { '12': [13n] } })
+    const sel: NodeRef[] = [
+      obj(11n),
+      sk(12n),
+      { kind: 'sketch-edge', id: 13n, sketch: 12n },
+    ]
+    expect(pruneDeadSelection(v, sel, [11n], [12n])).toBe(sel)
+    expect(pruneDeadSelection(v, sel)).toEqual([])
   })
 
   it('prunes sketch-scoped kinds: dead edges, curves, and islands go; live ones stay', () => {

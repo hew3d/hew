@@ -432,6 +432,27 @@ export function canBoolean(
 }
 
 /**
+ * Whether the boolean commands apply while editing INSIDE a component
+ * instance's own definition (component-edit-parity.md phase A2): exactly two
+ * distinct 'object' nodes, both live MEMBERS of the entered definition —
+ * `boolean_in_component` requires both operands from the SAME component. A
+ * definition is flat (no nesting), so there is no "top-level" concept to
+ * check here the way `canBoolean` checks it for the world.
+ *
+ * `isMember` reports whether the node is a live member of the entered
+ * definition (the caller checks against `component_member_objects`).
+ */
+export function canBooleanInComponent(
+  selected: NodeRef[],
+  isMember: (n: NodeRef) => boolean,
+): boolean {
+  if (selected.length !== 2) return false
+  const [a, b] = selected
+  if (nodeKey(a) === nodeKey(b)) return false
+  return selected.every((n) => n.kind === 'object' && isMember(n))
+}
+
+/**
  * Whether the selection can be ungrouped: exactly one selected node that is
  * a group.
  */
@@ -464,7 +485,7 @@ export function nextSelection(
 }
 
 /** The slice of the wasm `Scene` that `pruneDeadSelection` reads. Sub-entity
- * probes follow the kernel's own contracts: `sketch_edge_endpoints` returns
+ * probes follow the kernel's own contracts: `sketch_edge_island` returns
  * undefined for a stale edge, while the curve/island queries throw typed
  * errors — the prune treats a throw as "dead". */
 export interface SelectionLivenessView {
@@ -472,7 +493,7 @@ export interface SelectionLivenessView {
   group_ids(): ArrayLike<bigint>
   instance_ids(): ArrayLike<bigint>
   sketch_ids(): ArrayLike<bigint>
-  sketch_edge_endpoints(sketch: bigint, edge: bigint): Float64Array | undefined
+  sketch_edge_island(sketch: bigint, edge: bigint): bigint | undefined
   sketch_curve_chain(sketch: bigint, edge: bigint): ArrayLike<bigint>
   sketch_island_edges(sketch: bigint, island: bigint): ArrayLike<bigint>
 }
@@ -493,6 +514,8 @@ export interface SelectionLivenessView {
 export function pruneDeadSelection(
   scene: SelectionLivenessView,
   selected: NodeRef[],
+  scopedObjects: readonly bigint[] = [],
+  scopedSketches: readonly bigint[] = [],
 ): NodeRef[] {
   if (selected.length === 0) return selected
 
@@ -502,12 +525,12 @@ export function pruneDeadSelection(
   let instances: Set<bigint> | null = null
   let sketches: Set<bigint> | null = null
   const sketchSet = (): Set<bigint> =>
-    (sketches ??= new Set(Array.from(scene.sketch_ids())))
+    (sketches ??= new Set([...Array.from(scene.sketch_ids()), ...scopedSketches]))
 
   const alive = (n: NodeRef): boolean => {
     switch (n.kind) {
       case 'object':
-        return (objects ??= new Set(Array.from(scene.object_ids()))).has(n.id)
+        return (objects ??= new Set([...Array.from(scene.object_ids()), ...scopedObjects])).has(n.id)
       case 'group':
         return (groups ??= new Set(Array.from(scene.group_ids()))).has(n.id)
       case 'instance':
@@ -516,7 +539,7 @@ export function pruneDeadSelection(
         return sketchSet().has(n.id)
       case 'sketch-edge':
         if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
-        return scene.sketch_edge_endpoints(n.sketch, n.id) !== undefined
+        return scene.sketch_edge_island(n.sketch, n.id) !== undefined
       case 'sketch-curve':
         if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
         try {

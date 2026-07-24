@@ -643,6 +643,11 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
               if (e.key === 'Enter') {
                 e.currentTarget.blur()
               } else if (e.key === 'Escape') {
+                // A focused input's own Escape-revert must not ALSO pop the
+                // enclosing group/component edit context — same class as the
+                // dialogs' Escape dismiss (see dialogs.test.tsx). Stopping
+                // propagation here doesn't change the revert contract itself.
+                e.stopPropagation()
                 setLocalSegments(String(nodeInfo.segments))
                 e.currentTarget.blur()
               }
@@ -730,6 +735,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
               if (e.key === 'Enter') {
                 handleAddTag()
               } else if (e.key === 'Escape') {
+                // Same reasoning as the Segments field above: dismissing the
+                // transient add-tag input on Escape must not also pop the
+                // group/component edit context underneath it.
+                e.stopPropagation()
                 setTagInput('')
                 setAddingTag(false)
               }

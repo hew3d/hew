@@ -8,6 +8,9 @@ import {
   polygonAreaXY,
   circlePolygonGround,
   circlePolygonFace,
+  invertAffine3x4,
+  applyAffine3x4,
+  transformNormalThroughPose,
 } from './geoHelpers'
 import type { V3 } from './geoHelpers'
 
@@ -408,5 +411,128 @@ describe('circlePolygonFace', () => {
 
   it('returns null for a degenerate (near-zero) radius', () => {
     expect(circlePolygonFace([1, 1, 1], [1, 1, 1], normalZ, 24)).toBeNull()
+  })
+})
+
+describe('invertAffine3x4 / applyAffine3x4', () => {
+  it('round-trips a point through a translation-only pose', () => {
+    const pose = [1, 0, 0, 5, 0, 1, 0, 2, 0, 0, 1, -3]
+    const inv = invertAffine3x4(pose)
+    expect(inv).not.toBeNull()
+    const p: V3 = [1, 2, 3]
+    const world = applyAffine3x4(pose, p)
+    expect(world).toEqual([6, 4, 0])
+    const local = applyAffine3x4(inv!, world)
+    expect(local[0]).toBeCloseTo(p[0])
+    expect(local[1]).toBeCloseTo(p[1])
+    expect(local[2]).toBeCloseTo(p[2])
+  })
+
+  it('round-trips a point through a rotation + non-uniform scale + mirror pose', () => {
+    // 90° rotation about Z, scale (2, 0.5, -1) (mirrored Z), translate (1,-1,4).
+    const pose = [
+      0, -0.5, 0, 1,
+      2, 0, 0, -1,
+      0, 0, -1, 4,
+    ]
+    const inv = invertAffine3x4(pose)
+    expect(inv).not.toBeNull()
+    for (const p of [[1, 2, 3], [-4, 0.5, 2], [0, 0, 0]] as V3[]) {
+      const world = applyAffine3x4(pose, p)
+      const local = applyAffine3x4(inv!, world)
+      expect(local[0]).toBeCloseTo(p[0])
+      expect(local[1]).toBeCloseTo(p[1])
+      expect(local[2]).toBeCloseTo(p[2])
+    }
+  })
+
+  it('returns null for a singular linear part', () => {
+    // All rows equal → zero determinant.
+    const singular = [1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0]
+    expect(invertAffine3x4(singular)).toBeNull()
+  })
+})
+
+describe('transformNormalThroughPose', () => {
+  it('is unchanged by an identity pose', () => {
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+    const n = transformNormalThroughPose(identity, [0, 0, 1])
+    expect(n![0]).toBeCloseTo(0)
+    expect(n![1]).toBeCloseTo(0)
+    expect(n![2]).toBeCloseTo(1)
+  })
+
+  it('rotates a normal exactly like a point under a pure rotation', () => {
+    // 90° about Z: +X normal becomes +Y (translation is irrelevant to a normal).
+    const pose = [0, -1, 0, 5, 1, 0, 0, -2, 0, 0, 1, 9]
+    const n = transformNormalThroughPose(pose, [1, 0, 0])
+    expect(n![0]).toBeCloseTo(0)
+    expect(n![1]).toBeCloseTo(1)
+    expect(n![2]).toBeCloseTo(0)
+  })
+
+  it('mirrors a normal correctly under a pure mirror pose', () => {
+    const pose = [-1, 0, 0, 7, 0, 1, 0, 4, 0, 0, 1, 0]
+    const n = transformNormalThroughPose(pose, [1, 0, 0])
+    expect(n![0]).toBeCloseTo(-1)
+    expect(n![1]).toBeCloseTo(0)
+    expect(n![2]).toBeCloseTo(0)
+  })
+
+  it('a UNIFORM scale leaves the normal direction unchanged (only length would differ, and this always returns unit)', () => {
+    const pose = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0]
+    const n = transformNormalThroughPose(pose, [0, 0, 1])
+    expect(n![0]).toBeCloseTo(0)
+    expect(n![1]).toBeCloseTo(0)
+    expect(n![2]).toBeCloseTo(1)
+  })
+
+  it('a NON-uniform scale tilts the normal by the inverse-transpose, NOT the plain linear part — the exact bug this function exists to avoid', () => {
+    // Scale x2 in X only. A plane whose local normal is (1,1,0)/sqrt(2)
+    // (tilted 45° between X and Y) does NOT simply keep that direction once
+    // X is stretched: the plane itself tilts toward Y (the ×2 axis "loosens"
+    // its grip on the normal), matching the true inverse-transpose result.
+    const pose = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+    const local: V3 = [Math.SQRT1_2, Math.SQRT1_2, 0]
+    const n = transformNormalThroughPose(pose, local)
+    expect(n).not.toBeNull()
+    // The WRONG (plain-linear-part) answer would be (2,1,0) normalized ≈
+    // (0.894, 0.447, 0) — clearly different from the correct inverse-
+    // transpose answer computed below.
+    const wrongLen = Math.hypot(2 * local[0], 1 * local[1], 0)
+    const wrong: V3 = [(2 * local[0]) / wrongLen, (1 * local[1]) / wrongLen, 0]
+    expect(Math.abs(n![0] - wrong[0])).toBeGreaterThan(0.05)
+    // The correct inverse-transpose of diag(2,1,1) is diag(0.5,1,1) (a
+    // diagonal matrix's inverse-transpose is just its own elementwise
+    // reciprocal), so the correct mapped-but-unnormalized normal is
+    // (0.5, 1, 0)/sqrt(2), normalizing to (0.5,1,0)/|(0.5,1,0)|.
+    const correctLen = Math.hypot(0.5, 1, 0)
+    expect(n![0]).toBeCloseTo(0.5 / correctLen, 6)
+    expect(n![1]).toBeCloseTo(1 / correctLen, 6)
+    expect(n![2]).toBeCloseTo(0, 6)
+  })
+
+  it('round-trips through invertAffine3x4/applyAffine3x4: mapping a plane point AND its normal through the pose keeps the point ON the mapped plane', () => {
+    const pose = [0, -0.5, 0, 1, 2, 0, 0, -1, 0, 0, -1, 4] // rotation + non-uniform scale + mirror
+    const localPoint: V3 = [1, 2, 0] // a point on the LOCAL plane through origin, normal (0,0,1)
+    const localNormal: V3 = [0, 0, 1]
+    const worldPoint = applyAffine3x4(pose, localPoint)
+    const worldOrigin = applyAffine3x4(pose, [0, 0, 0])
+    const worldNormal = transformNormalThroughPose(pose, localNormal)
+    expect(worldNormal).not.toBeNull()
+    // (worldPoint - worldOrigin) · worldNormal must be ~0 — the mapped
+    // point still lies on the mapped plane.
+    const d = [
+      worldPoint[0] - worldOrigin[0],
+      worldPoint[1] - worldOrigin[1],
+      worldPoint[2] - worldOrigin[2],
+    ]
+    const dot = d[0] * worldNormal![0] + d[1] * worldNormal![1] + d[2] * worldNormal![2]
+    expect(dot).toBeCloseTo(0, 9)
+  })
+
+  it('returns null for a singular pose', () => {
+    const singular = [1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0]
+    expect(transformNormalThroughPose(singular, [0, 0, 1])).toBeNull()
   })
 })

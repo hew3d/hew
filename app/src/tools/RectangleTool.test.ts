@@ -51,6 +51,12 @@ function makeWasmScene(opts: {
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
     split_face_inner: vi.fn(() => 99n),
+    split_face_inner_in_instance: vi.fn(() => 99n),
+    begin_sketch_on_plane_in_instance: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
+    instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
   } as unknown as WasmScene
 }
 
@@ -138,12 +144,93 @@ describe('RectangleTool — top-level draw-on-face', () => {
   it('inside an entered object context only that object\'s faces are drawable (unchanged)', () => {
     const scene = makeWasmScene({ pick: () => makePick(999n, 3n) })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1 }), rayThrough(0, 0))
 
     // Ignored outright — no face anchor, and no ground sketch either.
     expect(tool.capturingInput()).toBe(false)
     expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+  })
+})
+
+describe('RectangleTool — instance editing context (component-edit-parity.md phase A2)', () => {
+  const INSTANCE = 42n
+  const COMPONENT = 5n
+
+  it('face mode routes to split_face_inner_in_instance, never the world split_face_inner', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n, INSTANCE) })
+    const { tool, onFaceImprint } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 1, kind: 'face' }), rayThrough(1, 2))
+
+    expect(scene.split_face_inner_in_instance).toHaveBeenCalledTimes(1)
+    const [instance, object, face] = (scene.split_face_inner_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(instance).toBe(INSTANCE)
+    expect(object).toBe(7n)
+    expect(face).toBe(3n)
+    expect(scene.split_face_inner).not.toHaveBeenCalled()
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+  })
+
+  it('plane mode on empty space mints a def-owned sketch via begin_sketch_on_plane_in_instance', () => {
+    const scene = makeWasmScene({ pick: () => undefined })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(makeSnap({ x: 6, y: 1, z: 0 }), rayThrough(6, 1))
+    tool.onPointerDown(makeSnap({ x: 7, y: 3, z: 0 }), rayThrough(7, 3))
+
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(4)
+    // Points are mapped into DEFINITION-local space (pose⁻¹ of +5-in-x).
+    for (const call of (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls) {
+      const [, ax] = call
+      const [, , , , bx] = call
+      expect(ax).toBeLessThan(6) // world x=6/7 maps to local x=1/2
+      expect(bx).toBeLessThan(6)
+    }
+  })
+
+  // The face_normal-as-world-space finding: every OTHER instance-context test
+  // in this file uses a translation-only pose, where the LOCAL normal
+  // face_normal reports happens to equal the WORLD one — a mapping bug would
+  // go unnoticed. This one genuinely rotates the instance (90° about X),
+  // turning the member face's local +Z normal into world −Y — before the
+  // fix, the tool used the raw local (0,0,1) normal directly and would have
+  // drawn the loop into the WRONG (Z-constant) plane; after it, the loop
+  // lands in the correctly posed (Y-constant) plane.
+  it('face mode poses the LOCAL face_normal into WORLD space through a rotated instance pose', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n, INSTANCE) })
+    ;(scene.instance_pose as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Float64Array([1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0]),
+    )
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    // Anchor at world (0,5,1) — on the posed (Y=5) plane. Second click's ray
+    // travels along +Y from (2,0,3), landing on the SAME plane at (2,5,3):
+    // a nonzero, non-degenerate rectangle in BOTH in-plane directions.
+    tool.onPointerDown(makeSnap({ x: 0, y: 5, z: 1, kind: 'face' }), {
+      origin: [0, 0, 1],
+      direction: [0, 1, 0],
+    })
+    tool.onPointerDown(makeSnap({ x: 2, y: 5, z: 3, kind: 'face' }), {
+      origin: [2, 0, 3],
+      direction: [0, 1, 0],
+    })
+
+    expect(scene.split_face_inner_in_instance).toHaveBeenCalledTimes(1)
+    const [, , , loopPts] = (scene.split_face_inner_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    const ys: number[] = []
+    for (let i = 1; i < (loopPts as Float64Array).length; i += 3) ys.push((loopPts as Float64Array)[i])
+    // Every corner lies in the posed Y=5 plane — proof the normal was
+    // actually mapped through the pose, not left at the raw local (0,0,1).
+    for (const y of ys) expect(y).toBeCloseTo(5, 9)
   })
 })

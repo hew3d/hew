@@ -3,7 +3,7 @@ import * as THREE from 'three'
 import { PolygonTool, DEFAULT_POLYGON_SIDES, MIN_POLYGON_SIDES, MAX_POLYGON_SIDES } from './PolygonTool'
 import { makeSketchPlaneCache } from './sketchGesture'
 import { groundDrawPlane, planeKey } from './drawPlane'
-import type { Snap } from './types'
+import { toolHasArmedGesture, type Snap, type Tool } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
@@ -20,11 +20,11 @@ function makeKeyEvent(key: string): KeyboardEvent {
 }
 
 /** A fake `FacePickJs` returning the seeded handles. */
-function makePick(object: bigint, face: bigint) {
+function makePick(object: bigint, face: bigint, instance?: bigint) {
   return {
     object: () => object,
     face: () => face,
-    instance: () => undefined,
+    instance: () => instance,
     free: vi.fn(),
   }
 }
@@ -82,6 +82,12 @@ function makeWasmScene(opts: {
       return 99n
     }),
     split_face_inner_with_curve: vi.fn(() => 99n),
+    split_face_inner_in_instance: vi.fn(() => 99n),
+    begin_sketch_on_plane_in_instance: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
+    instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
   } as unknown as WasmScene
 }
 
@@ -424,7 +430,7 @@ describe('PolygonTool — face mode', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center on face
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim click
@@ -444,7 +450,7 @@ describe('PolygonTool — face mode', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center on face
     expect(tool.capturingInput()).toBe(true)
@@ -466,7 +472,7 @@ describe('PolygonTool — face mode', () => {
     const pick = makePick(999n, 3n) // not the active context (7n)
     const scene = makeWasmScene({ pick })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     expect(tool.capturingInput()).toBe(false)
@@ -476,7 +482,7 @@ describe('PolygonTool — face mode', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, splitFaceThrows: true })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
@@ -535,5 +541,73 @@ describe('PolygonTool — capturingInput scoping', () => {
     expect(tool.capturingInput()).toBe(false)
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+describe('PolygonTool — hasArmedGesture (Escape routing, component-edit-parity.md phase A2)', () => {
+  // capturingInput() alone misses the idle-locked case: an idle plane lock is
+  // not "capturing input" but Escape still has tool-local work to do (clear
+  // the lock) before a context-pop is appropriate — see toolHasArmedGesture
+  // in tools/types.ts and the RectangleTool/LineTool coverage in
+  // idlePlaneLock.test.ts (Polygon isn't in that shared driver suite, so it
+  // gets its own copy here).
+  it('an idle plane lock arms the tool even though capturingInput() is false', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const asTool = tool as unknown as Tool
+
+    expect(toolHasArmedGesture(asTool)).toBe(false)
+    tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(tool.capturingInput()).toBe(false) // idle-locked, not anchored
+    expect(toolHasArmedGesture(asTool)).toBe(true)
+  })
+
+  it('one Escape clears an idle plane lock and the tool reports unarmed afterward', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const asTool = tool as unknown as Tool
+
+    tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(toolHasArmedGesture(asTool)).toBe(true)
+
+    tool.onKey(makeKeyEvent('Escape')) // idle-locked: Escape clears the lock, nothing else
+    expect(toolHasArmedGesture(asTool)).toBe(false)
+  })
+})
+
+describe('PolygonTool — instance editing context (component-edit-parity.md phase A2)', () => {
+  const INSTANCE = 42n
+  const COMPONENT = 5n
+
+  it('face mode routes to split_face_inner_in_instance, never the world variant', () => {
+    const pick = makePick(7n, 3n, INSTANCE)
+    const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
+    const { tool, onFaceImprint } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
+
+    expect(scene.split_face_inner_in_instance).toHaveBeenCalledTimes(1)
+    const [instance, object, face] = (scene.split_face_inner_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(instance).toBe(INSTANCE)
+    expect(object).toBe(7n)
+    expect(face).toBe(3n)
+    expect(scene.split_face_inner).not.toHaveBeenCalled()
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+  })
+
+  it('plane mode on empty space mints a def-owned sketch via begin_sketch_on_plane_in_instance', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    tool.onPointerDown(makeSnap({ x: 6, y: 1, z: 0 }), { origin: [6, 1, 5], direction: [0, 0, -1] })
+    tool.onPointerDown(makeSnap({ x: 9, y: 1, z: 0 }), { origin: [9, 1, 5], direction: [0, 0, -1] })
+
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.sketch_begin_polygon_with).toHaveBeenCalledWith(expect.any(BigInt), 1, 1, 0, expect.closeTo(3, 6))
   })
 })
