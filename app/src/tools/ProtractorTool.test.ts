@@ -4,6 +4,7 @@ import { ProtractorTool } from './ProtractorTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 
 const RAY: Ray = { origin: [0, 0, 0], direction: [0, 0, -1] }
 
@@ -239,6 +240,11 @@ describe('ProtractorTool — screen-constant disk scaling', () => {
     const desiredPixels = (0.03 * REF_VIEWPORT_H) / tanHalf(REF_FOV_DEG)
     return (desiredPixels * dist * tanHalf(fovDeg)) / viewportH
   }
+  /** `updateDiskScale` now takes a `worldPerPixel` callback (the CameraRig
+   * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
+   * pair. */
+  const wppPerspective = (fovDeg: number, viewportH: number) => (dist: number) =>
+    worldPerPixelPerspective(dist, fovDeg, viewportH)
 
   it('updateDiskScale matches the old DISK_SCREEN_K * dist size at the reference fov/viewport', () => {
     const { tool, preview } = makeTool()
@@ -248,7 +254,7 @@ describe('ProtractorTool — screen-constant disk scaling', () => {
     const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
     camera.position.set(1, 2, 10) // 10 m straight up from the disk center (1,2,0)
 
-    tool.updateDiskScale(camera, REF_VIEWPORT_H)
+    tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, REF_VIEWPORT_H))
 
     const dist = camera.position.distanceTo(disk.position)
     expect(dist).toBeCloseTo(10, 9)
@@ -268,7 +274,7 @@ describe('ProtractorTool — screen-constant disk scaling', () => {
     for (const fov of [20, 45, 70, 100]) {
       const camera = new THREE.PerspectiveCamera(fov)
       camera.position.set(0, 0, 10)
-      tool.updateDiskScale(camera, REF_VIEWPORT_H)
+      tool.updateDiskScale(camera, wppPerspective(fov, REF_VIEWPORT_H))
       const dist = camera.position.distanceTo(disk.position)
       const expected = expectedScale(dist, fov, REF_VIEWPORT_H)
       expect(disk.scale.x).toBeCloseTo(expected, 9)
@@ -283,7 +289,7 @@ describe('ProtractorTool — screen-constant disk scaling', () => {
     camera.position.set(0, 0, 10)
 
     for (const viewportH of [400, 720, 1200]) {
-      tool.updateDiskScale(camera, viewportH)
+      tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, viewportH))
       const dist = camera.position.distanceTo(disk.position)
       const expected = expectedScale(dist, REF_FOV_DEG, viewportH)
       expect(disk.scale.x).toBeCloseTo(expected, 9)
@@ -295,23 +301,33 @@ describe('ProtractorTool — screen-constant disk scaling', () => {
     const camera = new THREE.PerspectiveCamera()
     camera.position.set(0, 0, 10)
     // No pointer move yet -> previewDisk is null. Should not throw.
-    expect(() => tool.updateDiskScale(camera, REF_VIEWPORT_H)).not.toThrow()
+    expect(() => tool.updateDiskScale(camera, wppPerspective(45, REF_VIEWPORT_H))).not.toThrow()
   })
 
-  it('updateDiskScale is a no-op for a non-perspective camera or a degenerate viewport height', () => {
+  it('a degenerate (zero) worldPerPixel collapses the disk to a defined zero size, rather than leaving a stale scale', () => {
     const { tool, preview } = makeTool()
     tool.onPointerMove(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), RAY)
     const disk = preview.children[0]
-    const before = disk.scale.x
+    const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
+    camera.position.set(0, 0, 10)
+    tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, 0))
+    expect(disk.scale.x).toBe(0)
+  })
+
+  it('DESIGN CHANGE: works under an orthographic (parallel-projection) camera too — no longer silently hidden', () => {
+    // Before Phase 1, an `instanceof PerspectiveCamera` guard made this a
+    // no-op under ortho — the protractor disk would silently vanish the
+    // moment the user toggled Parallel Projection.
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), RAY)
+    const disk = preview.children[0]
 
     const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
     ortho.position.set(0, 0, 10)
-    tool.updateDiskScale(ortho, REF_VIEWPORT_H)
-    expect(disk.scale.x).toBe(before)
-
-    const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
-    camera.position.set(0, 0, 10)
-    tool.updateDiskScale(camera, 0)
-    expect(disk.scale.x).toBe(before)
+    const wppOrtho = worldPerPixelOrtho(4, 1, REF_VIEWPORT_H)
+    tool.updateDiskScale(ortho, () => wppOrtho)
+    const expected = ((0.03 * REF_VIEWPORT_H) / tanHalf(REF_FOV_DEG)) * wppOrtho / 2
+    expect(disk.scale.x).toBeCloseTo(expected, 9)
+    expect(disk.scale.x).toBeGreaterThan(0)
   })
 })

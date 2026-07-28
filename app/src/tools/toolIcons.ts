@@ -30,9 +30,13 @@ import architectureSvg from '@material-symbols/svg-400/outlined/architecture.svg
 import threeDRotationSvg from '@material-symbols/svg-400/outlined/3d_rotation.svg?raw'
 import panToolSvg from '@material-symbols/svg-400/outlined/pan_tool.svg?raw'
 import zoomInSvg from '@material-symbols/svg-400/outlined/zoom_in.svg?raw'
+import zoomInMapSvg from '@material-symbols/svg-400/outlined/zoom_in_map.svg?raw'
 import contentCutSvg from '@material-symbols/svg-400/outlined/content_cut.svg?raw'
 import dragPanSvg from '@material-symbols/svg-400/outlined/drag_pan.svg?raw'
 import verticalSplitSvg from '@material-symbols/svg-400/outlined/vertical_split.svg?raw'
+import personPinSvg from '@material-symbols/svg-400/outlined/person_pin.svg?raw'
+import threeSixtySvg from '@material-symbols/svg-400/outlined/360.svg?raw'
+import directionsWalkSvg from '@material-symbols/svg-400/outlined/directions_walk.svg?raw'
 
 /** Keep in sync with the `ToolName` union in App.tsx (not imported here to
  * avoid a UI-module -> App.tsx dependency edge; the key set is asserted by
@@ -59,6 +63,10 @@ export type ToolName =
   | 'Orbit'
   | 'Pan'
   | 'Zoom'
+  | 'Zoom Window'
+  | 'Position Camera'
+  | 'Look Around'
+  | 'Walk'
 
 /** Raw Material Symbols SVG markup for each tool. */
 export const TOOL_ICON_SVG: Record<ToolName, string> = {
@@ -83,6 +91,10 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Orbit': threeDRotationSvg,
   'Pan': panToolSvg,
   'Zoom': zoomInSvg,
+  'Zoom Window': zoomInMapSvg,
+  'Position Camera': personPinSvg,
+  'Look Around': threeSixtySvg,
+  'Walk': directionsWalkSvg,
 }
 
 /** Per-tool cursor hotspot, expressed as a fraction of the 32x32 cursor
@@ -110,6 +122,10 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Orbit': { x: 0.5, y: 0.5 },
   'Pan': { x: 0.5, y: 0.5 },
   'Zoom': { x: 0.5, y: 0.5 },
+  'Zoom Window': { x: 0.5, y: 0.5 },
+  'Position Camera': { x: 0.1, y: 0.9 },
+  'Look Around': { x: 0.5, y: 0.5 },
+  'Walk': { x: 0.5, y: 0.5 },
 }
 
 const CURSOR_SIZE = 32

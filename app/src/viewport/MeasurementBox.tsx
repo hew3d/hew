@@ -18,6 +18,11 @@ const VCB_LABEL: Record<string, string> = {
   'Tape Measure': 'Distance',
   'Protractor': 'Angle',
   'Follow Me': 'Swept length',
+  // Camera ▸ Field of View activates the same 'Zoom' camera mode as
+  // Camera ▸ Zoom / the Z shortcut (docs/design/camera.md §2) — the label
+  // only ever shows while a value is present (MeasurementBox returns null
+  // otherwise), i.e. only while the typed-FOV buffer is actually open.
+  'Zoom': 'Field of View',
 }
 
 export interface MeasurementBoxProps {

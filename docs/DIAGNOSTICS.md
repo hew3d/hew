@@ -256,15 +256,38 @@ interpretation, present only when captured (omitted entirely when empty):
   "mods": { "shift": false, "alt": false, "ctrl": false, "meta": false } }
 ```
 
+```jsonc
+{ "kind": "camera", "seq": 1, "t": 3, "gesture": 1,
+  "position": [8, 6, 8], "target": [0, 0, 0], "up": [0, 0, 1], "fovDeg": 45,
+  "projection": "parallel", "orthoFrustumHeight": 12.4, "orthoZoom": 1 }
+```
+
 Discriminated by `kind`: `pointerdown` / `pointermove` / `pointerup` /
 `camera` / `keydown`. `seq` is a global monotonic counter; `t` is milliseconds
 since capture start (pacing, not identity); `gesture` is a per-gesture
 correlation id that increments on each `pointerdown`. Pointer coordinates are
-CSS pixels relative to the viewport canvas's top-left corner. A `camera`
-event carries `position` / `target` / `up` / `fovDeg`, enough to rebuild the
-camera and its orbit target. A recording with only `calls` (no `input`) is
-still a complete, valid recording — the input layer is a diagnostic
-supplement, not a requirement.
+CSS pixels relative to the viewport canvas's top-left corner.
+
+A `camera` event carries `position` / `target` / `up` / `fovDeg`, enough to
+rebuild the camera and its orbit target under perspective. Two fields are
+additive (present only in recordings captured after Parallel Projection
+shipped; absent on an older recording implies perspective throughout, so
+nothing pre-existing needs backfilling):
+
+- `projection` (`"perspective" | "parallel"`, optional) — the active
+  projection at capture time. `fovDeg` is always the PERSISTED perspective
+  fov regardless of `projection` (`CameraRig` keeps it across toggles) — a
+  `"parallel"` capture's `fovDeg` is what the camera would return to on a
+  toggle back, not a meaningful "current" fov.
+- `orthoFrustumHeight` / `orthoZoom` (optional numbers) — present only when
+  `projection` is `"parallel"`; absent under perspective, where no ortho
+  frustum is in play. The minimal pair needed to reconstruct the
+  orthographic frustum: half-height = `orthoFrustumHeight / (2 *
+  orthoZoom)`, half-width scales that by the replay viewport's own aspect
+  ratio (frustum width itself is never recorded, only derived).
+
+A recording with only `calls` (no `input`) is still a complete, valid
+recording — the input layer is a diagnostic supplement, not a requirement.
 
 ### Replay
 

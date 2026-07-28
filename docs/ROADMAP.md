@@ -141,7 +141,19 @@ below.
   face translated far enough can pass through a disjoint shell of the
   same Object); the generalized-push/pull effort builds them for its
   stretch path, and translate mode follows at that integration
-- Standard camera views (Top, Front, Iso, etc.) plus orbit/pan/zoom navigation
+- Standard camera views (Top, Front, Iso, etc.), orbit/pan/zoom navigation,
+  and a Parallel Projection toggle (true orthographic, not a narrowed
+  field of view) that keeps every screen-constant widget (transform grips,
+  protractor/rotate disks, section-plane and slice previews) correctly
+  sized in both projections; a typed Field of View control; Zoom Window
+  (drag a rectangle to frame it)
+- Position Camera, Look Around, and Walk: first-person camera placement
+  and walkthrough navigation (click or drag to stand and look, mouse-look,
+  and forward/turn/strafe movement), sharing one session eye height that's
+  typed like any other measurement
+- The working camera view (projection, field of view, eye, target, and up)
+  is saved with the document and restored on load — optional and additive,
+  so older files are unaffected and simply open to today's home framing
 - Full undo/redo across the whole document
 
 ### Inference & precision

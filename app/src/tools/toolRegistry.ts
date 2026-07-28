@@ -78,6 +78,15 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Orbit', macKey: 'O', winKey: 'O' },
   { name: 'Pan', macKey: 'H', winKey: 'H' },
   { name: 'Zoom', macKey: 'Z', winKey: 'Z' },
+  // Zoom Window (docs/design/camera.md §3): no default bare-letter shortcut
+  // in v1 — SketchUp ships none for it either (menu + command palette only).
+  { name: 'Zoom Window', macKey: '', winKey: '' },
+  // Position Camera / Look Around / Walk (docs/design/camera.md §4): no
+  // default bare-letter shortcuts in v1 — SketchUp ships none for these
+  // either (menu + command palette only).
+  { name: 'Position Camera', macKey: '', winKey: '' },
+  { name: 'Look Around', macKey: '', winKey: '' },
+  { name: 'Walk', macKey: '', winKey: '' },
 ]
 
 /** Every tool name, in registry order — replaces the old App.tsx `TOOLS` const. */

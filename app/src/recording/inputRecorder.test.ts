@@ -125,4 +125,34 @@ describe('inputRecorder', () => {
     expect(snapshot).toHaveLength(1) // unaffected by the later record
     expect(rec.peek()).toHaveLength(2)
   })
+
+  it('captures CameraInput.projection (additive, omitted defaults to perspective)', () => {
+    rec.start()
+    // Omitted `projection` (existing perspective-only call sites) — the
+    // field must simply be absent, not coerced to a literal 'perspective'.
+    rec.recordCamera([0, 0, 5], [0, 0, 0], [0, 0, 1], 45)
+    // Explicit 'parallel', with its additive ortho frustum/zoom pair.
+    rec.recordCamera([0, 0, 5], [0, 0, 0], [0, 0, 1], 45, 'parallel', 12.4, 2)
+    const [persp, parallel] = rec.take()
+    expect(persp.kind).toBe('camera')
+    if (persp.kind === 'camera') {
+      expect(persp.projection).toBeUndefined()
+      expect(persp.orthoFrustumHeight).toBeUndefined()
+      expect(persp.orthoZoom).toBeUndefined()
+    }
+    expect(parallel.kind).toBe('camera')
+    if (parallel.kind === 'camera') {
+      expect(parallel.projection).toBe('parallel')
+      expect(parallel.orthoFrustumHeight).toBe(12.4)
+      expect(parallel.orthoZoom).toBe(2)
+    }
+  })
+
+  it('round-trips CameraInput.projection through a JSON serialize/parse (the shape a recording artifact goes through)', () => {
+    rec.start()
+    rec.recordCamera([1, 2, 3], [0, 0, 0], [0, 0, 1], 45, 'parallel', 8, 1.5)
+    const [ev] = rec.take()
+    const replayed = JSON.parse(JSON.stringify(ev)) as typeof ev
+    expect(replayed).toEqual(ev)
+  })
 })

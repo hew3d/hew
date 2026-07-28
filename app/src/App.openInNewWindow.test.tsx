@@ -56,6 +56,8 @@ const mockScene = {
   can_scene_redo: () => false,
   save: () => new Uint8Array(),
   load: vi.fn(),
+  camera_state: () => undefined,
+  set_camera_state: vi.fn(),
   node_parent: () => undefined as bigint | undefined,
   material_ids: () => new BigUint64Array(),
   material_info: () => undefined,

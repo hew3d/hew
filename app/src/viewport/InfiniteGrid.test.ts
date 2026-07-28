@@ -67,6 +67,31 @@ describe('InfiniteGrid', () => {
     expect(material.uniforms.uAxesVisible.value).toBe(1)
   })
 
+  it('update() defaults uLodDistanceOverride to -1 (per-fragment distance, perspective behavior)', () => {
+    const grid = new InfiniteGrid(0x0c0e11, 0x282c32, 0x454b54)
+    const material = grid.mesh.material as THREE.ShaderMaterial
+    expect(material.uniforms.uLodDistanceOverride.value).toBe(-1)
+    grid.update(new THREE.Vector3(1, 2, 3))
+    expect(material.uniforms.uLodDistanceOverride.value).toBe(-1)
+  })
+
+  it('update() sets uLodDistanceOverride when passed (parallel-projection LOD pin, camera.md §1)', () => {
+    const grid = new InfiniteGrid(0x0c0e11, 0x282c32, 0x454b54)
+    const material = grid.mesh.material as THREE.ShaderMaterial
+    grid.update(new THREE.Vector3(1, 2, 3), 12.5)
+    expect(material.uniforms.uLodDistanceOverride.value).toBe(12.5)
+    // Passing null (or omitting) again restores the per-fragment default.
+    grid.update(new THREE.Vector3(1, 2, 3), null)
+    expect(material.uniforms.uLodDistanceOverride.value).toBe(-1)
+  })
+
+  it('the fragment shader branches on uLodDistanceOverride instead of always using per-fragment distance', () => {
+    const grid = new InfiniteGrid(0x0c0e11, 0x282c32, 0x454b54)
+    const material = grid.mesh.material as THREE.ShaderMaterial
+    expect(material.fragmentShader).toContain('uniform float uLodDistanceOverride')
+    expect(material.fragmentShader).toMatch(/uLodDistanceOverride\s*>=\s*0\.0\s*\?\s*uLodDistanceOverride/)
+  })
+
   it('the fragment shader suppresses through-origin lines only when uAxesVisible is set (contains the origin-line mask wired behind the uniform)', () => {
     const grid = new InfiniteGrid(0x0c0e11, 0x282c32, 0x454b54)
     const material = grid.mesh.material as THREE.ShaderMaterial

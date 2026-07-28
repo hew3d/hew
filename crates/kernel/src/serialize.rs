@@ -16,6 +16,7 @@ use std::io::{Cursor, Read, Seek, Write};
 use serde::{Deserialize, Serialize};
 use slotmap::SecondaryMap;
 
+use crate::camera::{CameraProjection, CameraState};
 use crate::error::TopologyError;
 use crate::guide::Guide;
 use crate::ids::{
@@ -137,11 +138,26 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// read direction; a v11 reader given a v12 file loses only the distinction
 /// (it would read a polygon as a circle), which is why the version moves.
 /// Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 5).
-/// v13: `sketches[].owner` (component-edit-parity.md phase K1) — the
-/// `SketchOwner`: absent means world-owned (the only possibility before this
-/// phase, so every pre-v13 file loads unchanged); present names the dense id
-/// of the owning [`ComponentDto`]. Geometry buffer unchanged
-/// (`GEOMETRY_FORMAT_VERSION` stays 6).
+/// v13: a shared landing spot — two branches in flight at the same time
+/// (component-edit, camera) both bumped `MANIFEST_FORMAT_VERSION` 12→13 for
+/// their own additive fields; both land together here rather than
+/// splitting into 13/14, per the note this replaces.
+///
+/// - `sketches[].owner` (component-edit-parity.md phase K1) — the
+///   `SketchOwner`: absent means world-owned (the only possibility before
+///   this phase, so every pre-v13 file loads unchanged); present names the
+///   dense id of the owning [`ComponentDto`].
+/// - an optional top-level `camera` block — `{projection, fov_deg, eye,
+///   target, up}`, the working view at last save (docs/design/camera.md §5;
+///   see `CameraDto`). Absent in v1-v12 files (and in any v13 document that
+///   never called `Document::set_camera_state`) → the app falls back to
+///   today's home framing, exactly as before this version existed. NOT
+///   undoable (`camera.rs`'s module doc) — this is view state, not a
+///   document edit, mirroring the tag-visibility registry (v5) and
+///   user-hidden-node flags (v6) already on this list.
+///
+/// Geometry buffer unchanged by either field (`GEOMETRY_FORMAT_VERSION`
+/// stays 6).
 pub const MANIFEST_FORMAT_VERSION: u32 = 13;
 
 /// The manifest version at which the stored sketch–solid claim fields
@@ -159,6 +175,14 @@ pub(crate) const MANIFEST_CLAIMS_RETIRED_VERSION: u32 = 11;
 /// malformed for its own declared version and is rejected, never silently
 /// honored (reject-not-repair).
 pub(crate) const SKETCH_OWNER_MIN_VERSION: u32 = 13;
+
+/// The manifest version at which the top-level `camera` block was
+/// introduced (docs/design/camera.md §5). A file declaring an OLDER version
+/// that still carries a `camera` block is malformed for its own declared
+/// version and is rejected (reject-not-repair) — no legitimate pre-v13
+/// writer ever emitted one, so its presence means a hand-edited or smuggled
+/// field, not a real older camera.
+pub(crate) const CAMERA_MANIFEST_VERSION: u32 = 13;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -1359,7 +1383,33 @@ pub(crate) struct Manifest {
     /// files → empty registry (all node-carried tags visible).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<TagDto>,
+    /// The working camera view at last save (manifest v13+; docs/design/
+    /// camera.md §5). Absent → the app falls back to today's home framing:
+    /// always in a v1-v12 file, and in a v13+ document that never called
+    /// `Document::set_camera_state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<CameraDto>,
 }
+
+/// The working camera view (manifest v13+; docs/design/camera.md §5). NOT
+/// undoable (`camera.rs`'s module doc) — saved on document save, applied on
+/// load, never touching `Document::undo`/`redo`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CameraDto {
+    /// `"perspective"` | `"parallel"`.
+    pub projection: String,
+    /// Perspective vertical field of view, degrees (meaningless but still
+    /// stored under `"parallel"` — see [`crate::camera::CameraState`]).
+    pub fov_deg: f64,
+    pub eye: [f64; 3],
+    pub target: [f64; 3],
+    pub up: [f64; 3],
+}
+
+/// The [`CameraDto::projection`] token for [`CameraProjection::Perspective`].
+pub(crate) const CAMERA_PROJECTION_PERSPECTIVE: &str = "perspective";
+/// The [`CameraDto::projection`] token for [`CameraProjection::Parallel`].
+pub(crate) const CAMERA_PROJECTION_PARALLEL: &str = "parallel";
 
 /// A tag metadata entry (manifest v5+).
 #[derive(Debug, Serialize, Deserialize)]
@@ -1658,6 +1708,10 @@ pub(crate) struct DocSaveData {
     pub obj_hidden: std::collections::BTreeSet<ObjectId>,
     pub group_hidden: std::collections::BTreeSet<GroupId>,
     pub instance_hidden: std::collections::BTreeSet<InstanceId>,
+    /// The working camera view at last save (manifest v13+; docs/design/
+    /// camera.md §5), or `None` if none was ever set — NOT undoable (see
+    /// `camera.rs`), same posture as the tag/hidden fields above.
+    pub camera: Option<CameraState>,
 }
 
 /// Encodes a complete document into `.hew` zip bytes (HEW_FILE_FORMAT.md).
@@ -1888,6 +1942,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 hidden: *hidden,
             })
             .collect(),
+        camera: data.camera.map(encode_camera),
     };
 
     let manifest_json =
@@ -2050,6 +2105,9 @@ pub(crate) struct DocLoadRaw {
     pub obj_hidden: Vec<bool>,
     pub group_hidden: Vec<bool>,
     pub instance_hidden: Vec<bool>,
+    /// The working camera view at last save (manifest v13+; `None` for
+    /// older files or a v13+ document that never saved one).
+    pub camera: Option<CameraState>,
 }
 
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
@@ -2133,6 +2191,10 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Validate manifest references.
     validate_manifest_references(&manifest, obj_count, mat_count)?;
 
+    // Decode the camera block (manifest v13+; already confirmed absent for
+    // older declared versions by `validate_manifest_references`).
+    let camera = manifest.camera.as_ref().map(decode_camera).transpose()?;
+
     // Build def membership: for each object dense id, which component owns it?
     let mut def_membership: Vec<Option<u32>> = vec![None; obj_count];
     for (ci, comp) in manifest.components.iter().enumerate() {
@@ -2188,6 +2250,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         obj_hidden: manifest.objects.iter().map(|o| o.hidden).collect(),
         group_hidden: manifest.groups.iter().map(|g| g.hidden).collect(),
         instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
+        camera,
     })
 }
 
@@ -2330,6 +2393,20 @@ fn validate_manifest_references(
             what: format!(
                 "a v{} manifest must not carry a consumed list (retired at v{})",
                 manifest.format_version, MANIFEST_CLAIMS_RETIRED_VERSION
+            ),
+        });
+    }
+
+    // A `camera` block predates its own introduced version: a file
+    // declaring an older format that still carries one is malformed for its
+    // declared version (hand-edited or a broken/smuggled writer), never
+    // silently accepted as "an early camera block" (reject-not-repair,
+    // mirroring the `consumed`-list check just above).
+    if manifest.format_version < CAMERA_MANIFEST_VERSION && manifest.camera.is_some() {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry a camera block (introduced at v{})",
+                manifest.format_version, CAMERA_MANIFEST_VERSION
             ),
         });
     }
@@ -2605,6 +2682,178 @@ fn decode_guide(dto: &GuideDto) -> Result<Guide, LoadError> {
         other => Err(LoadError::MalformedManifest {
             what: format!("guide {} has unknown kind '{other}'", dto.id),
         }),
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Camera view-state reconstruction (manifest v13+; docs/design/camera.md §5)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Encodes a [`CameraState`] into its [`CameraDto`] wire form.
+fn encode_camera(state: CameraState) -> CameraDto {
+    let projection = match state.projection {
+        CameraProjection::Perspective => CAMERA_PROJECTION_PERSPECTIVE,
+        CameraProjection::Parallel => CAMERA_PROJECTION_PARALLEL,
+    }
+    .to_string();
+    CameraDto {
+        projection,
+        fov_deg: state.fov_deg,
+        eye: [state.eye.x, state.eye.y, state.eye.z],
+        target: [state.target.x, state.target.y, state.target.z],
+        up: [state.up.x, state.up.y, state.up.z],
+    }
+}
+
+/// Decodes a [`CameraDto`] into a [`CameraState`], rejecting (never
+/// repairing) a malformed entry: an unknown `projection` token or a
+/// non-finite coordinate/fov.
+fn decode_camera(dto: &CameraDto) -> Result<CameraState, LoadError> {
+    let projection = match dto.projection.as_str() {
+        CAMERA_PROJECTION_PERSPECTIVE => CameraProjection::Perspective,
+        CAMERA_PROJECTION_PARALLEL => CameraProjection::Parallel,
+        other => {
+            return Err(LoadError::MalformedManifest {
+                what: format!("camera has unknown projection '{other}'"),
+            });
+        }
+    };
+    let eye = Point3::new(dto.eye[0], dto.eye[1], dto.eye[2]);
+    let target = Point3::new(dto.target[0], dto.target[1], dto.target[2]);
+    let up = Vec3::new(dto.up[0], dto.up[1], dto.up[2]);
+    if !dto.fov_deg.is_finite()
+        || !eye.x.is_finite()
+        || !eye.y.is_finite()
+        || !eye.z.is_finite()
+        || !target.x.is_finite()
+        || !target.y.is_finite()
+        || !target.z.is_finite()
+        || !up.x.is_finite()
+        || !up.y.is_finite()
+        || !up.z.is_finite()
+    {
+        return Err(LoadError::MalformedManifest {
+            what: "camera has a non-finite fov or coordinate".to_string(),
+        });
+    }
+    Ok(CameraState {
+        projection,
+        fov_deg: dto.fov_deg,
+        eye,
+        target,
+        up,
+    })
+}
+
+#[cfg(test)]
+mod camera_manifest_tests {
+    use super::*;
+
+    fn empty_manifest(format_version: u32, camera: Option<CameraDto>) -> Manifest {
+        Manifest {
+            format_version,
+            geometry_version: GEOMETRY_FORMAT_VERSION,
+            app: "hew".to_string(),
+            app_version: "0.1.0".to_string(),
+            materials: Vec::new(),
+            objects: Vec::new(),
+            groups: Vec::new(),
+            components: Vec::new(),
+            instances: Vec::new(),
+            sketches: Vec::new(),
+            roots: Vec::new(),
+            consumed: Vec::new(),
+            guides: Vec::new(),
+            tags: Vec::new(),
+            camera,
+        }
+    }
+
+    fn a_camera_dto() -> CameraDto {
+        CameraDto {
+            projection: CAMERA_PROJECTION_PERSPECTIVE.to_string(),
+            fov_deg: 45.0,
+            eye: [0.0, 0.0, 5.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 0.0, 1.0],
+        }
+    }
+
+    /// A manifest declaring a version BEFORE `camera` existed
+    /// (`CAMERA_MANIFEST_VERSION`) that still carries a `camera` block is
+    /// malformed for its own declared version — a hand-edited or smuggled
+    /// field, never silently accepted as "an early camera" (reject-not-repair,
+    /// mirroring the `consumed`-list check this test sits beside).
+    #[test]
+    fn smuggled_camera_block_on_a_pre_v13_manifest_refuses_typed() {
+        let manifest = empty_manifest(CAMERA_MANIFEST_VERSION - 1, Some(a_camera_dto()));
+        match validate_manifest_references(&manifest, 0, 0) {
+            Err(LoadError::MalformedManifest { what }) => {
+                assert!(
+                    what.contains("camera"),
+                    "rejected for the wrong reason: {what}"
+                );
+            }
+            other => panic!("expected a typed MalformedManifest error, got {other:?}"),
+        }
+    }
+
+    /// The same manifest version WITHOUT a camera block is fine — the check
+    /// only fires on the smuggled block itself, not on every old version.
+    #[test]
+    fn pre_v13_manifest_without_a_camera_block_is_accepted() {
+        let manifest = empty_manifest(CAMERA_MANIFEST_VERSION - 1, None);
+        assert!(validate_manifest_references(&manifest, 0, 0).is_ok());
+    }
+
+    /// A v13+ manifest WITH a camera block is fine — this is the ordinary,
+    /// legitimate case the version was introduced for.
+    #[test]
+    fn v13_manifest_with_a_camera_block_is_accepted() {
+        let manifest = empty_manifest(CAMERA_MANIFEST_VERSION, Some(a_camera_dto()));
+        assert!(validate_manifest_references(&manifest, 0, 0).is_ok());
+    }
+
+    /// `decode_camera` round-trips every field through `encode_camera`,
+    /// including the `"parallel"` projection token.
+    #[test]
+    fn camera_encode_decode_round_trips_both_projections() {
+        for projection in [CameraProjection::Perspective, CameraProjection::Parallel] {
+            let state = CameraState {
+                projection,
+                fov_deg: 62.5,
+                eye: Point3::new(1.0, 2.0, 3.0),
+                target: Point3::new(-1.0, 0.5, 0.0),
+                up: Vec3::new(0.0, 0.0, 1.0),
+            };
+            let dto = encode_camera(state);
+            let decoded = decode_camera(&dto).expect("a well-formed CameraDto decodes");
+            assert_eq!(decoded, state);
+        }
+    }
+
+    /// An unknown `projection` token is rejected typed, not defaulted.
+    #[test]
+    fn decode_camera_rejects_an_unknown_projection_token() {
+        let mut dto = a_camera_dto();
+        dto.projection = "isometric".to_string();
+        match decode_camera(&dto) {
+            Err(LoadError::MalformedManifest { what }) => {
+                assert!(what.contains("isometric"));
+            }
+            other => panic!("expected a typed MalformedManifest error, got {other:?}"),
+        }
+    }
+
+    /// A non-finite coordinate is rejected typed, not silently accepted.
+    #[test]
+    fn decode_camera_rejects_a_non_finite_coordinate() {
+        let mut dto = a_camera_dto();
+        dto.eye[1] = f64::NAN;
+        assert!(matches!(
+            decode_camera(&dto),
+            Err(LoadError::MalformedManifest { .. })
+        ));
     }
 }
 

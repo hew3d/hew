@@ -4,6 +4,14 @@ import { ScaleTool } from './ScaleTool'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
+import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
+
+/** `updateGripScale` now takes a `worldPerPixel` callback (the CameraRig
+ * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
+ * pair — this is what a real Viewport would build from `rig.worldPerPixel`
+ * for a perspective camera at the given fov/viewport. */
+const wppPerspective = (fovDeg: number, viewportH: number) => (dist: number) =>
+  worldPerPixelPerspective(dist, fovDeg, viewportH)
 
 function rayThrough(x: number, y: number): Ray {
   return { origin: [x, y, 5], direction: [0, 0, -1] }
@@ -465,7 +473,7 @@ describe('ScaleTool — gizmo lifecycle (no viewport leak)', () => {
     tool.cancel()
 
     const before = meshes.map((m) => m.scale.x)
-    tool.updateGripScale(new THREE.PerspectiveCamera(50, 1, 0.01, 100), 800)
+    tool.updateGripScale(new THREE.PerspectiveCamera(50, 1, 0.01, 100), wppPerspective(50, 800))
     expect(meshes.map((m) => m.scale.x)).toEqual(before) // untouched
   })
 
@@ -526,7 +534,7 @@ describe('ScaleTool — screen-constant grip markers (updateGripScale)', () => {
     const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100)
     camera.position.set(0, -6, 3)
     const height = 800
-    tool.updateGripScale(camera, height)
+    tool.updateGripScale(camera, wppPerspective(50, height))
 
     const tanHalf = Math.tan((50 * Math.PI) / 360)
     const halves = meshes.map((m) => {
@@ -550,7 +558,7 @@ describe('ScaleTool — screen-constant grip markers (updateGripScale)', () => {
     // below 0.05 → the same near-miss ray now misses.
     const tight = makeBoxTool()
     tight.tool.activate()
-    tight.tool.updateGripScale(new THREE.PerspectiveCamera(10, 1, 0.01, 100), 4000)
+    tight.tool.updateGripScale(new THREE.PerspectiveCamera(10, 1, 0.01, 100), wppPerspective(10, 4000))
     tight.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayMissing(grip, missBy))
     expect(tight.tool.capturingInput()).toBe(false)
 
@@ -558,7 +566,7 @@ describe('ScaleTool — screen-constant grip markers (updateGripScale)', () => {
     // past 0.05 → the near-miss ray grabs the grip.
     const loose = makeBoxTool()
     loose.tool.activate()
-    loose.tool.updateGripScale(new THREE.PerspectiveCamera(90, 1, 0.01, 100), 200)
+    loose.tool.updateGripScale(new THREE.PerspectiveCamera(90, 1, 0.01, 100), wppPerspective(90, 200))
     loose.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayMissing(grip, missBy))
     expect(loose.tool.capturingInput()).toBe(true)
   })
@@ -576,7 +584,7 @@ describe('ScaleTool — screen-constant grip markers (updateGripScale)', () => {
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100)
     camera.position.set(0.06, -0.5, 0.02)
-    tool.updateGripScale(camera, 900)
+    tool.updateGripScale(camera, wppPerspective(45, 900))
 
     // From just past the near end, aiming down the box's length with a tiny
     // outward drift: every near-end grip is missed by ~0.02–0.04 m (far
@@ -592,20 +600,40 @@ describe('ScaleTool — screen-constant grip markers (updateGripScale)', () => {
     expect(tool.capturingInput()).toBe(true)
   })
 
-  it('before the first tick (and for a non-perspective camera) the placeholder size and fallback tolerance hold', () => {
+  it('before the first tick, the placeholder size and fallback tolerance hold', () => {
     const { tool, preview } = makeBoxTool()
     tool.activate()
     const meshes = gripMeshes(preview)
-    for (const m of meshes) expect(m.scale.x).toBeCloseTo(FALLBACK_HALF, 10)
-
-    // A non-perspective camera is a no-op: sizes unchanged, nothing cached.
-    tool.updateGripScale(new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10), 800)
     for (const m of meshes) expect(m.scale.x).toBeCloseTo(FALLBACK_HALF, 10)
 
     // The fallback pick tolerance (0.02·3 = 0.06) still governs: a 0.05-off
     // ray grabs the grip exactly as the pre-rework tests rely on.
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayMissing([1, 1, 1], 0.05))
     expect(tool.capturingInput()).toBe(true)
+  })
+
+  it('DESIGN CHANGE: an orthographic (parallel-projection) camera now scales the grips too — no longer a silent no-op', () => {
+    // Before Phase 1, an `instanceof PerspectiveCamera` guard made this a
+    // no-op under ortho — every grip would silently vanish (freeze at its
+    // pre-tick placeholder size) the moment the user toggled Parallel
+    // Projection. The tool now takes a `worldPerPixel` callback instead of a
+    // camera+viewportHeight pair, so it has no projection-specific branch at
+    // all; the caller (Viewport.tsx, via CameraRig.worldPerPixel) is what
+    // makes ortho behave correctly.
+    const { tool, preview } = makeBoxTool()
+    tool.activate()
+    const meshes = gripMeshes(preview)
+
+    const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
+    ortho.position.set(0, -6, 3)
+    const frustumHeight = 4 // top(1) - bottom(-1)
+    const wppOrtho = worldPerPixelOrtho(frustumHeight, 1, 800)
+    tool.updateGripScale(ortho, () => wppOrtho) // ortho: distance-independent
+
+    for (const m of meshes) {
+      const expected = (SCREEN_PX * wppOrtho) / 2
+      expect(m.scale.x).toBeCloseTo(expected, 10)
+    }
   })
 })
 

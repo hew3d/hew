@@ -67,6 +67,7 @@ import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import {
   screenConstantWorldHalf,
+  screenConstantWorldHalfFromWorldPerPixel,
   tanHalfFovRad,
   legacyScreenConstantToPixels,
   LEGACY_REFERENCE_FOV_DEG,
@@ -544,17 +545,16 @@ export class SliceTool implements Tool {
   /**
    * Keep the preview quad a constant on-screen size regardless of zoom, fov,
    * or viewport resize — called once per frame by the Viewport render loop
-   * (feature-detected, same as ProtractorTool's disk), passing the live
-   * viewport height alongside the camera (see `ScaleTool.updateGripScale`'s
-   * doc comment for the shared derivation). No-op when no preview plane is
-   * shown, the camera isn't a `PerspectiveCamera`, or `viewportHeight` is
-   * degenerate.
+   * (feature-detected, same as ProtractorTool's disk), passing the camera's
+   * position and a `worldPerPixel` callback derived from the active
+   * `CameraRig` (see `ScaleTool.updateGripScale`'s doc comment for the shared
+   * derivation). Projection-agnostic (docs/design/camera.md §1) — no longer
+   * guarded to `PerspectiveCamera` only. No-op when no preview plane is shown.
    */
-  updateDiskScale(camera: THREE.Camera, viewportHeight: number): void {
-    if (this.previewPlane === null || viewportHeight <= 0) return
-    if (!(camera instanceof THREE.PerspectiveCamera)) return
+  updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    if (this.previewPlane === null) return
     const dist = camera.position.distanceTo(this.previewPlane.position)
-    const scale = screenConstantWorldHalf(PLANE_SCREEN_PX, dist, tanHalfFovRad(camera.fov), viewportHeight)
+    const scale = screenConstantWorldHalfFromWorldPerPixel(PLANE_SCREEN_PX, worldPerPixel(dist))
     this.previewPlane.scale.setScalar(scale)
   }
 

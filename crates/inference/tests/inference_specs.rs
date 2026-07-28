@@ -7,7 +7,8 @@
 //! treats ids as opaque labels.
 
 use inference::{
-    ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
+    ApertureMode, ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery,
+    SnapWeights,
 };
 use kernel::{
     Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId, Transform,
@@ -62,6 +63,7 @@ fn query(ray: PickRay, aperture: f64) -> SnapQuery {
         anchor: None,
         lock: None,
         aperture,
+        aperture_mode: ApertureMode::Cone,
         constraint_plane: None,
     }
 }
@@ -149,6 +151,174 @@ fn nothing_in_the_cone_returns_none() {
     assert!(away.is_none());
 }
 
+// ── ApertureMode::Cylinder (docs/design/camera.md §1) ──────────────────────
+//
+// Parallel (orthographic) projection's pick tolerance is a constant
+// world-radius CYLINDER around the ray rather than perspective's
+// angular CONE (`ApertureMode` doc comment). A ray straight along +Z from
+// the origin, with one guide point as the sole candidate, isolates the
+// tolerance-shape math: everything below chooses the point's perpendicular
+// offset from the axis and its depth along it, then compares a Cone query at
+// `aperture` (radians) against a Cylinder query at the EQUIVALENT radius
+// `depth_ref * tan(aperture)` — the exact conversion `CameraRig` uses when
+// switching projections (design camera.md §1).
+
+const CYL_APERTURE_RAD: f64 = 0.1; // ~5.7°, arbitrary but not tiny/huge
+const CYL_REF_DEPTH: f64 = 10.0; // the "target distance" the two modes agree at
+
+/// A scene with exactly one guide point candidate, `offset` meters off the
+/// +Z ray axis at `depth` meters along it.
+fn single_point_scene(offset: f64, depth: f64) -> InferenceScene {
+    let mut scene = InferenceScene::new();
+    scene.add_guide(
+        GuideId::default(),
+        &Guide::Point {
+            position: Point3::new(offset, 0.0, depth),
+        },
+    );
+    scene
+}
+
+fn straight_z_ray() -> PickRay {
+    PickRay {
+        origin: Point3::ORIGIN,
+        direction: Vec3::new(0.0, 0.0, 1.0),
+    }
+}
+
+fn cone_query(aperture: f64) -> SnapQuery {
+    SnapQuery {
+        weights: SnapWeights::default(),
+        ray: straight_z_ray(),
+        anchor: None,
+        lock: None,
+        aperture,
+        aperture_mode: ApertureMode::Cone,
+        constraint_plane: None,
+    }
+}
+
+fn cylinder_query(radius: f64) -> SnapQuery {
+    SnapQuery {
+        weights: SnapWeights::default(),
+        ray: straight_z_ray(),
+        anchor: None,
+        lock: None,
+        aperture: radius,
+        aperture_mode: ApertureMode::Cylinder,
+        constraint_plane: None,
+    }
+}
+
+/// At the query's own reference depth, `radius = depth * tan(aperture)`
+/// makes the cylinder and the cone agree exactly (design camera.md §1): a
+/// candidate just inside one tolerance is just inside the other, and a
+/// candidate just outside one is just outside the other.
+#[test]
+fn cylinder_cone_equivalence_at_target_distance() {
+    let radius = CYL_REF_DEPTH * CYL_APERTURE_RAD.tan();
+
+    let inside = single_point_scene(0.9 * radius, CYL_REF_DEPTH);
+    assert!(
+        inside.resolve(&cone_query(CYL_APERTURE_RAD)).is_some(),
+        "cone admits a point safely inside its aperture at the reference depth"
+    );
+    assert!(
+        inside.resolve(&cylinder_query(radius)).is_some(),
+        "cylinder admits the same point at the equivalent radius"
+    );
+
+    let outside = single_point_scene(1.1 * radius, CYL_REF_DEPTH);
+    assert!(
+        outside.resolve(&cone_query(CYL_APERTURE_RAD)).is_none(),
+        "cone rejects a point safely outside its aperture at the reference depth"
+    );
+    assert!(
+        outside.resolve(&cylinder_query(radius)).is_none(),
+        "cylinder rejects the same point at the equivalent radius"
+    );
+}
+
+/// At a depth FARTHER than the reference, the cone's radius has grown past
+/// the cylinder's constant one: a point on the cone's surface (so the cone
+/// still admits it, at ANY depth, by construction) can sit outside the
+/// fixed-radius cylinder.
+#[test]
+fn cylinder_cone_diverge_when_the_candidate_is_farther_than_the_target_distance() {
+    let radius = CYL_REF_DEPTH * CYL_APERTURE_RAD.tan();
+    let far_depth = 100.0 * CYL_REF_DEPTH;
+    // Comfortably inside the cone at `far_depth` (its radius there is
+    // `far_depth * tan(aperture)`, far larger than `offset`), but well
+    // outside the cylinder's constant `radius`.
+    let offset = 5.0 * radius;
+    assert!(
+        offset < far_depth * CYL_APERTURE_RAD.tan(),
+        "still inside the cone"
+    );
+    assert!(offset > radius, "already outside the cylinder");
+
+    let scene = single_point_scene(offset, far_depth);
+    assert!(
+        scene.resolve(&cone_query(CYL_APERTURE_RAD)).is_some(),
+        "the cone's tolerance grows with depth, so a far candidate near its \
+         surface is still admitted"
+    );
+    assert!(
+        scene.resolve(&cylinder_query(radius)).is_none(),
+        "the cylinder's tolerance is constant, so the same far candidate \
+         falls outside it"
+    );
+}
+
+/// At a depth NEARER than the reference, the opposite divergence: the cone
+/// has shrunk (its radius there is smaller than the cylinder's constant
+/// one), so a candidate comfortably inside the cylinder can fall outside
+/// the cone.
+#[test]
+fn cylinder_cone_diverge_when_the_candidate_is_nearer_than_the_target_distance() {
+    let radius = CYL_REF_DEPTH * CYL_APERTURE_RAD.tan();
+    let near_depth = CYL_REF_DEPTH / 100.0;
+    // Well inside the cylinder's constant radius, but well outside the
+    // cone's shrunk radius at this depth (`near_depth * tan(aperture)`).
+    let offset = 0.5 * radius;
+    assert!(
+        offset > near_depth * CYL_APERTURE_RAD.tan(),
+        "already outside the cone"
+    );
+    assert!(offset < radius, "still inside the cylinder");
+
+    let scene = single_point_scene(offset, near_depth);
+    assert!(
+        scene.resolve(&cone_query(CYL_APERTURE_RAD)).is_none(),
+        "the cone's tolerance shrinks with depth, so a near candidate this \
+         far off-axis falls outside it"
+    );
+    assert!(
+        scene.resolve(&cylinder_query(radius)).is_some(),
+        "the cylinder's tolerance is constant, so the same near candidate \
+         is still admitted"
+    );
+}
+
+/// Both modes reject a candidate behind the ray origin, regardless of how
+/// wide the tolerance is — `ApertureMode` only changes the tolerance SHAPE
+/// in front of the ray, never the in-front-of-the-origin gate.
+#[test]
+fn cylinder_mode_still_rejects_points_behind_the_ray() {
+    let scene = single_point_scene(0.0, -5.0);
+    assert!(scene.resolve(&cone_query(3.0)).is_none());
+    assert!(scene.resolve(&cylinder_query(1e6)).is_none());
+}
+
+// The indexed spatial path's `Aabb::maybe_in_cylinder` prune agreeing with
+// the linear reference scan (`resolve` ≡ `resolve_linear`) for a `Cylinder`
+// query, over real solids/placements/guides/sketches, is covered by
+// `indexed_queries_equal_the_linear_reference` in `index_props.rs`, which
+// now randomizes `ApertureMode` alongside every other query dimension —
+// guide-point candidates (used above for their exact, single-candidate
+// geometry) bypass the index entirely, so they cannot stand in for that
+// contract themselves.
+
 #[test]
 fn pick_face_returns_the_nearest_face_through_the_ray() {
     let scene = cube_scene();
@@ -200,6 +370,7 @@ fn axis_lock_projects_onto_the_locked_line() {
         anchor: Some(anchor),
         lock: Some(SnapLock::Axis(inference::Axis::X)),
         aperture: WIDE,
+        aperture_mode: ApertureMode::Cone,
         constraint_plane: None,
     };
     let snap = scene.resolve(&q).expect("lock with anchor always resolves");
@@ -550,6 +721,7 @@ fn index_invalidation_tracks_every_mutation() {
             anchor: None,
             lock: None,
             aperture: NARROW,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         let indexed = scene.resolve(&q);

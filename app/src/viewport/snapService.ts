@@ -12,7 +12,13 @@
 
 import type { Scene, SnapJs } from '../wasm/pkg/wasm_api.js'
 import type { Snap } from '../tools/types'
-import { intersectGroundPlane, pixelRadiusToAperture, type Ray } from './math'
+import {
+  intersectGroundPlane,
+  apertureForPixelRadius,
+  apertureModeFor,
+  type ApertureBasis,
+  type Ray,
+} from './math'
 import { rayPlaneIntersect } from './geoHelpers'
 
 /** Pixel radius to *acquire* a snap candidate. */
@@ -133,7 +139,7 @@ export class SnapService {
     ray: Ray,
     pixelRadius: number,
     viewportHeightPx: number,
-    fovYDeg: number,
+    basis: ApertureBasis,
     anchorArr: Float64Array | null,
     lockAxis: 0 | 1 | 2 | undefined,
     constraintPlaneArr: Float64Array | null,
@@ -141,7 +147,8 @@ export class SnapService {
     try {
       const [ox, oy, oz] = ray.origin
       const [dx, dy, dz] = ray.direction
-      const aperture = pixelRadiusToAperture(pixelRadius, viewportHeightPx, fovYDeg)
+      const aperture = apertureForPixelRadius(basis, pixelRadius, viewportHeightPx)
+      const cylinder = apertureModeFor(basis) === 'cylinder'
       const result = this.scene.snap(
         ox, oy, oz,
         dx, dy, dz,
@@ -150,6 +157,7 @@ export class SnapService {
         lockAxis ?? null,
         constraintPlaneArr,
         this.precision,
+        cylinder,
       )
       return result !== undefined ? snapJsToSnap(result) : null
     } catch (err) {
@@ -178,7 +186,7 @@ export class SnapService {
   resolve(
     ray: Ray,
     viewportHeightPx: number,
-    fovYDeg: number,
+    basis: ApertureBasis,
     anchor?: [number, number, number],
     lockAxis?: 0 | 1 | 2,
     constraintPlane?: { point: [number, number, number]; normal: [number, number, number] },
@@ -191,7 +199,7 @@ export class SnapService {
 
     // 1. Acquire at the normal radius.
     const acquired = this.query(
-      ray, SNAP_RADIUS_PX, viewportHeightPx, fovYDeg, anchorArr, lockAxis, constraintPlaneArr,
+      ray, SNAP_RADIUS_PX, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
     )
     if (acquired !== null && STICKY_KINDS.has(acquired.kind)) {
       this.lastSnap = acquired
@@ -203,7 +211,7 @@ export class SnapService {
     //    wider break radius; if that same target is still a candidate, hold it.
     if (this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
       const held = this.query(
-        ray, SNAP_BREAK_RADIUS_PX, viewportHeightPx, fovYDeg, anchorArr, lockAxis, constraintPlaneArr,
+        ray, SNAP_BREAK_RADIUS_PX, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
       )
       if (held !== null && sameTarget(held, this.lastSnap)) {
         this.lastSnap = held

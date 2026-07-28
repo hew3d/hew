@@ -402,6 +402,20 @@ pub enum RecordedCall {
     /// `set_node_user_hidden(kind, id, hidden)` — persisted view state
     /// (manifest v6), same rationale as [`RecordedCall::SetTagHidden`].
     SetNodeUserHidden { kind: u8, id: u64, hidden: bool },
+    /// `set_camera_state(projection, fov_deg, eye, target, up)` — the
+    /// camera's working view (docs/design/camera.md §5): not undoable, but
+    /// persisted with the document (manifest v13), same rationale as
+    /// [`RecordedCall::SetTagHidden`]. Additive variant: a recording that
+    /// never sets a camera state (every recording captured before this
+    /// shipped) replays on older builds unchanged; one that does fails to
+    /// parse there — loudly, never silently divergent.
+    SetCameraState {
+        projection: String,
+        fov_deg: f64,
+        eye: [f64; 3],
+        target: [f64; 3],
+        up: [f64; 3],
+    },
     /// `add_material(name, r, g, b, a)` — palette additions are not
     /// undoable but are saved, and later recorded paint calls reference
     /// the handle this call deterministically produces.

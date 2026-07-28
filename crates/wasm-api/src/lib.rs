@@ -26,8 +26,8 @@ mod recording;
 
 use dae_import::ImageMap;
 use inference::{
-    Axis, ElementRef, InferenceScene, PickRay, SketchRegionFace, SnapKind, SnapLock, SnapQuery,
-    SnapWeights,
+    ApertureMode, Axis, ElementRef, InferenceScene, PickRay, SketchRegionFace, SnapKind, SnapLock,
+    SnapQuery, SnapWeights,
 };
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
@@ -347,6 +347,17 @@ fn node_id(kind: u8, id: u64) -> Result<NodeId, ApiError> {
         _ => Err(ApiError(
             "BadNodeKind: node kind must be 0 (object), 1 (group), or 2 (instance)".to_string(),
         )),
+    }
+}
+
+/// Decode an xyz `Box<[f64]>` boundary arg into a `[f64; 3]`, rejecting any
+/// other length. `name` labels the field in the error (`camera_state`'s
+/// `eye`/`target`/`up`, the same boundary shape `Scene::snap`'s `anchor`
+/// checks inline).
+fn triple(v: &[f64], name: &str) -> Result<[f64; 3], ApiError> {
+    match *v {
+        [x, y, z] => Ok([x, y, z]),
+        _ => Err(ApiError(format!("BadVector: {name} must be an xyz triple"))),
     }
 }
 
@@ -948,6 +959,59 @@ impl SketchEdgePickJs {
     /// Radial distance along the normalized pick ray.
     pub fn depth(&self) -> f64 {
         self.depth
+    }
+}
+
+/// The camera's working view (mirrors `kernel::CameraState`; docs/design/
+/// camera.md §5). Returned by [`Scene::camera_state`].
+#[wasm_bindgen]
+pub struct CameraStateJs {
+    state: kernel::CameraState,
+}
+
+#[wasm_bindgen]
+impl CameraStateJs {
+    /// `"perspective"` or `"parallel"`.
+    pub fn projection(&self) -> String {
+        match self.state.projection {
+            kernel::CameraProjection::Perspective => "perspective",
+            kernel::CameraProjection::Parallel => "parallel",
+        }
+        .to_string()
+    }
+
+    /// Perspective vertical field of view, degrees (meaningless but still
+    /// present under `"parallel"` — see `kernel::CameraState`).
+    pub fn fov_deg(&self) -> f64 {
+        self.state.fov_deg
+    }
+
+    pub fn eye_x(&self) -> f64 {
+        self.state.eye.x
+    }
+    pub fn eye_y(&self) -> f64 {
+        self.state.eye.y
+    }
+    pub fn eye_z(&self) -> f64 {
+        self.state.eye.z
+    }
+    pub fn target_x(&self) -> f64 {
+        self.state.target.x
+    }
+    pub fn target_y(&self) -> f64 {
+        self.state.target.y
+    }
+    pub fn target_z(&self) -> f64 {
+        self.state.target.z
+    }
+    pub fn up_x(&self) -> f64 {
+        self.state.up.x
+    }
+    pub fn up_y(&self) -> f64 {
+        self.state.up.y
+    }
+    pub fn up_z(&self) -> f64 {
+        self.state.up.z
     }
 }
 
@@ -4743,6 +4807,61 @@ impl Scene {
         Ok(DocChangeJs { inner: change })
     }
 
+    // ---------------------------------------------------------------- camera
+
+    /// The camera's working view at last save (docs/design/camera.md §5), or
+    /// `undefined` when none has ever been set — a pre-v13 file, or a
+    /// document that never called [`Scene::set_camera_state`]. The app reads
+    /// `undefined` as "use today's home framing".
+    pub fn camera_state(&self) -> Option<CameraStateJs> {
+        self.doc.camera_state().map(|state| CameraStateJs { state })
+    }
+
+    /// Records the camera's current working view: `projection` is
+    /// `"perspective"` or `"parallel"`; `eye`/`target`/`up` are xyz triples.
+    ///
+    /// View state, deliberately NOT undoable — matches how SketchUp treats
+    /// the camera (mirrors [`Scene::set_tag_hidden`]'s own non-undoable,
+    /// still-persisted posture). Saved with the document (manifest v13);
+    /// the app calls this on document save and reads it back via
+    /// [`Scene::camera_state`] on load.
+    pub fn set_camera_state(
+        &mut self,
+        projection: &str,
+        fov_deg: f64,
+        eye: Box<[f64]>,
+        target: Box<[f64]>,
+        up: Box<[f64]>,
+    ) -> Result<(), ApiError> {
+        let kernel_projection = match projection {
+            "perspective" => kernel::CameraProjection::Perspective,
+            "parallel" => kernel::CameraProjection::Parallel,
+            other => {
+                return Err(ApiError(format!(
+                    "BadProjection: unknown projection '{other}'"
+                )));
+            }
+        };
+        let eye3 = triple(&eye, "eye")?;
+        let target3 = triple(&target, "target")?;
+        let up3 = triple(&up, "up")?;
+        self.doc.set_camera_state(kernel::CameraState {
+            projection: kernel_projection,
+            fov_deg,
+            eye: Point3::new(eye3[0], eye3[1], eye3[2]),
+            target: Point3::new(target3[0], target3[1], target3[2]),
+            up: kernel::Vec3::new(up3[0], up3[1], up3[2]),
+        });
+        recording::record(recording::RecordedCall::SetCameraState {
+            projection: projection.to_string(),
+            fov_deg,
+            eye: eye3,
+            target: target3,
+            up: up3,
+        });
+        Ok(())
+    }
+
     // ------------------------------------------------------------ inference
 
     /// Resolves one snap query. `anchor` is an optional xyz triple;
@@ -4760,6 +4879,16 @@ impl Scene {
     /// gravity profile. It is a plain boolean because the *kernel* owns the
     /// weighting and the *app* owns the gesture that selects it: which key is
     /// held never crosses this boundary (DEVELOPMENT.md rule 1).
+    ///
+    /// `cylinder`, when true, interprets `aperture` per [`ApertureMode::Cylinder`]
+    /// — a constant world-space radius in meters around the ray, rather than
+    /// the default [`ApertureMode::Cone`] half-angle in radians. Parallel
+    /// (orthographic) projection's apparent size does not shrink with depth,
+    /// so its natural pick tolerance is this constant-radius cylinder rather
+    /// than perspective's cone (docs/design/camera.md §1); `snapService.ts`
+    /// selects it exactly when the active `CameraRig` projection is parallel.
+    /// Omitted/false selects `Cone`, matching every caller before this
+    /// parameter existed.
     // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
@@ -4775,6 +4904,7 @@ impl Scene {
         lock_axis: Option<u8>,
         constraint_plane: Option<Box<[f64]>>,
         precision: Option<bool>,
+        cylinder: Option<bool>,
     ) -> Result<Option<SnapJs>, ApiError> {
         let anchor = match anchor {
             None => None,
@@ -4824,6 +4954,11 @@ impl Scene {
             anchor,
             lock,
             aperture,
+            aperture_mode: if cylinder.unwrap_or(false) {
+                ApertureMode::Cylinder
+            } else {
+                ApertureMode::Cone
+            },
             constraint_plane,
             weights: if precision.unwrap_or(false) {
                 SnapWeights::uniform()
@@ -6173,6 +6308,21 @@ impl Scene {
                     SetNodeUserHidden { kind, id, hidden } => {
                         self.set_node_user_hidden(kind, id, hidden)?;
                     }
+                    SetCameraState {
+                        projection,
+                        fov_deg,
+                        eye,
+                        target,
+                        up,
+                    } => {
+                        self.set_camera_state(
+                            &projection,
+                            fov_deg,
+                            Box::new(eye),
+                            Box::new(target),
+                            Box::new(up),
+                        )?;
+                    }
                     AddMaterial { name, r, g, b, a } => {
                         self.add_material(name, r, g, b, a);
                     }
@@ -6553,13 +6703,17 @@ mod tests {
         // A facet vertex snaps as Endpoint…
         let (vx, vy) = p(0);
         let snap = loaded
-            .snap(vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None)
+            .snap(
+                vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None,
+            )
             .unwrap()
             .expect("loaded sketch vertex snaps");
         assert_eq!(snap.kind(), "endpoint");
         // …and the drawn circle's exact center snaps as Center.
         let snap = loaded
-            .snap(1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None)
+            .snap(
+                1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None,
+            )
             .unwrap()
             .expect("loaded circle center snaps");
         assert_eq!(snap.kind(), "center");
@@ -6623,6 +6777,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap()
             .expect("something snaps at the copy center");
@@ -6631,7 +6786,9 @@ mod tests {
         assert!((snap.y() - cy).abs() < 1e-12);
         // And the original center still snaps too.
         let snap0 = scene
-            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None)
+            .snap(
+                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None,
+            )
             .unwrap()
             .expect("original center snaps");
         assert_eq!(snap0.kind(), "center");
@@ -6683,7 +6840,9 @@ mod tests {
 
         // Center: the marquee case. Straight down onto the exact center.
         let c = scene
-            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None)
+            .snap(
+                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None,
+            )
             .unwrap()
             .expect("center snaps");
         assert_eq!(c.kind(), "center");
@@ -6701,7 +6860,9 @@ mod tests {
             let a = 2.0 * std::f64::consts::PI * (k as f64) / (steps as f64);
             let (wx, wy) = (cx + r * a.cos(), cy + r * a.sin());
             let snap = scene
-                .snap(wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None)
+                .snap(
+                    wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None, None,
+                )
                 .unwrap()
                 .unwrap_or_else(|| panic!("a point on the rim always snaps (angle {a})"));
             let ek = snap.element_kind();
@@ -6787,7 +6948,9 @@ mod tests {
 
         // A polygon offers no rim, so the centre is its sole analytic point.
         let c = scene
-            .snap(cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None)
+            .snap(
+                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None,
+            )
             .unwrap()
             .expect("polygon center snaps");
         assert_eq!(c.kind(), "center");
@@ -6958,7 +7121,9 @@ mod tests {
         let (ax, ay) = (qx + 0.65 * (vx - qx), qy + 0.65 * (vy - qy));
 
         let default_snap = scene
-            .snap(ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None)
+            .snap(
+                ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None,
+            )
             .unwrap()
             .expect("something snaps");
         assert_eq!(
@@ -6980,6 +7145,7 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
             )
             .unwrap()
             .expect("something snaps");
@@ -7004,6 +7170,7 @@ mod tests {
                 None,
                 None,
                 Some(false),
+                None,
             )
             .unwrap()
             .expect("something snaps");
@@ -7036,6 +7203,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.05,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         let snap = scene.inference.resolve(&q).expect("a snap over the fill");
@@ -7115,6 +7283,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.01,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         let snap = scene
@@ -7180,6 +7349,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.05,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         let snap = scene.inference.resolve(&q).expect("a snap over the region");
@@ -7223,6 +7393,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.05,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         let snap = scene.inference.resolve(&q).expect("a snap at the origin");
@@ -7956,6 +8127,96 @@ mod tests {
             "replaying a tag-op session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// `set_camera_state` is not undoable but IS persisted (manifest v13) —
+    /// mirrors `record_then_replay_covers_tag_ops_and_their_undo` for the
+    /// camera view instead of tags: a trailing `scene_undo` must hit the
+    /// extrude, not unwind the camera (there is nothing to unwind), and the
+    /// replayed document must carry the same camera state.
+    #[test]
+    fn record_then_replay_covers_camera_state() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 2.0).unwrap();
+        scene
+            .set_camera_state(
+                "parallel",
+                62.5,
+                Box::new([1.0, 2.0, 3.0]),
+                Box::new([-1.0, 0.5, 0.0]),
+                Box::new([0.0, 0.0, 1.0]),
+            )
+            .unwrap();
+        // Undoes the EXTRUDE — set_camera_state left no undo entry.
+        scene.scene_undo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            replayed.object_ids().len(),
+            0,
+            "the recorded undo hit the extrude — no objects survive"
+        );
+        assert_eq!(
+            final_hash, golden,
+            "replaying a camera-state session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+
+        let cam = replayed
+            .camera_state()
+            .expect("the replayed document carries the recorded camera state");
+        assert_eq!(cam.projection(), "parallel");
+        assert!((cam.fov_deg() - 62.5).abs() < 1e-12);
+        assert!((cam.eye_x() - 1.0).abs() < 1e-12);
+        assert!((cam.eye_y() - 2.0).abs() < 1e-12);
+        assert!((cam.eye_z() - 3.0).abs() < 1e-12);
+        assert!((cam.target_x() - (-1.0)).abs() < 1e-12);
+        assert!((cam.target_y() - 0.5).abs() < 1e-12);
+        assert!((cam.target_z() - 0.0).abs() < 1e-12);
+        assert!((cam.up_z() - 1.0).abs() < 1e-12);
+    }
+
+    /// `Scene::camera_state` is `undefined` until a camera has been set, and
+    /// `set_camera_state` rejects an unknown projection token typed rather
+    /// than silently defaulting.
+    #[test]
+    fn camera_state_getter_and_bad_projection() {
+        let mut scene = Scene::new();
+        assert!(scene.camera_state().is_none());
+
+        assert!(
+            scene
+                .set_camera_state(
+                    "isometric",
+                    45.0,
+                    Box::new([0.0, 0.0, 5.0]),
+                    Box::new([0.0, 0.0, 0.0]),
+                    Box::new([0.0, 0.0, 1.0]),
+                )
+                .is_err()
+        );
+        assert!(scene.camera_state().is_none(), "the bad call set nothing");
+
+        scene
+            .set_camera_state(
+                "perspective",
+                45.0,
+                Box::new([0.0, 0.0, 5.0]),
+                Box::new([0.0, 0.0, 0.0]),
+                Box::new([0.0, 0.0, 1.0]),
+            )
+            .unwrap();
+        assert_eq!(scene.camera_state().unwrap().projection(), "perspective");
     }
 
     /// A broad structural/metadata session — naming, duplication, grouping,
@@ -9239,7 +9500,9 @@ mod tests {
             .unwrap();
 
         let posed = scene
-            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .snap(
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+            )
             .unwrap()
             .expect("posed definition endpoint must snap");
         assert_eq!(posed.kind(), "endpoint");
@@ -9247,7 +9510,9 @@ mod tests {
 
         scene.set_hidden(&[], &[inst]);
         let hidden = scene
-            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .snap(
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+            )
             .unwrap();
         assert_ne!(
             hidden.as_ref().map(|s| s.kind()).as_deref(),
@@ -9256,14 +9521,18 @@ mod tests {
         );
         scene.set_hidden(&[], &[]);
         let shown = scene
-            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .snap(
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+            )
             .unwrap()
             .expect("showing the active instance restores its posed sketch inference");
         assert_eq!(shown.kind(), "endpoint");
 
         scene.set_active_inference_instance(None);
         let after_exit = scene
-            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .snap(
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+            )
             .unwrap();
         assert_ne!(
             after_exit.as_ref().map(|s| s.kind()).as_deref(),
@@ -9271,7 +9540,9 @@ mod tests {
             "exiting the context removes the posed definition endpoint"
         );
         let local = scene
-            .snap(2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .snap(
+                2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+            )
             .unwrap();
         assert_ne!(
             local.as_ref().map(|s| s.kind()).as_deref(),
@@ -9305,7 +9576,9 @@ mod tests {
         scene.set_active_inference_instance(Some(inst));
 
         let mirrored = scene
-            .snap(3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .snap(
+                3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+            )
             .unwrap()
             .expect("mirrored definition endpoint must snap");
         assert_eq!(mirrored.kind(), "endpoint");
@@ -10511,7 +10784,7 @@ mod tests {
             .snap(
                 5.0, 5.0, 3.0, // ray origin
                 0.0, 0.0, -1.0, // ray direction (-Z)
-                0.05, None, None, None, None,
+                0.05, None, None, None, None, None,
             )
             .unwrap()
             .expect("ray crosses the guide line");
@@ -10526,7 +10799,9 @@ mod tests {
         scene.delete_all_guides().unwrap();
 
         let snap = scene
-            .snap(5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None)
+            .snap(
+                5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None,
+            )
             .unwrap();
         assert!(
             snap.is_none(),
@@ -10546,7 +10821,7 @@ mod tests {
         let snaps = |scene: &Scene| {
             scene
                 .snap(
-                    ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None, None,
+                    ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None, None, None,
                 )
                 .unwrap()
         };
@@ -10578,10 +10853,55 @@ mod tests {
         scene.add_guide_point(2.0, 3.0, 0.0).unwrap();
 
         let snap = scene
-            .snap(2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None)
+            .snap(
+                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None,
+            )
             .unwrap()
             .expect("ray points straight at the guide point");
         assert_eq!(snap.kind(), "endpoint");
+    }
+
+    /// The `cylinder` flag on `Scene::snap` is the ONLY thing that crosses
+    /// the boundary for parallel-projection pick tolerance (docs/design/
+    /// camera.md §1) — the cone/cylinder math itself stays in `inference`,
+    /// and which projection is active stays in the app (DEVELOPMENT.md rule
+    /// 1). This pins that the flag is actually wired: a guide point 1 m off
+    /// the ray axis at 5 m depth is OUTSIDE a 0.05 rad cone (angle ≈ 0.197
+    /// rad) but INSIDE a 1.5 m cylinder — same ray, same call, only
+    /// `cylinder` and the (now meters, not radians) `aperture` differ.
+    #[test]
+    fn the_cylinder_flag_selects_a_constant_world_radius_tolerance() {
+        let mut scene = Scene::new();
+        scene.add_guide_point(2.0, 4.0, 0.0).unwrap();
+
+        let cone_miss = scene
+            .snap(
+                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None,
+            )
+            .unwrap();
+        assert!(
+            cone_miss.is_none(),
+            "1 m off-axis at 5 m depth is well outside a 0.05 rad cone"
+        );
+
+        let cylinder_hit = scene
+            .snap(
+                2.0,
+                3.0,
+                5.0,
+                0.0,
+                0.0,
+                -1.0,
+                1.5,
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+            )
+            .unwrap()
+            .expect("1 m off-axis is inside a 1.5 m cylinder, regardless of depth");
+        assert_eq!(cylinder_hit.kind(), "endpoint");
     }
 
     // ---------------------------------------------------------- begin_sketch_on_plane

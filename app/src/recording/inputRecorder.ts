@@ -56,6 +56,28 @@ export interface CameraInput {
   target: Vec3
   up: Vec3
   fovDeg: number
+  /**
+   * Active projection at capture time (docs/design/camera.md §1/§5) — additive,
+   * optional: absent means perspective (every recording captured before
+   * Parallel Projection shipped is implicitly perspective throughout, so
+   * nothing pre-existing needs backfilling). `fovDeg` is always the
+   * PERSISTED perspective fov regardless of `projection` (CameraRig keeps it
+   * across toggles), matching `ViewportApi.getCamera`'s convention — a
+   * 'parallel' capture's `fovDeg` is what the camera would return to on a
+   * toggle back, not a meaningful "current" fov.
+   */
+  projection?: 'perspective' | 'parallel'
+  /**
+   * Orthographic frustum height (top - bottom, at zoom 1) and zoom —
+   * additive and present only when `projection === 'parallel'` (absent
+   * under perspective, where no ortho frustum is in play). The minimal
+   * pair needed to reconstruct the ortho frustum on replay: half-height =
+   * `orthoFrustumHeight / (2 * orthoZoom)`, half-width scales that by the
+   * replay viewport's own aspect ratio (`CameraRig.setAspect`'s
+   * convention — width is never itself recorded, only derived).
+   */
+  orthoFrustumHeight?: number
+  orthoZoom?: number
 }
 
 /** A captured key event (Shift axis-lock, Esc, Enter, Del, …). */
@@ -149,15 +171,30 @@ export function recordPointer(
   events.push({ kind, ...stamp(), x, y, button: e.button, buttons: e.buttons, mods: mods(e) })
 }
 
-/** Record a camera state. A no-op unless active. */
+/** Record a camera state. A no-op unless active. `projection` and the
+ * ortho `orthoFrustumHeight`/`orthoZoom` pair are additive (see
+ * `CameraInput`'s doc) — omitted, a reader defaults to perspective. */
 export function recordCamera(
   position: Vec3,
   target: Vec3,
   up: Vec3,
   fovDeg: number,
+  projection?: 'perspective' | 'parallel',
+  orthoFrustumHeight?: number,
+  orthoZoom?: number,
 ): void {
   if (!active) return
-  events.push({ kind: 'camera', ...stamp(), position, target, up, fovDeg })
+  events.push({
+    kind: 'camera',
+    ...stamp(),
+    position,
+    target,
+    up,
+    fovDeg,
+    projection,
+    orthoFrustumHeight,
+    orthoZoom,
+  })
 }
 
 /** Record a key event. A no-op unless active. */

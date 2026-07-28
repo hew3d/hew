@@ -26,6 +26,12 @@ const sampleInput: InputEvent[] = [
     target: [0, 0, 0],
     up: [0, 0, 1],
     fovDeg: 45,
+    // Parallel projection + its additive ortho frustum/zoom pair — proves
+    // the splice/extract round trip preserves these alongside the older
+    // perspective-only fields (docs/design/camera.md §5).
+    projection: 'parallel',
+    orthoFrustumHeight: 12.4,
+    orthoZoom: 2,
   },
 ]
 

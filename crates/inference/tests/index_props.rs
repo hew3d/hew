@@ -6,7 +6,9 @@
 //! reference scan (`resolve_linear` / `pick_face_linear`) — the index may
 //! only prune, never decide.
 
-use inference::{Axis, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery, SnapWeights};
+use inference::{
+    ApertureMode, Axis, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery, SnapWeights,
+};
 use kernel::{Guide, InstanceId, Object, ObjectId, Plane, Point3, SketchId, Transform, Vec3};
 use proptest::prelude::*;
 
@@ -214,6 +216,11 @@ struct QuerySpec {
     origin: Point3,
     target: Point3,
     aperture: f64,
+    /// Cone (radians) or cylinder (meters) tolerance shape — randomized so
+    /// this property covers the SAME indexed≡linear acceptance criterion for
+    /// the parallel-projection prune (`Aabb::maybe_in_cylinder`) that it
+    /// already covers for the perspective cone.
+    aperture_mode: ApertureMode,
     anchor: Option<Point3>,
     lock: Option<SnapLock>,
     plane: Option<(Axis, f64)>,
@@ -263,8 +270,12 @@ fn arb_query() -> impl Strategy<Value = QuerySpec> {
         arb_point(60.0),
         arb_point(40.0),
         // Log-uniform (see LOG10_APERTURE_MIN/MAX): tiny saturation-window
-        // apertures through past-FRAC_PI_2 half-space cones.
+        // apertures through past-FRAC_PI_2 half-space cones. Reused verbatim
+        // as a world-radius range when `aperture_mode` draws `Cylinder` —
+        // the same tiny-to-huge spread is exactly what stresses a radius
+        // prune too (near-zero radius through radii dwarfing the scene).
         (LOG10_APERTURE_MIN..LOG10_APERTURE_MAX).prop_map(|e| 10f64.powf(e)),
+        prop_oneof![Just(ApertureMode::Cone), Just(ApertureMode::Cylinder)],
         prop::option::of(arb_point(30.0)),
         prop::option::of(prop_oneof![
             Just(SnapLock::Axis(Axis::X)),
@@ -280,7 +291,7 @@ fn arb_query() -> impl Strategy<Value = QuerySpec> {
     )
         .prop_filter_map(
             "ray direction too short",
-            |(origin, target, aperture, anchor, lock, plane, weights)| {
+            |(origin, target, aperture, aperture_mode, anchor, lock, plane, weights)| {
                 if (target - origin).length_squared() < MIN_RAY_LEN_SQ {
                     return None;
                 }
@@ -288,6 +299,7 @@ fn arb_query() -> impl Strategy<Value = QuerySpec> {
                     origin,
                     target,
                     aperture,
+                    aperture_mode,
                     anchor,
                     lock,
                     plane,
@@ -307,6 +319,7 @@ fn to_query(spec: &QuerySpec) -> SnapQuery {
         anchor: spec.anchor,
         lock: spec.lock,
         aperture: spec.aperture,
+        aperture_mode: spec.aperture_mode,
         constraint_plane: spec.plane.map(|(axis, offset)| {
             Plane::from_point_normal(Point3::ORIGIN + axis.unit() * offset, axis.unit())
                 .expect("model axis is unit")
@@ -463,6 +476,7 @@ fn intersection_snaps_agree_between_indexed_and_linear_paths() {
             anchor: None,
             lock: None,
             aperture: 0.01,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         let indexed = scene.resolve(&query);

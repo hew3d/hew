@@ -132,6 +132,10 @@ export interface MenuBarProps {
   onDrawText?: () => void
   /** Reposition the camera to a standard view (Camera → Standard Views). */
   onStandardView?: (view: StandardView) => void
+  /** Camera ▸ Parallel Projection checkbox state (docs/design/camera.md §1). */
+  parallelProjectionChecked?: boolean
+  /** Toggle Camera ▸ Parallel Projection. */
+  onToggleParallelProjection?: () => void
   /** Open document windows (Tauri multi-window only), rendered as a tail of
    *  focus-this-window entries at the end of the Window menu — the current
    *  window's entry is checked. `undefined` on plain web (single window, no
@@ -472,6 +476,8 @@ export function MenuBar({
   onZoomExtents,
   onDrawText,
   onStandardView,
+  parallelProjectionChecked = false,
+  onToggleParallelProjection,
   onOpenSettings,
   onReportBug,
   onCheckForUpdates,
@@ -851,9 +857,44 @@ export function MenuBar({
               onClick={withClose(() => onSelectTool?.('Zoom'))}
             />
             <div style={SEPARATOR_STYLE} />
+            {/* Position Camera / Walk / Look Around (docs/design/camera.md
+                §4): the first REAL camera tools — Orbit/Pan/Zoom above are
+                just OrbitControls mouse-button remaps. No default
+                bare-letter shortcut in v1 (SketchUp ships none for these
+                either), same as Zoom Window below. */}
+            <CheckMenuItem
+              label="Position Camera"
+              checked={activeTool === 'Position Camera'}
+              onClick={withClose(() => onSelectTool?.('Position Camera'))}
+            />
+            <CheckMenuItem
+              label="Walk"
+              checked={activeTool === 'Walk'}
+              onClick={withClose(() => onSelectTool?.('Walk'))}
+            />
+            <CheckMenuItem
+              label="Look Around"
+              checked={activeTool === 'Look Around'}
+              onClick={withClose(() => onSelectTool?.('Look Around'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            {/* No standalone Field of View entry (camera-playtest2.md §2 —
+                Kurt's playtest call): fov is reachable only through Zoom
+                (typed-degree/mm entry, or Shift-drag/wheel — camera.md §2,
+                camera-playtest2.md §3), never a separate menu item. */}
+            <MenuItem
+              label="Zoom Window"
+              onClick={withClose(() => onSelectTool?.('Zoom Window'))}
+            />
             <MenuItem
               label="Zoom Extents"
               onClick={withClose(() => onZoomExtents?.())}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Parallel Projection"
+              checked={parallelProjectionChecked}
+              onClick={withClose(() => onToggleParallelProjection?.())}
             />
             <div style={SEPARATOR_STYLE} />
             <SubMenu label="Standard Views">

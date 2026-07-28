@@ -22,11 +22,39 @@ If you're on a trackpad or prefer left-button navigation, activate a dedicated c
 
 - **Orbit** — press `O`, or Camera ▸ Orbit
 - **Pan** — press `H`, or Camera ▸ Pan
-- **Zoom** — press `Z` (drag up/down), or Camera ▸ Zoom
+- **Zoom** — press `Z` (drag up/down), or Camera ▸ Zoom. Hold `Shift` while dragging (or Shift-scroll) to change the field of view instead — see below.
 
 While the Orbit tool is active, holding `Shift` temporarily pans instead, the same convention SketchUp users know.
 
 When you're done navigating, press `Space` to return to the Select tool (or the shortcut of whatever tool you were using).
+
+## Position Camera, Look Around, and Walk
+
+These three walk you through a model at eye level instead of orbiting around it — useful for checking a doorway width, a sightline, or how a room actually feels to stand in.
+
+- **Camera ▸ Position Camera** — click a point to stand there, at eye height, facing whatever direction you were already looking; drag instead to stand at the press point and look toward wherever you release. Either way, it hands off straight to Look Around so you can immediately look around from where you landed.
+- **Camera ▸ Look Around** — drag to look around from a fixed spot, like turning your head; looking straight up or down is clamped just short of vertical so the view never flips.
+- **Camera ▸ Walk** — drag up or down to walk forward or back, left or right to turn; hold `Shift` to strafe sideways and change height instead. Walk keeps you at a constant eye height above the ground plane (there's no collision detection yet, so you can walk through geometry).
+
+Eye height defaults to 1.68 m (SketchUp's classic 5′6″) and is shared across all three: type a new height and press Enter in any of them, and it carries over to the others for the rest of the session. `Esc` returns to the Select tool from any of the three.
+
+## Parallel projection
+
+**Camera ▸ Parallel Projection** switches between the normal perspective view and an orthographic (parallel) one, where parallel edges in the model stay parallel on screen instead of converging toward a vanishing point — useful for reading true proportions, or for a flat, technical-drawing look on a standard view. Toggling holds the view steady on whatever you're currently looking at; toggle back and you're exactly where you started. Everything else — orbiting, panning, snapping, the tool gizmos — works the same in either projection.
+
+## Field of view
+
+There's no separate Field of View command — it's reachable only through the Zoom tool, in perspective.
+
+While Zoom is active, the current field of view shows in the corner the whole time. The most direct way to change it is to hold `Shift` while dragging: drag up to narrow the view (a longer, more zoomed-in lens), drag down to widen it. `Shift`-scroll does the same thing in smaller steps. Whichever way you started the drag decides what it does for its whole length — starting a plain drag and pressing `Shift` partway through still dollies, and vice versa.
+
+You can also type a value directly and press Enter: degrees (`45` or `45deg`, same as before) or a 35mm-equivalent focal length (`50mm`), if you're used to thinking in camera lenses. Either way the corner shows both units, so you always know where you landed.
+
+None of this does anything under Parallel Projection — a parallel view has no lens to speak of, so a Shift-drag there just dollies like a plain one.
+
+## Zoom Window
+
+**Camera ▸ Zoom Window** drags a rectangle over the part of the model you want to fill the screen, then returns you to the Select tool — a one-shot camera move, not a mode you have to remember to leave.
 
 ## Standard views and framing
 

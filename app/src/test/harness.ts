@@ -659,6 +659,30 @@ export interface HewTestHarness {
    * asserting framing (e.g. Zoom Extents re-targeting onto an instance). */
   getCamera(): { position: Vec3; target: Vec3; fovDeg: number }
 
+  /**
+   * The camera's FULL working view (docs/design/camera.md §5) — projection,
+   * fov, eye/target/up — unlike `getCamera` (always perspective-shaped,
+   * reads the possibly-stale `controls.target`), this covers both
+   * projections and derives `target` fresh from the live pose. The read
+   * side of camera persistence.
+   */
+  getCameraState(): {
+    projection: 'perspective' | 'parallel'
+    fovDeg: number
+    eye: Vec3
+    target: Vec3
+    up: Vec3
+  }
+
+  /**
+   * Pushes the CURRENT live camera view into the document (the same
+   * `Document::set_camera_state` call App's real Save/Save As run right
+   * before `scene.save()`) and returns the resulting bytes — camera
+   * persistence's save side, exercised end to end without needing an
+   * actual OS file-save dialog in this harness.
+   */
+  saveWithCameraState(): number[]
+
   /** Project a world point to canvas-relative CSS pixels at the current
    * camera, for pointer-driven E2E that must target an on-screen widget (e.g.
    * grabbing a Scale-gizmo grip by its exact projected position instead of a
@@ -1490,6 +1514,27 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getCamera()
     },
+
+    getCameraState: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getCameraState()
+    },
+
+    saveWithCameraState: () =>
+      query((s) => {
+        const api = deps.getViewportApi()
+        if (api === null) throw new Error('__hew_test: viewport not ready')
+        const state = api.getCameraState()
+        s.set_camera_state(
+          state.projection,
+          state.fovDeg,
+          new Float64Array(state.eye),
+          new Float64Array(state.target),
+          new Float64Array(state.up),
+        )
+        return Array.from(s.save())
+      }),
 
     worldToScreen: (world) => {
       const api = deps.getViewportApi()

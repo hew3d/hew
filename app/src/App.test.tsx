@@ -61,6 +61,10 @@ const mockScene = {
   // save() is called once to snapshot the blank scene for "New" resets.
   save: () => new Uint8Array(),
   load: vi.fn(),
+  // Camera persistence (docs/design/camera.md §5) — no saved view by
+  // default, so load falls back to the pre-existing default framing.
+  camera_state: () => undefined,
+  set_camera_state: vi.fn(),
   node_parent: () => undefined as bigint | undefined,
   material_ids: () => new BigUint64Array(),
   material_info: () => undefined,
@@ -271,6 +275,131 @@ describe('App — tool rail tool switching', () => {
   })
 })
 
+describe('App — Camera menu/rail check-state after a walkthrough handoff (playtest finding 2)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  /** The props App handed the (mocked) Viewport on its last render — mirrors
+   * `latestViewportProps`'s pattern in the Section Plane describe block
+   * above. `onInternalToolChange` is what the REAL Viewport's switchToolRef
+   * calls, at the end of EVERY invocation, with the tool that just actually
+   * became active — an explicit prop-driven switch, an auto-handoff, an
+   * Escape-to-Select, or a one-shot revert alike. Simulating that call here
+   * stands in for the internal transition the mock can't run itself
+   * (Viewport/three.js don't work under jsdom); it is what makes
+   * `activeTool` — and therefore every menu checkmark, the rail highlight,
+   * and the contextual dock, which all read it directly — truthful. */
+  function latestViewportToolProps(): {
+    onInternalToolChange?: (name: string) => void
+    activeTool?: string
+    activeToolSeq?: number
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  function openCameraMenu() {
+    fireEvent.click(screen.getByRole('button', { name: /^camera$/i }))
+  }
+
+  // CheckMenuItem commits on mousedown, not click (so the outside-mousedown
+  // closer can't race it) — same as the existing "clicking Draw > Arc"
+  // test below. `getByText` still matches the label alone once checked:
+  // the checkmark lives in its OWN nested `<span>`, and RTL's default text
+  // matching only considers an element's DIRECT text-node children, not
+  // descendants' — the wrapping label span's checkmark sibling is excluded.
+  function clickMenuItem(label: string): void {
+    fireEvent.mouseDown(menubar().getByText(label))
+  }
+
+  function isChecked(label: string): boolean {
+    return (menubar().getByText(label).closest('div')?.textContent ?? '').includes('✓')
+  }
+
+  /** What the REAL Viewport's switchToolRef does at the end of EVERY
+   * invocation: report the tool that's now actually active through
+   * `onInternalToolChange`. The mock can't run switchToolRef itself, so an
+   * explicit reselect (which Viewport would immediately re-confirm this
+   * way) needs it simulated by hand too. */
+  function reportToolChange(name: string): void {
+    const { onInternalToolChange } = latestViewportToolProps()
+    act(() => { onInternalToolChange?.(name) })
+  }
+
+  it('shows Look Around checked (not Position Camera) after the real auto-handoff, and nothing checked after Escape', async () => {
+    await renderAndLoad()
+
+    openCameraMenu()
+    clickMenuItem('Position Camera') // closes the menu (withClose)
+    reportToolChange('Position Camera') // what the real switchToolRef reports on activation
+    openCameraMenu()
+    expect(isChecked('Position Camera')).toBe(true)
+
+    // The auto-handoff: Position Camera places the eye then switches itself
+    // to Look Around via switchToolRef, which now reports the change through
+    // onInternalToolChange too — App's `activeTool` state is told, not just
+    // the status-bar signal. No menu interaction happens here, so the menu
+    // (already open) stays open.
+    reportToolChange('Look Around')
+    expect(isChecked('Look Around')).toBe(true)
+    expect(isChecked('Position Camera')).toBe(false)
+
+    // Escape returns to Select the same way (switchToolRef →
+    // onInternalToolChange) — the Camera group should show NOTHING checked.
+    reportToolChange('Select')
+    expect(isChecked('Look Around')).toBe(false)
+    expect(isChecked('Position Camera')).toBe(false)
+    expect(isChecked('Walk')).toBe(false)
+  })
+
+  it('re-choosing the (visually unchecked, but state-stale) Position Camera entry is NOT a no-op', async () => {
+    await renderAndLoad()
+
+    openCameraMenu()
+    clickMenuItem('Position Camera') // closes the menu (withClose)
+    reportToolChange('Position Camera')
+    const seqAfterFirstActivation = latestViewportToolProps().activeToolSeq
+
+    // Simulate the auto-handoff exactly as above — `activeTool` now follows
+    // it immediately, becoming 'Look Around'.
+    reportToolChange('Look Around')
+
+    // Re-choosing "Position Camera" from the menu: without `toolActivationSeq`
+    // forcing it through, a plain setState('Position Camera') would be a
+    // completely ordinary (non-stale) state change here and WOULD re-render
+    // regardless — so this test's real job is confirming the seq counter
+    // still advances on every explicit reselect, the behavior
+    // `toolActivationSeq` exists to guarantee independent of whether
+    // `activeTool` happened to already match.
+    openCameraMenu()
+    clickMenuItem('Position Camera') // closes the menu again
+    const seqAfterReselect = latestViewportToolProps().activeToolSeq
+    expect(seqAfterReselect).toBeGreaterThan(seqAfterFirstActivation ?? -1)
+
+    // The real switchToolRef would immediately re-confirm the activation.
+    reportToolChange('Position Camera')
+
+    // And the menu now shows it checked again.
+    openCameraMenu()
+    expect(isChecked('Position Camera')).toBe(true)
+  })
+
+  it('finding A: Escape from Look Around highlights Select in the tool rail too, not just the menus', async () => {
+    await renderAndLoad()
+
+    openCameraMenu()
+    clickMenuItem('Position Camera')
+    reportToolChange('Position Camera')
+    reportToolChange('Look Around') // auto-handoff
+
+    // Escape-to-Select — the rail (which reads `activeTool` directly, not a
+    // menu-only derivation) must pick this up exactly like the menus do.
+    reportToolChange('Select')
+    expect(screen.getByTitle('Select (Spc)')).toHaveAttribute('aria-checked', 'true')
+  })
+})
+
 describe('App — keyboard shortcuts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -329,6 +458,10 @@ describe('App — keyboard shortcuts', () => {
   it('bare H activates the Pan camera tool (SketchUp camera keys)', async () => {
     await renderAndLoad()
     fireEvent.keyDown(document, { key: 'h' })
+    // The bare-letter shortcut goes through `activateTool('Pan')`, which
+    // sets `activeTool` directly — every menu checkmark (Camera included)
+    // reads `activeTool` itself now, with no separate derivation step, so
+    // no simulated Viewport callback is needed to see it reflected here.
     fireEvent.click(screen.getByRole('button', { name: /^camera$/i }))
     const panItem = menubar().getByText('Pan').closest('div')
     expect(panItem?.textContent).toContain('✓')
