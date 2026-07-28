@@ -47,6 +47,8 @@ import { StlExportDialog } from './panels/StlExportDialog'
 import { StlUnitsDialog } from './panels/StlUnitsDialog'
 import { setLastStlImportUnit } from './settings/stlImportUnit'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
+import { TextDialog, type TextDialogResult } from './panels/TextDialog'
+import { layoutGlyphRun } from './text/glyphRun'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
 import { friendlyErrorText, isErrorLevelCode } from './kernelErrors'
 import { CommandPalette } from './palette/CommandPalette'
@@ -831,12 +833,18 @@ export default function App() {
     if (scene == null) return null
     const objectIdSet = new Set(Array.from(scene.object_ids()))
     const groupIdSet = new Set(Array.from(scene.group_ids()))
-    // Booleans take plain solids AND whole groups (boolean_nodes; the kernel
-    // owns eligibility — solidity, instances — and refuses typed). Liveness
+    const instanceIdSet = new Set(Array.from(scene.instance_ids()))
+    // Booleans take plain solids, whole groups, AND component instances
+    // (boolean_nodes; the kernel owns eligibility — solidity, an instance
+    // nested inside a group — and refuses typed). An instance operand is
+    // allowed here even though the kernel refuses it directly
+    // (`BooleanOperandHasInstance`): `Viewport.tsx`'s `runBoolean`
+    // transparently explodes it and retries (playtest finding 4). Liveness
     // here; top-level-ness in canBooleanHelper below.
     const isBooleanOperand = (n: NodeRef) =>
       (n.kind === 'object' && objectIdSet.has(n.id)) ||
-      (n.kind === 'group' && groupIdSet.has(n.id))
+      (n.kind === 'group' && groupIdSet.has(n.id)) ||
+      (n.kind === 'instance' && instanceIdSet.has(n.id))
     const deepest = activeContext.length > 0 ? activeContext[activeContext.length - 1] : undefined
     const activeComponent = deepest?.kind === 'instance'
       ? scene.instance_def(deepest.id)
@@ -1818,6 +1826,30 @@ export default function App() {
   // solid-gating dialog remains the follow-on step (chain unchanged).
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
 
+  // -------------------------------------------------------------------- 3D Text
+  // Draw ▸ 3D Text… (docs/design/3d-text.md): the dialog resolves text/font/
+  // height/depth; OK lays out the glyph run (font-aware, app-side) and hands
+  // the plain-geometry result to the viewport, which arms a placement tool —
+  // the dialog and this handler never touch the kernel directly.
+  const [textDialogOpen, setTextDialogOpen] = useState(false)
+
+  const handleTextPlace = useCallback((result: TextDialogResult) => {
+    setTextDialogOpen(false)
+    const { text, font, heightMeters, depthMeters } = result
+    const contours = layoutGlyphRun(font.font, text, heightMeters)
+    if (contours.length === 0 || !contours.some((c) => c.fill)) {
+      handleToast("Nothing to place — the text has no visible strokes at this size.")
+      return
+    }
+    const label = text.replace(/\s+/g, ' ').trim()
+    viewportApi.current?.armTextPlacement({
+      contours,
+      scale: heightMeters / font.font.unitsPerEm,
+      depth: depthMeters,
+      name: `3D Text "${label}"`,
+    })
+  }, [handleToast])
+
   const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number) => {
     setExportDialogOpen(false)
     if (format === 'glb') {
@@ -1938,6 +1970,7 @@ export default function App() {
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
       case 'export':   setExportDialogOpen(true); break
+      case 'draw-3d-text': setTextDialogOpen(true); break
       case 'save':     saveDocumentRef.current(); break
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
@@ -2775,7 +2808,15 @@ export default function App() {
     // solid or a group, at the top level.
     if (!(menuGates?.canBoolean ?? false)) return
     const result = viewportApi.current?.runBoolean(op, booleanOperands[0], booleanOperands[1])
-    if (result != null) {
+    if (result === 'mutated-failed') {
+      // The retried boolean failed AFTER auto-explode already committed
+      // real mutations (make_unique/explode_instance/group_nodes) —
+      // Viewport already refreshed the scene and pushed the exploded
+      // pieces as the new selection (onSelectMany) and toasted the honest
+      // recovery hint; this is not a no-op, so the outliner/watertight
+      // status must still be re-derived from the document.
+      setDocRev((r) => r + 1)
+    } else if (result != null) {
       setSelectedIds([result])
       setDocRev((r) => r + 1)
     }
@@ -2887,6 +2928,7 @@ export default function App() {
         onSaveAs={saveAsDocument}
         onImport={importDocument}
         onExport={() => setExportDialogOpen(true)}
+        onDrawText={() => setTextDialogOpen(true)}
         onClose={
           isTauri && !isMac
             ? () => {
@@ -3377,6 +3419,15 @@ export default function App() {
         <ExportDialog
           onExport={handleExportFormat}
           onCancel={() => setExportDialogOpen(false)}
+        />
+      )}
+
+      {/* Draw ▸ 3D Text… (docs/design/3d-text.md) — resolves text/font/
+          height/depth; OK arms the placement tool via handleTextPlace. */}
+      {textDialogOpen && (
+        <TextDialog
+          onPlace={handleTextPlace}
+          onCancel={() => setTextDialogOpen(false)}
         />
       )}
 

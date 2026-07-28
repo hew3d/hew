@@ -23,11 +23,14 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { TOOL_MENU_IDS } from './App'
 import { TOOLS } from './tools/toolRegistry'
+import { dockVerbsFor } from './panels/dockLogic'
+import { paletteEntries } from './palette/registry'
 
 const MAIN_RS = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../../shells/tauri/src-tauri/src/main.rs',
 )
+const MENU_BAR_TSX = resolve(dirname(fileURLToPath(import.meta.url)), './panels/MenuBar.tsx')
 
 describe('native menu parity', () => {
   const source = readFileSync(MAIN_RS, 'utf8')
@@ -79,5 +82,51 @@ describe('native menu parity', () => {
       }
     }
     expect(missing, 'menu items built but never attached to a SubmenuBuilder chain').toEqual([])
+  })
+})
+
+/**
+ * "3D Text…" discoverability (playtest finding 1): it is a one-off dialog
+ * action, not a toggleable tool, so it is deliberately outside
+ * `TOOL_MENU_IDS`/`TOOLS`/the checks above — those are scoped to the
+ * persistent, checkable tool set. It shipped reachable only from the
+ * command palette (`registry.ts`); this pins it onto every surface a
+ * sibling Draw-menu tool lives on, the same way the tool-parity suite
+ * above pins toggleable tools.
+ */
+describe('3D Text one-off action parity (not a TOOL_REGISTRY tool)', () => {
+  const mainRsSource = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const id = 'draw-3d-text'
+
+  it('is built as a native menu item, attached to a submenu, with a dispatch arm', () => {
+    const binding = new RegExp(
+      `let\\s+(\\w+)\\s*=\\s*MenuItemBuilder::with_id\\(\\s*"${id}"`,
+    ).exec(mainRsSource)
+    expect(binding, `no MenuItemBuilder::with_id binding found for ${id}`).not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      mainRsSource.includes(`.item(&${variable})`),
+      `${id} (-> ${variable}) is built but never attached to a SubmenuBuilder chain`,
+    ).toBe(true)
+    expect(
+      new RegExp(`"${id}"\\s*=>\\s*"`).test(mainRsSource),
+      `${id} has no dispatch arm forwarding it to the app`,
+    ).toBe(true)
+  })
+
+  it('is offered from the web MenuBar\'s Draw menu', () => {
+    expect(menuBarSource.includes('3D Text…')).toBe(true)
+    expect(menuBarSource.includes('onDrawText')).toBe(true)
+  })
+
+  it('is offered from the empty-selection dock\'s DRAW verb row', () => {
+    const ids = dockVerbsFor('empty').map((v) => v.id)
+    expect(ids).toContain(id)
+  })
+
+  it('is offered from the command palette', () => {
+    const ids = paletteEntries().map((e) => e.id)
+    expect(ids).toContain(id)
   })
 })

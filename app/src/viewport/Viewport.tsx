@@ -55,6 +55,7 @@ import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
 import { SectionPlaneTool } from '../tools/SectionPlaneTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
+import { TextPlaceTool, type TextPlacement } from '../tools/TextPlaceTool'
 import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray } from './math'
@@ -289,9 +290,25 @@ const STANDARD_VIEWS: Record<StandardView, { eye: [number, number, number] }> = 
 export interface ViewportApi {
   /** Combine two nodes — plain solids or whole groups (0=union,
    * 1=subtract a−b, 2=intersect). Returns the result root (a single object,
-   * or a result group when the result has disjoint pieces); null on a
-   * refused op (already toasted). */
-  runBoolean: (op: number, a: NodeRef, b: NodeRef) => NodeRef | null
+   * or a result group when the result has disjoint pieces); `null` on a
+   * refused op that left the document **completely** untouched (already
+   * toasted) — this is only ever true when nothing at all committed yet.
+   * `'mutated-failed'` is a THIRD outcome, distinct from both: a component
+   * instance operand needed auto-exploding first (`explodeInstanceOperand`
+   * via `runBooleanCore` — make_unique/explode_instance/group_nodes), and
+   * SOME step of that committed a real document mutation before something
+   * downstream failed — whether that's a later auto-explode sub-step (the
+   * other operand, or this same operand's own explode/group step), or the
+   * retried boolean itself. The document is left holding whatever exists at
+   * the point of failure (exploded pieces for an operand that finished,
+   * or the still-present-but-now-unique instance for one that didn't) — the
+   * caller must treat this like a mutation (bump its own revision counter)
+   * even though there is no single result node; the surviving pieces' new
+   * selection is already pushed via `onSelectMany` and an honest recovery
+   * toast (naming what committed, what failed, and exactly how many undo
+   * steps restore the pre-explode state) is already shown before this
+   * returns. */
+  runBoolean: (op: number, a: NodeRef, b: NodeRef) => NodeRef | null | 'mutated-failed'
   /** Group the given nodes into a merge group. */
   runGroup: (nodes: NodeRef[]) => bigint | null
   /** Dissolve a group. */
@@ -306,6 +323,14 @@ export interface ViewportApi {
   runExplodeInstance: (instanceId: bigint) => bigint[] | null
   /** Detach an instance onto a private copy of its definition. Returns the new component handle. */
   runMakeUnique: (instanceId: bigint) => bigint | null
+  /**
+   * Arms a one-shot 3D Text placement tool (docs/design/3d-text.md) with
+   * the dialog's already-resolved glyph geometry — the ghost follows the
+   * cursor on whatever face/ground/axis-locked plane the draw-tool rules
+   * resolve; a click commits the whole placement (gesture, extrusion, and
+   * component fold) as one undo step.
+   */
+  armTextPlacement: (placement: TextPlacement) => void
   /**
    * Call after a `scene.load()` to rebuild all viewport-side caches and
    * propagate the new watertight state / docRev to the parent.  Mirrors the
@@ -927,6 +952,134 @@ export function applyEditContext(tool: Tool, ctx: EditContext): void {
 }
 
 /**
+ * Outcome of exploding ONE component-instance boolean operand into plain
+ * world geometry — the auto-explode helper `runBooleanCore` calls per
+ * instance operand (playtest finding 4: the engrave/emboss use case needs
+ * booleans against 3D text, which is always a component instance, and the
+ * kernel rightly refuses an instance operand outright —
+ * `BooleanOperandHasInstance`, since a boolean consumes its operand and an
+ * instance's geometry is shared).
+ *
+ * No new kernel surface: `make_unique` (give the instance its own
+ * definition — the kernel error's own suggested fallback), then
+ * `explode_instance` (bake its pose into plain world solids), then — for a
+ * definition with more than one disjoint solid (exactly the 3D Text case,
+ * one Object per extruded glyph region) — `group_nodes` folds the pieces
+ * into one group so the boolean still sees a single operand (mirroring the
+ * existing multi-solid boolean flow: `canBoolean` in treeModel.ts accepts
+ * exactly 2 top-level operands, so combining >2 solids always means
+ * grouping first).
+ *
+ * Each of these is its own committed undo step (no sanctioned
+ * single-compound mechanism covers this sequence — `DocAction::Compound` is
+ * scoped to `place_text` alone), so `steps` on EVERY outcome — success or
+ * failure — reports exactly how many landed. Delta-review finding 1: a
+ * mirrored/reflected-pose instance (legal via import/load) passes
+ * `make_unique` and only then fails `explode_instance`
+ * (`CannotExplodeReflected`) — and `group_nodes` can likewise fail after
+ * `explode_instance` already committed. Both leave `steps > 0` with the
+ * operand never replaced; a caller that reads a bare failure as "nothing
+ * happened" loses track of a real, undoable document mutation.
+ */
+export interface ExplodeInstanceSuccess {
+  ok: true
+  /** The plain object (single solid) or group (multiple) now standing in for the instance. */
+  node: NodeRef
+  /** Undo steps committed to reach this: 2 (make_unique + explode) or 3 (+ group). */
+  steps: number
+}
+
+export interface ExplodeInstanceFailure {
+  ok: false
+  /** Undo steps already committed before the failure. 0 means the document
+   *  is untouched — `make_unique` itself refused. */
+  steps: number
+  /** Whatever now exists in the document in the instance's place, for
+   *  selection/recovery: the still-present (now-uniquely-defined) instance
+   *  if only `make_unique` landed, the ungrouped exploded objects if
+   *  `group_nodes` refused, or empty when nothing committed. */
+  pieces: NodeRef[]
+  code?: string
+  message: string
+}
+
+export type ExplodeInstanceOutcome = ExplodeInstanceSuccess | ExplodeInstanceFailure
+
+export function explodeInstanceOperand(wasmScene: WasmScene, instance: NodeRef): ExplodeInstanceOutcome {
+  try {
+    wasmScene.make_unique(instance.id)
+  } catch (err) {
+    const code = parseKernelErrorCode(err)
+    const rawMsg = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      steps: 0,
+      pieces: [],
+      code: code ?? undefined,
+      message: kernelErrorMessage(code ?? 'Unknown', rawMsg),
+    }
+  }
+
+  let created: bigint[]
+  try {
+    created = Array.from(wasmScene.explode_instance(instance.id))
+  } catch (err) {
+    const code = parseKernelErrorCode(err)
+    const rawMsg = err instanceof Error ? err.message : String(err)
+    // make_unique committed — the instance (same handle, now on a private
+    // definition) is still what's rendered in its place.
+    return {
+      ok: false,
+      steps: 1,
+      pieces: [instance],
+      code: code ?? undefined,
+      message: kernelErrorMessage(code ?? 'Unknown', rawMsg),
+    }
+  }
+
+  if (created.length === 0) {
+    return {
+      ok: false,
+      steps: 2,
+      pieces: [],
+      message: kernelErrorMessage('Unknown', 'exploding the component produced no solids'),
+    }
+  }
+
+  const pieces = created.map((id): NodeRef => ({ kind: 'object', id }))
+  if (created.length === 1) {
+    return { ok: true, node: pieces[0], steps: 2 }
+  }
+
+  const sel = structuralSelection(pieces)
+  if (sel === null) {
+    // Defensive: every piece here is a freshly-created plain object, always
+    // a valid kernel node id, so this should be unreachable — but the
+    // exploded pieces are still real, ungrouped document state if it fires.
+    return {
+      ok: false,
+      steps: 2,
+      pieces,
+      message: kernelErrorMessage('Unknown', 'could not fold the exploded pieces into a group'),
+    }
+  }
+  try {
+    const groupId = wasmScene.group_nodes(sel.kinds, sel.ids)
+    return { ok: true, node: { kind: 'group', id: groupId }, steps: 3 }
+  } catch (err) {
+    const code = parseKernelErrorCode(err)
+    const rawMsg = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      steps: 2,
+      pieces,
+      code: code ?? undefined,
+      message: kernelErrorMessage(code ?? 'Unknown', rawMsg),
+    }
+  }
+}
+
+/**
  * The instance ids that must stay individually lit (materialized + full
  * opacity) for the current `activeContext` breadcrumb — passed to
  * `SceneRenderer.setActiveContext` as `litInstances`.
@@ -963,6 +1116,156 @@ export function computeLitInstances(wasmScene: WasmScene, activeContext: NodeRef
     for (const id of instanceIds) lit.add(id)
   }
   return lit.size > 0 ? lit : null
+}
+
+/**
+ * Pure decision core for `ViewportApi.runBoolean`: every wasm call already
+ * made, every committed undo step already counted, so the UI shell (the
+ * `runBoolean` closure inside the `Viewport` component) only has to turn
+ * this into scene refresh / selection / toast side effects. Split out so
+ * the accounting itself — exactly what delta-review finding 1 found
+ * wrong — is exercised directly against a real compiled `Scene` in tests
+ * without mounting the (WebGL-backed) `Viewport` component; see
+ * `pickResolution.test.ts` for the same pattern with
+ * `buildAncestorChain`/`resolvePickToSelectable`.
+ */
+export type BooleanCoreOutcome =
+  | { kind: 'ok'; node: NodeRef; autoExploded: boolean }
+  | { kind: 'refused'; code?: string; message: string }
+  | {
+      kind: 'mutated-failed'
+      /** Every node now sitting in the document in place of a pre-explode
+       *  instance operand — for `onSelectMany`. */
+      settledNodes: NodeRef[]
+      /** Total undo steps committed across both operands' auto-explode
+       *  before the failure — exactly how many undos restore the original
+       *  document (delta-review finding 2). */
+      committedSteps: number
+      /** True when both operands fully resolved and it was the RETRIED
+       *  boolean itself that then failed; false when an operand's own
+       *  auto-explode (make_unique/explode_instance/group_nodes) failed
+       *  partway — drives which toast lead-in is accurate. */
+      retryFailed: boolean
+      /** Only meaningful when `retryFailed` is false: whether the OTHER
+       *  operand had already been fully exploded before this one failed —
+       *  the worst case (both operands were instances, one fully exploded,
+       *  the other then failed), so the toast can honestly say one
+       *  committed and is left sitting exploded while the other refused. */
+      otherOperandExploded: boolean
+      code?: string
+      message: string
+    }
+
+export function runBooleanCore(
+  wasmScene: WasmScene,
+  op: number,
+  a: NodeRef,
+  b: NodeRef,
+): BooleanCoreOutcome {
+  // Operands are plain solids, whole groups, or (transparently exploded
+  // below) component instances; the kernel composes group operands and owns
+  // every eligibility rule (boolean_nodes, the group-ops design). kind:
+  // 0=object, 1=group, 2=instance.
+  const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
+  const attempt = (opA: NodeRef, opB: NodeRef): NodeRef =>
+    nodeRefFromJs(wasmScene.boolean_nodes(op, kindNum(opA), opA.id, kindNum(opB), opB.id))
+
+  let opA = a
+  let opB = b
+  try {
+    const node = attempt(opA, opB)
+    return { kind: 'ok', node, autoExploded: false }
+  } catch (err) {
+    const code = parseKernelErrorCode(err)
+    if (code !== 'BooleanOperandHasInstance') {
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      return { kind: 'refused', code: code ?? undefined, message: kernelErrorMessage(code ?? 'Unknown', rawMsg) }
+    }
+
+    // Scoped to an operand that IS an instance, not one nested inside a
+    // group operand's subtree (the other way this refusal can fire) —
+    // finding 4's auto-explode targets the direct engrave/emboss case.
+    // `committedSteps` tracks "anything committed yet" across BOTH
+    // operands (delta-review finding 1c: opA can fully explode — up to 3
+    // committed steps — before opB's own explode then fails; that is
+    // still a real, partial mutation, never a bare no-op).
+    const settledNodes: NodeRef[] = []
+    let committedSteps = 0
+    let aExploded = false
+
+    if (opA.kind === 'instance') {
+      const outcome = explodeInstanceOperand(wasmScene, opA)
+      committedSteps += outcome.steps
+      if (!outcome.ok) {
+        settledNodes.push(...outcome.pieces)
+        if (committedSteps === 0) {
+          return { kind: 'refused', code: outcome.code, message: outcome.message }
+        }
+        return {
+          kind: 'mutated-failed',
+          settledNodes,
+          committedSteps,
+          retryFailed: false,
+          otherOperandExploded: false,
+          code: outcome.code,
+          message: outcome.message,
+        }
+      }
+      opA = outcome.node
+      settledNodes.push(outcome.node)
+      aExploded = true
+    }
+
+    if (opB.kind === 'instance') {
+      const outcome = explodeInstanceOperand(wasmScene, opB)
+      committedSteps += outcome.steps
+      if (!outcome.ok) {
+        settledNodes.push(...outcome.pieces)
+        if (committedSteps === 0) {
+          return { kind: 'refused', code: outcome.code, message: outcome.message }
+        }
+        return {
+          kind: 'mutated-failed',
+          settledNodes,
+          committedSteps,
+          retryFailed: false,
+          otherOperandExploded: aExploded,
+          code: outcome.code,
+          message: outcome.message,
+        }
+      }
+      opB = outcome.node
+      settledNodes.push(outcome.node)
+    }
+
+    if (committedSteps === 0) {
+      // Neither operand was a direct instance — the refusal fired for a
+      // reason this auto-explode doesn't cover (e.g. an instance nested
+      // inside a group operand's subtree). Nothing committed, clean refusal.
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      return { kind: 'refused', code, message: kernelErrorMessage(code, rawMsg) }
+    }
+
+    try {
+      const node = attempt(opA, opB)
+      return { kind: 'ok', node, autoExploded: true }
+    } catch (err2) {
+      // Unlike every refusal above, the explode(s) already committed real
+      // mutations — the document now holds the exploded pieces, not the
+      // pre-explode instance(s).
+      const code2 = parseKernelErrorCode(err2)
+      const rawMsg2 = err2 instanceof Error ? err2.message : String(err2)
+      return {
+        kind: 'mutated-failed',
+        settledNodes,
+        committedSteps,
+        retryFailed: true,
+        otherOperandExploded: false,
+        code: code2 ?? undefined,
+        message: kernelErrorMessage(code2 ?? 'Unknown', rawMsg2),
+      }
+    }
+  }
 }
 
 export default function Viewport({
@@ -1710,37 +2013,86 @@ export default function Viewport({
       onToastRef.current?.(message, code)
     }
 
-    // Imperative command surface for the parent.
-    function runBoolean(op: number, a: NodeRef, b: NodeRef): NodeRef | null {
-      // Operands are plain solids or whole groups; the kernel composes group
-      // operands and owns every eligibility rule (boolean_nodes,
-      // the group-ops design). kind: 0=object, 1=group — the same
-      // mapping as runGroup; instances are refused typed by the kernel.
-      const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
-      // Editing INSIDE a component instance's own definition (component-edit-
-      // parity.md phase A2): both operands are definition members — route
-      // through `boolean_in_component` instead of the world `boolean_nodes`.
-      // The result replaces both members in the SAME definition.
+    // Imperative command surface for the parent. Editing INSIDE a component
+    // instance's own definition (component-edit-parity.md phase A2) routes
+    // through `boolean_in_component` instead of the world `boolean_nodes` —
+    // both operands are definition members, replaced in place within that
+    // SAME definition. A definition member is never itself a component
+    // instance, so the auto-explode retry below does not apply on this path.
+    // At the world level (`editCtx.kind !== 'instance'`), all the wasm calls
+    // and undo-step accounting for the auto-explode-instance-operand retry
+    // (playtest finding 4) live in the pure, module-level `runBooleanCore`
+    // (above `Viewport` in this file) — this wrapper only turns its outcome
+    // into the side effects real usage needs (scene refresh, selection,
+    // toast), which is exactly the part testing the accounting itself
+    // doesn't need to exercise.
+    function runBoolean(op: number, a: NodeRef, b: NodeRef): NodeRef | null | 'mutated-failed' {
       const editCtx = computeEditContext(wasmScene, activeContextRef.current)
-      let result: NodeRef
-      try {
-        result = editCtx.kind === 'instance'
-          ? { kind: 'object', id: wasmScene.boolean_in_component(editCtx.component, op, a.id, b.id) }
-          : nodeRefFromJs(
-              wasmScene.boolean_nodes(op, kindNum(a), a.id, kindNum(b), b.id),
-            )
-      } catch (err) {
-        const code = parseKernelErrorCode(err)
-        const rawMsg = err instanceof Error ? err.message : String(err)
-        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      if (editCtx.kind === 'instance') {
+        let result: NodeRef
+        try {
+          result = { kind: 'object', id: wasmScene.boolean_in_component(editCtx.component, op, a.id, b.id) }
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          const rawMsg = err instanceof Error ? err.message : String(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          return null
+        }
+        handleSceneRefresh()
+        sceneRenderer.refreshAllSketches()
+        sceneRenderer.refreshGuides()
+        onSelectRef.current?.(result, false)
+        scheduleRender()
+        return result
+      }
+
+      const outcome = runBooleanCore(wasmScene, op, a, b)
+
+      if (outcome.kind === 'refused') {
+        handleToast(outcome.message, outcome.code)
         return null
       }
+
+      if (outcome.kind === 'mutated-failed') {
+        // The auto-explode already committed real mutations — the document
+        // now holds whatever survived (exploded pieces for whichever
+        // operand(s) finished, or the still-present-but-now-unique instance
+        // for one that didn't — delta-review finding 1). Refresh everything
+        // the success path below refreshes, push the settled nodes up as
+        // the new selection (so the outliner and viewport match the
+        // document instead of any stale reference), and toast an honest
+        // recovery hint naming what committed, what failed, and exactly how
+        // many undos restore the pre-explode state (finding 2). The caller
+        // (App's handleBoolean) must treat this like a committed mutation —
+        // bump its revision counter — even though there is no single result
+        // node to select.
+        handleSceneRefresh()
+        sceneRenderer.refreshAllSketches()
+        sceneRenderer.refreshGuides()
+        onSelectManyRef.current?.(outcome.settledNodes, false)
+        scheduleRender()
+        const undoHint =
+          outcome.committedSteps === 1
+            ? 'undo once to restore it'
+            : `undo ${outcome.committedSteps} times to restore it`
+        const lead = outcome.retryFailed
+          ? 'Component exploded to solids, but the boolean then failed'
+          : outcome.otherOperandExploded
+            ? 'One component could not be fully exploded for the boolean (the other was, and is left exploded)'
+            : 'Component could not be fully exploded for the boolean'
+        handleToast(`${lead}: ${outcome.message} — ${undoHint}.`, outcome.code)
+        return 'mutated-failed'
+      }
+
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
       sceneRenderer.refreshGuides()
-      onSelectRef.current?.(result, false)
+      onSelectRef.current?.(outcome.node, false)
       scheduleRender()
-      return result
+      if (outcome.autoExploded) {
+        handleToast('Component exploded to solids for the boolean.')
+      }
+      return outcome.node
     }
 
     function runGroup(nodes: NodeRef[]): bigint | null {
@@ -2310,7 +2662,37 @@ export default function Viewport({
         }
         return 'capturingInput' in t && (t as { capturingInput(): boolean }).capturingInput()
       }
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf }
+      // 3D Text (docs/design/3d-text.md): the dialog resolves parameters and
+      // lays out the glyph run app-side, then hands the result here to arm
+      // a one-shot TextPlaceTool — mirrors `makeFollowMeTool`'s group/face
+      // context wiring, but reached imperatively (from App.tsx's dialog
+      // handoff) rather than through the named-tool `switchToolRef` switch,
+      // since 3D Text has no rail slot (design doc: Draw menu + palette
+      // only).
+      function armTextPlacement(placement: TextPlacement): void {
+        const tool = new TextPlaceTool(
+          wasmScene,
+          previewGroup,
+          placement,
+          (instanceId) => {
+            handleSceneRefresh()
+            sceneRenderer.refreshAllSketches()
+            onSelectRef.current?.({ kind: 'instance', id: instanceId }, false)
+          },
+          handleToast,
+        )
+        const ctx = activeContextRef.current
+        const deepest = ctx.length > 0 ? ctx[ctx.length - 1] : null
+        tool.setActiveContext(deepest?.kind === 'object' ? deepest.id : null)
+        tool.setFaceEligibility(faceDrawEligible)
+        tool.setComponentContext(
+          deepest?.kind === 'instance' ? (wasmScene.instance_def(deepest.id) ?? null) : null,
+        )
+        tool.setActiveGroup(deepest?.kind === 'group' ? deepest.id : null)
+        toolController.setTool(tool)
+      }
+
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, armTextPlacement }
     }
 
     // ------------------------------------------------------------------ tool factories

@@ -333,6 +333,22 @@ pub enum RecordedCall {
     MakeComponent { kinds: Vec<u8>, ids: Vec<u64> },
     /// `place_instance(component, affine)`.
     PlaceInstance { component: u64, affine: [f64; 12] },
+    /// `place_text(sketch, regions, distance, name, group)` — the 3D Text
+    /// placement's atomic tail (extrude the app-selected fill regions,
+    /// fold into one component, place one instance), folding the
+    /// immediately-preceding glyph-injection gesture into the same undo
+    /// step. Additive variant (the [`RecordedCall::SketchBeginCurveWith`]
+    /// posture): recordings that never place 3D text replay on older
+    /// builds unchanged; one that does fails to parse there — loudly,
+    /// never silently divergent.
+    PlaceText {
+        sketch: u64,
+        regions: Vec<u64>,
+        distance: f64,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<u64>,
+    },
     /// `transform_instance(instance, affine)`.
     TransformInstance { instance: u64, affine: [f64; 12] },
     /// `explode_instance(instance)`.

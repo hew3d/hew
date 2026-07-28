@@ -28,6 +28,7 @@ import groupWorkSvg from '@material-symbols/svg-400/outlined/group_work.svg?raw'
 import deployedCodeSvg from '@material-symbols/svg-400/outlined/deployed_code.svg?raw'
 import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?raw'
 import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
+import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
 import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled, type DockContext, type DockGates, type DockVerb } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
@@ -39,6 +40,7 @@ const NON_TOOL_ICON_SVG: Record<string, string> = {
   'edit-make-component': deployedCodeSvg,
   'make-unique': contentCopySvg,
   'explode-instance': callSplitSvg,
+  'draw-3d-text': textFieldsSvg,
 }
 
 const CHIP_COLOR: Record<DockContext, string> = {

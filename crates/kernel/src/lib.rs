@@ -35,7 +35,7 @@ pub mod tol;
 pub mod topo;
 pub mod transform;
 
-pub use document::{DocChange, Document, DocumentError, FollowMePath, NodeId};
+pub use document::{DocChange, Document, DocumentError, FollowMePath, NodeId, PendingActionKind};
 pub use error::TopologyError;
 pub use guide::Guide;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};

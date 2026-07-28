@@ -58,6 +58,10 @@ const EMPTY_VERBS: DockVerb[] = [
   { id: 'tool-line', label: 'Line' },
   { id: 'tool-circle', label: 'Circle' },
   { id: 'tool-arc', label: 'Arc' },
+  // Not a toggleable tool (it opens a dialog, docs/design/3d-text.md) but
+  // reachable the same way every other Draw verb here is: same
+  // `menuActionRef.current(id)` dispatch as the native menu and palette.
+  { id: 'draw-3d-text', label: '3D Text…' },
 ]
 
 /** Spec's Face row (Push/Pull primary, then Offset · Move · Paint · Erase) is

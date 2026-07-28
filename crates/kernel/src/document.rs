@@ -682,6 +682,74 @@ enum DocAction {
         component: ComponentId,
         object: ObjectId,
     },
+    /// [`Document::place_text`]'s final cleanup: after every selected FILL
+    /// region has been extruded, any edges still standing in the sketch
+    /// belong to un-extruded counter/interior regions — the holes in
+    /// glyphs like 'O'/'D'/'e', never anyone's scaffolding, since only the
+    /// fill regions the caller selected were extruded
+    /// ([`DocAction::CreatedObject`] only ever removes ITS region's own
+    /// boundary). `place_text`'s sketch exists solely for that one
+    /// placement (docs/design/3d-text.md), so discarding whatever remains
+    /// loses nothing legitimate: the whole sketch retires with the
+    /// placement instead of lingering as a live, reachable scratch entity.
+    /// Mirrors [`DocAction::CreatedObject`]'s own scaffolding
+    /// removal/restoration exactly (same row shape, same
+    /// [`Sketch::restore_edges`]/[`Sketch::edge_at_positions`] mechanics)
+    /// but names no [`ObjectId`] — nothing is extruded, only discarded.
+    /// Only ever produced when `place_text` finds the sketch still live
+    /// after its region loop; a glyph run with no counters produces none
+    /// (the last region's own extrusion already emptied the sketch).
+    ConsumedScaffolding {
+        sketch: SketchId,
+        /// The discarded rows, in [`DocAction::CreatedObject::removed`]'s
+        /// exact shape — everything undo needs to re-insert them and redo
+        /// needs to re-delete them by geometry.
+        removed: Vec<(Point3, Point3, Option<SketchCurveId>)>,
+    },
+    /// [`Document::place_text`] (3D Text, docs/design/3d-text.md) bundles
+    /// several ordinary steps into ONE undo/redo entry: the glyph-injection
+    /// gesture that preceded it ([`DocAction::SketchGesture`]), one
+    /// [`DocAction::CreatedObject`] per extruded region, an optional
+    /// [`DocAction::ConsumedScaffolding`] that discards any counter-glyph
+    /// scaffolding the regions left behind, and the
+    /// [`DocAction::MadeComponent`] that folds the extruded objects into a
+    /// definition plus one instance — in that chronological order. Undo
+    /// reverses the list in REVERSE order (last extrusion first, gesture
+    /// last); redo replays it forward. Scoped to exactly this shape —
+    /// `place_text` is its only producer — rather than the fully general
+    /// [`DocAction::Compound`] nested-action mechanism (component-edit
+    /// selections spanning object members and def-owned sketch islands):
+    /// this variant predates that one and keeps its own dedicated,
+    /// pre-validating reversal path (see
+    /// `Document::undo_place_text_compound`/`redo_place_text_compound` and
+    /// `compound_reversal_feasible`) rather than folding into it.
+    PlaceTextCompound(Vec<DocAction>),
+}
+
+/// The coarse shape of a pending [`DocAction`], exposed to callers that need
+/// to distinguish action KINDS without matching the (private) `DocAction`
+/// type itself — see [`Document::peek_undo_action_kind`]. Deliberately not
+/// exhaustive of every `DocAction` variant: it exists only to let a guard
+/// narrow "which action is this refusal against", so anything not called
+/// out by name collapses into `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingActionKind {
+    /// [`DocAction::PlaceTextCompound`] — `place_text`'s bundled placement.
+    PlaceTextCompound,
+    /// [`DocAction::CreatedObject`] — a plain (non-bundled) extrusion.
+    CreatedObject,
+    /// Any other action kind.
+    Other,
+}
+
+impl DocAction {
+    fn kind(&self) -> PendingActionKind {
+        match self {
+            DocAction::PlaceTextCompound(_) => PendingActionKind::PlaceTextCompound,
+            DocAction::CreatedObject { .. } => PendingActionKind::CreatedObject,
+            _ => PendingActionKind::Other,
+        }
+    }
 }
 
 /// A Follow Me path source (the follow-me design §2): either a chain of
@@ -892,6 +960,12 @@ pub enum DocumentError {
     /// v1 refuses instead — deleting the last member means the user wants
     /// the instances gone, so the hint points at deleting those.
     LastDefinitionMember,
+    /// `place_text` expects to fold the caller's just-closed glyph-injection
+    /// gesture (`begin_sketch_gesture` … `end_sketch_gesture` on the same
+    /// sketch, nothing else committed in between) into its own compound
+    /// undo step; the top of the undo stack was not that gesture — a
+    /// caller-contract violation. The document is untouched.
+    UnexpectedGestureState,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -991,6 +1065,10 @@ impl std::fmt::Display for DocumentError {
             DocumentError::LastDefinitionMember => write!(
                 f,
                 "cannot delete a component definition's last member — delete its instances instead"
+            ),
+            DocumentError::UnexpectedGestureState => write!(
+                f,
+                "expected the just-closed sketch-drawing gesture at the top of the undo stack"
             ),
         }
     }
@@ -6118,6 +6196,194 @@ impl Document {
         ))
     }
 
+    /// The 3D Text placement pipeline's atomic tail (docs/design/3d-text.md).
+    /// The app has already injected a text run's glyph outlines as edges
+    /// into `sketch` (one shared sketch per placement, every glyph at its
+    /// own advance-width offset — letters never interact since real text
+    /// doesn't overlap itself) via the ordinary sketch-gesture bracket
+    /// (`begin_sketch_gesture` … `end_sketch_gesture`, closed immediately
+    /// before this call with nothing else committed in between — the caller
+    /// contract this function verifies before touching anything), and has
+    /// resolved which of the sketch's closed regions are glyph FILL versus
+    /// which are counter-INTERIOR cells: the kernel's region resolver
+    /// reports every closed region a nested pair of contours forms — an 'O'
+    /// traces as the ring (fill, with the counter as a hole) AND the
+    /// counter's own interior standing alone as a second, separate region
+    /// (see `Document::extrudable_regions`'s doc and the concentric-rings
+    /// test in `sketch.rs`) — so the CALLER selects exactly `regions` (the
+    /// fill ones, by the font's own nonzero-winding fill rule) rather than
+    /// this call extruding every region blindly. The kernel still does all
+    /// the actual geometric heavy lifting: overlapping/self-touching glyph
+    /// contours split and close exactly like hand-drawn strokes, and a
+    /// selected fill region's counter arrives already closed as a hole by
+    /// construction (`Sketch::profile`) — the app only decides WHICH
+    /// resolved regions represent material, never how their boundaries
+    /// resolve.
+    ///
+    /// Every region in `regions` extrudes `distance` (exactly
+    /// [`Document::extrude_region`]'s own machinery), and the resulting
+    /// solids fold into ONE new component definition named `name`, whose
+    /// one identity-posed instance is returned — SketchUp's "3D Text"
+    /// parity (the maker can Move/Rotate/Scale or explode it like any
+    /// instance).
+    ///
+    /// `group`, when given, births every extruded solid — and so the folded
+    /// instance — inside that group, mirroring
+    /// [`Document::follow_me_grouped`]; `None` births top-level.
+    ///
+    /// Recorded as ONE [`DocAction::PlaceTextCompound`] bundling the
+    /// gesture's own [`DocAction::SketchGesture`] with each region's
+    /// [`DocAction::CreatedObject`] and the fold's [`DocAction::MadeComponent`]
+    /// — a single undo removes the whole placement, a single redo restores
+    /// it.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownGroup`] — `group` is stale or hidden.
+    /// - [`DocumentError::EmptyComponent`] — `regions` is empty (nothing to
+    ///   place); the just-closed gesture, if any, is left exactly as the
+    ///   caller committed it.
+    /// - [`DocumentError::UnexpectedGestureState`] — the top of the undo
+    ///   stack was not the `SketchGesture` this call expects to fold in
+    ///   (the caller contract above was violated). The document is
+    ///   untouched.
+    /// - [`DocumentError::Sketch`] / [`DocumentError::Extrude`] — a region's
+    ///   profile tracing or extrusion failed (a glyph pathological enough
+    ///   that the kernel's own validation refuses it).
+    ///
+    /// On `Err` the document is untouched: every fallible step (profile
+    /// tracing, extrusion) for EVERY region runs to completion before
+    /// anything commits, exactly like [`Document::extrude_region`]'s own
+    /// strong guarantee, extended across the whole glyph run.
+    pub fn place_text(
+        &mut self,
+        sketch: SketchId,
+        regions: &[SketchRegionId],
+        distance: f64,
+        name: String,
+        group: Option<GroupId>,
+    ) -> Result<(ComponentId, InstanceId, DocChange), DocumentError> {
+        if let Some(gid) = group
+            && (!self.groups.contains_key(gid) || self.groups[gid].hidden)
+        {
+            return Err(DocumentError::UnknownGroup);
+        }
+        if self.hidden_sketches.contains(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        if regions.is_empty() {
+            return Err(DocumentError::EmptyComponent);
+        }
+
+        // Validate & build every extrusion before committing anything (the
+        // strong guarantee) — `extrude_region`'s own single-region body,
+        // run once per region ahead of any commit.
+        let s = self
+            .sketches
+            .get(sketch)
+            .ok_or(DocumentError::UnknownSketch)?;
+        let mut built: Vec<(BTreeSet<SketchEdgeId>, Object)> = Vec::with_capacity(regions.len());
+        for &region in regions {
+            let profile = s.profile(region).map_err(DocumentError::Sketch)?;
+            let scaffolding = s
+                .region_scaffolding(region)
+                .map_err(DocumentError::Sketch)?;
+            let object =
+                Object::from_extrusion(&profile, distance).map_err(DocumentError::Extrude)?;
+            built.push((scaffolding, object));
+        }
+
+        // Fold in the glyph-injection gesture the caller just closed — the
+        // caller contract above. Nothing has committed yet, so a mismatch
+        // here leaves the document exactly as found.
+        let Some(top) = self.undo.pop() else {
+            return Err(DocumentError::UnexpectedGestureState);
+        };
+        if !matches!(&top, DocAction::SketchGesture { sketch: gs, .. } if *gs == sketch) {
+            self.undo.push(top);
+            return Err(DocumentError::UnexpectedGestureState);
+        }
+        let mut bundle = vec![top];
+
+        let mut object_ids = Vec::with_capacity(built.len());
+        let mut extra_groups_touched = Vec::new();
+        for (scaffolding, object) in built {
+            let (id, change) = self.commit_region_object(sketch, &scaffolding, object, None, group);
+            object_ids.push(id);
+            extra_groups_touched.extend(change.groups_touched);
+            bundle.push(
+                self.undo
+                    .pop()
+                    .expect("commit_region_object just pushed CreatedObject"),
+            );
+        }
+
+        // Anything still standing in the sketch belongs to un-extruded
+        // counter/interior regions the caller never selected — a glyph's
+        // hole (the 'O'/'D'/'e' counters), never scaffolding of an object
+        // we just created. This sketch exists solely for this one
+        // placement (docs/design/3d-text.md), so nothing legitimate is
+        // lost discarding whatever remains: the whole sketch retires with
+        // the placement rather than lingering as a live, reachable scratch
+        // entity (Finding 2). A glyph run with no counters already emptied
+        // (and hid) the sketch via the last region's own extrusion above,
+        // so this is a no-op then — no action is recorded.
+        if !self.hidden_sketches.contains(&sketch) {
+            let sk = self
+                .sketches
+                .get(sketch)
+                .expect("sketch confirmed live above");
+            let remaining: BTreeSet<SketchEdgeId> = sk.edges().keys().collect();
+            if !remaining.is_empty() {
+                let removed: Vec<(Point3, Point3, Option<SketchCurveId>)> = remaining
+                    .iter()
+                    .map(|&eid| {
+                        let e = sk.edges()[eid];
+                        (
+                            sk.vertices()[e.from].position,
+                            sk.vertices()[e.to].position,
+                            e.curve,
+                        )
+                    })
+                    .collect();
+                let sk = self
+                    .sketches
+                    .get_mut(sketch)
+                    .expect("sketch confirmed live above");
+                sk.remove_edges(&remaining);
+                debug_assert!(
+                    sk.edges().is_empty(),
+                    "place_text's scratch sketch holds only its own injected glyph edges"
+                );
+                self.hidden_sketches.insert(sketch);
+                bundle.push(DocAction::ConsumedScaffolding { sketch, removed });
+            }
+        }
+
+        let members: Vec<NodeId> = object_ids.iter().copied().map(NodeId::Object).collect();
+        let (component, instance, mut change) = self
+            .make_component(&members)
+            .expect("fresh top-level siblings sharing one parent cannot fail make_component");
+        bundle.push(
+            self.undo
+                .pop()
+                .expect("make_component just pushed MadeComponent"),
+        );
+        // The definition's real name: `make_component`'s own naming only
+        // ever sees an unnamed multi-member selection here and generates
+        // "Component N". `MadeComponent`'s undo/redo never touches
+        // `.name`, only `.hidden` — so this direct set is exact across
+        // undo and redo alike, with no separate undoable rename step.
+        self.components[component].name = Some(name);
+
+        self.undo.push(DocAction::PlaceTextCompound(bundle));
+        self.redo.clear();
+        self.debug_validate();
+
+        change.sketches_touched.push(sketch);
+        change.groups_touched.extend(extra_groups_touched);
+        Ok((component, instance, change))
+    }
+
     /// Move/rotate/scale a visible instance by **composing** `t` into its pose
     /// (`pose' = pose.then(t)`) — *not* baked: the geometry is shared, so
     /// only this instance's pose changes. The pose may end up mirrored or
@@ -6947,13 +7213,40 @@ impl Document {
         }
     }
 
+    /// The coarse shape of the pending undo/redo [`DocAction`], for guard
+    /// harnesses that need to narrow a tolerated refusal to specific
+    /// action kinds without matching the (private) `DocAction` type itself
+    /// — mirrors [`Document::peek_undo_object_op`]'s "peek without popping"
+    /// shape, one level up (the action's own kind rather than its inner
+    /// per-object `KernelOp`). `None` when there is nothing pending.
+    pub fn peek_undo_action_kind(&self) -> Option<PendingActionKind> {
+        self.undo.last().map(DocAction::kind)
+    }
+
+    /// [`Document::peek_undo_action_kind`]'s redo-side mirror.
+    pub fn peek_redo_action_kind(&self) -> Option<PendingActionKind> {
+        self.redo.last().map(DocAction::kind)
+    }
+
     /// Undo one extrusion: hide the solid and RE-INSERT the scaffolding it
     /// deleted, merging with the sketch's current contents
     /// ([`Sketch::restore_edges`]) — edits made after the extrusion
     /// survive. On a re-insertion conflict the action returns to the undo
     /// stack and the document is untouched
     /// ([`SketchError::RestoreConflicts`]).
-    fn undo_created_object(&mut self, action: DocAction) -> Result<DocChange, DocumentError> {
+    ///
+    /// Returns the [`DocChange`] alongside the exact [`DocAction`] the
+    /// caller should push onto the redo stack — callers push it themselves
+    /// rather than this function pushing directly, so
+    /// [`Document::undo_place_text_compound`] can bundle several such
+    /// redo-actions into one [`DocAction::PlaceTextCompound`] instead of
+    /// each landing as its own entry. The ordinary top-level
+    /// [`Document::undo`] just pushes it straight through, unchanged from
+    /// before this split.
+    fn undo_created_object(
+        &mut self,
+        action: DocAction,
+    ) -> Result<(DocChange, DocAction), DocumentError> {
         let DocAction::CreatedObject {
             id,
             sketch,
@@ -7016,22 +7309,25 @@ impl Document {
             }
             _ => (Vec::new(), Vec::new()),
         };
-        self.redo.push(DocAction::CreatedObject {
+        let redo_action = DocAction::CreatedObject {
             id,
             sketch,
             removed,
             emptied,
             merged_base,
-        });
+        };
         self.debug_validate();
-        Ok(DocChange {
-            objects_touched,
-            sketches_touched: vec![sketch],
-            groups_touched,
-            instances_touched,
-            components_touched,
-            guides_touched: Vec::new(),
-        })
+        Ok((
+            DocChange {
+                objects_touched,
+                sketches_touched: vec![sketch],
+                groups_touched,
+                instances_touched,
+                components_touched,
+                guides_touched: Vec::new(),
+            },
+            redo_action,
+        ))
     }
 
     /// Redo one extrusion: re-delete the scaffolding BY GEOMETRY
@@ -7042,7 +7338,14 @@ impl Document {
     /// last undo can be stale while the row positions match exactly.
     /// Cannot conflict — nothing else intervenes between an undo and its
     /// redo (any new op clears the redo stack).
-    fn redo_created_object(&mut self, action: DocAction) -> Result<DocChange, DocumentError> {
+    ///
+    /// Returns the [`DocChange`] alongside the exact [`DocAction`] the
+    /// caller should push onto the undo stack — see
+    /// [`Document::undo_created_object`]'s matching note.
+    fn redo_created_object(
+        &mut self,
+        action: DocAction,
+    ) -> Result<(DocChange, DocAction), DocumentError> {
         let DocAction::CreatedObject {
             id,
             sketch,
@@ -7095,22 +7398,25 @@ impl Document {
             }
             _ => (Vec::new(), Vec::new()),
         };
-        self.undo.push(DocAction::CreatedObject {
+        let undo_action = DocAction::CreatedObject {
             id,
             sketch,
             removed,
             emptied,
             merged_base,
-        });
+        };
         self.debug_validate();
-        Ok(DocChange {
-            objects_touched,
-            sketches_touched: vec![sketch],
-            groups_touched,
-            instances_touched,
-            components_touched,
-            guides_touched: Vec::new(),
-        })
+        Ok((
+            DocChange {
+                objects_touched,
+                sketches_touched: vec![sketch],
+                groups_touched,
+                instances_touched,
+                components_touched,
+                guides_touched: Vec::new(),
+            },
+            undo_action,
+        ))
     }
 
     /// Undo one out-of-plane island detach: re-insert the island's outline
@@ -7203,6 +7509,320 @@ impl Document {
         })
     }
 
+    /// Feasibility pre-check for [`Document::undo_place_text_compound`]:
+    /// whether every bundled `CreatedObject` AND
+    /// [`DocAction::ConsumedScaffolding`] reversal's
+    /// [`Sketch::restore_edges`] call would succeed, WITHOUT mutating
+    /// `self` — the only inner reversal that can fail. (`MadeComponent`'s
+    /// reversal is pure field mutation; `SketchGesture`'s is a snapshot
+    /// restore; neither can err.) Simulates each
+    /// `CreatedObject`/`ConsumedScaffolding` entry against a scratch clone
+    /// of the sketch it names, replayed in the SAME reverse order
+    /// [`Document::undo_place_text_compound`] applies them, so a shared
+    /// sketch's cumulative state matches exactly — mirroring the
+    /// validate-then-apply
+    /// shape `restore_edges` itself already uses internally.
+    ///
+    /// Historically reachable through a counter glyph (an 'O'): before
+    /// [`DocAction::ConsumedScaffolding`] existed, `place_text` left the
+    /// counter's own contour standing as live scaffolding, so the sketch
+    /// stayed live and reachable for as long as the placement wasn't
+    /// undone, and anything drawn against it before that undo could leave
+    /// a `restore_edges` row unable to re-insert faithfully. `place_text`
+    /// now always retires (hides) its sketch by the time it returns — see
+    /// `Document::place_text`'s cleanup step — closing that hole at the
+    /// source. This check remains as defense in depth: it validates every
+    /// bundled reversal (`CreatedObject` AND `ConsumedScaffolding` alike)
+    /// against scratch sketch clones before `undo_place_text_compound`
+    /// mutates anything, so a future producer or an edge case this
+    /// reasoning missed still fails typed rather than wedging the undo
+    /// stack.
+    fn compound_reversal_feasible(&self, actions: &[DocAction]) -> Result<(), DocumentError> {
+        let mut scratch: Vec<(SketchId, Sketch)> = Vec::new();
+        for inner in actions.iter().rev() {
+            if let DocAction::CreatedObject {
+                sketch, removed, ..
+            }
+            | DocAction::ConsumedScaffolding { sketch, removed } = inner
+            {
+                let idx = match scratch.iter().position(|(id, _)| id == sketch) {
+                    Some(i) => i,
+                    None => {
+                        let sk = self
+                            .sketches
+                            .get(*sketch)
+                            .expect("sketch slots are never removed")
+                            .clone();
+                        scratch.push((*sketch, sk));
+                        scratch.len() - 1
+                    }
+                };
+                scratch[idx]
+                    .1
+                    .restore_edges(removed)
+                    .map_err(DocumentError::Sketch)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Undo a [`DocAction::PlaceTextCompound`] (3D Text placement,
+    /// [`Document::place_text`]): reverses every bundled action in REVERSE
+    /// order — last extrusion first, the glyph-injection gesture last —
+    /// exactly reproducing what undoing each step individually would have
+    /// done, then re-bundles their own redo-actions (in original order)
+    /// into one `PlaceTextCompound` for the redo stack, so one redo restores
+    /// the whole placement.
+    ///
+    /// Scoped to the fixed shape `place_text` builds — zero or more
+    /// [`DocAction::CreatedObject`], zero or one
+    /// [`DocAction::ConsumedScaffolding`], one [`DocAction::MadeComponent`],
+    /// one [`DocAction::SketchGesture`] — rather than the fully general
+    /// [`DocAction::Compound`] nested undo mechanism; any other inner
+    /// variant is a kernel bug (`place_text` is `PlaceTextCompound`'s only
+    /// producer).
+    ///
+    /// All-or-nothing (DEVELOPMENT.md rule 9): a `CreatedObject` entry's
+    /// re-insertion can fail (`SketchError::RestoreConflicts` —
+    /// [`Document::compound_reversal_feasible`]'s doc comment gives the
+    /// exact repro), and letting that surface mid-unwind would leave the
+    /// already-reversed `MadeComponent` step applied (an orphaned solid,
+    /// owner World with no live instance) while the rest of the bundle and
+    /// the `PlaceTextCompound` action itself are lost — a wedged undo
+    /// stack. So [`Document::compound_reversal_feasible`] validates every
+    /// bundled reversal against scratch sketch clones BEFORE this function
+    /// mutates anything; on refusal the `PlaceTextCompound` goes back onto
+    /// the undo stack untouched and the document is byte-identical to
+    /// before the call. Once the pre-check passes, every `CreatedObject`
+    /// reversal below is guaranteed to succeed (same rows, same order, same
+    /// starting sketch state), so the `?` on `undo_created_object` never
+    /// actually fires.
+    fn undo_place_text_compound(&mut self, action: DocAction) -> Result<DocChange, DocumentError> {
+        let DocAction::PlaceTextCompound(actions) = action else {
+            unreachable!("dispatched on PlaceTextCompound");
+        };
+        if let Err(e) = self.compound_reversal_feasible(&actions) {
+            self.undo.push(DocAction::PlaceTextCompound(actions));
+            return Err(e);
+        }
+        let mut redo_actions = Vec::with_capacity(actions.len());
+        let mut objects_touched = Vec::new();
+        let mut sketches_touched = Vec::new();
+        let mut groups_touched = Vec::new();
+        let mut instances_touched = Vec::new();
+        let mut components_touched = Vec::new();
+        for inner in actions.into_iter().rev() {
+            let (c, redo_action) = match &inner {
+                DocAction::CreatedObject { .. } => self.undo_created_object(inner)?,
+                DocAction::ConsumedScaffolding { sketch, removed } => {
+                    let (sketch, removed) = (*sketch, removed.clone());
+                    // `compound_reversal_feasible` already validated this
+                    // exact restore against a scratch clone of the same
+                    // starting state, so this cannot actually fail — the
+                    // `?` mirrors `undo_created_object`'s own guarantee.
+                    self.sketches
+                        .get_mut(sketch)
+                        .expect("sketch slots are never removed")
+                        .restore_edges(&removed)
+                        .map_err(DocumentError::Sketch)?;
+                    self.hidden_sketches.remove(&sketch);
+                    let c = DocChange {
+                        sketches_touched: vec![sketch],
+                        ..Default::default()
+                    };
+                    (c, inner.clone())
+                }
+                DocAction::MadeComponent {
+                    component,
+                    instance,
+                    parent,
+                    member_prior_parents,
+                    consumed_groups,
+                    prev_parent_members,
+                    ..
+                } => {
+                    let (component, instance, parent) = (*component, *instance, *parent);
+                    for &(o, prior) in member_prior_parents {
+                        self.objects[o].owner = ObjectOwner::World { parent: prior };
+                    }
+                    for &g in consumed_groups {
+                        self.groups[g].hidden = false;
+                    }
+                    if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
+                        self.groups[pg].members = prev.clone();
+                    }
+                    self.instances[instance].hidden = true;
+                    self.components[component].hidden = true;
+                    let leaves: Vec<ObjectId> =
+                        member_prior_parents.iter().map(|&(o, _)| o).collect();
+                    let c = made_component_change(
+                        component,
+                        instance,
+                        parent,
+                        &leaves,
+                        consumed_groups,
+                    );
+                    (c, inner.clone())
+                }
+                DocAction::SketchGesture {
+                    sketch,
+                    before,
+                    created,
+                    ..
+                } => {
+                    let (sketch, created) = (*sketch, *created);
+                    if let Some(s) = self.sketches.get_mut(sketch) {
+                        *s = (**before).clone();
+                    }
+                    if created {
+                        self.hidden_sketches.insert(sketch);
+                    }
+                    let c = DocChange {
+                        sketches_touched: vec![sketch],
+                        ..Default::default()
+                    };
+                    (c, inner.clone())
+                }
+                _ => unreachable!(
+                    "PlaceTextCompound only ever bundles SketchGesture/CreatedObject/ConsumedScaffolding/MadeComponent — place_text is its only producer"
+                ),
+            };
+            objects_touched.extend(c.objects_touched);
+            sketches_touched.extend(c.sketches_touched);
+            groups_touched.extend(c.groups_touched);
+            instances_touched.extend(c.instances_touched);
+            components_touched.extend(c.components_touched);
+            redo_actions.push(redo_action);
+        }
+        redo_actions.reverse();
+        self.redo.push(DocAction::PlaceTextCompound(redo_actions));
+        self.debug_validate();
+        Ok(DocChange {
+            objects_touched,
+            sketches_touched,
+            groups_touched,
+            instances_touched,
+            components_touched,
+            guides_touched: Vec::new(),
+        })
+    }
+
+    /// Redo a [`DocAction::PlaceTextCompound`]: replays every bundled action
+    /// in FORWARD (original) order — the glyph-injection gesture first,
+    /// each extrusion, then the component fold — mirroring
+    /// [`Document::undo_place_text_compound`]. See its doc comment for the
+    /// scoping and partial-failure notes (both apply here symmetrically);
+    /// redo cannot actually conflict in practice (nothing intervenes
+    /// between an undo and its matching redo).
+    fn redo_place_text_compound(&mut self, action: DocAction) -> Result<DocChange, DocumentError> {
+        let DocAction::PlaceTextCompound(actions) = action else {
+            unreachable!("dispatched on PlaceTextCompound");
+        };
+        let mut undo_actions = Vec::with_capacity(actions.len());
+        let mut objects_touched = Vec::new();
+        let mut sketches_touched = Vec::new();
+        let mut groups_touched = Vec::new();
+        let mut instances_touched = Vec::new();
+        let mut components_touched = Vec::new();
+        for inner in actions.into_iter() {
+            let (c, undo_action) = match &inner {
+                DocAction::CreatedObject { .. } => self.redo_created_object(inner)?,
+                DocAction::ConsumedScaffolding { sketch, removed } => {
+                    let (sketch, removed) = (*sketch, removed.clone());
+                    // Mirrors `redo_created_object`: re-delete BY GEOMETRY
+                    // (`Sketch::edge_at_positions`), not by the stored ids
+                    // — an interleaved gesture undo/redo on the same
+                    // sketch restores snapshots carrying fresh edge ids.
+                    let sk = self
+                        .sketches
+                        .get_mut(sketch)
+                        .expect("sketch slots are never removed");
+                    let scaffolding: BTreeSet<SketchEdgeId> = removed
+                        .iter()
+                        .filter_map(|&(a, b, _)| sk.edge_at_positions(a, b))
+                        .collect();
+                    sk.remove_edges(&scaffolding);
+                    self.hidden_sketches.insert(sketch);
+                    let c = DocChange {
+                        sketches_touched: vec![sketch],
+                        ..Default::default()
+                    };
+                    (c, inner.clone())
+                }
+                DocAction::MadeComponent {
+                    component,
+                    instance,
+                    selected,
+                    parent,
+                    member_prior_parents,
+                    consumed_groups,
+                    ..
+                } => {
+                    let (component, instance, parent) = (*component, *instance, *parent);
+                    for &(o, _) in member_prior_parents {
+                        self.objects[o].owner = ObjectOwner::Definition(component);
+                    }
+                    for &g in consumed_groups {
+                        self.groups[g].hidden = true;
+                    }
+                    self.components[component].hidden = false;
+                    self.instances[instance].hidden = false;
+                    if let Some(pg) = parent {
+                        self.splice_in_parent(pg, selected, NodeId::Instance(instance));
+                    }
+                    let leaves: Vec<ObjectId> =
+                        member_prior_parents.iter().map(|&(o, _)| o).collect();
+                    let c = made_component_change(
+                        component,
+                        instance,
+                        parent,
+                        &leaves,
+                        consumed_groups,
+                    );
+                    (c, inner.clone())
+                }
+                DocAction::SketchGesture {
+                    sketch,
+                    after,
+                    created,
+                    ..
+                } => {
+                    let (sketch, created) = (*sketch, *created);
+                    if created {
+                        self.hidden_sketches.remove(&sketch);
+                    }
+                    if let Some(s) = self.sketches.get_mut(sketch) {
+                        *s = (**after).clone();
+                    }
+                    let c = DocChange {
+                        sketches_touched: vec![sketch],
+                        ..Default::default()
+                    };
+                    (c, inner.clone())
+                }
+                _ => unreachable!(
+                    "PlaceTextCompound only ever bundles SketchGesture/CreatedObject/ConsumedScaffolding/MadeComponent — place_text is its only producer"
+                ),
+            };
+            objects_touched.extend(c.objects_touched);
+            sketches_touched.extend(c.sketches_touched);
+            groups_touched.extend(c.groups_touched);
+            instances_touched.extend(c.instances_touched);
+            components_touched.extend(c.components_touched);
+            undo_actions.push(undo_action);
+        }
+        self.undo.push(DocAction::PlaceTextCompound(undo_actions));
+        self.debug_validate();
+        Ok(DocChange {
+            objects_touched,
+            sketches_touched,
+            groups_touched,
+            instances_touched,
+            components_touched,
+            guides_touched: Vec::new(),
+        })
+    }
+
     /// Reverses the most recent document action (LIFO across creations and
     /// per-Object ops alike) and returns what it touched.
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
@@ -7232,12 +7852,21 @@ impl Document {
         // the action's scaffolding ids on success, so it manages its own
         // stacks in a dedicated helper rather than the shared match below.
         if matches!(action, DocAction::CreatedObject { .. }) {
-            return self.undo_created_object(action);
+            let (change, redo_action) = self.undo_created_object(action)?;
+            self.redo.push(redo_action);
+            return Ok(change);
         }
         // Island-detach undo can fail the same way (it restores the same
         // row shape); same dedicated-helper treatment.
         if matches!(action, DocAction::DetachedSketchIsland { .. }) {
             return self.undo_detached_island(action);
+        }
+        // A 3D Text placement (docs/design/3d-text.md) bundles several
+        // ordinary steps into one entry; its own dedicated helper reverses
+        // each in turn and re-bundles their own redo-actions into one
+        // `PlaceTextCompound` for the redo stack.
+        if matches!(action, DocAction::PlaceTextCompound(_)) {
+            return self.undo_place_text_compound(action);
         }
         let change = match &action {
             DocAction::Compound { .. } => unreachable!("Compound is handled before the match"),
@@ -7248,6 +7877,12 @@ impl Document {
             DocAction::DetachedSketchIsland { .. } => {
                 unreachable!("DetachedSketchIsland is handled before the match")
             }
+            DocAction::PlaceTextCompound(_) => {
+                unreachable!("PlaceTextCompound is handled before the match")
+            }
+            DocAction::ConsumedScaffolding { .. } => unreachable!(
+                "ConsumedScaffolding only ever appears inside a PlaceTextCompound — place_text is its only producer"
+            ),
             &DocAction::CopiedSketchIslands { copy } => {
                 // Undo a copy: hide the new sketch (its contents survive
                 // hiding bit-exactly). The source was never touched.
@@ -8050,10 +8685,15 @@ impl Document {
             return Ok(change);
         }
         if matches!(action, DocAction::CreatedObject { .. }) {
-            return self.redo_created_object(action);
+            let (change, undo_action) = self.redo_created_object(action)?;
+            self.undo.push(undo_action);
+            return Ok(change);
         }
         if matches!(action, DocAction::DetachedSketchIsland { .. }) {
             return self.redo_detached_island(action);
+        }
+        if matches!(action, DocAction::PlaceTextCompound(_)) {
+            return self.redo_place_text_compound(action);
         }
         let change = match &action {
             DocAction::Compound { .. } => unreachable!("Compound is handled before the match"),
@@ -8064,6 +8704,12 @@ impl Document {
             DocAction::DetachedSketchIsland { .. } => {
                 unreachable!("DetachedSketchIsland is handled before the match")
             }
+            DocAction::PlaceTextCompound(_) => {
+                unreachable!("PlaceTextCompound is handled before the match")
+            }
+            DocAction::ConsumedScaffolding { .. } => unreachable!(
+                "ConsumedScaffolding only ever appears inside a PlaceTextCompound — place_text is its only producer"
+            ),
             &DocAction::CopiedSketchIslands { copy } => {
                 // Redo a copy: unhide the new sketch again (its contents
                 // survived hiding bit-exactly). The source stays untouched.
@@ -9454,6 +10100,477 @@ mod tests {
         assert!(
             std::mem::discriminant(&err2) == std::mem::discriminant(&err),
             "a retry fails identically ({err:?} vs {err2:?}) — never a desync panic"
+        );
+    }
+
+    // ─────────────────────────────────────────────── 3D Text (place_text)
+
+    /// Build a glyph-like 'O' sketch — an outer square loop plus a smaller
+    /// concentric "counter" square loop — injected as ONE sketch-drawing
+    /// gesture, mirroring how the 3D Text tool injects a glyph outline
+    /// (`docs/design/3d-text.md`). The kernel's own region resolver
+    /// produces exactly the two regions the concentric-rings test in
+    /// `sketch.rs` documents for any two nested loops: the `ring` (fill —
+    /// outer boundary with the counter as a hole) and the `disk` (the
+    /// counter's own interior, no holes) — `place_text`'s caller must
+    /// select only `ring`, never `disk`, or the letter's hole would fill
+    /// in solid.
+    fn glyph_o_sketch(doc: &mut Document) -> (SketchId, SketchRegionId, SketchRegionId) {
+        let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            .expect("ground plane");
+        let sketch = doc.add_sketch(plane);
+        doc.begin_sketch_gesture(sketch).expect("gesture opens");
+        {
+            let sk = doc.sketch_mut(sketch).expect("sketch is live");
+            let outer = [
+                Point3::new(-1.0, -1.0, 0.0),
+                Point3::new(1.0, -1.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(-1.0, 1.0, 0.0),
+            ];
+            for k in 0..4 {
+                sk.add_segment(outer[k], outer[(k + 1) % 4])
+                    .expect("outer segment adds");
+            }
+            let inner = [
+                Point3::new(-0.4, -0.4, 0.0),
+                Point3::new(0.4, -0.4, 0.0),
+                Point3::new(0.4, 0.4, 0.0),
+                Point3::new(-0.4, 0.4, 0.0),
+            ];
+            for k in 0..4 {
+                sk.add_segment(inner[k], inner[(k + 1) % 4])
+                    .expect("inner segment adds");
+            }
+        }
+        doc.end_sketch_gesture(sketch).expect("gesture closes");
+
+        let regions: Vec<SketchRegionId> =
+            doc.sketch(sketch).expect("live").regions().keys().collect();
+        assert_eq!(regions.len(), 2, "two nested loops trace as ring + disk");
+        let ring = regions
+            .iter()
+            .copied()
+            .find(|&r| !doc.sketch(sketch).unwrap().regions()[r].holes.is_empty())
+            .expect("one region has the counter as a hole");
+        assert_eq!(
+            doc.sketch(sketch).unwrap().regions()[ring].holes.len(),
+            1,
+            "the ring has exactly one hole — the counter"
+        );
+        let disk = regions
+            .into_iter()
+            .find(|&r| r != ring)
+            .expect("the other region is the disk");
+        assert!(
+            doc.sketch(sketch).unwrap().regions()[disk].holes.is_empty(),
+            "the disk region (counter's own interior) has no holes"
+        );
+        (sketch, ring, disk)
+    }
+
+    #[test]
+    fn place_text_extrudes_only_the_selected_fill_region_and_is_watertight() {
+        let mut doc = Document::new();
+        let (sketch, ring, _disk) = glyph_o_sketch(&mut doc);
+
+        let (component, instance, _change) = doc
+            .place_text(sketch, &[ring], 0.5, "3D Text \"O\"".to_string(), None)
+            .expect("the ring alone places cleanly");
+
+        let members = doc.def_members(component).expect("live definition");
+        assert_eq!(members.len(), 1, "one fill region → one member object");
+        let obj = doc.object(members[0]).expect("member is live");
+        assert_eq!(
+            obj.watertight(),
+            WatertightState::Watertight,
+            "an extruded ring-with-hole must be watertight (a real tunnel, not a leak)"
+        );
+        assert_eq!(
+            doc.components[component].name.as_deref(),
+            Some("3D Text \"O\"")
+        );
+        assert!(
+            doc.instances[instance].pose == Transform::IDENTITY,
+            "the fold's instance sits exactly where the extrusion happened"
+        );
+    }
+
+    #[test]
+    fn place_text_is_one_undo_step_and_redo_restores_it() {
+        let mut doc = Document::new();
+        let (sketch, ring, _disk) = glyph_o_sketch(&mut doc);
+        let gen_before_place = doc.history_generation();
+
+        let (component, instance, _change) = doc
+            .place_text(sketch, &[ring], 0.5, "3D Text \"O\"".to_string(), None)
+            .expect("places cleanly");
+        assert!(
+            doc.history_generation() > gen_before_place,
+            "place_text pushed exactly one generation-advancing step"
+        );
+
+        doc.undo()
+            .expect("a single undo reverses the whole placement");
+        assert!(
+            doc.components[component].hidden,
+            "one undo hides the definition"
+        );
+        assert!(
+            doc.instances[instance].hidden,
+            "one undo hides the instance"
+        );
+        // The gesture that drew the glyph outline is folded into this SAME
+        // compound step (it created the sketch fresh), so undoing the
+        // whole placement removes the sketch too — "one undo removes the
+        // text" (docs/design/3d-text.md) means the glyph scaffolding as
+        // well, not just the solid.
+        assert!(
+            doc.sketch(sketch).is_none(),
+            "the whole compound undo removes the sketch the gesture created, not just the solid"
+        );
+        assert!(!doc.can_undo(), "the whole compound was one single step");
+
+        doc.redo()
+            .expect("a single redo restores the whole placement");
+        assert!(
+            !doc.components[component].hidden,
+            "one redo unhides the definition"
+        );
+        assert!(
+            !doc.instances[instance].hidden,
+            "one redo unhides the instance"
+        );
+        let members = doc.def_members(component).expect("live definition");
+        let obj = doc.object(members[0]).expect("member is live");
+        assert_eq!(
+            obj.watertight(),
+            WatertightState::Watertight,
+            "redo reproduces the identical watertight solid"
+        );
+        assert!(!doc.can_redo(), "the whole compound replayed as one step");
+    }
+
+    #[test]
+    fn place_text_births_into_the_given_group() {
+        let mut doc = Document::new();
+        // `group_nodes` needs at least one live member; seed the group with
+        // a throwaway solid, matching the group-context contract every other
+        // grouped-birth op (`follow_me_grouped`) is tested against.
+        let seed = extrude_unit_box(&mut doc);
+        let (group, _change) = doc
+            .group_nodes(&[NodeId::Object(seed)])
+            .expect("group forms from the seed");
+
+        let (sketch, ring, _disk) = glyph_o_sketch(&mut doc);
+        let (component, instance, change) = doc
+            .place_text(
+                sketch,
+                &[ring],
+                0.5,
+                "3D Text \"O\"".to_string(),
+                Some(group),
+            )
+            .expect("places inside the group");
+
+        assert_eq!(
+            doc.node_parent(NodeId::Instance(instance)),
+            Some(group),
+            "the folded instance lands inside the given group"
+        );
+        // `make_component` re-owns every member as `ObjectOwner::Definition`
+        // (never a world group) — `node_parent(members[0])`, read BEFORE
+        // that re-owning happens, is what `place_text` threads `group`
+        // through to land the fold's instance there; the member itself no
+        // longer has a world group parent at all once folded.
+        let members = doc.def_members(component).expect("live definition");
+        assert_eq!(
+            doc.objects[members[0]].group_parent(),
+            None,
+            "a definition member is never a world object, so it has no group parent of its own"
+        );
+        assert!(change.groups_touched.contains(&group));
+    }
+
+    /// RED-CHECK (playtest finding 2): before `DocAction::ConsumedScaffolding`
+    /// existed, a counter glyph (the 'O's disk) kept `place_text`'s sketch
+    /// live after placement — only the `ring` is selected/extruded (see
+    /// `glyph_o_sketch`'s doc comment) — so the counter loop lingered as
+    /// live, visible scratch geometry in the document for as long as the
+    /// placement wasn't undone. On that pre-fix code this test's first
+    /// assertion (`doc.sketch(sketch).is_none()`) fails: the sketch was
+    /// still `Some`. The fix makes `place_text` discard whatever the fill
+    /// regions didn't consume and retire the whole scratch sketch in the
+    /// same compound, so nothing outlives the placement.
+    #[test]
+    fn place_text_consumes_the_counter_glyphs_scratch_sketch() {
+        let mut doc = Document::new();
+        let (sketch, ring, _disk) = glyph_o_sketch(&mut doc);
+        let (component, _instance, _change) = doc
+            .place_text(sketch, &[ring], 0.5, "3D Text \"O\"".to_string(), None)
+            .expect("the ring alone places cleanly");
+
+        assert!(
+            doc.sketch(sketch).is_none(),
+            "the counter loop's leftover scaffolding must not keep the sketch live"
+        );
+        assert!(
+            !doc.sketch_ids().contains(&sketch),
+            "no leftover world sketch survives placement"
+        );
+        let members = doc.def_members(component).expect("live definition");
+        assert_eq!(members.len(), 1, "one fill region → one member object");
+        let obj = doc.object(members[0]).expect("member is live");
+        assert_eq!(
+            obj.watertight(),
+            WatertightState::Watertight,
+            "the ring's solid is unaffected by discarding the counter's own scaffolding"
+        );
+    }
+
+    /// Companion to the RED-CHECK above: undo must restore the placement
+    /// exactly — including the discarded counter scaffolding — and redo
+    /// must re-discard it, twice over (rule 9: undo restores everything,
+    /// redo re-removes, with no drift across repeated cycles).
+    #[test]
+    fn place_text_undo_redo_round_trips_exactly_with_a_counter_glyph() {
+        let mut doc = Document::new();
+        let (sketch, ring, _disk) = glyph_o_sketch(&mut doc);
+        let (component, instance, _change) = doc
+            .place_text(sketch, &[ring], 0.5, "3D Text \"O\"".to_string(), None)
+            .expect("the ring alone places cleanly");
+        let save_after_place = doc.save();
+
+        for cycle in 0..2 {
+            doc.undo().unwrap_or_else(|e| {
+                panic!("cycle {cycle}: single undo reverses the whole placement: {e:?}")
+            });
+            assert!(
+                doc.components[component].hidden,
+                "cycle {cycle}: undo hides the definition"
+            );
+            assert!(
+                doc.instances[instance].hidden,
+                "cycle {cycle}: undo hides the instance"
+            );
+            assert!(
+                doc.sketch(sketch).is_none(),
+                "cycle {cycle}: undo removes the whole gesture-created sketch, counter \
+                 scaffolding and all — not just the extruded ring"
+            );
+            assert!(
+                !doc.can_undo(),
+                "cycle {cycle}: the whole compound was one single step"
+            );
+
+            doc.redo().unwrap_or_else(|e| {
+                panic!("cycle {cycle}: single redo restores the whole placement: {e:?}")
+            });
+            assert!(
+                !doc.components[component].hidden,
+                "cycle {cycle}: redo unhides the definition"
+            );
+            assert!(
+                !doc.instances[instance].hidden,
+                "cycle {cycle}: redo unhides the instance"
+            );
+            assert!(
+                doc.sketch(sketch).is_none(),
+                "cycle {cycle}: redo re-consumes the counter's scaffolding — the sketch stays \
+                 retired exactly as it was right after the original placement"
+            );
+            assert!(
+                !doc.can_redo(),
+                "cycle {cycle}: the whole compound replayed as one step"
+            );
+            let members = doc.def_members(component).expect("live definition");
+            let obj = doc.object(members[0]).expect("member is live");
+            assert_eq!(
+                obj.watertight(),
+                WatertightState::Watertight,
+                "cycle {cycle}: redo reproduces the identical watertight solid"
+            );
+            assert_eq!(
+                doc.save(),
+                save_after_place,
+                "cycle {cycle}: redo lands byte-identical to the original placement — no drift \
+                 across repeated undo/redo cycles"
+            );
+        }
+    }
+
+    /// Defense-in-depth pin for `compound_reversal_feasible`'s refusal
+    /// branch (DEVELOPMENT.md rule 9: a guard with no live repro still gets
+    /// a red-checked spec, not a deleted one). Before
+    /// `DocAction::ConsumedScaffolding` existed, a counter glyph left
+    /// `place_text`'s sketch live after placement, and the fuzz harness's
+    /// `DocOp::TouchGlyphSketch` could draw an untracked segment onto it —
+    /// exactly the residue that made this branch refuse typed (pinned by
+    /// the now-deleted
+    /// `undo_compound_refuses_atomically_when_a_counter_glyph_kept_the_sketch_live`
+    /// spec). `place_text` now always retires (hides) its sketch before
+    /// returning, so `Document::sketch_mut` refuses every live API path
+    /// onto it for as long as the `PlaceTextCompound` sits on the undo stack —
+    /// closing that hole at the source. A search through every other
+    /// document op turned up no surviving way to leave live, reachable
+    /// residue on a `PlaceTextCompound`'s scaffolding sketch either: nothing besides
+    /// `place_text`/`undo`/`redo` ever touches one of its sketches, undoing
+    /// the `PlaceTextCompound` is all-or-nothing (it either fully restores the
+    /// original two-loop sketch or is refused), and the instant it restores
+    /// the original sketch, that exact restore has already succeeded — so
+    /// there is no real op sequence left that lands the sketch in a
+    /// half-restored, conflicting state for a subsequent op to build on.
+    /// This spec reconstructs that now-unreachable-by-real-ops state
+    /// directly (via the private `sketches` field, standing in for "a
+    /// future producer or bypass this reasoning missed"), the same
+    /// technique `compound_reversal_feasible`'s own doc comment describes
+    /// as its reason for existing.
+    #[test]
+    fn compound_reversal_feasible_traps_a_residue_left_on_a_retired_scratch_sketch() {
+        let mut doc = Document::new();
+        let (sketch, ring, _disk) = glyph_o_sketch(&mut doc);
+        let (component, instance, _change) = doc
+            .place_text(sketch, &[ring], 0.5, "3D Text \"O\"".to_string(), None)
+            .expect("the ring alone places cleanly");
+        assert!(
+            doc.hidden_sketches.contains(&sketch),
+            "place_text always retires its scratch sketch now — no live API reaches it while \
+             the PlaceTextCompound is pending, which is exactly why this defense-in-depth check can no \
+             longer be triggered through real ops"
+        );
+
+        // Reach around the now-closed hole directly: land untracked geometry
+        // exactly where the ring's own removed baseline edge needs to
+        // re-insert, on the sketch slot itself (never removed, only
+        // hidden — `Document::sketch_mut`'s own doc comment).
+        doc.sketches
+            .get_mut(sketch)
+            .expect("sketch slots are never removed, only hidden")
+            .add_segment(Point3::new(-1.0, -1.0, 0.0), Point3::new(1.0, -1.0, 0.0))
+            .expect("lands cleanly on the emptied, hidden sketch");
+
+        let save_before = doc.save();
+        let err = doc
+            .undo()
+            .expect_err("the ring's removed baseline collides with the residue");
+        assert!(
+            matches!(err, DocumentError::Sketch(SketchError::RestoreConflicts)),
+            "typed refusal, got {err:?}"
+        );
+
+        // Nothing orphaned: the fold is still fully intact, not mid-unwind.
+        assert!(
+            !doc.components[component].hidden,
+            "the component must still be live — not wedged mid-unwind"
+        );
+        assert!(
+            !doc.instances[instance].hidden,
+            "the instance must still be live — not wedged mid-unwind"
+        );
+        assert_eq!(
+            doc.save(),
+            save_before,
+            "a refused compound undo leaves the document's live, visible state byte-identical"
+        );
+        assert!(
+            doc.can_undo(),
+            "the refused PlaceTextCompound stays on the undo stack, not lost"
+        );
+        let err2 = doc.undo().expect_err("a retry fails identically");
+        assert!(
+            std::mem::discriminant(&err2) == std::mem::discriminant(&err),
+            "never a desync panic on retry"
+        );
+    }
+
+    #[test]
+    fn place_text_refuses_when_the_top_of_the_undo_stack_is_not_its_gesture() {
+        let mut doc = Document::new();
+        // A sketch drawn WITHOUT the gesture bracket — `place_text`'s caller
+        // contract (immediately after `end_sketch_gesture` on this same
+        // sketch) is violated, so it must refuse rather than fold in some
+        // unrelated action.
+        let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            .expect("ground plane");
+        let sketch = doc.add_sketch(plane);
+        let region = {
+            let sk = doc.sketch_mut(sketch).expect("sketch is live");
+            let p = [
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ];
+            for k in 0..4 {
+                sk.add_segment(p[k], p[(k + 1) % 4]).expect("segment adds");
+            }
+            sk.regions().keys().next().expect("square closes a region")
+        };
+
+        let gen_before = doc.history_generation();
+        let err = doc
+            .place_text(sketch, &[region], 0.5, "3D Text \"I\"".to_string(), None)
+            .expect_err("no gesture was ever closed on this sketch");
+        assert!(matches!(err, DocumentError::UnexpectedGestureState));
+        assert_eq!(
+            doc.history_generation(),
+            gen_before,
+            "a refused place_text touches neither stack"
+        );
+        assert!(
+            doc.sketch(sketch).expect("untouched").regions().len() == 1,
+            "the document is completely untouched"
+        );
+    }
+
+    #[test]
+    fn place_text_refuses_on_empty_regions_document_untouched() {
+        let mut doc = Document::new();
+        let (sketch, _ring, _disk) = glyph_o_sketch(&mut doc);
+
+        let gen_before = doc.history_generation();
+        let err = doc
+            .place_text(sketch, &[], 0.5, "Nothing".to_string(), None)
+            .expect_err("nothing to place");
+        assert!(matches!(err, DocumentError::EmptyComponent));
+        assert_eq!(
+            doc.history_generation(),
+            gen_before,
+            "a refused place_text touches neither stack"
+        );
+        assert_eq!(
+            doc.sketch(sketch).expect("untouched").regions().len(),
+            2,
+            "the just-closed gesture is left exactly as the caller committed it"
+        );
+    }
+
+    #[test]
+    fn place_text_refuses_on_an_unknown_region_id_document_untouched() {
+        let mut doc = Document::new();
+        let (sketch, ring, _disk) = glyph_o_sketch(&mut doc);
+        // Consume the ring directly (not through `place_text`), invalidating
+        // its region id while the disk survives and keeps the sketch live —
+        // `region_scaffolding`'s exclusive-edges rule (only the ring's own
+        // outer boundary is exclusive to it) means this does not touch the
+        // disk at all.
+        doc.extrude_region(sketch, ring, 0.5)
+            .expect("the ring extrudes independently, consuming its own boundary");
+
+        let gen_before = doc.history_generation();
+        let err = doc
+            .place_text(sketch, &[ring], 0.5, "Stale".to_string(), None)
+            .expect_err("the pre-extrusion `ring` handle is now stale");
+        assert!(
+            matches!(err, DocumentError::Sketch(SketchError::UnknownRegion)),
+            "typed refusal, got {err:?}"
+        );
+        assert_eq!(
+            doc.history_generation(),
+            gen_before,
+            "a refused place_text touches neither stack — profile/scaffolding validation \
+             for every region runs before anything commits, including before the gesture \
+             is even looked at"
         );
     }
 }
