@@ -45,7 +45,7 @@ use crate::ids::{
     AnnotationId, ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
 };
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
-use crate::material::Material;
+use crate::material::{FaceMaterial, Material, UvFrame};
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError};
 use crate::serialize::{
@@ -781,6 +781,55 @@ enum DocAction {
         prev: Option<MaterialId>,
         next: Option<MaterialId>,
     },
+    /// `set_face_uv_frame` reassigned a face's UV positioning frame
+    /// (paint-tool design §3 — SketchUp's fixed-pin Position Texture).
+    /// Non-topological, so it touches no [`History`]; undo restores `prev`
+    /// exactly (including `Some -> None` and `None -> Some`), redo re-applies
+    /// `next`. Handle-stable (the `ObjectId`/`FaceId` are untouched), same
+    /// posture as [`DocAction::PaintFace`].
+    SetFaceUvFrame {
+        object: ObjectId,
+        face: FaceId,
+        prev: Option<UvFrame>,
+        next: Option<UvFrame>,
+    },
+    /// `replace_material` swapped every face/object-default assignment equal
+    /// to `from` (within `scope`) to `to` in one atomic step — the
+    /// Shift-click "replace everywhere" gesture (paint-tool design §2).
+    /// Unlike `PaintFace`/`SetObjectMaterial`, a single call can touch many
+    /// objects; `faces`/`defaults` are exactly the assignments the forward op
+    /// touched (all equal to `from` by construction), so undo restores each
+    /// to `from` and redo re-applies `to` — no resolved/effective-material
+    /// recomputation needed at replay time.
+    ///
+    /// The op itself never creates, hides, or deletes anything, but a
+    /// *later* structural op sandwiched between this recording and its own
+    /// undo/redo can still consume one of the recorded `(object, face)`
+    /// pairs and mint a fresh slotmap generation for the replacement (the
+    /// same drift `document_fuzz.rs`'s `doc_fingerprint` doc comment
+    /// describes for `PaintFace`). Replay (undo and redo alike) validates
+    /// every recorded face and default-object target resolves live BEFORE
+    /// mutating anything, and refuses the WHOLE batch typed
+    /// ([`DocumentError::ReplaceMaterialReplayStale`], action re-pushed,
+    /// document untouched) if even one has gone stale — never a partial
+    /// pre/post mix behind one atomic-looking step (rule 9, ARCHITECTURE.md
+    /// §5.7).
+    ///
+    /// The forward op's `MaterialScope` is deliberately NOT recorded here.
+    /// Replay works entirely from the resolved `faces`/`defaults` lists, so a
+    /// stored scope would be write-only data that no undo or redo path can
+    /// consult — and re-deriving the target set from a scope at replay time is
+    /// exactly what this variant exists to avoid, since the document may have
+    /// changed underneath in the meantime.
+    ReplaceMaterial {
+        from: Option<MaterialId>,
+        to: Option<MaterialId>,
+        /// Explicit face overrides touched (object, face) — all previously
+        /// equal to `from`.
+        faces: Vec<(ObjectId, FaceId)>,
+        /// Object base materials touched — all previously equal to `from`.
+        defaults: Vec<ObjectId>,
+    },
     /// `set_material_alpha` changed a palette material's opacity. Unlike
     /// [`DocAction::PaintFace`]/[`DocAction::SetObjectMaterial`], this mutates
     /// the palette entry itself (shared by every face/object referencing it),
@@ -1191,6 +1240,18 @@ pub enum DocumentError {
     /// Nothing is silently renormalized or reoriented (DEVELOPMENT.md rule
     /// 4); the document is untouched.
     InvalidAxesFrame(AxesFrameError),
+    /// A [`DocAction::ReplaceMaterial`] undo/redo replay found a recorded
+    /// face or object-default target that no longer resolves live: a later
+    /// structural op (a split/merge, most concretely) consumed its slotmap
+    /// slot and minted a fresh generation before the replay ran. Refused
+    /// typed and WHOLE (rule 9, ARCHITECTURE.md §5.7) rather than silently
+    /// dropping just that entry and partially applying the rest — the
+    /// document is untouched, and the action stays on its stack.
+    ReplaceMaterialReplayStale,
+    /// `set_face_uv_frame` was given a frame with a non-finite component, a
+    /// (near-)zero-length gradient, or (near-)parallel `s`/`t` gradients —
+    /// see [`UvFrame::is_valid`]. Nothing is silently repaired or clamped.
+    DegenerateUvFrame,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -1308,6 +1369,16 @@ impl std::fmt::Display for DocumentError {
                 write!(f, "rescale factor must be a positive, finite number")
             }
             DocumentError::InvalidAxesFrame(e) => write!(f, "{e}"),
+            DocumentError::ReplaceMaterialReplayStale => write!(
+                f,
+                "a replace-material undo/redo target no longer resolves live \
+                 (a later edit consumed it)"
+            ),
+            DocumentError::DegenerateUvFrame => write!(
+                f,
+                "texture positioning frame is degenerate (non-finite, zero-length, \
+                 or parallel gradients)"
+            ),
         }
     }
 }
@@ -1346,6 +1417,18 @@ impl ActionStack {
     fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }
+}
+
+/// The blast radius of [`Document::replace_material`]: the whole document, or
+/// one object (its own faces plus its base material) — plain Shift-click vs.
+/// Ctrl/Cmd+Shift-click in the paint tool (design §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterialScope {
+    /// Every visible object (world objects and component-definition members
+    /// alike — the same reach as [`Document::paint_face`]).
+    Document,
+    /// Confined to one object's own faces and base material.
+    Object(ObjectId),
 }
 
 /// The authoritative model: the tree of Sketches and solid Objects plus the
@@ -2612,6 +2695,22 @@ impl Document {
             .and_then(|f| f.material)
     }
 
+    /// `face`'s own material AND its object's base material — the two knobs
+    /// [`Document::paint_face`]/[`Document::set_object_material`] each write,
+    /// and everything the eyedropper (paint-tool design §1) needs to resolve a
+    /// face's *effective* material (own, else base, else unpainted). `None`
+    /// if `object` is stale/hidden or `face` is not in it — distinct from a
+    /// live face carrying no material, which returns `Some((None, base))`.
+    pub fn face_material_pair(
+        &self,
+        object: ObjectId,
+        face: FaceId,
+    ) -> Option<(FaceMaterial, FaceMaterial)> {
+        let rec = self.objects.get(object).filter(|r| !r.hidden)?;
+        let f = rec.object.faces().get(face)?;
+        Some((f.material, rec.object.default_material))
+    }
+
     /// Paint `face` of `object` with `material` (`None` resets it to the default
     /// material), recording an undoable [`DocAction::PaintFace`].
     ///
@@ -2693,6 +2792,249 @@ impl Document {
         self.redo.clear();
         self.debug_validate();
         Ok(self.paint_change(object))
+    }
+
+    /// `face`'s explicit UV positioning frame, or `None` if it carries no
+    /// override (tessellate then falls back to the planar-projection
+    /// default). Read path for the Position Texture tool (paint-tool design
+    /// §3). Returns the outer `None` if `object`/`face` is unknown — distinct
+    /// from a live face with no explicit frame, which returns `Some(None)`,
+    /// same double-`Option` posture as [`Document::face_material_pair`].
+    pub fn face_uv_frame(&self, object: ObjectId, face: FaceId) -> Option<Option<UvFrame>> {
+        let rec = self.objects.get(object).filter(|r| !r.hidden)?;
+        let f = rec.object.faces().get(face)?;
+        Some(f.uv_frame)
+    }
+
+    /// Sets `face`'s UV positioning frame (`None` resets it to the planar
+    /// projection default) — the kernel commit for one Position Texture
+    /// gesture (paint-tool design §3: drag-translate, pin-anchored
+    /// scale/rotate). Recorded as an undoable [`DocAction::SetFaceUvFrame`]
+    /// storing the exact prior value, so undo restores it (`Some -> None`
+    /// and `None -> Some` alike) and redo re-applies `frame`.
+    ///
+    /// Works on world objects **and** component-definition members alike
+    /// (same unified object store as [`Document::paint_face`]); setting a
+    /// member's frame repositions the texture in every instance of that
+    /// definition. Assignment is non-topological — it bypasses the
+    /// per-Object [`History`] and never affects watertightness. A frame may
+    /// be set on a face with no textured material (or no material at all):
+    /// positioning is per-face UV state independent of which material is
+    /// currently applied — the *tool* only offers the gesture on textured
+    /// faces, but the kernel op itself has no such restriction.
+    ///
+    /// # Errors
+    /// - [`DocumentError::DegenerateUvFrame`] — `frame` is `Some` but has a
+    ///   non-finite component, a (near-)zero-length gradient, or (near-)
+    ///   parallel `s`/`t` gradients (see [`UvFrame::is_valid`]). Checked
+    ///   before the handle lookups below, so it fires even for a stale
+    ///   object/face.
+    /// - [`DocumentError::UnknownObject`] — stale or hidden object.
+    /// - [`DocumentError::UnknownFace`] — `face` is not in the object.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn set_face_uv_frame(
+        &mut self,
+        object: ObjectId,
+        face: FaceId,
+        frame: Option<UvFrame>,
+    ) -> Result<DocChange, DocumentError> {
+        if let Some(f) = frame
+            && !f.is_valid()
+        {
+            return Err(DocumentError::DegenerateUvFrame);
+        }
+        let rec = match self.objects.get_mut(object) {
+            Some(rec) if !rec.hidden => rec,
+            _ => return Err(DocumentError::UnknownObject),
+        };
+        let f = match rec.object.faces.get_mut(face) {
+            Some(f) => f,
+            None => return Err(DocumentError::UnknownFace),
+        };
+        let prev = f.uv_frame;
+        f.uv_frame = frame;
+        self.undo.push(DocAction::SetFaceUvFrame {
+            object,
+            face,
+            prev,
+            next: frame,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(self.paint_change(object))
+    }
+
+    /// Replace every assignment of material `from` with `to`, in one atomic
+    /// history entry — the Shift-click "replace everywhere" gesture
+    /// (paint-tool design §2). Touches exactly two kinds of assignment,
+    /// **literal, not resolved**: every face whose own `material` equals
+    /// `from`, and every object whose `default_material` equals `from`.
+    /// This pair is sufficient to reproduce "every face whose *effective*
+    /// (resolved) material is `from` now shows `to`" without walking
+    /// resolution chains: a face with no own material inherits whatever its
+    /// object's base is, so repointing a matching base carries every such
+    /// face along for free, while a face with a *different* own material (or
+    /// inheriting a non-matching base) is correctly left untouched.
+    ///
+    /// This is also why `from = None` (the unpainted sentinel) only ever
+    /// touches object defaults, never individual faces: a face's own
+    /// `material` field being `None` means "no override", not an explicit
+    /// assignment of the value `None` — so it can never be the explicit match
+    /// a literal face-level replacement requires. An object elsewhere with a
+    /// *painted* (non-`None`) base whose faces happen to carry `None` (i.e.
+    /// they inherit that base) is therefore never disturbed by an unpainted
+    /// `from`, exactly matching SketchUp: those faces are not "unpainted",
+    /// they're rendering their base color.
+    ///
+    /// `scope` confines the sweep to one object ([`MaterialScope::Object`])
+    /// or the whole document ([`MaterialScope::Document`]) — Ctrl/Cmd+Shift
+    /// vs. plain Shift in the tool. Undo restores every touched face/default
+    /// to `from` exactly; redo re-applies `to`. This call itself never
+    /// creates, hides, or deletes an object/face — but see
+    /// [`DocAction::ReplaceMaterial`] for what its OWN undo/redo replay does
+    /// if a *later* op consumes one of the recorded targets before then.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] — `scope` names a stale/hidden
+    ///   object.
+    /// - [`DocumentError::UnknownMaterial`] — `from`/`to` (when `Some`) is not
+    ///   in the palette.
+    ///
+    /// On `Err` the document is untouched. A call that matches nothing (no
+    /// face or object default currently equals `from` within `scope`, or
+    /// `from == to`) succeeds as a no-op: nothing is pushed to the undo
+    /// stack.
+    pub fn replace_material(
+        &mut self,
+        scope: MaterialScope,
+        from: Option<MaterialId>,
+        to: Option<MaterialId>,
+    ) -> Result<DocChange, DocumentError> {
+        if let Some(id) = from
+            && !self.materials.contains_key(id)
+        {
+            return Err(DocumentError::UnknownMaterial);
+        }
+        if let Some(id) = to
+            && !self.materials.contains_key(id)
+        {
+            return Err(DocumentError::UnknownMaterial);
+        }
+        let object_ids: Vec<ObjectId> = match scope {
+            MaterialScope::Document => self
+                .objects
+                .iter()
+                .filter(|(_, r)| !r.hidden)
+                .map(|(id, _)| id)
+                .collect(),
+            MaterialScope::Object(oid) => match self.objects.get(oid) {
+                Some(r) if !r.hidden => vec![oid],
+                _ => return Err(DocumentError::UnknownObject),
+            },
+        };
+
+        if from == to {
+            return Ok(DocChange::default());
+        }
+
+        let mut faces: Vec<(ObjectId, FaceId)> = Vec::new();
+        let mut defaults: Vec<ObjectId> = Vec::new();
+        for oid in object_ids {
+            let rec = self
+                .objects
+                .get_mut(oid)
+                .expect("collected from live objects above");
+            if rec.object.default_material == from {
+                rec.object.default_material = to;
+                defaults.push(oid);
+            }
+            if let Some(from_id) = from {
+                for (fid, face) in rec.object.faces.iter_mut() {
+                    if face.material == Some(from_id) {
+                        face.material = to;
+                        faces.push((oid, fid));
+                    }
+                }
+            }
+        }
+
+        if faces.is_empty() && defaults.is_empty() {
+            return Ok(DocChange::default());
+        }
+
+        let change = self.replace_material_change(&faces, &defaults);
+        self.undo.push(DocAction::ReplaceMaterial {
+            from,
+            to,
+            faces,
+            defaults,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// The aggregate [`DocChange`] for a [`Document::replace_material`] (or
+    /// its undo/redo replay): the union of [`Document::paint_change`] over
+    /// every distinct object named in `faces`/`defaults`, deduplicated so a
+    /// definition's instances aren't registered once per touched member face.
+    fn replace_material_change(
+        &self,
+        faces: &[(ObjectId, FaceId)],
+        defaults: &[ObjectId],
+    ) -> DocChange {
+        let mut objects: Vec<ObjectId> = defaults.to_vec();
+        objects.extend(faces.iter().map(|&(o, _)| o));
+        objects.sort_unstable();
+        objects.dedup();
+
+        let mut change = DocChange::default();
+        for oid in objects {
+            let piece = self.paint_change(oid);
+            change.objects_touched.extend(piece.objects_touched);
+            change.components_touched.extend(piece.components_touched);
+            change.instances_touched.extend(piece.instances_touched);
+        }
+        change.objects_touched.sort_unstable();
+        change.objects_touched.dedup();
+        change.components_touched.sort_unstable();
+        change.components_touched.dedup();
+        change.instances_touched.sort_unstable();
+        change.instances_touched.dedup();
+        change
+    }
+
+    /// Whether every recorded [`DocAction::ReplaceMaterial`] target still
+    /// resolves live — checked before undo OR redo mutates anything, so the
+    /// batch can be refused whole rather than partially applied (rule 9,
+    /// ARCHITECTURE.md §5.7). A face is live if its object is present and
+    /// visible AND the object still carries that exact `FaceId` (a later
+    /// split/merge — or any op that frees and re-inserts the face's slotmap
+    /// slot — can consume it, minting a fresh generation the recorded id
+    /// predates); a default target is live if its object is present and
+    /// visible (an `ObjectId` itself is never re-minted, only hidden, so
+    /// this arm is defensive rather than a known-reachable gap).
+    fn replace_material_targets_live(
+        &self,
+        faces: &[(ObjectId, FaceId)],
+        defaults: &[ObjectId],
+    ) -> Result<(), DocumentError> {
+        for &(oid, fid) in faces {
+            let live = self
+                .objects
+                .get(oid)
+                .is_some_and(|r| !r.hidden && r.object.faces.contains_key(fid));
+            if !live {
+                return Err(DocumentError::ReplaceMaterialReplayStale);
+            }
+        }
+        for &oid in defaults {
+            if self.objects.get(oid).is_none_or(|r| r.hidden) {
+                return Err(DocumentError::ReplaceMaterialReplayStale);
+            }
+        }
+        Ok(())
     }
 
     /// The [`DocChange`] for a paint of `object`: the object itself, plus — if it
@@ -9928,6 +10270,42 @@ impl Document {
                 }
                 self.paint_change(object)
             }
+            &DocAction::SetFaceUvFrame {
+                object, face, prev, ..
+            } => {
+                if let Some(f) = self
+                    .objects
+                    .get_mut(object)
+                    .and_then(|r| r.object.faces.get_mut(face))
+                {
+                    f.uv_frame = prev;
+                }
+                self.paint_change(object)
+            }
+            DocAction::ReplaceMaterial {
+                from,
+                faces,
+                defaults,
+                ..
+            } => {
+                let from = *from;
+                let (faces, defaults) = (faces.clone(), defaults.clone());
+                // All-or-nothing (rule 9): a face/default a later structural
+                // op consumed refuses the WHOLE batch typed rather than
+                // silently dropping just that entry and partially restoring
+                // the rest — see `DocAction::ReplaceMaterial`'s doc comment.
+                if let Err(e) = self.replace_material_targets_live(&faces, &defaults) {
+                    self.undo.push(action);
+                    return Err(e);
+                }
+                for &(oid, fid) in &faces {
+                    self.objects[oid].object.faces[fid].material = from;
+                }
+                for &oid in &defaults {
+                    self.objects[oid].object.default_material = from;
+                }
+                self.replace_material_change(&faces, &defaults)
+            }
             &DocAction::SetMaterialAlpha { material, prev, .. } => {
                 if let Some(mat) = self.materials.get_mut(material) {
                     mat.color.a = prev;
@@ -10900,6 +11278,39 @@ impl Document {
                     rec.object.default_material = next;
                 }
                 self.paint_change(object)
+            }
+            &DocAction::SetFaceUvFrame {
+                object, face, next, ..
+            } => {
+                if let Some(f) = self
+                    .objects
+                    .get_mut(object)
+                    .and_then(|r| r.object.faces.get_mut(face))
+                {
+                    f.uv_frame = next;
+                }
+                self.paint_change(object)
+            }
+            DocAction::ReplaceMaterial {
+                to,
+                faces,
+                defaults,
+                ..
+            } => {
+                let to = *to;
+                let (faces, defaults) = (faces.clone(), defaults.clone());
+                // All-or-nothing (rule 9) — same posture as undo above.
+                if let Err(e) = self.replace_material_targets_live(&faces, &defaults) {
+                    self.redo.push(action);
+                    return Err(e);
+                }
+                for &(oid, fid) in &faces {
+                    self.objects[oid].object.faces[fid].material = to;
+                }
+                for &oid in &defaults {
+                    self.objects[oid].object.default_material = to;
+                }
+                self.replace_material_change(&faces, &defaults)
             }
             &DocAction::SetMaterialAlpha { material, next, .. } => {
                 if let Some(mat) = self.materials.get_mut(material) {

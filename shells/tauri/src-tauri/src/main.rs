@@ -2306,6 +2306,14 @@ fn main() {
             )?;
             let tool_paint =
                 check_item(handle, &mut checks, "tool-paint", "Paint", None, Some("B"))?;
+            let tool_position_texture = check_item(
+                handle,
+                &mut checks,
+                "tool-position-texture",
+                "Position Texture",
+                None,
+                None,
+            )?;
             let tool_move = check_item(
                 handle,
                 &mut checks,
@@ -2402,6 +2410,7 @@ fn main() {
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
                 .item(&tool_paint)
+                .item(&tool_position_texture)
                 .item(&tool_move)
                 .item(&tool_rotate)
                 .item(&tool_scale)
@@ -2860,6 +2869,7 @@ fn main() {
                 "draw-3d-text" => "draw-3d-text",
                 "tool-select" => "tool-select",
                 "tool-paint" => "tool-paint",
+                "tool-position-texture" => "tool-position-texture",
                 "tool-move" => "tool-move",
                 "tool-rotate" => "tool-rotate",
                 "tool-scale" => "tool-scale",

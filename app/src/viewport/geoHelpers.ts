@@ -403,6 +403,26 @@ export function applyAffine3x4(m: Affine3x4, p: V3): V3 {
 }
 
 /**
+ * Apply a row-major 3x4 affine matrix's LINEAR part only (no translation) to
+ * a vector: `v' = A·v`. The correct transform for a DIRECTION — a ray
+ * direction, a drag delta — as opposed to a POINT (`applyAffine3x4`): a
+ * direction has no position, so the affine map's translation must never be
+ * added to it (unlike a point, translating a direction by `t` would be
+ * wrong regardless of what `t` is). Used to map a world-space pointer ray's
+ * direction into a component instance's definition-local space (via the
+ * pose's INVERSE) and to map a definition-local delta vector back out into
+ * true world space (via the pose itself) — see PositionTextureTool's
+ * in-component ray mapping (paint-playtest2 §2).
+ */
+export function applyAffine3x4Linear(m: Affine3x4, v: V3): V3 {
+  return [
+    m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+    m[4] * v[0] + m[5] * v[1] + m[6] * v[2],
+    m[8] * v[0] + m[9] * v[1] + m[10] * v[2],
+  ]
+}
+
+/**
  * Map a unit surface normal from `pose`'s LOCAL frame into WORLD space — the
  * mapping `face_normal`'s definition-local-frame result needs whenever the
  * face belongs to a component INSTANCE's own definition (component-edit-

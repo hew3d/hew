@@ -13,9 +13,10 @@
 use kernel::{
     Anchor, Annotation, AxesFrame, AxesFrameError, BooleanError, BooleanOp, CapturedCurve,
     Document, DocumentError, FaceId, GroupId, Guide, ImageFormat, ImportNode, ImportScene,
-    KernelOp, KernelOpReport, Material, MaterialId, MeshRecipe, NodeId, Object, ObjectId, Operand,
-    Plane, Point3, RadialKind, Rgba8, SketchEdgeId, SketchError, SketchId, SketchRegionId,
-    SketchVertexId, Texture, Transform, TransformError, Vec3, WatertightState,
+    KernelOp, KernelOpReport, Material, MaterialId, MaterialScope, MeshRecipe, NodeId, Object,
+    ObjectId, Operand, Plane, Point3, RadialKind, Rgba8, SketchEdgeId, SketchError, SketchId,
+    SketchRegionId, SketchVertexId, Texture, Transform, TransformError, UvFrame, Vec3,
+    WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -2796,6 +2797,179 @@ fn set_material_alpha_applies_uniformly_to_a_textured_material() {
     assert!(doc.material(glass).unwrap().has_texture());
 }
 
+// --------------------------------------------------- texture positioning (UvFrame)
+
+#[test]
+fn set_face_uv_frame_sets_and_clears_frame() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    let frame = UvFrame::new(
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        0.25,
+        0.5,
+    );
+
+    assert_eq!(
+        doc.face_uv_frame(o, top),
+        Some(None),
+        "unset = planar default"
+    );
+    doc.set_face_uv_frame(o, top, Some(frame))
+        .expect("set frame");
+    assert_eq!(doc.face_uv_frame(o, top), Some(Some(frame)));
+
+    // Setting None resets to the planar default.
+    doc.set_face_uv_frame(o, top, None).expect("clear frame");
+    assert_eq!(doc.face_uv_frame(o, top), Some(None));
+}
+
+#[test]
+fn set_face_uv_frame_rejects_unknown_inputs() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let frame = UvFrame::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.0, 0.0);
+
+    // Unknown object handle.
+    assert_eq!(
+        doc.set_face_uv_frame(ObjectId::default(), FaceId::default(), Some(frame)),
+        Err(DocumentError::UnknownObject)
+    );
+    assert_eq!(
+        doc.face_uv_frame(ObjectId::default(), FaceId::default()),
+        None,
+        "unknown object reads back as the outer None"
+    );
+
+    // Unknown face handle on a real object.
+    let stray_face = FaceId::default();
+    assert_eq!(
+        doc.set_face_uv_frame(o, stray_face, Some(frame)),
+        Err(DocumentError::UnknownFace)
+    );
+}
+
+#[test]
+fn set_face_uv_frame_rejects_degenerate_frame() {
+    // No silent repair (DEVELOPMENT.md rule 4): a non-finite, zero-gradient,
+    // or singular (parallel s/t) frame is refused typed, not clamped or
+    // guessed, and the document is left exactly as it was.
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+
+    let non_finite = UvFrame::new(
+        Vec3::new(f64::NAN, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        0.0,
+        0.0,
+    );
+    assert_eq!(
+        doc.set_face_uv_frame(o, top, Some(non_finite)),
+        Err(DocumentError::DegenerateUvFrame),
+        "non-finite component"
+    );
+
+    let zero_gradient = UvFrame::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.0, 0.0);
+    assert_eq!(
+        doc.set_face_uv_frame(o, top, Some(zero_gradient)),
+        Err(DocumentError::DegenerateUvFrame),
+        "zero-length s gradient"
+    );
+
+    let parallel = UvFrame::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), 0.0, 0.0);
+    assert_eq!(
+        doc.set_face_uv_frame(o, top, Some(parallel)),
+        Err(DocumentError::DegenerateUvFrame),
+        "s and t are parallel — no genuine 2D gradient"
+    );
+
+    assert_eq!(
+        doc.face_uv_frame(o, top),
+        Some(None),
+        "every refusal above left the face at its unset planar default, untouched"
+    );
+}
+
+#[test]
+fn set_face_uv_frame_undo_redo_is_exact() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    let a = UvFrame::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.0, 0.0);
+    let b = UvFrame::new(
+        Vec3::new(0.0, 2.0, 0.0),
+        Vec3::new(-2.0, 0.0, 0.0),
+        0.1,
+        -0.2,
+    );
+
+    // None -> Some(a) -> Some(b), then unwind and replay both directions.
+    doc.set_face_uv_frame(o, top, Some(a)).unwrap();
+    doc.set_face_uv_frame(o, top, Some(b)).unwrap();
+    assert_eq!(doc.face_uv_frame(o, top), Some(Some(b)));
+
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.face_uv_frame(o, top),
+        Some(Some(a)),
+        "undo restores the prior frame"
+    );
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.face_uv_frame(o, top),
+        Some(None),
+        "undo all the way back restores the planar default (Some -> None)"
+    );
+
+    doc.redo().unwrap();
+    assert_eq!(
+        doc.face_uv_frame(o, top),
+        Some(Some(a)),
+        "redo re-applies (None -> Some)"
+    );
+    doc.redo().unwrap();
+    assert_eq!(doc.face_uv_frame(o, top), Some(Some(b)));
+}
+
+#[test]
+fn set_face_uv_frame_covers_component_definition_members() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    let frame = UvFrame::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.0, 0.0);
+
+    let (comp, _inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let member = doc.def_members(comp).unwrap()[0];
+
+    doc.set_face_uv_frame(member, top, Some(frame))
+        .expect("positioning reaches a definition member, same reach as paint_face");
+    assert_eq!(doc.face_uv_frame(member, top), Some(Some(frame)));
+}
+
+#[test]
+fn set_face_uv_frame_is_independent_of_material() {
+    // Positioning is per-face UV state independent of which material is
+    // currently applied: a frame is settable on a wholly unpainted face —
+    // the UI only offers the gesture on textured faces, but the kernel op
+    // itself carries no such restriction (paint-tool design §3).
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    let frame = UvFrame::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.0, 0.0);
+
+    assert_eq!(doc.face_material(o, top), None, "face starts unpainted");
+    doc.set_face_uv_frame(o, top, Some(frame))
+        .expect("frame is settable on an unpainted face");
+    assert_eq!(doc.face_uv_frame(o, top), Some(Some(frame)));
+    assert_eq!(
+        doc.face_material(o, top),
+        None,
+        "setting a frame does not paint the face"
+    );
+}
+
 #[test]
 fn explicit_face_paint_overrides_object_base() {
     let mut doc = Document::new();
@@ -2827,6 +3001,302 @@ fn boolean_result_inherits_operand_a_base_material() {
         Some(red),
         "the subtract result inherits operand A's base material, so carved \
          walls from an unpainted cutter resolve to A's color"
+    );
+}
+
+// --------------------------------------------- replace_material (paint §2)
+
+#[test]
+fn replace_material_document_scope_swaps_mixed_face_and_default_assignments_atomically() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let c = extrude_box(&mut doc, 4.0, 0.0, 5.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+
+    // A: an explicit face override of red, base left default.
+    let a_top = face_with_normal(&doc, a, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(a, a_top, Some(red)).unwrap();
+    // B: the whole object painted red (base material), no face overrides.
+    doc.set_object_material(b, Some(red)).unwrap();
+    // C: untouched control — must not be disturbed by the replace.
+    let c_top = face_with_normal(&doc, c, Vec3::new(0.0, 0.0, 1.0));
+
+    let change = doc
+        .replace_material(MaterialScope::Document, Some(red), Some(blue))
+        .expect("document-wide replace");
+    assert!(
+        change.objects_touched.contains(&a) && change.objects_touched.contains(&b),
+        "both touched objects are reported"
+    );
+    assert!(
+        !change.objects_touched.contains(&c),
+        "untouched object not reported"
+    );
+
+    assert_eq!(
+        doc.face_material(a, a_top),
+        Some(blue),
+        "explicit override swapped"
+    );
+    assert_eq!(
+        doc.object(b).unwrap().default_material(),
+        Some(blue),
+        "base swapped"
+    );
+    assert_eq!(
+        doc.face_material(c, c_top),
+        None,
+        "an object never touching `from` is left alone"
+    );
+    assert_eq!(doc.object(c).unwrap().default_material(), None);
+
+    // One undo reverses BOTH the face override and the base swap.
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.face_material(a, a_top),
+        Some(red),
+        "undo restores the face override"
+    );
+    assert_eq!(
+        doc.object(b).unwrap().default_material(),
+        Some(red),
+        "undo restores the base"
+    );
+
+    doc.redo().unwrap();
+    assert_eq!(doc.face_material(a, a_top), Some(blue));
+    assert_eq!(doc.object(b).unwrap().default_material(), Some(blue));
+}
+
+#[test]
+fn replace_material_sentinel_from_fills_only_truly_unpainted_faces() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+
+    // A: whole-object painted red via the base — its unset faces render red
+    // through inheritance, so they are NOT "unpainted" in the visual sense.
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_object_material(a, Some(red)).unwrap();
+    let a_top = face_with_normal(&doc, a, Vec3::new(0.0, 0.0, 1.0));
+    // B: genuinely never painted — base is `None`, faces are `None`.
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let b_top = face_with_normal(&doc, b, Vec3::new(0.0, 0.0, 1.0));
+
+    doc.replace_material(MaterialScope::Document, None, Some(blue))
+        .expect("fill unpainted");
+
+    assert_eq!(
+        doc.object(a).unwrap().default_material(),
+        Some(red),
+        "A's painted base is untouched — its faces were never `unpainted`"
+    );
+    assert_eq!(
+        doc.face_material(a, a_top),
+        None,
+        "A's face override is untouched (still None, inheriting red)"
+    );
+    assert_eq!(
+        doc.object(b).unwrap().default_material(),
+        Some(blue),
+        "B's genuinely-unpainted base is filled"
+    );
+    assert_eq!(
+        doc.face_material(b, b_top),
+        None,
+        "B's face stays an implicit inherit — now of blue"
+    );
+}
+
+#[test]
+fn replace_material_object_scope_does_not_leak() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+    let a_top = face_with_normal(&doc, a, Vec3::new(0.0, 0.0, 1.0));
+    let b_top = face_with_normal(&doc, b, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(a, a_top, Some(red)).unwrap();
+    doc.paint_face(b, b_top, Some(red)).unwrap();
+
+    doc.replace_material(MaterialScope::Object(a), Some(red), Some(blue))
+        .expect("object-scoped replace");
+
+    assert_eq!(
+        doc.face_material(a, a_top),
+        Some(blue),
+        "the scoped object changes"
+    );
+    assert_eq!(
+        doc.face_material(b, b_top),
+        Some(red),
+        "an identically-painted face on a DIFFERENT object is untouched"
+    );
+}
+
+#[test]
+fn replace_material_covers_component_definition_members() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(o, top, Some(red)).unwrap();
+
+    let (comp, _inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let member = doc.def_members(comp).unwrap()[0];
+
+    doc.replace_material(MaterialScope::Document, Some(red), Some(blue))
+        .expect("document-wide replace reaches definition members");
+    assert_eq!(
+        doc.face_material(member, top),
+        Some(blue),
+        "a definition member (shared geometry) is covered, same reach as paint_face"
+    );
+}
+
+#[test]
+fn replace_material_rejects_unknown_object_and_material() {
+    // `doc`'s own materials palette is left EMPTY for the two checks below —
+    // seeding it with a real material first would risk `stray` structurally
+    // colliding with that material's handle (two freshly-created documents
+    // assign identical keys to their Nth insert), which would make the
+    // "unknown material" checks pass for the wrong reason. An empty palette
+    // sidesteps the collision entirely: no key is contained, full stop (the
+    // same trap `set_object_material_rejects_unknown_material` sidesteps).
+    let mut other = Document::new();
+    let stray = other.add_material(Material::solid("X", Rgba8::rgb(0, 0, 0)));
+    let mut doc = Document::new();
+
+    assert_eq!(
+        doc.replace_material(MaterialScope::Document, Some(stray), None),
+        Err(DocumentError::UnknownMaterial),
+        "unknown `from`"
+    );
+    assert_eq!(
+        doc.replace_material(MaterialScope::Document, None, Some(stray)),
+        Err(DocumentError::UnknownMaterial),
+        "unknown `to`"
+    );
+    assert_eq!(
+        doc.replace_material(MaterialScope::Object(ObjectId::default()), None, None),
+        Err(DocumentError::UnknownObject)
+    );
+}
+
+#[test]
+fn replace_material_noop_does_not_record_undo() {
+    let mut doc = Document::new();
+    // `extrude_box` itself pushes an undoable `CreatedObject`, so a bare
+    // `doc.undo() == Err(NothingToUndo)` check would actually be exercising
+    // THAT entry rather than proving `replace_material` pushed nothing;
+    // `history_generation` (monotonic push count) is the precise instrument.
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 220, 30)));
+
+    // `from == to`: trivially a no-op.
+    let gen_before = doc.history_generation();
+    doc.replace_material(MaterialScope::Document, Some(red), Some(red))
+        .expect("from == to is a harmless no-op");
+    assert_eq!(
+        doc.history_generation(),
+        gen_before,
+        "from == to pushes nothing to the undo stack"
+    );
+
+    // `from` matches nothing anywhere in the document.
+    doc.replace_material(MaterialScope::Object(o), Some(green), Some(red))
+        .expect("no matching assignment is a harmless no-op");
+    assert_eq!(
+        doc.history_generation(),
+        gen_before,
+        "a non-matching `from` pushes nothing to the undo stack"
+    );
+}
+
+/// A batched `replace_material` undo/redo refuses WHOLE and typed — never a
+/// partial pre/post mix — if a *later* structural op consumes one of its
+/// recorded `(object, face)` targets before the replay runs (rule 9,
+/// ARCHITECTURE.md §5.7). Also pins the ordinary, non-stale case still
+/// restores/reproduces exactly, so the new validation adds no cost to the
+/// common path.
+#[test]
+fn replace_material_undo_refuses_whole_batch_when_a_recorded_face_goes_stale() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let f0 = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220)));
+    doc.paint_face(o, f0, Some(red)).unwrap();
+
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let fb0 = face_with_normal(&doc, b, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(b, fb0, Some(red)).unwrap();
+
+    doc.replace_material(MaterialScope::Document, Some(red), Some(blue))
+        .expect("replace across both objects");
+    assert_eq!(doc.face_material(o, f0), Some(blue));
+    assert_eq!(doc.face_material(b, fb0), Some(blue));
+
+    // The non-stale case: undo/redo bracketing THIS call, immediately,
+    // restores/reproduces exactly (the common path the fix must not
+    // regress).
+    doc.undo().expect("non-stale undo restores exactly");
+    assert_eq!(doc.face_material(o, f0), Some(red));
+    assert_eq!(doc.face_material(b, fb0), Some(red));
+    doc.redo().expect("non-stale redo reproduces exactly");
+    assert_eq!(doc.face_material(o, f0), Some(blue));
+    assert_eq!(doc.face_material(b, fb0), Some(blue));
+
+    // Now a LATER, independent structural op consumes `f0`: split it in
+    // two, then undo the split. `merge_faces` (the split's inverse) keeps
+    // one child and drops the other — empirically the ORIGINAL id, `f0`,
+    // is the one dropped, minting a fresh survivor in its place. `f0` is
+    // now permanently stale: the exact "creating structural op undone /
+    // redone" drift `document_fuzz.rs`'s `doc_fingerprint` doc comment
+    // describes for `PaintFace` — but never silently tolerated here.
+    let path = vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
+    doc.apply_object_op(
+        o,
+        KernelOp::SplitFace {
+            face: f0,
+            path,
+            restore: None,
+        },
+    )
+    .expect("split applies");
+    doc.undo().expect("undo the split (merge)");
+    assert!(
+        doc.object(o).unwrap().faces().keys().all(|f| f != f0),
+        "f0 must be gone — the merge minted a fresh survivor, not f0"
+    );
+
+    // Undoing `replace_material` now must refuse WHOLE and typed rather
+    // than silently reverting only `b` (the still-live target) while
+    // leaving `o`'s stale-recorded face at `blue` — an atomic-looking undo
+    // that actually mixed pre/post state.
+    let fingerprint_before = doc.save();
+    let err = doc
+        .undo()
+        .expect_err("a stale recorded face refuses the whole undo");
+    assert_eq!(err, DocumentError::ReplaceMaterialReplayStale);
+    assert_eq!(
+        doc.save(),
+        fingerprint_before,
+        "the document is byte-identical/untouched after the refusal"
+    );
+    assert_eq!(
+        doc.face_material(b, fb0),
+        Some(blue),
+        "the still-live target is NOT partially reverted"
+    );
+    assert!(
+        doc.can_undo(),
+        "the action stays on the undo stack rather than being dropped"
     );
 }
 

@@ -83,6 +83,9 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   // Text: leader-text annotations (docs/design/dimensions-text.md) — menu/
   // palette-only, like Protractor/Slice/Edit Vertex above.
   { name: 'Text', macKey: '', winKey: '' },
+  // Position Texture: reached via the contextual dock on a textured face
+  // (paint-tool design §3), not the rail — SketchUp assigns no default key.
+  { name: 'Position Texture', macKey: '', winKey: '' },
   // Camera tools: SketchUp's real O / H / Z everywhere.
   { name: 'Orbit', macKey: 'O', winKey: 'O' },
   { name: 'Pan', macKey: 'H', winKey: 'H' },

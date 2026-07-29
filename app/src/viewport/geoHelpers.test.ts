@@ -10,6 +10,7 @@ import {
   circlePolygonFace,
   invertAffine3x4,
   applyAffine3x4,
+  applyAffine3x4Linear,
   transformNormalThroughPose,
 } from './geoHelpers'
 import type { V3 } from './geoHelpers'
@@ -450,6 +451,58 @@ describe('invertAffine3x4 / applyAffine3x4', () => {
     // All rows equal → zero determinant.
     const singular = [1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0]
     expect(invertAffine3x4(singular)).toBeNull()
+  })
+})
+
+describe('applyAffine3x4Linear (direction transform — no translation applied, paint-playtest2 §2 ray mapping)', () => {
+  it('a translation-only pose leaves a direction vector untouched (linear part is identity)', () => {
+    const pose = [1, 0, 0, 5, 0, 1, 0, 2, 0, 0, 1, -3]
+    const v: V3 = [1, 2, 3]
+    expect(applyAffine3x4Linear(pose, v)).toEqual(v)
+  })
+
+  it('a rotation + non-uniform scale + mirror pose applies only the 3x3 linear part, exactly matching the explicit row math', () => {
+    // Same fixture as the applyAffine3x4 round-trip test above: 90° rotation
+    // about Z, scale (2, 0.5, -1) (mirrored Z), translate (1,-1,4).
+    const pose = [
+      0, -0.5, 0, 1,
+      2, 0, 0, -1,
+      0, 0, -1, 4,
+    ]
+    // x' = 0*1 - 0.5*0 + 0*0 = 0; y' = 2*1 + 0*0 + 0*0 = 2; z' = 0*1+0*0-1*0 = 0.
+    expect(applyAffine3x4Linear(pose, [1, 0, 0])).toEqual([0, 2, 0])
+  })
+
+  it('is translation-invariant: equals applyAffine3x4(pose, v) - applyAffine3x4(pose, [0,0,0]) for any affine pose', () => {
+    const pose = [
+      0, -0.5, 0, 1,
+      2, 0, 0, -1,
+      0, 0, -1, 4,
+    ]
+    for (const v of [[1, 2, 3], [-4, 0.5, 2], [0, 0, 0]] as V3[]) {
+      const viaLinear = applyAffine3x4Linear(pose, v)
+      const worldV = applyAffine3x4(pose, v)
+      const worldOrigin = applyAffine3x4(pose, [0, 0, 0])
+      expect(viaLinear[0]).toBeCloseTo(worldV[0] - worldOrigin[0])
+      expect(viaLinear[1]).toBeCloseTo(worldV[1] - worldOrigin[1])
+      expect(viaLinear[2]).toBeCloseTo(worldV[2] - worldOrigin[2])
+    }
+  })
+
+  it('round-trips a direction through pose then its inverse', () => {
+    const pose = [
+      0, -0.5, 0, 1,
+      2, 0, 0, -1,
+      0, 0, -1, 4,
+    ]
+    const inv = invertAffine3x4(pose)!
+    for (const v of [[1, 2, 3], [-4, 0.5, 2]] as V3[]) {
+      const mapped = applyAffine3x4Linear(pose, v)
+      const back = applyAffine3x4Linear(inv, mapped)
+      expect(back[0]).toBeCloseTo(v[0])
+      expect(back[1]).toBeCloseTo(v[1])
+      expect(back[2]).toBeCloseTo(v[2])
+    }
   })
 })
 

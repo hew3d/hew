@@ -1114,6 +1114,10 @@ describe('MaterialPalette', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // jsdom does not implement scrollIntoView; polyfill (fresh mock each
+    // test) so the selected-swatch scroll effect doesn't throw and its
+    // calls are cleanly isolated per test.
+    Element.prototype.scrollIntoView = vi.fn()
   })
 
   it('renders the Default swatch with title "Default (unpainted)"', () => {
@@ -1269,6 +1273,63 @@ describe('MaterialPalette', () => {
     const slider = screen.getByRole('slider') as HTMLInputElement
     expect(slider).not.toBeDisabled()
     expect(slider.value).toBe('128')
+  })
+
+  it('scrolls the newly-selected swatch into view when currentMaterialId changes — the Alt-eyedropper\'s sample→select loop on a long list', () => {
+    const mockInfoFor = (name: string) => ({
+      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false,
+    })
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n, 2n, 3n]),
+      material_info: (id: bigint) => mockInfoFor(`Mat ${id}`),
+    })
+    const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={1n} />)
+    ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+    // Simulate the eyedropper landing on material 3 far down the list.
+    rerender(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={3n} />)
+
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+  })
+
+  it('an eyedropper sample landing on a filtered-out swatch clears the filter so the swatch is visible and still gets scrolled to', () => {
+    const mockInfoFor = (name: string) => ({
+      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false,
+    })
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n, 2n, 3n]),
+      material_info: (id: bigint) => mockInfoFor(`Mat ${id}`),
+    })
+    const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={1n} />)
+
+    // Filter down to a name that hides material 3, the eyedropper's target.
+    fireEvent.change(screen.getByLabelText('Filter materials'), { target: { value: 'Mat 1' } })
+    expect(screen.queryByTitle('Mat 3')).not.toBeInTheDocument()
+    ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+    // The eyedropper samples material 3 — hidden by the still-active filter.
+    rerender(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={3n} />)
+
+    // The filter is cleared so the sampled swatch is visible again, and the
+    // scroll still lands once the row exists.
+    expect(screen.getByLabelText('Filter materials')).toHaveValue('')
+    expect(screen.getByTitle('Mat 3')).toBeInTheDocument()
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+  })
+
+  it('does not re-trigger the scroll on a re-render where the selection did not actually change', () => {
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n]),
+      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false }),
+    })
+    const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={1n} docRev={0} />)
+    ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+    // An unrelated doc-change re-render (docRev bump) with the SAME selected
+    // material must not yank the scroll position.
+    rerender(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={1n} docRev={1} />)
+
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled()
   })
 
   it('opacity slider is disabled when the Default swatch is selected', () => {

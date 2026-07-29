@@ -36,6 +36,7 @@ import {
   pushCenterTick,
   CENTER_TICK_HALF,
 } from './annotationLayout'
+import { writeFrameUvs, type UvFrameComponents } from '../tools/uvFrameMath'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -3612,6 +3613,65 @@ export class SceneRenderer {
    * over `objectsGroup` (marquee hit-testing calls this per candidate). */
   getObjectGroup(objectId: bigint): THREE.Group | null {
     return this.objectGroups.get(objectId)?.group ?? null
+  }
+
+  /**
+   * Live-preview patch target for the Position Texture tool (paint-tool
+   * design §3): recomputes `face`'s UV sub-range under a CANDIDATE frame and
+   * writes it directly into the already-rendered `uv` attribute(s), in
+   * place — no re-tessellation, no wasm mesh re-fetch. The frame isn't
+   * committed to the document until the gesture ends (Enter/click-away), so
+   * this only ever touches renderer-local buffers.
+   *
+   * `face_mesh_range` (a cheap lookup into the already-cached `RenderMesh`,
+   * not a re-tessellation) gives the `[base, count]` vertex range; the
+   * source positions are read straight out of whatever is ALREADY uploaded
+   * (the object's own geometry for a world object, or the member's shared
+   * cache for a component member — the same shared `Float32Array` every
+   * batch/materialized-instance mesh of that member wraps, so mutating it
+   * once and flagging each attribute's `needsUpdate` covers every placement).
+   * A stale object/face (e.g. the gesture's target vanished mid-drag) is a
+   * silent no-op — same posture as a hover-pick miss elsewhere in the tools.
+   *
+   * Reading `positions` from the already-f32 render buffer (rather than the
+   * kernel's f64 source) bounds this preview's precision at large distances
+   * from the origin — see `writeFrameUvs`'s doc comment (uvFrameMath.ts) for
+   * the exact bound; the COMMITTED result this patches over on
+   * Enter/click-away is unaffected.
+   */
+  previewFaceUv(objectId: bigint, faceId: bigint, frame: UvFrameComponents): void {
+    const range = this.wasmScene.face_mesh_range(objectId, faceId)
+    if (range === undefined) return
+    const base = range[0]
+    const count = range[1]
+
+    const wg = this.objectGroups.get(objectId)
+    if (wg !== undefined) {
+      const posAttr = wg.facesMesh.geometry.getAttribute('position') as THREE.BufferAttribute
+      const uvAttr = wg.facesMesh.geometry.getAttribute('uv') as THREE.BufferAttribute
+      writeFrameUvs(posAttr.array as Float32Array, base, count, frame, uvAttr.array as Float32Array)
+      uvAttr.needsUpdate = true
+      return
+    }
+
+    // Definition-member path: the shared per-member cache backs every batch
+    // slot AND every materialized instance's face geometry with the SAME
+    // underlying Float32Array, so one write covers them all — only the
+    // THREE.BufferAttribute wrapper objects need their `needsUpdate` flagged.
+    const cached = this.memberGeometryCache.get(objectId)
+    if (cached === undefined) return
+    writeFrameUvs(cached.positions, base, count, frame, cached.uvs)
+    for (const batch of this.batches.values()) {
+      if (batch.memberId !== objectId) continue
+      const attr = batch.mesh.geometry.getAttribute('uv') as THREE.BufferAttribute | undefined
+      if (attr !== undefined) attr.needsUpdate = true
+    }
+    for (const g of this.instanceGroups.values()) {
+      const idx = g.memberIds.indexOf(objectId)
+      if (idx === -1) continue
+      const attr = g.facesMeshes[idx].geometry.getAttribute('uv') as THREE.BufferAttribute | undefined
+      if (attr !== undefined) attr.needsUpdate = true
+    }
   }
 
   private _clearSketchLines(): void {

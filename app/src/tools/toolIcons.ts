@@ -22,6 +22,7 @@ import unfoldMoreSvg from '@material-symbols/svg-400/outlined/unfold_more.svg?ra
 import conversionPathSvg from '@material-symbols/svg-400/outlined/conversion_path.svg?raw'
 import allOutSvg from '@material-symbols/svg-400/outlined/all_out.svg?raw'
 import formatPaintSvg from '@material-symbols/svg-400/outlined/format_paint.svg?raw'
+import colorizeSvg from '@material-symbols/svg-400/outlined/colorize.svg?raw'
 import openWithSvg from '@material-symbols/svg-400/outlined/open_with.svg?raw'
 import rotateRightSvg from '@material-symbols/svg-400/outlined/rotate_right.svg?raw'
 import aspectRatioSvg from '@material-symbols/svg-400/outlined/aspect_ratio.svg?raw'
@@ -37,6 +38,7 @@ import verticalSplitSvg from '@material-symbols/svg-400/outlined/vertical_split.
 import personPinSvg from '@material-symbols/svg-400/outlined/person_pin.svg?raw'
 import threeSixtySvg from '@material-symbols/svg-400/outlined/360.svg?raw'
 import directionsWalkSvg from '@material-symbols/svg-400/outlined/directions_walk.svg?raw'
+import controlCameraSvg from '@material-symbols/svg-400/outlined/control_camera.svg?raw'
 import lineAxisSvg from '@material-symbols/svg-400/outlined/line_axis.svg?raw'
 import squareFootSvg from '@material-symbols/svg-400/outlined/square_foot.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
@@ -55,6 +57,7 @@ export type ToolName =
   | 'Follow Me'
   | 'Offset'
   | 'Paint'
+  | 'Position Texture'
   | 'Move'
   | 'Rotate'
   | 'Scale'
@@ -86,6 +89,7 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Follow Me': conversionPathSvg,
   'Offset': allOutSvg, // concentric outline pushed outward
   'Paint': formatPaintSvg,
+  'Position Texture': controlCameraSvg,
   'Move': openWithSvg,
   'Rotate': rotateRightSvg,
   'Scale': aspectRatioSvg,
@@ -120,6 +124,7 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Follow Me': { x: 0.25, y: 0.75 },
   'Offset': { x: 0.5, y: 0.5 },
   'Paint': { x: 0.15, y: 0.9 },
+  'Position Texture': { x: 0.5, y: 0.5 },
   'Move': { x: 0.5, y: 0.5 },
   'Rotate': { x: 0.5, y: 0.5 },
   'Scale': { x: 0.5, y: 0.5 },
@@ -162,10 +167,15 @@ function innerMarkup(svg: string): string {
  * With `copyBadge`, a small `+` is drawn in the top-right corner of the
  * cursor canvas (the SketchUp convention for "this transform copies") —
  * used by the Move tool while its durable copy toggle is on.
+ *
+ * With `eyedropper`, the glyph is swapped for the eyedropper icon regardless
+ * of `toolName` — Paint's live Alt-held cursor (paint-tool design §1), using
+ * the same hotspot as Paint's own cursor (a point-and-click tip, matching
+ * the eyedropper's real "pick point").
  */
-export function cursorFor(toolName: string, copyBadge = false): string {
-  const icon = TOOL_ICON_SVG[toolName as ToolName] ?? TOOL_ICON_SVG['Select']
-  const hotspot = CURSOR_HOTSPOT[toolName as ToolName] ?? CURSOR_HOTSPOT['Select']
+export function cursorFor(toolName: string, copyBadge = false, eyedropper = false): string {
+  const icon = eyedropper ? colorizeSvg : (TOOL_ICON_SVG[toolName as ToolName] ?? TOOL_ICON_SVG['Select'])
+  const hotspot = eyedropper ? CURSOR_HOTSPOT['Paint'] : (CURSOR_HOTSPOT[toolName as ToolName] ?? CURSOR_HOTSPOT['Select'])
   const glyph = innerMarkup(icon)
 
   const offset = (CURSOR_SIZE - GLYPH_SIZE) / 2

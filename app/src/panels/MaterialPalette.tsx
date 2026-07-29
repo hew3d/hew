@@ -165,6 +165,51 @@ export function MaterialPalette({
           return info !== undefined && info.name().toLowerCase().includes(normalizedFilter)
         })
 
+  // Scroll the selected swatch into view whenever the selection changes —
+  // in particular the Alt-eyedropper's sample→select loop (paint-tool design
+  // §1), which can land on a swatch far down a long list with no visible
+  // cue that anything happened. `block: 'nearest'` (the same convention
+  // DocumentTree's primary-selection scroll and TagsPanel's reveal-tag
+  // scroll both use) is a no-op when the row is already fully visible, so an
+  // ordinary click on a swatch already in view doesn't yank the scroll
+  // position — only an off-screen selection actually scrolls. This effect
+  // fires on every mount too (there's always a "current" selection — the
+  // Default swatch at minimum, unlike DocumentTree's possibly-empty
+  // selection) — TagsPanel's double-optional `?.scrollIntoView?.(...)` call
+  // (rather than DocumentTree's bare call) so environments without a real
+  // scrollIntoView (jsdom without a polyfill) degrade to a silent no-op
+  // instead of throwing.
+  //
+  // A live filter can hide the row the eyedropper just landed on outright —
+  // nothing to scroll to, and the pick would look like it silently did
+  // nothing. `pendingScrollRef` bridges the two renders this needs: the
+  // dedicated effect below (keyed on `currentMaterialId` alone, so it never
+  // fires from the user just typing a filter over an already-selected
+  // swatch — that swatch stays hidden without disturbing the selection, see
+  // the "filtering out the selected material" spec) arms the flag on every
+  // selection change; this deps-less effect runs after every commit,
+  // consumes the flag once its target row is actually renderable — clearing
+  // the filter first, and waiting for the resulting re-render, if the
+  // current filter hides it — and then scrolls.
+  const selectedRowRef = useRef<HTMLDivElement | null>(null)
+  const pendingScrollRef = useRef(false)
+  useEffect(() => {
+    pendingScrollRef.current = true
+  }, [currentMaterialId])
+  useEffect(() => {
+    if (!pendingScrollRef.current) return
+    if (normalizedFilter !== '' && currentMaterialId !== MATERIAL_SENTINEL) {
+      const info = scene.material_info(currentMaterialId)
+      const hiddenByFilter = info === undefined || !info.name().toLowerCase().includes(normalizedFilter)
+      if (hiddenByFilter) {
+        setFilter('')
+        return // wait for the filter-cleared re-render; flag stays armed
+      }
+    }
+    pendingScrollRef.current = false
+    selectedRowRef.current?.scrollIntoView?.({ block: 'nearest' })
+  })
+
   // --- Opacity state ---
   // Non-null only mid-drag/mid-keystroke, so the slider tracks the pointer
   // without a kernel round trip on every tick; committed (and cleared) on
@@ -338,7 +383,10 @@ export function MaterialPalette({
       </div>
 
       {/* Default swatch */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+      <div
+        ref={currentMaterialId === MATERIAL_SENTINEL ? selectedRowRef : undefined}
+        style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+      >
         <div
           onClick={() => onSelectMaterial(MATERIAL_SENTINEL)}
           title="Default (unpainted)"
@@ -380,6 +428,7 @@ export function MaterialPalette({
         return (
           <div
             key={id.toString()}
+            ref={selected ? selectedRowRef : undefined}
             style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
           >
             <div

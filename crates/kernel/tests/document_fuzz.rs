@@ -30,9 +30,10 @@
 //!   that noise is exactly what tolerance-aware equivalence exists for.
 
 use kernel::{
-    Anchor, Annotation, BooleanOp, CapturedCurve, Document, DocumentError, KernelOp, KernelOpError,
-    NodeId, ObjectId, PendingActionKind, Plane, Point3, PushPullError, RadialKind, SketchError,
-    SketchRegionId, Transform, Vec3,
+    Anchor, Annotation, BooleanOp, CapturedCurve, Document, DocumentError, FaceId, KernelOp,
+    KernelOpError, Material, MaterialId, MaterialScope, NodeId, ObjectId, PendingActionKind, Plane,
+    Point3, PushPullError, RadialKind, Rgba8, SketchError, SketchRegionId, Transform, UvFrame,
+    Vec3,
 };
 use proptest::prelude::*;
 
@@ -309,6 +310,40 @@ enum DocOp {
         ann_sel: usize,
         text: String,
     },
+    /// Paint the `face_sel`-th face of the `obj_sel`-th visible object.
+    /// `mat_sel` indexes the fixed 3-material palette PLUS the unpainted
+    /// sentinel (`mat_sel % 4`, last slot = `None`).
+    PaintFace {
+        obj_sel: usize,
+        face_sel: usize,
+        mat_sel: usize,
+    },
+    /// Set the `obj_sel`-th visible object's base material (same `mat_sel`
+    /// convention as `PaintFace`).
+    SetObjectMaterial {
+        obj_sel: usize,
+        mat_sel: usize,
+    },
+    /// `replace_material` — Shift-click "replace everywhere" (`object_scope:
+    /// false` = whole document) or Ctrl/Cmd+Shift (`true` = confined to the
+    /// `obj_sel`-th visible object). `from_sel`/`to_sel` use the same
+    /// `mat_sel` convention (3 materials + the unpainted sentinel), so `from`
+    /// is exercised as both a real material and the sentinel.
+    ReplaceMaterial {
+        object_scope: bool,
+        obj_sel: usize,
+        from_sel: usize,
+        to_sel: usize,
+    },
+    /// `set_face_uv_frame` — Position Texture's kernel commit (paint-tool
+    /// design §3). `frame_sel` indexes a small fixed set of sample frames
+    /// PLUS `None` (see `pick_uv_frame`), same modulo convention as
+    /// `pick_material`.
+    SetFaceUvFrame {
+        obj_sel: usize,
+        face_sel: usize,
+        frame_sel: usize,
+    },
     Undo,
     Redo,
 }
@@ -429,9 +464,169 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => (any::<usize>(), "[a-z]{0,6}").prop_map(|(ann_sel, text)| {
             DocOp::UpdateAnnotationText { ann_sel, text }
         }),
+        2 => (any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
+            |(obj_sel, face_sel, mat_sel)| DocOp::PaintFace { obj_sel, face_sel, mat_sel }
+        ),
+        1 => (any::<usize>(), any::<usize>()).prop_map(|(obj_sel, mat_sel)| {
+            DocOp::SetObjectMaterial { obj_sel, mat_sel }
+        }),
+        2 => (proptest::bool::ANY, any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
+            |(object_scope, obj_sel, from_sel, to_sel)| DocOp::ReplaceMaterial {
+                object_scope, obj_sel, from_sel, to_sel,
+            }
+        ),
+        1 => (any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
+            |(obj_sel, face_sel, frame_sel)| DocOp::SetFaceUvFrame { obj_sel, face_sel, frame_sel }
+        ),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
+}
+
+/// Fixed 3-material palette, seeded once (materials are never removed or
+/// undone — `add_material` is deliberately not on the undo stack — so these
+/// handles stay valid for the whole test). `mat_sel % 4` resolves into it:
+/// `3` (the last slot) is the unpainted sentinel `None`.
+fn seed_materials(doc: &mut Document) -> Vec<MaterialId> {
+    vec![
+        doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30))),
+        doc.add_material(Material::solid("Green", Rgba8::rgb(30, 220, 30))),
+        doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 220))),
+    ]
+}
+
+/// Resolves a fuzz `mat_sel` against the fixed palette: `sel % (len + 1)`,
+/// the last index being the unpainted sentinel `None`.
+fn pick_material(materials: &[MaterialId], sel: usize) -> Option<MaterialId> {
+    let idx = sel % (materials.len() + 1);
+    materials.get(idx).copied()
+}
+
+/// Resolves a fuzz `frame_sel` against a small fixed set of sample
+/// [`UvFrame`]s, `sel % 6` — three well-formed frames, two deliberately
+/// DEGENERATE ones (a zero-length gradient, and parallel `s`/`t`) that
+/// `set_face_uv_frame` must refuse ([`DocumentError::DegenerateUvFrame`])
+/// rather than silently store — `apply_doc_op` below discards the
+/// `Result` via `let _ =`, same posture as `PaintFace`, so the refusal
+/// itself isn't asserted here; `check_doc`'s invariant walk after every
+/// step is what proves the refusal left the document uncorrupted — and
+/// the last index `None` (the planar-default sentinel), same modulo
+/// convention as `pick_material`.
+fn pick_uv_frame(sel: usize) -> Option<UvFrame> {
+    const FRAMES: [UvFrame; 5] = [
+        UvFrame {
+            s: Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            t: Vec3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+            u0: 0.0,
+            v0: 0.0,
+        },
+        UvFrame {
+            s: Vec3 {
+                x: 0.0,
+                y: 2.0,
+                z: 0.0,
+            },
+            t: Vec3 {
+                x: -2.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            u0: 0.25,
+            v0: -0.5,
+        },
+        UvFrame {
+            s: Vec3 {
+                x: 0.5,
+                y: 0.5,
+                z: 0.0,
+            },
+            t: Vec3 {
+                x: -0.5,
+                y: 0.5,
+                z: 0.7,
+            },
+            u0: 1.0,
+            v0: 1.0,
+        },
+        // Degenerate: zero-length s gradient.
+        UvFrame {
+            s: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            t: Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            u0: 0.0,
+            v0: 0.0,
+        },
+        // Degenerate: s and t parallel (no genuine 2D gradient).
+        UvFrame {
+            s: Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            t: Vec3 {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            u0: 0.0,
+            v0: 0.0,
+        },
+    ];
+    let idx = sel % (FRAMES.len() + 1);
+    FRAMES.get(idx).copied()
+}
+
+/// One object's material state in a [`MaterialsSnapshot`]: its base, plus
+/// every face's own (sorted by handle).
+type ObjectMaterialsSnapshot = (
+    ObjectId,
+    Option<MaterialId>,
+    Vec<(FaceId, Option<MaterialId>)>,
+);
+
+/// Every visible object's material state: base material, plus every face's
+/// own — for the LOCAL round-trip check bracketing a single
+/// `replace_material` call (see `DocOp::ReplaceMaterial` in `apply_doc_op`).
+/// Raw handles are fine here (unlike `doc_fingerprint`, which must survive a
+/// full document reload/replay): this snapshot only ever compares against
+/// another snapshot of the SAME live `Document`, taken immediately before
+/// and after one `replace_material` + its own immediate undo/redo — it never
+/// crosses an earlier structural op's own undo/redo, so it can't land on the
+/// face-handle-drift gap `doc_fingerprint`'s doc comment describes.
+type MaterialsSnapshot = Vec<ObjectMaterialsSnapshot>;
+
+fn snapshot_materials(doc: &Document) -> MaterialsSnapshot {
+    let mut objects: Vec<_> = doc
+        .visible_object_ids()
+        .into_iter()
+        .map(|oid| {
+            let obj = doc.object(oid).expect("visible id resolves");
+            let mut faces: Vec<(FaceId, Option<MaterialId>)> = obj
+                .faces()
+                .iter()
+                .map(|(fid, f)| (fid, f.material))
+                .collect();
+            faces.sort_unstable_by_key(|&(fid, _)| fid);
+            (oid, obj.default_material(), faces)
+        })
+        .collect();
+    objects.sort_unstable_by_key(|&(oid, _, _)| oid);
+    objects
 }
 
 /// Seeds one box by sketching a rectangle on the ground plane and extruding.
@@ -500,6 +695,14 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
 ///   never fire again. If it ever does, that is a regression, not a
 ///   tolerated gap — letting it fail loudly here is the correct trap
 ///   posture, so `PlaceTextCompound` is not matched below.
+/// - `DocumentError::ReplaceMaterialReplayStale`: this harness's own
+///   full-log unwind-and-replay (twice) is exactly the shape that can churn
+///   a `replace_material` batch's recorded face stale — split/merge one of
+///   its target faces via an unrelated later op, then unwind past both —
+///   the same drift `doc_fingerprint`'s doc comment describes for
+///   `PaintFace`. The error is unambiguous (only this one replay path
+///   produces it), so no `peek` is needed to confirm which action is
+///   pending, unlike the `UnbuildPushPull` signature below.
 fn is_known_inverse_guard_gap(doc: &Document, e: &DocumentError, redo: bool) -> bool {
     if matches!(e, DocumentError::Sketch(SketchError::RestoreConflicts)) {
         let pending = if redo {
@@ -508,6 +711,9 @@ fn is_known_inverse_guard_gap(doc: &Document, e: &DocumentError, redo: bool) -> 
             doc.peek_undo_action_kind()
         };
         return matches!(pending, Some(PendingActionKind::CreatedObject));
+    }
+    if matches!(e, DocumentError::ReplaceMaterialReplayStale) {
+        return true;
     }
     let signature = matches!(
         e,
@@ -600,6 +806,31 @@ fn check_persistence(doc: &Document, what: &str) -> Result<(), TestCaseError> {
 /// object, its sorted vertex positions (rounded well below any op tolerance)
 /// and sorted face sizes; plus node/instance/component counts. Two documents
 /// with equal fingerprints are the same model up to handle renaming.
+///
+/// Deliberately does NOT include face/object material state. A scratch
+/// repro (split a face, paint one child, then unwind-and-replay the WHOLE
+/// document log twice) pinned down a pre-existing, orthogonal gap: a
+/// face-level attribute recorded against a `FaceId` survives its own
+/// immediate undo/redo perfectly, but if an EARLIER structural op that
+/// created that face is *itself* undone and redone in a later cycle, the
+/// redo mints a fresh slotmap generation for the face — the paint action's
+/// recorded handle goes stale and its restore silently no-ops (`if let
+/// Some(f) = ...get_mut(face)`, the same guard `PaintFace`'s undo/redo has
+/// always used). This affects `PaintFace` identically; it is not introduced
+/// by `replace_material`. `replace_material`'s OWN batched undo/redo replay
+/// no longer shares the silent-no-op half of this gap — a stale recorded
+/// face now refuses the WHOLE batch typed
+/// (`DocumentError::ReplaceMaterialReplayStale`, tolerated by
+/// `is_known_inverse_guard_gap` below) rather than partially applying the
+/// rest, so this harness's full double-unwind/replay can hit that typed
+/// refusal and abandon the round-trip for the case instead of silently
+/// drifting — see `document_specs.rs` for the exact repro and the local
+/// round-trip check below for the immediate-bracketing (never-stale) case.
+/// It is still not a safe place to assert material fidelity across the full
+/// unwind/replay, since `PaintFace`'s own silent-no-op half of the gap is
+/// unaffected and unaddressed here — a face-handle stability question that
+/// reaches split/boolean/push-through undo broadly, well past paint-tool
+/// Phase 1's scope.
 fn doc_fingerprint(doc: &Document) -> String {
     let q = |c: f64| (c * 1e7).round() as i64;
     let object_print = |oid| {
@@ -864,8 +1095,15 @@ fn place_glyph(doc: &mut Document, x: f64, y: f64, depth: f64) -> Option<()> {
     Some(())
 }
 
-/// Applies one abstract op.
-fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, TestCaseError> {
+/// Applies one abstract op. `materials` is the fixed palette `seed_materials`
+/// built up front (paint ops resolve their `mat_sel`/`from_sel`/`to_sel`
+/// against it).
+fn apply_doc_op(
+    doc: &mut Document,
+    step: usize,
+    op: &DocOp,
+    materials: &[MaterialId],
+) -> Result<bool, TestCaseError> {
     match op {
         DocOp::PushPull {
             obj_sel,
@@ -1508,6 +1746,92 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
             };
             let _ = doc.update_annotation(id, updated);
         }
+        DocOp::PaintFace {
+            obj_sel,
+            face_sel,
+            mat_sel,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(true);
+            };
+            let _ = doc.paint_face(oid, face, pick_material(materials, *mat_sel));
+        }
+        DocOp::SetObjectMaterial { obj_sel, mat_sel } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let _ = doc.set_object_material(oid, pick_material(materials, *mat_sel));
+        }
+        DocOp::ReplaceMaterial {
+            object_scope,
+            obj_sel,
+            from_sel,
+            to_sel,
+        } => {
+            let scope = if *object_scope {
+                let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                    return Ok(true);
+                };
+                MaterialScope::Object(oid)
+            } else {
+                MaterialScope::Document
+            };
+            let from = pick_material(materials, *from_sel);
+            let to = pick_material(materials, *to_sel);
+            let before = snapshot_materials(doc);
+            if doc.replace_material(scope, from, to).is_ok() {
+                let after = snapshot_materials(doc);
+                // A no-op (from == to, or nothing matched `from`) pushes no
+                // undo entry — nothing to round-trip. Otherwise, one local
+                // undo/redo bracketing THIS call (nothing else runs in
+                // between) must restore/reproduce the snapshot exactly —
+                // the atomic-undo contract, fuzzed against random document
+                // states/scopes/materials on top of the targeted
+                // `document_specs.rs` unit specs.
+                if after != before {
+                    doc.undo().map_err(|e| {
+                        TestCaseError::fail(format!(
+                            "step {step}: replace_material's own undo failed: {e}"
+                        ))
+                    })?;
+                    if snapshot_materials(doc) != before {
+                        return Err(TestCaseError::fail(format!(
+                            "step {step}: replace_material undo did not restore the prior \
+                             material state exactly"
+                        )));
+                    }
+                    doc.redo().map_err(|e| {
+                        TestCaseError::fail(format!(
+                            "step {step}: replace_material's own redo failed: {e}"
+                        ))
+                    })?;
+                    if snapshot_materials(doc) != after {
+                        return Err(TestCaseError::fail(format!(
+                            "step {step}: replace_material redo did not reproduce the \
+                             post-op material state exactly"
+                        )));
+                    }
+                }
+            }
+        }
+        DocOp::SetFaceUvFrame {
+            obj_sel,
+            face_sel,
+            frame_sel,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(true);
+            };
+            let _ = doc.set_face_uv_frame(oid, face, pick_uv_frame(*frame_sel));
+        }
         DocOp::Undo => {
             if doc.can_undo()
                 && let Err(e) = doc.undo()
@@ -1555,6 +1879,7 @@ proptest! {
         for ((x, y), (dx, dy), h) in seeds {
             add_box(&mut doc, x, y, dx, dy, h);
         }
+        let materials = seed_materials(&mut doc);
         check_doc(&doc, 0, "seed")?;
 
         if std::env::var("FUZZ_TRACE").is_ok() {
@@ -1562,7 +1887,7 @@ proptest! {
         }
 
         for (step, op) in ops.iter().enumerate() {
-            if !apply_doc_op(&mut doc, step, op)? {
+            if !apply_doc_op(&mut doc, step, op, &materials)? {
                 return Ok(());
             }
             check_doc(&doc, step, "apply")?;

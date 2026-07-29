@@ -41,7 +41,9 @@ pub mod transform;
 pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
-pub use document::{DocChange, Document, DocumentError, FollowMePath, NodeId, PendingActionKind};
+pub use document::{
+    DocChange, Document, DocumentError, FollowMePath, MaterialScope, NodeId, PendingActionKind,
+};
 pub use error::TopologyError;
 pub use guide::Guide;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
