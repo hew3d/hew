@@ -817,6 +817,11 @@ export function MenuBar({
               onClick={withClose(() => onSelectTool?.('Tape Measure'))}
             />
             <CheckMenuItem
+              label="Dimension"
+              checked={activeTool === 'Dimension'}
+              onClick={withClose(() => onSelectTool?.('Dimension'))}
+            />
+            <CheckMenuItem
               label="Protractor"
               checked={activeTool === 'Protractor'}
               onClick={withClose(() => onSelectTool?.('Protractor'))}
@@ -840,6 +845,11 @@ export function MenuBar({
               label="Axes"
               checked={activeTool === 'Axes'}
               onClick={withClose(() => onSelectTool?.('Axes'))}
+            />
+            <CheckMenuItem
+              label="Text"
+              checked={activeTool === 'Text'}
+              onClick={withClose(() => onSelectTool?.('Text'))}
             />
           </div>
         )}

@@ -63,6 +63,8 @@ import { WalkTool } from '../tools/WalkTool'
 import { DEFAULT_EYE_HEIGHT_M, type V3 as WalkV3 } from '../tools/cameraWalkMath'
 import { AxesTool } from '../tools/AxesTool'
 import { getDrawingAxes, type DrawingAxes } from '../tools/drawingAxes'
+import { DimensionTool } from '../tools/DimensionTool'
+import { TextTool, type PlacedLeader } from '../tools/TextTool'
 import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray, ApertureBasis } from './math'
@@ -90,6 +92,8 @@ import {
 import { shouldSkipToolSwitch } from './toolSwitchGuard'
 import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
+import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
+import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
 import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
@@ -102,8 +106,9 @@ import {
 import { CleanModifierTap } from './cleanModifierTap'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { cursorFor } from '../tools/toolIcons'
-import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
-import { getLengthUnit, homeFramingScale } from '../settings/units'
+import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
+import { readAppliedTheme } from '../theme/applyTheme'
+import { getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
 import { SketchHoverGate } from './sketchHoverGate'
 import { isRenderStatsActive, recordRender } from './renderStats'
@@ -270,6 +275,29 @@ interface Props {
   onSelectGuide?: (id: bigint | null) => void
   /** The currently selected guide, reflected into the renderer highlight. */
   selectedGuide?: bigint | null
+  /** Lift an annotation (dimension/leader-text) pick to the parent; `null`
+   * clears (docs/design/dimensions-text.md). */
+  onSelectAnnotation?: (id: bigint | null) => void
+  /** The currently selected annotation, reflected into the renderer highlight. */
+  selectedAnnotation?: bigint | null
+  /**
+   * Requests the parent open the in-viewport text editor (`AnnotationEditor`,
+   * the `InferenceTooltip` DOM-positioning pattern): a double-click on an
+   * existing annotation (`id` set — editing its text/override), or the Text
+   * tool's second click (`id` null — a brand-new leader, placed but not yet
+   * worded). The parent renders the editor at `screenX`/`screenY`, prefilled
+   * with `initialText`, and on commit/cancel calls back through
+   * `ViewportApi.commitAnnotationEditorText`/`cancelAnnotationEditor` — this
+   * component tracks WHICH annotation (or pending new leader) the edit
+   * applies to internally, so the parent only ever passes text through.
+   */
+  onOpenAnnotationEditor?: (info: {
+    id: bigint | null
+    screenX: number
+    screenY: number
+    initialText: string
+    placeholder: string
+  }) => void
   /** Request entering a node's editing context (double-click). */
   onEnterContext?: (node: NodeRef) => void
   /** Request popping one level off the context path (Esc). */
@@ -569,6 +597,38 @@ export interface ViewportApi {
   resetAxes: () => void
   /** Delete a single picked construction guide. */
   runDeleteGuide: (id: bigint) => void
+  /** Delete a single picked annotation (dimension or leader text) —
+   * docs/design/dimensions-text.md. */
+  runDeleteAnnotation: (id: bigint) => void
+  /**
+   * Commit whatever the in-viewport annotation editor currently has pending
+   * (`AnnotationEditor`'s Enter/blur) — either an edit to an existing
+   * annotation's text (a dimension's `text_override`, or a leader's
+   * content) or a brand-new leader text placed by the Text tool. No-op if
+   * nothing is pending (e.g. a stray call after the editor already closed).
+   */
+  commitAnnotationEditorText: (text: string) => void
+  /** Discard whatever the in-viewport annotation editor currently has
+   * pending (Esc) — no kernel call, unlike `commitAnnotationEditorText`. */
+  cancelAnnotationEditor: () => void
+  /**
+   * Test/E2E: the currently rendered label text for annotation `id` (the
+   * app-computed measurement, or its `text_override`), or `null` if not
+   * live/rendered — proves a unit-setting change actually re-labels a
+   * dimension without reading the rasterized canvas texture directly.
+   */
+  getAnnotationLabel: (id: bigint) => string | null
+  /**
+   * Test/E2E: the current world-space position of annotation `id`'s text
+   * billboard (the same point the double-click-to-edit gesture projects to
+   * place the in-viewport editor), or `null` if `id` isn't live/rendered.
+   * Lets a pixel-precision E2E check that a dimension's LABEL actually
+   * rendered sample the real render-time anchor — correct for both a linear
+   * dimension's 'broken' (label centered on the line) and 'outside' (label
+   * pushed past an end) gap-layout modes — rather than guessing at the
+   * line's midpoint.
+   */
+  getAnnotationTextWorldPosition: (id: bigint) => [number, number, number] | null
   /**
    * Toggle the placed section plane's active (clipping) flag — "Toggle
    * Section Plane Active" (menu + palette), SketchUp's "Active Cut". A
@@ -1501,6 +1561,9 @@ export default function Viewport({
   onSelectMany,
   onSelectGuide,
   selectedGuide = null,
+  onSelectAnnotation,
+  selectedAnnotation = null,
+  onOpenAnnotationEditor,
   onEnterContext,
   onExitContext,
   onDocumentChanged,
@@ -1536,6 +1599,10 @@ export default function Viewport({
   onSelectManyRef.current = onSelectMany
   const onSelectGuideRef = useRef(onSelectGuide)
   onSelectGuideRef.current = onSelectGuide
+  const onSelectAnnotationRef = useRef(onSelectAnnotation)
+  onSelectAnnotationRef.current = onSelectAnnotation
+  const onOpenAnnotationEditorRef = useRef(onOpenAnnotationEditor)
+  onOpenAnnotationEditorRef.current = onOpenAnnotationEditor
   const onEnterContextRef = useRef(onEnterContext)
   onEnterContextRef.current = onEnterContext
   const onExitContextRef = useRef(onExitContext)
@@ -1694,7 +1761,18 @@ export default function Viewport({
     // --surface-window (a shade lighter than --surface-canvas-page); light
     // sky is the lightest stop of the CSS gradient token.
     const CANVAS_CLEAR_COLOR: Record<'light' | 'dark', number> = { dark: 0x15181d, light: 0xf2f5f9 }
-    renderer.setClearColor(CANVAS_CLEAR_COLOR[getResolvedTheme()])
+    // The single resolved-theme read for this mount: `getResolvedTheme()`
+    // queries `matchMedia` when the setting is 'auto', so it is read ONCE
+    // here (not re-read at every one-time init call below) and kept current
+    // by `subscribeTheme` below for the clear color/light rig/grid/axes,
+    // which only need to react to an EXPLICIT Settings > Theme change (that
+    // subscription's own event). The per-frame annotation billboards read
+    // `readAppliedTheme()` directly instead (see the `updateAnnotationBillboards`
+    // call below) — `subscribeTheme` alone would miss an OS-level
+    // `prefers-color-scheme` flip while 'auto' is in effect, since that flip
+    // never fires the settings-change subscription.
+    let currentTheme: ResolvedTheme = getResolvedTheme()
+    renderer.setClearColor(CANVAS_CLEAR_COLOR[currentTheme])
     renderer.setSize(el.clientWidth, el.clientHeight)
     el.appendChild(renderer.domElement)
 
@@ -1754,7 +1832,7 @@ export default function Viewport({
       dark: { ambient: 0.4, directional: 0.9 },
       light: { ambient: 0.72 * Math.PI, directional: 0.55 * Math.PI },
     }
-    const initialRig = MODEL_LIGHT_RIG[getResolvedTheme()]
+    const initialRig = MODEL_LIGHT_RIG[currentTheme]
     const ambient = new THREE.AmbientLight(0xffffff, initialRig.ambient)
     threeScene.add(ambient)
     const dirLight = new THREE.DirectionalLight(0xffffff, initialRig.directional)
@@ -1780,7 +1858,7 @@ export default function Viewport({
     // render frame (see fatLine.ts's module doc comment).
     updateFatLineResolutions(el.clientWidth, el.clientHeight)
     threeScene.add(originAxes)
-    const initialGridColors = GROUND_GRID_COLORS[getResolvedTheme()]
+    const initialGridColors = GROUND_GRID_COLORS[currentTheme]
     // `originAxes.visible` (default true — nothing sets it false before
     // here) seeds the grid's own through-origin-line suppression so the two
     // start in sync; `setAxesVisible` below keeps them in sync from then on.
@@ -1818,6 +1896,7 @@ export default function Viewport({
     // (CSS variables) already updates live via `data-theme`.
     const unsubscribeTheme = subscribeTheme(() => {
       const theme = getResolvedTheme()
+      currentTheme = theme
       renderer.setClearColor(CANVAS_CLEAR_COLOR[theme])
       const rig = MODEL_LIGHT_RIG[theme]
       ambient.intensity = rig.ambient
@@ -1838,6 +1917,18 @@ export default function Viewport({
     // Initial refresh (empty scene is fine — just populates nothing)
     sceneRenderer.refresh()
     sceneRenderer.refreshGuides()
+    sceneRenderer.refreshAnnotations()
+
+    // Live unit reactivity: Settings > Units can change at any time while
+    // the viewport is mounted, and every dimension's DISPLAYED measurement
+    // is computed app-side from the current unit (docs/design/
+    // dimensions-text.md — "changing units re-labels every dimension, like
+    // SketchUp") — nothing else about the document changed, so nothing else
+    // would otherwise trigger a re-render of the annotation text.
+    const unsubscribeLengthUnit = subscribeLengthUnit(() => {
+      sceneRenderer.refreshAnnotations()
+      scheduleRenderRef.current()
+    })
 
     // Non-destructive section plane (DESIGN §2) — a
     // three.js clip, not a kernel/document entity. Session-only for the
@@ -2217,6 +2308,128 @@ export default function Viewport({
       deferClick: boolean
     }
     let dragMove: DragMove | null = null
+
+    // Annotation offset/leader drag (docs/design/dimensions-text.md "Tools
+    // & UX": "drag moves the offset/text placement"). A press directly on
+    // the picked annotation (see `pickAnnotation` below) arms this; past
+    // `exceedsDragThreshold` (the same threshold `dragMove` uses) it goes
+    // `active` and live-previews the new placement, committed in ONE kernel
+    // call on release (never per-move — that would flood undo with one step
+    // per mouse-move frame). A sub-threshold release is a plain click — the
+    // annotation is already selected (done at arm time), nothing to commit.
+    interface AnnotationDrag {
+      id: bigint
+      snapshot: AnnotationSnapshot
+      startX: number
+      startY: number
+      active: boolean
+    }
+    let annotationDrag: AnnotationDrag | null = null
+    let annotationDragPreview: THREE.LineSegments | null = null
+
+    // The in-viewport text editor's pending target (docs/design/
+    // dimensions-text.md): either an existing annotation's text being
+    // edited (double-click), or a brand-new leader the Text tool just
+    // placed but hasn't been worded yet. `ViewportApi.commitAnnotationEditorText`/
+    // `cancelAnnotationEditor` resolve against this — the parent (App.tsx)
+    // only ever passes typed TEXT through, never annotation internals.
+    type PendingAnnotationEdit =
+      | { kind: 'edit'; id: bigint; snapshot: AnnotationSnapshot }
+      | { kind: 'new-leader'; leader: PlacedLeader }
+    let pendingAnnotationEdit: PendingAnnotationEdit | null = null
+
+    function _clearAnnotationDragPreview(): void {
+      if (annotationDragPreview === null) return
+      annotationDragPreview.geometry.dispose()
+      if (annotationDragPreview.material instanceof THREE.Material) annotationDragPreview.material.dispose()
+      previewGroup.remove(annotationDragPreview)
+      annotationDragPreview = null
+    }
+
+    /** Resolve the world point the annotation's offset/leader should follow
+     * for `ray`, projected onto the geometrically relevant plane: the
+     * dimension's own plane (linear), the captured circle's plane (radial),
+     * or a camera-facing plane through the anchor (leader — it has no
+     * natural plane of its own, so it drags freely relative to the view,
+     * matching a billboarded label). `null` only for a degenerate ray
+     * (parallel to the plane — an edge-on view), which simply leaves the
+     * preview at its last position. */
+    function _resolveAnnotationDragPoint(snapshot: AnnotationSnapshot, ray: Ray): V3 | null {
+      if (snapshot.kind === 'linear') {
+        return rayPlaneIntersect(ray.origin, ray.direction, snapshot.a.point, [
+          snapshot.plane[3], snapshot.plane[4], snapshot.plane[5],
+        ])
+      }
+      if (snapshot.kind === 'radial') {
+        return rayPlaneIntersect(ray.origin, ray.direction, snapshot.curveCenter, [
+          snapshot.curvePlane[3], snapshot.curvePlane[4], snapshot.curvePlane[5],
+        ])
+      }
+      camera.getWorldDirection(cameraForwardV)
+      return rayPlaneIntersect(ray.origin, ray.direction, snapshot.anchor.point, [
+        cameraForwardV.x, cameraForwardV.y, cameraForwardV.z,
+      ])
+    }
+
+    /** Rebuild the drag preview line from `snapshot` with its offset/leader
+     * replaced by the drag-derived one — a plain (non-fat) rubber-band line
+     * in the shared preview group, matching every other tool's live-drag
+     * preview (never the committed annotationsGroup rendering, which stays
+     * on the pre-drag geometry until release). */
+    function _updateAnnotationDragPreview(snapshot: AnnotationSnapshot, cursorWorld: V3): void {
+      _clearAnnotationDragPreview()
+      let positions: number[]
+      if (snapshot.kind === 'linear') {
+        const dir = subV3(snapshot.b.point, snapshot.a.point)
+        const len = Math.hypot(dir[0], dir[1], dir[2])
+        const offset = len > 1e-9
+          ? perpComponentV3(subV3(cursorWorld, snapshot.a.point), [dir[0] / len, dir[1] / len, dir[2] / len])
+          : snapshot.offset
+        const a1 = addV3(snapshot.a.point, offset)
+        const b1 = addV3(snapshot.b.point, offset)
+        positions = [...snapshot.a.point, ...a1, ...snapshot.b.point, ...b1, ...a1, ...b1]
+      } else if (snapshot.kind === 'radial') {
+        const normal: V3 = [snapshot.curvePlane[3], snapshot.curvePlane[4], snapshot.curvePlane[5]]
+        const leaderDir = perpComponentV3(subV3(cursorWorld, snapshot.anchor.point), normal)
+        positions = [...snapshot.anchor.point, ...addV3(snapshot.anchor.point, leaderDir)]
+      } else {
+        const offset = subV3(cursorWorld, snapshot.anchor.point)
+        positions = [...snapshot.anchor.point, ...addV3(snapshot.anchor.point, offset)]
+      }
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+      const mat = new THREE.LineBasicMaterial({ color: 0x4d90ff, depthTest: false })
+      annotationDragPreview = new THREE.LineSegments(geo, mat)
+      previewGroup.add(annotationDragPreview)
+    }
+
+    /** Commit the drag's final placement (one kernel call, one undo step)
+     * and clear the preview + drag state. */
+    function _commitAnnotationDrag(id: bigint, snapshot: AnnotationSnapshot, cursorWorld: V3 | null): void {
+      _clearAnnotationDragPreview()
+      if (cursorWorld === null) return
+      if (snapshot.kind === 'linear') {
+        const dir = subV3(snapshot.b.point, snapshot.a.point)
+        const len = Math.hypot(dir[0], dir[1], dir[2])
+        if (len < 1e-9) return
+        const offset = perpComponentV3(subV3(cursorWorld, snapshot.a.point), [dir[0] / len, dir[1] / len, dir[2] / len])
+        commitAnnotationText(wasmScene, id, { ...snapshot, offset }, initialEditorText(snapshot))
+      } else if (snapshot.kind === 'radial') {
+        const normal: V3 = [snapshot.curvePlane[3], snapshot.curvePlane[4], snapshot.curvePlane[5]]
+        const leaderDir = perpComponentV3(subV3(cursorWorld, snapshot.anchor.point), normal)
+        commitAnnotationText(wasmScene, id, { ...snapshot, leaderDir }, initialEditorText(snapshot))
+      } else {
+        const offset = subV3(cursorWorld, snapshot.anchor.point)
+        commitAnnotationText(wasmScene, id, { ...snapshot, offset }, snapshot.text)
+      }
+      sceneRenderer.refreshAnnotations()
+      onDocumentChangedRef.current?.()
+    }
+
+    function _cancelAnnotationDrag(): void {
+      _clearAnnotationDragPreview()
+      annotationDrag = null
+    }
 
     /** Abandon an armed/active drag-move (Esc, focus loss, pointercancel). */
     function abortDragMove(): void {
@@ -2706,12 +2919,21 @@ export default function Viewport({
         : sceneRenderer.refresh()
       onSceneChangeRef.current?.(wtMap)
       onDocumentChangedRef.current?.()
-      scheduleRender()
       // Every kernel-mutating path funnels through here (tool commits,
-      // boolean/group/delete, undo, redo, harness ops) — re-poll the sketch
-      // hover probe against the cursor's last known position right away so a
-      // stationary mouse across the mutation doesn't leave the contextual
-      // dock showing a stale context (see `reevaluateHoverNow`'s doc comment).
+      // boolean/group/delete, undo, redo, harness ops) — a transform/
+      // boolean/delete on a node can geometrically re-anchor or DETACH a
+      // live annotation (docs/design/dimensions-text.md), so this is the
+      // one place that guarantees the annotation render always follows,
+      // rather than pairing `refreshAnnotations()` at every call site
+      // individually (guides' `refreshGuides()` precedent — annotations
+      // need the SAME breadth of coverage guides never did, since guides
+      // are never re-anchored).
+      sceneRenderer.refreshAnnotations()
+      scheduleRender()
+      // Re-poll the sketch hover probe against the cursor's last known
+      // position right away so a stationary mouse across the mutation
+      // doesn't leave the contextual dock showing a stale context (see
+      // `reevaluateHoverNow`'s doc comment).
       reevaluateHoverNow()
     }
 
@@ -2737,7 +2959,8 @@ export default function Viewport({
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()
       // Harness mutations can also add/remove construction guides
-      // (addGuideLine/addGuidePoint/deleteGuide); keep their overlay faithful too.
+      // (addGuideLine/addGuidePoint/deleteGuide); keep their overlay faithful
+      // too (annotations are covered inside handleSceneRefresh itself).
       sceneRenderer.refreshGuides()
     }
 
@@ -3704,6 +3927,77 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function runDeleteAnnotation(id: bigint): void {
+      try {
+        wasmScene.delete_annotation(id)
+      } catch (err) {
+        handleToast(friendlyErrorText(err))
+        return
+      }
+      sceneRenderer.refreshAnnotations()
+      onDocumentChangedRef.current?.()
+      scheduleRender()
+    }
+
+    function commitAnnotationEditorText(text: string): void {
+      const pending = pendingAnnotationEdit
+      pendingAnnotationEdit = null
+      if (pending === null) return
+
+      if (pending.kind === 'edit') {
+        // Blanking out an existing leader's text is a no-op refusal rather
+        // than committing an empty label (there is no "restore computed
+        // value" concept for a leader the way there is for a dimension's
+        // text_override — an empty leader is just a leader with nothing to
+        // say, so leave the prior content alone instead).
+        if (pending.snapshot.kind === 'leader' && text.trim() === '') return
+        try {
+          commitAnnotationText(wasmScene, pending.id, pending.snapshot, text)
+        } catch (err) {
+          handleToast(friendlyErrorText(err))
+          return
+        }
+        sceneRenderer.refreshAnnotations()
+        onDocumentChangedRef.current?.()
+        scheduleRender()
+        return
+      }
+
+      // 'new-leader': an empty commit creates nothing — the user typed
+      // nothing worth annotating, so the placed-but-unworded leader is
+      // simply dropped (no partial/blank annotation left behind).
+      const trimmed = text.trim()
+      if (trimmed === '') return
+      const { anchorNode, anchorPoint, offset } = pending.leader
+      try {
+        wasmScene.add_leader_text(
+          anchorNode?.kind ?? -1,
+          anchorNode?.id ?? 0n,
+          new Float64Array(anchorPoint),
+          new Float64Array(offset),
+          trimmed,
+        )
+      } catch (err) {
+        handleToast(friendlyErrorText(err))
+        return
+      }
+      sceneRenderer.refreshAnnotations()
+      onDocumentChangedRef.current?.()
+      scheduleRender()
+    }
+
+    function cancelAnnotationEditor(): void {
+      pendingAnnotationEdit = null
+    }
+
+    function getAnnotationLabel(id: bigint): string | null {
+      return sceneRenderer.annotationLabelText(id)
+    }
+
+    function getAnnotationTextWorldPosition(id: bigint): [number, number, number] | null {
+      return sceneRenderer.annotationTextWorldPosition(id)
+    }
+
     function toggleSectionActive(): void {
       sectionManager.toggleActive()
       sceneRenderer.setSectionPlane(sectionManager.current)
@@ -3794,7 +4088,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -4197,6 +4491,39 @@ export default function Viewport({
       )
     }
 
+    function makeDimensionTool(): DimensionTool {
+      return new DimensionTool(
+        wasmScene,
+        previewGroup,
+        () => {
+          sceneRenderer.refreshAnnotations()
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
+    function makeTextTool(): TextTool {
+      return new TextTool(previewGroup, (leader: PlacedLeader) => {
+        pendingAnnotationEdit = { kind: 'new-leader', leader }
+        const end: V3 = [
+          leader.anchorPoint[0] + leader.offset[0],
+          leader.anchorPoint[1] + leader.offset[1],
+          leader.anchorPoint[2] + leader.offset[2],
+        ]
+        const p = worldToPixels(new THREE.Vector3(end[0], end[1], end[2]))
+        onOpenAnnotationEditorRef.current?.({
+          id: null,
+          screenX: p.x,
+          screenY: p.y,
+          initialText: '',
+          placeholder: 'Leader text…',
+        })
+      })
+    }
+
     function makeSliceTool(): SliceTool {
       const tool = new SliceTool(
         wasmScene,
@@ -4549,6 +4876,16 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeTapeMeasureTool())
+          break
+        case 'Dimension':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeDimensionTool())
+          break
+        case 'Text':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeTextTool())
           break
         case 'Protractor':
           cameraModeRef.current = false
@@ -5085,6 +5422,20 @@ export default function Viewport({
         // (docs/design/camera.md §1 — CameraRig.effectiveDistance).
         const effDist = rig.effectiveDistance(controls.getDistance())
         sceneRenderer.updateGuideDashScale(effDist)
+        // Billboard every annotation text quad + keep annotation colors
+        // current for the resolved theme (docs/design/dimensions-text.md).
+        // Reads `readAppliedTheme()` — a `dataset.theme` DOM read, NOT the
+        // `currentTheme` cache above and NOT `getResolvedTheme()` — so it
+        // stays correct across BOTH an explicit Settings > Theme change and
+        // an OS-level `prefers-color-scheme` flip under 'auto' (the cache is
+        // only refreshed by `subscribeTheme`'s explicit-change event and
+        // would silently go stale on an OS flip; `getResolvedTheme()` would
+        // stay correct but re-queries `matchMedia` every call, which is pure
+        // per-frame waste — the same no-per-frame-waste rule as the fat-line
+        // resolution cache below (updateFatLineResolutions's doc comment)).
+        // `readAppliedTheme()` is just a DOM attribute read, so it pays
+        // neither cost.
+        sceneRenderer.updateAnnotationBillboards(camera, el.clientWidth, el.clientHeight, readAppliedTheme())
         // Rotate/Protractor/Slice/SectionPlane's single-position preview
         // disks are virtual constructs too — keep them screen-constant the
         // same way (see RotateTool/ProtractorTool/SliceTool/
@@ -5106,6 +5457,15 @@ export default function Viewport({
         if ('updateGripScale' in activeToolForScale) {
           ;(activeToolForScale as { updateGripScale(c: THREE.Camera, worldPerPixel: (dist: number) => number): void })
             .updateGripScale(camera, worldPerPixelAt)
+        }
+        // DimensionTool/TextTool need the camera's actual view direction
+        // (DimensionTool for `axisDimensionPlane`'s face-on candidate
+        // scoring, annotationLayout.ts §3) — `onPointerMove`/`onPointerDown`
+        // only carry a per-pixel cursor ray, never the camera itself, so
+        // this is their one live feed for it, mirroring
+        // updateDiskScale/updateGripScale's own pattern.
+        if ('updateCamera' in activeToolForScale) {
+          ;(activeToolForScale as { updateCamera(c: THREE.Camera): void }).updateCamera(camera)
         }
         // Feed the shader grid the camera's current position so it can pick
         // the right cell-size decade per fragment; under parallel projection
@@ -5376,6 +5736,29 @@ export default function Viewport({
       }
       if (ev.buttons !== 0 && ev.button !== -1 && dragMove?.active !== true) return
 
+      // Armed annotation offset/leader drag: past the threshold, live-preview
+      // the new placement and own the pointer entirely (no tool routing) —
+      // committed as ONE kernel call on release (onPointerUp).
+      if (annotationDrag !== null) {
+        if ((ev.buttons & 1) === 0) {
+          // The release happened outside our listeners (focus loss) — drop it.
+          _cancelAnnotationDrag()
+        } else {
+          if (!annotationDrag.active) {
+            const [px, py] = canvasPoint(ev)
+            if (exceedsDragThreshold(annotationDrag.startX, annotationDrag.startY, px, py)) {
+              annotationDrag.active = true
+            }
+          }
+          if (annotationDrag.active) {
+            const cursorWorld = _resolveAnnotationDragPoint(annotationDrag.snapshot, ray)
+            if (cursorWorld !== null) _updateAnnotationDragPreview(annotationDrag.snapshot, cursorWorld)
+            scheduleRender()
+            return
+          }
+        }
+      }
+
       const viewportH = el.clientHeight
       const basis = apertureBasis()
 
@@ -5445,6 +5828,7 @@ export default function Viewport({
     // ------------------------------------------------------------------ pointer down
     // --- construction-guide picking ---------------------------------
     const GUIDE_PICK_PX = 8
+    const ANNOTATION_PICK_PX = 8
     // Matches SceneRenderer's GUIDE_LINE_HALF_LENGTH (the rendered extent).
     const GUIDE_LINE_SAMPLE_HALF = 50
 
@@ -5527,6 +5911,59 @@ export default function Viewport({
       return best
     }
 
+    /** Nearest annotation within ANNOTATION_PICK_PX of the NDC click, or null
+     * (docs/design/dimensions-text.md — "annotations are pickable via
+     * screen-space distance"). Tests the segment a real user would actually
+     * click: the dimension line for a linear dimension, the leader for a
+     * radial dimension or leader text — the same segment-sampling technique
+     * `pickGuide` uses above, just against the annotation's own two key
+     * points instead of a sampled infinite line. */
+    function pickAnnotation(ndcX: number, ndcY: number): bigint | null {
+      const w = renderer.domElement.clientWidth
+      const h = renderer.domElement.clientHeight
+      const clickX = (ndcX * 0.5 + 0.5) * w
+      const clickY = (-ndcY * 0.5 + 0.5) * h
+      let best: bigint | null = null
+      let bestDist = ANNOTATION_PICK_PX
+      for (const id of wasmScene.annotation_ids()) {
+        const kind = wasmScene.annotation_kind(id)
+        if (kind === undefined) continue
+        let p0: V3 | undefined
+        let p1: V3 | undefined
+        if (kind === 'linear') {
+          const a = wasmScene.annotation_anchor_point(id, 0)
+          const b = wasmScene.annotation_anchor_point(id, 1)
+          const offset = wasmScene.annotation_offset(id)
+          if (a === undefined || b === undefined || offset === undefined) continue
+          p0 = [a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]]
+          p1 = [b[0] + offset[0], b[1] + offset[1], b[2] + offset[2]]
+        } else if (kind === 'radial') {
+          const anchor = wasmScene.annotation_anchor_point(id, 0)
+          const leaderDir = wasmScene.annotation_leader_dir(id)
+          if (anchor === undefined || leaderDir === undefined) continue
+          p0 = [anchor[0], anchor[1], anchor[2]]
+          p1 = [anchor[0] + leaderDir[0], anchor[1] + leaderDir[1], anchor[2] + leaderDir[2]]
+        } else {
+          const anchor = wasmScene.annotation_anchor_point(id, 0)
+          const offset = wasmScene.annotation_offset(id)
+          if (anchor === undefined || offset === undefined) continue
+          p0 = [anchor[0], anchor[1], anchor[2]]
+          p1 = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]]
+        }
+        const a2 = worldToPixels(new THREE.Vector3(p0[0], p0[1], p0[2]))
+        const b2 = worldToPixels(new THREE.Vector3(p1[0], p1[1], p1[2]))
+        let d = Infinity
+        if (!a2.behind) d = Math.min(d, Math.hypot(a2.x - clickX, a2.y - clickY))
+        if (!b2.behind) d = Math.min(d, Math.hypot(b2.x - clickX, b2.y - clickY))
+        if (!a2.behind && !b2.behind) d = Math.min(d, pointSegPx(clickX, clickY, a2.x, a2.y, b2.x, b2.y))
+        if (d < bestDist) {
+          bestDist = d
+          best = id
+        }
+      }
+      return best
+    }
+
     function onPointerDown(ev: PointerEvent): void {
       recordPointerInput('pointerdown', ev)
       if (ev.button !== 0) return
@@ -5559,6 +5996,24 @@ export default function Viewport({
       if (toolController.activeToolName === 'Select') {
         const [px, py] = canvasPoint(ev)
         const topLevel = activeContextRef.current.length === 0
+
+        // A press directly on an annotation selects it and arms its own
+        // offset/leader drag (docs/design/dimensions-text.md) — a thin
+        // deliberate target, like a guide, but (unlike a guide) draggable in
+        // place rather than only click-pickable.
+        if (!ev.shiftKey) {
+          const annotationId = pickAnnotation(ndcX, ndcY)
+          if (annotationId !== null) {
+            onSelectAnnotationRef.current?.(annotationId)
+            const snapshot = readAnnotation(wasmScene, annotationId)
+            if (snapshot !== null) {
+              annotationDrag = { id: annotationId, snapshot, startX: px, startY: py, active: false }
+              renderer.domElement.setPointerCapture(ev.pointerId)
+            }
+            scheduleRender()
+            return
+          }
+        }
 
         // A press on a movable node arms DRAG-TO-MOVE: dragging past the
         // threshold hands the gesture to a one-shot Move (see beginDragMove),
@@ -5648,10 +6103,44 @@ export default function Viewport({
     // At top level: enters the topmost ancestor group/instance/object.
     // Inside a group: enters the direct child of that group.
     // Inside an instance: enters the instance's definition for editing.
+    /** Open the in-viewport text editor for a live annotation `id`
+     * (double-click-to-edit, docs/design/dimensions-text.md): reads its full
+     * current geometry (`readAnnotation`), stashes it as the pending edit
+     * target, and asks the parent to render the editor at the label's
+     * projected screen position, prefilled per `initialEditorText`. */
+    function _openAnnotationEditorFor(id: bigint): void {
+      const snapshot = readAnnotation(wasmScene, id)
+      if (snapshot === null) return
+      pendingAnnotationEdit = { kind: 'edit', id, snapshot }
+      const worldPos = sceneRenderer.annotationTextWorldPosition(id)
+      const p = worldPos !== null
+        ? worldToPixels(new THREE.Vector3(worldPos[0], worldPos[1], worldPos[2]))
+        : { x: el.clientWidth / 2, y: el.clientHeight / 2, behind: false }
+      onOpenAnnotationEditorRef.current?.({
+        id,
+        screenX: p.x,
+        screenY: p.y,
+        initialText: initialEditorText(snapshot),
+        placeholder: snapshot.kind === 'leader' ? 'Leader text…' : 'Override (blank = computed)',
+      })
+    }
+
     function onDoubleClick(ev: MouseEvent): void {
       if (ev.button !== 0) return
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
       const ray = makeWorldRay(ndcX, ndcY, camera)
+
+      // A double-click directly on an annotation opens its text editor
+      // (Select tool only — mirrors the annotation-drag priority check in
+      // onPointerDown) instead of falling through to the tool/enter-context
+      // gestures below.
+      if (toolController.activeToolName === 'Select') {
+        const annotationId = pickAnnotation(ndcX, ndcY)
+        if (annotationId !== null) {
+          _openAnnotationEditorFor(annotationId)
+          return
+        }
+      }
 
       // Let the active tool consume the double-click first (e.g. LineTool
       // ending a chain) — only fall through to the default "enter context"
@@ -5729,6 +6218,13 @@ export default function Viewport({
       // so escaping a drag inside a group doesn't ALSO exit the group).
       if (ev.key === 'Escape' && dragMove !== null) {
         abortDragMove()
+        return
+      }
+
+      // Esc cancels an in-flight annotation offset/leader drag, discarding
+      // the preview without committing anything.
+      if (ev.key === 'Escape' && annotationDrag !== null) {
+        _cancelAnnotationDrag()
         return
       }
 
@@ -5905,6 +6401,25 @@ export default function Viewport({
         }
       }
 
+      // Annotation drag release: an ACTIVE drag commits the new offset/
+      // leader placement in ONE kernel call at the release position; a
+      // sub-threshold release is a plain click — the annotation was already
+      // selected at the arming press, nothing further to do.
+      if (annotationDrag !== null) {
+        const ad = annotationDrag
+        annotationDrag = null
+        if (ad.active) {
+          const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+          const ray = makeWorldRay(ndcX, ndcY, camera)
+          const cursorWorld = _resolveAnnotationDragPoint(ad.snapshot, ray)
+          _commitAnnotationDrag(ad.id, ad.snapshot, cursorWorld)
+          scheduleRender()
+        } else {
+          _clearAnnotationDragPreview()
+        }
+        return
+      }
+
       // Drag-to-move release: an ACTIVE drag commits the Move at the release
       // position (the same second click a two-click Move would get, honoring
       // any live axis lock), then springs back to Select. A sub-threshold
@@ -5987,6 +6502,7 @@ export default function Viewport({
         marqueeOverlay.style.display = 'none'
         if (wasActive) onToolRevertedRef.current?.()
       }
+      _cancelAnnotationDrag()
     }
     // Each routed event may advance (or cancel) the active tool's gesture —
     // wrap the handlers so the status-bar hint is re-polled after every one,
@@ -6081,6 +6597,7 @@ export default function Viewport({
       window.removeEventListener('blur', onFovDragWindowBlur)
       resizeObserver.disconnect()
       unsubscribeTheme()
+      unsubscribeLengthUnit()
       disposeOriginAxes(originAxes)
       infiniteGrid.dispose()
       controls.dispose()
@@ -6273,6 +6790,13 @@ export default function Viewport({
     sceneRendererRef.current?.setSelectedGuide(selectedGuide)
     scheduleRenderRef.current()
   }, [selectedGuide])
+
+  // Reflect the selected annotation into the renderer highlight
+  // (docs/design/dimensions-text.md).
+  useEffect(() => {
+    sceneRendererRef.current?.setSelectedAnnotation(selectedAnnotation)
+    scheduleRenderRef.current()
+  }, [selectedAnnotation])
 
   return (
     <div

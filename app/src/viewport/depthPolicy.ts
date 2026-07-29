@@ -51,7 +51,7 @@
  * |------|-----------------------------------------|--------------------------|
  * |  -2  | tool rubber-bands, sketch region fills  | fat lines / triangles    |
  * |  -1  | committed sketch lines                  | fat lines (`LineSegments2`) |
- * |   0  | object edge overlays, guide lines       | native `GL_LINES` (fixed) |
+ * |   0  | object edge overlays, guide lines, dim/leader annotations | native `GL_LINES` (fixed), fat lines, quads |
  * |  +1  | origin axes                             | fat lines (`Line2`)      |
  * |  +2  | face fills                              | triangles                |
  *
@@ -60,7 +60,10 @@
  * biased — every other layer is placed around them. Fat lines (three's
  * `Line2`/`LineSegments2`) render as camera-facing triangle strips whose
  * fragment depth is the underlying segment's depth, so the offset applies to
- * them like any polygon.
+ * them like any polygon. Dimension/leader-text annotations join this
+ * reference rung too, deliberately carrying NO polygonOffset of their own —
+ * see the "Dimension/leader-text annotations" note below for why that,
+ * rather than a nonzero rung, is the fix.
  *
  * The ordering puts every class of model linework — previews, region fills,
  * sketch lines, and native edges — in front of the axes, and the axes in
@@ -70,6 +73,94 @@
  * unit, which is exactly what a deterministic tie-break needs; wider gaps
  * would only grow the (harmless but nonzero) epsilon by which a biased layer
  * can poke through genuinely nearer geometry.
+ *
+ * Dimension/leader-text annotations (fat-line geometry + label quads,
+ * `SceneRenderer.ts`'s `_installAnnotationLineBatch`/`TextBillboard`) sit at
+ * rung 0 — meaning, concretely, they carry NO `glPolygonOffset` of their
+ * own. That is the second design tried for this problem, after two other
+ * approaches were measured and rejected:
+ *
+ *  - A first attempt applied `glPolygonOffset` to the annotation geometry
+ *    itself, uncapped, sized to out-rank EVERY rung on this ladder (i.e.
+ *    more negative than -2) so an annotation would win against literally
+ *    anything it might be coincident with. Wrong target: `glPolygonOffset`'s
+ *    bias is bounded by local depth-buffer precision, which grows with
+ *    distance, so an offset large enough to beat the whole ladder at typical
+ *    "see the whole model" distances leaked several millimetres past a
+ *    genuinely nearer occluder — reintroducing the "annotations read through
+ *    the model" bug the depth-tested-ink change existed to fix.
+ *  - The fix at the time swapped to a world-space nudge instead: a per-vertex
+ *    push toward the camera along the view direction, capped at a fixed
+ *    0.3mm world-space ceiling regardless of camera distance
+ *    (`ANNOTATION_BIAS_MAX_WORLD`/`annotationViewBiasVector`, both since
+ *    removed from `annotationLayout.ts`). A DELTA review measured this
+ *    broken too, on BOTH sides of the tradeoff it was meant to hold:
+ *     - Occlusion: re-measured with a real frame yield between the camera
+ *       move and the pixel sample (the shipped regression test lacked one —
+ *       `pixelColorAt`'s underlying `captureFrame` does NOT itself call the
+ *       per-frame annotation-billboard update, so it was sampling a bias
+ *       baked for a STALE camera pose), the 0.3mm nudge already leaked past
+ *       a 2mm-separated occluder by the reviewer's own "ordinary see-the-
+ *       whole-model" distance (~11.6 world units) — the exact failure this
+ *       mechanism was built to prevent.
+ *     - The coincident-face tie itself was re-examined for a DIFFERENT
+ *       structural reason: a VIEW-DIRECTION nudge has almost no component
+ *       perpendicular to a surface viewed near edge-on, however large its
+ *       cap, because the nudge direction (toward the camera) is itself
+ *       nearly TANGENT to the surface at grazing incidence. No cap size
+ *       fixes a direction problem. (This is the same failure mode the
+ *       original design already rejected a plane-normal bias for — just
+ *       reached by a different vector, since "toward the camera" degrades
+ *       the same way "along the surface normal" does when the two are
+ *       nearly parallel.)
+ *  - `glPolygonOffset` on the annotation's own geometry was tried again, this
+ *    time MODEST — rung -1, shared with `SKETCH_LINE`, a comfortable
+ *    3-quantum margin under FACE rather than sized to beat the whole ladder.
+ *    Measured against the review's own 2mm-occluder-gap reproduction across
+ *    a distance sweep (before/after-same-point pixel comparison, real frame
+ *    yields), this still leaked: correct at 6.6 world units, but already
+ *    leaking past the occluder by 11.6 — the review's own target distance.
+ *    Smaller magnitude than the uncapped first attempt's leak (which the
+ *    original round measured leaking several millimetres at that same
+ *    distance), but the same underlying mechanism: ANY nonzero offset on the
+ *    annotation's own geometry pulls it toward the camera by an amount that
+ *    grows with distance, eventually exceeding a small enough real gap.
+ *
+ * The fix that actually holds: give the annotation's own geometry NO offset
+ * at all (rung 0, the same reference level as native edges). Annotations
+ * only need to beat ONE thing — a coincident FACE (+2) — and FACE already
+ * recedes on its own account (it has carried +2 since before annotations
+ * existed, to lose against its own edge overlay). An annotation drawn
+ * exactly on a face is closer, at its true unmodified depth, than that
+ * face's own artificially-receded fragment — no annotation-side push
+ * required, and so no annotation-side leak possible: an annotation's
+ * rendered depth is always its GENUINE geometric depth, so it can never
+ * appear closer than a real, non-coincident object actually is. (Losing a
+ * tie against `PREVIEW`/`REGION_FILL` at -2, or `SKETCH_LINE` at -1, in the
+ * rare case an annotation is coincident with one of those instead of a face,
+ * is accepted — those are overlay layers, and reading under one during an
+ * active gesture is fine.)
+ *
+ * Verified across a full grazing/edge-on-angle distance sweep (5-50 world
+ * units, both a fixed camera-height sweep and one holding the shipped
+ * edgeOn pose's exact ~0.4°-off-level angle constant, with a real frame
+ * yield before every sample) that the coincident-face tie is won throughout,
+ * and against the review's 2mm-occluder-gap reproduction (before/after-
+ * same-point pixel comparison) that occlusion holds correctly at 6.6 AND
+ * 11.6 world units — the review's own target distance — by
+ * `app/e2e/dimensions-depth.spec.ts`. The residual, measured directly rather
+ * than assumed: a 2mm gap between an annotation and a genuinely nearer
+ * occluder starts failing to occlude correctly somewhere between 11.6 and
+ * 15 world units, because FACE's own +2 recession (not the annotation's,
+ * which is zero) grows in world-space terms at long range, same as it would
+ * for any other rung on this ladder — an existing, orthogonal property of
+ * `glPolygonOffset` shared by every layer here, not something specific to
+ * annotations. A 30mm gap (the review's own control case) still occludes
+ * correctly at 20 world units in the same measurement. Accepted as the
+ * documented tradeoff per the design priority: correct occlusion at
+ * ordinary working distances (and for anything but a sub-few-millimetre
+ * gap) matters more than a coincident-tie win at a camera distance and gap
+ * size combination far outside normal modeling precision.
  *
  * Rubber-bands and region fills sharing rung -2 is deliberate, and their one
  * same-bias encounter — an active rubber-band drawn coplanar over an
@@ -131,6 +222,15 @@ export const DEPTH_BIAS = {
   REGION_FILL: -2,
   /** Committed sketch lines (fat) — in front of coincident object edges. */
   SKETCH_LINE: -1,
+  /** Dimension/leader-text annotations (fat-line geometry + label quads) —
+   * deliberately ZERO, not omitted: see this file's "Dimension/leader-text
+   * annotations" note above for why relying on FACE's own recession, rather
+   * than adding any bias here (even a small one), is what makes annotations
+   * win a coincident-face tie WITHOUT the annotation-side leak that sized
+   * every prior attempt (uncapped polygonOffset, a capped world-space nudge,
+   * a modest polygonOffset) too aggressively for one requirement or the
+   * other. */
+  ANNOTATION: 0,
   /** Face fills — behind their own edge overlay (the shipped shimmer fix)
    * and behind the origin axes. */
   FACE: 2,

@@ -14,16 +14,16 @@ describe('toolRegistry', () => {
     expect(toolSpec('Select').macKey).toBe('Spc')
   })
 
-  it('groups the 03_tool_rail.md tools plus Arc, Polygon, Follow Me, and Section Plane', () => {
+  it('groups the 03_tool_rail.md tools plus Arc, Polygon, Follow Me, Dimension, and Section Plane', () => {
     expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Polygon', 'Arc'])
     expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Move', 'Rotate', 'Scale'])
-    expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Paint', 'Section Plane'])
+    expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Dimension', 'Paint', 'Section Plane'])
   })
 
-  it('leaves Protractor/Slice/Edit Vertex/Axes/camera tools off the rail (no group)', () => {
+  it('leaves Protractor/Slice/Edit Vertex/Axes/Text/camera tools off the rail (no group)', () => {
     const ungrouped = TOOL_REGISTRY.filter((t) => t.group === undefined).map((t) => t.name)
     expect(ungrouped).toEqual([
-      'Protractor', 'Slice', 'Edit Vertex', 'Axes', 'Orbit', 'Pan', 'Zoom', 'Zoom Window',
+      'Protractor', 'Slice', 'Edit Vertex', 'Axes', 'Text', 'Orbit', 'Pan', 'Zoom', 'Zoom Window',
       'Position Camera', 'Look Around', 'Walk',
     ])
   })
@@ -59,8 +59,8 @@ describe('toolRegistry', () => {
       expect(shortcutFor('Paint', false)).toBe('B')
     })
 
-    it('non-spec tools (Follow Me/Polygon/Protractor/Slice/Section Plane/Edit Vertex) have no shortcut on either platform', () => {
-      for (const name of ['Follow Me', 'Polygon', 'Protractor', 'Slice', 'Section Plane', 'Edit Vertex'] as const) {
+    it('non-spec tools (Follow Me/Polygon/Protractor/Slice/Section Plane/Edit Vertex/Dimension/Text) have no shortcut on either platform', () => {
+      for (const name of ['Follow Me', 'Polygon', 'Protractor', 'Slice', 'Section Plane', 'Edit Vertex', 'Dimension', 'Text'] as const) {
         expect(shortcutFor(name, true)).toBe('')
         expect(shortcutFor(name, false)).toBe('')
       }

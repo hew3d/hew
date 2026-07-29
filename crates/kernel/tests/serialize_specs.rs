@@ -11,9 +11,9 @@
 //! poses, materials, and sketch contents are not.
 
 use kernel::{
-    CameraProjection, CameraState, CurveGeom, DecodeError, Document, Guide, ImageFormat, Material,
-    NodeId, Object, Plane, Point3, Profile, Rgba8, SurfaceRef, Texture, Transform, Vec3,
-    WatertightState, tol,
+    Anchor, Annotation, CameraProjection, CameraState, CapturedCurve, CurveGeom, DecodeError,
+    Document, Guide, ImageFormat, Material, NodeId, Object, Plane, Point3, Profile, RadialKind,
+    Rgba8, SurfaceRef, Texture, Transform, Vec3, WatertightState, tol,
 };
 use kernel::{ImportNode, ImportScene, MeshRecipe};
 
@@ -1661,6 +1661,253 @@ fn pre_v4_manifest_loads_with_no_guides() {
         loaded.guide_ids().is_empty(),
         "guides default to empty when the manifest predates v4"
     );
+}
+
+// ────────────────────────────────────── annotations round-trip (v13) ─────
+
+fn point_anchor(node: Option<NodeId>, p: Point3) -> Anchor {
+    Anchor { node, point: p }
+}
+
+/// A document with all three annotation kinds — one anchored to a live
+/// object, one free-floating, one detached — survives `save`→`load` intact
+/// (manifest v13).
+#[test]
+fn annotations_round_trip_through_save_load() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+
+    let dim_a = Point3::new(0.0, 0.0, 0.0);
+    let dim_b = Point3::new(1.0, 0.0, 0.0);
+    let dim_offset = Vec3::new(0.0, -0.5, 0.0);
+    let dim = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), dim_a),
+            point_anchor(Some(NodeId::Object(obj)), dim_b),
+            dim_offset,
+            ground(),
+            Some("custom".to_string()),
+        )
+        .expect("add linear dimension");
+
+    let curve = CapturedCurve {
+        center: Point3::new(0.5, 0.5, 0.0),
+        radius: 0.5,
+        plane: ground(),
+    };
+    let radial = doc
+        .add_radial_dimension(
+            point_anchor(Some(NodeId::Object(obj)), Point3::new(1.0, 0.5, 0.0)),
+            RadialKind::Diameter,
+            curve,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+        )
+        .expect("add radial dimension");
+
+    let leader_point = Point3::new(3.0, 3.0, 3.0);
+    let leader = doc
+        .add_leader_text(
+            point_anchor(None, leader_point),
+            Vec3::new(0.1, 0.2, 0.0),
+            "free leader".to_string(),
+        )
+        .expect("add leader text");
+
+    // A detached annotation: its anchor names a node that is about to be
+    // deleted, so it round-trips as `node: None` (the node genuinely does
+    // not exist in the saved file — see `encode_document`'s
+    // `anchor_node_to_dto`) while the point and `detached` flag survive.
+    let detached_obj = extrude_box(&mut doc, 5.0, 5.0, 6.0, 6.0, 0.0, 1.0);
+    let stale_point = Point3::new(5.0, 5.0, 0.0);
+    let detached = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(detached_obj)), stale_point),
+            Vec3::ZERO,
+            "stale".to_string(),
+        )
+        .expect("add leader text");
+    doc.delete_node(NodeId::Object(detached_obj)).unwrap();
+    assert_eq!(doc.annotation_detached(detached), Some(true));
+
+    let bytes = doc.save();
+    let loaded = Document::load(&bytes).expect("load");
+
+    assert_eq!(
+        loaded.annotation_ids().len(),
+        4,
+        "all four annotations round-trip"
+    );
+
+    match loaded.annotation(dim).expect("linear dimension live") {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            text_override,
+            ..
+        } => {
+            assert!(a.point.approx_eq(dim_a, 1e-9));
+            assert!(b.point.approx_eq(dim_b, 1e-9));
+            assert!(offset.approx_eq(dim_offset, 1e-9));
+            assert_eq!(text_override.as_deref(), Some("custom"));
+            assert!(
+                matches!(a.node, Some(NodeId::Object(_))),
+                "the live anchor's node reference survives"
+            );
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+    assert_eq!(loaded.annotation_detached(dim), Some(false));
+
+    match loaded.annotation(radial).expect("radial dimension live") {
+        Annotation::RadialDimension { kind, curve, .. } => {
+            assert_eq!(*kind, RadialKind::Diameter);
+            assert!((curve.radius - 0.5).abs() < 1e-9);
+            assert!(curve.center.approx_eq(Point3::new(0.5, 0.5, 0.0), 1e-9));
+        }
+        other => panic!("expected RadialDimension, got {other:?}"),
+    }
+
+    match loaded.annotation(leader).expect("leader text live") {
+        Annotation::LeaderText { anchor, text, .. } => {
+            assert_eq!(text, "free leader");
+            assert_eq!(anchor.node, None, "a free-floating anchor stays free");
+            assert!(anchor.point.approx_eq(leader_point, 1e-9));
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+
+    match loaded
+        .annotation(detached)
+        .expect("detached annotation persists, not deleted")
+    {
+        Annotation::LeaderText { anchor, .. } => {
+            assert_eq!(
+                anchor.node, None,
+                "the deleted node doesn't exist in the file, so the anchor degrades to free"
+            );
+            assert!(
+                anchor.point.approx_eq(stale_point, 1e-9),
+                "the last-known point survives"
+            );
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+    assert_eq!(
+        loaded.annotation_detached(detached),
+        Some(true),
+        "the detached flag round-trips — it does not silently clear on load"
+    );
+}
+
+/// `save` is byte-deterministic with annotations present.
+#[test]
+fn annotations_save_is_byte_deterministic() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.add_linear_dimension(
+        point_anchor(Some(NodeId::Object(obj)), Point3::new(0.0, 0.0, 0.0)),
+        point_anchor(Some(NodeId::Object(obj)), Point3::new(1.0, 0.0, 0.0)),
+        Vec3::new(0.0, -0.5, 0.0),
+        ground(),
+        None,
+    )
+    .unwrap();
+
+    let bytes_a = doc.save();
+    let bytes_b = doc.save();
+    assert_eq!(bytes_a, bytes_b, "save() is deterministic with annotations");
+}
+
+/// A manifest annotation entry with an unknown `kind` is a typed load error
+/// (the §4.2 unknown-kind refusal posture, applied to annotations), never a
+/// panic and never silently repaired.
+#[test]
+fn load_rejects_annotation_with_unknown_kind() {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let mut doc = Document::new();
+    doc.add_leader_text(
+        point_anchor(None, Point3::ORIGIN),
+        Vec3::ZERO,
+        "x".to_string(),
+    )
+    .unwrap();
+    let bytes = doc.save();
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let annotations = manifest["annotations"]
+        .as_array_mut()
+        .expect("annotations array present");
+    assert_eq!(annotations.len(), 1);
+    annotations[0]["kind"] = serde_json::json!("not-a-real-kind");
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    for i in 0..zip2.len() {
+        let mut entry = zip2.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    let patched_bytes = new_zip.finish().unwrap().into_inner();
+
+    let err = Document::load(&patched_bytes).expect_err("unknown annotation kind must be rejected");
+    assert!(
+        matches!(err, kernel::LoadError::MalformedManifest { .. }),
+        "expected MalformedManifest, got {err:?}"
+    );
+}
+
+/// A pre-v13 manifest (no `annotations` key at all) still loads, with zero
+/// annotations — back-compat, mirroring `pre_v4_manifest_loads_with_no_guides`.
+#[test]
+fn pre_v13_manifest_loads_with_no_annotations() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let _ = obj;
+    let bytes = doc.save();
+
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut zip.by_name("manifest.json").unwrap(),
+        &mut manifest_bytes,
+    )
+    .unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert!(
+        manifest.as_object().unwrap().get("annotations").is_none(),
+        "an empty annotations Vec should be omitted from the manifest entirely"
+    );
+
+    // This doc has no annotations at all, so the manifest as saved already IS
+    // the pre-v13 shape (no `annotations` key) — load it back directly.
+    let loaded = Document::load(&bytes).expect("loads with no annotations key");
+    assert!(loaded.annotation_ids().is_empty());
 }
 
 // ------------------------------------------------------------ state_hash

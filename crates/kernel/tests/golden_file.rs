@@ -182,6 +182,32 @@ fn build_representative_doc() -> Document {
         .unwrap();
     doc.add_guide_point(Point3::new(2.0, 3.0, 0.0)).unwrap();
 
+    // ── Annotations: a linear dimension anchored on Object A, and a
+    // free-floating leader text (docs/design/dimensions-text.md) ───
+    doc.add_linear_dimension(
+        kernel::Anchor {
+            node: Some(NodeId::Object(obj_a)),
+            point: Point3::new(0.0, 0.0, 0.0),
+        },
+        kernel::Anchor {
+            node: Some(NodeId::Object(obj_a)),
+            point: Point3::new(1.0, 0.0, 0.0),
+        },
+        Vec3::new(0.0, -0.5, 0.0),
+        plane_a,
+        None,
+    )
+    .unwrap();
+    doc.add_leader_text(
+        kernel::Anchor {
+            node: None,
+            point: Point3::new(9.0, 9.0, 0.0),
+        },
+        Vec3::new(0.2, 0.2, 0.0),
+        "Golden note".to_string(),
+    )
+    .unwrap();
+
     doc
 }
 
@@ -307,6 +333,33 @@ fn golden_file_save_load_and_determinism() {
         }
     }
     assert!(saw_line && saw_point, "both guide kinds round-trip");
+
+    // Annotations: the linear dimension + the free leader text round-trip.
+    let annotation_ids = loaded.annotation_ids();
+    assert_eq!(annotation_ids.len(), 2, "two annotations round-trip");
+    let mut saw_dimension = false;
+    let mut saw_leader = false;
+    for aid in annotation_ids {
+        match loaded.annotation(aid).unwrap() {
+            kernel::Annotation::LinearDimension { a, b, .. } => {
+                saw_dimension = true;
+                assert!(a.point.approx_eq(Point3::new(0.0, 0.0, 0.0), 1e-9));
+                assert!(b.point.approx_eq(Point3::new(1.0, 0.0, 0.0), 1e-9));
+                assert!(matches!(a.node, Some(NodeId::Object(_))));
+            }
+            kernel::Annotation::LeaderText { anchor, text, .. } => {
+                saw_leader = true;
+                assert_eq!(text, "Golden note");
+                assert_eq!(anchor.node, None);
+            }
+            other => panic!("unexpected annotation kind: {other:?}"),
+        }
+        assert_eq!(loaded.annotation_detached(aid), Some(false));
+    }
+    assert!(
+        saw_dimension && saw_leader,
+        "both annotation kinds round-trip"
+    );
 
     // No undo history in loaded doc.
     assert!(!loaded.can_undo(), "loaded doc has empty undo stack");

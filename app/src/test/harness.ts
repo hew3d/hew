@@ -244,6 +244,64 @@ export interface HewTestHarness {
    */
   getDrawingAxes(): number[]
 
+  /** Handles of every currently live annotation (dimension/leader text —
+   * docs/design/dimensions-text.md). */
+  getAnnotationIds(): string[]
+  /** `"linear"` | `"radial"` | `"leader"`, or `undefined` if stale/hidden. */
+  getAnnotationKind(id: string): string | undefined
+  /** Whether `id` is currently `detached` (its anchor couldn't be
+   * geometrically re-anchored through the last transform that touched it),
+   * or `undefined` if stale/hidden. */
+  getAnnotationDetached(id: string): boolean | undefined
+  /** The currently RENDERED label text for `id` (the app-computed
+   * measurement, or its `text_override`), or `null` if not live/rendered —
+   * proves a unit-setting change actually re-labels a dimension. */
+  getAnnotationLabel(id: string): string | null
+  /**
+   * The current world-space position of annotation `id`'s text billboard
+   * (the same point the double-click-to-edit gesture projects to place the
+   * in-viewport editor), or `null` if `id` isn't live/rendered. Lets a
+   * pixel-precision test sample the real render-time label anchor — correct
+   * for a linear dimension's 'broken' AND 'outside' gap-layout modes alike
+   * — rather than guessing at the line's midpoint.
+   */
+  getAnnotationTextWorldPosition(id: string): Vec3 | null
+  /**
+   * The world-space endpoints of a LINEAR dimension's own drawn line
+   * (`a + offset`, `b + offset` — the same `a1`/`b1` `SceneRenderer.
+   * _buildAnnotationBase` computes), or `null` if `id` is stale/hidden or not
+   * a linear dimension. A pixel-precision test convenience: lets a test that
+   * drove the real DimensionTool gesture (rather than `addLinearDimension`'s
+   * exact-coordinate shortcut) still know exactly where the committed line
+   * should render, without duplicating the offset arithmetic itself.
+   */
+  getLinearDimensionEndpoints(id: string): { a1: Vec3; b1: Vec3 } | null
+
+  /**
+   * Add a linear dimension directly (free anchors, no node), bypassing
+   * DimensionTool's click-drag-click gesture — a pixel-precision test
+   * convenience (dimensions-playtest2.md's depth/z-fighting E2E coverage
+   * needs exact, deterministic annotation geometry, not whatever a
+   * mouse-driven snap resolves to) mirroring `addGuideLine`'s role for
+   * construction guides. `plane` is `[px,py,pz,nx,ny,nz]`. Returns the new
+   * annotation's handle (decimal string).
+   */
+  addLinearDimension(aPoint: Vec3, bPoint: Vec3, offset: Vec3, plane: [number, number, number, number, number, number]): string
+
+  /**
+   * Add a radial dimension directly (free anchor, no node) — same rationale
+   * as `addLinearDimension`. `curvePlane` is `[px,py,pz,nx,ny,nz]`. Returns
+   * the new annotation's handle (decimal string).
+   */
+  addRadialDimension(
+    anchor: Vec3,
+    kind: 'radius' | 'diameter',
+    center: Vec3,
+    radius: number,
+    curvePlane: [number, number, number, number, number, number],
+    leaderDir: Vec3,
+  ): string
+
   // -------- NEW in  --------
 
   /**
@@ -1044,6 +1102,25 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getLastError: () => lastError,
     getDrawingAxes: () => query((s) => Array.from(s.axes())),
 
+    getAnnotationIds: () => query((s) => Array.from(s.annotation_ids()).map(String)),
+    getAnnotationKind: (id) => query((s) => s.annotation_kind(BigInt(id))),
+    getAnnotationDetached: (id) => query((s) => s.annotation_detached(BigInt(id))),
+    getAnnotationLabel: (id) => deps.getViewportApi()?.getAnnotationLabel(BigInt(id)) ?? null,
+    getAnnotationTextWorldPosition: (id) => deps.getViewportApi()?.getAnnotationTextWorldPosition(BigInt(id)) ?? null,
+    getLinearDimensionEndpoints: (id) =>
+      query((s) => {
+        const bid = BigInt(id)
+        if (s.annotation_kind(bid) !== 'linear') return null
+        const a = s.annotation_anchor_point(bid, 0)
+        const b = s.annotation_anchor_point(bid, 1)
+        const offset = s.annotation_offset(bid)
+        if (a === undefined || b === undefined || offset === undefined) return null
+        return {
+          a1: [a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]],
+          b1: [b[0] + offset[0], b[1] + offset[1], b[2] + offset[2]],
+        }
+      }),
+
     // -------- NEW in  --------
 
     drawLineChain: (points) =>
@@ -1240,6 +1317,34 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         const ids = s.slice_object(BigInt(object), new Float64Array(plane))
         return [ids[0].toString(), ids[1].toString()] as [string, string]
       }),
+
+    addLinearDimension: (aPoint, bPoint, offset, plane) =>
+      act((s) =>
+        s
+          .add_linear_dimension(
+            -1, 0n, new Float64Array(aPoint),
+            -1, 0n, new Float64Array(bPoint),
+            new Float64Array(offset),
+            new Float64Array(plane),
+            undefined,
+          )
+          .toString(),
+      ),
+
+    addRadialDimension: (anchor, kind, center, radius, curvePlane, leaderDir) =>
+      act((s) =>
+        s
+          .add_radial_dimension(
+            -1, 0n, new Float64Array(anchor),
+            kind,
+            new Float64Array(center),
+            radius,
+            new Float64Array(curvePlane),
+            new Float64Array(leaderDir),
+            undefined,
+          )
+          .toString(),
+      ),
 
     addGuideLine: (ox, oy, oz, dx, dy, dz) =>
       act((s) => s.add_guide_line(ox, oy, oz, dx, dy, dz).toString()),

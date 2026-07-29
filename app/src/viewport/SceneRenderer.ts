@@ -24,9 +24,18 @@ import { makeFatSegments, disposeFatSegments } from './fatLine'
 import { DEPTH_BIAS } from './depthPolicy'
 import { srgbColorsToLinear } from './colorSpace'
 import { expandByVisibleObject } from './visibleBounds'
-import { facePlaneBasis, type V3 } from './geoHelpers'
+import { facePlaneBasis, crossV3, normalizeV3, clamp, pushArrowChevron, type V3 } from './geoHelpers'
 import type { SectionPlane } from './sectionManager'
 import { getResolvedTheme } from '../settings/theme'
+import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
+import { formatLength } from '../settings/units'
+import {
+  computeLineLabelLayout,
+  pickOutsideEnd,
+  buildRadialGeometry,
+  pushCenterTick,
+  CENTER_TICK_HALF,
+} from './annotationLayout'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -110,6 +119,93 @@ const GUIDE_COLOR = 0x555555
 const GUIDE_LINE_HALF_LENGTH = 50
 /** Half-size of a point guide's cross marker (meters). */
 const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
+
+/**
+ * Per-annotation CAMERA-INDEPENDENT render data (`SceneRenderer.annotationBase`,
+ * populated by `refreshAnnotations()`): everything about how one live
+ * annotation draws EXCEPT what depends on the current camera (the
+ * dimension-line/label gap, dimensions-playtest2.md §2, and the
+ * view-direction depth bias, §1) — those are computed fresh every frame by
+ * `updateAnnotationBillboards()` from this data, with no wasm re-read.
+ */
+interface AnnotationRenderInfo {
+  detached: boolean
+  label: string
+  /** In-plane text-alignment basis for a linear/radial dimension's label —
+   * `null` for leader text (billboards) or a degenerate (near-zero)
+   * alignment direction. */
+  orient: { alignDir: V3; planeNormal: V3 } | null
+  /** Segments that never move with the camera: extension lines + arrowheads
+   * (linear), the measured run + centre tick + leader (radial), or the
+   * plain leader (leader-text) — flat `[ax,ay,az,bx,by,bz, ...]` pairs. */
+  fixed: number[]
+  /** Only for a LINEAR dimension: its raw (unbroken) dimension-line
+   * endpoints, laid out fresh every frame around the current label size
+   * (dimensions-playtest2.md §2 — the "break the line around its label"
+   * fix). `null` for radial/leader-text, whose label already sits past the
+   * end of a line rather than centered on one, so there's no "runs through
+   * the label" defect to fix (see the fix's own report for this scoping
+   * note).
+   */
+  dimLine: { a: V3; b: V3 } | null
+  /** Base (unbiased, un-gap-adjusted) label anchor: the dimension line's
+   * midpoint (linear) or the leader tip (radial/leader-text). */
+  textAnchor: V3
+}
+
+/**
+ * Dimension/leader-text annotation styling (docs/design/dimensions-text.md
+ * "Rendering"). Colors match `theme/tokens.css`'s `--text-primary` (the
+ * annotation's normal color, since dimension lines/text read as ordinary
+ * document ink) and `--status-warning` (a DETACHED annotation's warning-
+ * color cue — SketchUp's red-highlight convention for a dimension that
+ * couldn't be re-anchored, docs/design/dimensions-text.md's associativity
+ * section). three.js wants numeric hex, not the CSS custom property.
+ */
+const ANNOTATION_COLOR: Record<'light' | 'dark', number> = { dark: 0xe6e9ee, light: 0x23272e }
+const ANNOTATION_WARNING_COLOR: Record<'light' | 'dark', number> = { dark: 0xe8c84a, light: 0xb8860b }
+/** Fat-line width (px) for annotation lines — matches the sketch-line weight. */
+const ANNOTATION_LINE_WIDTH_PX = 2.0
+/** Nominal on-screen GLYPH height (px) for an annotation's measurement label
+ * — the `screenPxHeight` a `TextBillboard` holds a REFERENCE DIGIT's visible
+ * ink to (continuously, every frame, via `TextBillboard.update`'s
+ * `glyphContentFraction` correction, calibrated from `'0'`'s measured ink,
+ * not the font's em-box and not the label's own content — see that
+ * function's doc comment) regardless of zoom. A readable default (Finding 1
+ * of the first playtest round: the previous nominal value read as a blurry
+ * ~10px in practice because it sized the padded canvas quad, not the glyph
+ * ink, to a constant screen size; a later regression briefly recalibrated
+ * against the font's em-box instead of real ink, which shrank digits back
+ * toward unreadable — ~8-9px — before the reference-digit fix, Finding 1 of
+ * the second playtest round). */
+const ANNOTATION_TEXT_SCREEN_PX = 14
+/** Extension lines run slightly past the dimension line (a fraction of the
+ * offset's own length) — the small CAD-drafting overshoot convention. */
+const ANNOTATION_EXTENSION_OVERSHOOT_FRAC = 0.12
+/** Dimension-line arrowhead half-length, clamped to [MIN, MAX] meters and
+ * otherwise a fraction of the dimension's own length — small dimensions get
+ * proportionally small arrows, large ones don't grow arrows without bound. */
+const ANNOTATION_ARROW_LEN_FRAC = 0.06
+const ANNOTATION_ARROW_LEN_MIN = 0.02
+const ANNOTATION_ARROW_LEN_MAX = 0.12
+/** Arrowhead half-width as a fraction of its length (a narrow, readable V). */
+const ANNOTATION_ARROW_WIDTH_FRAC = 0.35
+/**
+ * renderOrder for annotation geometry. Annotations are DEPTH-TESTED, ordinary
+ * document ink now (dimensions-playtest2.md §1 — findings 2/3: they used to
+ * read above every committed geometry via `depthTest:false` + a high
+ * renderOrder, which is what made them "visible through any model"). These
+ * small, close-together renderOrder values are NOT the overlay trick the old
+ * high numbers were — they only break ties among the annotation layers
+ * themselves (line under highlight under text) at the ordinary band real
+ * depth testing already puts them in; the actual "does an annotation show
+ * through the model" question is now answered by the depth test plus a
+ * coincident FACE's own `polygonOffset` recession (`DEPTH_BIAS.ANNOTATION`
+ * is deliberately zero — see depthPolicy.ts), not by draw order. */
+const ANNOTATION_LINE_RENDER_ORDER = 0
+const ANNOTATION_LINE_DETACHED_RENDER_ORDER = 0
+const ANNOTATION_HIGHLIGHT_RENDER_ORDER = 1
+const ANNOTATION_TEXT_RENDER_ORDER = 2
 /**
  * Guide-line dash/gap size as a fraction of the camera-to-target distance.
  * For a perspective camera the on-screen size of a world length L is ∝ L /
@@ -285,6 +381,9 @@ export class SceneRenderer {
   readonly instancesGroup: THREE.Group
   /** Parent group for construction guide geometry */
   readonly guidesGroup: THREE.Group
+  /** Parent group for dimension/leader-text annotation geometry
+   * (docs/design/dimensions-text.md), beside `guidesGroup`. */
+  readonly annotationsGroup: THREE.Group
 
   private objectGroups: Map<bigint, ObjectMeshGroup> = new Map()
   /** MATERIALIZED instances only (selected / isolation-lit / transform-preview
@@ -336,6 +435,32 @@ export class SceneRenderer {
   private selectedGuideId: bigint | null = null
   /** Highlight overlay (solid bright line/cross) for `selectedGuideId`. */
   private guideHighlight: THREE.LineSegments | null = null
+
+  /** Batched fat-line geometry for every live, non-detached annotation's
+   * dimension/extension/leader lines + arrowheads (one draw call). */
+  private annotationLines: LineSegments2 | null = null
+  /** Same, for every live DETACHED annotation (rendered in the warning color). */
+  private annotationLinesDetached: LineSegments2 | null = null
+  /** Bright overlay for the currently selected annotation's lines. */
+  private annotationHighlight: LineSegments2 | null = null
+  /** One text quad per live annotation, keyed by annotation id — billboarded
+   * (leader text) or oriented in-plane (linear/radial dimensions), per
+   * `updateAnnotationBillboards`. */
+  private annotationBillboards: Map<bigint, TextBillboard> = new Map()
+  /** Per-annotation CAMERA-INDEPENDENT render data — populated by
+   * `refreshAnnotations()` (a wasm read, so kept off the per-frame path),
+   * read every frame by `updateAnnotationBillboards()` to lay out the
+   * things that DO depend on the camera: the dimension-line/label gap
+   * (dimensions-playtest2.md §2) and the view-direction depth bias (§1). */
+  private annotationBase: Map<bigint, AnnotationRenderInfo> = new Map()
+  /** Per-annotation readability-flip state from the last frame's
+   * `inlineTextQuaternion` call (`TextBillboard.ts`'s screen-space rule) —
+   * carried forward so its edge-on guard (baseline viewed screen-on) can
+   * hold the previous decision instead of guessing, avoiding oscillation. */
+  private annotationFlipState: Map<bigint, boolean> = new Map()
+  /** The currently selected annotation, drawn as a bright overlay. */
+  private selectedAnnotationId: bigint | null = null
+
   /** Currently selected sketch ids, drawn as a bright overlay. */
   private selectedSketchIds: bigint[] = []
 
@@ -432,6 +557,10 @@ export class SceneRenderer {
     this.guidesGroup = new THREE.Group()
     this.guidesGroup.name = 'Guides'
     threeScene.add(this.guidesGroup)
+
+    this.annotationsGroup = new THREE.Group()
+    this.annotationsGroup.name = 'Annotations'
+    threeScene.add(this.annotationsGroup)
   }
 
   /** Rebuild all object geometry from the WASM scene. Returns watertight map. */
@@ -1944,6 +2073,470 @@ export class SceneRenderer {
     this.guidesGroup.visible = visible
   }
 
+  // ------------------------------------------------------------ annotations
+  //
+  // Dimension / leader-text annotations (docs/design/dimensions-text.md,
+  // depth/gap/radial-geometry fixes in docs/design/dimensions-playtest2.md).
+  // Kernel owns the geometry (anchors, offset/leader vectors, a radial
+  // dimension's captured circle); `refreshAnnotations()` pulls that into
+  // `annotationBase` (camera-independent — extension lines, arrowheads, the
+  // radial measured run + centre tick, everything a wasm read produces) and
+  // one billboarded text quad per annotation. `updateAnnotationBillboards()`
+  // then runs EVERY FRAME to lay out what DOES depend on the camera: the
+  // dimension-line/label gap (§2) and the view-direction depth bias (§1) —
+  // rebuilding the merged fat-line batches from `annotationBase` plus that
+  // per-frame layout ("clear and rebuild from scratch" like `refreshGuides`,
+  // now paid per camera-changed frame instead of per mutation — annotation
+  // counts are small enough that this is still cheap, and it's what lets a
+  // merged multi-annotation batch track a live orbit without per-vertex GPU
+  // attribute plumbing).
+
+  /**
+   * Rebuild all annotation geometry from the WASM scene. Call after any
+   * annotation mutation (create/update/delete), and alongside
+   * `refreshGuides()` at every general document-mutation call site — a
+   * transform/boolean/undo/redo can re-anchor or DETACH a live annotation
+   * (kernel-side geometric re-anchoring, docs/design/dimensions-text.md),
+   * and this is what picks that up on the render side.
+   *
+   * Builds an initial (camera-independent: unbroken dimension line) paint
+   * immediately, exactly like `annotationBillboards`' pre-existing "position
+   * set here, oriented/sized every frame" split — `updateAnnotationBillboards`
+   * (called every render frame) corrects the label/line gap on the very next
+   * frame, so this is at most a one-frame nicety gap, not a correctness one.
+   * The depth bias itself (`DEPTH_BIAS.ANNOTATION`, a `polygonOffset` on the
+   * material) is constant and applied from the first paint — unlike the old
+   * per-vertex world-space nudge, it needs no per-frame camera input.
+   */
+  refreshAnnotations(): void {
+    const liveIds = new Set(this.wasmScene.annotation_ids())
+    for (const id of [...this.annotationBillboards.keys()]) {
+      if (!liveIds.has(id)) {
+        const billboard = this.annotationBillboards.get(id)
+        billboard?.dispose()
+        if (billboard !== undefined) this.annotationsGroup.remove(billboard.mesh)
+        this.annotationBillboards.delete(id)
+        this.annotationBase.delete(id)
+        this.annotationFlipState.delete(id)
+      }
+    }
+
+    for (const id of liveIds) {
+      const info = this._buildAnnotationBase(id)
+      if (info === null) continue // torn read — keep whatever was there before
+      this.annotationBase.set(id, info)
+
+      let billboard = this.annotationBillboards.get(id)
+      if (billboard === undefined) {
+        billboard = new TextBillboard(ANNOTATION_TEXT_SCREEN_PX, ANNOTATION_TEXT_RENDER_ORDER, DEPTH_BIAS.ANNOTATION)
+        this.annotationsGroup.add(billboard.mesh)
+        this.annotationBillboards.set(id, billboard)
+      }
+      billboard.mesh.position.set(info.textAnchor[0], info.textAnchor[1], info.textAnchor[2])
+    }
+
+    this._rebuildAnnotationLineBatches()
+    this._rebuildAnnotationHighlight()
+  }
+
+  /**
+   * Resolve one live annotation's CAMERA-INDEPENDENT render data (see
+   * `AnnotationRenderInfo`). `null` if `id` is stale/hidden or any
+   * anchor/geometry query comes back `undefined` (a torn read mid-mutation —
+   * refreshAnnotations is always called after a committed change, so this
+   * should not happen in practice, but a torn read must never throw
+   * mid-rebuild).
+   */
+  private _buildAnnotationBase(id: bigint): AnnotationRenderInfo | null {
+    const kind = this.wasmScene.annotation_kind(id)
+    if (kind === undefined) return null
+    const detached = this.wasmScene.annotation_detached(id) ?? false
+
+    if (kind === 'linear') {
+      const a = this.wasmScene.annotation_anchor_point(id, 0)
+      const b = this.wasmScene.annotation_anchor_point(id, 1)
+      const offset = this.wasmScene.annotation_offset(id)
+      const plane = this.wasmScene.annotation_plane(id)
+      if (a === undefined || b === undefined || offset === undefined || plane === undefined) return null
+      const a1: V3 = [a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]]
+      const b1: V3 = [b[0] + offset[0], b[1] + offset[1], b[2] + offset[2]]
+
+      // Extension lines: anchor -> (anchor+offset), overshot slightly past
+      // the dimension line (the small CAD-drafting convention). These never
+      // move with the camera, so they're part of `fixed`, not `dimLine`.
+      const fixed: number[] = []
+      const over = 1 + ANNOTATION_EXTENSION_OVERSHOOT_FRAC
+      const aExt: V3 = [a[0] + offset[0] * over, a[1] + offset[1] * over, a[2] + offset[2] * over]
+      const bExt: V3 = [b[0] + offset[0] * over, b[1] + offset[1] * over, b[2] + offset[2] * over]
+      fixed.push(a[0], a[1], a[2], aExt[0], aExt[1], aExt[2])
+      fixed.push(b[0], b[1], b[2], bExt[0], bExt[1], bExt[2])
+
+      // Arrowheads: a small in-plane V at each end, tip at the endpoint,
+      // wings spread perpendicular to the a1-b1 line within `plane`. These
+      // are anchored to the TRUE a1/b1 endpoints regardless of where the
+      // §2 gap ends up, so they're `fixed` too.
+      const planeNormal: V3 = [plane[3], plane[4], plane[5]]
+      const dx = b1[0] - a1[0], dy = b1[1] - a1[1], dz = b1[2] - a1[2]
+      const len = Math.hypot(dx, dy, dz)
+      // The dimension line's own direction — also the label's inline text
+      // alignment (dimensions-text.md Finding 2); `null` for a degenerate
+      // (zero-length) line, which falls back to billboarding rather than an
+      // undefined basis.
+      let alignDir: V3 | null = null
+      if (len > 1e-9) {
+        const dir: V3 = [dx / len, dy / len, dz / len]
+        alignDir = dir
+        const perp = normalizeV3(crossV3(planeNormal, dir))
+        const arrowLen = clamp(len * ANNOTATION_ARROW_LEN_FRAC, ANNOTATION_ARROW_LEN_MIN, ANNOTATION_ARROW_LEN_MAX)
+        const arrowW = arrowLen * ANNOTATION_ARROW_WIDTH_FRAC
+        if (perp !== null) {
+          pushArrowChevron(fixed, a1, dir, perp, arrowLen, arrowW)
+          pushArrowChevron(fixed, b1, [-dir[0], -dir[1], -dir[2]], perp, arrowLen, arrowW)
+        }
+      }
+
+      const dist = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2])
+      const override = this.wasmScene.annotation_text_override(id)
+      const label = override ?? formatLength(dist)
+      const textAnchor: V3 = [(a1[0] + b1[0]) / 2, (a1[1] + b1[1]) / 2, (a1[2] + b1[2]) / 2]
+      const orient = alignDir !== null ? { alignDir, planeNormal } : null
+      return { detached, label, orient, fixed, dimLine: { a: a1, b: b1 }, textAnchor }
+    }
+
+    if (kind === 'radial') {
+      const anchor = this.wasmScene.annotation_anchor_point(id, 0)
+      const leaderDir = this.wasmScene.annotation_leader_dir(id)
+      const curve = this.wasmScene.annotation_curve(id)
+      const radialKind = this.wasmScene.annotation_radial_kind(id)
+      if (anchor === undefined || leaderDir === undefined || curve === undefined || radialKind === undefined) {
+        return null
+      }
+      const anchorV: V3 = [anchor[0], anchor[1], anchor[2]]
+      const center: V3 = [curve[0], curve[1], curve[2]]
+      const radius = curve[3]
+      const planeNormal: V3 = [curve[7], curve[8], curve[9]]
+      const kindWord: 'radius' | 'diameter' = radialKind === 'diameter' ? 'diameter' : 'radius'
+      const end: V3 = [anchorV[0] + leaderDir[0], anchorV[1] + leaderDir[1], anchorV[2] + leaderDir[2]]
+
+      // dimensions-playtest2.md §4: the drawn geometry must SHOW the
+      // measurement — centre-to-rim for a radius, rim-to-rim through the
+      // centre for a diameter — not just `anchor -> leaderDir` (the old
+      // bug: a plain leader stub that never touched the centre at all).
+      const fixed: number[] = []
+      const geo = buildRadialGeometry(center, anchorV, kindWord)
+      fixed.push(
+        geo.measured[0][0], geo.measured[0][1], geo.measured[0][2],
+        geo.measured[1][0], geo.measured[1][1], geo.measured[1][2],
+      )
+      // The leader, continuing outward from the rim anchor to the label.
+      fixed.push(anchorV[0], anchorV[1], anchorV[2], end[0], end[1], end[2])
+
+      const measuredLen = Math.hypot(
+        geo.measured[1][0] - geo.measured[0][0],
+        geo.measured[1][1] - geo.measured[0][1],
+        geo.measured[1][2] - geo.measured[0][2],
+      )
+      if (measuredLen > 1e-9) {
+        const arrowLen = clamp(measuredLen * ANNOTATION_ARROW_LEN_FRAC, ANNOTATION_ARROW_LEN_MIN, ANNOTATION_ARROW_LEN_MAX)
+        const arrowW = arrowLen * ANNOTATION_ARROW_WIDTH_FRAC
+        const towardFar: V3 = [
+          (geo.farEnd[0] - anchorV[0]) / measuredLen,
+          (geo.farEnd[1] - anchorV[1]) / measuredLen,
+          (geo.farEnd[2] - anchorV[2]) / measuredLen,
+        ]
+        const perp = normalizeV3(crossV3(planeNormal, towardFar))
+        if (perp !== null) {
+          // Arrowhead at the rim end (both kinds: "Arrowhead at the rim
+          // end" for Radius, one of "arrowheads at both ends" for Diameter).
+          pushArrowChevron(fixed, anchorV, towardFar, perp, arrowLen, arrowW)
+          if (kindWord === 'diameter') {
+            // The far end is ALSO a rim point for a diameter.
+            pushArrowChevron(fixed, geo.farEnd, [-towardFar[0], -towardFar[1], -towardFar[2]], perp, arrowLen, arrowW)
+          }
+        }
+      }
+      if (kindWord === 'radius') {
+        // "A small centre cross/tick" — Diameter has no single centre
+        // endpoint to mark (the measured run passes THROUGH the centre
+        // rather than terminating there).
+        pushCenterTick(fixed, center, planeNormal, CENTER_TICK_HALF)
+      }
+
+      const value = kindWord === 'diameter' ? radius * 2 : radius
+      const prefix = kindWord === 'diameter' ? 'Ø ' : 'R '
+      const override = this.wasmScene.annotation_text_override(id)
+      const label = override ?? `${prefix}${formatLength(value)}`
+      // Radial label alignment: the leader segment's own direction, in the
+      // curve's own plane (dimensions-text.md Finding 2) — `null` for a
+      // degenerate (zero-length) leader, which falls back to billboarding.
+      const leaderLen = Math.hypot(leaderDir[0], leaderDir[1], leaderDir[2])
+      const orient =
+        leaderLen > 1e-9
+          ? { alignDir: [leaderDir[0] / leaderLen, leaderDir[1] / leaderLen, leaderDir[2] / leaderLen] as V3, planeNormal }
+          : null
+      // No `dimLine`: the radial label already sits PAST the end of the
+      // leader (like SketchUp's own radial dimensions), not centered on top
+      // of a line — there is no "runs through the label" defect to fix here
+      // (see `AnnotationRenderInfo.dimLine`'s doc comment).
+      return { detached, label, orient, fixed, dimLine: null, textAnchor: end }
+    }
+
+    // 'leader' — stays billboarded (docs/design/dimensions-text.md), so no
+    // in-plane orientation basis, and no `dimLine` (same reasoning as radial
+    // above: the label sits at the leader's tip, not its midpoint).
+    const anchor = this.wasmScene.annotation_anchor_point(id, 0)
+    const offset = this.wasmScene.annotation_offset(id)
+    if (anchor === undefined || offset === undefined) return null
+    const end: V3 = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]]
+    const fixed = [anchor[0], anchor[1], anchor[2], end[0], end[1], end[2]]
+    const label = this.wasmScene.annotation_text(id) ?? ''
+    return { detached, label, orient: null, fixed, dimLine: null, textAnchor: end }
+  }
+
+  /** (Re)build one of the three merged annotation fat-line batches (`which`)
+   * from a flat positions array, disposing whatever was there before —
+   * shared by the structural rebuild (`refreshAnnotations`, camera-
+   * independent) and the per-frame rebuild (`updateAnnotationBillboards`,
+   * gap-laid-out). `depthTest: true` throughout (dimensions-playtest2.md §1
+   * — findings 2/3: annotations are ordinary depth-tested ink now, not a
+   * permanent overlay); `polygonOffset` explicitly zero at
+   * `DEPTH_BIAS.ANNOTATION` — deliberately carrying no bias of its own,
+   * leaving a coincident FACE's own recession to win the tie, after both an
+   * uncapped `polygonOffset` and a world-space camera-ward nudge (and then a
+   * modest, nonzero `polygonOffset`) were each measured leaking past a
+   * genuinely nearer real occluder (see `depthPolicy.ts`'s "Dimension/
+   * leader-text annotations" note for the full history and measurements). */
+  private _installAnnotationLineBatch(
+    which: 'normal' | 'detached' | 'highlight',
+    positions: number[],
+    color: number,
+  ): void {
+    const current =
+      which === 'normal' ? this.annotationLines : which === 'detached' ? this.annotationLinesDetached : this.annotationHighlight
+    if (current !== null) {
+      this.annotationsGroup.remove(current)
+      disposeFatSegments(current)
+    }
+    let next: LineSegments2 | null = null
+    if (positions.length > 0) {
+      const widthPx = which === 'highlight' ? ANNOTATION_LINE_WIDTH_PX + 1 : ANNOTATION_LINE_WIDTH_PX
+      const renderOrder =
+        which === 'normal'
+          ? ANNOTATION_LINE_RENDER_ORDER
+          : which === 'detached'
+            ? ANNOTATION_LINE_DETACHED_RENDER_ORDER
+            : ANNOTATION_HIGHLIGHT_RENDER_ORDER
+      next = makeFatSegments(new Float32Array(positions), {
+        color,
+        widthPx,
+        depthTest: true,
+        renderOrder,
+        depthBias: DEPTH_BIAS.ANNOTATION,
+      })
+      this.annotationsGroup.add(next)
+    }
+    if (which === 'normal') this.annotationLines = next
+    else if (which === 'detached') this.annotationLinesDetached = next
+    else this.annotationHighlight = next
+  }
+
+  /** Structural (camera-independent) rebuild of the normal/detached merged
+   * batches straight from `annotationBase` — a LINEAR dimension's line is
+   * drawn whole (unbroken) here; `updateAnnotationBillboards` (every render
+   * frame) is what lays out the real §2 gap once a camera is available. */
+  private _rebuildAnnotationLineBatches(): void {
+    const normalPositions: number[] = []
+    const detachedPositions: number[] = []
+    for (const info of this.annotationBase.values()) {
+      const bucket = info.detached ? detachedPositions : normalPositions
+      bucket.push(...info.fixed)
+      if (info.dimLine !== null) {
+        bucket.push(
+          info.dimLine.a[0], info.dimLine.a[1], info.dimLine.a[2],
+          info.dimLine.b[0], info.dimLine.b[1], info.dimLine.b[2],
+        )
+      }
+    }
+    this._installAnnotationLineBatch('normal', normalPositions, ANNOTATION_COLOR.dark)
+    this._installAnnotationLineBatch('detached', detachedPositions, ANNOTATION_WARNING_COLOR.dark)
+  }
+
+  /** Dispose all three annotation line batches outright (normal + detached +
+   * highlight) — the full-scene teardown path (`dispose()`) wants this; the
+   * ordinary refresh/frame paths always rebuild instead of merely clearing. */
+  private _clearAnnotationLines(): void {
+    this._installAnnotationLineBatch('normal', [], ANNOTATION_COLOR.dark)
+    this._installAnnotationLineBatch('detached', [], ANNOTATION_WARNING_COLOR.dark)
+    this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
+  }
+
+  /** Mark `id` as the selected annotation and redraw its bright overlay;
+   * `null` clears it. The caller schedules the render. */
+  setSelectedAnnotation(id: bigint | null): void {
+    this.selectedAnnotationId = id
+    this._rebuildAnnotationHighlight()
+  }
+
+  /** The current world-space position of `id`'s text billboard (its
+   * measurement/leader label), or `null` if `id` isn't live/rendered. The
+   * double-click-to-edit gesture projects this to screen coordinates to
+   * position the in-viewport text editor exactly at the label. */
+  annotationTextWorldPosition(id: bigint): [number, number, number] | null {
+    const billboard = this.annotationBillboards.get(id)
+    if (billboard === undefined) return null
+    const p = billboard.mesh.position
+    return [p.x, p.y, p.z]
+  }
+
+  /** The rendered label text for `id` — the app-computed measurement (via
+   * `formatLength`, current document units) or `text_override` when set —
+   * or `null` if `id` isn't live/rendered. Test/E2E observe-only surface
+   * (mirrors `getSectionState`'s role for the section plane): proves a unit
+   * change actually re-labels a dimension without needing to read the
+   * rasterized canvas texture. */
+  annotationLabelText(id: bigint): string | null {
+    return this.annotationBase.get(id)?.label ?? null
+  }
+
+  /** (Re)build the bright overlay for the selected annotation, straight from
+   * `annotationBase` (camera-independent — the per-frame path in
+   * `updateAnnotationBillboards` overwrites this with the gap-laid-out +
+   * biased version on the very next frame, same one-frame-nicety-gap
+   * tradeoff as `refreshAnnotations`' own initial paint). */
+  private _rebuildAnnotationHighlight(): void {
+    if (this.selectedAnnotationId === null) {
+      this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
+      return
+    }
+    const info = this.annotationBase.get(this.selectedAnnotationId)
+    if (info === undefined) {
+      this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
+      return
+    }
+    const positions = [...info.fixed]
+    if (info.dimLine !== null) {
+      positions.push(info.dimLine.a[0], info.dimLine.a[1], info.dimLine.a[2], info.dimLine.b[0], info.dimLine.b[1], info.dimLine.b[2])
+    }
+    this._installAnnotationLineBatch('highlight', positions, EDGE_COLOR_SELECTED)
+  }
+
+  /**
+   * Per-frame annotation upkeep — the camera-dependent half of annotation
+   * rendering (see this section's opening comment): lays out each LINEAR
+   * dimension's line/label gap around its CURRENT on-screen label size
+   * (dimensions-playtest2.md §2 — the depth bias itself, §1, is now a
+   * constant `polygonOffset` on the annotation materials, not something this
+   * per-frame pass computes), orients every text quad (in-plane + aligned
+   * for a linear/radial dimension label, dimensions-text.md Finding 2;
+   * camera-facing billboard for leader text), holds it at a constant
+   * on-screen glyph size (`TextBillboard.update`, Finding 1), and keeps
+   * colors current for `theme`. Rebuilds the merged line batches from
+   * scratch every call — annotation counts are small (see this section's
+   * opening comment) — so this should only run when the camera (or
+   * document) actually changed, exactly like the render loop's own
+   * `changed || needsRender` gate already ensures. Call once per render
+   * frame, mirroring `updateGuideDashScale`.
+   */
+  updateAnnotationBillboards(camera: THREE.Camera, viewportWidth: number, viewportHeight: number, theme: 'light' | 'dark'): void {
+    const normalColor = ANNOTATION_COLOR[theme]
+    const warningColor = ANNOTATION_WARNING_COLOR[theme]
+    if (this.annotationBase.size === 0) return
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+
+    const normalPositions: number[] = []
+    const detachedPositions: number[] = []
+    let highlightPositions: number[] = []
+
+    for (const [id, info] of this.annotationBase) {
+      const billboard = this.annotationBillboards.get(id)
+      if (billboard === undefined) continue
+      const color = info.detached ? warningColor : normalColor
+
+      // Provisional (pre-gap-layout) position so `setContent`/`worldSize`
+      // measure at roughly the right camera distance — the §2 layout below
+      // may move this a little (the "outside" case), a same-order-of-
+      // magnitude correction that doesn't cross a zoom-tier boundary.
+      billboard.mesh.position.set(info.textAnchor[0], info.textAnchor[1], info.textAnchor[2])
+      const provisionalDist = camera.position.distanceTo(billboard.mesh.position)
+      billboard.setContent(info.label, color, dpr, provisionalDist)
+
+      let finalTextAnchor: V3 = info.textAnchor
+      const dimSegments: number[] = []
+      if (info.dimLine !== null) {
+        const { a, b } = info.dimLine
+        const dir: V3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+        const lineLen = Math.hypot(dir[0], dir[1], dir[2])
+        const size = billboard.worldSize(camera, viewportHeight)
+        if (size !== null && lineLen > 1e-9) {
+          const unit: V3 = [dir[0] / lineLen, dir[1] / lineLen, dir[2] / lineLen]
+          const chosenEnd = pickOutsideEnd(
+            camera,
+            new THREE.Vector3(a[0], a[1], a[2]),
+            new THREE.Vector3(b[0], b[1], b[2]),
+            viewportWidth,
+            viewportHeight,
+          )
+          const layout = computeLineLabelLayout(lineLen, size.width, size.height, (end) => (end === chosenEnd ? 1 : 0))
+          if (layout.mode === 'broken') {
+            const gapStart: V3 = [a[0] + unit[0] * layout.gapStart, a[1] + unit[1] * layout.gapStart, a[2] + unit[2] * layout.gapStart]
+            const gapEnd: V3 = [a[0] + unit[0] * layout.gapEnd, a[1] + unit[1] * layout.gapEnd, a[2] + unit[2] * layout.gapEnd]
+            dimSegments.push(a[0], a[1], a[2], gapStart[0], gapStart[1], gapStart[2])
+            dimSegments.push(gapEnd[0], gapEnd[1], gapEnd[2], b[0], b[1], b[2])
+          } else {
+            // Whole line, label pushed outside one end with a short tail
+            // toward it (SketchUp's "too small for its text" convention).
+            dimSegments.push(a[0], a[1], a[2], b[0], b[1], b[2])
+            const labelPt: V3 = [
+              a[0] + unit[0] * layout.labelCenterT, a[1] + unit[1] * layout.labelCenterT, a[2] + unit[2] * layout.labelCenterT,
+            ]
+            const endPt = layout.end === 1 ? b : a
+            dimSegments.push(endPt[0], endPt[1], endPt[2], labelPt[0], labelPt[1], labelPt[2])
+            finalTextAnchor = labelPt
+          }
+        } else {
+          // Degenerate zero-length line, or no rasterized label size yet —
+          // draw the line whole rather than guessing at a gap.
+          dimSegments.push(a[0], a[1], a[2], b[0], b[1], b[2])
+        }
+      }
+
+      const bucket = info.detached ? detachedPositions : normalPositions
+      bucket.push(...info.fixed)
+      bucket.push(...dimSegments)
+
+      billboard.mesh.position.set(finalTextAnchor[0], finalTextAnchor[1], finalTextAnchor[2])
+
+      let faceQuaternion: THREE.Quaternion | undefined
+      if (info.orient !== null) {
+        // Persist the readability flip decision per-annotation across
+        // frames — `inlineTextQuaternion`'s edge-on guard (the baseline
+        // viewed screen-on) falls back to this instead of guessing, so the
+        // label doesn't oscillate; a never-seen id defaults to un-flipped.
+        const previousFlipped = this.annotationFlipState.get(id) ?? false
+        const oriented = inlineTextQuaternion(
+          new THREE.Vector3(info.orient.alignDir[0], info.orient.alignDir[1], info.orient.alignDir[2]),
+          new THREE.Vector3(info.orient.planeNormal[0], info.orient.planeNormal[1], info.orient.planeNormal[2]),
+          camera,
+          billboard.mesh.position,
+          previousFlipped,
+        )
+        this.annotationFlipState.set(id, oriented.flipped)
+        faceQuaternion = oriented.quaternion
+      }
+      billboard.update(camera, viewportHeight, faceQuaternion)
+
+      if (id === this.selectedAnnotationId) {
+        highlightPositions = [...info.fixed, ...dimSegments]
+      }
+    }
+
+    this._installAnnotationLineBatch('normal', normalPositions, normalColor)
+    this._installAnnotationLineBatch('detached', detachedPositions, warningColor)
+    if (this.selectedAnnotationId !== null) {
+      this._installAnnotationLineBatch('highlight', highlightPositions, EDGE_COLOR_SELECTED)
+    }
+  }
+
   /**
    * Keep the dashed guide lines at a constant on-screen dash size regardless
    * of zoom (mirrors CueLayer's screen-constant cursor). `cameraDistance` is
@@ -3059,6 +3652,13 @@ export class SceneRenderer {
     this._clearSketchRegions()
     this._clearDefSketchGroups()
     this._clearGuides()
+    this._clearAnnotationLines()
+    for (const billboard of this.annotationBillboards.values()) {
+      billboard.dispose()
+    }
+    this.annotationBillboards.clear()
+    this.annotationBase.clear()
+    this.annotationFlipState.clear()
     this._disposeSectionWidget()
     this.sectionClipPlane = null
   }

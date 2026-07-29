@@ -436,3 +436,77 @@ export function transformNormalThroughPose(pose: Affine3x4, normal: V3): V3 | nu
   if (len <= 1e-12) return null
   return [rx / len, ry / len, rz / len]
 }
+
+/** `a - b`. */
+export function subV3(a: V3, b: V3): V3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+/** `a + b`. */
+export function addV3(a: V3, b: V3): V3 {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+/** Dot product `a · b`. */
+export function dotV3(a: V3, b: V3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/** `v`'s component perpendicular to unit vector `d`. */
+export function perpComponentV3(v: V3, d: V3): V3 {
+  const k = dotV3(v, d)
+  return [v[0] - d[0] * k, v[1] - d[1] * k, v[2] - d[2] * k]
+}
+
+/** Cross product `a × b`. */
+export function crossV3(a: V3, b: V3): V3 {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ]
+}
+
+/** Normalize `v`, or `null` if its length is below 1e-9 (degenerate — no
+ * direction to normalize to). */
+export function normalizeV3(v: V3): V3 | null {
+  const len = Math.hypot(v[0], v[1], v[2])
+  if (len < 1e-9) return null
+  return [v[0] / len, v[1] / len, v[2] / len]
+}
+
+/** Clamp `x` to `[lo, hi]`. */
+export function clamp(x: number, lo: number, hi: number): number {
+  return Math.min(Math.max(x, lo), hi)
+}
+
+/**
+ * Appends a small chevron arrowhead's two wing segments to a flat
+ * `[ax,ay,az,bx,by,bz, ...]` segment-pair position array — used by
+ * `SceneRenderer`'s linear-dimension arrowheads. The tip sits at `tip`; the
+ * two wings run from the tip to `tip + dir·len ± perp·width`, so the
+ * chevron "points" opposite `dir` (pass the direction FROM the arrow's tip
+ * TOWARD the rest of the dimension line for the conventional look: wings
+ * trailing back along the line).
+ */
+export function pushArrowChevron(
+  positions: number[],
+  tip: V3,
+  dir: V3,
+  perp: V3,
+  len: number,
+  width: number,
+): void {
+  const wing1: V3 = [
+    tip[0] + dir[0] * len + perp[0] * width,
+    tip[1] + dir[1] * len + perp[1] * width,
+    tip[2] + dir[2] * len + perp[2] * width,
+  ]
+  const wing2: V3 = [
+    tip[0] + dir[0] * len - perp[0] * width,
+    tip[1] + dir[1] * len - perp[1] * width,
+    tip[2] + dir[2] * len - perp[2] * width,
+  ]
+  positions.push(tip[0], tip[1], tip[2], wing1[0], wing1[1], wing1[2])
+  positions.push(tip[0], tip[1], tip[2], wing2[0], wing2[1], wing2[2])
+}

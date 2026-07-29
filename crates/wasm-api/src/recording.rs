@@ -477,6 +477,92 @@ pub enum RecordedCall {
     DeleteGuide { guide: u64 },
     /// `delete_all_guides()`.
     DeleteAllGuides,
+    /// `add_linear_dimension(a_node_kind, a_node_id, a_point, b_node_kind,
+    /// b_node_id, b_point, offset, plane, text_override)`. Additive variant
+    /// (the [`RecordedCall::SketchBeginCurveWith`] posture): a recording
+    /// that never dimensions replays on older builds unchanged; one that
+    /// does fails to parse there — loudly, never silently divergent.
+    #[allow(clippy::too_many_arguments)]
+    AddLinearDimension {
+        a_node_kind: i8,
+        a_node_id: u64,
+        a_point: [f64; 3],
+        b_node_kind: i8,
+        b_node_id: u64,
+        b_point: [f64; 3],
+        offset: [f64; 3],
+        plane: [f64; 6],
+        text_override: Option<String>,
+    },
+    /// `add_radial_dimension(anchor_node_kind, anchor_node_id, anchor_point,
+    /// kind, curve_center, curve_radius, curve_plane, leader_dir,
+    /// text_override)`. Additive variant, same posture as
+    /// [`RecordedCall::AddLinearDimension`].
+    #[allow(clippy::too_many_arguments)]
+    AddRadialDimension {
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: [f64; 3],
+        kind: String,
+        curve_center: [f64; 3],
+        curve_radius: f64,
+        curve_plane: [f64; 6],
+        leader_dir: [f64; 3],
+        text_override: Option<String>,
+    },
+    /// `add_leader_text(anchor_node_kind, anchor_node_id, anchor_point,
+    /// offset, text)`. Additive variant, same posture as
+    /// [`RecordedCall::AddLinearDimension`].
+    AddLeaderText {
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: [f64; 3],
+        offset: [f64; 3],
+        text: String,
+    },
+    /// `update_linear_dimension(id, ...)`. Additive variant, same posture as
+    /// [`RecordedCall::AddLinearDimension`].
+    #[allow(clippy::too_many_arguments)]
+    UpdateLinearDimension {
+        id: u64,
+        a_node_kind: i8,
+        a_node_id: u64,
+        a_point: [f64; 3],
+        b_node_kind: i8,
+        b_node_id: u64,
+        b_point: [f64; 3],
+        offset: [f64; 3],
+        plane: [f64; 6],
+        text_override: Option<String>,
+    },
+    /// `update_radial_dimension(id, ...)`. Additive variant, same posture as
+    /// [`RecordedCall::AddLinearDimension`].
+    #[allow(clippy::too_many_arguments)]
+    UpdateRadialDimension {
+        id: u64,
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: [f64; 3],
+        kind: String,
+        curve_center: [f64; 3],
+        curve_radius: f64,
+        curve_plane: [f64; 6],
+        leader_dir: [f64; 3],
+        text_override: Option<String>,
+    },
+    /// `update_leader_text(id, ...)`. Additive variant, same posture as
+    /// [`RecordedCall::AddLinearDimension`].
+    UpdateLeaderText {
+        id: u64,
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: [f64; 3],
+        offset: [f64; 3],
+        text: String,
+    },
+    /// `delete_annotation(id)`. Additive variant, same posture as
+    /// [`RecordedCall::AddLinearDimension`].
+    DeleteAnnotation { id: u64 },
     /// `import_dae(bytes, images)` — embeds the COLLADA file and its image
     /// map, so a session with an import replays self-contained.
     ImportDae {
