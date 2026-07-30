@@ -54,6 +54,11 @@ import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdle
 import { getDrawingAxes } from './drawingAxes'
 import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 
+/** Smallest side, in metres, a ground rectangle may commit with. See the
+ *  degeneracy check in `onPointerDown` for why this is per-axis and why it
+ *  sits deliberately above the kernel's `tol::POINT_MERGE`. */
+export const RECTANGLE_MIN_SIDE = 1e-8
+
 export type RectangleCommitResult = {
   sketchHandle: bigint
   /** Handles of regions created by the last segment (may be empty if not yet closed) */
@@ -247,11 +252,24 @@ export class RectangleTool implements Tool {
   private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
     if (plane.ground) {
       if (snap === null) return null
+      // Records whether the z about to be discarded was actually carrying
+      // information — see `snapProjected`.
+      this._snapProjected = snap.z !== 0
       return [snap.x, snap.y, 0]
     }
+    this._snapProjected = false
     if (snap !== null) return [snap.x, snap.y, snap.z]
     return pointOnPlane(ray, plane)
   }
+
+  /** See `Tool.snapProjected`. Set by `_planeCursor`, which is where the
+   *  drawing plane's z actually replaces the snap's. */
+  snapProjected(): boolean {
+    return this._snapProjected
+  }
+
+  /** Whether the last `_planeCursor` discarded a non-zero snap z. */
+  private _snapProjected = false
 
   /**
    * Decide which mode governs the NEXT pointer event (same contract as the
@@ -703,11 +721,22 @@ export class RectangleTool implements Tool {
       if (cursor === null) return
 
       if (plane.ground) {
-        // Skip degenerate rectangles (same point or zero area) — the exact
-        // legacy ground check.
+        // Skip degenerate rectangles (same point, or zero area).
+        //
+        // PER-AXIS on purpose, and deliberately NOT harmonised with the
+        // kernel's `tol::POINT_MERGE` (1e-9). This is not asking "are these
+        // two points the same?" the way a segment gate does — a rectangle
+        // whose corners are far apart in x but coincident in y has two
+        // distinct corners and no area at all, so an axis that collapses is
+        // what makes it degenerate. The bound is also an order of magnitude
+        // STRICTER than POINT_MERGE, which is the safe direction: the tool
+        // refuses a sliver the kernel would have accepted, and there is no
+        // width where the tool commits a rectangle whose corners the kernel
+        // then merges. Loosening this toward POINT_MERGE would open exactly
+        // that window.
         if (
-          Math.abs(anchor[0] - cursor[0]) < 1e-8 ||
-          Math.abs(anchor[1] - cursor[1]) < 1e-8
+          Math.abs(anchor[0] - cursor[0]) < RECTANGLE_MIN_SIDE ||
+          Math.abs(anchor[1] - cursor[1]) < RECTANGLE_MIN_SIDE
         ) {
           return
         }

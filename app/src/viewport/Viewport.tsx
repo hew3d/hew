@@ -215,6 +215,10 @@ export interface InferenceInfo {
   screenY: number
   direction?: [number, number, number]
   frame?: DrawingAxes
+  /** The snap is a REFERENCE, not the committed point: the active tool
+   *  projected it onto its drawing plane (see `Tool.snapProjected`). The chip
+   *  qualifies the label so it stops claiming a snap that was not honoured. */
+  projected?: boolean
 }
 
 interface Props {
@@ -5946,12 +5950,15 @@ export default function Viewport({
         onInferenceChangeRef.current?.(null)
       } else {
         const p = worldToPixels(new THREE.Vector3(snap.x, snap.y, snap.z))
+        // Read AFTER the tool's own onPointerMove (both callers order it that
+        // way), so this reflects what the tool just did with this very snap.
         onInferenceChangeRef.current?.({
           kind: snapKind ?? snap.kind,
           screenX: p.x,
           screenY: p.y,
           direction: snap.direction,
           frame: getDrawingAxes(wasmScene),
+          projected: activeTool.snapProjected?.() ?? false,
         })
       }
     }

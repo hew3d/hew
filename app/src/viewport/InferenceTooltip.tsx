@@ -54,6 +54,14 @@ export function InferenceTooltip({ info }: { info: InferenceInfo | null }) {
       }}
     >
       <span>{label}</span>
+      {/* The point named above is a REFERENCE the gesture takes its x/y from,
+          not where the geometry lands: a shape has to be planar on the plane
+          it is drawn on, so a snap sitting above that plane has its height
+          dropped. Saying so is the difference between an alignment aid and a
+          chip claiming a snap the commit did not honour. */}
+      {info.projected === true && (
+        <span style={{ color: 'var(--text-secondary)' }}>projected</span>
+      )}
       {axisName !== null && info.kind !== 'on-axis' && (
         <span style={{ color: `var(--axis-${axisName})` }}>on {axisName} axis</span>
       )}

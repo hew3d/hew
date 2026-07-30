@@ -333,11 +333,24 @@ export class PolygonTool implements Tool {
   private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
     if (plane.ground) {
       if (snap === null) return null
+      // Records whether the z about to be discarded was actually carrying
+      // information — see `snapProjected`.
+      this._snapProjected = snap.z !== 0
       return [snap.x, snap.y, 0]
     }
+    this._snapProjected = false
     if (snap !== null) return [snap.x, snap.y, snap.z]
     return pointOnPlane(ray, plane)
   }
+
+  /** See `Tool.snapProjected`. Set by `_planeCursor`, which is where the
+   *  drawing plane's z actually replaces the snap's. */
+  snapProjected(): boolean {
+    return this._snapProjected
+  }
+
+  /** Whether the last `_planeCursor` discarded a non-zero snap z. */
+  private _snapProjected = false
 
   /**
    * Decide which mode governs the NEXT pointer event (same contract as the

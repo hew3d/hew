@@ -144,6 +144,27 @@ export interface Tool {
   updateCamera?(camera: THREE.Camera): void
 
   /**
+   * (optional) True when the snap most recently handed to `onPointerMove` was
+   * PROJECTED onto the tool's drawing plane rather than used as-is — i.e. the
+   * point the gesture will actually commit is not the point the inference
+   * chip is naming.
+   *
+   * Only the draw tools can answer this, and only they know it: a shape has to
+   * be planar on the plane it is drawn on, so a snap to a vertex floating
+   * above the ground contributes its x/y and has its z discarded. That is the
+   * intended behaviour — it is how you align a rectangle under a solid's
+   * corner — but reporting it as a plain "Endpoint" claims a snap that was not
+   * honoured. The Viewport passes this through to the inference chip so the
+   * label can say so.
+   *
+   * False (or absent) means the snap was taken exactly as reported, which
+   * includes every idle hover: before a gesture is anchored, a click on that
+   * floating vertex legitimately starts a sketch THERE, so nothing is
+   * projected and nothing needs qualifying.
+   */
+  snapProjected?(): boolean
+
+  /**
    * (optional) Return snap constraints the tool wants injected into the next
    * snapService.resolve() call.  Viewport feature-detects with
    * `'snapConstraint' in tool`.
