@@ -105,6 +105,7 @@ import {
   type ZoomWindowDragState,
 } from './zoomWindowDrag'
 import { CleanModifierTap } from './cleanModifierTap'
+import { MultiClickTracker } from './multiClick'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
@@ -4434,6 +4435,7 @@ export default function Viewport({
       // same mid-hold-tap reset — see switchToolRef's comment above.
       ctrlTap.reset()
       pushPullModifierTap.reset()
+      multiClick.reset()
       const tool = makeMoveTool(dm.nodes)
       toolController.setTool(tool)
       renderer.domElement.style.cursor = cursorFor('Move')
@@ -4865,6 +4867,7 @@ export default function Viewport({
       // direct toolController.setTool).
       ctrlTap.reset()
       pushPullModifierTap.reset()
+      multiClick.reset()
       switch (toolName) {
         case 'Rectangle':
           cameraModeRef.current = false
@@ -5325,6 +5328,11 @@ export default function Viewport({
     // silently drops the tap instead of misdirecting it. `.reset()` is also
     // called on every tool switch (see switchToolRef/beginDragMove above) as
     // a belt-and-suspenders clear.
+    // Click-count for pointerdown, reconstructed because Chromium reports
+    // `detail === 0` on pointer events (see multiClick.ts). Reset alongside
+    // `ctrlTap` on tool switches and on blur: two clicks either side of an
+    // unrelated event are not a double-click however close together they land.
+    const multiClick = new MultiClickTracker()
     const ctrlTap = new CleanModifierTap<Tool>((key) => key === 'Control')
     function onCtrlKeyDown(ev: KeyboardEvent): void {
       ctrlTap.onKeyDown(ev, toolController.activeTool)
@@ -6090,6 +6098,10 @@ export default function Viewport({
     function onPointerDown(ev: PointerEvent): void {
       recordPointerInput('pointerdown', ev)
       if (ev.button !== 0) return
+      // Counted here, before any of the early returns below, so the sequence
+      // reflects every primary press the canvas actually received rather than
+      // only the ones that reach the tool-routing guard further down.
+      const clickCount = Math.max(ev.detail, multiClick.press(ev))
       // A Shift-fov drag is already armed by now — onFovDragPointerDownCapture
       // (an `el`-level capture-phase listener, wired further down) runs
       // BEFORE this bubble-phase handler and before OrbitControls' own
@@ -6179,13 +6191,23 @@ export default function Viewport({
 
       const activeTool = toolController.activeTool
 
-      // The second pointerdown of a double-click carries `detail >= 2` — it's
-      // the phantom that precedes the 'dblclick' event. For tools that finish
-      // on double-click (LineTool), skip routing it so it can't place a
-      // spurious near-duplicate point; the 'dblclick' handler runs
-      // onDoubleClick instead. Distinct clicks are always detail === 1, so
-      // normal point-by-point drawing is unaffected at any cadence.
-      if (ev.detail >= 2 && 'onDoubleClick' in activeTool) return
+      // The second pointerdown of a double-click is the phantom that precedes
+      // the 'dblclick' event. For tools that finish on double-click (LineTool
+      // ending a chain, PushPullTool repeating its last distance), skip
+      // routing it so it can't place a spurious near-duplicate point or
+      // free-commit at ~0 distance; the 'dblclick' handler runs onDoubleClick
+      // instead. Distinct clicks always count 1, so normal point-by-point
+      // drawing is unaffected at any cadence.
+      //
+      // The count is `max(ev.detail, tracker)` rather than `ev.detail` alone
+      // because Chromium leaves `detail` at 0 on POINTER events — only its
+      // MouseEvent-derived click/dblclick carry real counts — so this guard
+      // never fired there, on the web app in Chrome/Edge and in the Windows
+      // desktop shell's Chromium-based WebView2 alike. See `multiClick.ts` for
+      // the measurement and for why the tracker is deliberately stricter than
+      // the browsers' own double-click window. A browser that DOES report a
+      // count still decides for itself, since its value wins the max.
+      if (clickCount >= 2 && 'onDoubleClick' in activeTool) return
 
       // Paint tool modifiers (paint-tool design §1–2), all read live off this
       // pointerdown — the same idiom as the whole-object fill below. Alt is

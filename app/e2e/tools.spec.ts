@@ -264,7 +264,7 @@ test('Push/Pull: growing a face extends the solid (positive distance)', async ({
     return { hash0, hash1, count0, count1 }
   })
 
-  if (result && 'error' in result) { test.skip(); return }
+  if (result && 'error' in result) throw new Error(String(result.error))
   // Push/pull mutated the document but didn't add or remove objects.
   expect(result!.count0).toBe(1)
   expect(result!.count1).toBe(1)
@@ -293,7 +293,7 @@ test('Push/Pull: kernel correctly rejects a push that would remove all material'
     return { err }
   })
 
-  if (result && 'error' in result) { test.skip(); return }
+  if (result && 'error' in result) throw new Error(String(result.error))
   // The kernel should have refused with a typed error.
   expect(result!.err).not.toBeNull()
   expect(result!.err).toContain('WouldVanish')
@@ -359,23 +359,18 @@ test('Push/Pull: a real Ctrl tap extrudes a NEW coincident object, leaving the s
 // (SketchUp parity — see PushPullTool.onDoubleClick). Ground truth is read
 // from getObjectBounds, not the status-bar text.
 //
-// WebKit only (pre-existing, unrelated gap, found while writing this test —
-// not part of tool-parity P2/P3): Viewport's phantom-click guard
-// (`ev.detail >= 2 && 'onDoubleClick' in activeTool`, just above
-// onPointerDown) relies on the second pointerdown of a double-click
-// reporting `detail: 2`. WebKit does (spec-conformant click-count carried
-// onto PointerEvent); Chromium always reports `detail: 0` on `pointerdown`
-// (only its MouseEvent-derived `click`/`dblclick` get real counts), so the
-// guard never trips there — the phantom second click free-commits at
-// ~0 distance instead of being skipped, and the repeat never fires. This
-// looks like it would affect every `onDoubleClick` tool (also LineTool's
-// chain-ending double-click) on any Chromium-based target, including
-// Windows Tauri's WebView2 — worth a dedicated look, separate from this fix.
+// Runs on Chromium — the browser this gate actually exercises. It used to
+// skip there, on a real Chromium gap: `pointerdown.detail` is always 0 (only
+// the MouseEvent-derived `click`/`dblclick` carry click counts), so Viewport's
+// phantom-click guard never tripped and the phantom second press free-committed
+// at ~0 distance instead of being skipped. Because the gate runs ONLY
+// `--project=chromium`, skipping there meant this test never ran anywhere, and
+// a live defect on every Chromium target — Chrome/Edge, and the Windows desktop
+// shell's WebView2 — sat behind a green result. The guard now derives the count
+// itself (`viewport/multiClick.ts`), so this is a real regression test again.
 test('Push/Pull: double-click repeats the last committed distance on a different face', async ({
   page,
-  browserName,
 }) => {
-  test.skip(browserName === 'chromium', 'pre-existing Chromium pointerdown.detail gap — see comment above')
   await page.evaluate(() => {
     const h = window.__hew_test!
     h.setCamera({ position: [10, -9, 7], target: [3.5, 1, 1], fovDeg: 50 })

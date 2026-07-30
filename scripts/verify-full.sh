@@ -60,6 +60,30 @@ echo "=== install Playwright chromium (idempotent) ==="
 pnpm --dir app exec playwright install chromium
 
 echo "=== web E2E smoke (chromium) ==="
-pnpm --dir app exec playwright test --project=chromium
+# `--forbid-only` fails the run outright if a `.only` was committed, which
+# would otherwise silently reduce the suite to a single test while still
+# reporting green.
+#
+# The chromium suite must also finish with ZERO skips, enforced below. A
+# skipped test reports green while asserting nothing, and there is no louder
+# signal that it did so: `test.skip()` inside a body turns a failing
+# precondition into a pass, and a `test.skip(browserName === 'chromium', …)`
+# removes the test entirely, because chromium is the ONLY project this gate
+# runs. Both shapes were present in this suite, and the second one hid a real
+# Chromium/WebView2 double-click defect behind a passing gate for as long as it
+# existed. A genuinely unrunnable case belongs behind a capability check that
+# FAILS when the capability is missing, or it belongs deleted — either way it
+# gets argued for here rather than added quietly.
+E2E_LOG="$(mktemp -t hew-e2e-XXXXXX)"
+trap 'rm -f "$E2E_LOG"' EXIT
+pnpm --dir app exec playwright test --project=chromium --forbid-only | tee "$E2E_LOG"
+if grep -qE '[0-9]+ skipped' "$E2E_LOG"; then
+  echo
+  echo "verify-full: FAILED — the chromium E2E run skipped tests:"
+  grep -E '[0-9]+ skipped' "$E2E_LOG"
+  echo "A skipped test reports green while testing nothing. Fix the test, or"
+  echo "state the case for the skip in scripts/verify-full.sh."
+  exit 1
+fi
 
 echo "verify-full: all green"
