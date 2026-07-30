@@ -6,6 +6,7 @@ import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 
 /** ~2° axis tolerance, matching RotateTool's own AXIS_SNAP_TOL_DOT. */
 const TOL = Math.cos((2 * Math.PI) / 180)
@@ -350,6 +351,12 @@ describe('RotateTool — screen-constant disk scaling', () => {
     const desiredPixels = (0.06 * REF_VIEWPORT_H) / tanHalf(REF_FOV_DEG)
     return (desiredPixels * dist * tanHalf(fovDeg)) / viewportH
   }
+  /** `updateDiskScale` now takes a `worldPerPixel` callback (the CameraRig
+   * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
+   * pair — this is what a real Viewport would build from `rig.worldPerPixel`
+   * for a perspective camera at the given fov/viewport. */
+  const wppPerspective = (fovDeg: number, viewportH: number) => (dist: number) =>
+    worldPerPixelPerspective(dist, fovDeg, viewportH)
 
   it('updateDiskScale matches the old DISK_SCREEN_K * dist size at the reference fov/viewport', () => {
     const { tool, preview } = makeTool()
@@ -359,7 +366,7 @@ describe('RotateTool — screen-constant disk scaling', () => {
     const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
     camera.position.set(1, 2, 10) // 10 m straight up from the disk center
 
-    tool.updateDiskScale(camera, REF_VIEWPORT_H)
+    tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, REF_VIEWPORT_H))
 
     const dist = camera.position.distanceTo(disk.position)
     expect(dist).toBeCloseTo(10, 9)
@@ -376,7 +383,7 @@ describe('RotateTool — screen-constant disk scaling', () => {
     for (const fov of [20, 45, 70, 100]) {
       const camera = new THREE.PerspectiveCamera(fov)
       camera.position.set(0, 0, 10)
-      tool.updateDiskScale(camera, REF_VIEWPORT_H)
+      tool.updateDiskScale(camera, wppPerspective(fov, REF_VIEWPORT_H))
       const dist = camera.position.distanceTo(disk.position)
       expect(disk.scale.x).toBeCloseTo(expectedScale(dist, fov, REF_VIEWPORT_H), 9)
     }
@@ -390,27 +397,46 @@ describe('RotateTool — screen-constant disk scaling', () => {
     camera.position.set(0, 0, 10)
 
     for (const viewportH of [400, 720, 1200]) {
-      tool.updateDiskScale(camera, viewportH)
+      tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, viewportH))
       const dist = camera.position.distanceTo(disk.position)
       expect(disk.scale.x).toBeCloseTo(expectedScale(dist, REF_FOV_DEG, viewportH), 9)
     }
   })
 
-  it('is a no-op for a non-perspective camera or a degenerate viewport height', () => {
+  it('is a no-op only when no disk is shown — a degenerate worldPerPixel still yields a defined (zero) size rather than leaving the old scale untouched', () => {
     const { tool, preview } = makeTool()
     tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
     const disk = diskGroup(preview)
-    const before = disk.scale.x
-
-    const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
-    ortho.position.set(0, 0, 10)
-    tool.updateDiskScale(ortho, REF_VIEWPORT_H)
-    expect(disk.scale.x).toBe(before)
 
     const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
     camera.position.set(0, 0, 10)
-    tool.updateDiskScale(camera, 0)
-    expect(disk.scale.x).toBe(before)
+    // A degenerate (zero) viewport height's worldPerPixel is 0 (see
+    // worldPerPixelPerspective) — the disk collapses to size 0 deterministically,
+    // rather than the old guard's "leave the previous scale untouched" (which
+    // could leave an arbitrary stale size on screen).
+    tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, 0))
+    expect(disk.scale.x).toBe(0)
+  })
+
+  it('DESIGN CHANGE: works under an orthographic (parallel-projection) camera too — no longer silently hidden', () => {
+    // Before Phase 1, an `instanceof PerspectiveCamera` guard made this a
+    // no-op under ortho — the protractor disk would silently vanish the
+    // moment the user toggled Parallel Projection. `worldPerPixel` is
+    // supplied by the caller (CameraRig.worldPerPixel under the hood), so the
+    // tool itself no longer has (or needs) any projection-specific branch.
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    const disk = diskGroup(preview)
+
+    const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
+    ortho.position.set(0, 0, 10)
+    const frustumHeight = 4 // top(1) - bottom(-1), pre-scaled for this test
+    const wpp = (_dist: number) => worldPerPixelOrtho(frustumHeight, 1, REF_VIEWPORT_H)
+    tool.updateDiskScale(ortho, wpp)
+
+    const expected = (0.06 * REF_VIEWPORT_H) / tanHalf(REF_FOV_DEG) * wpp(0) / 2
+    expect(disk.scale.x).toBeCloseTo(expected, 9)
+    expect(disk.scale.x).toBeGreaterThan(0)
   })
 })
 

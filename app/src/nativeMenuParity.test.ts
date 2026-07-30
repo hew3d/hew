@@ -69,19 +69,35 @@ describe('native menu parity', () => {
     // id string (and the dispatch arm) in the file, so the two scrapes
     // above stay green while the item silently vanishes from the menu —
     // extract each id's binding variable and require its attachment.
+    //
+    // Most tool ids bind via `check_item` (the active-tool radio group);
+    // Zoom Window is the one exception — a plain, non-checkable
+    // `MenuItemBuilder::with_id(…)` build, because that mode always springs
+    // back to Select right after its drag and a persistent checkmark would
+    // be misleading (matches the web MenuBar's plain item for it). Either
+    // binding shape is accepted here; both still must be attached.
     const missing: string[] = []
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
-      const binding = new RegExp(
-        `let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"${id}"`,
-        's',
-      ).exec(source)
-      expect(binding, `no check_item binding found for ${tool} (${id})`).not.toBeNull()
+      const binding =
+        new RegExp(`let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"${id}"`, 's').exec(source) ??
+        new RegExp(`let\\s+(\\w+)\\s*=\\s*MenuItemBuilder::with_id\\("${id}"`, 's').exec(source)
+      expect(binding, `no check_item/MenuItemBuilder binding found for ${tool} (${id})`).not.toBeNull()
       const variable = (binding as RegExpExecArray)[1]
       if (!source.includes(`.item(&${variable})`)) {
         missing.push(`${tool} (${id} -> ${variable})`)
       }
     }
     expect(missing, 'menu items built but never attached to a SubmenuBuilder chain').toEqual([])
+  })
+
+  it('offers no standalone Field of View item on the native menu (camera-playtest2.md §2 — removed, not hidden)', () => {
+    // A positive absence check, not a loosened/dropped assertion — Kurt's
+    // playtest call was to remove the item entirely (fov stays reachable
+    // only through Zoom's typed entry and Shift-drag/wheel). Checks BOTH
+    // the id (`cam-field-of-view`) and the human label, so a re-add under
+    // either spelling fails this test.
+    expect(source).not.toContain('cam-field-of-view')
+    expect(source).not.toContain('Field of View')
   })
 })
 

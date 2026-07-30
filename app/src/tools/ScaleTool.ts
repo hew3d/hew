@@ -64,7 +64,7 @@ import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
-import { screenConstantWorldHalf, tanHalfFovRad } from '../viewport/math'
+import { screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { nonUniformScaleAboutPivot, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
@@ -273,14 +273,13 @@ export class ScaleTool implements Tool {
    * each one holds a constant on-screen size (see that method's doc). Null
    * when the gizmo isn't showing. */
   private gizmoGripMeshes: THREE.Mesh[] | null = null
-  /** The camera's half-vertical-FOV tangent and the canvas height from the
-   * most recent `updateGripScale` tick — cached so `_pickGrip` (which only
-   * has a ray, not the camera) can reproduce the SAME on-screen size for
-   * pick tolerance. Null before the first tick (unit tests never drive a
-   * real render loop) — `_pickToleranceAt` falls back to a fixed reasonable
-   * tolerance then. */
-  private _pickTanHalfFov: number | null = null
-  private _pickViewportHeight: number | null = null
+  /** The `worldPerPixel` callback from the most recent `updateGripScale` tick
+   * — cached so `_pickGrip` (which only has a ray, not the camera/rig) can
+   * reproduce the SAME on-screen size for pick tolerance, in either
+   * projection (docs/design/camera.md §1). Null before the first tick (unit
+   * tests never drive a real render loop) — `_pickToleranceAt` falls back to
+   * a fixed reasonable tolerance then. */
+  private _pickWorldPerPixel: ((dist: number) => number) | null = null
 
   /** Auto-select fallback, injected by the Viewport (see MoveTool's). */
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
@@ -745,54 +744,53 @@ export class ScaleTool implements Tool {
    *
    * Each grip's local geometry is a unit cube (half-extent 1); its world
    * half-extent is set to `GRIP_SCREEN_PX` pixels' worth of world space AT
-   * ITS OWN DISTANCE from the camera via `screenConstantWorldHalf`
-   * (`viewport/math.ts`) — the standard perspective-projection inverse:
-   * `worldHalf = desiredPixels · dist · tan(fov/2) / viewportHeight`. `dist`
-   * is the Euclidean camera→grip distance, not view-space depth, so a grip
-   * off the view axis by angle θ renders ≈1/cosθ oversized (~8% worst case
-   * at 45° fov) — a deliberate approximation, exact on-axis, and
-   * self-consistent with `_pickToleranceAt` (render and pick share it, so
-   * grips feel exactly as big as they look). Every grip ends up (near) the
-   * same apparent size on screen no matter how far it is from the camera or
-   * how big the selection's box is. No-op when the gizmo isn't showing or
-   * the camera isn't a `PerspectiveCamera` (the only kind this app ever
-   * creates — see Viewport.tsx). RotateTool/ProtractorTool/SliceTool/
-   * SectionPlaneTool's single-disk widgets share this same helper.
+   * ITS OWN DISTANCE from the camera via `screenConstantWorldHalfFromWorldPerPixel`
+   * (`viewport/math.ts`), fed a `worldPerPixel` callback derived from the
+   * active `CameraRig` — projection-agnostic (docs/design/camera.md §1):
+   * `dist` is the Euclidean camera→grip distance, not view-space depth, so a
+   * grip off the view axis by angle θ renders ≈1/cosθ oversized under
+   * perspective (~8% worst case at 45° fov; exactly on-axis under parallel,
+   * where apparent size doesn't depend on distance at all) — a deliberate
+   * approximation, exact on-axis, and self-consistent with
+   * `_pickToleranceAt` (render and pick share it, so grips feel exactly as
+   * big as they look). Every grip ends up (near) the same apparent size on
+   * screen no matter how far it is from the camera or how big the
+   * selection's box is. No-op when the gizmo isn't showing. A former
+   * `instanceof PerspectiveCamera` guard here silently hid every grip under
+   * parallel projection — exactly the bug design closes.
+   * RotateTool/ProtractorTool/SliceTool/SectionPlaneTool's single-disk
+   * widgets share this same helper.
    */
-  updateGripScale(camera: THREE.Camera, viewportHeight: number): void {
-    if (this.gizmoGripMeshes === null || viewportHeight <= 0) return
-    if (!(camera instanceof THREE.PerspectiveCamera)) return
-    const tanHalfFov = tanHalfFovRad(camera.fov)
-    this._pickTanHalfFov = tanHalfFov
-    this._pickViewportHeight = viewportHeight
+  updateGripScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    if (this.gizmoGripMeshes === null) return
+    this._pickWorldPerPixel = worldPerPixel
     for (const mesh of this.gizmoGripMeshes) {
       const dist = camera.position.distanceTo(mesh.position)
-      const half = screenConstantWorldHalf(GRIP_SCREEN_PX, dist, tanHalfFov, viewportHeight, MIN_GRIP_WORLD_HALF)
+      const half = screenConstantWorldHalfFromWorldPerPixel(GRIP_SCREEN_PX, worldPerPixel(dist), MIN_GRIP_WORLD_HALF)
       mesh.scale.setScalar(half)
     }
   }
 
   /** The pick tolerance (world units) at `pos`, matching what `pos` actually
    * renders at on screen right now — reproduces `updateGripScale`'s formula
-   * using the camera info it cached last tick, and `ray.origin` as a stand-in
-   * for the camera position (the ray originates at the near clip plane, ~1 cm
-   * from the eye — negligible next to any real grip distance). Falls back to
-   * a fixed placeholder tolerance before the first tick ever runs — in unit
-   * tests (jsdom never drives a real render loop), and in one narrow real-app
-   * path: the session's FIRST Scale click when it auto-selects and probes the
-   * just-revealed gizmo synchronously, before any render tick has cached the
-   * camera (safe — the fallback is close to the old fixed clamp). */
+   * using the `worldPerPixel` callback it cached last tick, and `ray.origin`
+   * as a stand-in for the camera position (the ray originates at the near
+   * clip plane, ~1 cm from the eye — negligible next to any real grip
+   * distance). Falls back to a fixed placeholder tolerance before the first
+   * tick ever runs — in unit tests (jsdom never drives a real render loop),
+   * and in one narrow real-app path: the session's FIRST Scale click when it
+   * auto-selects and probes the just-revealed gizmo synchronously, before any
+   * render tick has cached the callback (safe — the fallback is close to the
+   * old fixed clamp). */
   private _pickToleranceAt(ray: Ray, pos: Vec3): number {
-    if (this._pickTanHalfFov === null || this._pickViewportHeight === null) {
+    if (this._pickWorldPerPixel === null) {
       return FALLBACK_GRIP_HALF_M * GRIP_PICK_MULTIPLIER
     }
     const dx = pos[0] - ray.origin[0], dy = pos[1] - ray.origin[1], dz = pos[2] - ray.origin[2]
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-    const half = screenConstantWorldHalf(
+    const half = screenConstantWorldHalfFromWorldPerPixel(
       GRIP_SCREEN_PX,
-      dist,
-      this._pickTanHalfFov,
-      this._pickViewportHeight,
+      this._pickWorldPerPixel(dist),
       MIN_GRIP_WORLD_HALF,
     )
     return half * GRIP_PICK_MULTIPLIER

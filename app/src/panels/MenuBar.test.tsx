@@ -200,6 +200,17 @@ describe('MenuBar', () => {
     expect(onSelectTool).toHaveBeenCalledWith('Push/Pull')
   })
 
+  it('offers no standalone Field of View entry in the Camera menu (camera-playtest2.md §2 — removed, not hidden)', () => {
+    render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /camera/i }))
+    // The Camera dropdown IS open at this point (Zoom Window/Zoom Extents,
+    // its siblings in the same group, prove that) — this isn't a false
+    // negative from querying a closed menu.
+    expect(screen.getByText('Zoom Window')).toBeInTheDocument()
+    expect(screen.queryByText('Field of View')).not.toBeInTheDocument()
+    expect(screen.queryByText(/field of view/i)).not.toBeInTheDocument()
+  })
+
   // --- Rail ↔ menu parity ---
 
   it('every registry tool is reachable from the Draw/Tools/Camera dropdowns (no rail↔menu drift)', () => {

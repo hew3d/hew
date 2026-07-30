@@ -83,6 +83,10 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
   'Orbit': 'tool-orbit',
   'Pan': 'tool-pan',
   'Zoom': 'tool-zoom',
+  'Position Camera': 'tool-position-camera',
+  'Walk': 'tool-walk',
+  'Look Around': 'tool-look-around',
+  'Zoom Window': 'tool-zoom-window',
 }
 
 const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
@@ -107,6 +111,10 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Orbit': 'Rotate the camera around the model.',
   'Pan': 'Slide the camera parallel to the view plane.',
   'Zoom': 'Move the camera closer to or farther from the model.',
+  'Position Camera': 'Click to stand at a point facing your view, or drag to look toward where you release.',
+  'Walk': 'Drag to walk forward/back and turn; hold Shift to strafe and change height.',
+  'Look Around': 'Drag to look around from a fixed eye position.',
+  'Zoom Window': 'Drag a rectangle to zoom the camera onto it, then return to Select.',
 }
 
 /** One-line instructor hint for a tool, for the status bar's active-tool line
@@ -134,6 +142,9 @@ const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
   'Protractor': ['angle'],
   'Section Plane': ['section', 'cut', 'cross-section', 'clip', 'inside', 'wall thickness'],
   'Edit Vertex': ['vertex', 'reshape'],
+  'Position Camera': ['stand', 'eye height', 'walkthrough', 'first person'],
+  'Walk': ['walkthrough', 'first person', 'fps'],
+  'Look Around': ['mouselook', 'walkthrough', 'first person'],
 }
 
 function toolEntries(): PaletteEntry[] {
@@ -174,6 +185,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'toggle-guides', label: 'Toggle Guides', description: 'Show or hide construction guides.', group: 'Actions' },
   { id: 'toggle-section-active', label: 'Section Plane', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
   { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
+  { id: 'toggle-parallel-projection', label: 'Parallel Projection', description: 'Toggle between perspective and parallel (orthographic) projection.', group: 'Actions', synonyms: ['orthographic', 'perspective', 'ortho'] },
   { id: 'view-top', label: 'Standard View: Top', description: 'Look straight down at the model.', group: 'Actions' },
   { id: 'view-bottom', label: 'Standard View: Bottom', description: 'Look straight up at the model.', group: 'Actions' },
   { id: 'view-front', label: 'Standard View: Front', description: 'Look at the model from the front.', group: 'Actions' },

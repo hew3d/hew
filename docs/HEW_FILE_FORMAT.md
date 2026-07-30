@@ -109,7 +109,14 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   ],
   "roots": [ {"kind":"object","id":0}, {"kind":"instance","id":0} ],
   "tags": [ {"path": ["Architecture", "Walls"]},
-            {"path": ["Mock Walls"], "hidden": true} ]
+            {"path": ["Mock Walls"], "hidden": true} ],
+  "camera": {                        // v13+; omitted entirely if never saved
+    "projection": "perspective",     // "perspective" | "parallel"
+    "fov_deg": 45.0,
+    "eye": [4.0, -6.0, 3.0],
+    "target": [0.0, 0.0, 0.0],
+    "up": [0.0, 0.0, 1.0]
+  }
 }
 ```
 
@@ -133,6 +140,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 - **`roots`** — the document's top-level nodes, in display order ().
 - **`tags`** — the tag metadata registry: known tag paths with their
   hidden-by-default flags.
+- **`camera`** (v13+, optional) — the camera's working view at last save.
 
 ### `NodeRef`
 
@@ -181,16 +189,26 @@ of the manifest:
 | `sketches[].curves` | 10 | empty list (every curve chain is identity-only, no analytic definition) |
 | `sketches[].curves[].kind` | 12 | `"circle"` — the chain's edges are chord facets approximating the stored circle, which is what a `curves[]` entry meant at v10/v11 |
 | `sketches[].owner` | 13 | absent — world-owned (the only kind of sketch before v13) |
+| `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
 
-`sketches[].owner` is version-gated the same way the retired fields below
-are (just in the opposite direction — introduced, not retired): the gate is
-on the declared `format_version`, not on the field's presence. A file that
-declares a version **older than 13** but still carries an `owner` field is
-malformed for its own declared version and MUST be rejected with a typed
-error, never honored — a pre-v13 writer could never have produced it, and
-silently attaching a sketch to a definition on the strength of a field that
-version claims not to have would be exactly the silent repair this format
-refuses everywhere else.
+Both `sketches[].owner` and `camera` landed in the same v13 bump (two
+efforts in flight at once) and are version-gated the same way the retired
+fields below are (just in the opposite direction — introduced, not
+retired): the gate is on the declared `format_version`, not on the field's
+presence.
+
+- A file that declares a version **older than 13** but still carries an
+  `owner` field is malformed for its own declared version and MUST be
+  rejected with a typed error, never honored — a pre-v13 writer could never
+  have produced it, and silently attaching a sketch to a definition on the
+  strength of a field that version claims not to have would be exactly the
+  silent repair this format refuses everywhere else.
+- Likewise, it is malformed for a file to declare `format_version < 13` and
+  STILL carry a `camera` block (no legitimate writer older than v13 ever
+  emitted one), and a conforming reader MUST reject such a file with a typed
+  error rather than accept "an early camera" — reject-not-repair, the same
+  posture the `consumed`-list check below applies in the opposite
+  direction.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -626,6 +644,54 @@ state (a per-node "Hide", covering `.skp` hidden groups/components on
 import and the UI's per-node eye toggle). Hiding a group or instance hides
 its whole subtree in the UI. The same rule applies: a reader MUST NOT drop
 user-hidden content.
+
+### 4.10 Camera
+
+`camera` (manifest v13+, optional) is the camera's working view at the
+moment the document was last saved (docs/design/camera.md §5): which
+projection was active, its field of view, and where the eye/target/up sat,
+in world space.
+
+```jsonc
+"camera": {
+  "projection": "perspective",   // "perspective" | "parallel"
+  "fov_deg": 45.0,                // perspective vertical fov, degrees
+  "eye": [4.0, -6.0, 3.0],
+  "target": [0.0, 0.0, 0.0],
+  "up": [0.0, 0.0, 1.0]
+}
+```
+
+- **`projection`** — `"perspective"` or `"parallel"`; any other value is a
+  fatal, typed load error.
+- **`fov_deg`** — the perspective vertical field of view in degrees. Present
+  (and round-tripped) even when `projection` is `"parallel"`, where it is
+  currently meaningless to the ortho frustum itself but is what the camera
+  returns to on a later toggle back to perspective — mirroring the app's
+  own `CameraRig`, which keeps a single persistent fov across projection
+  toggles rather than one per projection.
+- **`eye`**, **`target`**, **`up`** — world-space xyz triples: the camera
+  position, the point it looks toward, and its up direction. A non-finite
+  coordinate (in `fov_deg` or any of the three triples) is a fatal, typed
+  load error, never clamped or defaulted.
+
+**Absence is the steady state, not an edge case.** A document that never
+explicitly saved a camera view — every file from before this version, and
+a v13+ document whose app never called the equivalent of
+`Document::set_camera_state` — has no `camera` block at all. A reader MUST
+treat its absence as "apply today's home framing" (whatever the app's
+default startup view is), never as an error and never by manufacturing a
+placeholder view.
+
+**Not undoable.** Unlike every other piece of document state this format
+persists, the camera view is deliberately **outside the document's
+undo/redo history** — changing your viewpoint is not a model edit, matching
+how SketchUp itself treats the camera. An app sets it directly (mirroring
+how the tag-visibility registry and per-node user-hidden flags above are
+also persisted but not undoable) and typically does so once, right before
+a save, so the persisted view reflects "what you were looking at when you
+last saved" rather than every transient camera position visited along the
+way.
 
 ## 5. Versioning policy
 

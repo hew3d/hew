@@ -17,7 +17,7 @@
  *   - : context path navigation, group-aware picking
  */
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Line2 } from 'three/examples/jsm/lines/Line2.js'
@@ -56,15 +56,36 @@ import { SliceTool } from '../tools/SliceTool'
 import { SectionPlaneTool } from '../tools/SectionPlaneTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
 import { TextPlaceTool, type TextPlacement } from '../tools/TextPlaceTool'
+import { PositionCameraTool } from '../tools/PositionCameraTool'
+import { LookAroundTool } from '../tools/LookAroundTool'
+import { WalkTool } from '../tools/WalkTool'
+import { DEFAULT_EYE_HEIGHT_M, type V3 as WalkV3 } from '../tools/cameraWalkMath'
 import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
-import type { Ray } from './math'
-import { axisDashGapWorld, tanHalfFovRad } from './math'
+import type { Ray, ApertureBasis } from './math'
+import { axisDashGapWorldFromWorldPerPixel, orthoZoomBounds, tanHalfFovRad } from './math'
+import { CameraRig, type Projection, isBehindCamera } from './cameraRig'
+import { fovReadoutText, activeCameraToolForName } from './fovReadout'
+import { parseFovEntry } from './fovUnits'
+import {
+  beginFovDrag,
+  decideFovDragMode,
+  fovAfterWheel,
+  fovDragValue,
+  type FovDragState,
+} from './fovDrag'
+import { shouldSkipToolSwitch } from './toolSwitchGuard'
 import type { Snap, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
+import {
+  beginZoomWindowDrag as beginZoomWindowDragState,
+  updateZoomWindowDrag as updateZoomWindowDragState,
+  finishZoomWindowDrag as finishZoomWindowDragRect,
+  type ZoomWindowDragState,
+} from './zoomWindowDrag'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
@@ -191,6 +212,27 @@ interface Props {
   onPrecisionChange?: (active: boolean) => void
   /** Active tool name from parent (undefined = parent doesn't control) */
   activeTool?: string
+  /** Bumped by the parent on every EXPLICIT camera-tool selection so a
+   * re-choice of an already-`activeTool`-valued entry (stale because the
+   * real tool drifted out from under it — an internal auto-handoff or
+   * Escape, see App.tsx's `activateTool`) still re-applies: included in
+   * the tool-switch effect's dependency array below purely to force it to
+   * re-run even when `activeTool` itself hasn't changed. */
+  activeToolSeq?: number
+  /**
+   * Fired at the end of switchToolRef's single entry point on EVERY
+   * invocation — not just ones the parent itself requested — with the tool
+   * that just actually became active. This is what makes `activeTool`
+   * truthful for the internal transitions `activeToolSeq` above works
+   * around otherwise: Position Camera's auto-handoff to Look Around, any
+   * camera tool's Escape-to-Select, and every other switchToolRef caller.
+   * The parent's handler should skip the update when the name already
+   * matches its current `activeTool` — both because that's a harmless no-op
+   * (React already bails on an unchanged value) and because this callback
+   * must never fight `activeToolSeq`'s forced-reapply purpose: it only
+   * FOLLOWS what Viewport just did, it never itself requests a switch.
+   */
+  onInternalToolChange?: (toolName: string) => void
   /** Active context path. Empty = top level. */
   activeContext?: NodeRef[]
   /** Selected nodes (ordered; index 0 = primary). */
@@ -250,6 +292,21 @@ interface Props {
    *  default / unpaint. The viewport keeps a stable ref so a paint tool
    *  instantiated inside the effect always sees the latest value. */
   currentMaterialId?: bigint
+  /** Fired whenever the active projection changes (mount, and every
+   * `toggleProjection` call) — the parent's Camera ▸ Parallel Projection
+   * checkbox state derives from this rather than polling `getProjection`
+   * (docs/design/camera.md §1). */
+  onProjectionChange?: (projection: Projection) => void
+  /**
+   * Fired when a Viewport-internal ONE-SHOT gesture finishes and the tool
+   * should spring back to Select without the parent having initiated the
+   * change — currently just Zoom Window (design §3: "springs back to
+   * Select", the drag-to-move one-shot's precedent, but that one never
+   * actually LEAVES Select at the app-tool-state level the way Zoom Window
+   * does, so this callback is what closes that gap). The parent should treat
+   * this exactly like a user clicking Select in the rail/menu.
+   */
+  onToolReverted?: () => void
 }
 
 /** Imperative handle the viewport exposes to the parent. */
@@ -423,6 +480,30 @@ export interface ViewportApi {
     fovDeg: number
   }
   /**
+   * The camera's full working view (projection + fov + eye/target/up),
+   * for document-save persistence (docs/design/camera.md §5) — see
+   * `getCameraState`'s doc comment for how this differs from `getCamera`.
+   */
+  getCameraState: () => {
+    projection: Projection
+    fovDeg: number
+    eye: [number, number, number]
+    target: [number, number, number]
+    up: [number, number, number]
+  }
+  /**
+   * Restores a full camera view saved by `getCameraState` — the document-
+   * load complement (design §5). Handles a projection change either
+   * direction.
+   */
+  applyCameraState: (state: {
+    projection: Projection
+    fovDeg: number
+    eye: [number, number, number]
+    target: [number, number, number]
+    up: [number, number, number]
+  }) => void
+  /**
    * Re-pose the camera at the default home view, `scale`× the meter-scale
    * distance (the welcome screen's unit choice re-frames a blank document —
    * see settings/units.ts homeFramingScale). Callers guard that the scene is
@@ -496,13 +577,37 @@ export interface ViewportApi {
    * Resolves null when the model has no solids.
    */
   export3mf: () => Promise<ThreeMfBuildResult | null>
+  /**
+   * Camera ▸ Parallel Projection (docs/design/camera.md §1): toggles between
+   * perspective and parallel projection, visually stable at the orbit
+   * target. `onProjectionChange` (a Props callback) reports the result so
+   * the parent's checkbox state never needs a separate `getProjection` poll.
+   */
+  toggleProjection: () => void
+  /** The active projection right now — for callers that need it
+   * synchronously (e.g. gating a fov-dependent affordance under parallel
+   * projection, which has no lens) rather than waiting on the next
+   * `onProjectionChange` callback. */
+  getProjection: () => Projection
+  /**
+   * Set the perspective vertical fov directly (degrees, clamped to
+   * `[MIN_FOV_DEG, MAX_FOV_DEG]` — `cameraRig.ts`). The normal path is typing
+   * into the Zoom tool's VCB (design §2); this is the equivalent direct/test
+   * entry point. No-op on the orthographic frustum — fov is a
+   * perspective-only property that persists across a projection toggle.
+   */
+  setFov: (deg: number) => void
 }
 
-/** Build a normalised world-space ray from NDC (-1..1) coords and a camera */
+/** Build a normalised world-space ray from NDC (-1..1) coords and a camera.
+ * Projection-agnostic: `Vector3.unproject` works identically for a
+ * perspective or orthographic camera (docs/design/camera.md §1) — picking
+ * needed no change at all when Parallel Projection landed, only this type
+ * widening. */
 function makeWorldRay(
   ndcX: number,
   ndcY: number,
-  camera: THREE.PerspectiveCamera,
+  camera: THREE.Camera,
 ): Ray {
   const near = new THREE.Vector3(ndcX, ndcY, -1).unproject(camera)
   const far = new THREE.Vector3(ndcX, ndcY, 1).unproject(camera)
@@ -674,9 +779,19 @@ function buildAxisLine(
  * general technique — same one `ScaleTool.updateGripScale` uses per-grip).
  * `dashSize`/`gapSize` are plain `LineMaterial` uniforms (not a `dashed`
  * flag flip), so writing them every frame recompiles nothing.
+ *
+ * Projection-agnostic (docs/design/camera.md §1): under perspective the
+ * side-plane bound GROWS with view-space depth (a true cone,
+ * `bound(-z) = tanH·(-z)`); under parallel projection it's a CONSTANT
+ * half-width/height independent of depth (a box, not a cone — apparent
+ * size doesn't track distance under ortho at all). Folding both into
+ * `hBoundBase + hBoundSlope·(-bz)` (ortho: `hBoundSlope = 0`, so the
+ * depth-dependent term drops out entirely) lets the per-child plane math
+ * below stay a single formula either way — no `instanceof PerspectiveCamera`
+ * branch in the clip loop itself.
  */
 const FRUSTUM_SLACK = 1.5
-function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera, viewportHeightPx: number): void {
+function clampOriginAxes(group: THREE.Group, rig: CameraRig, viewportHeightPx: number): void {
   // View transform in float64: three stores matrix elements and camera pose
   // as JS numbers, so composing the two matrix-vector products here (rather
   // than in the f32 vertex shader) is what buys the precision. Recompute the
@@ -684,6 +799,7 @@ function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera, vi
   // only refreshed by `renderer.render`, i.e. it still holds LAST frame's
   // pose here, and a stale view would misclip the very frame captured right
   // after a programmatic `setCamera` jump.
+  const camera = rig.active
   camera.updateMatrixWorld()
   const m = _axisView.copy(camera.matrixWorld).invert().elements
   // View-space position of the world origin (the shared start of every half).
@@ -693,20 +809,35 @@ function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera, vi
   // Near margin: comfortably past the near plane, growing with camera
   // distance so the float noise floor (ulps of camera/axis coordinate
   // magnitudes) stays orders of magnitude below one depth/pixel quantum at
-  // every scale.
-  const margin = Math.max(4 * camera.near, 0.02 * camera.position.length())
-  const tanV = Math.tan((camera.fov * Math.PI) / 360) * FRUSTUM_SLACK
-  const tanH = tanV * camera.aspect
+  // every scale. `rig.perspective.near` is always current: CameraRig keeps
+  // both cameras' near/far synced through every toggle.
+  const margin = Math.max(4 * rig.perspective.near, 0.02 * camera.position.length())
 
-  // Screen-constant dash/gap sizing for the negative halves: same
-  // camera-distance-to-origin reference the near `margin` above uses (see
-  // `axisDashGapWorld`'s doc comment, math.ts, for why).
-  const { dashSize: dashWorld, gapSize: gapWorld } = axisDashGapWorld(
+  let hBoundBase: number, hBoundSlope: number, vBoundBase: number, vBoundSlope: number
+  if (rig.projection === 'perspective') {
+    const tanV = Math.tan((rig.perspective.fov * Math.PI) / 360) * FRUSTUM_SLACK
+    const tanH = tanV * rig.perspective.aspect
+    hBoundBase = tanH * -az
+    hBoundSlope = tanH
+    vBoundBase = tanV * -az
+    vBoundSlope = tanV
+  } else {
+    const o = rig.orthographic
+    hBoundBase = ((o.right - o.left) / (2 * o.zoom)) * FRUSTUM_SLACK
+    vBoundBase = ((o.top - o.bottom) / (2 * o.zoom)) * FRUSTUM_SLACK
+    hBoundSlope = 0
+    vBoundSlope = 0
+  }
+
+  // Screen-constant dash/gap sizing for the negative halves, via the active
+  // projection's worldPerPixel (docs/design/camera.md §1) — same
+  // camera-distance-to-origin reference the near `margin` above uses for
+  // perspective; ortho's worldPerPixel ignores the distance argument
+  // entirely (distance-independent by definition).
+  const { dashSize: dashWorld, gapSize: gapWorld } = axisDashGapWorldFromWorldPerPixel(
     AXIS_DASH_SCREEN_PX,
     AXIS_GAP_SCREEN_PX,
-    camera.position.length(),
-    tanHalfFovRad(camera.fov),
-    viewportHeightPx,
+    rig.worldPerPixel(camera.position.length(), viewportHeightPx),
     AXIS_DASH_MIN_WORLD,
   )
 
@@ -732,16 +863,16 @@ function clampOriginAxes(group: THREE.Group, camera: THREE.PerspectiveCamera, vi
     // each linear in t (view space: camera at 0 looking down -z, so the
     // depth in front is -z):
     //   depth:  -z(t) ≥ margin
-    //   sides:  |x(t)| ≤ tanH·(-z(t)),  |y(t)| ≤ tanV·(-z(t))
+    //   sides:  |x(t)| ≤ hBound(-z(t)),  |y(t)| ≤ vBound(-z(t))
     let t0 = 0
     let t1 = 1
     // Each constraint as g(t) = c + d·t ≥ 0.
     const planes: Array<[number, number]> = [
       [-az - margin, -bz],
-      [-az * tanH - ax, -bz * tanH - bx],
-      [-az * tanH + ax, -bz * tanH + bx],
-      [-az * tanV - ay, -bz * tanV - by],
-      [-az * tanV + ay, -bz * tanV + by],
+      [hBoundBase - ax, hBoundSlope * -bz - bx],
+      [hBoundBase + ax, hBoundSlope * -bz + bx],
+      [vBoundBase - ay, vBoundSlope * -bz - by],
+      [vBoundBase + ay, vBoundSlope * -bz + by],
     ]
     for (const [c, d] of planes) {
       if (d === 0) {
@@ -1277,6 +1408,8 @@ export default function Viewport({
   onToolHint,
   onPrecisionChange,
   activeTool: activeToolProp,
+  activeToolSeq: activeToolSeqProp,
+  onInternalToolChange,
   activeContext = [],
   selectedIds = [],
   activeLitSet = null,
@@ -1294,6 +1427,8 @@ export default function Viewport({
   onCameraDragChange,
   onHoverSketchRegionChange,
   currentMaterialId = MATERIAL_SENTINEL,
+  onProjectionChange,
+  onToolReverted,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -1334,6 +1469,12 @@ export default function Viewport({
   onCameraDragChangeRef.current = onCameraDragChange
   const onHoverSketchRegionChangeRef = useRef(onHoverSketchRegionChange)
   onHoverSketchRegionChangeRef.current = onHoverSketchRegionChange
+  const onProjectionChangeRef = useRef(onProjectionChange)
+  onProjectionChangeRef.current = onProjectionChange
+  const onToolRevertedRef = useRef(onToolReverted)
+  onToolRevertedRef.current = onToolReverted
+  const onInternalToolChangeRef = useRef(onInternalToolChange)
+  onInternalToolChangeRef.current = onInternalToolChange
   // Latest context path, readable inside the stable event closures.
   const activeContextRef = useRef<NodeRef[]>(activeContext)
   // Latest selected ids, readable inside the stable event closures.
@@ -1367,9 +1508,29 @@ export default function Viewport({
   // switch them from outside (via activeToolProp). Use a ref for the switch fn.
   const switchToolRef = useRef<((toolName: string) => void) | null>(null)
 
+  // The tool-switch effect's last-applied guard (see `shouldSkipToolSwitch`'s
+  // doc comment): the `activeToolSeqProp` value as of the last run that
+  // actually invoked `switchToolRef`, so a later run can tell an explicit
+  // forced reapply (the seq bumped) apart from an echoed prop update that
+  // merely re-reports a transition the tool controller already made.
+  const lastAppliedToolSeqRef = useRef<number | undefined>(undefined)
+  // The `toolName` argument `switchToolRef` was last invoked with — set on
+  // EVERY invocation (prop-driven switch, internal handoff, Escape revert,
+  // one-shot), inside `switchToolRef.current` itself below. This, NOT
+  // `toolController.activeToolName`, is what the guard compares the
+  // requested name against: Orbit/Pan/Zoom/Zoom Window/default all call
+  // `toolController.resetToSelect()` (see the switch body), so the
+  // controller reads 'Select' while one of those camera tools is active —
+  // comparing against the controller's name made the guard fire for a
+  // completely unrelated later switch TO 'Select' (e.g. the rail's Select
+  // button while Orbit is active), skipping the entire switch body and
+  // leaving the viewport wedged in camera mode while the rail showed
+  // Select.
+  const lastAppliedToolNameRef = useRef<string | undefined>(undefined)
+
   // Last pointer ray + viewport params cached so key-driven re-lock can
   // immediately re-resolve snap without waiting for the next pointer move.
-  const lastRayRef = useRef<{ ray: import('./math').Ray; viewportH: number; fovY: number } | null>(null)
+  const lastRayRef = useRef<{ ray: import('./math').Ray; viewportH: number; basis: ApertureBasis } | null>(null)
 
   // Last pointer NDC position, captured on every `onPointerMove` regardless of
   // any early-return below it (camera-nav mode, button held, ...) — unlike
@@ -1452,15 +1613,35 @@ export default function Viewport({
 
     const threeScene = new THREE.Scene()
 
-    const camera = new THREE.PerspectiveCamera(45, el.clientWidth / el.clientHeight, 0.01, 100)
+    // CameraRig owns BOTH a perspective and an orthographic camera and keeps
+    // them pose-synchronized (docs/design/camera.md §1); `camera` is always
+    // whichever is currently live (`rig.active`), reassigned by
+    // `toggleProjection` below. Kept as its own binding (rather than every
+    // call site reading `rig.active` directly) so the ~100 existing
+    // raycasting/render/pose call sites throughout this effect needed NO
+    // change beyond this declaration and the projection-specific ones this
+    // effort converts explicitly.
+    const rig = new CameraRig(el.clientWidth / el.clientHeight, 0.01, 100)
+    let camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = rig.active
     // Person-scale default: frames a ~2–3 m region; classic SketchUp 3/4 angle.
     // Distance ≈ 4.7 m; a 1.8 m figure reads as substantial, not dwarfed.
     // Scaled down for small-scale display units (cm/mm/inches imply a small
     // model — see homeFramingScale); the direction is always the same 3/4 view.
     const homeScale = homeFramingScale(getLengthUnit())
-    camera.position.set(3.5 * homeScale, -3.0 * homeScale, 2.5 * homeScale)
-    camera.up.set(0, 0, 1)
-    camera.lookAt(0, 0, 0)
+    rig.perspective.position.set(3.5 * homeScale, -3.0 * homeScale, 2.5 * homeScale)
+    rig.perspective.up.set(0, 0, 1)
+    rig.perspective.lookAt(0, 0, 0)
+
+    /**
+     * The `ApertureBasis` (math.ts) every `snapService.resolve` call site
+     * below builds from, instead of a raw `camera.fov` — projection-aware
+     * (docs/design/camera.md §1, "Snap aperture"): a cone under perspective,
+     * a constant-world-radius cylinder under parallel projection (no
+     * distance parameter needed — `CameraRig.apertureBasis`'s own doc).
+     */
+    function apertureBasis(): ApertureBasis {
+      return rig.apertureBasis(el.clientHeight)
+    }
 
     // Lights — theme-aware intensities. Dark keeps the original dim rig: its
     // low floor is what makes the dark viewport read as deliberately muted.
@@ -1630,18 +1811,41 @@ export default function Viewport({
     const toolController = new ToolController(wasmScene, handleSelect)
     toolControllerRef.current = toolController
 
+    // Orbit/Pan/Zoom/Zoom Window are just OrbitControls `mouseButtons` remaps
+    // (see the tool-switch below), not real Tool instances — so unlike every
+    // geometry tool, none of them has an object to host a VCB buffer or a
+    // meaningful `statusHint()`. `activeCameraTool` is the minimal state that
+    // lets `reportToolHint` (just below) and Field of View typed entry (see
+    // the "camera-mode tracking + FOV entry" section further down) work
+    // anyway. Declared here (rather than down in that section) because
+    // `reportToolHint` reads it synchronously on the very next line — this is
+    // a `let`, not a hoisted `function`, so the read needs the declaration to
+    // have already RUN, not just be hoisted.
+    let activeCameraTool: 'Orbit' | 'Pan' | 'Zoom' | 'ZoomWindow' | null = null
+
+    /** Eye height (meters) for Position Camera / Look Around / Walk
+     * (docs/design/camera.md §4) — SESSION-shared across all three, VCB-
+     * editable from any of them. A plain closure `let`, not per-tool state:
+     * a fresh tool instance is constructed on every activation (the
+     * `makeXTool()` convention this file already uses throughout), so the
+     * value has to live above any single instance to actually persist. */
+    let eyeHeightM = DEFAULT_EYE_HEIGHT_M
+
     // Live status-bar guidance: re-poll the active tool's stage hint after
     // every routed event (the wrapped listeners below) and on tool switches,
     // pushing CHANGES up — a string compare keeps the per-move cost trivial.
     let lastToolHint: string | null = null
     function reportToolHint(): void {
-      // Camera tools (Orbit/Pan/Zoom) park the controller on Select while
-      // OrbitControls owns the left button — left-clicks navigate, they
-      // don't select — so Select's hint would mislabel them. Report null
-      // and let the status bar fall back to the camera tool's static
-      // description. cameraModeRef is set BEFORE resetToSelect() fires the
-      // tool-change listener, so this reads the new mode.
-      const hint = cameraModeRef.current
+      // Camera tools (Orbit/Pan/Zoom/Zoom Window) park the controller on
+      // Select — for Orbit/Pan/Zoom because OrbitControls owns the left
+      // button (left-clicks navigate, they don't select); for Zoom Window
+      // because it owns left-drag itself (see the Zoom Window section) —
+      // either way Select's own hint would mislabel them. Report null and
+      // let the status bar fall back to the camera tool's static
+      // description. `activeCameraTool` (like `cameraModeRef`) is set
+      // BEFORE resetToSelect() fires the tool-change listener, so this
+      // reads the new mode.
+      const hint = activeCameraTool !== null
         ? null
         : (toolController.activeTool.statusHint?.() ?? null)
       if (hint !== lastToolHint) {
@@ -1812,7 +2016,7 @@ export default function Viewport({
         scheduleRender()
         return
       }
-      const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov)
+      const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis())
       toolController.activeTool.onPointerDown(snap, ray)
     }
 
@@ -1828,7 +2032,7 @@ export default function Viewport({
      * Null when nothing movable is under the cursor.
      */
     function pickTransformableUnderCursor(ray: Ray): NodeRef | null {
-      const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov)
+      const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis())
       return resolveSelectableRef(snap, ray, selectionDeps())
     }
 
@@ -1949,6 +2153,437 @@ export default function Viewport({
     function clearMarquee(): void {
       marqueeDrag = null
       marqueeOverlay.style.display = 'none'
+    }
+
+    // ------------------------------------------------------------------ camera-mode tracking + FOV entry (camera.md §2, camera-playtest2.md §1-2)
+    // Typed FOV entry (degrees or millimetres, fovUnits.ts) works WHENEVER
+    // the Zoom camera mode is active — Camera ▸ Zoom / the Z shortcut / the
+    // command palette all enter the same interactive Zoom tool, exactly
+    // like SketchUp's own Zoom tool. There is no separate Field of View
+    // menu entry (camera-playtest2.md §2 — Kurt's playtest call: FOV is
+    // reachable only through Zoom, via typed entry or Shift-drag/wheel,
+    // §3 below).
+    let fovEntryBuffer: string | null = null
+
+    /**
+     * The VCB's resting (not-currently-typing) display while the Zoom
+     * camera mode is active: the CURRENT fovDeg (both units — fovUnits.ts),
+     * persistently — not only once typing starts (playtest finding 4b:
+     * cursor FOV drags and a fresh Zoom activation left the VCB blank until
+     * the user typed a digit). Blank whenever Zoom isn't active, or under
+     * parallel projection (no lens to report). Never stomps a buffer that
+     * IS actively being typed — every caller below clears `fovEntryBuffer`
+     * first.
+     */
+    function refreshFovReadout(): void {
+      if (fovEntryBuffer !== null) return
+      onMeasurementRef.current?.(fovReadoutText(activeCameraTool, rig.projection, rig.perspective.fov))
+    }
+
+    /** Parses the typed buffer via `parseFovEntry` (fovUnits.ts — degrees:
+     * "45"/"45deg"/"45°"; focal length: "50mm", converted through the
+     * 18mm-half-frame law) and applies it via `rig.setFov`; anything
+     * `parseFovEntry` can't parse is silently discarded (Enter on garbage
+     * input just closes the VCB, like SketchUp). `rig.setFov` clamps to
+     * [MIN_FOV_DEG, MAX_FOV_DEG] — `refreshFovReadout` below always shows
+     * the CLAMPED value, not the raw typed number, so e.g. a typed "5mm"
+     * visibly lands on 120°/10.4mm rather than silently doing nothing. */
+    function commitFovEntry(): void {
+      if (fovEntryBuffer === null) return
+      const parsed = parseFovEntry(fovEntryBuffer)
+      fovEntryBuffer = null
+      if (parsed !== null) {
+        rig.setFov(parsed.fovDeg)
+        controls.update()
+        scheduleRender()
+      }
+      refreshFovReadout()
+    }
+
+    function cancelFovEntry(): void {
+      if (fovEntryBuffer === null) return
+      fovEntryBuffer = null
+      refreshFovReadout()
+    }
+
+    /**
+     * Routes a keydown to the FOV typed-entry buffer while the Zoom camera
+     * mode is active. Returns true when the key was consumed (the caller
+     * should treat it like a tool's own `capturesKey`/`onKey` handling —
+     * `scheduleRender()` and stop further processing) — the shape a real
+     * Tool would use, but Zoom has no Tool instance of its own to host it
+     * (see the module doc above).
+     */
+    function handleFovEntryKey(ev: KeyboardEvent): boolean {
+      if (activeCameraTool !== 'Zoom') return false
+      // Field of View is a no-op under parallel projection (design §2) — a
+      // parallel camera has no fov to set. The Zoom tool itself stays
+      // reachable under parallel (Z / Camera ▸ Zoom is still a valid dolly
+      // gesture there), so this must ALSO refuse to open a typed-digit
+      // buffer here — otherwise typing while parallel silently overwrites
+      // the persisted perspective fov with no visible feedback (parallel
+      // ignores it), surfacing later as an unexplained camera jump the next
+      // time the user toggles back to perspective.
+      if (rig.projection === 'parallel') return false
+      if (ev.key === 'Enter') {
+        if (fovEntryBuffer === null) return false
+        commitFovEntry()
+        ev.preventDefault()
+        return true
+      }
+      if (ev.key === 'Escape') {
+        if (fovEntryBuffer === null) return false
+        cancelFovEntry()
+        ev.preventDefault()
+        return true
+      }
+      if (ev.key === 'Backspace') {
+        if (fovEntryBuffer === null) return false
+        fovEntryBuffer = fovEntryBuffer.slice(0, -1)
+        onMeasurementRef.current?.(fovEntryBuffer)
+        ev.preventDefault()
+        return true
+      }
+      // A leading digit or '.' opens the buffer; once open, letters (deg/
+      // mm), the degree glyph, and an internal space are also accepted —
+      // mirrors SketchUp's typed-degree VCB entry, extended for
+      // camera-playtest2.md §1's "45deg or 50mm" spellings. A bare
+      // letter/space/° can never START a buffer (`fovEntryBuffer === null`
+      // gate on the second branch) — only digits/'.' can.
+      if (
+        /^[0-9.]$/.test(ev.key) ||
+        (fovEntryBuffer !== null && /^[a-z°]$/i.test(ev.key)) ||
+        (fovEntryBuffer !== null && ev.key === ' ')
+      ) {
+        fovEntryBuffer = (fovEntryBuffer ?? '') + ev.key
+        onMeasurementRef.current?.(fovEntryBuffer)
+        ev.preventDefault()
+        return true
+      }
+      return false
+    }
+
+    // ------------------------------------------------------------------ Zoom Window (camera.md §3)
+    // A one-shot rectangle-drag camera mode (Camera ▸ Zoom Window / command
+    // palette): reuses the marquee's rubber-band visuals, but reframes the
+    // camera on release instead of selecting, then always springs back to
+    // Select (`onToolRevertedRef`) — the drag-to-move one-shot's precedent,
+    // except that gesture never actually LEAVES Select at the app-tool-state
+    // level the way this one does (see `onToolReverted`'s doc comment).
+    // `zoomWindowActive` is set true only while this specific camera mode is
+    // engaged (the tool-switch below) and checked at the very top of
+    // onPointerDown/Move/Up so it pre-empts both OrbitControls' native
+    // handling (mouseButtons.LEFT stays null for this mode) and the normal
+    // Select/geometry routing.
+    let zoomWindowActive = false
+    // Arm/drag decision logic lives in zoomWindowDrag.ts (pure, unit-tested —
+    // see its doc comment); this closure only owns the DOM/pointer-capture
+    // side effects and the actual camera reframe below.
+    let zoomWindowDrag: ZoomWindowDragState | null = null
+
+    function beginZoomWindowDrag(ev: PointerEvent): void {
+      const [px, py] = canvasPoint(ev)
+      zoomWindowDrag = beginZoomWindowDragState(px, py)
+      // Track the drag even when it leaves the canvas.
+      renderer.domElement.setPointerCapture(ev.pointerId)
+    }
+
+    /** Abandon an in-flight Zoom Window drag (Esc, focus loss) — reverts the
+     * rectangle, no reframe. One-shot semantics preserved: this only cancels
+     * the DRAG, not the surrounding camera mode — `zoomWindowActive` stays
+     * true, so the mode remains armed for another attempt, mirroring
+     * `clearMarquee` (aborting a marquee doesn't leave Select either); only a
+     * COMPLETED drag or an explicit tool switch leaves Zoom Window. */
+    function abortZoomWindowDrag(): void {
+      zoomWindowDrag = null
+      marqueeOverlay.style.display = 'none'
+    }
+
+    function updateZoomWindowDrag(ev: PointerEvent): void {
+      if (zoomWindowDrag === null) return
+      const [px, py] = canvasPoint(ev)
+      const { state, rect } = updateZoomWindowDragState(zoomWindowDrag, px, py, (ev.buttons & 1) !== 0)
+      if (state === null) {
+        // The release happened outside our listeners (focus loss) — drop it,
+        // no reframe (mirrors clearMarquee's equivalent path).
+        abortZoomWindowDrag()
+        return
+      }
+      zoomWindowDrag = state
+      if (rect !== null) {
+        // Always the "window" (solid) rubber-band styling — Zoom Window has
+        // no crossing-selection analogue, so drag direction carries no
+        // separate meaning the way it does for the Select marquee.
+        marqueeOverlay.style.border = '1px solid #4a90e2'
+        marqueeOverlay.style.left = `${rect.minX}px`
+        marqueeOverlay.style.top = `${rect.minY}px`
+        marqueeOverlay.style.width = `${rect.maxX - rect.minX}px`
+        marqueeOverlay.style.height = `${rect.maxY - rect.minY}px`
+        marqueeOverlay.style.display = 'block'
+      }
+    }
+
+    function finishZoomWindowDrag(ev: PointerEvent): void {
+      if (zoomWindowDrag === null) return
+      const drag = zoomWindowDrag
+      zoomWindowDrag = null
+      marqueeOverlay.style.display = 'none'
+      const [px, py] = canvasPoint(ev)
+      const rect = finishZoomWindowDragRect(drag, px, py)
+      if (rect !== null) applyZoomWindow(rect)
+      // One-shot: always springs back to Select, whether the release
+      // resolved to a real drag or was just a plain (sub-threshold) click.
+      onToolRevertedRef.current?.()
+    }
+
+    /**
+     * Reframe the camera onto `rect` (canvas CSS pixels) — Camera ▸ Zoom
+     * Window's commit (design §3):
+     *   - New `controls.target`: the existing snap/pick chain through the
+     *     rect center, falling back to the CURRENT target's depth plane
+     *     along the new ray when nothing is under it (a miss over open space
+     *     still re-centers sensibly instead of aborting the zoom).
+     *   - Perspective scales distance by `max(rectW/vpW, rectH/vpH)`;
+     *     parallel scales the orthographic frustum by the same factor
+     *     (`CameraRig.scaleOrthoFrustum`) — the eye direction is unchanged
+     *     either way.
+     */
+    function applyZoomWindow(rect: MarqueeRect): void {
+      const vpW = el.clientWidth
+      const vpH = el.clientHeight
+      if (vpW <= 0 || vpH <= 0) return
+      const cx = (rect.minX + rect.maxX) / 2
+      const cy = (rect.minY + rect.maxY) / 2
+      const ndcX = (cx / vpW) * 2 - 1
+      const ndcY = -(cy / vpH) * 2 + 1
+      const ray = makeWorldRay(ndcX, ndcY, camera)
+
+      const { snap } = snapService.resolve(ray, vpH, apertureBasis())
+      const rayOrigin = new THREE.Vector3(ray.origin[0], ray.origin[1], ray.origin[2])
+      const rayDir = new THREE.Vector3(ray.direction[0], ray.direction[1], ray.direction[2])
+      let newTarget: THREE.Vector3
+      if (snap !== null) {
+        newTarget = new THREE.Vector3(snap.x, snap.y, snap.z)
+      } else {
+        const viewDir = new THREE.Vector3()
+        camera.getWorldDirection(viewDir)
+        const denom = viewDir.dot(rayDir)
+        const t = Math.abs(denom) > 1e-9
+          ? viewDir.dot(controls.target.clone().sub(rayOrigin)) / denom
+          : controls.getDistance()
+        newTarget = rayOrigin.clone().addScaledVector(rayDir, t)
+      }
+
+      const scale = Math.max((rect.maxX - rect.minX) / vpW, (rect.maxY - rect.minY) / vpH)
+      if (!(scale > 0)) return
+
+      const oldDistance = controls.getDistance()
+      const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize()
+      controls.target.copy(newTarget)
+
+      if (rig.projection === 'perspective') {
+        const newDist = Math.max(oldDistance * scale, controls.minDistance)
+        camera.position.copy(newTarget).addScaledVector(dir, newDist)
+      } else {
+        camera.position.copy(newTarget).addScaledVector(dir, oldDistance)
+        rig.scaleOrthoFrustum(scale)
+      }
+      camera.updateProjectionMatrix()
+      controls.update()
+      scheduleRender()
+    }
+
+    // ------------------------------------------------------------------ Shift+Zoom fov drag/wheel (camera-playtest2.md §3)
+    // While the Zoom camera mode is active in perspective, a left-drag
+    // begun with Shift held adjusts fov instead of dollying (eye fixed);
+    // Shift+wheel does the same in smaller steps. The multiplicative law
+    // and the fixed-at-press mode decision are pure/unit-tested in
+    // fovDrag.ts — this section owns only the DOM side effects: pre-empting
+    // OrbitControls, pointer capture, the cursor swap, and restoring
+    // `MOUSE.DOLLY` on every exit path (release, Escape, focus loss,
+    // pointer-capture loss, a tool switch away from Zoom).
+    let fovDragState: FovDragState | null = null
+    // The pointerId that armed the current `fovDragState` (finding 4,
+    // camera-playtest2 review) — `updateFovDrag` only accepts events from
+    // THIS pointer. Without it, a second concurrent pointer (a stray touch,
+    // a second mouse-like device) moving while the drag is armed would drive
+    // `rig.setFov` off ITS position instead of the arming pointer's, even
+    // though it never went through the press-time mode decision at all.
+    let fovDragPointerId: number | null = null
+
+    /** Restore the Zoom tool's normal dolly binding AND cursor. Every exit
+     * path from a Shift-fov gesture calls this (directly or via
+     * `abortFovDrag`/`finishFovDrag`) — a leaked `mouseButtons.LEFT ===
+     * null` here would silently stop Zoom's left-drag from dollying at
+     * all, the same class of abort-path mode leak this branch has already
+     * shipped once (see fovDrag.ts's module doc). No-op when Zoom isn't
+     * the active camera tool — some callers (a tool switch, a projection
+     * change) run this defensively after Zoom may already have been left,
+     * and the switch's own per-case logic is what sets `mouseButtons.LEFT`
+     * (and the cursor) in that case. `touches.ONE` (finding 2) shares the
+     * exact same lifecycle and is restored to OrbitControls' own default
+     * (`TOUCH.ROTATE` — the only value this file ever sets it to) right
+     * alongside it. */
+    function restoreZoomDollyBinding(): void {
+      if (activeCameraTool !== 'Zoom') return
+      controls.mouseButtons.LEFT = THREE.MOUSE.DOLLY
+      controls.touches.ONE = THREE.TOUCH.ROTATE
+      // Shift may still be held when the gesture ends (e.g. a plain
+      // release with Shift still down) — show its cursor, not the plain
+      // Zoom one, so the user isn't told Shift stopped doing anything.
+      renderer.domElement.style.cursor = cursorFor(shiftFovCursorActive ? 'Zoom Window' : 'Zoom')
+    }
+
+    /** Abandon an in-flight Shift-fov drag with no commit — Escape, focus
+     * loss, or pointer-capture loss (see the listeners wired below). The
+     * fov stays wherever the drag last left it (matching Zoom Window's own
+     * "abort cancels the GESTURE, not any already-applied change"
+     * precedent — there is no un-set to roll back to, unlike Zoom Window's
+     * rectangle).
+     *
+     * `pointerId`, when given, scopes the abort to the pointer that ARMED
+     * the drag (findings 1+2, camera-playtest2 DELTA review): a
+     * pointer-specific exit — release, cancel, or pointer-capture loss —
+     * belongs to ONE DOM pointer, but `onPointerUp`/`onPointerCancel`/the
+     * `lostpointercapture` listener are plain listeners on the canvas that
+     * fire for EVERY pointer (capture only redirects the CAPTURING
+     * pointer's OWN move/up events elsewhere; it does not stop other
+     * pointers' events from reaching the same listener). Without this,
+     * some OTHER pointer's own release/cancel/capture-loss — touch and pen
+     * report `button === 0` too — would silently end a gesture it never
+     * armed, and worse than ending it cleanly: `updateFovDrag` was already
+     * scoped to the arming pointer, so the arming pointer's FURTHER
+     * movement after the wrong end would be silently dropped (no further
+     * fov change) while OrbitControls can't pick the gesture back up
+     * either, since `mouseButtons.LEFT`/`touches.ONE` were never restored
+     * mid-hold — the drag freezes rather than ending or handing off.
+     * Callers with no pointer of their own to scope to — window blur, a
+     * tool switch, a projection rebind, Escape — omit the argument and get
+     * the old unconditional abort, which IS correct there: those are
+     * program-level exits (not one pointer's own event) that must end the
+     * gesture regardless of which pointer armed it. */
+    function abortFovDrag(pointerId?: number): void {
+      if (fovDragState === null) return
+      if (pointerId !== undefined && pointerId !== fovDragPointerId) return
+      fovDragState = null
+      fovDragPointerId = null
+      restoreZoomDollyBinding()
+    }
+
+    /** A completed drag/release — same cleanup as abort, kept as a
+     * separately-named entry point so call sites read as what they mean
+     * (release vs. abort), even though today they do the same thing. */
+    function finishFovDrag(pointerId?: number): void {
+      abortFovDrag(pointerId)
+    }
+
+    function updateFovDrag(ev: PointerEvent): void {
+      if (fovDragState === null) return
+      // Only the pointer that armed this drag may drive it (finding 4,
+      // camera-playtest2 review) — a second concurrent pointer's moves are
+      // simply ignored, exactly as if the gesture weren't watching them at
+      // all; they neither advance nor abort the armed drag.
+      if (ev.pointerId !== fovDragPointerId) return
+      if ((ev.buttons & 1) === 0) {
+        // The release happened outside our listeners (focus loss /
+        // pointer-capture loss) — drop it, mirroring every other drag
+        // state in this file (clearMarquee, abortDragMove,
+        // updateZoomWindowDrag's own buttonsDown check).
+        abortFovDrag()
+        return
+      }
+      const [, py] = canvasPoint(ev)
+      rig.setFov(fovDragValue(fovDragState, py))
+      controls.update()
+      // Readout tracks every tick (design §3) — refreshFovReadout already
+      // refuses to stomp an in-progress typed buffer.
+      refreshFovReadout()
+      scheduleRender()
+    }
+
+    /**
+     * Decides + arms a Shift-fov drag BEFORE OrbitControls' own pointerdown
+     * handler runs — this is NOT the same as the `zoomWindowActive` check
+     * at the top of `onPointerDown` below, and can't be: that check works
+     * because `mouseButtons.LEFT` is already `null` from a PRIOR tool
+     * switch by the time any press happens. Here the fov-vs-dolly decision
+     * itself must be made from `ev.shiftKey` on THIS press, and
+     * OrbitControls registers its own pointerdown listener directly on
+     * `renderer.domElement` at construction time (`three.js`'s `connect()`)
+     * — earlier than this component's own `onPointerDown` (wired up near
+     * the end of this effect). Per the DOM spec, listeners on the SAME
+     * target fire in REGISTRATION order regardless of the capture flag, so
+     * a capture-phase listener added later on `renderer.domElement` itself
+     * would NOT run first. Registering on `el` (the canvas's parent)
+     * instead runs this during the CAPTURE phase, strictly before the
+     * event ever reaches the canvas target — the same trick
+     * `onCameraPointerDown` already relies on (window-level capture,
+     * camera.md §1's `cameraDragActive` plumbing) — so by the time
+     * OrbitControls reads `mouseButtons.LEFT`, it already sees `null` and
+     * takes its own no-mapped-action path (no state change, no capture
+     * conflict: it still calls `setPointerCapture` on the same element,
+     * which is a harmless no-op once we already hold it).
+     */
+    function onFovDragPointerDownCapture(ev: PointerEvent): void {
+      if (ev.button !== 0) return
+      if (fovDragState !== null || zoomWindowActive) return
+      if (activeCameraTool !== 'Zoom' || rig.projection !== 'perspective') return
+      // The fixed-at-press mode decision (fovDrag.ts) — read from `ev.shiftKey`
+      // exactly once, right here, and never re-evaluated for the rest of this
+      // gesture (see decideFovDragMode's doc and the module doc's "MODE FIXED
+      // AT PRESS" section for why).
+      if (decideFovDragMode(ev.shiftKey) !== 'fov') return
+      // A new fov drag supersedes any uncommitted typed VCB entry (finding 1,
+      // camera-playtest2 review): `refreshFovReadout` refuses to overwrite an
+      // open `fovEntryBuffer`, so without this, the readout would show stale
+      // typed digits for the entire drag (a real camera change happening
+      // underneath a frozen display) and a later Enter would silently discard
+      // the whole drag by re-applying that stale typed value on top of it.
+      // `cancelFovEntry` is the Escape-like discard (not a commit) — exactly
+      // right here: the drag is a NEW gesture, not a completion of the typed
+      // one. The invariant this establishes: the readout never shows a value
+      // the camera does not actually have.
+      cancelFovEntry()
+      const [, py] = canvasPoint(ev)
+      fovDragState = beginFovDrag(py, rig.perspective.fov)
+      fovDragPointerId = ev.pointerId
+      controls.mouseButtons.LEFT = null
+      // Touch routes through `controls.touches` (never `mouseButtons`) —
+      // three.js's OrbitControls dispatches touchstart/touchmove through a
+      // wholly separate internal state machine keyed off `touches.ONE`/`TWO`
+      // (see OrbitControls.js's `onTouchStart`), so nulling `mouseButtons.LEFT`
+      // alone leaves a Shift-held single-finger drag free to ALSO rotate the
+      // camera natively — the eye moving is exactly what this feature promises
+      // it won't do (finding 2, camera-playtest2 review). Pre-empt it the same
+      // way, on the same capture-phase listener, restored alongside
+      // `mouseButtons.LEFT` in `restoreZoomDollyBinding`. (A pen contact needs
+      // no separate handling: OrbitControls routes any non-'touch' pointerType,
+      // pen included, through the SAME `mouseButtons`-driven onMouseDown path
+      // as the mouse — see onPointerDown's `event.pointerType === 'touch'`
+      // branch — so it is already covered by the null above.)
+      controls.touches.ONE = null
+      renderer.domElement.setPointerCapture(ev.pointerId)
+      renderer.domElement.style.cursor = cursorFor('Zoom Window')
+    }
+
+    /** Shift+wheel (design §3): same law, smaller steps, no press involved
+     * — pre-empts OrbitControls' own wheel-dolly listener the same way as
+     * the pointerdown capture above (registered on `el`, capture phase,
+     * ahead of OrbitControls' bubble-phase listener on the canvas). */
+    function onFovWheelCapture(ev: WheelEvent): void {
+      if (fovDragState !== null || zoomWindowActive) return
+      if (activeCameraTool !== 'Zoom' || rig.projection !== 'perspective' || !ev.shiftKey) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      // Same finding-1 fix as the drag's own pointerdown: a wheel tick is
+      // just as much a new gesture as a drag press, and shares the exact
+      // same stale-readout/silently-discarded-change bug shape if a typed
+      // buffer is left open underneath it.
+      cancelFovEntry()
+      rig.setFov(fovAfterWheel(rig.perspective.fov, ev.deltaY))
+      controls.update()
+      refreshFovReadout()
+      scheduleRender()
     }
 
     // ------------------------------------------------------------------ commit callbacks
@@ -2440,15 +3075,23 @@ export default function Viewport({
       box.getSize(size)
 
       // Fit the bounding sphere to the vertical FOV with a 1.2× margin.
+      // `perspectiveFramingDistance` uses the rig's (persisted-across-toggle)
+      // perspective fov regardless of the ACTIVE projection — both
+      // projections place the camera at the same distance from the target;
+      // only parallel projection additionally needs its frustum sized
+      // (design §1, "Framing"), since ortho's apparent size doesn't track
+      // distance at all.
       const halfDiag = box.getBoundingSphere(new THREE.Sphere()).radius
-      const fovRad = (camera.fov * Math.PI) / 180
-      const distance = (halfDiag * 1.2) / Math.tan(fovRad / 2)
+      const distance = rig.perspectiveFramingDistance(halfDiag, 1.2)
 
       // Keep the current view direction; re-target at box center.
       const dir = new THREE.Vector3()
       dir.subVectors(camera.position, controls.target).normalize()
       controls.target.copy(center)
       camera.position.copy(center).addScaledVector(dir, distance)
+      if (rig.projection === 'parallel') {
+        rig.frameOrthoToRadius(halfDiag, 1.2, el.clientWidth / el.clientHeight)
+      }
       camera.updateProjectionMatrix()
       controls.update()
       scheduleRender()
@@ -2471,20 +3114,27 @@ export default function Viewport({
 
       const center = new THREE.Vector3()
       let distance: number
+      let radius = 0
       if (box.isEmpty()) {
         center.copy(controls.target)
         distance = controls.getDistance()
       } else {
         box.getCenter(center)
-        const radius = box.getBoundingSphere(new THREE.Sphere()).radius
-        const fovRad = (camera.fov * Math.PI) / 180
-        distance = (radius * 1.2) / Math.tan(fovRad / 2)
+        radius = box.getBoundingSphere(new THREE.Sphere()).radius
+        distance = rig.perspectiveFramingDistance(radius, 1.2)
       }
 
       const eye = new THREE.Vector3(spec.eye[0], spec.eye[1], spec.eye[2]).normalize()
       camera.up.set(0, 0, 1)
       controls.target.copy(center)
       camera.position.copy(center).addScaledVector(eye, distance)
+      // Parallel path keeps the eye direction (above) and sizes the frustum
+      // from the box radius instead of distance (design §1) — only when
+      // there IS a box to frame; an empty scene keeps the current frustum
+      // size, matching the perspective branch's "keep current distance".
+      if (rig.projection === 'parallel' && !box.isEmpty()) {
+        rig.frameOrthoToRadius(radius, 1.2, el.clientWidth / el.clientHeight)
+      }
       camera.updateProjectionMatrix()
       controls.update()
       scheduleRender()
@@ -2496,11 +3146,24 @@ export default function Viewport({
       up: [number, number, number],
       fovDeg: number,
     ): void {
-      camera.position.set(position[0], position[1], position[2])
+      // Test-pinning helper (__hew_test.setCamera): always forces perspective
+      // — deterministic framing for E2E/pixel tests shouldn't depend on
+      // whatever projection a PRIOR test left the rig in. Routed through the
+      // SAME rebindControlsForProjectionChange helper the interactive
+      // Camera ▸ Parallel Projection toggle uses (below) instead of
+      // reassigning `camera` inline — forcing the rig's projection without
+      // also rebuilding OrbitControls left `controls` bound to the
+      // now-inactive camera, permanently freezing input (OrbitControls
+      // binds to one camera for its whole lifetime; a projection change
+      // can't just mutate `.object`).
+      if (rig.projection !== 'perspective') {
+        rig.toggleProjection(controls.target)
+        rebindControlsForProjectionChange()
+      }
+      rig.perspective.position.set(position[0], position[1], position[2])
       controls.target.set(target[0], target[1], target[2])
-      camera.up.set(up[0], up[1], up[2])
-      camera.fov = fovDeg
-      camera.updateProjectionMatrix()
+      rig.perspective.up.set(up[0], up[1], up[2])
+      rig.setFov(fovDeg)
       controls.update()
       scheduleRender()
     }
@@ -2509,8 +3172,9 @@ export default function Viewport({
       // Mirror the per-frame camera-dependent updates of the animation loop
       // (this renders out-of-band, without going through it) so a captured
       // frame is exactly what the loop would put on screen for this pose.
-      infiniteGrid.update(camera.position)
-      clampOriginAxes(originAxes, camera, el.clientHeight)
+      const effDist = rig.projection === 'parallel' ? rig.effectiveDistance(controls.getDistance()) : null
+      infiniteGrid.update(camera.position, effDist)
+      clampOriginAxes(originAxes, rig, el.clientHeight)
       renderer.render(threeScene, camera)
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
@@ -2528,8 +3192,99 @@ export default function Viewport({
       return {
         position: [camera.position.x, camera.position.y, camera.position.z],
         target: [controls.target.x, controls.target.y, controls.target.z],
-        fovDeg: camera.fov,
+        fovDeg: rig.perspective.fov,
       }
+    }
+
+    /**
+     * The camera's full working view, for document-save persistence
+     * (docs/design/camera.md §5) — unlike the test-only `getCamera`
+     * (always perspective-shaped, reads `controls.target` directly), this
+     * covers BOTH projections and derives `target` fresh from the live
+     * camera pose rather than trusting `controls.target`, which goes stale
+     * while a walkthrough tool (Position Camera/Look Around/Walk, design
+     * §4) has OrbitControls disabled and never touches it mid-gesture.
+     *
+     * The synthesized `target`'s DISTANCE from `eye` is deliberately NOT
+     * `CameraRig.effectiveDistance()` — that normalizes against a fixed
+     * REFERENCE fov (45°) for a different purpose entirely (keeping guide-
+     * dash/grid LOD continuous across a projection toggle) and is the
+     * WRONG quantity to persist: `applyCameraState`'s restore re-derives
+     * the ortho frustum via `CameraRig.toggleProjection`, whose own
+     * `matchOrthoToPerspective` sizes it as `distance · tan(halfFov)` using
+     * the camera's ACTUAL fov, not the reference one. Feeding an
+     * effectiveDistance-scaled target back through that math would size the
+     * restored ortho frustum off by `tan(actualFov/2)/tan(45°/2)` — this
+     * computes the matching inverse directly instead: under parallel, the
+     * exact distance `matchOrthoToPerspective` needs to reproduce the
+     * CURRENT ortho frustum height when this state is later restored and
+     * re-toggled; under perspective, the plain orbit distance (which
+     * IS what a perspective→parallel toggle already uses verbatim).
+     */
+    function getCameraState(): {
+      projection: Projection
+      fovDeg: number
+      eye: [number, number, number]
+      target: [number, number, number]
+      up: [number, number, number]
+    } {
+      const forward = currentForward()
+      const eye = currentEye()
+      const dist =
+        rig.projection === 'parallel'
+          ? (rig.orthographic.top - rig.orthographic.bottom) / (2 * rig.orthographic.zoom) / tanHalfFovRad(rig.perspective.fov)
+          : controls.getDistance()
+      return {
+        projection: rig.projection,
+        fovDeg: rig.perspective.fov,
+        eye,
+        target: [eye[0] + forward[0] * dist, eye[1] + forward[1] * dist, eye[2] + forward[2] * dist],
+        up: [camera.up.x, camera.up.y, camera.up.z],
+      }
+    }
+
+    /**
+     * Restores a full camera view (docs/design/camera.md §5) — the load
+     * complement of `getCameraState`. Normalizes to perspective FIRST
+     * regardless of the target projection: `CameraRig.toggleProjection`'s
+     * math always derives from the perspective camera's CURRENT pose (its
+     * own doc comment), so that pose has to be the freshly-restored one
+     * before any toggle runs, in EITHER direction.
+     *
+     * `controls.target` is set to the RESTORED target FIRST, before either
+     * toggle: `rebindControlsForProjectionChange` rebuilds `controls` and
+     * calls `controls.update()` on it, which — like the walkthrough-exit
+     * reseed above — unconditionally re-aims the camera at WHATEVER
+     * `controls.target` currently is. Toggling with the OLD (pre-restore)
+     * target still in place would silently re-aim the freshly-restored
+     * camera at the wrong point the instant the ortho rebind runs.
+     */
+    function applyCameraState(state: {
+      projection: Projection
+      fovDeg: number
+      eye: [number, number, number]
+      target: [number, number, number]
+      up: [number, number, number]
+    }): void {
+      const targetVec = new THREE.Vector3(state.target[0], state.target[1], state.target[2])
+      controls.target.copy(targetVec)
+      if (rig.projection === 'parallel') {
+        rig.toggleProjection(targetVec)
+        rebindControlsForProjectionChange()
+      }
+      rig.perspective.position.set(state.eye[0], state.eye[1], state.eye[2])
+      rig.perspective.up.set(state.up[0], state.up[1], state.up[2])
+      rig.perspective.lookAt(targetVec)
+      rig.setFov(state.fovDeg)
+      rig.perspective.updateProjectionMatrix()
+      if (state.projection === 'parallel') {
+        rig.toggleProjection(targetVec)
+        rebindControlsForProjectionChange()
+      }
+      controls.target.copy(targetVec)
+      rig.syncInactiveCamera(targetVec)
+      controls.update()
+      scheduleRender()
     }
 
     // Test-only world→screen projection (ViewportApi.worldToScreen). Delegates
@@ -2552,6 +3307,13 @@ export default function Viewport({
       controls.target.set(0, 0, 0)
       camera.updateProjectionMatrix()
       controls.update()
+      // Keep the INACTIVE rig camera in sync too — not just whichever is
+      // active — so a projection toggle right afterward (a freshly-opened
+      // blank document is still perspective by default, and toggling
+      // straight to parallel is a real path) lands framed from THIS pose
+      // instead of whatever stale placeholder/leftover-zoom pose the
+      // long-inactive camera was last left at.
+      rig.syncInactiveCamera(controls.target)
       scheduleRender()
     }
 
@@ -2653,6 +3415,12 @@ export default function Viewport({
 
     if (apiRefRef.current !== undefined) {
       const isCapturingInput = (key?: string): boolean => {
+        // Field of View typed entry (design §2) has no Tool instance of its
+        // own (see the module doc above `activeCameraTool`) but must still
+        // own its keys the same way a tool mid-VCB-entry does — the App-level
+        // Delete/Backspace handler must not steal Backspace while a FOV
+        // digit buffer is open.
+        if (fovEntryBuffer !== null) return true
         const t = toolController.activeTool
         // With a key, honor a tool's per-key capture (Tool.capturesKey) so
         // App-level shortcut gates (Space→Select, Delete/Backspace) agree
@@ -2692,7 +3460,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, armTextPlacement }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -2975,7 +3743,7 @@ export default function Viewport({
       const tool = makeMoveTool(dm.nodes)
       toolController.setTool(tool)
       renderer.domElement.style.cursor = cursorFor('Move')
-      const { snap } = snapService.resolve(dm.pressRay, el.clientHeight, camera.fov)
+      const { snap } = snapService.resolve(dm.pressRay, el.clientHeight, apertureBasis())
       tool.onPointerDown(snap, dm.pressRay)
       scheduleRender()
     }
@@ -3141,6 +3909,76 @@ export default function Viewport({
       )
     }
 
+    // ------------------------------------------------------------------ walkthrough camera tools (camera.md §4)
+    // The first REAL camera Tool classes (Orbit/Pan/Zoom stay OrbitControls
+    // `mouseButtons` remaps, above). All three mutate `camera` (whichever of
+    // `rig.perspective`/`rig.orthographic` is active) directly while
+    // OrbitControls sits fully DISABLED (see the switch-case wiring below) —
+    // `applyWalkthroughPose` is their single shared write path, syncing the
+    // currently-INACTIVE rig camera too so a projection toggle mid-walkthrough
+    // (or right after exiting) starts from this pose, not a stale one.
+    const walkthroughForwardV = new THREE.Vector3()
+    function currentEye(): WalkV3 {
+      return [camera.position.x, camera.position.y, camera.position.z]
+    }
+    function currentForward(): WalkV3 {
+      camera.getWorldDirection(walkthroughForwardV)
+      return [walkthroughForwardV.x, walkthroughForwardV.y, walkthroughForwardV.z]
+    }
+    function applyWalkthroughPose(eye: WalkV3, forward: WalkV3): void {
+      camera.position.set(eye[0], eye[1], eye[2])
+      camera.up.set(0, 0, 1)
+      const target = new THREE.Vector3(eye[0] + forward[0], eye[1] + forward[1], eye[2] + forward[2])
+      camera.lookAt(target)
+      camera.updateProjectionMatrix()
+      rig.syncInactiveCamera(target)
+      scheduleRender()
+    }
+
+    function makePositionCameraTool(): PositionCameraTool {
+      return new PositionCameraTool(
+        currentForward,
+        () => eyeHeightM,
+        (h) => { eyeHeightM = h },
+        applyWalkthroughPose,
+        // Auto-switch to Look Around (SketchUp behavior, design §4) — routes
+        // through the same switchToolRef the menu/palette/rail all use, so
+        // App's React tool state (rail highlight, status bar) stays in sync;
+        // a raw `toolController.setTool(...)` here would desync it exactly
+        // like the SectionPlaneTool doc note above warns against.
+        () => switchToolRef.current?.('Look Around'),
+        // Esc returns to Select (design §4, user guide "viewing.md" — "Esc
+        // returns to the Select tool from any of the three"), same as
+        // Look Around/Walk below.
+        () => switchToolRef.current?.('Select'),
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
+    function makeLookAroundTool(): LookAroundTool {
+      return new LookAroundTool(
+        currentEye,
+        currentForward,
+        () => eyeHeightM,
+        (h) => { eyeHeightM = h },
+        applyWalkthroughPose,
+        () => switchToolRef.current?.('Select'),
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
+    function makeWalkTool(): WalkTool {
+      return new WalkTool(
+        currentEye,
+        currentForward,
+        () => eyeHeightM,
+        (h) => { eyeHeightM = h },
+        applyWalkthroughPose,
+        () => switchToolRef.current?.('Select'),
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+    }
+
     function makeEditVertexTool(): EditVertexTool {
       return new EditVertexTool(
         wasmScene,
@@ -3164,13 +4002,79 @@ export default function Viewport({
     // handlers and the tool switch can all see/clear the same flag.
     let shiftPanActive = false
 
+    // Shift-in-Zoom (camera-playtest2.md §3): cursor-only tracking of
+    // "Shift is currently held while a fov drag/wheel is reachable" — mirrors
+    // shiftPanActive's own autorepeat-guard shape, kept as a SEPARATE flag
+    // (rather than reusing shiftPanActive) since Orbit and Zoom are
+    // different tools with independent cursor-swap lifecycles. This never
+    // touches `controls.mouseButtons.LEFT` itself — the actual fov-vs-dolly
+    // decision for a drag is made once, at pointerdown, by
+    // `onFovDragPointerDownCapture`.
+    let shiftFovCursorActive = false
+
+    // Position Camera / Look Around / Walk (camera.md §4): unlike every
+    // other tool switch, entering one of these fully DISABLES OrbitControls
+    // (not just remaps its left button — the walkthrough tools own left-drag
+    // outright), and exiting must re-enable it AND re-seed `controls.target`
+    // to where the eye ends up looking, so a subsequent orbit orbits around
+    // what's actually on screen instead of wherever the target was frozen at
+    // before the walkthrough began.
+    const WALKTHROUGH_TOOL_NAMES = new Set(['Position Camera', 'Look Around', 'Walk'])
+
     // Switch tool by name
     switchToolRef.current = (toolName: string) => {
+      // Record the requested name on EVERY invocation, before anything else
+      // runs — this is the tool-switch guard's comparison source (see
+      // `lastAppliedToolNameRef`'s doc comment), not
+      // `toolController.activeToolName`, which several branches below
+      // deliberately overwrite with 'Select'.
+      lastAppliedToolNameRef.current = toolName
       // A tool switch always wins over a stale shift-pan state: if the user
       // changes tools while Shift happens to be held, the explicit
       // mouseButtons.LEFT/cursor this switch sets below must not later be
       // clobbered by onShiftKeyUp restoring the *previous* tool's Orbit state.
       shiftPanActive = false
+      shiftFovCursorActive = false
+      // Any tool switch (even re-selecting the same camera tool) abandons an
+      // in-progress Zoom Window drag, an in-progress Shift-fov drag, and a
+      // typed-but-uncommitted FOV entry — all per-activation state that must
+      // not survive past it. `abortFovDrag` reads the OLD `activeCameraTool`
+      // (still 'Zoom' if that's what's being left) to restore MOUSE.DOLLY;
+      // the switch below then sets `mouseButtons.LEFT` again per-case
+      // regardless, so this is what stops the drag's OWN state (and
+      // pointer capture) from lingering, not what decides the new binding.
+      abortFovDrag()
+      if (zoomWindowDrag !== null) {
+        zoomWindowDrag = null
+        marqueeOverlay.style.display = 'none'
+      }
+      zoomWindowActive = false
+      cancelFovEntry()
+      // Exiting a walkthrough tool (design §4) — see the const's doc above.
+      // `dist` MUST be read before `controls.target` is overwritten below:
+      // `controls.getDistance()` measures FROM the (still stale, pre-reseed)
+      // target, and chaining `.copy(camera.position).addScaledVector(dir,
+      // rig.effectiveDistance(controls.getDistance()))` evaluates that inner
+      // call only after `.copy()` has already run — by then `controls.target
+      // === camera.position` and `getDistance()` collapses to (numerically)
+      // zero, silently discarding the reseed (a real bug this fixes, not
+      // just a test artifact: EVERY walkthrough exit hit it).
+      if (WALKTHROUGH_TOOL_NAMES.has(toolController.activeToolName)) {
+        controls.enabled = true
+        camera.getWorldDirection(walkthroughForwardV)
+        const dist = rig.effectiveDistance(controls.getDistance())
+        controls.target.copy(camera.position).addScaledVector(walkthroughForwardV, dist)
+        controls.update()
+      }
+      // ONE unconditional assignment covering every case below, including
+      // ones (Rectangle, Move, Position Camera, …) that never mention
+      // `activeCameraTool` themselves — see `activeCameraToolForName`'s doc
+      // (finding C, camera-fov-fixes): previously this was assigned only
+      // inside the Orbit/Pan/Zoom/Zoom Window/default cases, so a switch
+      // straight from Zoom to a NAMED tool fell through that tool's own
+      // case without ever clearing it, leaving the FOV readout stuck
+      // showing the stale Zoom reading.
+      activeCameraTool = activeCameraToolForName(toolName)
       switch (toolName) {
         case 'Rectangle':
           cameraModeRef.current = false
@@ -3260,6 +4164,24 @@ export default function Viewport({
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeEditVertexTool())
           break
+        case 'Position Camera':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          controls.enabled = false
+          toolController.setTool(makePositionCameraTool())
+          break
+        case 'Look Around':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          controls.enabled = false
+          toolController.setTool(makeLookAroundTool())
+          break
+        case 'Walk':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          controls.enabled = false
+          toolController.setTool(makeWalkTool())
+          break
         case 'Orbit':
           cameraModeRef.current = true
           controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
@@ -3275,6 +4197,16 @@ export default function Viewport({
           controls.mouseButtons.LEFT = THREE.MOUSE.DOLLY
           toolController.resetToSelect()
           break
+        case 'Zoom Window':
+          // NOT cameraModeRef — this mode owns left-drag itself (a one-shot
+          // rectangle, see the Zoom Window section above), not OrbitControls'
+          // native orbit/pan/dolly, so geometry routing's camera-nav
+          // early-return must NOT swallow it.
+          cameraModeRef.current = false
+          zoomWindowActive = true
+          controls.mouseButtons.LEFT = null
+          toolController.resetToSelect()
+          break
         default:
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
@@ -3286,7 +4218,20 @@ export default function Viewport({
       // read "Select" here — use the requested toolName instead. The snap
       // kind is reset to null since switching tools invalidates any prior snap.
       onStatusChangeRef.current?.(toolName, null)
+      // Report the REAL active tool to the parent — same requested-name
+      // reasoning as onStatusChange just above applies here too. This is
+      // switchToolRef's single entry point, so every invocation reaches
+      // here regardless of why it fired: an explicit prop-driven switch, an
+      // auto-handoff (Position Camera → Look Around), an Escape-to-Select,
+      // or a one-shot revert — making `activeTool` (App.tsx state) truthful
+      // for all of them instead of only the explicit ones.
+      onInternalToolChangeRef.current?.(toolName)
       onInferenceChangeRef.current?.(null)
+      // Show (or hide) the persistent FOV readout for the tool just entered
+      // — AFTER activeCameraTool above has settled on its new value (design
+      // §2 / finding 4b: entering Zoom in perspective must show the current
+      // fov immediately, not wait for the first typed digit).
+      refreshFovReadout()
       // Tool-aware cursor: derived from the same Material Symbols
       // icon as the toolbar button, so the active tool is readable from the
       // pointer. The canvas owns its cursor — the only writers besides this
@@ -3300,34 +4245,56 @@ export default function Viewport({
     }
 
     // ------------------------------------------------------------------ OrbitControls
-    const controls = new OrbitControls(camera, renderer.domElement)
-    // middle-drag = orbit, right-drag = pan, wheel = dolly-to-cursor
-    controls.mouseButtons = {
-      LEFT: null,
-      MIDDLE: THREE.MOUSE.ROTATE,
-      RIGHT: THREE.MOUSE.PAN,
+    // middle-drag = orbit, right-drag = pan, wheel = dolly-to-cursor. Extracted
+    // (docs/design/camera.md §1) so `rebindControlsForProjectionChange` below
+    // can dispose and recreate an OrbitControls bound to whichever camera
+    // just became active — OrbitControls binds to one camera for its whole
+    // lifetime, so a projection change can't just mutate `.object`.
+    function configureControls(c: OrbitControls): void {
+      c.mouseButtons = {
+        LEFT: null,
+        MIDDLE: THREE.MOUSE.ROTATE,
+        RIGHT: THREE.MOUSE.PAN,
+      }
+      c.zoomToCursor = true
+      c.enableDamping = true
+      c.dampingFactor = 0.08
+      c.screenSpacePanning = true
+      c.minDistance = 0.1
+      c.maxDistance = 50
+      c.enablePan = true
+      // Free orbit must not reach the ±Z poles. Exactly at a pole the view
+      // basis is gimbal-degenerate (look ∥ up), and even NEAR one it is
+      // ill-conditioned: with world-up +Z, screen roll tracks the azimuth of
+      // the camera's tiny lateral offset, so at a polar angle of ~1e-6 rad
+      // (OrbitControls' own makeSafe floor) sub-µm position jitter re-rolls
+      // the whole frame on every damping-tail repaint — severe whole-viewport
+      // shimmer. The Top/Bottom standard views already embody the safe margin
+      // (their baked eyes sit POLE_TILT off the pole — see STANDARD_VIEWS);
+      // clamp free orbit to the polar angle of that very pose, atan(POLE_TILT),
+      // so the two margins share one constant and cannot drift apart (and so
+      // controls.update() leaves the Top/Bottom framing itself untouched).
+      // ≈0.057° — imperceptible.
+      c.minPolarAngle = Math.atan(POLE_TILT)
+      c.maxPolarAngle = Math.PI - Math.atan(POLE_TILT)
+      // Ortho zoom clamp (docs/design/camera.md §1): OrbitControls treats
+      // wheel-zoom under an OrthographicCamera as scaling `.zoom` instead of
+      // dollying distance, and defaults to NO clamp at all (`minZoom: 0`,
+      // `maxZoom: Infinity`) — zooming out under parallel projection could
+      // drive `zoom` toward 0, sending `CameraRig.effectiveDistance` toward
+      // Infinity and silently rendering guide dashes solid. Mirror the same
+      // reachable visual range `minDistance`/`maxDistance` give perspective
+      // (see `orthoZoomBounds`'s doc for the derivation).
+      const { minZoom, maxZoom } = orthoZoomBounds(c.minDistance, c.maxDistance)
+      c.minZoom = minZoom
+      c.maxZoom = maxZoom
     }
-    controls.zoomToCursor = true
-    controls.enableDamping = true
-    controls.dampingFactor = 0.08
-    controls.screenSpacePanning = true
-    controls.minDistance = 0.1
-    controls.maxDistance = 50
-    controls.enablePan = true
-    // Free orbit must not reach the ±Z poles. Exactly at a pole the view
-    // basis is gimbal-degenerate (look ∥ up), and even NEAR one it is
-    // ill-conditioned: with world-up +Z, screen roll tracks the azimuth of
-    // the camera's tiny lateral offset, so at a polar angle of ~1e-6 rad
-    // (OrbitControls' own makeSafe floor) sub-µm position jitter re-rolls
-    // the whole frame on every damping-tail repaint — severe whole-viewport
-    // shimmer. The Top/Bottom standard views already embody the safe margin
-    // (their baked eyes sit POLE_TILT off the pole — see STANDARD_VIEWS);
-    // clamp free orbit to the polar angle of that very pose, atan(POLE_TILT),
-    // so the two margins share one constant and cannot drift apart (and so
-    // controls.update() leaves the Top/Bottom framing itself untouched).
-    // ≈0.057° — imperceptible.
-    controls.minPolarAngle = Math.atan(POLE_TILT)
-    controls.maxPolarAngle = Math.PI - Math.atan(POLE_TILT)
+    // `let`, not `const`: `rebindControlsForProjectionChange` disposes and
+    // replaces this with a new instance bound to the newly-active camera
+    // (OrbitControls supports OrthographicCamera natively — dolly becomes
+    // zoom, zoomToCursor works for both — docs/design/camera.md §1).
+    let controls = new OrbitControls(camera, renderer.domElement)
+    configureControls(controls)
 
     // Camera-drag notifications: tell the parent while a pointer-drag
     // navigation is in flight so it can fade the contextual dock out of the
@@ -3353,14 +4320,107 @@ export default function Viewport({
     window.addEventListener('pointerdown', onCameraPointerDown, true)
     window.addEventListener('pointerup', onCameraPointerUp, true)
     window.addEventListener('pointercancel', onCameraPointerUp, true)
-    controls.addEventListener('start', onControlsStart)
-    controls.addEventListener('end', onControlsEnd)
+    // Bundles every listener a live `controls` instance needs — called once
+    // at creation above (via the initial call below) and again after
+    // `rebindControlsForProjectionChange` recreates the instance. `scheduleRender`/
+    // `recordCameraInput` are declared later in this effect but, like
+    // `apertureBasis` above, this is a `function` declaration (hoisted) only
+    // ever CALLED after both exist.
+    function attachControlsListeners(c: OrbitControls): void {
+      c.addEventListener('start', onControlsStart)
+      c.addEventListener('end', onControlsEnd)
+      c.addEventListener('change', scheduleRender)
+      c.addEventListener('change', recordCameraInput)
+    }
+    attachControlsListeners(controls)
 
     // Prevent the browser context menu on right-drag so pan isn't interrupted.
     function onContextMenu(ev: MouseEvent): void {
       ev.preventDefault()
     }
     renderer.domElement.addEventListener('contextmenu', onContextMenu)
+
+    /**
+     * Rebind OrbitControls to whichever camera is now `rig.active`, right
+     * after a `rig.toggleProjection()` call — extracted so the interactive
+     * Camera ▸ Parallel Projection toggle (`toggleProjection` below) and the
+     * test-pinning `setCamera` helper (which force-toggles to perspective)
+     * share the SAME dispose/recreate/configure/attach dance rather than one
+     * of them reimplementing half of it inline. `setCamera` used to do
+     * exactly that — force `rig.toggleProjection` but leave `controls` bound
+     * to the now-inactive camera, permanently freezing input, since
+     * OrbitControls binds to one camera for its whole lifetime and a
+     * projection change can't just mutate `.object`.
+     *
+     * Also clears any in-flight typed FOV entry (`cancelFovEntry` —
+     * Escape-like discard, not commit; matches the VCB idiom, camera.md
+     * §2): a value typed under perspective and left uncommitted across a
+     * toggle would otherwise silently apply the STALE typed number once the
+     * round trip lands back on perspective.
+     *
+     * `refreshFovReadout` runs UNCONDITIONALLY after that, regardless of
+     * whether a buffer was typing (finding D, camera-fov-fixes):
+     * `cancelFovEntry` early-returns — by design — when nothing was typed,
+     * so it alone never refreshes the readout's TEXT, only its typed-entry
+     * state. But the readout's text depends on `rig.projection` too (parallel
+     * has no fov to show), and that just changed, so a toggle with no
+     * in-flight typing left the readout showing whatever it said under the
+     * PREVIOUS projection until some unrelated later event happened to
+     * refresh it.
+     */
+    function rebindControlsForProjectionChange(): void {
+      // Defensive: abort any in-flight Shift-fov drag BEFORE reading
+      // `prevLeft` below, so a (practically unreachable — see
+      // onFovDragPointerDownCapture's perspective-only gate) mid-drag
+      // projection change doesn't carry a leaked `mouseButtons.LEFT ===
+      // null` onto the freshly rebuilt `controls`.
+      abortFovDrag()
+      const prevLeft = controls.mouseButtons.LEFT
+      const prevTarget = controls.target.clone()
+      // Preserve `.enabled` across the rebuild — a fresh OrbitControls
+      // defaults to enabled, which would silently re-enable orbiting if a
+      // Parallel Projection toggle (independent of the active tool) fires
+      // WHILE a walkthrough tool (Position Camera/Look Around/Walk,
+      // camera.md §4) has it deliberately disabled.
+      const prevEnabled = controls.enabled
+      camera = rig.active
+      controls.dispose()
+      controls = new OrbitControls(camera, renderer.domElement)
+      configureControls(controls)
+      controls.mouseButtons.LEFT = prevLeft
+      controls.target.copy(prevTarget)
+      controls.enabled = prevEnabled
+      controls.update()
+      attachControlsListeners(controls)
+      cancelFovEntry()
+      refreshFovReadout()
+      onProjectionChangeRef.current?.(rig.projection)
+    }
+
+    /**
+     * Camera ▸ Parallel Projection (checkbox) — toggles between perspective
+     * and parallel projection, visually stable at the orbit target
+     * (docs/design/camera.md §1: `CameraRig.toggleProjection`).
+     */
+    function toggleProjection(): void {
+      rig.toggleProjection(controls.target)
+      rebindControlsForProjectionChange()
+      scheduleRender()
+    }
+    // Push the initial projection once, mount-time — the parent's checkbox
+    // otherwise has no way to learn the starting state without assuming it
+    // matches CameraRig's default.
+    onProjectionChangeRef.current?.(rig.projection)
+
+    /** Direct fov setter (design §2): typing into the Zoom tool's VCB (see
+     * `commitFovEntry` above) is the normal interactive path; this is the
+     * equivalent direct/test entry point ViewportApi exposes alongside it. */
+    function setFov(deg: number): void {
+      rig.setFov(deg)
+      controls.update()
+      refreshFovReadout()
+      scheduleRender()
+    }
 
     // Shift-in-Orbit -> temporary Pan. OrbitControls already handles
     // this natively: with mouseButtons.LEFT === MOUSE.ROTATE, holding
@@ -3371,6 +4431,15 @@ export default function Viewport({
     // behaves exactly as before. Guarded by shiftPanActive so keydown
     // autorepeat doesn't re-apply the same state repeatedly, and so keyup
     // only restores the Orbit cursor if we're the ones who changed it.
+    //
+    // Shift-in-Zoom (camera-playtest2.md §3) is handled in the SAME pair of
+    // handlers (per that design's explicit direction — extend rather than
+    // add a second Shift listener), independently guarded by
+    // `shiftFovCursorActive` so neither swap's autorepeat/restore logic
+    // interferes with the other's. Unlike Shift-in-Orbit, this DOES have a
+    // real functional effect on a drag — but that decision is made once, at
+    // pointerdown, by `onFovDragPointerDownCapture`; these handlers are
+    // cursor-only, exactly like the Orbit/Pan swap above.
     function onShiftKeyDown(ev: KeyboardEvent): void {
       if (ev.key !== 'Shift') return
       // Move's Shift-held axis lock. Idempotent under keydown autorepeat.
@@ -3378,10 +4447,30 @@ export default function Viewport({
       if ('setShiftHeld' in at) {
         (at as { setShiftHeld(held: boolean): void }).setShiftHeld(true)
       }
-      if (shiftPanActive) return
-      if (activeToolPropRef.current !== 'Orbit') return
-      shiftPanActive = true
-      renderer.domElement.style.cursor = cursorFor('Pan')
+      if (!shiftPanActive && activeToolPropRef.current === 'Orbit') {
+        shiftPanActive = true
+        renderer.domElement.style.cursor = cursorFor('Pan')
+      }
+      // `!cameraDragActive` (finding 3, camera-playtest2 review): the
+      // fov-vs-dolly mode is fixed at the Zoom tool's own pointerdown and
+      // never re-evaluated mid-gesture (fovDrag.ts's module doc — the same
+      // "MODE FIXED AT PRESS" rule this cursor swap must respect). Once
+      // OrbitControls has already started a plain dolly (`cameraDragActive`
+      // is the same "a real drag is live" flag `onControlsStart`/`onControlsEnd`
+      // maintain from OrbitControls' own 'start'/'end' events — it stays
+      // false throughout an armed fov drag, since that drag pre-empts
+      // OrbitControls entirely and it never dispatches 'start'), swapping the
+      // cursor to the fov one here would claim a mode change that will not
+      // happen: the drag stays a dolly no matter how long Shift is held.
+      if (
+        !shiftFovCursorActive &&
+        !cameraDragActive &&
+        activeCameraTool === 'Zoom' &&
+        rig.projection === 'perspective'
+      ) {
+        shiftFovCursorActive = true
+        renderer.domElement.style.cursor = cursorFor('Zoom Window')
+      }
     }
     function onShiftKeyUp(ev: KeyboardEvent): void {
       if (ev.key === 'Shift') {
@@ -3390,10 +4479,18 @@ export default function Viewport({
           (at as { setShiftHeld(held: boolean): void }).setShiftHeld(false)
         }
       }
-      if (!shiftPanActive) return
-      if (ev.key !== 'Shift' && ev.shiftKey) return
-      shiftPanActive = false
-      renderer.domElement.style.cursor = cursorFor('Orbit')
+      const releasedCleanly = ev.key === 'Shift' || !ev.shiftKey
+      if (shiftFovCursorActive && releasedCleanly) {
+        shiftFovCursorActive = false
+        // An active drag/wheel-adjust owns the cursor until its OWN
+        // gesture ends (see restoreZoomDollyBinding) — don't stomp it back
+        // to the plain Zoom cursor mid-drag.
+        if (fovDragState === null) renderer.domElement.style.cursor = cursorFor('Zoom')
+      }
+      if (shiftPanActive && releasedCleanly) {
+        shiftPanActive = false
+        renderer.domElement.style.cursor = cursorFor('Orbit')
+      }
     }
     window.addEventListener('keydown', onShiftKeyDown)
     window.addEventListener('keyup', onShiftKeyUp)
@@ -3500,7 +4597,7 @@ export default function Viewport({
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(cached.ray)
           : null
-        const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+        const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
         activeTool.onPointerMove(snap, cached.ray)
         cueLayer.update(snap)
         drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
@@ -3526,21 +4623,35 @@ export default function Viewport({
 
     function render(): void {
       rafId = requestAnimationFrame(render)
-      const changed = controls.update()
+      // `controls.enabled` only gates OrbitControls' OWN input listeners —
+      // `update()` itself runs its full position/orientation recomputation
+      // regardless, including an unconditional `camera.lookAt(controls.
+      // target)` every call. A walkthrough tool (Position Camera/Look
+      // Around/Walk, camera.md §4) disables `controls` specifically so it
+      // can own the camera outright; calling `update()` anyway would silently
+      // re-aim the camera at the stale `controls.target` every frame,
+      // discarding the tool's own orientation on the very next repaint. Only
+      // run it while controls actually own the camera.
+      const changed = controls.enabled && controls.update()
       if (changed || needsRender) {
         // Keep guide-line dashes screen-constant too (see updateGuideDashScale).
-        sceneRenderer.updateGuideDashScale(controls.getDistance())
+        // effectiveDistance (not the raw controls distance) so this reacts to
+        // an ortho zoom exactly like a perspective dolly would
+        // (docs/design/camera.md §1 — CameraRig.effectiveDistance).
+        const effDist = rig.effectiveDistance(controls.getDistance())
+        sceneRenderer.updateGuideDashScale(effDist)
         // Rotate/Protractor/Slice/SectionPlane's single-position preview
         // disks are virtual constructs too — keep them screen-constant the
         // same way (see RotateTool/ProtractorTool/SliceTool/
         // SectionPlaneTool.updateDiskScale, all built on
-        // viewport/math.ts's screenConstantWorldHalf). viewportHeight is
-        // passed alongside the camera — the old K·dist form baked it into a
-        // constant and silently drifted on resize; this doesn't.
+        // viewport/math.ts's screenConstantWorldHalfFromWorldPerPixel). The
+        // `worldPerPixel` callback is projection-agnostic — no
+        // `instanceof PerspectiveCamera` guard needed on either side anymore.
+        const worldPerPixelAt = (dist: number) => rig.worldPerPixel(dist, el.clientHeight)
         const activeToolForScale = toolController.activeTool
         if ('updateDiskScale' in activeToolForScale) {
-          ;(activeToolForScale as { updateDiskScale(c: THREE.Camera, viewportHeight: number): void })
-            .updateDiskScale(camera, el.clientHeight)
+          ;(activeToolForScale as { updateDiskScale(c: THREE.Camera, worldPerPixel: (dist: number) => number): void })
+            .updateDiskScale(camera, worldPerPixelAt)
         }
         // ScaleTool's grip markers are screen-constant size too, but each
         // grip needs its OWN world-space size (they sit at different
@@ -3548,16 +4659,18 @@ export default function Viewport({
         // ScaleTool.updateGripScale. Called here, before renderer.render(),
         // so the scale takes effect on THIS frame's updateMatrixWorld pass.
         if ('updateGripScale' in activeToolForScale) {
-          ;(activeToolForScale as { updateGripScale(c: THREE.Camera, viewportHeight: number): void })
-            .updateGripScale(camera, el.clientHeight)
+          ;(activeToolForScale as { updateGripScale(c: THREE.Camera, worldPerPixel: (dist: number) => number): void })
+            .updateGripScale(camera, worldPerPixelAt)
         }
         // Feed the shader grid the camera's current position so it can pick
-        // the right cell-size decade per fragment.
-        infiniteGrid.update(camera.position)
+        // the right cell-size decade per fragment; under parallel projection
+        // every fragment must use the SAME (depth-independent) LOD instead
+        // (see InfiniteGrid's uLodDistanceOverride doc comment).
+        infiniteGrid.update(camera.position, rig.projection === 'parallel' ? effDist : null)
         // Re-clip the axis halves to the enlarged frustum (float64 — see
         // clampOriginAxes; the fat-line shader's own handling of extreme
         // segments is what shimmered).
-        clampOriginAxes(originAxes, camera, el.clientHeight)
+        clampOriginAxes(originAxes, rig, el.clientHeight)
         // Fat-line resolutions (sketch edges, tool-preview rubber-bands) are
         // NOT refreshed here: LineMaterial's resolution uniform depends only
         // on the canvas size, so it's set at mount and on resize (see the
@@ -3585,17 +4698,25 @@ export default function Viewport({
     }
     scheduleRenderRef.current = scheduleRender
 
-    controls.addEventListener('change', scheduleRender)
-
     // Low-level capture: camera state on every orbit/pan/zoom change, and
     // keys (Shift axis-lock, Esc/Enter/Del). All no-ops unless recording.
+    // (Both this and `scheduleRender` are wired to `controls`' 'change' event
+    // via `attachControlsListeners`, called once at controls-creation time
+    // above and again by `toggleProjection` after it recreates `controls`.)
     function recordCameraInput(): void {
       if (!inputRecorder.isActive()) return
+      // The ortho frustum height/zoom are additive and present only under
+      // parallel projection (docs/design/camera.md §5) — the minimal pair
+      // needed to reconstruct the orthographic frustum on replay; absent
+      // under perspective, where no ortho frustum is in play.
       inputRecorder.recordCamera(
         [camera.position.x, camera.position.y, camera.position.z],
         [controls.target.x, controls.target.y, controls.target.z],
         [camera.up.x, camera.up.y, camera.up.z],
-        camera.fov,
+        rig.perspective.fov,
+        rig.projection,
+        rig.projection === 'parallel' ? rig.orthographic.top - rig.orthographic.bottom : undefined,
+        rig.projection === 'parallel' ? rig.orthographic.zoom : undefined,
       )
     }
     function onKeyDownRecord(ev: KeyboardEvent): void {
@@ -3604,7 +4725,6 @@ export default function Viewport({
     function onKeyUpRecord(ev: KeyboardEvent): void {
       inputRecorder.recordKey('keyup', ev)
     }
-    controls.addEventListener('change', recordCameraInput)
     window.addEventListener('keydown', onKeyDownRecord)
     window.addEventListener('keyup', onKeyUpRecord)
 
@@ -3739,6 +4859,19 @@ export default function Viewport({
       // replay reproduces the whole stack, camera-nav moves included.
       recordPointerInput('pointermove', ev)
 
+      // Shift-fov drag owns the pointer for its whole gesture — armed at
+      // pointerdown by onFovDragPointerDownCapture (camera-playtest2.md §3).
+      if (fovDragState !== null) {
+        updateFovDrag(ev)
+        return
+      }
+
+      // Zoom Window owns the pointer for its whole gesture — see onPointerDown.
+      if (zoomWindowActive) {
+        updateZoomWindowDrag(ev)
+        return
+      }
+
       // NDC/ray math is cheap (no wasm calls) — compute it up front so both
       // the hover probe above and the geometry routing below share one ray,
       // and the probe still runs even when the early-returns below skip the
@@ -3795,17 +4928,31 @@ export default function Viewport({
       if (ev.buttons !== 0 && ev.button !== -1 && dragMove?.active !== true) return
 
       const viewportH = el.clientHeight
-      const fovY = camera.fov
+      const basis = apertureBasis()
 
       // Cache for live re-lock after key events
-      lastRayRef.current = { ray, viewportH, fovY }
+      lastRayRef.current = { ray, viewportH, basis }
 
       const activeTool = toolController.activeTool
-      const constraint = 'snapConstraint' in activeTool
+      // A screen-space drag tool (Look Around/Walk, camera.md §4 — see
+      // Tool.onPointerRawMove's doc) has no world pick of its own: skip the
+      // snap resolve entirely (a wasted wasm call every frame) rather than
+      // resolving one nothing will read, which would otherwise leave a
+      // stale/misleading inference cue floating over the scene while walking.
+      const isRawDragTool = 'onPointerRawMove' in activeTool
+      const constraint = !isRawDragTool && 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+      const { snap } = isRawDragTool
+        ? { snap: null }
+        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
       activeTool.onPointerMove(snap, ray)
+      if (isRawDragTool) {
+        const [rawX, rawY] = canvasPoint(ev)
+        ;(activeTool as {
+          onPointerRawMove(xPx: number, yPx: number, buttons: number, mods: { shift: boolean }): void
+        }).onPointerRawMove(rawX, rawY, ev.buttons, { shift: ev.shiftKey })
+      }
       cueLayer.update(snap)
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
       scheduleRender()
@@ -3855,7 +5002,10 @@ export default function Viewport({
       const v = p.clone().project(camera)
       const w = renderer.domElement.clientWidth
       const h = renderer.domElement.clientHeight
-      return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, behind: v.z > 1 }
+      // `isBehindCamera` (cameraRig.ts) is projection-agnostic via
+      // camera-space z — the old NDC `v.z > 1` check was a perspective-only
+      // heuristic that inverts under orthographic projection (see its doc).
+      return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, behind: isBehindCamera(p, camera) }
     }
 
     function pointSegPx(
@@ -3930,13 +5080,27 @@ export default function Viewport({
     function onPointerDown(ev: PointerEvent): void {
       recordPointerInput('pointerdown', ev)
       if (ev.button !== 0) return
+      // A Shift-fov drag is already armed by now — onFovDragPointerDownCapture
+      // (an `el`-level capture-phase listener, wired further down) runs
+      // BEFORE this bubble-phase handler and before OrbitControls' own
+      // pointerdown handler for the very same event (see its doc). Nothing
+      // left to do here but decline to fall through to camera-nav/geometry
+      // routing below.
+      if (fovDragState !== null) return
+      // Zoom Window owns left-drag itself (a one-shot rectangle, not
+      // OrbitControls' native orbit/pan/dolly) — checked before the
+      // camera-nav early-return below so it isn't swallowed by it.
+      if (zoomWindowActive) {
+        beginZoomWindowDrag(ev)
+        return
+      }
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
       if (cameraModeRef.current) return
 
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
       const ray = makeWorldRay(ndcX, ndcY, camera)
       const viewportH = el.clientHeight
-      const fovY = camera.fov
+      const basis = apertureBasis()
 
       // Record shift state so handleSelect (driven by the tool's onSelect) can
       // treat this click as additive multi-select.
@@ -4015,8 +5179,19 @@ export default function Viewport({
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
       activeTool.onPointerDown(snap, ray)
+      // Walk's press-relative drag (camera.md §4) — see Tool.onPointerRawDown's doc.
+      if ('onPointerRawDown' in activeTool) {
+        const [rawX, rawY] = canvasPoint(ev)
+        ;(activeTool as { onPointerRawDown(xPx: number, yPx: number): void }).onPointerRawDown(rawX, rawY)
+        // Track the drag even when it leaves the canvas (same as
+        // dragMove/marquee/Zoom Window above) — Look Around/Walk drive their
+        // whole gesture off raw canvas-pixel deltas, so losing pointermove
+        // the instant the cursor crosses the canvas edge would freeze the
+        // camera mid-drag instead of merely clamping its input.
+        renderer.domElement.setPointerCapture(ev.pointerId)
+      }
     }
 
     // Double-click a node to enter its context (SketchUp-style).
@@ -4034,11 +5209,11 @@ export default function Viewport({
       const activeTool = toolController.activeTool
       if ('onDoubleClick' in activeTool) {
         const viewportH = el.clientHeight
-        const fovY = camera.fov
+        const basis = apertureBasis()
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
           : null
-        const { snap } = snapService.resolve(ray, viewportH, fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
         const handled = (activeTool as { onDoubleClick(snap: Snap | null, ray: Ray): boolean }).onDoubleClick(snap, ray)
         if (handled) {
           scheduleRender()
@@ -4067,7 +5242,32 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ keyboard
     function onKeyDown(ev: KeyboardEvent): void {
+      // Field of View typed entry (design §2) takes priority over everything
+      // below while the Zoom camera mode is active and a digit has started
+      // the buffer — mirrors how a real tool's capturesKey pre-empts the
+      // bare-letter shortcuts further down.
+      if (handleFovEntryKey(ev)) {
+        scheduleRender()
+        return
+      }
+
       const isMod = ev.metaKey || ev.ctrlKey
+
+      // Esc aborts an in-flight Shift-fov drag before anything else
+      // (camera-playtest2.md §3) — restores MOUSE.DOLLY, no fov rollback
+      // (see abortFovDrag's doc).
+      if (ev.key === 'Escape' && fovDragState !== null) {
+        abortFovDrag()
+        return
+      }
+
+      // Esc cancels an in-flight Zoom Window drag before anything else — a
+      // DIFFERENT drag state than the Select tool's marquee/drag-move below
+      // (Zoom Window owns left-drag itself; see its mode-switch comment).
+      if (ev.key === 'Escape' && zoomWindowDrag !== null) {
+        abortZoomWindowDrag()
+        return
+      }
 
       // Esc cancels an in-flight marquee before anything else.
       if (ev.key === 'Escape' && marqueeDrag !== null) {
@@ -4132,7 +5332,7 @@ export default function Viewport({
             const constraint = 'snapConstraint' in activeTool
               ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(cached.ray)
               : null
-            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.fovY, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
             activeTool.onPointerMove(snap, cached.ray)
             cueLayer.update(snap)
             drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
@@ -4220,6 +5420,21 @@ export default function Viewport({
     function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
       if (ev.button !== 0) return
+      // Shift-fov drag owns the pointer for its whole gesture — see
+      // onPointerDown. Scoped to the arming pointer (findings 1+2,
+      // camera-playtest2 DELTA review): an unrelated pointer's OWN release
+      // still falls into this branch (a drag stays "owned" until its own
+      // pointer's exit) but must not commit someone else's gesture —
+      // `finishFovDrag` no-ops for the wrong pointerId.
+      if (fovDragState !== null) {
+        finishFovDrag(ev.pointerId)
+        return
+      }
+      // Zoom Window owns the pointer for its whole gesture — see onPointerDown.
+      if (zoomWindowActive) {
+        finishZoomWindowDrag(ev)
+        return
+      }
       if (!cameraModeRef.current) {
         const activeTool = toolController.activeTool
         // A live read at the RELEASE too (see the onPointerDown wiring's doc)
@@ -4234,7 +5449,7 @@ export default function Viewport({
           const constraint = 'snapConstraint' in activeTool
             ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
             : null
-          const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
           ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
           scheduleRender()
         }
@@ -4260,7 +5475,7 @@ export default function Viewport({
             const constraint = 'snapConstraint' in tool
               ? (tool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
               : null
-            const { snap } = snapService.resolve(ray, el.clientHeight, camera.fov, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
             tool.onPointerDown(snap, ray)
           }
           // (If the tool is no longer mid-gesture — a VCB Enter or Esc ended
@@ -4302,8 +5517,26 @@ export default function Viewport({
     }
     function onPointerCancel(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
+      // A real pointer-capture loss (OS gesture interruption, etc.) — abort
+      // the fov drag exactly like Escape/focus-loss (camera-playtest2.md
+      // §3), scoped to the arming pointer (findings 1+2, camera-playtest2
+      // DELTA review): this listener fires for EVERY pointer's own cancel,
+      // so an unrelated pointer's cancellation must not end someone else's
+      // still-armed drag.
+      abortFovDrag(ev.pointerId)
       clearMarquee()
       abortDragMove()
+      if (zoomWindowDrag !== null) {
+        // Mirrors abortDragMove's own precedent: an ACTIVE (past-threshold)
+        // gesture cancelled mid-flight still springs back to Select — the
+        // one-shot is consumed by starting the drag, not only by finishing
+        // it — while a bare armed-but-not-yet-dragging press quietly drops
+        // (the user never left the idle Zoom Window state in any visible way).
+        const wasActive = zoomWindowDrag.active
+        zoomWindowDrag = null
+        marqueeOverlay.style.display = 'none'
+        if (wasActive) onToolRevertedRef.current?.()
+      }
     }
     // Each routed event may advance (or cancel) the active tool's gesture —
     // wrap the handlers so the status-bar hint is re-polled after every one,
@@ -4319,13 +5552,34 @@ export default function Viewport({
     renderer.domElement.addEventListener('pointercancel', onPointerCancel)
     renderer.domElement.addEventListener('dblclick', onDoubleClickTracked)
     window.addEventListener('keydown', onKeyDownTracked)
+    // Shift-fov drag/wheel pre-emption (camera-playtest2.md §3): CAPTURE
+    // phase on `el` (the canvas's PARENT, not the canvas itself — see
+    // onFovDragPointerDownCapture's doc for why registering on the canvas
+    // wouldn't run early enough to beat OrbitControls' own listener).
+    el.addEventListener('pointerdown', onFovDragPointerDownCapture, true)
+    el.addEventListener('wheel', onFovWheelCapture, { capture: true, passive: false })
+    // A real pointer-capture loss (unrelated to our own release/abort
+    // paths, e.g. the OS reclaiming capture) — abort exactly like Escape,
+    // scoped to the arming pointer (findings 1+2, camera-playtest2 DELTA
+    // review): `lostpointercapture` fires per-pointer, and OrbitControls
+    // itself calls `setPointerCapture` on OTHER pointers for its own
+    // gestures (e.g. a second touch mid pinch-zoom) — that pointer's own
+    // capture loss must not end a drag it never armed.
+    const onFovDragLostPointerCapture = (ev: PointerEvent) => abortFovDrag(ev.pointerId)
+    renderer.domElement.addEventListener('lostpointercapture', onFovDragLostPointerCapture)
+    // Cmd-Tab / devtools / another window — the button may still be
+    // physically held with no further event ever reaching us. Unlike the
+    // listeners above, a window blur has no pointer of its own to scope
+    // to and genuinely should end the drag regardless of which pointer
+    // armed it — the omitted argument gets the unconditional abort.
+    const onFovDragWindowBlur = () => abortFovDrag()
+    window.addEventListener('blur', onFovDragWindowBlur)
 
     // ------------------------------------------------------------------ resize
     const resizeObserver = new ResizeObserver(() => {
       const w = el.clientWidth
       const h = el.clientHeight
-      camera.aspect = w / h
-      camera.updateProjectionMatrix()
+      rig.setAspect(w / h)
       renderer.setSize(w, h)
       updateAxisResolution(originAxes, w, h)
       // Keep every fat line (sketch edges, tool-preview rubber-bands) sized
@@ -4369,6 +5623,10 @@ export default function Viewport({
       renderer.domElement.removeEventListener('dblclick', onDoubleClickTracked)
       marqueeOverlay.remove()
       window.removeEventListener('keydown', onKeyDownTracked)
+      el.removeEventListener('pointerdown', onFovDragPointerDownCapture, true)
+      el.removeEventListener('wheel', onFovWheelCapture, true)
+      renderer.domElement.removeEventListener('lostpointercapture', onFovDragLostPointerCapture)
+      window.removeEventListener('blur', onFovDragWindowBlur)
       resizeObserver.disconnect()
       unsubscribeTheme()
       disposeOriginAxes(originAxes)
@@ -4392,12 +5650,59 @@ export default function Viewport({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wasmScene])
 
-  // React to activeTool changes from parent without re-mounting the effect
-  useEffect(() => {
+  // React to activeTool changes from parent without re-mounting the effect.
+  //
+  // MUST be a layout effect, not a passive one: switchToolRef.current arms
+  // the pointer-handling state a tool activation depends on (Zoom Window's
+  // `zoomWindowActive`, camera tools' `cameraModeRef`/`mouseButtons.LEFT`,
+  // walkthrough tools' `controls.enabled`, …). A passive `useEffect` is
+  // flushed on a LATER macrotask, after the browser has already had a
+  // chance to paint — so a menu click that sets `activeTool` can be
+  // followed by a real pointerdown (a fast click-drag straight from the
+  // Camera menu onto the canvas) BEFORE that effect ever runs. That
+  // pointerdown then sees the OLD arm-state and gets routed to whatever
+  // the PREVIOUS tool was (typically Select's marquee), silently
+  // swallowing the gesture — this was the "Zoom Window ignores the first
+  // drag" defect: the drag wasn't lost, it was misrouted, and the very
+  // next drag "worked" only because by then the effect had long since
+  // flushed. `useLayoutEffect` runs synchronously right after the commit,
+  // before the browser can paint or dispatch another input event, so the
+  // arm-state is always current by the time any subsequent pointer event
+  // can possibly arrive.
+  useLayoutEffect(() => {
     if (activeToolProp !== undefined && switchToolRef.current !== null) {
-      switchToolRef.current(activeToolProp)
+      // Last-applied guard (see `shouldSkipToolSwitch`'s and
+      // `lastAppliedToolNameRef`'s doc comments): this effect re-runs both
+      // for genuine parent-driven switches AND for the ECHO of an internal
+      // transition Viewport itself just reported via `onInternalToolChange`
+      // (Position Camera's auto-handoff to Look Around, Escape-to-Select,
+      // …) — by the time that echo lands here the tool controller has
+      // already made the switch, so re-invoking `switchToolRef` would
+      // re-run the whole switch body a second time for a transition that
+      // already happened (double-applying the walkthrough-exit reseed,
+      // tearing down and replacing the tool instance the first invocation
+      // just created). Compare against `lastAppliedToolNameRef`, NOT
+      // `toolController.activeToolName` — several switch-body branches
+      // (Orbit/Pan/Zoom/Zoom Window/default) call `resetToSelect()`, so the
+      // controller's name is 'Select' while one of those is active and
+      // would wrongly match (and skip) an unrelated later switch TO
+      // 'Select'. Skip only when the requested name is already the last one
+      // actually applied AND nothing forced a reapply — an explicit
+      // reselect of an already-active camera tool still bumps
+      // `activeToolSeqProp` (App.tsx `toolActivationSeq`) and must still go
+      // through.
+      const seqChanged = activeToolSeqProp !== lastAppliedToolSeqRef.current
+      if (!shouldSkipToolSwitch(activeToolProp, lastAppliedToolNameRef.current, seqChanged)) {
+        switchToolRef.current(activeToolProp)
+      }
     }
-  }, [activeToolProp])
+    lastAppliedToolSeqRef.current = activeToolSeqProp
+    // `activeToolSeqProp` is intentionally not read above (beyond the guard)
+    // — it exists only to force this effect to re-run when the parent
+    // explicitly reselects an unchanged `activeToolProp` (see the prop's
+    // doc comment).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeToolProp, activeToolSeqProp])
 
   // Reflect the editing context path into the renderer (isolation fade) and the
   // active tool (scoped editing) when the parent changes it.

@@ -21,6 +21,7 @@ const ALL_TOOLS: ToolName[] = [
   'Orbit',
   'Pan',
   'Zoom',
+  'Zoom Window',
 ]
 
 describe('TOOL_ICON_SVG', () => {

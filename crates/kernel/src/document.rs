@@ -36,6 +36,7 @@ use std::num::NonZeroU32;
 use slotmap::SlotMap;
 use tracing::info;
 
+use crate::camera::CameraState;
 use crate::guide::Guide;
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 use crate::ids::{
@@ -1182,6 +1183,14 @@ pub struct Document {
     user_hidden_objects: BTreeSet<ObjectId>,
     user_hidden_groups: BTreeSet<GroupId>,
     user_hidden_instances: BTreeSet<InstanceId>,
+    /// The working camera view at last save (manifest v13+; docs/design/
+    /// camera.md §5): `None` for a document that never had one saved (every
+    /// pre-v13 file, and a brand-new in-memory `Document` before the app's
+    /// first `set_camera_state`), which the app reads as "use today's home
+    /// framing". Deliberately NOT undoable — see `camera.rs`'s module doc —
+    /// so it sits beside `tag_meta`/`user_hidden_*` rather than going through
+    /// `undo`/`redo`.
+    camera: Option<CameraState>,
     undo: ActionStack,
     redo: ActionStack,
     /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
@@ -1360,6 +1369,7 @@ impl Document {
             obj_hidden: self.user_hidden_objects.clone(),
             group_hidden: self.user_hidden_groups.clone(),
             instance_hidden: self.user_hidden_instances.clone(),
+            camera: self.camera,
         })
     }
 
@@ -1679,6 +1689,9 @@ impl Document {
                 doc.user_hidden_instances.insert(iid);
             }
         }
+
+        // ── Camera view state (manifest v13; absent pre-v13) ──────────────
+        doc.camera = raw.camera;
 
         // Undo/redo stacks are empty by construction (Document::new() gives empty).
         Ok(doc)
@@ -2500,6 +2513,25 @@ impl Document {
             return;
         }
         self.tag_meta.insert(path, hidden);
+    }
+
+    /// The camera's working view at last save (manifest v13+; docs/design/
+    /// camera.md §5), or `None` when no view has ever been saved (a pre-v13
+    /// file, or a fresh `Document` before the app's first `set_camera_state`)
+    /// — the app reads `None` as "use today's home framing".
+    pub fn camera_state(&self) -> Option<CameraState> {
+        self.camera
+    }
+
+    /// Records the camera's current working view.
+    ///
+    /// View state, deliberately NOT undoable — matching how SketchUp treats
+    /// the camera (`camera.rs`'s module doc) and mirroring
+    /// [`Document::set_tag_hidden`]'s own non-undoable, still-serialized
+    /// posture. Serialized with the document (manifest v13); saved on
+    /// document save, applied on load.
+    pub fn set_camera_state(&mut self, state: CameraState) {
+        self.camera = Some(state);
     }
 
     /// Whether a node is USER-hidden (view state; persisted, manifest v6).

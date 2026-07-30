@@ -8,10 +8,17 @@
 import { describe, it, expect, vi } from 'vitest'
 import { SnapService, SNAP_RADIUS_PX } from './snapService'
 import type { Scene } from '../wasm/pkg/wasm_api.js'
-import { pixelRadiusToAperture, type Ray } from './math'
+import { pixelRadiusToAperture, type ApertureBasis, type Ray } from './math'
 
 /** A ray straight down -Z from above the origin. */
 const DOWN: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
+
+/** The perspective aperture basis every pre-existing test below used to
+ * pass as a bare `45` (fovYDeg) — same meaning, now explicit (SnapService's
+ * `resolve` takes an `ApertureBasis` so the same query code path also
+ * serves parallel projection; see the 'ApertureBasis — projection-aware
+ * aperture' describe block below for the parallel-projection cases). */
+const PERSPECTIVE_45: ApertureBasis = { kind: 'perspective', fovYDeg: 45 }
 
 /** A fake Scene whose `snap()` always misses (undefined) — every resolve()
  *  call falls through to the fallback tier under test. */
@@ -22,7 +29,7 @@ function fakeScene(): Scene {
 describe('SnapService — fallback tier', () => {
   it('without a constraintPlane, falls back to ground (kind "ground")', () => {
     const svc = new SnapService(fakeScene())
-    const { snap, fromKernel } = svc.resolve(DOWN, 800, 45)
+    const { snap, fromKernel } = svc.resolve(DOWN, 800, PERSPECTIVE_45)
     expect(fromKernel).toBe(false)
     expect(snap).not.toBeNull()
     expect(snap?.kind).toBe('ground')
@@ -36,7 +43,7 @@ describe('SnapService — fallback tier', () => {
     // actually intersects the SUPPLIED plane rather than z=0.
     const constraintPlane = { point: [2, 0, 0] as [number, number, number], normal: [1, 0, 0] as [number, number, number] }
     const ray: Ray = { origin: [0, 0, 0], direction: [1, 0, 0] }
-    const { snap, fromKernel } = svc.resolve(ray, 800, 45, undefined, undefined, constraintPlane)
+    const { snap, fromKernel } = svc.resolve(ray, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane)
     expect(fromKernel).toBe(false)
     expect(snap?.kind).toBe('plane')
     expect(snap?.x).toBeCloseTo(2)
@@ -49,30 +56,31 @@ describe('SnapService — fallback tier', () => {
     // Plane normal perpendicular to the ray direction — parallel miss.
     const constraintPlane = { point: [0, 0, 1] as [number, number, number], normal: [0, 0, 1] as [number, number, number] }
     const ray: Ray = { origin: [0, 0, 0], direction: [1, 0, 0] }
-    const { snap, fromKernel } = svc.resolve(ray, 800, 45, undefined, undefined, constraintPlane)
+    const { snap, fromKernel } = svc.resolve(ray, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane)
     expect(fromKernel).toBe(false)
     expect(snap).toBeNull()
   })
 })
 
 describe('SnapService — precision mode', () => {
-  it('passes the precision flag through to Scene.snap() as the trailing argument', () => {
+  it('passes the precision flag through to Scene.snap() as the second-to-last argument (cylinder is now the trailing one)', () => {
     const scene = fakeScene()
     const svc = new SnapService(scene)
     const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+    const precisionArg = () => snapFn.mock.calls.at(-1)?.at(-2)
 
-    svc.resolve(DOWN, 800, 45)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
     // The kernel owns the weighting; only this boolean crosses the boundary.
-    expect(snapFn.mock.calls[0].at(-1)).toBe(false)
+    expect(precisionArg()).toBe(false)
 
     expect(svc.setPrecision(true)).toBe(true)
     expect(svc.isPrecision()).toBe(true)
-    svc.resolve(DOWN, 800, 45)
-    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(true)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    expect(precisionArg()).toBe(true)
 
     expect(svc.setPrecision(false)).toBe(true)
-    svc.resolve(DOWN, 800, 45)
-    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(false)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    expect(precisionArg()).toBe(false)
   })
 
   it('setting the same mode again is a no-op (keydown autorepeat must be free)', () => {
@@ -104,22 +112,22 @@ describe('SnapService — precision mode', () => {
     const snapFn = vi.fn(() => (hit ? held : undefined))
     const scene = { snap: snapFn } as unknown as Scene
     const svc = new SnapService(scene)
-    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('endpoint')
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('endpoint')
 
     // Control: with the mode unchanged, losing the endpoint costs TWO queries
     // (acquire, then the wider release-resisting one).
     hit = false
     snapFn.mockClear()
-    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('ground')
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('ground')
     expect(snapFn.mock.calls.length).toBe(2)
 
     // Re-acquire, then toggle: the held snap is gone, so one query only.
     hit = true
-    svc.resolve(DOWN, 800, 45)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
     svc.setPrecision(true)
     hit = false
     snapFn.mockClear()
-    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('ground')
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('ground')
     expect(snapFn.mock.calls.length).toBe(1)
   })
 
@@ -160,13 +168,75 @@ describe('SnapService — precision mode', () => {
     const svc = new SnapService({ snap: snapFn } as unknown as Scene)
 
     // Acquire A: a sticky Centre snap becomes the held target.
-    expect(svc.resolve(DOWN, 800, 45).snap?.kind).toBe('center')
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('center')
 
     // Cursor drifts off A onto B's neighbourhood. B is not the same target,
     // so the result RELEASES (ground fallback), and is certainly not B.
     phase = 'missThenB'
-    const released = svc.resolve(DOWN, 800, 45).snap
+    const released = svc.resolve(DOWN, 800, PERSPECTIVE_45).snap
     expect(released?.kind).toBe('ground')
     expect(released?.sketchCurve).toBeUndefined()
+  })
+})
+
+describe('SnapService — ApertureBasis (projection-aware aperture, camera.md §1)', () => {
+  // A held (sticky) endpoint snap the kernel returns whenever it's asked,
+  // regardless of aperture — these tests are about what aperture gets SENT,
+  // not the kernel's own admit/reject logic (that's inference's job).
+  const held = {
+    x: () => 1, y: () => 2, z: () => 3,
+    kind: () => 'endpoint',
+    direction: () => undefined,
+    object: () => undefined,
+    instance: () => undefined,
+    element: () => 7n,
+    element_kind: () => 'vertex',
+    sketch: () => undefined,
+    sketch_region: () => undefined,
+    sketch_curve: () => undefined,
+    free: () => {},
+  }
+
+  it('a perspective basis sends cylinder=false and an angular (radians) aperture', () => {
+    const snapFn = vi.fn((..._args: unknown[]) => held)
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    const aperture = snapFn.mock.calls[0][6] as number
+    const cylinder = snapFn.mock.calls[0][11] as boolean
+
+    expect(cylinder).toBe(false)
+    expect(aperture).toBeCloseTo(pixelRadiusToAperture(SNAP_RADIUS_PX, 800, 45), 12)
+  })
+
+  it('a parallel basis sends cylinder=true and a world-radius (meters) aperture — a TRUE cylindrical tolerance, not a synthesized angle', () => {
+    const snapFn = vi.fn((..._args: unknown[]) => held)
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    const worldPerPixel = 0.02
+    const parallelBasis: ApertureBasis = { kind: 'parallel', worldPerPixel }
+    svc.resolve(DOWN, 800, parallelBasis)
+    const aperture = snapFn.mock.calls[0][6] as number
+    const cylinder = snapFn.mock.calls[0][11] as boolean
+
+    expect(cylinder).toBe(true)
+    // Exactly pixelRadius * worldPerPixel — no depth/target-distance enters
+    // the computation at all (unlike phase 1's interim cone synthesis).
+    expect(aperture).toBeCloseTo(SNAP_RADIUS_PX * worldPerPixel, 12)
+  })
+
+  it('a wider parallel worldPerPixel (zoomed further out) sends a proportionally wider aperture', () => {
+    const snapFn = vi.fn((..._args: unknown[]) => held)
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    svc.resolve(DOWN, 800, { kind: 'parallel', worldPerPixel: 0.01 })
+    const tight = snapFn.mock.calls[0][6] as number
+
+    snapFn.mockClear()
+    svc.resolve(DOWN, 800, { kind: 'parallel', worldPerPixel: 0.05 })
+    const wide = snapFn.mock.calls[0][6] as number
+
+    expect(wide).toBeGreaterThan(tight)
+    expect(wide).toBeCloseTo(5 * tight, 12)
   })
 })

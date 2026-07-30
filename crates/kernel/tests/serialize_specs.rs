@@ -11,8 +11,9 @@
 //! poses, materials, and sketch contents are not.
 
 use kernel::{
-    CurveGeom, DecodeError, Document, Guide, ImageFormat, Material, NodeId, Object, Plane, Point3,
-    Profile, Rgba8, SurfaceRef, Texture, Transform, Vec3, WatertightState, tol,
+    CameraProjection, CameraState, CurveGeom, DecodeError, Document, Guide, ImageFormat, Material,
+    NodeId, Object, Plane, Point3, Profile, Rgba8, SurfaceRef, Texture, Transform, Vec3,
+    WatertightState, tol,
 };
 use kernel::{ImportNode, ImportScene, MeshRecipe};
 
@@ -385,6 +386,117 @@ fn loaded_document_has_empty_undo_stack() {
     assert!(
         !loaded.can_undo(),
         "a freshly loaded document has no undo history"
+    );
+}
+
+// ----------------------------------------------------------------- camera (docs/design/camera.md §5)
+
+fn a_camera_state() -> CameraState {
+    CameraState {
+        projection: CameraProjection::Parallel,
+        fov_deg: 62.5,
+        eye: Point3::new(1.0, 2.0, 3.0),
+        target: Point3::new(-1.0, 0.5, 0.0),
+        up: Vec3::new(0.0, 0.0, 1.0),
+    }
+}
+
+/// A document that never called `set_camera_state` has no camera state —
+/// before AND after a save/load round-trip. This is the default-framing
+/// contract every pre-v13 file (and every v13+ document that never saved a
+/// view) relies on: absent block means "use today's home framing"
+/// (docs/design/camera.md §5), never a manufactured default view.
+#[test]
+fn absent_camera_state_round_trips_as_none() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    assert_eq!(doc.camera_state(), None);
+
+    let loaded = Document::load(&doc.save()).expect("load");
+    assert_eq!(
+        loaded.camera_state(),
+        None,
+        "no camera was ever set, so none should appear after a round-trip"
+    );
+}
+
+/// `set_camera_state` round-trips every field through save/load exactly,
+/// for both projections.
+#[test]
+fn camera_state_round_trips_through_save_load() {
+    for projection in [CameraProjection::Perspective, CameraProjection::Parallel] {
+        let mut doc = Document::new();
+        extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+        let state = CameraState {
+            projection,
+            ..a_camera_state()
+        };
+        doc.set_camera_state(state);
+        assert_eq!(doc.camera_state(), Some(state));
+
+        let loaded = Document::load(&doc.save()).expect("load");
+        assert_eq!(
+            loaded.camera_state(),
+            Some(state),
+            "camera view survives a save/load round-trip"
+        );
+    }
+}
+
+/// Setting the camera state does not disturb `can_undo`/`can_redo` — it is
+/// deliberately outside document history (docs/design/camera.md §5, matching
+/// SketchUp's own camera posture), unlike every geometry-mutating op in this
+/// suite.
+#[test]
+fn setting_camera_state_is_not_undoable() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    assert!(doc.can_undo());
+    doc.undo().expect("undo the extrusion");
+    assert!(!doc.can_undo());
+
+    doc.set_camera_state(a_camera_state());
+    assert!(
+        !doc.can_undo(),
+        "setting the camera must not push an undo step"
+    );
+    assert_eq!(doc.camera_state(), Some(a_camera_state()));
+}
+
+/// Re-saving a document that set its camera state is still byte-deterministic
+/// (mirrors `save_is_byte_deterministic`) — the camera block participates in
+/// the same golden-file/state-hash contract as everything else `save` emits.
+#[test]
+fn save_with_camera_state_is_byte_deterministic() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_camera_state(a_camera_state());
+    assert_eq!(doc.save(), doc.save());
+}
+
+/// The smuggle gate (`serialize.rs`'s `CAMERA_MANIFEST_VERSION` check) is
+/// also unit-tested at the struct level, directly against a hand-built
+/// `Manifest`. This is the same contract proven through the REAL wire
+/// format — mirroring `consumed_field_smuggled_into_a_v11_file_is_rejected`'s
+/// byte-level pattern below: a genuine save with a real camera block, its
+/// declared version rolled back by patching the zipped manifest.json
+/// directly, must still refuse to load.
+#[test]
+fn camera_block_smuggled_into_a_downgraded_manifest_is_rejected() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_camera_state(a_camera_state());
+    let bytes = doc.save();
+
+    let smuggled = patch_manifest(&bytes, |m| {
+        m["format_version"] = serde_json::json!(12);
+    });
+    assert!(
+        matches!(
+            Document::load(&smuggled),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a v12 file carrying a camera block is malformed, not repaired"
     );
 }
 

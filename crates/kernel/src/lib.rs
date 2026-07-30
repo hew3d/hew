@@ -19,6 +19,7 @@ mod build;
 mod geom2d;
 mod validate;
 
+pub mod camera;
 pub mod document;
 pub mod error;
 pub mod guide;
@@ -35,6 +36,7 @@ pub mod tol;
 pub mod topo;
 pub mod transform;
 
+pub use camera::{CameraProjection, CameraState};
 pub use document::{DocChange, Document, DocumentError, FollowMePath, NodeId, PendingActionKind};
 pub use error::TopologyError;
 pub use guide::Guide;

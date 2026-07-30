@@ -8,6 +8,14 @@ import {
   axisDashGapWorld,
   LEGACY_REFERENCE_FOV_DEG,
   LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX,
+  worldPerPixelPerspective,
+  worldPerPixelOrtho,
+  orthoZoomBounds,
+  screenConstantWorldHalfFromWorldPerPixel,
+  axisDashGapWorldFromWorldPerPixel,
+  apertureForPixelRadius,
+  apertureModeFor,
+  type ApertureBasis,
 } from './math'
 
 describe('pixelRadiusToAperture', () => {
@@ -245,5 +253,129 @@ describe('axisDashGapWorld', () => {
     const { dashSize, gapSize } = axisDashGapWorld(9, 7, 0, tanHalf45, 800)
     expect(dashSize).toBe(0)
     expect(gapSize).toBe(0)
+  })
+})
+
+describe('worldPerPixelPerspective — parity with the legacy fov math', () => {
+  it('matches 2 · dist · tanHalfFov / viewportHeight directly', () => {
+    const dist = 12, fov = 50, vpH = 640
+    expect(worldPerPixelPerspective(dist, fov, vpH)).toBeCloseTo(
+      (2 * dist * tanHalfFovRad(fov)) / vpH, 12,
+    )
+  })
+
+  it('feeding it through screenConstantWorldHalfFromWorldPerPixel reproduces screenConstantWorldHalf exactly, at every dist/fov/viewport combo', () => {
+    for (const dist of [0.5, 4, 12.5, 100]) {
+      for (const fov of [20, 45, 70, 100]) {
+        for (const vpH of [400, 720, 1440]) {
+          const legacy = screenConstantWorldHalf(10, dist, tanHalfFovRad(fov), vpH)
+          const rigAware = screenConstantWorldHalfFromWorldPerPixel(
+            10, worldPerPixelPerspective(dist, fov, vpH),
+          )
+          expect(rigAware).toBeCloseTo(legacy, 9)
+        }
+      }
+    }
+  })
+
+  it('is zero for a degenerate (<=0) viewport height', () => {
+    expect(worldPerPixelPerspective(10, 45, 0)).toBe(0)
+    expect(worldPerPixelPerspective(10, 45, -5)).toBe(0)
+  })
+})
+
+describe('worldPerPixelOrtho', () => {
+  it('is frustumHeight / zoom / viewportHeight', () => {
+    expect(worldPerPixelOrtho(20, 2, 800)).toBeCloseTo(20 / 2 / 800, 12)
+  })
+
+  it('is INDEPENDENT of camera distance — the defining ortho behavior worldPerPixelPerspective cannot express', () => {
+    // A perspective worldPerPixel grows linearly with dist; an ortho one has
+    // no dist parameter at all — the same frustumHeight/zoom/viewportHeight
+    // applies to a point 1 m away or 1000 m away.
+    const near = worldPerPixelOrtho(20, 1, 800)
+    const far = worldPerPixelOrtho(20, 1, 800) // same call — no dist to vary
+    expect(near).toBe(far)
+  })
+
+  it('halving zoom doubles the world-per-pixel (zooming out)', () => {
+    expect(worldPerPixelOrtho(20, 0.5, 800)).toBeCloseTo(worldPerPixelOrtho(20, 1, 800) * 2, 12)
+  })
+
+  it('is zero for a degenerate (<=0) viewport height or zoom', () => {
+    expect(worldPerPixelOrtho(20, 1, 0)).toBe(0)
+    expect(worldPerPixelOrtho(20, 0, 800)).toBe(0)
+    expect(worldPerPixelOrtho(20, -1, 800)).toBe(0)
+  })
+})
+
+describe('orthoZoomBounds', () => {
+  it('spans the same total ratio as maxDistance/minDistance, symmetric in log-space around zoom = 1', () => {
+    const { minZoom, maxZoom } = orthoZoomBounds(0.1, 50) // ratio 500, matching configureControls
+    expect(maxZoom / minZoom).toBeCloseTo(500, 9)
+    expect(minZoom).toBeLessThan(1)
+    expect(maxZoom).toBeGreaterThan(1)
+    // Symmetric in log space: log(minZoom) == -log(maxZoom).
+    expect(Math.log(minZoom)).toBeCloseTo(-Math.log(maxZoom), 9)
+  })
+
+  it('equal min/max distance gives a zoom range of exactly [1, 1] (no headroom either way)', () => {
+    const { minZoom, maxZoom } = orthoZoomBounds(5, 5)
+    expect(minZoom).toBeCloseTo(1, 9)
+    expect(maxZoom).toBeCloseTo(1, 9)
+  })
+
+  it('never returns a zero/negative bound even for a degenerate (<=0) input', () => {
+    const { minZoom, maxZoom } = orthoZoomBounds(0, 0)
+    expect(minZoom).toBeGreaterThan(0)
+    expect(maxZoom).toBeGreaterThan(0)
+    expect(Number.isFinite(minZoom)).toBe(true)
+    expect(Number.isFinite(maxZoom)).toBe(true)
+  })
+})
+
+describe('screenConstantWorldHalfFromWorldPerPixel', () => {
+  it('is desiredPixels · worldPerPixel / 2, clamped to minWorldHalf', () => {
+    expect(screenConstantWorldHalfFromWorldPerPixel(10, 4)).toBeCloseTo(20, 12)
+    expect(screenConstantWorldHalfFromWorldPerPixel(10, 0, 0.5)).toBe(0.5)
+  })
+})
+
+describe('axisDashGapWorldFromWorldPerPixel', () => {
+  it('applies screenConstantWorldHalfFromWorldPerPixel to dash/gap separately', () => {
+    const { dashSize, gapSize } = axisDashGapWorldFromWorldPerPixel(9, 7, 4)
+    expect(dashSize).toBeCloseTo(screenConstantWorldHalfFromWorldPerPixel(9, 4), 12)
+    expect(gapSize).toBeCloseTo(screenConstantWorldHalfFromWorldPerPixel(7, 4), 12)
+  })
+})
+
+describe('apertureForPixelRadius', () => {
+  it('perspective basis matches pixelRadiusToAperture exactly (radians)', () => {
+    const basis: ApertureBasis = { kind: 'perspective', fovYDeg: 45 }
+    expect(apertureForPixelRadius(basis, 8, 800)).toBeCloseTo(pixelRadiusToAperture(8, 800, 45), 12)
+  })
+
+  it('parallel basis returns the exact world radius — a true cylindrical tolerance, no depth involved', () => {
+    const worldPerPixel = 0.01 // 1 cm per pixel
+    const basis: ApertureBasis = { kind: 'parallel', worldPerPixel }
+    expect(apertureForPixelRadius(basis, 8, 800)).toBeCloseTo(8 * worldPerPixel, 12)
+  })
+
+  it('parallel basis scales monotonically (and linearly) with pixel radius', () => {
+    const basis: ApertureBasis = { kind: 'parallel', worldPerPixel: 0.02 }
+    const small = apertureForPixelRadius(basis, 4, 800)
+    const large = apertureForPixelRadius(basis, 16, 800)
+    expect(large).toBeGreaterThan(small)
+    expect(large).toBeCloseTo(4 * small, 12)
+  })
+})
+
+describe('apertureModeFor', () => {
+  it('perspective basis selects cone', () => {
+    expect(apertureModeFor({ kind: 'perspective', fovYDeg: 45 })).toBe('cone')
+  })
+
+  it('parallel basis selects cylinder', () => {
+    expect(apertureModeFor({ kind: 'parallel', worldPerPixel: 0.02 })).toBe('cylinder')
   })
 })

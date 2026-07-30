@@ -4,7 +4,7 @@ description: "Where your work lives: the open .hew format, saving in the browser
 order: 14
 ---
 
-Hew's native format is **`.hew`**, an open, documented container (a zip holding a JSON manifest and binary geometry buffers) that saves everything: geometry, names, groups, components, materials, tags, and guides. Saving is deterministic: the same model always produces byte-identical output, which plays well with backups and version control.
+Hew's native format is **`.hew`**, an open, documented container (a zip holding a JSON manifest and binary geometry buffers) that saves everything: geometry, names, groups, components, materials, tags, guides, and your current view (which camera projection, field of view, and viewpoint you had). Saving is deterministic: the same model always produces byte-identical output, which plays well with backups and version control.
 
 ## Saving and opening
 
@@ -44,3 +44,5 @@ Recovery snapshots are an emergency net, not a save system: save normally, and u
 ## Undo history
 
 Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z`) span the whole document — every modeling operation, transform, paint, rename, and delete. History lives for the session; it isn't stored in the file.
+
+Your view is the one exception to both rules above: it's saved with the file (so reopening a model brings back the last view you had it framed in), but changing it is never an undo step — panning, orbiting, or walking around is not something you'd want an accidental `Ctrl+Z` to reverse.

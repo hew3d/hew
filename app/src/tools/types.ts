@@ -175,6 +175,31 @@ export interface Tool {
   onPointerUp?(snap: Snap | null, ray: Ray): void
 
   /**
+   * (optional) Raw canvas-relative CSS-pixel pointer position, called on
+   * EVERY pointer move alongside `onPointerMove` (both fire — this is
+   * additive, not a replacement) with the live `PointerEvent.buttons`
+   * bitmask and Shift's live state. For a gesture that is fundamentally a
+   * SCREEN-SPACE drag rather than a world pick — Look Around's mouse-look
+   * and Walk's forward/turn (docs/design/camera.md §4) — `onPointerMove`'s
+   * resolved `Snap`/`Ray` carry no useful signal (there is no "point in the
+   * scene" being aimed at) and no pixel delta at all; this hook exists
+   * for exactly that shape. Most tools should NOT implement this. Viewport
+   * feature-detects with `'onPointerRawMove' in tool`.
+   */
+  onPointerRawMove?(xPx: number, yPx: number, buttons: number, mods: { shift: boolean }): void
+
+  /**
+   * (optional) Raw canvas-relative CSS-pixel pointer position at a genuine
+   * left-button pointerDOWN, called alongside `onPointerDown` (both fire).
+   * Pairs with `onPointerRawMove` for a screen-space drag gesture that needs
+   * to measure movement FROM THE PRESS POINT (Walk's forward/turn speed,
+   * design §4 — proportional to net drag distance, not a per-frame
+   * velocity) rather than incrementally since the last move. Viewport
+   * feature-detects with `'onPointerRawDown' in tool`.
+   */
+  onPointerRawDown?(xPx: number, yPx: number): void
+
+  /**
    * (optional) A new/loaded document has replaced the Scene. Tools that cache
    * kernel handles across gestures (e.g. a ground-sketch handle) must drop
    * them here — reusing a handle from the previous document throws

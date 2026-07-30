@@ -213,6 +213,66 @@ impl Aabb {
         let slack = tol::CONE_SLACK;
         (c - closest).length() - r <= (tan_aperture * (1.0 + slack) + slack) * t_far
     }
+
+    /// Conservative cylinder-vs-box test: `false` only when NO point of the
+    /// box can pass [`crate::cone_test`]'s `Cylinder` mode for a
+    /// constant-world-radius `radius` around the ray (design camera.md §1;
+    /// the parallel-projection sibling of [`Aabb::maybe_in_cone`]).
+    /// `radius == None` mirrors `maybe_in_cone`'s `tan_aperture == None`:
+    /// unconstrained (only the behind-the-origin rejection applies).
+    ///
+    /// Unlike the cone, a cylinder's radius does NOT grow with depth, so this
+    /// needs only a single perpendicular-distance-to-the-ray-line test on the
+    /// box's bounding sphere — no `CONE_SLACK`-style guard band: that band
+    /// exists solely to cover `acos`'s trig-amplified rounding near the cone
+    /// boundary (see the comment above), and a plain Euclidean distance has
+    /// no such amplification — the flat [`tol::POINT_MERGE`] epsilon already
+    /// used elsewhere in this module for exact-distance comparisons covers
+    /// it, exactly as the doc comment on `maybe_in_cone` notes for the
+    /// ray-only paths.
+    fn maybe_in_cylinder(self, origin: Point3, dir: Vec3, radius: Option<f64>) -> bool {
+        let c = self.center();
+        let r = self.half_diagonal();
+        let t_center = (c - origin).dot(dir);
+        if t_center + r <= 0.0 {
+            // Everything in the box is at depth ≤ 0: `cone_test`'s `Cylinder`
+            // mode, like `Cone`, admits only candidates strictly in front.
+            return false;
+        }
+        let Some(radius) = radius else {
+            return true;
+        };
+        let closest_on_ray = origin + dir * t_center.max(0.0);
+        (c - closest_on_ray).length() - r <= radius + tol::POINT_MERGE
+    }
+
+    /// Dispatches to [`Aabb::maybe_in_cone`] or [`Aabb::maybe_in_cylinder`]
+    /// per `tol` ([`PruneTolerance`]) — the single entry point [`Bvh`]'s
+    /// generic collection walk uses, so it never needs to know which
+    /// projection's tolerance shape is active.
+    fn admits(self, origin: Point3, dir: Vec3, tol: PruneTolerance) -> bool {
+        match tol {
+            PruneTolerance::Cone(tan_aperture) => self.maybe_in_cone(origin, dir, tan_aperture),
+            PruneTolerance::Cylinder(radius) => self.maybe_in_cylinder(origin, dir, radius),
+        }
+    }
+}
+
+/// Pick-tolerance shape for a spatial-index prune query — the widened-by-
+/// weight value already handed to `cone_test`/`segment_cone_hit` (mirrors
+/// [`crate::SnapQuery`]'s `aperture`/`aperture_mode`, see
+/// [`crate::ApertureMode`]): a depth-growing cone half-angle tangent, or
+/// parallel projection's constant-world-radius cylinder. `None` in either
+/// variant means "unconstrained" (admit the whole front half-space),
+/// mirroring `Aabb::maybe_in_cone`/`maybe_in_cylinder`'s own `Option<f64>`
+/// meaning.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PruneTolerance {
+    /// Half-angle tangent (`tan(aperture)`), or `None` for an aperture at or
+    /// past ~90° (the cone already covers the whole front half-space).
+    Cone(Option<f64>),
+    /// Constant world-space radius in meters, or `None` for unconstrained.
+    Cylinder(Option<f64>),
 }
 
 /// A binary bounding-volume hierarchy over pre-built primitive boxes.
@@ -253,17 +313,17 @@ impl Bvh {
     }
 
     /// Ascending indices of primitives whose box may intersect the pick
-    /// cone — a conservative superset (see [`Aabb::maybe_in_cone`]); the
-    /// caller re-runs the exact test. Ascending order keeps candidate
-    /// emission identical to the linear scan, so ranking ties break the
-    /// same way on both paths.
+    /// tolerance ([`PruneTolerance`], cone or cylinder) — a conservative
+    /// superset (see [`Aabb::admits`]); the caller re-runs the exact test.
+    /// Ascending order keeps candidate emission identical to the linear
+    /// scan, so ranking ties break the same way on both paths.
     pub(crate) fn cone_candidates(
         &self,
         origin: Point3,
         dir: Vec3,
-        tan_aperture: Option<f64>,
+        tol: PruneTolerance,
     ) -> Vec<usize> {
-        self.collect(|aabb| aabb.maybe_in_cone(origin, dir, tan_aperture))
+        self.collect(|aabb| aabb.admits(origin, dir, tol))
     }
 
     /// Ascending indices of primitives whose box the ray `origin + t·dir`
@@ -285,9 +345,9 @@ impl Bvh {
         map: impl Fn(Aabb) -> Aabb,
         origin: Point3,
         dir: Vec3,
-        tan_aperture: Option<f64>,
+        tol: PruneTolerance,
     ) -> Vec<usize> {
-        self.collect(|aabb| map(aabb).maybe_in_cone(origin, dir, tan_aperture))
+        self.collect(|aabb| map(aabb).admits(origin, dir, tol))
     }
 
     /// [`Bvh::ray_candidates`] with node boxes passed through `map`, for the
@@ -671,22 +731,22 @@ impl SceneIndex {
         &self,
         origin: Point3,
         dir: Vec3,
-        tan_aperture: Option<f64>,
+        tol: PruneTolerance,
     ) -> Vec<usize> {
-        self.points.cone_candidates(origin, dir, tan_aperture)
+        self.points.cone_candidates(origin, dir, tol)
     }
 
     /// World segment candidates for `resolve`'s Midpoint/OnEdge tests
     /// (superset, ascending). Both exact candidate positions — the midpoint
     /// and the closest point on the segment — lie inside the segment's box,
-    /// so the cone-vs-box test covers them.
+    /// so the cone/cylinder-vs-box test covers them.
     pub(crate) fn segments_in_cone(
         &self,
         origin: Point3,
         dir: Vec3,
-        tan_aperture: Option<f64>,
+        tol: PruneTolerance,
     ) -> Vec<usize> {
-        self.segments.cone_candidates(origin, dir, tan_aperture)
+        self.segments.cone_candidates(origin, dir, tol)
     }
 
     /// World face candidates for ray-hit tests (`resolve`'s OnFace and
@@ -710,23 +770,19 @@ impl SceneIndex {
         members: &BTreeMap<ObjectId, DefMember>,
         origin: Point3,
         dir: Vec3,
-        tan_aperture: Option<f64>,
+        tol: PruneTolerance,
     ) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
-        for pi in self
-            .placement_points
-            .cone_candidates(origin, dir, tan_aperture)
-        {
+        for pi in self.placement_points.cone_candidates(origin, dir, tol) {
             let pl = &placements[pi];
             let Some(m) = members.get(&pl.member) else {
                 continue;
             };
-            for li in m.index.points.cone_candidates_mapped(
-                DefIndex::map(&pl.pose),
-                origin,
-                dir,
-                tan_aperture,
-            ) {
+            for li in
+                m.index
+                    .points
+                    .cone_candidates_mapped(DefIndex::map(&pl.pose), origin, dir, tol)
+            {
                 out.push((pi, li));
             }
         }
@@ -740,23 +796,19 @@ impl SceneIndex {
         members: &BTreeMap<ObjectId, DefMember>,
         origin: Point3,
         dir: Vec3,
-        tan_aperture: Option<f64>,
+        tol: PruneTolerance,
     ) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
-        for pi in self
-            .placement_segments
-            .cone_candidates(origin, dir, tan_aperture)
-        {
+        for pi in self.placement_segments.cone_candidates(origin, dir, tol) {
             let pl = &placements[pi];
             let Some(m) = members.get(&pl.member) else {
                 continue;
             };
-            for li in m.index.segments.cone_candidates_mapped(
-                DefIndex::map(&pl.pose),
-                origin,
-                dir,
-                tan_aperture,
-            ) {
+            for li in
+                m.index
+                    .segments
+                    .cone_candidates_mapped(DefIndex::map(&pl.pose), origin, dir, tol)
+            {
                 out.push((pi, li));
             }
         }
@@ -943,7 +995,10 @@ mod tests {
         let bvh = Bvh::build(&[]);
         let origin = Point3::ORIGIN;
         let dir = Vec3::new(0.0, 0.0, 1.0);
-        assert!(bvh.cone_candidates(origin, dir, Some(1.0)).is_empty());
+        assert!(
+            bvh.cone_candidates(origin, dir, PruneTolerance::Cone(Some(1.0)))
+                .is_empty()
+        );
         assert!(bvh.ray_candidates(origin, dir).is_empty());
         assert!(!bvh.any_hit_before(origin, dir, f64::INFINITY, |_| true));
     }

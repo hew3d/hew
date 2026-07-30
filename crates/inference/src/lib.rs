@@ -109,7 +109,7 @@ use kernel::{
 
 mod index;
 
-use index::{DefIndex, SceneIndex};
+use index::{DefIndex, PruneTolerance, SceneIndex};
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -515,6 +515,33 @@ pub enum SnapLock {
     Direction(Vec3),
 }
 
+/// How [`SnapQuery::aperture`] is interpreted (docs/design/camera.md §1).
+/// Perspective projection's apparent size shrinks with depth, so its natural
+/// pick tolerance is an angular CONE around the ray — a candidate at twice
+/// the depth gets twice the world-space slack, matching how twice as much
+/// world moves under one screen pixel there. Parallel (orthographic)
+/// projection's apparent size is depth-INDEPENDENT, so the matching pick
+/// tolerance is a constant-world-radius CYLINDER around the ray instead —
+/// using the cone there would make distant geometry ever harder to snap even
+/// though it looks no smaller on screen.
+///
+/// The two coincide exactly for a candidate at the query's own reference
+/// depth (typically the current orbit target's distance): cylinder radius =
+/// `target_distance · tan(cone_aperture)` reproduces the SAME world-space
+/// tolerance the cone gives at that one depth. They diverge for any OTHER
+/// depth — nearer/farther candidates get a wider/narrower cone under `Cone`,
+/// but the identical radius under `Cylinder` (see
+/// `cylinder_cone_equivalence_at_target_distance` and
+/// `cylinder_cone_diverge_off_target_depth` below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApertureMode {
+    /// `aperture` is a half-angle in radians (perspective).
+    #[default]
+    Cone,
+    /// `aperture` is a world-space radius in meters (parallel projection).
+    Cylinder,
+}
+
 /// One inference request.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SnapQuery {
@@ -525,10 +552,15 @@ pub struct SnapQuery {
     pub anchor: Option<Point3>,
     /// Active direction lock, if any.
     pub lock: Option<SnapLock>,
-    /// Pick-cone half-angle in radians. The UI computes it from its snap
-    /// radius in pixels and the camera FOV, keeping this crate
-    /// screen-agnostic.
+    /// Pick tolerance around the ray, interpreted per [`ApertureMode`]:
+    /// a half-angle in radians (`Cone`) or a world-space radius in meters
+    /// (`Cylinder`). The UI computes it from its snap radius in pixels and
+    /// either the camera FOV (`Cone`) or `CameraRig::worldPerPixel`
+    /// (`Cylinder`), keeping this crate screen-agnostic either way.
     pub aperture: f64,
+    /// Which of the two `aperture` means (default `Cone` — see
+    /// [`ApertureMode`]).
+    pub aperture_mode: ApertureMode,
     /// Active drawing-plane constraint. When `Some`, only candidates whose
     /// position lies on this plane (within [`tol::PLANE_DIST`]) are considered —
     /// drawing on a face must not "see through" the solid and snap to occluded,
@@ -1694,6 +1726,7 @@ impl InferenceScene {
         };
         let origin = query.ray.origin;
         let aperture = query.aperture;
+        let mode = query.aperture_mode;
         let weights = query.weights;
 
         // Per-kind gravity (crate docs, *Gravity*): a candidate of `kind` is
@@ -1701,34 +1734,46 @@ impl InferenceScene {
         // distance is stored raw — the ranking pass below is where the weight
         // divides it, so that both the plain-aperture reach test and the
         // weighted ranking read the same untouched number. With every weight
-        // at GRAVITY_NEUTRAL these are exactly the old cone tests.
+        // at GRAVITY_NEUTRAL these are exactly the old cone tests. `mode`
+        // (`ApertureMode`) picks the cone/cylinder interpretation of
+        // `aperture` (design camera.md §1); both closures forward it as-is.
         let wcone = |point: Point3, kind: SnapKind| -> Option<(f64, f64)> {
-            cone_test(origin, dir, point, aperture * weights.weight(kind))
+            cone_test(origin, dir, point, aperture * weights.weight(kind), mode)
         };
         let wsegment = |a: Point3, b: Point3, kind: SnapKind| -> Option<(Point3, f64, f64)> {
-            segment_cone_hit(origin, dir, a, b, aperture * weights.weight(kind))
+            segment_cone_hit(origin, dir, a, b, aperture * weights.weight(kind), mode)
         };
 
-        // tan(aperture) bounds the cone's radius growth per unit depth for
-        // the index's conservative node test. At or past a 90° half-angle
-        // the cone covers the whole front half-space, so the radius prune is
+        // Bounds the prune shape's radius growth per unit depth for the
+        // index's conservative node test — under `Cone`, `tan(aperture)`
+        // (linear-in-depth cone radius); at or past a 90° half-angle the
+        // cone covers the whole front half-space, so the radius prune is
         // disabled (`None`); FRAC_PI_2 is a domain bound, not a tolerance.
         // The cutoff backs off by tol::CONE_SLACK: within that band of π/2
         // the tangent is so ill-conditioned that the node test's guard band
         // (see `Aabb::maybe_in_cone`) could no longer provably cover the
         // exact test's rounding, so those cones are treated as the whole
-        // front half-space too. Only pruning strength is affected — the
-        // exact tests always use their own kind's weighted aperture.
+        // front half-space too. Under `Cylinder` the prune shape's radius is
+        // simply constant (`Aabb::maybe_in_cylinder` needs no such guard band
+        // — a plain Euclidean distance has no trig amplification). Only
+        // pruning strength is affected either way — the exact tests always
+        // use their own kind's weighted aperture.
         //
-        // The prune cone is widened by the largest weight among the kinds the
-        // index serves (`SnapWeights::max_indexed`): a boosted kind is
+        // The prune shape is widened by the largest weight among the kinds
+        // the index serves (`SnapWeights::max_indexed`): a boosted kind is
         // admitted further off-axis than `aperture`, so pruning at `aperture`
         // would discard candidates the exact test accepts and `resolve` would
         // stop agreeing with `resolve_linear`. The shipped profile boosts only
         // linear-walked kinds, so it leaves this factor at 1.0.
         let prune_aperture = aperture * weights.max_indexed();
-        let tan_aperture = (prune_aperture < std::f64::consts::FRAC_PI_2 - tol::CONE_SLACK)
-            .then(|| prune_aperture.tan());
+        let prune_tolerance = match mode {
+            ApertureMode::Cone => {
+                let tan_aperture = (prune_aperture < std::f64::consts::FRAC_PI_2 - tol::CONE_SLACK)
+                    .then(|| prune_aperture.tan());
+                PruneTolerance::Cone(tan_aperture)
+            }
+            ApertureMode::Cylinder => PruneTolerance::Cylinder(Some(prune_aperture)),
+        };
 
         // Candidate index sets. The spatial index prunes to a conservative
         // superset (the exact tests below re-filter); the linear reference
@@ -1739,8 +1784,8 @@ impl InferenceScene {
         // registration, so both storage schemes produce bit-equal positions.
         let (point_ids, segment_ids, face_ids) = match index {
             Some(ix) => (
-                ix.points_in_cone(origin, dir, tan_aperture),
-                ix.segments_in_cone(origin, dir, tan_aperture),
+                ix.points_in_cone(origin, dir, prune_tolerance),
+                ix.segments_in_cone(origin, dir, prune_tolerance),
                 ix.faces_crossing_ray(origin, dir),
             ),
             None => (
@@ -1756,14 +1801,14 @@ impl InferenceScene {
                     &self.def_members,
                     origin,
                     dir,
-                    tan_aperture,
+                    prune_tolerance,
                 ),
                 ix.placed_segments_in_cone(
                     &self.placements,
                     &self.def_members,
                     origin,
                     dir,
-                    tan_aperture,
+                    prune_tolerance,
                 ),
                 ix.placed_faces_crossing_ray(&self.placements, &self.def_members, origin, dir),
             ),
@@ -2535,7 +2580,8 @@ impl InferenceScene {
         // (angular_dist, depth, sketch, edge)
         let mut best: Option<(f64, f64, SketchId, SketchEdgeId)> = None;
         for &(id, eid, _cid, ref seg) in &self.sketch_segments {
-            if let Some((_pos, ang, depth)) = segment_cone_hit(origin, dir, seg.a, seg.b, aperture)
+            if let Some((_pos, ang, depth)) =
+                segment_cone_hit(origin, dir, seg.a, seg.b, aperture, ApertureMode::Cone)
                 && best
                     .as_ref()
                     .is_none_or(|&(a, d, _, _)| (ang, depth) < (a, d))
@@ -2562,7 +2608,7 @@ impl InferenceScene {
         // (angular_dist, depth, id, vertex, position)
         let mut best: Option<(f64, f64, SketchId, SketchVertexId, Point3)> = None;
         for &(id, vid, pos) in &self.sketch_vertices {
-            if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture)
+            if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture, ApertureMode::Cone)
                 && best
                     .as_ref()
                     .is_none_or(|&(a, d, _, _, _)| (ang, depth) < (a, d))
@@ -2587,29 +2633,57 @@ type Candidate = (SnapKind, f64, f64, Point3, Option<Provenance>, Option<Vec3>);
 // Geometry helpers (crate-private)
 // ---------------------------------------------------------------------------
 
-/// Returns `(angular_distance_radians, depth)` if `point` is inside the pick
-/// cone (in front of the ray and within `aperture` radians of the ray axis),
-/// otherwise `None`.
+/// Returns `(distance, depth)` if `point` is inside the pick tolerance (in
+/// front of the ray and within `aperture` of the ray axis), otherwise `None`.
+/// The returned `distance` — and what `aperture` means — depends on `mode`
+/// ([`ApertureMode`]): under `Cone` both are an angle in radians (the
+/// original pick-cone test); under `Cylinder` both are a world-space
+/// perpendicular distance in meters, constant with depth rather than
+/// growing with it. Either way the same value is compared directly against
+/// `aperture` for admission AND returned raw for the caller's weighted
+/// ranking (see `InferenceScene::resolve_impl`'s `wcone`) — the two modes
+/// never mix within one query, so the unit only needs to be self-consistent.
 ///
 /// `dir` must already be normalized.
-fn cone_test(origin: Point3, dir: Vec3, point: Point3, aperture: f64) -> Option<(f64, f64)> {
+fn cone_test(
+    origin: Point3,
+    dir: Vec3,
+    point: Point3,
+    aperture: f64,
+    mode: ApertureMode,
+) -> Option<(f64, f64)> {
     let to_point = point - origin;
     let depth = to_point.dot(dir); // signed distance along ray
     if depth <= 0.0 {
         return None; // behind the ray origin
     }
-    let dist_sq = to_point.length_squared();
-    if dist_sq < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
-        // Point is essentially at the ray origin; treat as angle 0.
-        return Some((0.0, depth));
-    }
-    // cos(angle) = depth / dist; angle = acos(depth / dist).
-    let cos_angle = (depth / dist_sq.sqrt()).min(1.0);
-    let angle = cos_angle.acos();
-    if angle <= aperture {
-        Some((angle, depth))
-    } else {
-        None
+    match mode {
+        ApertureMode::Cone => {
+            let dist_sq = to_point.length_squared();
+            if dist_sq < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
+                // Point is essentially at the ray origin; treat as angle 0.
+                return Some((0.0, depth));
+            }
+            // cos(angle) = depth / dist; angle = acos(depth / dist).
+            let cos_angle = (depth / dist_sq.sqrt()).min(1.0);
+            let angle = cos_angle.acos();
+            if angle <= aperture {
+                Some((angle, depth))
+            } else {
+                None
+            }
+        }
+        ApertureMode::Cylinder => {
+            // Perpendicular (rejection) component of `to_point` off the ray
+            // axis — constant-radius tolerance, independent of `depth`.
+            let perp = to_point - dir * depth;
+            let perp_dist = perp.length();
+            if perp_dist <= aperture {
+                Some((perp_dist, depth))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -2642,6 +2716,154 @@ fn midpoint(a: Point3, b: Point3) -> Point3 {
     Point3::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5)
 }
 
+/// Resolves `segment_cone_hit`'s candidate search: tests a handful of
+/// candidate points along the segment through `cone_test` itself and keeps
+/// its best (per `cone_test`'s own ranking tuple) admissible result, rather
+/// than picking a single point analytically — see the "why not
+/// analytically" note below. Always invoked (not just when the ray and the
+/// segment's line are (near-)parallel, or when the true closest-line-point
+/// lands behind the ray origin): neither of `segment_cone_hit`'s two
+/// analytic closest-point candidates, `perp_min_s`/`angle_min_s` below, is
+/// trusted outright — both are tested and ranked like any other candidate.
+///
+/// `depth_a`/`slope` describe how depth varies along the segment: depth is
+/// ALWAYS affine in `s` regardless of parallelism,
+/// `depth(s) = depth_a + s*slope`, since `depth(0) = dir·(a-origin) = depth_a`
+/// and `depth(1) - depth(0) = dir·seg_dir = slope`.
+///
+/// Why not just use a single analytically-correct `s`? `cone_test`'s two
+/// `ApertureMode`s rank points by two DIFFERENT metrics, each optimized by
+/// a DIFFERENT point along the segment's infinite line in general:
+/// - `Cylinder` ranks by perpendicular distance to the ray's axis line,
+///   depth-independent — minimized by the textbook closest-point-between-
+///   two-lines construction, `perp_min_s`. But that point can itself still
+///   land behind the origin's depth plane (a point can be very close to the
+///   axis while still just barely on the ray's "wrong" side).
+/// - `Cone` ranks by ANGLE off the axis, i.e. `depth(s)^2 / dist(s)^2` where
+///   `dist` is measured from the ray ORIGIN (not the axis line) — a
+///   genuinely different optimum from `perp_min_s` in general, since a
+///   segment's perpendicular offset from the axis can vary with `s`
+///   independently of its depth. `angle_min_s` is that optimum, derived by
+///   maximizing `depth(s)^2/dist(s)^2`; its derivative's `s^2` terms cancel,
+///   so — like `perp_min_s` — it has exactly one critical point over the
+///   whole (unclamped) line.
+///
+/// Testing both analytic candidates and deferring to `cone_test`'s own
+/// ranking sidesteps having to special-case either mode by hand — an
+/// irrelevant candidate for a given mode simply loses the ranking to a
+/// relevant one, so folding both in unconditionally is always safe.
+/// Candidates:
+/// - both endpoints (`s = 0, 1`) — whichever the whole segment favors when
+///   it's admissible throughout, and the sole survivor when the other end
+///   sits behind the ray origin or otherwise fails its own cone_test;
+/// - the depth-zero crossing (where the admissible half begins, if the
+///   segment straddles it), nudged a hair to either side so it lands
+///   strictly admissible rather than exactly on `cone_test`'s excluded
+///   `depth <= 0` boundary — the point `Cylinder` actually wants there;
+/// - `perp_min_s`/`angle_min_s` (each clamped to the segment and only
+///   included when well-defined), the two analytic optima above.
+///
+/// The old code hard-coded `s = 0` for the parallel case (silently testing
+/// the FIRST endpoint even when it sat behind the ray origin's depth plane
+/// while the rest of the segment was admissible ahead of it), didn't handle
+/// the behind-the-origin case for a non-parallel segment at all, and (in an
+/// intermediate version of this fix) returned `perp_min_s` unconditionally
+/// for the non-parallel case instead of ranking it against the endpoints —
+/// which is correct for `Cylinder` but not for `Cone`, since `perp_min_s`
+/// doesn't account for depth at all. Both were caught by
+/// `segment_cone_hit_matches_fine_scan_oracle` only once its draws stopped
+/// forcing every segment to be exactly parallel to the ray (see that test's
+/// doc).
+fn segment_edge_fallback_hit(
+    origin: Point3,
+    dir: Vec3,
+    a: Point3,
+    seg_dir: Vec3,
+    // depth(s) = depth_a + s*slope (see the doc above); perp_min_s/
+    // angle_min_s are the two analytic candidates' `s`, if defined (see the
+    // doc above) — bundled since `clippy::too_many_arguments` caps a free
+    // function at 7 (this would otherwise be 9).
+    (depth_a, slope, perp_min_s, angle_min_s): (f64, f64, Option<f64>, Option<f64>),
+    aperture: f64,
+    mode: ApertureMode,
+) -> Option<(Point3, f64, f64)> {
+    // A generous-but-tiny nudge off the depth=0 crossing, in units of DEPTH
+    // (not the segment parameter — a fixed `s`-space nudge scales its
+    // resulting depth error by `slope`, which can be arbitrarily large for a
+    // long, steep segment; `segment_cone_hit_matches_fine_scan_oracle`
+    // caught the discrepancy this produced against a fine scan landing even
+    // closer to the true, unreachable `depth == 0` infimum). Converting to
+    // an `s`-space offset by dividing by `slope` keeps the resulting depth
+    // comfortably bigger than float noise yet close to that infimum
+    // regardless of the segment's scale.
+    const CROSSING_DEPTH_NUDGE: f64 = 1e-9;
+
+    let mut candidates = [0.0_f64, 1.0, f64::NAN, f64::NAN, f64::NAN, f64::NAN];
+    let mut n = 2;
+    if slope.abs() >= tol::NORMALIZE_MIN_LENGTH {
+        let s0 = -depth_a / slope; // depth(s0) == 0
+        let s_nudge = CROSSING_DEPTH_NUDGE / slope.abs();
+        candidates[2] = (s0 + s_nudge).clamp(0.0, 1.0);
+        candidates[3] = (s0 - s_nudge).clamp(0.0, 1.0);
+        n = 4;
+    }
+    if let Some(s) = perp_min_s {
+        candidates[n] = s;
+        n += 1;
+    }
+    if let Some(s) = angle_min_s {
+        candidates[n] = s;
+        n += 1;
+    }
+
+    let mut best: Option<(Point3, f64, f64)> = None;
+    for &s in &candidates[..n] {
+        let point = a + seg_dir * s;
+        if let Some((metric, depth)) = cone_test(origin, dir, point, aperture, mode)
+            && best
+                .as_ref()
+                .is_none_or(|&(_, m, d)| (metric, depth) < (m, d))
+        {
+            best = Some((point, metric, depth));
+        }
+    }
+    best
+}
+
+// Test-only counters for whether `segment_cone_hit` found a usable
+// `perp_min_s` (the raw line-line closest point) to add as a candidate —
+// `(general, fallback)` — so its property test can assert the run actually
+// exercised both, rather than trusting a property's construction by
+// inspection. `thread_local!` rather than a crate-wide atomic: `cargo test`
+// gives each `#[test]` fn its own thread, so counts from unrelated tests
+// calling this same function can't leak into one test's total. A prior
+// version of the property test gave both segment endpoints the SAME
+// lateral offset, making every drawn segment exactly parallel to the ray —
+// the general (non-parallel) case below never ran across the whole
+// property run, and these counters exist so that regresses loudly instead
+// of silently.
+#[cfg(test)]
+thread_local! {
+    static SEGMENT_CONE_HIT_BRANCH_COUNTS: std::cell::Cell<(u64, u64)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+fn record_general_branch_hit() {
+    SEGMENT_CONE_HIT_BRANCH_COUNTS.with(|c| {
+        let (general, fallback) = c.get();
+        c.set((general + 1, fallback));
+    });
+}
+
+#[cfg(test)]
+fn record_fallback_branch_hit() {
+    SEGMENT_CONE_HIT_BRANCH_COUNTS.with(|c| {
+        let (general, fallback) = c.get();
+        c.set((general, fallback + 1));
+    });
+}
+
 /// Finds the closest point on the segment [a, b] to the pick ray, and returns
 /// `(position, angular_distance, depth)` if that point lies within `aperture`.
 ///
@@ -2652,6 +2874,7 @@ fn segment_cone_hit(
     a: Point3,
     b: Point3,
     aperture: f64,
+    mode: ApertureMode,
 ) -> Option<(Point3, f64, f64)> {
     // Closest point between two lines (ray and segment-as-line), then clamp
     // to the segment [0, 1].
@@ -2662,35 +2885,72 @@ fn segment_cone_hit(
     let seg_len_sq = seg_dir.length_squared();
     if seg_len_sq < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
         // Degenerate segment (endpoints coincide); treat as a point.
-        return cone_test(origin, dir, a, aperture).map(|(ang, depth)| (a, ang, depth));
+        return cone_test(origin, dir, a, aperture, mode).map(|(ang, depth)| (a, ang, depth));
     }
 
     let w = origin - a;
     let b_coef = dir.dot(seg_dir); // dot(ray_dir, seg_dir)
+    let e = dir.dot(w); // dir · (origin - a) — note depth(s=0) = -e
+    let f = seg_dir.dot(w); // seg_dir · (origin - a)
 
     // denom = |dir|^2 * |seg_dir|^2 - (dir . seg_dir)^2, but |dir|=1 so:
     //       = seg_len_sq - b_coef^2
     let denom = seg_len_sq - b_coef * b_coef;
+    let depth_a = -e; // depth(s=0); depth(s) = depth_a + s*b_coef throughout.
 
-    // s on the segment line (unclamped), then clamped to [0, 1].
-    let s_unclamped = if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
-        // Lines are parallel; closest point is at s=0 (endpoint a).
-        0.0_f64
+    // Segment parameter of the closest point between the (unit-direction)
+    // ray and the segment line: s = (f - (dir·seg_dir)(dir·w)) / denom. (The
+    // earlier `seg_len_sq * e - b_coef * f` form was the ray parameter's
+    // numerator and clamped to the wrong endpoint — caught by
+    // segment_closest_point_clamps_to_endpoints.) Kept only as a candidate
+    // in `segment_edge_fallback_hit`, not returned directly: it minimizes
+    // raw perpendicular distance to the ray's axis line (the `Cylinder`
+    // metric) — a different objective from `Cone`'s angle metric, and (per
+    // `segment_edge_fallback_hit`'s doc) can itself still land behind the
+    // ray origin (`depth(s) = s*b_coef - e = s*b_coef + depth_a`,
+    // `cone_test`'s `depth`, since `dir` is unit).
+    let perp_min_s = if denom.abs() >= tol::NORMALIZE_MIN_LENGTH {
+        let s = ((f - b_coef * e) / denom).clamp(0.0, 1.0);
+        (s * b_coef + depth_a > 0.0).then_some(s)
     } else {
-        let e = dir.dot(w); // dir · (origin - a)
-        let f = seg_dir.dot(w); // seg_dir · (origin - a)
-        // Segment parameter of the closest point between the (unit-direction)
-        // ray and the segment line: s = (f - (dir·seg_dir)(dir·w)) / denom.
-        // (The earlier `seg_len_sq * e - b_coef * f` form was the ray
-        // parameter's numerator and clamped to the wrong endpoint — caught by
-        // segment_closest_point_clamps_to_endpoints.)
-        (f - b_coef * e) / denom
+        None
     };
-    let s = s_unclamped.clamp(0.0, 1.0);
 
-    let closest_on_seg = a + seg_dir * s;
-    cone_test(origin, dir, closest_on_seg, aperture)
-        .map(|(ang, depth)| (closest_on_seg, ang, depth))
+    // The point of MINIMUM ANGLE (as opposed to minimum perpendicular
+    // distance) along the segment's infinite line — see
+    // `segment_edge_fallback_hit`'s doc for why this is a genuinely
+    // different point from `perp_min_s` in general. Maximizing
+    // `depth(s)^2 / dist(s)^2` (`dist` from the ray ORIGIN) reduces, after
+    // its `s^2` terms cancel, to one linear equation in `s`:
+    // `q = |origin - a|^2` and `r = (a - origin)·seg_dir = -f` play the role
+    // `depth_a`/`b_coef` play for depth, but for `dist_sq(s) = q + 2*r*s +
+    // seg_len_sq*s^2` instead.
+    let q = w.length_squared();
+    let r = -f;
+    let angle_denom = b_coef * r - seg_len_sq * depth_a;
+    let angle_min_s = if angle_denom.abs() >= tol::NORMALIZE_MIN_LENGTH {
+        let s = (r * depth_a - b_coef * q) / angle_denom;
+        (0.0..=1.0).contains(&s).then_some(s)
+    } else {
+        None
+    };
+
+    #[cfg(test)]
+    if perp_min_s.is_some() {
+        record_general_branch_hit();
+    } else {
+        record_fallback_branch_hit();
+    }
+
+    segment_edge_fallback_hit(
+        origin,
+        dir,
+        a,
+        seg_dir,
+        (depth_a, b_coef, perp_min_s, angle_min_s),
+        aperture,
+        mode,
+    )
 }
 
 /// Ray-face intersection: returns `(position, angular_distance, depth)` if
@@ -2903,6 +3163,8 @@ fn closest_point_on_line_to_ray(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestRunner;
 
     #[test]
     fn snap_kind_priority_is_declaration_order() {
@@ -3081,6 +3343,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.3,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         assert!(scene.resolve(&query).is_none());
@@ -3091,11 +3354,26 @@ mod tests {
         let origin = Point3::new(0.0, 0.0, 0.0);
         let dir = Vec3::new(0.0, 0.0, 1.0);
         // Directly ahead: included, angular distance 0.
-        let ahead = cone_test(origin, dir, Point3::new(0.0, 0.0, 5.0), 0.3);
+        let ahead = cone_test(
+            origin,
+            dir,
+            Point3::new(0.0, 0.0, 5.0),
+            0.3,
+            ApertureMode::Cone,
+        );
         assert!(ahead.is_some());
         assert!(ahead.unwrap().0.abs() < tol::NORMAL_DIRECTION);
         // Directly behind: excluded regardless of how wide the cone is.
-        assert!(cone_test(origin, dir, Point3::new(0.0, 0.0, -5.0), 3.0).is_none());
+        assert!(
+            cone_test(
+                origin,
+                dir,
+                Point3::new(0.0, 0.0, -5.0),
+                3.0,
+                ApertureMode::Cone
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -3111,10 +3389,247 @@ mod tests {
             Point3::new(0.0, 0.0, 5.0),
             Point3::new(2.0, 0.0, 5.0),
             3.0,
+            ApertureMode::Cone,
         );
         let (pos, _ang, depth) = hit.expect("segment is in front and within the wide cone");
         assert!(pos.approx_eq(Point3::new(2.0, 0.0, 5.0), tol::POINT_MERGE));
         assert!((depth - 5.0).abs() < tol::POINT_MERGE);
+    }
+
+    /// Reviewer's exact-parallel counterexample: a segment collinear with
+    /// the ray's own axis (offset 0.05 m to the side), straddling the ray
+    /// origin's depth plane (a behind at z=-5, b ahead at z=5). The old
+    /// code's parallel branch hard-coded `s=0`, which is exactly `a` —
+    /// behind the origin — so it rejected a segment that is plainly
+    /// admissible near its `b` end (and, for `Cylinder`, admissible at
+    /// EVERY depth, since the 0.05 m offset is exactly constant along an
+    /// exactly-parallel segment). Both `ApertureMode`s must find a hit.
+    #[test]
+    fn exact_parallel_segment_straddling_the_origin_still_hits() {
+        let origin = Point3::new(0.0, 0.0, 0.0);
+        let dir = Vec3::new(0.0, 0.0, 1.0);
+        let a = Point3::new(0.05, 0.0, -5.0);
+        let b = Point3::new(0.05, 0.0, 5.0);
+
+        let cone_hit = segment_cone_hit(origin, dir, a, b, 0.1, ApertureMode::Cone)
+            .expect("b end reads a tiny angle off-axis at depth 5 — well within a 0.1 rad cone");
+        assert!(cone_hit.2 > 0.0, "depth must be in front of the ray origin");
+        assert!(
+            cone_hit.0.approx_eq(b, tol::POINT_MERGE),
+            "Cone favors the farther (smaller-angle) admissible end"
+        );
+
+        let cyl_hit = segment_cone_hit(origin, dir, a, b, 0.1, ApertureMode::Cylinder)
+            .expect("the 0.05 m offset is within a 0.1 m cylinder at every depth along an exactly-parallel segment");
+        assert!(cyl_hit.2 > 0.0, "depth must be in front of the ray origin");
+        assert!(
+            cyl_hit.1 <= 0.1 + tol::POINT_MERGE,
+            "perpendicular offset must respect the aperture"
+        );
+    }
+
+    /// A NON-parallel ("general branch") segment straddling the ray origin's
+    /// depth plane: the line-line closest point (the segment's true nearest
+    /// approach to the ray's infinite line) lands at s=0.5 with depth -0.5 —
+    /// behind the origin — even though `b` (s=1, depth 2) is clearly
+    /// admissible. The pre-fix code handed `cone_test` that single
+    /// unclamped-closest point and accepted its rejection, never trying
+    /// anywhere else on the segment. This is the "may be pre-existing"
+    /// Cone-mode half the review called out, reproduced without any
+    /// near-parallel geometry at all.
+    ///
+    /// The two modes pick OPPOSITE ends of the admissible sub-interval here
+    /// (see `segment_edge_fallback_hit`'s doc): `Cone`'s angle shrinks with
+    /// depth for a roughly-fixed lateral offset, so it favors the far `b`
+    /// end; `Cylinder`'s offset is depth-independent, so its ranking
+    /// tie-break favors the near (smallest-admissible-depth) point close to
+    /// the depth=0 crossing instead. Expected values cross-checked against a
+    /// 200,001-sample linear scan in Python.
+    #[test]
+    fn general_branch_segment_straddling_the_origin_still_hits() {
+        let origin = Point3::new(0.0, 0.0, 0.0);
+        let dir = Vec3::new(0.0, 0.0, 1.0);
+        let a = Point3::new(1.0, 0.0, -3.0);
+        let b = Point3::new(-1.0, 0.0, 2.0);
+
+        let (cone_pos, cone_ang, cone_depth) =
+            segment_cone_hit(origin, dir, a, b, 0.5, ApertureMode::Cone)
+                .expect("b end (angle ~0.4636 rad, depth 2) is within a 0.5 rad cone");
+        assert!(cone_pos.approx_eq(b, 1e-4), "Cone lands at the far (b) end");
+        assert!((cone_ang - 0.463_647_609_000_806_15).abs() < 1e-4);
+        assert!((cone_depth - 2.0).abs() < 1e-4);
+
+        let (cyl_pos, cyl_perp, cyl_depth) =
+            segment_cone_hit(origin, dir, a, b, 1.5, ApertureMode::Cylinder)
+                .expect("the near-crossing point (perp ~0.2, depth ~0) is within a 1.5 m cylinder");
+        assert!(
+            (cyl_perp - 0.2).abs() < 1e-3,
+            "Cylinder lands near the depth=0 crossing, not at an endpoint"
+        );
+        assert!(
+            cyl_depth > 0.0 && cyl_depth < 1e-3,
+            "hugging the crossing from the admissible side"
+        );
+        assert!(
+            !cyl_pos.approx_eq(b, 1e-3),
+            "Cylinder's pick is NOT the same point Cone picked"
+        );
+    }
+
+    /// A fine-grained oracle: scans `s` linearly across the segment and
+    /// returns the best (per `cone_test`'s own ranking tuple) admissible
+    /// sample — the ground truth `segment_cone_hit` (and its fallback) is
+    /// checked against below, since a closed-form derivation would just
+    /// re-litigate the same reasoning the implementation itself relies on.
+    fn scan_oracle(
+        origin: Point3,
+        dir: Vec3,
+        a: Point3,
+        b: Point3,
+        aperture: f64,
+        mode: ApertureMode,
+    ) -> Option<(f64, f64)> {
+        const STEPS: u32 = 20_000;
+        let mut best: Option<(f64, f64)> = None;
+        for i in 0..=STEPS {
+            let s = f64::from(i) / f64::from(STEPS);
+            let point = a + (b - a) * s;
+            if let Some((metric, depth)) = cone_test(origin, dir, point, aperture, mode)
+                && best.is_none_or(|(m, d)| (metric, depth) < (m, d))
+            {
+                best = Some((metric, depth));
+            }
+        }
+        best
+    }
+
+    /// Property test (DEVELOPMENT.md rule 3): for segments constructed to
+    /// straddle the ray origin's depth plane — one endpoint behind it, one
+    /// ahead, by construction — `segment_cone_hit` must (a) find a hit
+    /// whenever the fine `scan_oracle` does, in BOTH `ApertureMode`s,
+    /// directly targeting the false-rejection bug this whole fix addresses,
+    /// and (b) never report a WORSE (larger-ranking) metric than the oracle
+    /// found by more than a hair — the analytic/nudged point this function
+    /// picks should equal or beat a 20,001-sample discrete scan, not trail
+    /// meaningfully behind it.
+    ///
+    /// An earlier version of this test drew ONE lateral offset and reused it
+    /// for both `a` and `b`, so `b - a` was exactly parallel to `dir` on
+    /// every single case — the general (non-parallel closest-point) branch
+    /// in `segment_cone_hit` never ran across the whole property run, and
+    /// its depth guard was backed only by the one hand-written
+    /// `general_branch_segment_straddling_the_origin_still_hits` example
+    /// above. Fixed by drawing `lateral_a`/`lateral_b` INDEPENDENTLY, so a
+    /// typical draw is genuinely non-parallel, while `force_parallel` still
+    /// deliberately recreates the exact-parallel case some of the time so
+    /// the near-/exact-parallel path through `segment_edge_fallback_hit`
+    /// stays covered too. This is written against `TestRunner` directly
+    /// (rather than the `proptest!` macro used elsewhere in this crate)
+    /// because it needs to reset `SEGMENT_CONE_HIT_BRANCH_COUNTS` before the
+    /// run and read it back after — the macro's generated `#[test]` fn has
+    /// no seam for that setup/teardown around the many per-case calls.
+    #[test]
+    fn segment_cone_hit_matches_fine_scan_oracle() {
+        SEGMENT_CONE_HIT_BRANCH_COUNTS.with(|c| c.set((0, 0)));
+
+        let strategy = (
+            (-1.0f64..1.0, -1.0f64..1.0, -1.0f64..1.0),
+            -10.0f64..-0.01,
+            0.01f64..10.0,
+            prop::bool::weighted(0.15),
+            (-0.5f64..0.5, -0.5f64..0.5),
+            (-0.5f64..0.5, -0.5f64..0.5),
+            0.05f64..1.4,
+            0.05f64..2.0,
+        );
+
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(6000));
+        let result = runner.run(
+            &strategy,
+            |(
+                dir_seed,
+                depth_a,
+                depth_b,
+                force_parallel,
+                lateral_a,
+                lateral_b,
+                aperture_cone,
+                aperture_cyl,
+            )| {
+                let dir = match Vec3::new(dir_seed.0, dir_seed.1, dir_seed.2).normalized() {
+                    Ok(d) => d,
+                    Err(_) => return Ok(()), // degenerate draw; skip
+                };
+                let origin = Point3::ORIGIN;
+                // An orthonormal (u, v) basis for the plane perpendicular to
+                // `dir`, so `a`/`b` can each be placed at their OWN
+                // independently-drawn lateral offset — genuinely
+                // non-parallel in the typical draw — unless
+                // `force_parallel` says to reuse `lateral_a` for `b` too,
+                // recreating the exact-parallel case on purpose.
+                let helper = if dir.x.abs() < 0.9 {
+                    Vec3::new(1.0, 0.0, 0.0)
+                } else {
+                    Vec3::new(0.0, 1.0, 0.0)
+                };
+                let u = dir
+                    .cross(helper)
+                    .normalized()
+                    .expect("helper never parallel to dir");
+                let v = dir.cross(u);
+
+                let lateral_b = if force_parallel { lateral_a } else { lateral_b };
+
+                let a = origin + dir * depth_a + u * lateral_a.0 + v * lateral_a.1;
+                let b = origin + dir * depth_b + u * lateral_b.0 + v * lateral_b.1;
+
+                for (aperture, mode) in [
+                    (aperture_cone, ApertureMode::Cone),
+                    (aperture_cyl, ApertureMode::Cylinder),
+                ] {
+                    let oracle = scan_oracle(origin, dir, a, b, aperture, mode);
+                    let actual = segment_cone_hit(origin, dir, a, b, aperture, mode);
+
+                    if let Some((oracle_metric, _)) = oracle {
+                        let (_, actual_metric, actual_depth) = actual.unwrap_or_else(|| {
+                            panic!(
+                                "oracle found an admissible point (metric {oracle_metric}) but \
+                                 segment_cone_hit found none ({mode:?}, aperture {aperture})"
+                            )
+                        });
+                        prop_assert!(actual_depth > 0.0);
+                        prop_assert!(
+                            actual_metric <= oracle_metric + 1e-6,
+                            "segment_cone_hit's metric {actual_metric} beat the oracle's \
+                             {oracle_metric} ({mode:?}, aperture {aperture}) — the oracle isn't \
+                             actually the best"
+                        );
+                    }
+                }
+                Ok(())
+            },
+        );
+        if let Err(err) = result {
+            panic!("{err}");
+        }
+
+        // Structural proof of branch coverage, not hope: both of
+        // `segment_cone_hit`'s return paths must have actually run a
+        // nontrivial number of times (6000 cases x 2 `ApertureMode`s = up to
+        // 12000 opportunities each, since branch selection is geometry-only
+        // and identical across both modes for a given `a`/`b`/`dir`).
+        let (general, fallback) = SEGMENT_CONE_HIT_BRANCH_COUNTS.with(|c| c.get());
+        assert!(
+            general > 1000,
+            "general (non-parallel closest-point) branch ran only {general} times across 6000 \
+             cases x 2 modes — independent lateral offsets should make it the common case"
+        );
+        assert!(
+            fallback > 1000,
+            "fallback (near-/exact-parallel, or behind-origin) branch ran only {fallback} times \
+             across 6000 cases x 2 modes — force_parallel draws and depth-straddling geometry \
+             should both reach it"
+        );
     }
 
     #[test]
@@ -3171,6 +3686,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.6,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("a corner is within the cone");
@@ -3237,6 +3753,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.6,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("something visible in the wide cone");
@@ -3257,6 +3774,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.6,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: Some(top),
             })
             .expect("an on-plane candidate (top face / its edges) remains");
@@ -3290,6 +3808,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("the visible top face is under the cursor");
@@ -3331,6 +3850,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("a visible +X-face corner is in the cone");
@@ -3392,6 +3912,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("the sub-face seen through the parent's hole is visible");
@@ -3422,6 +3943,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.6,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: Some(top),
             })
             .expect("the on-plane top corner is still snappable");
@@ -3572,6 +4094,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("X-axis point (5,0,0) is within the cone");
@@ -3600,6 +4123,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("origin is directly on the ray");
@@ -3629,6 +4153,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("cube vertex (1,0,0) is on this ray");
@@ -3674,6 +4199,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("ray passes through the guide line");
@@ -3707,6 +4233,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("ray points straight at the guide point");
@@ -3741,6 +4268,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("cube vertex and guide line are both on this ray");
@@ -3765,6 +4293,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("cube edge midpoint and guide line are both on this ray");
@@ -3803,6 +4332,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.3,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("the guide line is on this ray");
@@ -3817,6 +4347,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.3,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: Some(ground),
         });
         assert!(
@@ -3852,6 +4383,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.05,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         assert!(scene.resolve(&query).is_some());
@@ -3898,6 +4430,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("sketch endpoint is on this ray");
@@ -3916,6 +4449,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("sketch midpoint is on this ray");
@@ -3950,6 +4484,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.05,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
 
@@ -4001,6 +4536,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.05,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         assert!(scene.resolve(&query).is_some());
@@ -4049,6 +4585,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.02,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
 
@@ -4119,6 +4656,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.02,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("the guide crossing snaps");
@@ -4239,6 +4777,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("a snap over the region fill");
@@ -4273,6 +4812,7 @@ mod tests {
                 anchor: None,
                 lock: None,
                 aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
             })
             .expect("a snap past the region edge");
@@ -4389,6 +4929,7 @@ mod tests {
             anchor: None,
             lock: None,
             aperture: 0.05,
+            aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
         };
         let snap = scene

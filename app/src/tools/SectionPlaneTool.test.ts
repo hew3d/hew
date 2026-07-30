@@ -19,6 +19,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import type { SectionPlane } from '../viewport/sectionManager'
 import type { SectionWidgetCoverage } from '../viewport/SceneRenderer'
+import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 
 /** Fixed ray direction: 45° between -X and -Z, deliberately not parallel to
  * the [0,0,1] test plane's normal. */
@@ -405,6 +406,11 @@ describe('SectionPlaneTool — screen-constant preview-quad scaling', () => {
     const desiredPixels = (0.06 * REF_VIEWPORT_H) / tanHalf(REF_FOV_DEG)
     return (desiredPixels * dist * tanHalf(fovDeg)) / viewportH
   }
+  /** `updateDiskScale` now takes a `worldPerPixel` callback (the CameraRig
+   * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
+   * pair. */
+  const wppPerspective = (fovDeg: number, viewportH: number) => (dist: number) =>
+    worldPerPixelPerspective(dist, fovDeg, viewportH)
 
   function hoverPreview(tool: SectionPlaneTool, preview: THREE.Group) {
     tool.onPointerMove(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), rayThroughZ(0))
@@ -417,7 +423,7 @@ describe('SectionPlaneTool — screen-constant preview-quad scaling', () => {
 
     const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
     camera.position.set(0, 0, 10)
-    tool.updateDiskScale(camera, REF_VIEWPORT_H)
+    tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, REF_VIEWPORT_H))
 
     const dist = camera.position.distanceTo(quad.position)
     const expected = expectedScale(dist, REF_FOV_DEG, REF_VIEWPORT_H)
@@ -432,7 +438,7 @@ describe('SectionPlaneTool — screen-constant preview-quad scaling', () => {
     for (const fov of [20, 45, 70, 100]) {
       const camera = new THREE.PerspectiveCamera(fov)
       camera.position.set(0, 0, 10)
-      tool.updateDiskScale(camera, REF_VIEWPORT_H)
+      tool.updateDiskScale(camera, wppPerspective(fov, REF_VIEWPORT_H))
       const dist = camera.position.distanceTo(quad.position)
       expect(quad.scale.x).toBeCloseTo(expectedScale(dist, fov, REF_VIEWPORT_H), 9)
     }
@@ -445,28 +451,38 @@ describe('SectionPlaneTool — screen-constant preview-quad scaling', () => {
     camera.position.set(0, 0, 10)
 
     for (const viewportH of [400, 720, 1200]) {
-      tool.updateDiskScale(camera, viewportH)
+      tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, viewportH))
       const dist = camera.position.distanceTo(quad.position)
       expect(quad.scale.x).toBeCloseTo(expectedScale(dist, REF_FOV_DEG, viewportH), 9)
     }
   })
 
-  it('is a no-op when no preview is shown, for a non-perspective camera, or a degenerate viewport height', () => {
+  it('is a no-op when no preview is shown', () => {
     const { tool } = makeTool()
-    expect(() => tool.updateDiskScale(new THREE.PerspectiveCamera(REF_FOV_DEG), REF_VIEWPORT_H)).not.toThrow()
+    expect(() => tool.updateDiskScale(new THREE.PerspectiveCamera(REF_FOV_DEG), wppPerspective(REF_FOV_DEG, REF_VIEWPORT_H))).not.toThrow()
+  })
 
-    const { tool: tool2, preview } = makeTool()
-    const quad = hoverPreview(tool2, preview)
-    const before = quad.scale.x
-
-    const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
-    ortho.position.set(0, 0, 10)
-    tool2.updateDiskScale(ortho, REF_VIEWPORT_H)
-    expect(quad.scale.x).toBe(before)
-
+  it('a degenerate (zero) worldPerPixel collapses the preview to a defined zero size, rather than leaving a stale scale', () => {
+    const { tool, preview } = makeTool()
+    const quad = hoverPreview(tool, preview)
     const camera = new THREE.PerspectiveCamera(REF_FOV_DEG)
     camera.position.set(0, 0, 10)
-    tool2.updateDiskScale(camera, 0)
-    expect(quad.scale.x).toBe(before)
+    tool.updateDiskScale(camera, wppPerspective(REF_FOV_DEG, 0))
+    expect(quad.scale.x).toBe(0)
+  })
+
+  it('DESIGN CHANGE: works under an orthographic (parallel-projection) camera too — no longer silently hidden', () => {
+    // Before Phase 1, an `instanceof PerspectiveCamera` guard made this a
+    // no-op under ortho — the section-plane placement preview would silently
+    // vanish the moment the user toggled Parallel Projection.
+    const { tool, preview } = makeTool()
+    const quad = hoverPreview(tool, preview)
+    const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10)
+    ortho.position.set(0, 0, 10)
+    const wppOrtho = worldPerPixelOrtho(4, 1, REF_VIEWPORT_H)
+    tool.updateDiskScale(ortho, () => wppOrtho)
+    const expected = ((0.06 * REF_VIEWPORT_H) / tanHalf(REF_FOV_DEG)) * wppOrtho / 2
+    expect(quad.scale.x).toBeCloseTo(expected, 9)
+    expect(quad.scale.x).toBeGreaterThan(0)
   })
 })

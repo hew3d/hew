@@ -2428,8 +2428,56 @@ fn main() {
                 Some("CmdOrCtrl+\\"),
                 Some("Z"),
             )?;
+            // Position Camera / Walk / Look Around (docs/design/camera.md §4):
+            // the first REAL camera tools (Orbit/Pan/Zoom above are just
+            // OrbitControls mouse-button remaps). Sticky like Orbit/Pan/Zoom
+            // (`check_item`, not a one-shot `MenuItemBuilder` — they stay
+            // active until Escape/another tool switch, unlike Zoom Window
+            // below), and — like Zoom Window — no default bare-letter
+            // shortcut in v1 (SketchUp ships none for these either).
+            let cam_position_camera = check_item(
+                handle,
+                &mut checks,
+                "cam-position-camera",
+                "Position Camera",
+                None,
+                None,
+            )?;
+            let cam_walk = check_item(handle, &mut checks, "cam-walk", "Walk", None, None)?;
+            let cam_look_around = check_item(
+                handle,
+                &mut checks,
+                "cam-look-around",
+                "Look Around",
+                None,
+                None,
+            )?;
+            // Zoom Window (docs/design/camera.md §3): one-shot rectangle-drag
+            // reframe, springs back to Select — no default shortcut in v1
+            // (SketchUp ships none for it either), same as the tool registry.
+            // A PLAIN item, not `check_item` — unlike Orbit/Pan/Zoom this
+            // mode is never "sticky": it always springs back to Select right
+            // after the drag, so a persistent checkmark would be misleading
+            // (matches the web `MenuBar`'s plain `MenuItem` for the same
+            // entry).
+            let cam_zoom_window =
+                MenuItemBuilder::with_id("cam-zoom-window", "Zoom Window").build(handle)?;
             let cam_zoom_extents =
                 MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents").build(handle)?;
+            // No standalone fov-entry menu item (camera-playtest2.md §2 —
+            // Kurt's playtest call): the lens is reachable only through
+            // Zoom (typed-degree/mm entry, or Shift-drag/wheel — design
+            // §2-3), never a separate menu entry.
+            // Parallel Projection (design §1): perspective <-> parallel
+            // toggle, visually stable at the orbit target.
+            let cam_parallel_projection = check_item(
+                handle,
+                &mut checks,
+                "cam-parallel-projection",
+                "Parallel Projection",
+                None,
+                None,
+            )?;
 
             // Standard Views — axis-aligned + isometric framings.
             let view_top = MenuItemBuilder::with_id("cam-view-top", "Top").build(handle)?;
@@ -2456,7 +2504,15 @@ fn main() {
                 .item(&cam_pan)
                 .item(&cam_zoom)
                 .separator()
+                .item(&cam_position_camera)
+                .item(&cam_walk)
+                .item(&cam_look_around)
+                .separator()
+                .item(&cam_zoom_window)
                 .item(&cam_zoom_extents)
+                .separator()
+                .item(&cam_parallel_projection)
+                .separator()
                 .item(&standard_views)
                 .build()?;
 
@@ -2796,7 +2852,12 @@ fn main() {
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",
+                "cam-position-camera" => "tool-position-camera",
+                "cam-walk" => "tool-walk",
+                "cam-look-around" => "tool-look-around",
+                "cam-zoom-window" => "tool-zoom-window",
                 "cam-zoom-extents" => "zoom-extents",
+                "cam-parallel-projection" => "toggle-parallel-projection",
                 "cam-view-top" => "view-top",
                 "cam-view-bottom" => "view-bottom",
                 "cam-view-front" => "view-front",

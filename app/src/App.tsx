@@ -9,6 +9,7 @@ import { ViewportHUD } from './viewport/ViewportHUD'
 import { DocumentTree } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
+import { CAMERA_HANDOFF_TOOL_NAMES } from './panels/cameraHandoffTools'
 import { TitleBar } from './TitleBar'
 import { isLinux, isMac, isWindows } from './platform'
 import { nextPaint } from './paint'
@@ -122,6 +123,10 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Orbit: 'cam-orbit',
   Pan: 'cam-pan',
   Zoom: 'cam-zoom',
+  'Zoom Window': 'cam-zoom-window',
+  'Position Camera': 'cam-position-camera',
+  'Look Around': 'cam-look-around',
+  Walk: 'cam-walk',
 }
 
 /** Extract the filename from an absolute path (cross-platform / or \). */
@@ -178,6 +183,42 @@ export default function App() {
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
   /** Tool driven from toolbar clicks */
   const [activeTool, setActiveTool] = useState<ToolName>('Select')
+  /** Bumped on every EXPLICIT camera-tool selection (menu/native
+   * menu/keyboard) — see `activateTool` below. Forces Viewport to re-apply
+   * the tool even when `name` is unchanged from `activeTool`'s current
+   * value, which React's setState would otherwise treat as a no-op (it
+   * bails out on an unchanged value, so re-choosing the menu's own already-
+   * checked entry would silently do nothing without this). `activeTool`
+   * itself stays truthful at all times now — Viewport's
+   * `onInternalToolChange` (see `handleInternalToolChange` below) reports
+   * every internal transition (auto-handoffs, Escape-to-Select, one-shot
+   * reverts) the instant it happens — so this exists purely to force a real
+   * re-application of an explicit reselect, not to paper over any drift. */
+  const [toolActivationSeq, setToolActivationSeq] = useState(0)
+  /** The one entry point every camera-tool selection (Camera menu, native
+   * menu, keyboard shortcut, the ViewportHUD orbit button) should go
+   * through — see `toolActivationSeq`'s doc comment. Scoped to the camera
+   * group: forcing every tool to re-apply on a same-name reselect would
+   * also reset in-progress non-camera gestures (e.g. a multi-click Line
+   * chain), which nothing here calls for. */
+  const activateTool = useCallback((name: ToolName) => {
+    setActiveTool(name)
+    if (CAMERA_HANDOFF_TOOL_NAMES.has(name)) setToolActivationSeq((s) => s + 1)
+  }, [])
+  /** The truthful source `activeTool` is built from for every INTERNAL tool
+   * transition — Viewport's switchToolRef reports the tool that just
+   * actually became active here on EVERY invocation, whether the parent
+   * requested it (an echo, this then no-ops) or Viewport decided it
+   * internally (an auto-handoff, an Escape, a one-shot revert). Skips the
+   * update when the name already matches: both a harmless React bailout on
+   * an echo, and — the important part — this must never fight
+   * `toolActivationSeq` above, which forces a real reapply for an EXPLICIT
+   * reselect; this callback only follows what Viewport already did, it
+   * never itself requests a switch or touches that counter. */
+  const handleInternalToolChange = useCallback((name: string) => {
+    setActiveTool((prev) => (prev === name ? prev : (name as ToolName)))
+  }, [])
+
   /** Sticky banner: true once a kernel panic / borrow-lock is detected */
   const [kernelPanicked, setKernelPanicked] = useState(false)
   /** Selected nodes (ordered; index 0 = primary). */
@@ -226,6 +267,11 @@ export default function App() {
   const [showAxes, setShowAxes] = useState(true)
   const [showGrid, setShowGrid] = useState(true)
   const [showGuides, setShowGuides] = useState(true)
+  /** Camera ▸ Parallel Projection checkbox state (docs/design/camera.md §1)
+   * — a RENDER CACHE of the rig's own truth, mirroring showAxes/showGrid's
+   * pattern but populated from Viewport's `onProjectionChange` callback
+   * (mount + every `toggleProjection`) rather than toggled directly here. */
+  const [parallelProjection, setParallelProjection] = useState(false)
   /** View ▸ Section Plane's check/enabled state — a RENDER CACHE of the
    * section manager's own truth, never toggled directly by this component.
    * Populated only by `handleSectionChanged` re-reading
@@ -432,6 +478,23 @@ export default function App() {
     docSessionRef.current = docSession
   }, [docSession])
 
+  // Pushes the viewport's current camera view into the document (docs/
+  // design/camera.md §5) immediately before a `scene.save()` call, so the
+  // saved bytes carry "what you were looking at when you last saved" —
+  // session view state, NOT undoable (Document::set_camera_state's own
+  // doc). A no-op if the viewport hasn't mounted yet (nothing to read).
+  const pushCameraStateToScene = useCallback((scene: Scene) => {
+    const state = viewportApi.current?.getCameraState()
+    if (state === undefined) return
+    scene.set_camera_state(
+      state.projection,
+      state.fovDeg,
+      new Float64Array(state.eye),
+      new Float64Array(state.target),
+      new Float64Array(state.up),
+    )
+  }, [])
+
   // ---------------------------------------------------------------- autosave
   // Periodically snapshot the scene to the RecoveryStore so a crash or forced
   // quit doesn't lose work. Only writes when the document is dirty AND has
@@ -442,6 +505,9 @@ export default function App() {
       const scene = sceneRef.current
       const session = docSessionRef.current
       if (scene === null || !session.dirty || !dirtySinceAutosaveRef.current) return
+      // Crash-recovered documents should reopen at the last view too —
+      // same posture as an explicit Save (docs/design/camera.md §5).
+      pushCameraStateToScene(scene)
       const bytes = new Uint8Array(scene.save())
       const meta: RecoveryMeta = {
         version: 1,
@@ -462,7 +528,7 @@ export default function App() {
       autosaveWriteRef.current = write
     }, AUTOSAVE_INTERVAL_MS)
     return () => clearInterval(interval)
-  }, [])
+  }, [pushCameraStateToScene])
 
   // ---------------------------------------------------------------- save-state indicator tick
   // The "Edited/Saved <relative time>" text in TitleBar/MenuBar needs to
@@ -1028,10 +1094,29 @@ export default function App() {
     // above), so hidden-by-default tags/nodes take effect on first render
     // instead of waiting for the user to touch an eye toggle.
     pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
-    // Frame the freshly-loaded model (Open / Recover / drag-drop / file
-    // association all funnel through here). Empty documents (File ▸ New's
-    // blank bytes) keep the default framing.
-    if (!isSceneEmpty(scene)) {
+    // Restore the saved camera view (docs/design/camera.md §5) if the
+    // document carries one; absent (every pre-v13 file, or a v13+ document
+    // that never saved a view — File ▸ New's blank bytes always land here)
+    // falls back to the pre-existing default framing (zoomExtents for a
+    // non-empty model, or the mount-time home view for a blank one).
+    const savedCamera = scene.camera_state()
+    if (savedCamera !== undefined) {
+      try {
+        const applyState = {
+          projection: savedCamera.projection() as 'perspective' | 'parallel',
+          fovDeg: savedCamera.fov_deg(),
+          eye: [savedCamera.eye_x(), savedCamera.eye_y(), savedCamera.eye_z()] as [number, number, number],
+          target: [savedCamera.target_x(), savedCamera.target_y(), savedCamera.target_z()] as [number, number, number],
+          up: [savedCamera.up_x(), savedCamera.up_y(), savedCamera.up_z()] as [number, number, number],
+        }
+        requestAnimationFrame(() => viewportApi.current?.applyCameraState(applyState))
+      } finally {
+        savedCamera.free()
+      }
+    } else if (!isSceneEmpty(scene)) {
+      // Frame the freshly-loaded model (Open / Recover / drag-drop / file
+      // association all funnel through here). Empty documents (File ▸ New's
+      // blank bytes) keep the default framing.
       requestAnimationFrame(() => viewportApi.current?.zoomExtents())
     }
     return true
@@ -1400,6 +1485,7 @@ export default function App() {
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) return
+    pushCameraStateToScene(scene)
     const bytes = new Uint8Array(scene.save())
     const ref = docSession.currentRef
     fileHostRef.current.save(bytes, ref).then((newRef) => {
@@ -1416,11 +1502,12 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(`Save failed: ${friendlyErrorText(err)}`)
     })
-  }, [docSession.currentRef, handleToast, clearRecoverySnapshot])
+  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene])
 
   const saveAsDocument = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) return
+    pushCameraStateToScene(scene)
     const bytes = new Uint8Array(scene.save())
     // When saving an imported model (currentRef=null, importedName set), suggest
     // the imported filename with a .hew extension so the user sees a sensible
@@ -1441,7 +1528,7 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(`Save As failed: ${friendlyErrorText(err)}`)
     })
-  }, [docSession.currentRef, docSession.importedName, handleToast, clearRecoverySnapshot])
+  }, [docSession.currentRef, docSession.importedName, handleToast, clearRecoverySnapshot, pushCameraStateToScene])
 
   // ---------------------------------------------------------------- open by path (Tauri only)
   // Reads the file at `path` and applies it to the CURRENT window
@@ -2003,9 +2090,14 @@ export default function App() {
       case 'tool-slice':     setActiveTool('Slice'); break
       case 'tool-section-plane': setActiveTool('Section Plane'); break
       case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
-      case 'tool-orbit':     setActiveTool('Orbit'); break
-      case 'tool-pan':       setActiveTool('Pan'); break
-      case 'tool-zoom':      setActiveTool('Zoom'); break
+      case 'tool-orbit':     activateTool('Orbit'); break
+      case 'tool-pan':       activateTool('Pan'); break
+      case 'tool-zoom':      activateTool('Zoom'); break
+      case 'tool-position-camera': activateTool('Position Camera'); break
+      case 'tool-walk':      activateTool('Walk'); break
+      case 'tool-look-around': activateTool('Look Around'); break
+      case 'tool-zoom-window': activateTool('Zoom Window'); break
+      case 'toggle-parallel-projection': viewportApi.current?.toggleProjection(); break
       // Window pane toggles — must use functional updaters (StrictMode safe)
       case 'toggle-model-info':   setShowModelInfo((v) => !v); break
       case 'toggle-materials':    setShowMaterials((v) => !v); break
@@ -2357,9 +2449,9 @@ export default function App() {
         // Camera tools: SketchUp's real O / H / Z — replaces the old
         // Ctrl+B / Ctrl+R / Ctrl+\ Hew inventions so the rail, the menus,
         // and actual dispatch all advertise the same keys.
-        if (key === 'o') { ev.preventDefault(); setActiveTool('Orbit'); return }
-        if (key === 'h') { ev.preventDefault(); setActiveTool('Pan'); return }
-        if (key === 'z') { ev.preventDefault(); setActiveTool('Zoom'); return }
+        if (key === 'o') { ev.preventDefault(); activateTool('Orbit'); return }
+        if (key === 'h') { ev.preventDefault(); activateTool('Pan'); return }
+        if (key === 'z') { ev.preventDefault(); activateTool('Zoom'); return }
       }
 
       // (Delete/Backspace handled by a dedicated always-on effect below.)
@@ -2541,6 +2633,7 @@ export default function App() {
       'win-tags': showTags,
       'win-object-info': showObjectInfo,
       'win-debug-log': showDebugLog,
+      'cam-parallel-projection': parallelProjection,
     }
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
       checked[id] = tool === activeTool
@@ -2576,6 +2669,7 @@ export default function App() {
     selectedGuide,
     menuGates,
     menuFocusTick,
+    parallelProjection,
   ])
 
   // ---------------------------------------------------------------- drag-drop open
@@ -2962,7 +3056,7 @@ export default function App() {
         canUndo={canUndo}
         canRedo={canRedo}
         activeTool={activeTool}
-        onSelectTool={(name) => setActiveTool(name as ToolName)}
+        onSelectTool={(name) => activateTool(name as ToolName)}
         showModelInfo={showModelInfo}
         showMaterials={showMaterials}
         showTags={showTags}
@@ -2996,6 +3090,8 @@ export default function App() {
         }}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
+        parallelProjectionChecked={parallelProjection}
+        onToggleParallelProjection={() => viewportApi.current?.toggleProjection()}
         onOpenSettings={openSettings}
         onReportBug={handleReportBug}
         onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
@@ -3047,7 +3143,7 @@ export default function App() {
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <ToolRail
           activeTool={activeTool}
-          onSelectTool={(name) => setActiveTool(name)}
+          onSelectTool={(name) => activateTool(name)}
           // The resting palette field lives at the top of the rail on every
           // platform ( — macOS forced it here since it has no in-window
           // menu bar, and the rest follow for consistency). The shortcut on
@@ -3075,6 +3171,8 @@ export default function App() {
             onToolHint={setToolStageHint}
             onPrecisionChange={setPrecisionSnap}
             activeTool={activeTool}
+            activeToolSeq={toolActivationSeq}
+            onInternalToolChange={handleInternalToolChange}
             activeContext={activeContext}
             selectedIds={selectedIds}
             activeLitSet={activeLitSet}
@@ -3093,6 +3191,8 @@ export default function App() {
             onCameraDragChange={setCameraDragging}
             onHoverSketchRegionChange={setHoveringSketchRegion}
             currentMaterialId={currentMaterialId}
+            onProjectionChange={(projection) => setParallelProjection(projection === 'parallel')}
+            onToolReverted={() => setActiveTool('Select')}
           />
 
           {/* Inference & viewport feedback (`07_inference_feedback.md`)
@@ -3108,7 +3208,7 @@ export default function App() {
             <MeasurementBox toolName={toolName} value={measurement} />
             <ViewportHUD
               onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
-              onOrbit={() => setActiveTool('Orbit')}
+              onOrbit={() => activateTool('Orbit')}
             />
           </div>
 

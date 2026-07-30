@@ -121,7 +121,7 @@ export class MarqueeProjector {
   /** Scratch projected-point slots (ax, ay, bx, by, cx, cy). */
   private readonly px = new Float64Array(6)
 
-  constructor(camera: THREE.PerspectiveCamera, width: number, height: number) {
+  constructor(camera: THREE.PerspectiveCamera | THREE.OrthographicCamera, width: number, height: number) {
     camera.updateMatrixWorld()
     this.view.copy(camera.matrixWorldInverse)
     this.projection = camera.projectionMatrix

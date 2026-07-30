@@ -164,6 +164,7 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
+import { screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
@@ -2003,14 +2004,12 @@ export class FollowMeTool implements Tool {
    * Hold the verdict badge and the drag gesture's live station marker at a
    * constant on-screen size. Named to match the hook the Viewport render loop
    * already feature-detects (`'updateGripScale' in tool`), and using the same
-   * perspective inverse ScaleTool documents: `worldHalf = px · dist ·
-   * tan(fov/2) / viewportHeight`, which is stable under both fov change and
-   * viewport resize (unlike the `K · dist` shorthand, which bakes those in).
+   * `worldPerPixel`-callback form ScaleTool documents — stable under fov
+   * change, zoom, and viewport resize, and projection-agnostic
+   * (docs/design/camera.md §1; a former `instanceof PerspectiveCamera` guard
+   * here silently hid both markers under parallel projection).
    */
-  updateGripScale(camera: THREE.Camera, viewportHeight: number): void {
-    if (viewportHeight <= 0) return
-    if (!(camera instanceof THREE.PerspectiveCamera)) return
-    const tanHalfFov = Math.tan((camera.fov * Math.PI) / 360)
+  updateGripScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
     const all: THREE.Object3D[] = []
     if (this.hoverMarker !== null) all.push(this.hoverMarker)
     if (this.stationMarker !== null) all.push(this.stationMarker)
@@ -2019,7 +2018,7 @@ export class FollowMeTool implements Tool {
       const dist = camera.position.distanceTo(marker.position)
       const px = (marker.userData.screenPx as number | undefined) ?? VERDICT_BADGE_PX
       marker.scale.setScalar(
-        Math.max((px * dist * tanHalfFov) / viewportHeight, MIN_MARKER_WORLD_HALF),
+        screenConstantWorldHalfFromWorldPerPixel(px, worldPerPixel(dist), MIN_MARKER_WORLD_HALF),
       )
     }
   }

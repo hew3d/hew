@@ -43,6 +43,16 @@ const FRAGMENT_SHADER = `
   uniform vec3 uMinorColor;
   uniform vec3 uMajorColor;
   uniform float uAxesVisible;
+  // >= 0 overrides the per-fragment camera distance used for cell-size LOD
+  // below with this FIXED value; < 0 (the default) uses the real per-fragment
+  // distance. Set under parallel projection (docs/design/camera.md section 1):
+  // apparent size there is depth-independent (unlike perspective, where a
+  // point twice as far away really does look half as big, which is what lets
+  // per-fragment distance stand in for per-fragment world-per-pixel below) -
+  // every fragment must pick the SAME cell size regardless of how far into
+  // the scene it sits, or near cells would be finer than far ones for no
+  // optical reason. CameraRig.effectiveDistance() supplies the value.
+  uniform float uLodDistanceOverride;
 
   // Anti-aliased grid-line intensity at world-space cell size \`cellSize\`
   // (the standard fwidth-based "pristine grid" technique — the derivative
@@ -82,7 +92,7 @@ const FRAGMENT_SHADER = `
   }
 
   void main() {
-    float dist = length(uCameraPos - vWorldPos);
+    float dist = uLodDistanceOverride >= 0.0 ? uLodDistanceOverride : length(uCameraPos - vWorldPos);
 
     // Map camera distance to a cell size on a log10 scale, clamped to Hew's
     // supported range [1mm, 10m] — the low end reaches millimetre cells so a
@@ -150,6 +160,7 @@ export class InfiniteGrid {
         // here too, or the grid will suppress lines under axes nobody sees
         // until the next real `setAxesVisible` call corrects it.
         uAxesVisible: { value: axesVisible ? 1 : 0 },
+        uLodDistanceOverride: { value: -1 },
       },
       // A BACKDROP, not an occluder: opaque-pass (transparent: false) so it
       // draws before the model, at renderOrder -1 so it's first within that
@@ -181,9 +192,18 @@ export class InfiniteGrid {
     this.mesh.frustumCulled = false
   }
 
-  /** Call every frame the scene re-renders (camera moved) — see `Viewport.tsx`'s render loop. */
-  update(cameraPos: THREE.Vector3): void {
+  /**
+   * Call every frame the scene re-renders (camera moved) — see
+   * `Viewport.tsx`'s render loop. `lodDistanceOverride`, when non-null,
+   * pins the cell-size LOD calculation to that single value for every
+   * fragment instead of each fragment's own distance to `cameraPos` — pass
+   * `CameraRig.effectiveDistance()` under parallel projection (see the
+   * `uLodDistanceOverride` shader doc above); omit (or pass `null`) under
+   * perspective, where the real per-fragment distance is correct.
+   */
+  update(cameraPos: THREE.Vector3, lodDistanceOverride: number | null = null): void {
     (this.material.uniforms.uCameraPos.value as THREE.Vector3).copy(cameraPos)
+    this.material.uniforms.uLodDistanceOverride.value = lodDistanceOverride ?? -1
   }
 
   /** Call on every theme change — cheap uniform write, no rebuild. */

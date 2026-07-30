@@ -11,6 +11,7 @@ import { FollowMeTool, cueColors, pathHoverColors } from './FollowMeTool'
 import type { NodeRef } from '../panels/treeModel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { worldPerPixelPerspective } from '../viewport/math'
 import { clearPreview } from './transformPreview'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
@@ -1127,11 +1128,14 @@ describe('FollowMeTool — start verdict', () => {
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
     camera.position.set(0, 0, 10)
-    tool.updateGripScale(camera, 800)
+    // Reads camera.fov live (mutated below), same as a real CameraRig-backed
+    // worldPerPixel callback would.
+    const wpp = (viewportH: number) => (dist: number) => worldPerPixelPerspective(dist, camera.fov, viewportH)
+    tool.updateGripScale(camera, wpp(800))
     const near = marker.scale.x
     const nearDist = camera.position.distanceTo(marker.position)
     camera.position.set(0, 0, 20)
-    tool.updateGripScale(camera, 800)
+    tool.updateGripScale(camera, wpp(800))
     // World size tracks camera distance exactly, so the PIXEL size is
     // unchanged — the property a `K · dist` shorthand also has.
     const farDist = camera.position.distanceTo(marker.position)
@@ -1140,11 +1144,32 @@ describe('FollowMeTool — start verdict', () => {
     // …and, unlike that shorthand, both fov and viewport height are honoured
     // rather than baked into the constant: halving the viewport height doubles
     // the world size, and widening the fov widens the marker with it.
-    tool.updateGripScale(camera, 400)
+    tool.updateGripScale(camera, wpp(400))
     expect(marker.scale.x).toBeCloseTo(atFov45 * 2, 9)
     camera.fov = 90
-    tool.updateGripScale(camera, 400)
+    tool.updateGripScale(camera, wpp(400))
     expect(marker.scale.x).toBeCloseTo(atFov45 * 2 * (1 / Math.tan(Math.PI / 8)), 9)
+  })
+
+  it('DESIGN CHANGE: the verdict badge scales under an orthographic (parallel-projection) camera too — no longer silently hidden', () => {
+    // Before Phase 1, an `instanceof PerspectiveCamera` guard made this a
+    // no-op under ortho. The tool now takes a `worldPerPixel` callback
+    // instead of a camera+viewportHeight pair, so it has no projection branch
+    // at all — the caller (CameraRig.worldPerPixel) is what makes ortho work.
+    const scene = circleScene([0, 0, 0, 0, 1, 0])
+    const { tool, preview } = makeTool(scene)
+    tool.onPointerDown(null, RAY)
+    tool.onPointerMove(null, RAY)
+    const marker = preview.children.find(
+      (c) => c instanceof THREE.Mesh && !(c instanceof LineSegments2),
+    )!
+    const before = marker.scale.x
+
+    const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100)
+    ortho.position.set(0, 0, 10)
+    tool.updateGripScale(ortho, () => 0.05) // an arbitrary, distance-independent worldPerPixel
+    expect(marker.scale.x).not.toBe(before)
+    expect(marker.scale.x).toBeGreaterThan(0)
   })
 
   it('informs (not warns) in the status bar while hovering a profile auto-orientation will fold up', () => {
