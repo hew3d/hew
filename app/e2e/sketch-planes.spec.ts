@@ -227,3 +227,67 @@ test('sketches on any plane: draw, rotate onto vertical, hover-split, idle-lock 
   const probe = await page.evaluate(() => window.__hew_test!.pickFace([0.5, 3, 1], [0, -1, 0]))
   expect(probe).not.toBeNull()
 })
+
+/**
+ * The inference chip must not claim a snap the commit will not honour.
+ *
+ * A shape drawn on the ground has to be planar on it, so hovering a vertex
+ * floating above the ground contributes its x/y and has its height dropped —
+ * deliberately, since that is how a rectangle gets aligned under a solid's
+ * corner. What is not deliberate is labelling that plain "Endpoint": the chip
+ * names a point two metres above where the geometry actually lands.
+ *
+ * The distinction is stage-dependent, which is why the tool has to be the one
+ * to report it. While IDLE the same hover is honoured exactly — a click there
+ * starts a sketch on a vertical plane through that corner — so qualifying it
+ * then would be just as wrong in the other direction.
+ */
+test('the inference chip qualifies a projected snap, and only when it is really projected', async ({
+  page,
+}) => {
+  await ready(page)
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [9, -8, 7], target: [1, 1, 1], up: [0, 0, 1], fovDeg: 50 })
+    h.drawBox([0, 0, 0], [2, 2, 0], 2) // top corners at z=2
+  })
+  await page.waitForTimeout(200)
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+  const chipSaysProjected = () =>
+    page.evaluate(() => document.body.innerText.includes('projected'))
+
+  await page.keyboard.press('r')
+
+  // IDLE over the box's TOP corner: honoured as-is, so no qualifier.
+  const topCorner = await toPage([2, 2, 2])
+  await page.mouse.move(topCorner.x, topCorner.y)
+  await page.waitForTimeout(200)
+  expect(await chipSaysProjected()).toBe(false)
+
+  // Anchor on empty ground, then hover that same top corner: now the gesture
+  // is committed to the ground plane and the corner's height is dropped.
+  const groundStart = await toPage([5, 5, 0])
+  await page.mouse.move(groundStart.x, groundStart.y)
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.waitForTimeout(120)
+  await page.mouse.move(topCorner.x, topCorner.y)
+  await page.waitForTimeout(200)
+  expect(await chipSaysProjected()).toBe(true)
+
+  // Still anchored, but over the box's BOTTOM corner, which is already on the
+  // ground: nothing is dropped, so nothing is qualified.
+  const bottomCorner = await toPage([2, 2, 0])
+  await page.mouse.move(bottomCorner.x, bottomCorner.y)
+  await page.waitForTimeout(200)
+  expect(await chipSaysProjected()).toBe(false)
+})

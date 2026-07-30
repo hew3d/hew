@@ -151,6 +151,67 @@ describe('planeFromSketch', () => {
   })
 })
 
+describe('axisDrawPlane — the `ground` flag is a licence to flatten', () => {
+  // Every draw tool has a ground fast path that returns `[snap.x, snap.y, 0]`,
+  // discarding the snapped point's z outright. That is only safe because
+  // `ground: true` is supposed to mean "this plane IS the world z=0 plane", so
+  // the z being discarded is always already 0.
+  //
+  // Nothing in the type system ties those together. If a lock ever reported
+  // `ground: true` for a plane that is not z=0 — a moved drawing frame whose
+  // "ground-like" plane sits at a height, say — every draw tool would silently
+  // snap points down to the world ground with no other symptom. That is the
+  // shape of the defect the Line tool actually hit, where an axis lock could
+  // take a segment off its plane and the fast path flattened it away.
+  //
+  // This sweep pins the coupling directly: whatever `axisDrawPlane` returns,
+  // `ground: true` must imply that flattening to z=0 is lossless.
+  it('never reports ground: true for a plane where discarding z would lose information', () => {
+    const movedFrame = {
+      origin: [3, -4, 2] as [number, number, number],
+      x: [0, 1, 0] as [number, number, number],
+      y: [-1, 0, 0] as [number, number, number],
+      z: [0, 0, 1] as [number, number, number],
+    }
+    const throughs: Array<[number, number, number]> = [
+      [0, 0, 0], [3, -2, 0], [-7, 11, 0],
+      [0, 0, 5], [3, -2, 0.5], [1, 1, -2], [0, 0, 1e-9],
+    ]
+    const axes: Array<0 | 1 | 2> = [0, 1, 2]
+    let groundCount = 0
+    for (const frame of [undefined, movedFrame]) {
+      for (const axis of axes) {
+        for (const through of throughs) {
+          const plane = frame === undefined
+            ? axisDrawPlane(axis, through)
+            : axisDrawPlane(axis, through, frame)
+          if (!plane.ground) continue
+          groundCount += 1
+          // The two conditions that make `[x, y, 0]` a faithful projection.
+          expect(plane.normal).toEqual([0, 0, 1])
+          expect(plane.origin[2]).toBe(0)
+        }
+      }
+    }
+    // Guard the guard: if a refactor stopped producing ground planes here at
+    // all, every assertion above would pass vacuously.
+    expect(groundCount).toBeGreaterThan(0)
+  })
+
+  it('a moved drawing frame never yields a ground plane, however ground-like it looks', () => {
+    // A frame lifted in z has a horizontal plane through its own origin, which
+    // is emphatically NOT the world ground — flattening a point onto it would
+    // move the point.
+    const lifted = {
+      origin: [0, 0, 4] as [number, number, number],
+      x: [1, 0, 0] as [number, number, number],
+      y: [0, 1, 0] as [number, number, number],
+      z: [0, 0, 1] as [number, number, number],
+    }
+    expect(axisDrawPlane(2, [0, 0, 4], lifted).ground).toBe(false)
+  })
+})
+
 describe('axisDrawPlane', () => {
   it('axis 2 (Z) through a z=0 point returns the exact ground frame, ground: true', () => {
     const plane = axisDrawPlane(2, [3, -2, 0])

@@ -45,4 +45,23 @@ describe('InferenceTooltip', () => {
     expect(chip.style.left).toBe('116px')
     expect(chip.style.top).toBe('216px')
   })
+
+  it('qualifies a projected snap so the chip stops claiming a point the commit will not use', () => {
+    render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20, projected: true }} />)
+    // The kind still names what was inferred — the qualifier says the gesture
+    // took only its x/y, which is what makes it an alignment aid rather than a
+    // lie about where the geometry lands.
+    expect(screen.getByText('Endpoint')).toBeInTheDocument()
+    expect(screen.getByText('projected')).toBeInTheDocument()
+  })
+
+  it('says nothing extra when the snap was honoured as-is', () => {
+    render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20, projected: false }} />)
+    expect(screen.queryByText('projected')).toBeNull()
+  })
+
+  it('omits the qualifier entirely when the field is absent', () => {
+    render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20 }} />)
+    expect(screen.queryByText('projected')).toBeNull()
+  })
 })
