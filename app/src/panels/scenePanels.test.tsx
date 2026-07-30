@@ -8,7 +8,7 @@
  * with the right methods stands in as the Scene.
  */
 
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
 import { MaterialPalette } from './MaterialPalette'
@@ -1135,12 +1135,28 @@ describe('MaterialPalette', () => {
     expect(onSelectMaterial).toHaveBeenCalledWith(MATERIAL_SENTINEL)
   })
 
-  it('renders a "+ Add color" button', () => {
+  it('the "Add color" and "Add texture" sub-panes start collapsed', () => {
     render(<MaterialPalette {...baseProps} scene={makeScene()} />)
-    expect(screen.getByRole('button', { name: /\+ add color/i })).toBeInTheDocument()
+    const colorHeader = screen.getByRole('button', { name: 'Add color' })
+    const textureHeader = screen.getByRole('button', { name: 'Add texture' })
+    expect(colorHeader).toHaveAttribute('aria-expanded', 'false')
+    expect(textureHeader).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: /\+ add color/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /\+ add texture/i })).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('Name…')).not.toBeInTheDocument()
   })
 
-  it('clicking "+ Add color" calls add_material, onMaterialCreated, and onDocumentChanged — but not onSelectMaterial (adding a color must not switch to the Paint tool)', () => {
+  it('expanding "Add color" reveals its body; a "+ Add color" button appears, disabled until a color is chosen', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add color' }))
+    expect(screen.getByRole('button', { name: 'Add color' })).toHaveAttribute('aria-expanded', 'true')
+    const addButton = screen.getByRole('button', { name: /\+ add color/i })
+    expect(addButton).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Choose color'), { target: { value: '#112233' } })
+    expect(addButton).not.toBeDisabled()
+  })
+
+  it('clicking "+ Add color" (after choosing a color) calls add_material, onMaterialCreated, and onDocumentChanged — but not onSelectMaterial (adding a color must not switch to the Paint tool)', () => {
     const scene = makeScene()
     const onSelectMaterial = vi.fn()
     const onMaterialCreated = vi.fn()
@@ -1154,6 +1170,8 @@ describe('MaterialPalette', () => {
         onDocumentChanged={onDocumentChanged}
       />,
     )
+    fireEvent.click(screen.getByRole('button', { name: 'Add color' }))
+    fireEvent.change(screen.getByLabelText('Choose color'), { target: { value: '#112233' } })
     fireEvent.click(screen.getByRole('button', { name: /\+ add color/i }))
     expect((scene as any).add_material).toHaveBeenCalled()
     expect(onMaterialCreated).toHaveBeenCalled()
@@ -1201,6 +1219,56 @@ describe('MaterialPalette', () => {
     )
     fireEvent.click(screen.getByTitle('Sky Blue'))
     expect(onSelectMaterial).toHaveBeenCalledWith(3n)
+  })
+
+  it('filter narrows the materials list by case-insensitive substring match on name, without hiding the Default row', () => {
+    const infos: Record<string, { r: () => number; g: () => number; b: () => number; a: () => number; name: () => string; has_texture: () => boolean }> = {
+      '1': { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false },
+      '2': { r: () => 0, g: () => 128, b: () => 255, a: () => 255, name: () => 'Sky Blue', has_texture: () => false },
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n, 2n]),
+      material_info: (id: bigint) => infos[id.toString()],
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} />)
+    expect(screen.getByTitle('Red Paint')).toBeInTheDocument()
+    expect(screen.getByTitle('Sky Blue')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Filter materials'), { target: { value: 'BLUE' } })
+    expect(screen.queryByTitle('Red Paint')).not.toBeInTheDocument()
+    expect(screen.getByTitle('Sky Blue')).toBeInTheDocument()
+    // The Default row is not a material — it is never filtered out.
+    expect(screen.getByTitle('Default (unpainted)')).toBeInTheDocument()
+  })
+
+  it('shows "No materials match" when the filter matches nothing, and the × clears it back to the full list', () => {
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n]),
+      material_info: () => mockInfo,
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} />)
+    fireEvent.change(screen.getByLabelText('Filter materials'), { target: { value: 'zzz' } })
+    expect(screen.queryByTitle('Red Paint')).not.toBeInTheDocument()
+    expect(screen.getByText('No materials match')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }))
+    expect(screen.getByTitle('Red Paint')).toBeInTheDocument()
+    expect(screen.queryByText('No materials match')).not.toBeInTheDocument()
+  })
+
+  it('filtering out the selected material does not clear the selection — the opacity slider keeps showing its alpha', () => {
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 128, name: () => 'Glass', has_texture: () => false }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
+    fireEvent.change(screen.getByLabelText('Filter materials'), { target: { value: 'zzz' } })
+    expect(screen.queryByTitle('Glass')).not.toBeInTheDocument()
+    const slider = screen.getByRole('slider') as HTMLInputElement
+    expect(slider).not.toBeDisabled()
+    expect(slider.value).toBe('128')
   })
 
   it('opacity slider is disabled when the Default swatch is selected', () => {
@@ -1324,6 +1392,125 @@ describe('MaterialPalette', () => {
     expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
     unmount()
     expect((scene as any).set_material_alpha).toHaveBeenCalledWith(7n, 64)
+  })
+
+  it('after a successful "+ Add color", focus moves to the Add-color Name input, not <body>', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add color' }))
+    const nameInput = screen.getByPlaceholderText('Name…')
+    fireEvent.change(screen.getByLabelText('Choose color'), { target: { value: '#112233' } })
+    fireEvent.click(screen.getByRole('button', { name: /\+ add color/i }))
+    // The button that was just clicked disables itself immediately
+    // (newColorHex resets to null) — focus must not be left on <body>.
+    expect(document.activeElement).toBe(nameInput)
+  })
+
+  it('clicking the × to clear the filter returns focus to the filter input, not <body>', () => {
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n]),
+      material_info: () => mockInfo,
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} />)
+    const filterInput = screen.getByLabelText('Filter materials')
+    fireEvent.change(filterInput, { target: { value: 'zzz' } })
+    const clearButton = screen.getByRole('button', { name: 'Clear filter' })
+    // The × button unmounts the instant the filter becomes empty — this is
+    // exactly the click that would otherwise drop focus to <body>.
+    fireEvent.click(clearButton)
+    expect(document.activeElement).toBe(filterInput)
+  })
+
+  it('clicking the color chooser (with no prior change event) counts the #4488cc seed as chosen', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add color' }))
+    const addButton = screen.getByRole('button', { name: /\+ add color/i })
+    const chooser = screen.getByLabelText('Choose color') as HTMLInputElement
+    expect(addButton).toBeDisabled()
+    // Native activation (mouse or keyboard) fires 'click' on the input, with
+    // no accompanying 'input'/'change' event when the OS picker is cancelled
+    // or the same value is re-picked — this is the real-browser edge case
+    // that used to leave "+ Add color" permanently disabled.
+    fireEvent.click(chooser)
+    expect(addButton).not.toBeDisabled()
+    expect(chooser.value.toLowerCase()).toBe('#4488cc')
+  })
+
+  it('onChange still refines the color after the click-activation seed is accepted', () => {
+    const scene = makeScene()
+    render(<MaterialPalette {...baseProps} scene={scene} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add color' }))
+    const chooser = screen.getByLabelText('Choose color')
+    fireEvent.click(chooser)
+    fireEvent.change(chooser, { target: { value: '#112233' } })
+    fireEvent.click(screen.getByRole('button', { name: /\+ add color/i }))
+    expect((scene as any).add_material).toHaveBeenCalledWith(
+      expect.any(String),
+      0x11,
+      0x22,
+      0x33,
+      255,
+    )
+  })
+
+  it('Enter in the Add-color Name field is a no-op until a color is chosen, and submits once one is', () => {
+    const scene = makeScene()
+    render(<MaterialPalette {...baseProps} scene={scene} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add color' }))
+    const nameInput = screen.getByPlaceholderText('Name…')
+    fireEvent.change(nameInput, { target: { value: 'Sunset' } })
+    fireEvent.keyDown(nameInput, { key: 'Enter' })
+    expect((scene as any).add_material).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('Choose color'), { target: { value: '#112233' } })
+    fireEvent.keyDown(nameInput, { key: 'Enter' })
+    expect((scene as any).add_material).toHaveBeenCalledWith('Sunset', 0x11, 0x22, 0x33, 255)
+  })
+
+  it('expanding "Add texture" reveals its body: name and file inputs appear', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    const textureHeader = screen.getByRole('button', { name: 'Add texture' })
+    expect(textureHeader).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(textureHeader)
+    expect(textureHeader).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByPlaceholderText('Name…')).toBeInTheDocument()
+    const fileInput = document.querySelector('input[type="file"]')
+    expect(fileInput).not.toBeNull()
+    expect(screen.getByRole('button', { name: /\+ add texture/i })).toBeInTheDocument()
+  })
+
+  it('collapsing and reopening "Add texture" keeps the pending file (shown filename stays truthful) and the add still succeeds', async () => {
+    const scene = makeScene({ add_texture_material: vi.fn().mockReturnValue(9n) })
+    const onMaterialCreated = vi.fn()
+    render(
+      <MaterialPalette {...baseProps} scene={scene} onMaterialCreated={onMaterialCreated} />,
+    )
+    const textureHeader = screen.getByRole('button', { name: 'Add texture' })
+    fireEvent.click(textureHeader)
+
+    const file = new File(['pixel-bytes'], 'brick.png', { type: 'image/png' })
+    // jsdom's File does not implement arrayBuffer() (unlike browsers/Node's
+    // own File) — handleAddTexture awaits it, so the test file needs it too.
+    file.arrayBuffer = async () => new TextEncoder().encode('pixel-bytes').buffer
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [file] } })
+    expect(screen.getByText('brick.png')).toBeInTheDocument()
+
+    // Collapse — the whole sub-pane body (including the native file input)
+    // unmounts here.
+    fireEvent.click(textureHeader)
+    expect(textureHeader).toHaveAttribute('aria-expanded', 'false')
+
+    // Reopen — a brand-new native file input mounts, reset by the browser,
+    // but the pending file lives in React state and must still be shown and
+    // still be the one that gets added.
+    fireEvent.click(textureHeader)
+    expect(screen.getByText('brick.png')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /\+ add texture/i }))
+    await waitFor(() => expect((scene as any).add_texture_material).toHaveBeenCalled())
+    expect(onMaterialCreated).toHaveBeenCalledWith(9n)
+    expect(screen.queryByText(/choose an image file first/i)).not.toBeInTheDocument()
   })
 })
 

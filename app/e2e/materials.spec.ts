@@ -37,3 +37,61 @@ test('selecting a material activates the Paint tool; no Fill button remains', as
   await defaultSwatch.click()
   await expect(page.getByText(/Click a face to paint it with the current material/i)).toBeVisible()
 })
+
+test('filtering the materials list narrows by name, keeps the Default row, and clears back', async ({ page }) => {
+  const defaultSwatch = page.getByTitle('Default (unpainted)')
+  if (!(await defaultSwatch.isVisible().catch(() => false))) {
+    await page.getByText('Materials', { exact: true }).first().click()
+  }
+  await expect(defaultSwatch).toBeVisible()
+
+  // Add two colors through the Add-color flow so there is something to filter.
+  await page.getByRole('button', { name: 'Add color', exact: true }).click()
+  await page.getByLabel('Choose color').fill('#ff0000')
+  await page.getByPlaceholder('Name…').first().fill('Red Paint')
+  await page.getByRole('button', { name: '+ Add color' }).click()
+
+  await page.getByLabel('Choose color').fill('#0000ff')
+  await page.getByPlaceholder('Name…').first().fill('Sky Blue')
+  await page.getByRole('button', { name: '+ Add color' }).click()
+
+  await expect(page.getByTitle('Red Paint')).toBeVisible()
+  await expect(page.getByTitle('Sky Blue')).toBeVisible()
+
+  const filterInput = page.getByLabel('Filter materials')
+  await filterInput.fill('blue')
+  await expect(page.getByTitle('Sky Blue')).toBeVisible()
+  await expect(page.getByTitle('Red Paint')).toHaveCount(0)
+  await expect(defaultSwatch).toBeVisible()
+
+  await filterInput.fill('nonexistent material name')
+  await expect(page.getByText('No materials match')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Clear filter' }).click()
+  await expect(page.getByTitle('Red Paint')).toBeVisible()
+  await expect(page.getByTitle('Sky Blue')).toBeVisible()
+})
+
+test('Add color sub-pane starts collapsed and requires a chosen color before it can be added', async ({ page }) => {
+  const defaultSwatch = page.getByTitle('Default (unpainted)')
+  if (!(await defaultSwatch.isVisible().catch(() => false))) {
+    await page.getByText('Materials', { exact: true }).first().click()
+  }
+  await expect(defaultSwatch).toBeVisible()
+
+  const colorHeader = page.getByRole('button', { name: 'Add color', exact: true })
+  await expect(colorHeader).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByRole('button', { name: '+ Add color' })).toHaveCount(0)
+
+  await colorHeader.click()
+  await expect(colorHeader).toHaveAttribute('aria-expanded', 'true')
+  const addButton = page.getByRole('button', { name: '+ Add color' })
+  await expect(addButton).toBeVisible()
+  await expect(addButton).toBeDisabled()
+
+  await page.getByLabel('Choose color').fill('#33cc99')
+  await expect(addButton).toBeEnabled()
+  await page.getByPlaceholder('Name…').first().fill('Fresh Mint')
+  await addButton.click()
+  await expect(page.getByTitle('Fresh Mint')).toBeVisible()
+})

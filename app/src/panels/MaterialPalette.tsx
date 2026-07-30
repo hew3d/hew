@@ -94,6 +94,47 @@ function alphaToDisplayPercent(alpha: number): number {
   return Math.min(99, Math.max(1, Math.round((alpha / 255) * 100)))
 }
 
+/**
+ * Toggle header for an in-panel collapsible sub-pane ("Add color" / "Add
+ * texture") — the whole row is one <button>, chevron + label, matching the
+ * TraySection/TagsPanel collapse idiom used elsewhere in the tray.
+ */
+function SubPaneHeader({
+  label,
+  expanded,
+  onToggle,
+}: {
+  label: string
+  expanded: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        width: '100%',
+        background: 'none',
+        border: 'none',
+        padding: 0,
+        cursor: 'pointer',
+        textAlign: 'left',
+        fontWeight: 'bold',
+        fontFamily: 'monospace',
+        color: 'var(--text-tertiary, #aaa)',
+        fontSize: '10px',
+      }}
+    >
+      <span>{label}</span>
+      <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+    </button>
+  )
+}
+
 export function MaterialPalette({
   scene,
   docRev,
@@ -108,6 +149,21 @@ export function MaterialPalette({
   void docRev
 
   const materialIds = Array.from(scene.material_ids())
+
+  // --- Filter state ---
+  // Live, case-insensitive substring match on material name. Applied at
+  // render time against the already-fresh materialIds — filtering never
+  // touches the scene and never clears the current selection (the Default
+  // row and the opacity slider are unaffected).
+  const [filter, setFilter] = useState('')
+  const normalizedFilter = filter.toLowerCase()
+  const filteredMaterialIds =
+    normalizedFilter === ''
+      ? materialIds
+      : materialIds.filter((id) => {
+          const info = scene.material_info(id)
+          return info !== undefined && info.name().toLowerCase().includes(normalizedFilter)
+        })
 
   // --- Opacity state ---
   // Non-null only mid-drag/mid-keystroke, so the slider tracks the pointer
@@ -139,9 +195,27 @@ export function MaterialPalette({
   commitAlphaRef.current = commitAlpha
   useEffect(() => () => commitAlphaRef.current(), [])
 
+  // --- Add sub-pane collapse state ---
+  // Independent per sub-pane, session-only (no persistence) — both start
+  // collapsed so the pane opens compact and the user opts into either flow.
+  const [colorOpen, setColorOpen] = useState(false)
+  const [textureOpen, setTextureOpen] = useState(false)
+
   // --- Add color state ---
-  const [newColorHex, setNewColorHex] = useState('#4488cc')
+  // null until the user actually picks a color. The native <input
+  // type="color"> still needs a seed value to render (`#4488cc`), but that
+  // seed is never treated as "chosen" — the prompt-state overlay below covers
+  // it until the first change event.
+  const [newColorHex, setNewColorHex] = useState<string | null>(null)
   const [newColorName, setNewColorName] = useState('')
+  // Focus target after a successful add — the natural next action is adding
+  // another color, so focus returns to the Name field rather than dropping
+  // to <body> when the just-clicked "+ Add color" button disables itself.
+  const newColorNameInputRef = useRef<HTMLInputElement>(null)
+  // Focus target after the filter is cleared via the × button — that button
+  // unmounts the instant the filter becomes empty, which would otherwise
+  // drop focus to <body>.
+  const filterInputRef = useRef<HTMLInputElement>(null)
 
   // --- Add texture state ---
   const [texName, setTexName] = useState('')
@@ -152,6 +226,7 @@ export function MaterialPalette({
   const [pendingFile, setPendingFile] = useState<File | null>(null)
 
   function handleAddColor() {
+    if (newColorHex === null) return // disabled in the UI until a color is chosen
     const name = newColorName.trim() || `Color ${materialIds.length + 1}`
     const hex = newColorHex.replace('#', '')
     const r = parseInt(hex.substring(0, 2), 16)
@@ -161,6 +236,10 @@ export function MaterialPalette({
     onMaterialCreated(id)
     onDocumentChanged()
     setNewColorName('')
+    setNewColorHex(null)
+    // The Name input is still mounted (the sub-pane stays expanded), so this
+    // is a plain synchronous focus move — no timeout needed.
+    newColorNameInputRef.current?.focus()
   }
 
   async function handleAddTexture() {
@@ -197,6 +276,67 @@ export function MaterialPalette({
 
   return (
     <div style={PANEL_STYLE}>
+      {/* Filter */}
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: '6px',
+            color: 'var(--text-faint, #888)',
+            fontSize: '11px',
+            pointerEvents: 'none',
+          }}
+        >
+          ⌕
+        </span>
+        <input
+          ref={filterInputRef}
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter materials…"
+          aria-label="Filter materials"
+          style={{
+            flex: 1,
+            fontSize: '11px',
+            fontFamily: 'monospace',
+            background: 'var(--surface-input, #444)',
+            color: 'var(--text-primary, #eee)',
+            border: 'none',
+            borderRadius: '3px',
+            padding: '3px 20px',
+            boxSizing: 'border-box',
+          }}
+        />
+        {filter !== '' && (
+          <button
+            type="button"
+            onClick={() => {
+              setFilter('')
+              // This button unmounts the instant the filter becomes empty
+              // (it only renders while filter !== ''); without this, focus
+              // would drop to <body> rather than staying in the filter flow.
+              filterInputRef.current?.focus()
+            }}
+            aria-label="Clear filter"
+            style={{
+              position: 'absolute',
+              right: '4px',
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-faint, #888)',
+              cursor: 'pointer',
+              fontSize: '13px',
+              lineHeight: 1,
+              padding: '2px',
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
+
       {/* Default swatch */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
         <div
@@ -212,7 +352,7 @@ export function MaterialPalette({
       </div>
 
       {/* Material swatches */}
-      {materialIds.map((id) => {
+      {filteredMaterialIds.map((id) => {
         const info = scene.material_info(id)
         if (info === undefined) return null
         const hex =
@@ -267,6 +407,11 @@ export function MaterialPalette({
           </div>
         )
       })}
+      {normalizedFilter !== '' && filteredMaterialIds.length === 0 && (
+        <div style={{ color: 'var(--text-faint, #888)', fontSize: '10px', padding: '4px 0' }}>
+          No materials match
+        </div>
+      )}
 
       {/* Opacity */}
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
@@ -306,75 +451,140 @@ export function MaterialPalette({
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
 
       {/* Add color */}
-      <div style={{ fontWeight: 'bold', color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Add color</div>
-      <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-        <input
-          type="color"
-          value={newColorHex}
-          onChange={(e) => setNewColorHex(e.target.value)}
-          style={{ width: '36px', height: '24px', padding: 0, border: 'none', cursor: 'pointer' }}
-        />
-        <input
-          type="text"
-          value={newColorName}
-          onChange={(e) => setNewColorName(e.target.value)}
-          placeholder="Name…"
-          style={{ ...INPUT_STYLE, flex: 1 }}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleAddColor() }}
-        />
-      </div>
-      <button style={BTN_STYLE} onClick={handleAddColor}>
-        + Add color
-      </button>
+      <SubPaneHeader label="Add color" expanded={colorOpen} onToggle={() => setColorOpen((v) => !v)} />
+      {colorOpen && (
+        <>
+          <input
+            ref={newColorNameInputRef}
+            type="text"
+            value={newColorName}
+            onChange={(e) => setNewColorName(e.target.value)}
+            placeholder="Name…"
+            style={INPUT_STYLE}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleAddColor() }}
+          />
+          <div style={{ position: 'relative', width: '100%', height: '24px' }}>
+            <input
+              type="color"
+              value={newColorHex ?? '#4488cc'}
+              onClick={(e) => {
+                // Picking exactly the #4488cc seed on first open fires no
+                // input/change event (native same-value dedup + React's value
+                // tracker), which would otherwise leave newColorHex stuck at
+                // null with no feedback and "+ Add color" permanently
+                // disabled. 'click' fires on activation (and on keyboard
+                // activation of a native input too), so treat activation
+                // itself as "chosen" the first time — onChange still refines
+                // it if the user picks something else. Opening then
+                // cancelling the OS picker counts the seed as chosen, which
+                // is acceptable and predictable next to the alternative.
+                if (newColorHex === null) setNewColorHex(e.currentTarget.value)
+              }}
+              onChange={(e) => setNewColorHex(e.target.value)}
+              aria-label="Choose color"
+              style={{
+                width: '100%',
+                height: '24px',
+                padding: 0,
+                border: '1px solid var(--border-strong, #555)',
+                borderRadius: '3px',
+                cursor: 'pointer',
+                boxSizing: 'border-box',
+              }}
+            />
+            {newColorHex === null && (
+              // Un-chosen prompt state: fully covers the native swatch (which
+              // would otherwise render the #4488cc seed as if already
+              // "chosen") with a neutral, dashed-outline placeholder.
+              // pointerEvents: 'none' lets clicks pass through to the native
+              // input beneath, which still opens the OS color picker.
+              <div
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  pointerEvents: 'none',
+                  borderRadius: '3px',
+                  border: '1px dashed var(--border-strong, #555)',
+                  background: 'var(--surface-input, #444)',
+                  color: 'var(--text-faint, #888)',
+                  fontSize: '10px',
+                  fontFamily: 'monospace',
+                }}
+              >
+                Choose color…
+              </div>
+            )}
+          </div>
+          <button
+            style={{
+              ...BTN_STYLE,
+              opacity: newColorHex === null ? 0.5 : 1,
+              cursor: newColorHex === null ? 'not-allowed' : 'pointer',
+            }}
+            disabled={newColorHex === null}
+            onClick={handleAddColor}
+          >
+            + Add color
+          </button>
+        </>
+      )}
 
       {/* Add texture */}
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
-      <div style={{ fontWeight: 'bold', color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Add texture</div>
-      <input
-        type="text"
-        value={texName}
-        onChange={(e) => setTexName(e.target.value)}
-        placeholder="Name…"
-        style={INPUT_STYLE}
-      />
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/png,image/jpeg"
-        onChange={(e) => setPendingFile(e.target.files?.[0] ?? null)}
-        style={{ fontSize: '10px', color: 'var(--text-tertiary, #aaa)' }}
-      />
-      <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-        <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>W:</span>
-        <input
-          type="number"
-          value={texWorldW}
-          min="0.01"
-          step="0.1"
-          onChange={(e) => setTexWorldW(e.target.value)}
-          style={{ ...INPUT_STYLE, width: '60px' }}
-        />
-        <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>H:</span>
-        <input
-          type="number"
-          value={texWorldH}
-          min="0.01"
-          step="0.1"
-          onChange={(e) => setTexWorldH(e.target.value)}
-          style={{ ...INPUT_STYLE, width: '60px' }}
-        />
-      </div>
-      {pendingFile !== null && (
-        <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {pendingFile.name}
-        </span>
+      <SubPaneHeader label="Add texture" expanded={textureOpen} onToggle={() => setTextureOpen((v) => !v)} />
+      {textureOpen && (
+        <>
+          <input
+            type="text"
+            value={texName}
+            onChange={(e) => setTexName(e.target.value)}
+            placeholder="Name…"
+            style={INPUT_STYLE}
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg"
+            onChange={(e) => setPendingFile(e.target.files?.[0] ?? null)}
+            style={{ fontSize: '10px', color: 'var(--text-tertiary, #aaa)' }}
+          />
+          <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+            <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>W:</span>
+            <input
+              type="number"
+              value={texWorldW}
+              min="0.01"
+              step="0.1"
+              onChange={(e) => setTexWorldW(e.target.value)}
+              style={{ ...INPUT_STYLE, width: '60px' }}
+            />
+            <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>H:</span>
+            <input
+              type="number"
+              value={texWorldH}
+              min="0.01"
+              step="0.1"
+              onChange={(e) => setTexWorldH(e.target.value)}
+              style={{ ...INPUT_STYLE, width: '60px' }}
+            />
+          </div>
+          {pendingFile !== null && (
+            <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {pendingFile.name}
+            </span>
+          )}
+          {texError !== null && (
+            <span style={{ color: 'var(--status-leaky)', fontSize: '10px' }}>{texError}</span>
+          )}
+          <button style={BTN_STYLE} onClick={() => { void handleAddTexture() }}>
+            + Add texture
+          </button>
+        </>
       )}
-      {texError !== null && (
-        <span style={{ color: 'var(--status-leaky)', fontSize: '10px' }}>{texError}</span>
-      )}
-      <button style={BTN_STYLE} onClick={() => { void handleAddTexture() }}>
-        + Add texture
-      </button>
     </div>
   )
 }

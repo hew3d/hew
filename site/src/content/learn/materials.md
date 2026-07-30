@@ -10,21 +10,22 @@ Materials in Hew are simple and per-document: a palette of flat colors and image
 
 Expand **Materials** in the right-hand tray (or Window ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`).
 
-![The Materials panel expanded, showing the Default swatch, two named materials, and the Add color controls](/docs/materials-panel.png)
+![The Materials panel expanded, showing the filter field, the Default swatch, and two named materials](/docs/materials-panel.png)
 
 The panel contains:
 
+- A **filter** field at the top: type to narrow the swatch list to materials whose name contains what you typed (case-insensitive). The **Default** swatch always stays visible regardless of the filter, and filtering never changes your current selection.
 - **Default (unpainted)** is the built-in neutral gray. Select it to "paint with nothing," i.e. to reset faces back to unpainted.
 - Your **material swatches**: click one to make it the current material and pick up the **Paint** tool in one move — the very next click paints with it (see [Painting](#painting) below). Texture materials show a thumbnail.
 - **Opacity**: drag the slider to make the selected swatch translucent — glass, screens, scrims, anything meant to be seen through. Works the same for colors and textures.
-- **Add color**: pick a color with the color picker, optionally name it, and add it to the palette.
+- **Add color** and **Add texture** are collapsed by default — click either header to expand it. In Add color, name the material and click the swatch button to open the color picker; **+ Add color** stays disabled until you've actually picked a color.
 - **Add texture**: choose a PNG or JPEG image and give it a real-world size (width × height in meters). The image tiles across faces at that physical scale.
 
 ## Opacity
 
 Every material has an opacity, from fully opaque (100%) down to fully transparent (0%) — 255 shades either way. Select the swatch you want to change, then drag the **Opacity** slider underneath the swatch list. The percentage next to it tracks where you are.
 
-![The Materials panel with the Slate swatch selected and its Opacity slider dragged down to 66%, visibly lightening the slate base object in the viewport](/docs/materials-opacity.png)
+![The Materials panel with the Slate swatch selected and its Opacity slider dragged down to 67%, visibly lightening the slate base object in the viewport](/docs/materials-opacity.png)
 
 The change applies to every face and object currently painted with that material, updates the viewport immediately, and is undoable like any other edit.
 
