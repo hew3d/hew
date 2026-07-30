@@ -5525,6 +5525,11 @@ export default function Viewport({
       // A blur (Cmd-Tab, devtools, another window) swallows the keyup that
       // would otherwise release the chord.
       applyPrecision(false)
+      // The same blur also swallows the pointerup that would have closed an
+      // in-flight press, and time keeps running while the window is away. Two
+      // clicks either side of a trip to another application are not a
+      // double-click however close together their timestamps land.
+      multiClick.reset()
     }
     window.addEventListener('keydown', onPrecisionKey)
     window.addEventListener('keyup', onPrecisionKey)
@@ -6531,6 +6536,12 @@ export default function Viewport({
     function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
       if (ev.button !== 0) return
+      // Closes the press counted in onPointerDown. Recorded before any of the
+      // early returns below for the same reason the press is: a release
+      // consumed by a camera or FOV drag still ends that press, and a press
+      // that travelled must break the click run rather than leave a stale
+      // anchor for the next one to pair with.
+      multiClick.release(ev)
       // Shift-fov drag owns the pointer for its whole gesture — see
       // onPointerDown. Scoped to the arming pointer (findings 1+2,
       // camera-playtest2 DELTA review): an unrelated pointer's OWN release

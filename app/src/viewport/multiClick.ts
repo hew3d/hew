@@ -57,12 +57,16 @@ export interface MultiClickPress {
 }
 
 export class MultiClickTracker {
-  private lastTime = Number.NEGATIVE_INFINITY
-  private lastX = 0
-  private lastY = 0
+  /** Where and when the last COMPLETED click landed — a click being a press
+   *  that was released without travelling (see `release`). `null` until one
+   *  completes, and cleared whenever a press turns out to be a drag. */
+  private lastClick: { time: number; x: number; y: number } | null = null
   private lastButton = -1
   private lastPointerType: string | undefined = undefined
   private count = 0
+  /** The press currently in flight, so `release` can measure how far it
+   *  travelled. */
+  private pending: { x: number; y: number } | null = null
 
   /**
    * Records a press and returns the click count it represents: 1 for a fresh
@@ -72,10 +76,12 @@ export class MultiClickTracker {
    * left-clicks breaks the sequence, as it does natively.
    */
   press(ev: MultiClickPress): number {
-    const dt = ev.timeStamp - this.lastTime
-    const dx = ev.clientX - this.lastX
-    const dy = ev.clientY - this.lastY
+    const prev = this.lastClick
+    const dt = prev === null ? Number.POSITIVE_INFINITY : ev.timeStamp - prev.time
+    const dx = prev === null ? 0 : ev.clientX - prev.x
+    const dy = prev === null ? 0 : ev.clientY - prev.y
     const continues =
+      prev !== null &&
       this.count > 0 &&
       ev.button === this.lastButton &&
       ev.pointerType === this.lastPointerType &&
@@ -87,12 +93,45 @@ export class MultiClickTracker {
       dx * dx + dy * dy <= MULTI_CLICK_SLOP_PX * MULTI_CLICK_SLOP_PX
 
     this.count = continues ? this.count + 1 : 1
-    this.lastTime = ev.timeStamp
-    this.lastX = ev.clientX
-    this.lastY = ev.clientY
     this.lastButton = ev.button
     this.lastPointerType = ev.pointerType
+    this.pending = { x: ev.clientX, y: ev.clientY }
     return this.count
+  }
+
+  /**
+   * Closes the press opened by `press`, deciding whether it was a CLICK (and
+   * so can anchor a double-click) or a DRAG (which cannot).
+   *
+   * This distinction is the whole reason `release` exists. Browsers pair a
+   * double-click from consecutive CLICKS, comparing where each click was
+   * RELEASED; a press that travels before release is a drag and is never one
+   * half of a pair. Measuring only press-to-press distance misses that
+   * completely: a drag from P to Q followed within the window by a fresh press
+   * back at P looks like two presses at the same spot, so the second would be
+   * suppressed while the browser — seeing releases at Q and then wherever the
+   * second ends — fires no `dblclick` to replace it. That swallows a real
+   * gesture outright, which for a tool like Push/Pull (armed only from its
+   * idle stage, on pointerdown, with no later fallback) silently drops the
+   * whole interaction.
+   *
+   * A press that travelled therefore ends the sequence, and the anchor for the
+   * next comparison is the RELEASE position, matching what the browser pairs
+   * on rather than approximating it with the press position.
+   */
+  release(ev: MultiClickPress): void {
+    const down = this.pending
+    this.pending = null
+    if (down === null) return
+    const dx = ev.clientX - down.x
+    const dy = ev.clientY - down.y
+    if (dx * dx + dy * dy > MULTI_CLICK_SLOP_PX * MULTI_CLICK_SLOP_PX) {
+      // A drag. It anchors nothing, and it breaks any run it landed in.
+      this.lastClick = null
+      this.count = 0
+      return
+    }
+    this.lastClick = { time: ev.timeStamp, x: ev.clientX, y: ev.clientY }
   }
 
   /**
@@ -104,7 +143,8 @@ export class MultiClickTracker {
    */
   reset(): void {
     this.count = 0
-    this.lastTime = Number.NEGATIVE_INFINITY
+    this.lastClick = null
+    this.pending = null
     this.lastButton = -1
     this.lastPointerType = undefined
   }
