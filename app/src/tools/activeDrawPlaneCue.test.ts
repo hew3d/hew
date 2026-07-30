@@ -20,11 +20,17 @@ import { RectangleTool } from './RectangleTool'
 import { CircleTool } from './CircleTool'
 import { ArcTool } from './ArcTool'
 import { axisDrawPlane, groundDrawPlane, type DrawPlane } from './drawPlane'
+import { getDrawingAxes } from './drawingAxes'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
+
+/** A non-identity frame (tool-parity §4): red/green swapped-and-flipped
+ *  relative to world, blue unchanged — the same fixture MoveTool.test.ts /
+ *  RotateTool.test.ts use for their own moved-frame arrow-lock regressions. */
+const ROTATED_FRAME_FLAT = [0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1]
 
 function makeSnap(p: readonly [number, number, number]): Snap {
   return { x: p[0], y: p[1], z: p[2], kind: 'plane' }
@@ -43,10 +49,18 @@ function makeWasmScene(opts: {
   pick?: () => ReturnType<typeof makePick> | undefined
   /** The picked face's normal (also mirrored into `face_plane`'s offset). Default +Z (ground-plane face). */
   faceNormal?: readonly [number, number, number]
+  /** The flat 12-float buffer `Scene::axes()` returns — defaults to world
+   *  identity (this suite otherwise pins the legacy world-axis fast paths);
+   *  a moved-frame test overrides it with `ROTATED_FRAME_FLAT`. */
+  frame?: number[]
 } = {}): WasmScene {
   let sketchCounter = 90n
   const normal = opts.faceNormal ?? [0, 0, 1]
   const scene = {
+    // World-identity drawing axes (tool-parity §4) — this suite pins the
+    // legacy world-axis fast paths; see drawPlane.test.ts for moved-frame
+    // coverage of `axisDrawPlane` itself.
+    axes: vi.fn(() => new Float64Array(opts.frame ?? [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     begin_ground_sketch: vi.fn(() => { sketchCounter += 1n; return sketchCounter }),
     begin_sketch_on_plane: vi.fn(() => { sketchCounter += 1n; return sketchCounter }),
     pick_face: vi.fn(() => opts.pick?.()),
@@ -164,6 +178,31 @@ describe.each(DRIVERS)('$name — activeDrawPlaneCue', ({ make }) => {
     const tool = make(scene)
     tool.onPointerDown(makeSnap([1, 2, 0]), RAY)
     expect(tool.activeDrawPlaneCue()).toBeNull()
+  })
+
+  // ── Movable drawing axes (tool-parity §4) ──────────────────────────────
+  it('under a moved frame, the idle-lock cue equals the plane a click at the same lock/point would resolve onto', () => {
+    const scene = makeWasmScene({ frame: ROTATED_FRAME_FLAT })
+    const tool = make(scene)
+    tool.onKey(makeKeyEvent('ArrowRight')) // red/X lock
+    tool.onPointerMove(makeSnap([2, 3, 4]), RAY)
+    const frame = getDrawingAxes(scene)
+    const cue = tool.activeDrawPlaneCue()
+    expect(cue).toEqual({ plane: axisDrawPlane(0, [2, 3, 4], frame), through: [2, 3, 4] })
+    // Axis 0 (red) of this moved frame is world [0,1,0], not world [1,0,0] —
+    // the un-fixed bug (defaulting to world identity) would show a plane
+    // through the raw world-X normal instead.
+    expect(cue!.plane.normal).toEqual([0, 1, 0])
+  })
+
+  it('a Z lock through a z=0 hover under a moved frame does not suppress to null (the ground fast path is world-identity only)', () => {
+    const scene = makeWasmScene({ frame: ROTATED_FRAME_FLAT })
+    const tool = make(scene)
+    tool.onKey(makeKeyEvent('ArrowUp')) // blue/Z lock
+    tool.onPointerMove(makeSnap([1, 2, 0]), RAY)
+    const cue = tool.activeDrawPlaneCue()
+    expect(cue).not.toBeNull()
+    expect(cue!.plane.ground).toBe(false)
   })
 })
 

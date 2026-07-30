@@ -74,6 +74,8 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Protractor', macKey: '', winKey: '' },
   { name: 'Slice', macKey: '', winKey: '' },
   { name: 'Edit Vertex', macKey: '', winKey: '' },
+  // Axes: SketchUp assigns no default key either.
+  { name: 'Axes', macKey: '', winKey: '' },
   // Camera tools: SketchUp's real O / H / Z everywhere.
   { name: 'Orbit', macKey: 'O', winKey: 'O' },
   { name: 'Pan', macKey: 'H', winKey: 'H' },

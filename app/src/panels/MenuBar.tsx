@@ -90,6 +90,8 @@ export interface MenuBarProps {
   showGuides?: boolean
   /** Toggle the world axes. */
   onToggleAxes?: () => void
+  /** Reset the movable drawing axes to world identity (View ▸ Reset Axes). */
+  onResetAxes?: () => void
   /** Toggle the ground grid. */
   onToggleGrid?: () => void
   /** Toggle construction-guide visibility. */
@@ -464,6 +466,7 @@ export function MenuBar({
   showGrid = true,
   showGuides = true,
   onToggleAxes,
+  onResetAxes,
   onToggleGrid,
   onToggleGuides,
   onDeleteGuides,
@@ -685,6 +688,10 @@ export function MenuBar({
               checked={showAxes}
               onClick={withClose(() => onToggleAxes?.())}
             />
+            <MenuItem
+              label="Reset Axes"
+              onClick={withClose(() => onResetAxes?.())}
+            />
             <CheckMenuItem
               label="Grid"
               checked={showGrid}
@@ -828,6 +835,11 @@ export function MenuBar({
               label="Edit Vertex"
               checked={activeTool === 'Edit Vertex'}
               onClick={withClose(() => onSelectTool?.('Edit Vertex'))}
+            />
+            <CheckMenuItem
+              label="Axes"
+              checked={activeTool === 'Axes'}
+              onClick={withClose(() => onSelectTool?.('Axes'))}
             />
           </div>
         )}

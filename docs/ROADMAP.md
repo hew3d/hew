@@ -41,6 +41,12 @@ below.
   second solid
 - Push/pull through-cuts that punch holes or remove material, including
   splitting a solid into two when a cut fully severs it
+- Push/pull SketchUp-parity modifiers: double-click a face (or sketch
+  region) to repeat the last committed distance there; a durable Ctrl/Cmd
+  toggle (tap to flip, cursor badge + status-bar cue) extrudes a NEW
+  coincident solid from the clicked face instead — the source is left
+  untouched, sharing a footprint with the new solid exactly like
+  re-extruding occupied ground
 - Explicit boolean union, subtract, and intersect, with coplanar seams
   dissolved on the result (a union of two flush boxes reads as one box)
 - Non-destructive, nestable grouping (Group/Ungroup)
@@ -167,7 +173,13 @@ below.
   snapping and are saved with the model
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
   offset — sourced from an edge, a sketch line, a world axis, or another
-  guide line) and Protractor (measure an angle, or drop an angular guide)
+  guide line) and Protractor (measure an angle, or drop an angular guide).
+  Typing a length right after measuring between two real points offers to
+  resize the WHOLE model so that distance becomes the typed one (a
+  confirmation dialog shows the scale factor); confirming uniformly rescales
+  every object, sketch, and guide about the world origin in one undo step —
+  component definitions stay at their authored size, only instance poses
+  scale
 - Section Plane: a non-destructive clipping plane for looking inside a
   model (wall thickness, clearance, voids) — click a face to section it
   there, drag its widget to sweep the cut, toggle it on/off, delete it.

@@ -19,6 +19,7 @@ import { ImportReportDialog } from './ImportReportDialog'
 import { StlExportDialog } from './StlExportDialog'
 import { StlUnitsDialog } from './StlUnitsDialog'
 import { ExportDialog } from './ExportDialog'
+import { RescaleConfirmDialog } from './RescaleConfirmDialog'
 import { resetStlImportUnitForTest, setLastStlImportUnit } from '../settings/stlImportUnit'
 import type { RecoveryListing } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
@@ -470,6 +471,74 @@ describe('StlUnitsDialog', () => {
   it('has the expected ARIA dialog role and label', () => {
     render(<StlUnitsDialog fileName="bracket.stl" onChoose={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /stl import units/i })).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RescaleConfirmDialog (Tape Measure's "resize the model?" confirmation,
+// design tool-parity §3)
+// ---------------------------------------------------------------------------
+
+describe('RescaleConfirmDialog', () => {
+  const props = { currentDistance: 2, typedDistance: 3, factor: 1.5 }
+
+  it('shows the measured distance, typed distance, and scale factor', () => {
+    render(<RescaleConfirmDialog {...props} onConfirm={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByText(/2 m/)).toBeInTheDocument()
+    expect(screen.getByText(/3 m/)).toBeInTheDocument()
+    expect(screen.getByText(/1\.5000/)).toBeInTheDocument()
+  })
+
+  it('calls onConfirm when Resize is clicked', () => {
+    const onConfirm = vi.fn()
+    render(<RescaleConfirmDialog {...props} onConfirm={onConfirm} onCancel={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /resize/i }))
+    expect(onConfirm).toHaveBeenCalledOnce()
+  })
+
+  it('calls onCancel when Cancel is clicked', () => {
+    const onCancel = vi.fn()
+    render(<RescaleConfirmDialog {...props} onConfirm={vi.fn()} onCancel={onCancel} />)
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  it('calls onCancel — never onConfirm — when Escape is pressed', () => {
+    const onConfirm = vi.fn()
+    const onCancel = vi.fn()
+    render(<RescaleConfirmDialog {...props} onConfirm={onConfirm} onCancel={onCancel} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledOnce()
+    expect(onConfirm).not.toHaveBeenCalled()
+  })
+
+  it('has the expected ARIA dialog role and label', () => {
+    render(<RescaleConfirmDialog {...props} onConfirm={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByRole('dialog', { name: /resize the model/i })).toBeInTheDocument()
+  })
+
+  // The adversarial-review finding this dialog's Escape handler now fixes:
+  // Escape used to double-dispatch — this dialog's own document-level
+  // listener cancels (correctly), and the SAME event then bubbled to a
+  // window-level listener (the Viewport's onKeyDown in production), which
+  // routed it to the now-idle TapeMeasureTool and cleared its idlePlaneLock
+  // out from under the cancel that had just run. `stopPropagation` in the
+  // dialog's handler must stop the event before it ever reaches window.
+  it('stops Escape from propagating to a window-level listener (the Viewport, in production)', () => {
+    const onCancel = vi.fn()
+    const windowListener = vi.fn()
+    window.addEventListener('keydown', windowListener)
+    try {
+      render(<RescaleConfirmDialog {...props} onConfirm={vi.fn()} onCancel={onCancel} />)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(onCancel).toHaveBeenCalledOnce()
+      // If this fires, the fix regressed: the SAME Escape reached window too,
+      // which in production means TapeMeasureTool.onKey ran a SECOND time
+      // and clobbered the idlePlaneLock the dialog's own cancel preserved.
+      expect(windowListener).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', windowListener)
+    }
   })
 })
 

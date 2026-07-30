@@ -1,7 +1,12 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
-import Viewport, { type ViewportApi, type InferenceInfo, type StandardView } from './viewport/Viewport'
+import Viewport, {
+  type ViewportApi,
+  type InferenceInfo,
+  type StandardView,
+  type RescaleConfirmInfo,
+} from './viewport/Viewport'
 import { InferenceTooltip } from './viewport/InferenceTooltip'
 import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
@@ -46,6 +51,7 @@ import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
 import { getLengthUnit, setLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit, type LengthFormat } from './settings/units'
 import { StlExportDialog } from './panels/StlExportDialog'
 import { StlUnitsDialog } from './panels/StlUnitsDialog'
+import { RescaleConfirmDialog } from './panels/RescaleConfirmDialog'
 import { setLastStlImportUnit } from './settings/stlImportUnit'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { TextDialog, type TextDialogResult } from './panels/TextDialog'
@@ -120,6 +126,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Slice: 'tool-slice',
   'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
+  Axes: 'tool-axes',
   Orbit: 'cam-orbit',
   Pan: 'cam-pan',
   Zoom: 'cam-zoom',
@@ -310,6 +317,9 @@ export default function App() {
   const [importingName, setImportingName] = useState('')
   /** STL units-chooser modal: the picked file's name, or null when closed. */
   const [pendingStlImport, setPendingStlImport] = useState<{ name: string } | null>(null)
+  /** Tape Measure "resize the model?" confirmation (design tool-parity §3);
+   *  null when closed. */
+  const [pendingRescaleConfirm, setPendingRescaleConfirm] = useState<RescaleConfirmInfo | null>(null)
   /** Recovery snapshot to offer at startup (null = no dialog). */
   const [recoveryPrompt, setRecoveryPrompt] = useState<RecoveryListing[] | null>(null)
   /** Welcome screen on a bare launch (startup-handoff effect decides). */
@@ -582,6 +592,10 @@ export default function App() {
 
   const handleMeasurement = useCallback((text: string) => {
     setMeasurement(text)
+  }, [])
+
+  const handleRescaleArmed = useCallback((info: RescaleConfirmInfo) => {
+    setPendingRescaleConfirm(info)
   }, [])
 
   const handleInferenceChange = useCallback((info: InferenceInfo | null) => {
@@ -2090,6 +2104,7 @@ export default function App() {
       case 'tool-slice':     setActiveTool('Slice'); break
       case 'tool-section-plane': setActiveTool('Section Plane'); break
       case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
+      case 'tool-axes':        setActiveTool('Axes'); break
       case 'tool-orbit':     activateTool('Orbit'); break
       case 'tool-pan':       activateTool('Pan'); break
       case 'tool-zoom':      activateTool('Zoom'); break
@@ -2105,6 +2120,7 @@ export default function App() {
       case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'toggle-axes':         setShowAxes((v) => !v); break
+      case 'reset-axes':         viewportApi.current?.resetAxes(); break
       case 'toggle-grid':         setShowGrid((v) => !v); break
       case 'toggle-guides':       setShowGuides((v) => !v); break
       case 'toggle-section-active': viewportApi.current?.toggleSectionActive(); break
@@ -3071,6 +3087,7 @@ export default function App() {
         showGrid={showGrid}
         showGuides={showGuides}
         onToggleAxes={() => setShowAxes((v) => !v)}
+        onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
         onToggleGuides={() => setShowGuides((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
@@ -3187,6 +3204,7 @@ export default function App() {
             onHistoryChanged={handleHistoryChanged}
             apiRef={viewportApi}
             onMeasurement={handleMeasurement}
+            onRescaleArmed={handleRescaleArmed}
             onInferenceChange={handleInferenceChange}
             onCameraDragChange={setCameraDragging}
             onHoverSketchRegionChange={setHoveringSketchRegion}
@@ -3499,6 +3517,23 @@ export default function App() {
             setPendingStlImport(null)
             stlUnitsResolveRef.current?.(null)
             stlUnitsResolveRef.current = null
+          }}
+        />
+      )}
+
+      {/* Tape Measure resize-the-model confirmation (design tool-parity §3) */}
+      {pendingRescaleConfirm !== null && (
+        <RescaleConfirmDialog
+          currentDistance={pendingRescaleConfirm.currentDistance}
+          typedDistance={pendingRescaleConfirm.typedDistance}
+          factor={pendingRescaleConfirm.factor}
+          onConfirm={() => {
+            setPendingRescaleConfirm(null)
+            viewportApi.current?.confirmPendingRescale()
+          }}
+          onCancel={() => {
+            setPendingRescaleConfirm(null)
+            viewportApi.current?.cancelPendingRescale()
           }}
         />
       )}

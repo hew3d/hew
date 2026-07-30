@@ -2176,6 +2176,13 @@ fn main() {
             // View menu
             // ----------------------------------------------------------------
             let view_axes = check_item(handle, &mut checks, "view-axes", "Axes", None, None)?;
+            // Reset the movable drawing axes (tool-parity §4) back to world
+            // identity — a plain action, not a checkable toggle like Axes/
+            // Grid/Guides above, so it's built with `MenuItemBuilder`
+            // directly (same shape as "edit-delete-guides" below) rather
+            // than `check_item`.
+            let view_reset_axes =
+                MenuItemBuilder::with_id("view-reset-axes", "Reset Axes").build(handle)?;
             let view_grid = check_item(handle, &mut checks, "view-grid", "Grid", None, None)?;
             let view_guides = check_item(handle, &mut checks, "view-guides", "Guides", None, None)?;
             // Section Plane's active (clipping) toggle — moved here from Tools
@@ -2206,6 +2213,7 @@ fn main() {
 
             let view_menu = SubmenuBuilder::new(handle, "View")
                 .item(&view_axes)
+                .item(&view_reset_axes)
                 .item(&view_grid)
                 .item(&view_guides)
                 .item(&view_section_plane)
@@ -2380,6 +2388,7 @@ fn main() {
                 None,
                 None,
             )?;
+            let tool_axes = check_item(handle, &mut checks, "tool-axes", "Axes", None, None)?;
 
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
@@ -2396,6 +2405,7 @@ fn main() {
                 .item(&tool_slice)
                 .item(&tool_section_plane)
                 .item(&tool_edit_vertex)
+                .item(&tool_axes)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -2826,6 +2836,7 @@ fn main() {
                 "edit-subtract" => "edit-subtract",
                 "edit-intersect" => "edit-intersect",
                 "view-axes" => "toggle-axes",
+                "view-reset-axes" => "reset-axes",
                 "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",
                 "view-section-plane" => "toggle-section-active",
@@ -2849,6 +2860,7 @@ fn main() {
                 "tool-slice" => "tool-slice",
                 "tool-section-plane" => "tool-section-plane",
                 "tool-edit-vertex" => "tool-edit-vertex",
+                "tool-axes" => "tool-axes",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",

@@ -8,6 +8,7 @@
  */
 import { axisColorForDirection } from './axisColors'
 import type { InferenceInfo } from './Viewport'
+import { WORLD_DRAWING_AXES } from '../tools/drawingAxes'
 
 /** CSS hex per snap kind. */
 export const KIND_CSS_COLOR: Record<string, string> = {
@@ -31,10 +32,12 @@ const AXIS_LABEL_TOL_DOT = Math.cos((10 * Math.PI) / 180)
 const AXIS_NAME = ['red', 'green', 'blue'] as const
 
 /** The axis name ('red'|'green'|'blue') for an inference whose direction is
- * (near) axis-aligned, else null. */
+ * (near) axis-aligned WITH the CURRENT drawing-axes frame (tool-parity §4 —
+ * `info.frame`, defaulting to world identity when the caller didn't attach
+ * one), else null. */
 export function inferenceAxisName(info: InferenceInfo): (typeof AXIS_NAME)[number] | null {
   if (info.direction === undefined) return null
-  const match = axisColorForDirection(info.direction, AXIS_LABEL_TOL_DOT)
+  const match = axisColorForDirection(info.direction, AXIS_LABEL_TOL_DOT, undefined, info.frame ?? WORLD_DRAWING_AXES)
   return match !== null ? AXIS_NAME[match.axis] : null
 }
 

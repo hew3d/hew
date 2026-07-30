@@ -66,6 +66,7 @@ import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { getDrawingAxes } from './drawingAxes'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
@@ -96,13 +97,6 @@ const AXIS_COLOR: Record<0 | 1 | 2, number> = {
   0: 0xff0000,   // X — red
   1: 0x00aa00,   // Y — green
   2: 0x0000ff,   // Z — blue
-}
-
-/** Unit direction for each locked axis */
-const AXIS_DIR: Record<0 | 1 | 2, [number, number, number]> = {
-  0: [1, 0, 0],
-  1: [0, 1, 0],
-  2: [0, 0, 1],
 }
 
 /** Half-extent of the axis guide line drawn through the base point */
@@ -342,16 +336,38 @@ export class MoveTool implements Tool {
     }
   }
 
-  /** The world axis the current base→dest drag is most aligned with, or null. */
+  /**
+   * Unit direction of drawing axis `axis` (0=red/X, 1=green/Y, 2=blue/Z) in
+   * the CURRENT frame (tool-parity design §4 — movable drawing axes). Reads
+   * the kernel's live frame every call rather than caching it: cheap (a
+   * handful of float reads through `getDrawingAxes`) and always current,
+   * even mid-gesture if a concurrent undo/redo moved the frame under it.
+   * Replaces the old world-constant `AXIS_DIR` lookup table.
+   */
+  private axisDir(axis: 0 | 1 | 2): [number, number, number] {
+    const f = getDrawingAxes(this.wasmScene)
+    return axis === 0 ? f.x : axis === 1 ? f.y : f.z
+  }
+
+  /** The drawing axis (in the CURRENT frame) the base→dest drag is most
+   *  aligned with, or null. Projects the drag vector onto each of the
+   *  frame's three directions (dot product) and picks the largest |dot| —
+   *  under a moved frame this locks Shift to the axis the drag visually
+   *  looks closest to, not literal world XYZ. */
   private _dominantAxis(): 0 | 1 | 2 | null {
     if (this.stage.kind !== 'base') return null
     const { base, dest } = this.stage
-    const d = [dest[0] - base[0], dest[1] - base[1], dest[2] - base[2]]
-    const ax = Math.abs(d[0]), ay = Math.abs(d[1]), az = Math.abs(d[2])
-    const max = Math.max(ax, ay, az)
+    const d: [number, number, number] = [dest[0] - base[0], dest[1] - base[1], dest[2] - base[2]]
+    const f = getDrawingAxes(this.wasmScene)
+    const dots: [number, number, number] = [
+      Math.abs(d[0] * f.x[0] + d[1] * f.x[1] + d[2] * f.x[2]),
+      Math.abs(d[0] * f.y[0] + d[1] * f.y[1] + d[2] * f.y[2]),
+      Math.abs(d[0] * f.z[0] + d[1] * f.z[1] + d[2] * f.z[2]),
+    ]
+    const max = Math.max(dots[0], dots[1], dots[2])
     if (max < 1e-9) return null
-    if (max === ax) return 0
-    if (max === ay) return 1
+    if (max === dots[0]) return 0
+    if (max === dots[1]) return 1
     return 2
   }
 
@@ -526,12 +542,12 @@ export class MoveTool implements Tool {
     if (this.lockAxis !== null) {
       // Signed direction: match the cursor side so typing "2" means "2 in the
       // direction the cursor is pointing".
-      const axisDir = AXIS_DIR[this.lockAxis]
-      const dotSign = (dest[0] - base[0]) * axisDir[0]
-                    + (dest[1] - base[1]) * axisDir[1]
-                    + (dest[2] - base[2]) * axisDir[2]
+      const lockedDir = this.axisDir(this.lockAxis)
+      const dotSign = (dest[0] - base[0]) * lockedDir[0]
+                    + (dest[1] - base[1]) * lockedDir[1]
+                    + (dest[2] - base[2]) * lockedDir[2]
       const sign = dotSign < 0 ? -1 : 1
-      dir = [axisDir[0] * sign, axisDir[1] * sign, axisDir[2] * sign]
+      dir = [lockedDir[0] * sign, lockedDir[1] * sign, lockedDir[2] * sign]
     } else {
       dir = [dest[0] - base[0], dest[1] - base[1], dest[2] - base[2]]
     }
@@ -758,10 +774,10 @@ export class MoveTool implements Tool {
 
     let dist: number
     if (this.lockAxis !== null) {
-      const axisDir = AXIS_DIR[this.lockAxis]
-      dist = (dest[0] - base[0]) * axisDir[0]
-           + (dest[1] - base[1]) * axisDir[1]
-           + (dest[2] - base[2]) * axisDir[2]
+      const lockedDir = this.axisDir(this.lockAxis)
+      dist = (dest[0] - base[0]) * lockedDir[0]
+           + (dest[1] - base[1]) * lockedDir[1]
+           + (dest[2] - base[2]) * lockedDir[2]
     } else {
       const dx = dest[0] - base[0]
       const dy = dest[1] - base[1]
@@ -796,7 +812,7 @@ export class MoveTool implements Tool {
     if (this.stage.kind !== 'base' || this.lockAxis === null) return
 
     const [bx, by, bz] = this.stage.base
-    const dir = AXIS_DIR[this.lockAxis]
+    const dir = this.axisDir(this.lockAxis)
     const color = AXIS_COLOR[this.lockAxis]
 
     const pts = new Float32Array([

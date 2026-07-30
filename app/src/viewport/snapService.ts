@@ -33,6 +33,21 @@ export const SNAP_RADIUS_PX = 8
  */
 export const SNAP_BREAK_RADIUS_PX = 16
 
+/**
+ * The same acquire→release widening ratio as `SNAP_BREAK_RADIUS_PX /
+ * SNAP_RADIUS_PX`, applied to the soft-axis (`on-axis`, anchor-relative)
+ * candidate's OWN angular tolerance instead of the pixel-derived `aperture`
+ * (playtest-2 review finding E). `on-axis` is in `STICKY_KINDS`, but that
+ * candidate never reads `aperture` at all — it has its own fixed cone
+ * (`SOFT_AXIS_APERTURE` in the inference crate), so the ordinary release
+ * query (wider `aperture`, unchanged) does not reach it: a held soft-axis
+ * snap would drop the instant the cursor left the UNSCALED cone, with no
+ * hysteresis at all. Reusing this exact ratio (rather than inventing an
+ * independently-tuned second constant) keeps the soft-axis release "feel"
+ * consistent with every other sticky kind's.
+ */
+export const SOFT_AXIS_BREAK_APERTURE_SCALE = SNAP_BREAK_RADIUS_PX / SNAP_RADIUS_PX
+
 /** Snap kinds that are discrete/linear inference targets worth holding onto
  * with hysteresis. Excludes the broad-area 'ground' and 'on-face' snaps, where
  * "resistance" has no meaning (any point on the face/ground is equally valid). */
@@ -134,7 +149,9 @@ export class SnapService {
   }
 
   /** One kernel snap query at a given pixel aperture; null if the kernel
-   * returns no candidate or throws. */
+   * returns no candidate or throws. `softAxisApertureScale` multiplies the
+   * soft-axis candidate's own fixed cone for THIS query only (finding E) —
+   * omitted for the ordinary acquire query, so it behaves exactly as before. */
   private query(
     ray: Ray,
     pixelRadius: number,
@@ -143,6 +160,8 @@ export class SnapService {
     anchorArr: Float64Array | null,
     lockAxis: 0 | 1 | 2 | undefined,
     constraintPlaneArr: Float64Array | null,
+    offPlanePoints: boolean,
+    softAxisApertureScale?: number,
   ): Snap | null {
     try {
       const [ox, oy, oz] = ray.origin
@@ -158,6 +177,8 @@ export class SnapService {
         constraintPlaneArr,
         this.precision,
         cylinder,
+        softAxisApertureScale ?? null,
+        offPlanePoints,
       )
       return result !== undefined ? snapJsToSnap(result) : null
     } catch (err) {
@@ -182,6 +203,11 @@ export class SnapService {
    * *released* once the cursor moves past the larger `SNAP_BREAK_RADIUS_PX`.
    * The wider release query only runs when the normal query is about to lose a
    * held sticky snap, so a steady hover on a point costs a single kernel call.
+   * `on-axis` (soft-axis inference) is a STICKY_KINDS member too, but its
+   * candidate has its own fixed angular tolerance rather than one derived
+   * from `aperture`, so the release query ALSO widens that tolerance
+   * (`SOFT_AXIS_BREAK_APERTURE_SCALE`) — without it, a held soft-axis snap
+   * would have no hysteresis at all (playtest-2 review finding E).
    */
   resolve(
     ray: Ray,
@@ -190,6 +216,7 @@ export class SnapService {
     anchor?: [number, number, number],
     lockAxis?: 0 | 1 | 2,
     constraintPlane?: { point: [number, number, number]; normal: [number, number, number] },
+    offPlanePoints?: boolean,
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
     const constraintPlaneArr =
@@ -200,6 +227,7 @@ export class SnapService {
     // 1. Acquire at the normal radius.
     const acquired = this.query(
       ray, SNAP_RADIUS_PX, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+      offPlanePoints ?? false,
     )
     if (acquired !== null && STICKY_KINDS.has(acquired.kind)) {
       this.lastSnap = acquired
@@ -209,9 +237,14 @@ export class SnapService {
     // 2. Resist release: the acquire query lost the previously-held sticky
     //    point (returned nothing / a broad ground/face snap). Re-query at the
     //    wider break radius; if that same target is still a candidate, hold it.
+    //    Also widen the soft-axis candidate's own cone by the SAME ratio
+    //    (finding E) — it never reads the widened `aperture` above, so
+    //    without this a held on-axis snap would have no hysteresis at all.
     if (this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
       const held = this.query(
         ray, SNAP_BREAK_RADIUS_PX, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+        offPlanePoints ?? false,
+        SOFT_AXIS_BREAK_APERTURE_SCALE,
       )
       if (held !== null && sameTarget(held, this.lastSnap)) {
         this.lastSnap = held

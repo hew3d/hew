@@ -75,6 +75,28 @@ export interface Snap {
 }
 
 /**
+ * Snap constraints a tool injects into the next `snapService.resolve()`
+ * call (see `Tool.snapConstraint`):
+ *
+ * - `anchor` + `lockAxis`: axis-lock for distance tools (e.g. MoveTool).
+ * - `constraintPlane`: restrict candidates to a plane (e.g. RectangleTool
+ *   in face mode, to avoid snapping to occluded off-plane geometry).
+ * - `offPlanePoints`: keep precise POINT candidates (endpoint, midpoint,
+ *   center, quadrant, intersection) that lie OFF `constraintPlane`. Only a
+ *   tool that can HONOUR an off-plane point may set it — today that is
+ *   LineTool's plane-mode chain, whose commit re-homes onto a new sketch
+ *   plane through the anchor and the snapped point. A tool that commits
+ *   into one frozen plane must leave it unset: it would have to project
+ *   the reported point back onto the plane, i.e. lie about the snap.
+ */
+export interface SnapConstraint {
+  anchor?: [number, number, number]
+  lockAxis?: 0 | 1 | 2
+  constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }
+  offPlanePoints?: boolean
+}
+
+/**
  * One active tool at a time. ToolController owns the routing; each method
  * is called with the resolved snap result (or null when snap is unavailable
  * and fallback was also null).
@@ -104,11 +126,7 @@ export interface Tool {
    * pick the hovered face (e.g. RectangleTool idle) can use it.  Tools that
    * don't need it may omit the parameter.
    */
-  snapConstraint?(ray?: Ray): {
-    anchor?: [number, number, number]
-    lockAxis?: 0 | 1 | 2
-    constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }
-  } | null
+  snapConstraint?(ray?: Ray): SnapConstraint | null
 
   /**
    * (optional) When true the tool is capturing raw keyboard input (e.g. VCB
@@ -207,6 +225,24 @@ export interface Tool {
    * `notifyLoaded`. Feature-detected with `'onDocumentReset' in tool`.
    */
   onDocumentReset?(): void
+
+  /**
+   * (optional) Kernel history changed under this tool via undo/redo — ANY
+   * entry point (Edit menu, command palette, or the viewport's own Cmd+Z /
+   * Cmd+Shift+Z), all funneled through the Viewport's shared `runUndo`/
+   * `runRedo` choke point. Tools that cache UI-side descriptions of
+   * ALREADY-COMMITTED kernel geometry across a multi-click gesture (e.g.
+   * LineTool's `_chainVertices`, used only for its same-chain cross-sketch
+   * coincidence check) must drop that cached state here — an undo can
+   * remove the very segments it describes, leaving a phantom that no
+   * longer corresponds to real geometry and can misfire against a
+   * perfectly legitimate later action. This does NOT reset the gesture
+   * itself (`planeStage`/`faceStage` stay anchored) — only stale
+   * descriptions of committed geometry are invalidated; unlike
+   * `onDocumentReset`, the tool is not rewound to idle. Feature-detected
+   * with `'onHistoryChanged' in tool`.
+   */
+  onHistoryChanged?(): void
 
   /**
    * (optional) The app selection changed while this tool is active. Tools

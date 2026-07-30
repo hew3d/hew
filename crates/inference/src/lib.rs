@@ -102,8 +102,8 @@ use std::cell::{Cell, Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
-    AnalyticRim, EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3,
-    SketchCurveId, SketchCurveRim, SketchEdgeId, SketchId, SketchRegionId, SketchVertexId,
+    AnalyticRim, AxesFrame, EdgeId, FaceId, Guide, GuideId, InstanceId, Object, ObjectId, Plane,
+    Point3, SketchCurveId, SketchCurveRim, SketchEdgeId, SketchId, SketchRegionId, SketchVertexId,
     Transform, Vec3, VertexId, tol,
 };
 
@@ -159,17 +159,38 @@ pub enum SnapKind {
     /// rim) but loses to explicit points (endpoints, quadrants, midpoints,
     /// intersections).
     Tangent,
+    /// On a construction guide: a line or point the user placed
+    /// deliberately as a drawing aid. Sits ABOVE [`SnapKind::OnAxis`]
+    /// (tool-parity playtest-2 review finding D) — a guide is a choice the
+    /// user made on purpose; a soft-axis snap is the system merely
+    /// GUESSING the user's intended direction, and a guess must not
+    /// silently override a deliberate placement, even when both resolve to
+    /// the exact same point. As a necessary CONSEQUENCE of sitting above
+    /// `OnAxis` (not a separately chosen ordering — `rank_group`'s total
+    /// order forces it), a guide now also outranks plain
+    /// [`SnapKind::OnEdge`]/[`SnapKind::OnFace`], which `OnAxis` already
+    /// outranked. Still loses to every exact point kind above it
+    /// (Endpoint/Center/Quadrant/Midpoint/Intersection/Tangent) and to an
+    /// EXPLICIT axis/direction hold (`query.lock`, which bypasses this
+    /// ranking entirely and always wins regardless of `SnapKind`).
+    OnGuide,
+    /// On a model axis through the frame origin, OR — the tool-parity
+    /// playtest2 soft-axis-inference design §2c — through the query's
+    /// `anchor`, when the drag direction from it lands close enough (its
+    /// own dedicated angular tolerance, `SOFT_AXIS_APERTURE`, not the
+    /// query's point-snap `aperture`) to one of the three frame axes:
+    /// SketchUp's "the line turns green and locks softly onto the axis"
+    /// feel. Beats plain [`SnapKind::OnEdge`]/[`SnapKind::OnFace`] (a
+    /// directional cue the user is actively aiming for outranks merely
+    /// being somewhere on a face) — but loses to [`SnapKind::OnGuide`]
+    /// (finding D): an INFERRED direction must not beat a DELIBERATE one.
+    /// Still loses to every exact point kind above it, including
+    /// [`SnapKind::Tangent`].
+    OnAxis,
     /// Anywhere along an edge.
     OnEdge,
     /// Anywhere on a face.
     OnFace,
-    /// On a construction guide: a line or point the user placed
-    /// deliberately as a drawing aid. Beats the ambient world axes (it's a
-    /// real, user-placed reference) but loses to actual solid geometry
-    /// (faces/edges/vertices) — a guide is an aid, not material.
-    OnGuide,
-    /// On a model axis (or locked direction) through the anchor.
-    OnAxis,
     /// Direction parallel to a reference edge (M2; needs a reference).
     Parallel,
     /// Direction perpendicular to a reference edge (M2; needs a reference).
@@ -186,10 +207,10 @@ impl SnapKind {
         SnapKind::Midpoint,
         SnapKind::Intersection,
         SnapKind::Tangent,
-        SnapKind::OnEdge,
-        SnapKind::OnFace,
         SnapKind::OnGuide,
         SnapKind::OnAxis,
+        SnapKind::OnEdge,
+        SnapKind::OnFace,
         SnapKind::Parallel,
         SnapKind::Perpendicular,
     ];
@@ -207,10 +228,10 @@ impl SnapKind {
             SnapKind::Midpoint => 3,
             SnapKind::Intersection => 4,
             SnapKind::Tangent => 5,
-            SnapKind::OnEdge => 6,
-            SnapKind::OnFace => 7,
-            SnapKind::OnGuide => 8,
-            SnapKind::OnAxis => 9,
+            SnapKind::OnGuide => 6,
+            SnapKind::OnAxis => 7,
+            SnapKind::OnEdge => 8,
+            SnapKind::OnFace => 9,
             SnapKind::Parallel => 10,
             SnapKind::Perpendicular => 11,
         }
@@ -233,6 +254,19 @@ impl SnapKind {
     /// Within a group, equal normalized distance still breaks toward the
     /// stronger `SnapKind`, so a real vertex at the same spot as a center
     /// keeps winning (the invariant [`SnapKind::Center`]'s docs promise).
+    ///
+    /// `OnGuide` and `OnAxis` each sit in their OWN group here, immediately
+    /// after `Tangent` and before `OnEdge`, in that order (tool-parity
+    /// playtest-2 review finding D) — `OnGuide` first, because a
+    /// deliberately-placed guide must beat an INFERRED soft-axis cue, then
+    /// `OnAxis`, which still BEATS (a smaller group number than) plain
+    /// `OnEdge`/`OnFace` — a directional cue the user is actively aiming for
+    /// outranks merely being somewhere on a face or edge. `OnGuide` sitting
+    /// above `OnAxis` transitively means it also beats `OnEdge`/`OnFace` —
+    /// not a separately chosen ordering, just the unavoidable consequence of
+    /// a single total order (the same kind of forced consequence that
+    /// previously made `OnAxis` beat `OnGuide`, before this reorder). Both
+    /// still lose to every exact point kind above them, including `Tangent`.
     pub const fn rank_group(self) -> u8 {
         match self {
             // The exact-named-point band.
@@ -240,10 +274,10 @@ impl SnapKind {
             SnapKind::Midpoint => 1,
             SnapKind::Intersection => 2,
             SnapKind::Tangent => 3,
-            SnapKind::OnEdge => 4,
-            SnapKind::OnFace => 5,
-            SnapKind::OnGuide => 6,
-            SnapKind::OnAxis => 7,
+            SnapKind::OnGuide => 4,
+            SnapKind::OnAxis => 5,
+            SnapKind::OnEdge => 6,
+            SnapKind::OnFace => 7,
             SnapKind::Parallel => 8,
             SnapKind::Perpendicular => 9,
         }
@@ -272,6 +306,78 @@ pub const GRAVITY_ANALYTIC_POINT: f64 = 2.5;
 /// `SnapWeights::max_indexed`); past a point that stops being a prune. It is
 /// a policy bound on a ranking parameter, not a geometric tolerance.
 pub const GRAVITY_MAX: f64 = 8.0;
+
+/// Soft-axis inference's own angular aperture (tool-parity playtest2 §2c),
+/// in degrees — the pick-cone half-angle for the anchor-relative
+/// [`SnapKind::OnAxis`] candidates `resolve` generates when the query
+/// carries an `anchor`. Deliberately its OWN fixed value rather than the
+/// query's `aperture` (which the UI derives from an 8px point-snap radius —
+/// typically well under a degree, far too tight for "I'm aiming roughly
+/// this way"): the point-snap aperture answers "is the cursor pixel-precise
+/// on this candidate", soft axis answers "is the drag direction from the
+/// anchor roughly aligned with this one" — a categorically wider, purely
+/// angular question with no pixel/FOV conversion of its own. 5° sits in the
+/// middle of the ~4-6° a directional "soft lock" reads as generous but not
+/// promiscuous; picked and documented here rather than left a bare literal.
+pub const SOFT_AXIS_APERTURE_DEG: f64 = 5.0;
+
+/// [`SOFT_AXIS_APERTURE_DEG`] in radians — [`cone_test`]'s native unit.
+pub const SOFT_AXIS_APERTURE: f64 = SOFT_AXIS_APERTURE_DEG * std::f64::consts::PI / 180.0;
+
+/// Below this angle (degrees) between the pick ray and a candidate soft-axis
+/// direction, the axis is treated as too EDGE-ON to trust and no candidate
+/// is generated for it at all.
+///
+/// `closest_point_on_line_to_ray`'s own guard (`tol::NORMALIZE_MIN_LENGTH`)
+/// only catches EXACT parallelism; merely NEAR-parallel already makes its
+/// result ill-conditioned, because on screen the axis is foreshortened down
+/// to a sliver a few pixels long — a pixel of mouse motion then swings the
+/// resolved point arbitrarily far along it. Measured as the angle between
+/// the (both unit) ray and axis directions, which needs no screen/pixel
+/// conversion: a ray nearly parallel to the axis direction is, by
+/// construction, sighting almost exactly down it, wherever the camera
+/// happens to sit — the same underlying condition "a few pixels of screen
+/// length" describes, reached without any screen-space math in this
+/// screen-agnostic crate. 3° is comfortably past ordinary drawing angles
+/// (a user drawing broadside to an axis is nowhere near this) while still
+/// catching the genuinely degenerate "sighting straight down it" case.
+/// `axis_is_edge_on` compares against `cos` of this (computed there, not
+/// pre-baked as a literal, so changing this constant can never silently
+/// drift out of sync with the threshold it drives).
+pub const SOFT_AXIS_EDGE_ON_DEG: f64 = 3.0;
+
+/// Fraction of the query `aperture` within which the pick RAY counts as
+/// hovering the lock's anchor itself, rather than merely passing near it.
+///
+/// A locked resolve needs this distinction because the reconstructed
+/// cursor ray never re-crosses a hovered point EXACTLY (pixel rounding
+/// and unprojection leave a sub-pixel miss), so with the cursor visually
+/// ON the anchor the directional fallback's station is that miss
+/// verbatim: a noise-scale, noise-SIGNED offset, not a direction the
+/// user chose. A tool that derives a typed-entry direction from the
+/// resolved station (Move's signed-distance commit, Line's rubber-band
+/// direction) would amplify that accident into a full-magnitude move the
+/// WRONG WAY. Within this fraction of the aperture, therefore, the
+/// no-winner directional fallback returns the anchor exactly (zero
+/// displacement — what the gesture indicates), and the wrong-side
+/// candidate disqualification is suspended (the fallback station's sign
+/// is itself noise there). This is deliberately a fact about the RAY
+/// only, consumed only by those two ray-judging rules — the winner
+/// cull's noise test compares each CANDIDATE against the fallback point
+/// itself, with no aperture band involved, so real geometry keeps
+/// winning at its true station however the ray sits relative to the
+/// anchor.
+///
+/// 0.25 — a quarter of the pick aperture, i.e. 2 px of the app's 8 px snap
+/// radius — splits the bands with real margin on both sides: the
+/// reconstruction noise is at most ~half a pixel (≈ 6% of the aperture)
+/// regardless of zoom, while the closest pinned "genuinely aiming near
+/// the anchor" case (the rehomed-plane sweep's d = 0.05 step, which must
+/// land at the aimed station, not the anchor) puts the anchor ≈ 60% of
+/// the aperture off the ray. Being aperture-relative keeps the split
+/// zoom-independent — both the noise band and the aperture are
+/// pixel-derived quantities.
+pub const LOCK_ON_ANCHOR_APERTURE_FRACTION: f64 = 0.25;
 
 /// Per-kind snap gravity — see the crate docs' *Gravity* section.
 ///
@@ -576,6 +682,46 @@ pub struct SnapQuery {
     /// queries against one scene may legitimately want different answers.
     /// This crate never learns what selects it (DEVELOPMENT.md rule 1).
     pub weights: SnapWeights,
+    /// Multiplies [`SOFT_AXIS_APERTURE`] for THIS query's anchor-relative
+    /// soft-axis candidates only (tool-parity playtest-2 review finding E) —
+    /// `None` (or a non-finite/non-positive value) behaves exactly as
+    /// before, i.e. `SOFT_AXIS_APERTURE` unscaled. `OnAxis` is in the app's
+    /// `STICKY_KINDS` (`snapService.ts`), but the origin-relative widening
+    /// its acquire/release hysteresis normally applies works by re-querying
+    /// at a WIDER `aperture` — which this candidate never reads (it has its
+    /// own fixed angular tolerance, deliberately not `aperture`; see that
+    /// constant's doc). Without a dedicated knob a held soft-axis snap had
+    /// no hysteresis at all: it dropped the instant the cursor left the
+    /// unscaled 5° cone, unlike every other sticky kind. The app's release
+    /// query sets this to the SAME ratio it already widens the pixel radius
+    /// by (`SNAP_BREAK_RADIUS_PX / SNAP_RADIUS_PX`), so soft-axis hysteresis
+    /// matches the "feel" of every other sticky kind without inventing a
+    /// second, independently-tuned constant.
+    pub soft_axis_aperture_scale: Option<f64>,
+    /// Keep PRECISE POINT candidates ([`SnapKind::Endpoint`],
+    /// [`SnapKind::Midpoint`], [`SnapKind::Center`], [`SnapKind::Quadrant`],
+    /// [`SnapKind::Intersection`]) that lie OFF the `constraint_plane`
+    /// instead of filtering them out. No effect without a
+    /// `constraint_plane`, and never loosens the occlusion cull — a hidden
+    /// off-plane point stays unsnappable, so the see-through protection the
+    /// plane filter was introduced for is preserved by the cull alone.
+    ///
+    /// Exists for tools that can HONOUR an off-plane point (the 3d-line
+    /// defect): `LineTool`'s plane-mode chain re-homes onto a new sketch
+    /// plane when a committed point leaves the frozen one, so a visible
+    /// vertex in an EARLIER sketch of the same chain — e.g. the chain's own
+    /// origin after axis-locked segments carried it across two re-homes —
+    /// is a legitimate target its frozen plane must not veto. Tools that
+    /// commit into one immutable plane (Rectangle/Circle/Polygon/Arc, and
+    /// Line's face mode) leave this `false`: a snap they would have to
+    /// project back onto the plane afterwards would LIE about its position,
+    /// and a candidate that cannot be honoured must not be offered.
+    ///
+    /// Sliding/directional kinds (`OnEdge`, `OnFace`, `OnAxis`, `OnGuide`,
+    /// `Tangent`) stay plane-filtered even when this is set: they are not
+    /// discrete targets a re-home can pin down, and off-plane they mostly
+    /// reintroduce the see-through noise the filter exists to remove.
+    pub off_plane_points: bool,
 }
 
 /// A snappable point with provenance.
@@ -1023,6 +1169,14 @@ pub struct InferenceScene {
     /// When `false`, the world-origin/axis candidates are suppressed (View ▸
     /// Axes off): hidden axes must not snap or flash a cue. Defaults to `true`.
     axes_enabled: bool,
+    /// The document's movable drawing axes (tool-parity design §4), pushed
+    /// in by [`InferenceScene::set_axes_frame`] the way `axes_enabled` is
+    /// pushed by [`InferenceScene::set_axes_enabled`]. The origin/axis
+    /// candidates below snap to THIS frame's origin and directions, not the
+    /// literal world axes — so moving the drawing axes moves what "on
+    /// axis" means for inference exactly as it does for drawing. Defaults
+    /// to [`AxesFrame::IDENTITY`] (world).
+    axes_frame: AxesFrame,
     /// Lazily rebuilt spatial index over `points`/`segments`/`faces`; `None`
     /// means dirty (a mutator ran since the last build). Interior mutability
     /// because the hot pointer-move queries (`resolve`, `pick_face`) take
@@ -1101,6 +1255,7 @@ impl Default for InferenceScene {
             transient_segments: Vec::new(),
             guides_enabled: true,
             axes_enabled: true,
+            axes_frame: AxesFrame::IDENTITY,
             spatial: RefCell::new(None),
             occlusion_tests: Cell::new(0),
             world_owners: BTreeSet::new(),
@@ -1130,6 +1285,15 @@ impl InferenceScene {
     /// Enable/disable world-origin/axis snapping (View ▸ Axes).
     pub fn set_axes_enabled(&mut self, enabled: bool) {
         self.axes_enabled = enabled;
+    }
+
+    /// Sets the movable drawing axes frame (tool-parity design §4) that
+    /// origin/axis inference candidates snap to. Pushed by the wasm boundary
+    /// on every reconciled document mutation (including a document load or
+    /// an axes-move undo/redo), so this scene's candidates never lag the
+    /// document's own [`kernel::Document::axes`].
+    pub fn set_axes_frame(&mut self, frame: AxesFrame) {
+        self.axes_frame = frame;
     }
 
     /// Candidate counts as (points, segments, faces) — cheap introspection
@@ -1728,6 +1892,16 @@ impl InferenceScene {
         let aperture = query.aperture;
         let mode = query.aperture_mode;
         let weights = query.weights;
+        // The soft-axis (anchor-relative `OnAxis`) candidate's own angular
+        // tolerance, optionally scaled for this query (playtest-2 review
+        // finding E — see `SnapQuery::soft_axis_aperture_scale`'s doc).
+        // Computed once here so BOTH the candidate-generation cone test and
+        // the ranking pass's "extended" (reach-never-steals) reference below
+        // agree on the same widened value.
+        let soft_axis_aperture = match query.soft_axis_aperture_scale {
+            Some(scale) if scale.is_finite() && scale > 0.0 => SOFT_AXIS_APERTURE * scale,
+            _ => SOFT_AXIS_APERTURE,
+        };
 
         // Per-kind gravity (crate docs, *Gravity*): a candidate of `kind` is
         // ADMITTED within `w * aperture` instead of `aperture`. The angular
@@ -2155,20 +2329,131 @@ impl InferenceScene {
             }
         }
 
-        // --- World-origin and world-axis candidates ---
-        // The origin snaps as a strong Endpoint; the three world axes snap as
+        // The active lock's direction, resolved and normalized ONCE, ahead
+        // of candidate generation: the reach-reference gate just below
+        // needs it, and the lock context further down reuses it verbatim.
+        // A present-but-degenerate `SnapLock::Direction` refuses the whole
+        // query, exactly as the lock context always did.
+        let locked_dir: Option<Vec3> = match (query.lock, query.anchor) {
+            (Some(lock), Some(_)) => {
+                let raw = match lock {
+                    SnapLock::Axis(Axis::X) => self.axes_frame.x,
+                    SnapLock::Axis(Axis::Y) => self.axes_frame.y,
+                    SnapLock::Axis(Axis::Z) => self.axes_frame.z(),
+                    SnapLock::Direction(v) => v,
+                };
+                match raw.normalized() {
+                    Ok(d) => Some(d),
+                    Err(_) => return None,
+                }
+            }
+            _ => None,
+        };
+        // Reach reference for a candidate LINE's clamp (see
+        // `closest_point_on_line_to_ray`): the anchor ONLY when an active
+        // lock is collinear with the candidate's direction — the one case
+        // where the winner cull's fallback-equality test needs the two
+        // computations of the same line to clamp identically — and `None`
+        // for every other candidate, which keeps its own natural origin
+        // and bound. An UNCONDITIONAL anchor reference was a regression in
+        // the common case: an anchor exists from the first click of nearly
+        // every drawing tool, and with no lock the winner's raw position
+        // is returned unprojected, so an anchor sitting far along a
+        // hovered axis inflated the near-edge-on clamp bound from the
+        // camera-to-origin scale to the camera-to-anchor's-foot scale and
+        // moved the resolved point ~100 m along the identical axis, ray
+        // and camera. Collinearity reads the codebase's parallel-floor
+        // convention — sin² of the angle against
+        // `tol::NORMALIZE_MIN_LENGTH` — the same test
+        // `closest_point_on_line_to_ray`'s own parallel branch uses.
+        let reach_for = |line_dir: Vec3| -> Option<Point3> {
+            match locked_dir {
+                Some(ld) => {
+                    let b = line_dir.dot(ld);
+                    if 1.0 - b * b < tol::NORMALIZE_MIN_LENGTH {
+                        query.anchor
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+
+        // --- Drawing-axes origin and axis candidates ---
+        // The origin snaps as a strong Endpoint; the three axes snap as
         // OnAxis (weakest meaningful kind, so object geometry still wins).
         // Suppressed when axes are hidden (View ▸ Axes off) so a hidden axis
-        // never snaps or flashes a cue.
+        // never snaps or flashes a cue. Reads `axes_frame` (tool-parity
+        // design §4), not the literal world origin/X/Y/Z — moving the
+        // drawing axes moves what "on axis" means for inference exactly as
+        // it does for drawing (world identity is this frame's default, so
+        // an unmoved document snaps exactly as before).
         if self.axes_enabled {
-            if let Some((ang, depth)) = wcone(Point3::ORIGIN, SnapKind::Endpoint) {
-                candidates.push((SnapKind::Endpoint, ang, depth, Point3::ORIGIN, None, None));
+            let frame_origin = self.axes_frame.origin;
+            if let Some((ang, depth)) = wcone(frame_origin, SnapKind::Endpoint) {
+                candidates.push((SnapKind::Endpoint, ang, depth, frame_origin, None, None));
             }
-            for axis in [Axis::X, Axis::Y, Axis::Z] {
-                let adir = axis.unit();
-                let pos = closest_point_on_line_to_ray(Point3::ORIGIN, adir, origin, dir);
+            for adir in [self.axes_frame.x, self.axes_frame.y, self.axes_frame.z()] {
+                let pos =
+                    closest_point_on_line_to_ray(frame_origin, adir, reach_for(adir), origin, dir);
                 if let Some((ang, depth)) = wcone(pos, SnapKind::OnAxis) {
                     candidates.push((SnapKind::OnAxis, ang, depth, pos, None, Some(adir)));
+                }
+            }
+
+            // --- Soft axis inference (tool-parity playtest2 §2c) ---
+            // When the query carries an `anchor` AND NO active hard lock,
+            // ALSO offer the three axis lines THROUGH IT: "if you're
+            // dragging roughly along an axis from where you started, snap
+            // to it" — SketchUp's soft axis-lock feel. Gated on
+            // `query.lock.is_none()` (playtest-2 defect: a hard lock's own
+            // fallback line, below, must never be hijacked by a DIFFERENT
+            // axis's soft candidate winning the ranking and getting
+            // projected onto the locked line — see that branch's doc for
+            // why the projection collapses to exactly `anchor` when it is).
+            // Uses its OWN, wider `SOFT_AXIS_APERTURE` rather than
+            // `wcone`'s query-derived `aperture` — seeing "roughly this
+            // way" is a categorically looser question than point-snap
+            // precision (see that constant's doc) — optionally scaled by
+            // `query.soft_axis_aperture_scale` (playtest-2 review finding
+            // E), the app's magnetic-hysteresis release query's only way to
+            // reach this candidate at all, since it never reads the widened
+            // `aperture` that hysteresis normally works through.
+            if let (Some(anchor), None) = (query.anchor, query.lock) {
+                for adir in [self.axes_frame.x, self.axes_frame.y, self.axes_frame.z()] {
+                    // Edge-on guard: skip a candidate axis the ray is
+                    // sighting nearly straight down BEFORE computing its
+                    // closest point at all — `closest_point_on_line_to_ray`
+                    // only guards EXACT parallelism, and merely
+                    // near-parallel already makes its result swing
+                    // arbitrarily far for a pixel of mouse motion.
+                    if axis_is_edge_on(dir, adir) {
+                        continue;
+                    }
+                    // Admission uses `soft_axis_deviation` — a
+                    // camera-position-independent angle, NOT a plain
+                    // `cone_test` on the (potentially very distant) point
+                    // this axis line comes closest to the ray at (see that
+                    // function's doc for the tool-parity playtest-2 defect
+                    // this replaces: for anything but a near-straight-
+                    // overhead camera, `cone_test`'s eye-relative angle lets
+                    // this candidate be admitted tens of degrees outside
+                    // `SOFT_AXIS_APERTURE_DEG`).
+                    if let Some(ang) =
+                        soft_axis_deviation(anchor, adir, origin, dir, soft_axis_aperture)
+                    {
+                        // No reach reference: soft axes exist only when NO
+                        // lock is active (the gate above), so there is no
+                        // fallback to clamp consistently with — and the line
+                        // passes through the anchor anyway, so `Some(anchor)`
+                        // would be the same origin bit for bit.
+                        let pos = closest_point_on_line_to_ray(anchor, adir, None, origin, dir);
+                        let depth = (pos - origin).dot(dir);
+                        if depth > 0.0 {
+                            candidates.push((SnapKind::OnAxis, ang, depth, pos, None, Some(adir)));
+                        }
+                    }
                 }
             }
         }
@@ -2191,7 +2476,14 @@ impl InferenceScene {
                         origin: go,
                         direction: gd,
                     } => {
-                        let pos = closest_point_on_line_to_ray(go, gd, origin, dir);
+                        // Reach reference only for a guide COLLINEAR with an
+                        // active lock (`reach_for`): that guide must clamp
+                        // exactly as the lock's own fallback does, however it
+                        // happens to be parameterized (round-7 review
+                        // CRITICAL — see the function's invariant); every
+                        // other guide keeps its own natural origin and bound
+                        // (round-8 review MAJOR).
+                        let pos = closest_point_on_line_to_ray(go, gd, reach_for(gd), origin, dir);
                         if let Some((ang, depth)) = wcone(pos, SnapKind::OnGuide) {
                             candidates.push((SnapKind::OnGuide, ang, depth, pos, None, Some(gd)));
                         }
@@ -2254,8 +2546,27 @@ impl InferenceScene {
         // OnFace to the coplanar (active) face. The lock-fallback line below is
         // intentionally NOT constrained — it's a directional inference, not a
         // candidate snap.
+        //
+        // `off_plane_points` (the 3d-line defect, see the field's doc) keeps
+        // PRECISE POINT kinds even off the plane for the one tool contract
+        // that can honour them (a re-homing line chain): a chain that
+        // re-homed across sketch planes must still snap back to its own
+        // origin vertex, which lives on an EARLIER sketch's plane. Occlusion
+        // culling below still rejects hidden ones, so the see-through
+        // protection this filter was introduced for is preserved.
         if let Some(plane) = query.constraint_plane {
-            candidates.retain(|c| plane.signed_distance(c.3).abs() <= tol::PLANE_DIST);
+            candidates.retain(|c| {
+                plane.signed_distance(c.3).abs() <= tol::PLANE_DIST
+                    || (query.off_plane_points
+                        && matches!(
+                            c.0,
+                            SnapKind::Endpoint
+                                | SnapKind::Midpoint
+                                | SnapKind::Center
+                                | SnapKind::Quadrant
+                                | SnapKind::Intersection
+                        ))
+            });
         }
 
         // --- Rank (crate docs, *Gravity*): candidates inside the plain
@@ -2286,9 +2597,33 @@ impl InferenceScene {
         //     The SnapKind tie-break sits *between* distance and depth so two
         //     candidates at equal weighted distance still resolve to the
         //     stronger kind — a real vertex exactly on a circle's center keeps
-        //     winning, as `SnapKind::Center`'s docs promise. ---
+        //     winning, as `SnapKind::Center`'s docs promise.
+        //
+        //     `OnAxis` measures "extended" against `soft_axis_aperture`
+        //     (§2c's fixed tolerance, optionally scaled — finding E) instead
+        //     of the query's own (typically far tighter, point-snap)
+        //     `aperture` — the ONE exception to "reach never steals" this
+        //     crate has. It is not a breach of that guard's purpose: the
+        //     guard exists so a gravity-WEIGHTED reach past the query's own
+        //     scale never outranks something genuinely inside it; OnAxis's
+        //     wider reach isn't gravity widening a shared scale, it is its
+        //     own dedicated directional tolerance (tool-parity playtest2
+        //     §2c) — comparing it against the *point* aperture would make
+        //     "extended" fire on nearly every soft-axis hit and demote it
+        //     behind anything else in view, defeating the ranking §2c asks
+        //     for (soft axis beats plain OnEdge/OnFace). A query that scales
+        //     `soft_axis_aperture` up (the hysteresis release query) still
+        //     marks anything beyond the UNSCALED tolerance as extended —
+        //     using the scaled value here, not the bare constant, so reach
+        //     the scale itself bought in still never steals from a candidate
+        //     genuinely inside the normal aperture either. ---
         let rank_key = |c: &Candidate| {
-            let extended = u8::from(c.1 > aperture);
+            let ref_aperture = if c.0 == SnapKind::OnAxis {
+                soft_axis_aperture.max(aperture)
+            } else {
+                aperture
+            };
+            let extended = u8::from(c.1 > ref_aperture);
             (extended, c.0.rank_group(), c.1 / weights.weight(c.0))
         };
         candidates.sort_by(|a, b| {
@@ -2301,17 +2636,178 @@ impl InferenceScene {
                 .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
         });
 
+        // --- Resolve the lock (direction + anchor) BEFORE picking a winner:
+        //     under a lock the winner's projection outcome is part of what
+        //     makes it a winner at all (see the cull below). `SnapLock::Axis`
+        //     resolves through the drawing-axes frame (tool-parity design
+        //     §4), not the literal world X/Y/Z, so an axis-locked drawing
+        //     gesture follows a moved frame exactly like the OnAxis snap
+        //     candidates above (world identity is this frame's default, so
+        //     an unmoved document locks exactly as before). ---
+        // Beyond the direction + anchor, a lock context carries the
+        // gesture-side facts the winner cull and the fallback below need:
+        //
+        //   `fall` — the directional fallback point itself: the locked
+        //   line's point nearest the ray, exactly what the no-winner
+        //   branch below returns. Computed once here because the winner
+        //   cull ALSO needs it: a ray-sliding candidate that resolves to
+        //   this same point is contributing nothing but the ray (see the
+        //   cull's noise bullet).
+        //
+        //   `t_fallback` — `fall`'s signed station (along `lock_dir`, from
+        //   the anchor): where the cursor itself is pointing along the
+        //   lock, and therefore which SIDE of the anchor the gesture
+        //   indicates when it is not `on_anchor`.
+        //
+        //   `on_anchor` — the pick ray passes within
+        //   `LOCK_ON_ANCHOR_APERTURE_FRACTION` of the aperture of the
+        //   anchor: at pixel resolution the cursor is ON the anchor, so the
+        //   gesture indicates ZERO displacement — the directional
+        //   fallback's own station is then sub-pixel reconstruction noise
+        //   with an arbitrary SIGN, not a direction the user chose (see
+        //   that constant's doc for the Move+Alt wrong-way repro this
+        //   closes). Deliberately a fact about the RAY only, consumed only
+        //   by the fallback clamp and the wrong-side gate below — the
+        //   winner cull judges each CANDIDATE by its own position, so real
+        //   geometry keeps winning at its true station wherever the cursor
+        //   is.
+        let lock_ctx = match (locked_dir, query.anchor) {
+            (Some(d), Some(anchor)) => {
+                let on_anchor = cone_test(
+                    origin,
+                    dir,
+                    anchor,
+                    aperture * LOCK_ON_ANCHOR_APERTURE_FRACTION,
+                    mode,
+                )
+                .is_some();
+                // The lock line passes THROUGH the anchor, so the
+                // anchor as reach reference is bit-for-bit the old
+                // behaviour — and the shared reference is what makes
+                // a collinear guide/axis candidate clamp to exactly
+                // this same point (the cull's noise-equality test).
+                let fall = closest_point_on_line_to_ray(anchor, d, Some(anchor), origin, dir);
+                let t_fallback = (fall - anchor).dot(d);
+                Some((d, anchor, on_anchor, t_fallback, fall))
+            }
+            _ => None,
+        };
+
         // --- Occlusion cull: walk the ranked list and take the first candidate
         //     that isn't hidden behind an opaque face. A solid must not let a
         //     draw/select snap "see through" it to a higher-priority back edge
         //     or vertex — only what's visible from the eye should snap. Lazy by
         //     design: usually the top candidate is visible, so this costs one
         //     visibility test. The lock-fallback line below is a *directional*
-        //     inference, not a candidate, so it is intentionally never culled. ---
-        let winner = candidates
-            .iter()
-            .copied()
-            .find(|c| !self.is_occluded(origin, c.3, index));
+        //     inference, not a candidate, so it is intentionally never culled.
+        //
+        //     Under an active lock, a candidate must ALSO survive its own lock
+        //     projection to win: the only thing a candidate contributes to a
+        //     locked gesture is where it lands on the locked line, and one
+        //     whose projection collapses onto the anchor contributes nothing —
+        //     it names the point the segment already starts from, which no
+        //     tool can commit. Without this, a legitimate candidate lying in
+        //     the plane through the anchor perpendicular to the lock (the
+        //     anchor's own vertex, or — the 3d-line staircase's third,
+        //     axis-locked segment, where the lock is normal to the frozen
+        //     sketch plane — ANY candidate the constraint plane kept) would
+        //     win on angular rank, project to the anchor, and turn an
+        //     ordinary locked click into a degenerate-segment refusal. Such a
+        //     candidate is skipped, not fatal: the next candidate with a real
+        //     projection wins, else the directional fallback line below.
+        //
+        //     The disqualification line is `tol::POINT_MERGE` because that IS
+        //     the definition of an uncommittable segment: the kernel's own
+        //     `SketchError::DegenerateSegment` refuses exactly the segments
+        //     whose endpoints are within `POINT_MERGE`, and the app-side
+        //     commit gates (`LineTool`'s `DEGENERATE_SEGMENT_EPS`) mirror the
+        //     same constant. All three layers reading one threshold is what
+        //     closes the gap completely: any looser line here (or any
+        //     stricter gate there) reopens a band of projections that one
+        //     side returns as a real winner and the other still refuses.
+        //
+        //     Surviving a collapsed projection is NOT sufficient, though: the
+        //     fall-through must never hand the gesture a station the user did
+        //     not indicate. Two further disqualifications close the two ways
+        //     it could (both found by the Move+Alt donut copy landing BELOW
+        //     the ground it was copied up from):
+        //
+        //     * A ray-sliding candidate (`OnEdge`/`OnFace`/`OnAxis`/
+        //       `OnGuide`, whose positions are computed FROM the ray) that
+        //       resolves to the SAME point the no-winner fallback would
+        //       return (`fall`, the locked line's ray-nearest point) is
+        //       contributing nothing but the ray itself: its "station" is
+        //       the ray's own sub-pixel reconstruction miss, verbatim — a
+        //       noise-scale, noise-signed number that a typed Move/Line
+        //       commit would amplify into a full move the wrong way (the
+        //       Move+Alt donut repro: the world axis COLLINEAR with the
+        //       lock line slides to exactly this point). The test is
+        //       equality with `fall` — deliberately not a proximity band
+        //       around the anchor (a ray-based zone discards real geometry
+        //       the cursor is squarely on) and not a depth-scaled station
+        //       envelope (metres wide at depth, swallowing genuine far
+        //       stations): a real edge crossing the cone metres along the
+        //       lock is never equal to the fallback point, at any depth.
+        //       The comparison is sound because
+        //       `closest_point_on_line_to_ray` is parameterization-
+        //       invariant under this query's reach reference (the anchor —
+        //       see that function's invariant): a guide or axis collinear
+        //       with the lock line clamps to exactly the fallback's own
+        //       point however it happens to be parameterized, so equality
+        //       genuinely detects "same construction" (round-7 review
+        //       CRITICAL: before that invariant, a collinear guide with an
+        //       origin near the camera clamped metres from the fallback
+        //       and won with the corrupted station). `tol::POINT_MERGE`
+        //       absorbs the residual fp rounding between the two
+        //       computations (~1e-13 at scene scale for a flipped or
+        //       re-derived direction); a genuinely coincident candidate AT
+        //       the fallback point is culled harmlessly (the fallback
+        //       returns the identical position, only kind/provenance
+        //       differ).
+        //       Point-kind candidates are never tested: their positions
+        //       are geometry, not ray constructions (a real vertex
+        //       nanometres along the lock must still resolve at its true
+        //       station — see the committable-band spec).
+        //
+        //     * When the cursor is not `on_anchor` the gesture indicates a
+        //       definite side of the anchor — the sign of `t_fallback` — and
+        //       a candidate whose own station lies on the OPPOSITE side is
+        //       not a better answer than the directional fallback, it is a
+        //       wrong answer (e.g. a far face the extended pick ray crosses
+        //       BEHIND the anchor while the user drags away from it).
+        //       Skipped the same way; the side test is gated on `on_anchor`
+        //       being false and `t_fallback` being meaningfully nonzero
+        //       (`> POINT_MERGE`), since with the cursor on the anchor, or
+        //       the ray aimed exactly down the anchor's perpendicular, the
+        //       "side" is itself noise. ---
+        let winner = candidates.iter().copied().find(|c| {
+            if self.is_occluded(origin, c.3, index) {
+                return false;
+            }
+            match lock_ctx {
+                Some((lock_dir, anchor, on_anchor, t_fallback, fall)) => {
+                    let proj = project_onto_line(anchor, lock_dir, c.3);
+                    if proj.approx_eq(anchor, tol::POINT_MERGE) {
+                        return false; // collapses onto the anchor: uncommittable
+                    }
+                    if matches!(
+                        c.0,
+                        SnapKind::OnEdge | SnapKind::OnFace | SnapKind::OnAxis | SnapKind::OnGuide
+                    ) && c.3.approx_eq(fall, tol::POINT_MERGE)
+                    {
+                        return false; // the candidate IS the fallback point: ray, not geometry
+                    }
+                    if !on_anchor
+                        && t_fallback.abs() > tol::POINT_MERGE
+                        && (proj - anchor).dot(lock_dir) * t_fallback < 0.0
+                    {
+                        return false; // wrong side of the anchor
+                    }
+                    true
+                }
+                None => true,
+            }
+        });
 
         // TRACE only — `resolve` runs on every pointer move, so this is a
         // firehose filtered out by default; raise the capture level to debug a
@@ -2323,18 +2819,8 @@ impl InferenceScene {
         );
 
         // --- Handle locking ---
-        match (query.lock, query.anchor) {
-            (Some(lock), Some(anchor)) => {
-                // Build the normalized lock direction.
-                let lock_dir_raw = match lock {
-                    SnapLock::Axis(axis) => axis.unit(),
-                    SnapLock::Direction(v) => v,
-                };
-                let lock_dir = match lock_dir_raw.normalized() {
-                    Ok(d) => d,
-                    Err(_) => return None,
-                };
-
+        match lock_ctx {
+            Some((lock_dir, anchor, on_anchor, _t_fallback, fall)) => {
                 if let Some((kind, _ang, _depth, pos, prov, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
@@ -2350,9 +2836,19 @@ impl InferenceScene {
                         direction: Some(lock_dir),
                     })
                 } else {
-                    // Nothing snapped: intersect the locked line with the pick ray
-                    // (closest point between the two lines).
-                    let locked_pos = closest_point_on_line_to_ray(anchor, lock_dir, origin, dir);
+                    // Nothing snapped: the directional fallback (`fall`, the
+                    // locked line's ray-nearest point, from `lock_ctx`) —
+                    // unless the cursor is ON the anchor itself
+                    // (`on_anchor`, see `lock_ctx`), in which case that
+                    // point's station is only the ray's sub-pixel
+                    // reconstruction noise and the honest answer is the
+                    // anchor: zero displacement, exactly what the gesture
+                    // indicates. Tools already treat a zero-displacement
+                    // locked resolve correctly (Move's typed commit
+                    // defaults to the POSITIVE lock direction; Line refuses
+                    // the degenerate click) — it is the noise-SIGNED
+                    // near-zero station they cannot survive.
+                    let locked_pos = if on_anchor { anchor } else { fall };
                     Some(Snap {
                         position: locked_pos,
                         kind: SnapKind::OnAxis,
@@ -3135,29 +3631,222 @@ fn project_onto_line(anchor: Point3, dir: Vec3, point: Point3) -> Point3 {
     anchor + dir * t
 }
 
+/// The largest distance [`closest_point_on_line_to_ray`] will place its
+/// result from `line_origin`, as a multiple of the distance from
+/// `ray_origin` to `line_origin` — playtest-2 review finding F.
+///
+/// The formula's `t` is divided by `1 - b²` (`b` = cos of the angle between
+/// the line and the ray), so as the ray approaches parallel to the line the
+/// result races toward infinity — and does so in a way that is NOT bounded
+/// by scene scale on its own: empirically, a camera ~35m from `line_origin`
+/// sighting exactly [`SOFT_AXIS_EDGE_ON_DEG`] (3°) off parallel resolves to
+/// a point roughly 400m away, and a single pixel of mouse motion (~0.06° of
+/// ray-direction change) swings that point by several METERS. The edge-on
+/// guard only excludes candidates BELOW that angle; it does nothing to
+/// bound the result at or past it, and [`tol::NORMALIZE_MIN_LENGTH`]'s own
+/// guard (the function's only other safeguard) catches merely EXACT
+/// parallelism, not merely-near. No fixed edge-on angle threshold can fix
+/// this on its own either: the swing scales linearly with camera distance
+/// at a FIXED angle, so a threshold tuned for one scene scale is
+/// simultaneously too loose for a larger one and needless for a smaller
+/// one. Clamping `t` directly, scaled to the query's own distance instead
+/// of a hardcoded absolute, is scale-invariant and protects every caller of
+/// this function (soft-axis, the literal origin axis, guide lines, and the
+/// hard axis lock), not just the one with an edge-on guard.
+///
+/// 5.0 was chosen empirically (see `closest_point_on_line_to_ray_stays_bounded_near_the_edge_on_angle`):
+/// it fully saturates (swing → 0 for a single-pixel ray perturbation) the
+/// 3-5° range right at the edge-on boundary, while leaving well-conditioned,
+/// broadside-ish rays (where the unclamped result is already well within
+/// this reach) completely untouched.
+///
+/// [`soft_axis_deviation`] does NOT reuse this constant (tool-parity
+/// delta-review finding: reach-clamp regression). An earlier revision
+/// clamped that function's own ray-side parameter (`s`, the point `Q`)
+/// against this same eye-to-anchor-scaled bound, but `s` there has a
+/// different scale entirely: for a dead-on aim it is essentially the
+/// camera-to-target depth along the RAY, which grows with drag length, not
+/// with eye-to-anchor distance. Reusing this bound made an ordinary
+/// "zoom in close, drag a long way along the axis" interaction — drag
+/// length a few times the eye-to-anchor distance — false-reject a
+/// mathematically dead-on aim. See that function's doc for why no clamp is
+/// needed there at all.
+const MAX_AXIS_REACH_FACTOR: f64 = 5.0;
+
 /// Closest point on the line `line_origin + t * line_dir` to the ray
 /// `ray_origin + s * ray_dir`. Returns the point on the line (not the ray).
 ///
 /// If lines are parallel, returns the point on the line closest to
 /// `ray_origin`.
+///
+/// `t` is clamped to `±MAX_AXIS_REACH_FACTOR` times the distance from
+/// `ray_origin` to the clamp's reference origin (playtest-2 review finding
+/// F) — see that constant's doc for why an unclamped result is unsafe near
+/// (not just at) exact parallelism, and why a distance-scaled clamp is the
+/// fix rather than a differently-tuned angle threshold.
+///
+/// `reach_ref` — the query's own reference point for the clamp (the
+/// gesture's anchor), when it has one. INVARIANT: for a fixed ray and a
+/// fixed `reach_ref`, any two `(line_origin, ±line_dir)` descriptions of
+/// the same geometric line produce the same clamped point (to fp
+/// rounding), because both the clamp's center and its bound are derived
+/// from `reach_ref`'s own foot on the line — a fact about the line as a
+/// SET — never from whichever origin happens to parameterize it. Without
+/// this, a construction guide collinear with an axis-locked line but
+/// parameterized from an origin near the camera clamped METRES away from
+/// where the lock's own fallback (parameterized from the anchor) clamped
+/// the identical construction, and the locked winner cull's "this
+/// candidate IS the fallback point" noise test could not see they were
+/// the same thing (round-7 review CRITICAL). With no `reach_ref` (an
+/// unanchored query), the line's own origin is the reference, exactly as
+/// before — those callers compare nothing across parameterizations.
 fn closest_point_on_line_to_ray(
     line_origin: Point3,
     line_dir: Vec3,
+    reach_ref: Option<Point3>,
     ray_origin: Point3,
     ray_dir: Vec3,
 ) -> Point3 {
+    // Re-origin the line at the reference's own foot on it (for a line
+    // THROUGH the reference — the lock fallback, the soft-axis candidates —
+    // this is exactly the reference itself, bit for bit, so those callers
+    // are untouched).
+    let origin = match reach_ref {
+        Some(r) => project_onto_line(line_origin, line_dir, r),
+        None => line_origin,
+    };
     // Standard closest-point-between-two-lines derivation.
-    let w = line_origin - ray_origin;
+    let w = origin - ray_origin;
     let b = line_dir.dot(ray_dir);
     let denom = 1.0 - b * b;
     if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
         // Lines are parallel: project ray_origin onto the line.
-        return project_onto_line(line_origin, line_dir, ray_origin);
+        return project_onto_line(origin, line_dir, ray_origin);
     }
     let d = line_dir.dot(w);
     let e = ray_dir.dot(w);
     let t = (b * e - d) / denom;
-    line_origin + line_dir * t
+    let bound = w.length() * MAX_AXIS_REACH_FACTOR;
+    let t = t.clamp(-bound, bound);
+    origin + line_dir * t
+}
+
+/// True iff `axis_dir` is too close to parallel with `ray_dir` for a
+/// soft-axis candidate computed from it (`closest_point_on_line_to_ray`) to
+/// be trustworthy — see [`SOFT_AXIS_EDGE_ON_DEG`]. Both arguments must
+/// already be unit vectors; the comparison is orientation-free (an axis
+/// sighted from either end is equally edge-on).
+fn axis_is_edge_on(ray_dir: Vec3, axis_dir: Vec3) -> bool {
+    let cos_edge_on = (SOFT_AXIS_EDGE_ON_DEG * std::f64::consts::PI / 180.0).cos();
+    ray_dir.dot(axis_dir).abs() >= cos_edge_on
+}
+
+/// The soft-axis candidate's admission angle (radians): find `Q`, the point
+/// on the pick RAY `(origin, dir)` closest to the candidate axis LINE
+/// (through `anchor`, direction `axis_dir`) — the ray-side counterpart of
+/// [`closest_point_on_line_to_ray`]'s result (call it `P`), which lies on
+/// the axis by construction and so can never itself express deviation from
+/// it. The admission angle is the angle between `(Q - anchor)` and
+/// `axis_dir`, taking the along-axis component as `abs()` so a backward
+/// drag — aiming at a point on the axis on `anchor`'s OTHER side — reads
+/// identically to a forward one (the axis is a full line through `anchor`,
+/// not a ray from it). `None` when `anchor` is behind the ray origin, when
+/// `Q` itself resolves behind the ray origin, when the ray is
+/// (near-)parallel to the axis, or when the resulting angle exceeds
+/// `soft_axis_aperture`.
+///
+/// This is the SECOND generation of this function (tool-parity delta-review
+/// finding 1). The FIRST generation evaluated at the point on the ray at
+/// `anchor`'s own depth ALONG THE RAY (`origin + dir * dir.dot(anchor -
+/// origin)`), using the axis-perpendicular component of that point's offset
+/// from `anchor`, divided by the EYE-relative depth. That mixes reference
+/// frames — an axis-relative numerator over an eye-relative denominator is
+/// not a valid angle — and for a dead-on aim (the ray genuinely passes
+/// through a point ON the axis) the two only coincide when `dir` happens to
+/// be perpendicular to `axis_dir`, i.e. a near-straight-overhead camera,
+/// which is what every fixture in this suite used before this finding.
+/// From an ordinary oblique camera the old formula grew without bound as
+/// drag length increased even for a mathematically dead-on aim: anchor
+/// (2,3,9), axis +X, eye (-8,-7,17) — an ordinary 3/4 orbit — read 0.09° at
+/// a 0.05m drag, climbed past the 5° aperture by roughly 2.8m, and reached
+/// 27° at 20m, silently dropping the soft axis mid-drag while the user kept
+/// aiming exactly along it the whole time.
+///
+/// The `Q`-based angle used here is EXACT for a dead-on aim, at every drag
+/// length and every camera position, not just near-overhead ones: when the
+/// ray truly meets the axis, the closest point on each line IS that meeting
+/// point, so `Q = P` and the perpendicular component of `Q - anchor` is
+/// exactly zero — no reference-frame mixing is possible because there is
+/// only one frame (the axis's own). `Q`'s own ray parameter (`s`) is
+/// deliberately left UNCLAMPED (tool-parity delta-review finding: an
+/// earlier revision clamped it against [`MAX_AXIS_REACH_FACTOR`] times the
+/// eye-to-anchor distance, copying [`closest_point_on_line_to_ray`]'s
+/// clamp — but that bound is the wrong scale here. There, `t` is a point
+/// returned to the caller for use as a snap position, and near parallelism
+/// makes that returned POINT swing without bound for a single pixel of
+/// mouse motion, which is what the clamp guards. Here, `s` is never
+/// returned; only the ANGLE derived from it is, and that angle is
+/// well-conditioned regardless of how large `s` gets: `perp` (the
+/// perpendicular distance from `Q` to the axis line) is exactly the
+/// minimized point-to-line distance between the two lines, which stays
+/// bounded as the lines approach parallel, so `perp.atan2(along.abs())`
+/// does not blow up even when `s` itself does. Clamping `s` to a bound
+/// scaled by eye-to-anchor distance instead reintroduced false rejection of
+/// dead-on aims whenever drag length exceeded roughly `MAX_AXIS_REACH_FACTOR`
+/// times that distance — an everyday "zoom in close, drag a long way along
+/// the axis" interaction. The only guard against actual ill-conditioning
+/// (division by a near-zero `denom`, i.e. exact or near-exact parallelism)
+/// is the `denom.abs() < tol::NORMALIZE_MIN_LENGTH` check above; this call
+/// site is additionally behind [`axis_is_edge_on`], which keeps `denom`
+/// bounded well away from that floor in practice.
+///
+/// This is NOT a camera-proof measure, and cannot be made one from this
+/// function's inputs alone: being exactly zero for a dead-on aim at every
+/// drag length and every camera forces it (up to reparametrization) to be
+/// equivalent to the true minimum distance between the ray and the axis as
+/// infinite lines — i.e. to whether they are coplanar — and two skew lines
+/// can be made coplanar (miss distance exactly zero, so this angle reads
+/// exactly zero too) by an off-axis target whose direction from `anchor`
+/// happens to lie in the plane spanned by `axis_dir` and the eye-to-anchor
+/// vector, however far off-axis that target actually is. That configuration
+/// is reachable from an ordinary, non-edge-on camera position — see
+/// `soft_axis_deviation_can_still_be_fooled_by_a_near_coplanar_camera` for a
+/// disclosed, worked example — so this is a known, accepted residual gap,
+/// not a fixed one. Genuinely closing it would need real screen-space
+/// information (the camera's actual projection), which this function does
+/// not receive and which would be a wasm-api surface change.
+fn soft_axis_deviation(
+    anchor: Point3,
+    axis_dir: Vec3,
+    origin: Point3,
+    dir: Vec3,
+    soft_axis_aperture: f64,
+) -> Option<f64> {
+    let depth_anchor = dir.dot(anchor - origin);
+    if depth_anchor <= 0.0 {
+        return None; // anchor is behind the ray origin
+    }
+    // Same derivation as `closest_point_on_line_to_ray`, but solved for the
+    // RAY's own parameter (`s`, the point `Q`) rather than the axis line's
+    // (`t`, the point `P`) — see that function for the shared setup.
+    let w = anchor - origin;
+    let b = axis_dir.dot(dir);
+    let denom = 1.0 - b * b;
+    if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
+        return None; // (near-)parallel to the axis; axis_is_edge_on already guards this call site
+    }
+    let d = axis_dir.dot(w);
+    let e = dir.dot(w);
+    let s = (e - b * d) / denom;
+    if s <= 0.0 {
+        return None; // Q itself is behind the ray origin
+    }
+    let q = origin + dir * s;
+    let offset = q - anchor;
+    let along = offset.dot(axis_dir);
+    let perp = (offset - axis_dir * along).length();
+    let angle = perp.atan2(along.abs());
+    (angle <= soft_axis_aperture).then_some(angle)
 }
 
 #[cfg(test)]
@@ -3177,11 +3866,17 @@ mod tests {
         assert!(SnapKind::Quadrant < SnapKind::Midpoint);
         assert!(SnapKind::Midpoint < SnapKind::Intersection);
         assert!(SnapKind::Intersection < SnapKind::Tangent);
-        assert!(SnapKind::Tangent < SnapKind::OnEdge);
-        assert!(SnapKind::OnEdge < SnapKind::OnFace);
-        assert!(SnapKind::OnFace < SnapKind::OnGuide);
+        // OnGuide then OnAxis sit between Tangent and OnEdge, in that order
+        // (tool-parity playtest-2 review finding D): a deliberately-placed
+        // guide outranks an INFERRED soft-axis cue, which in turn still
+        // outranks plain edge/face hovering (and, transitively, OnGuide
+        // outranks edge/face too — see `rank_group`'s doc). Both still lose
+        // to every exact point kind, Tangent included.
+        assert!(SnapKind::Tangent < SnapKind::OnGuide);
         assert!(SnapKind::OnGuide < SnapKind::OnAxis);
-        assert!(SnapKind::OnAxis < SnapKind::Parallel);
+        assert!(SnapKind::OnAxis < SnapKind::OnEdge);
+        assert!(SnapKind::OnEdge < SnapKind::OnFace);
+        assert!(SnapKind::OnFace < SnapKind::Parallel);
         assert!(SnapKind::Parallel < SnapKind::Perpendicular);
     }
 
@@ -3345,6 +4040,8 @@ mod tests {
             aperture: 0.3,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         assert!(scene.resolve(&query).is_none());
     }
@@ -3688,6 +4385,8 @@ mod tests {
                 aperture: 0.6,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("a corner is within the cone");
         assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -3755,6 +4454,8 @@ mod tests {
                 aperture: 0.6,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("something visible in the wide cone");
         assert!(
@@ -3776,6 +4477,8 @@ mod tests {
                 aperture: 0.6,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: Some(top),
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("an on-plane candidate (top face / its edges) remains");
         assert!(
@@ -3810,6 +4513,8 @@ mod tests {
                 aperture: 0.05,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("the visible top face is under the cursor");
         assert_eq!(
@@ -3852,6 +4557,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("a visible +X-face corner is in the cone");
         assert_eq!(
@@ -3914,6 +4621,8 @@ mod tests {
                 aperture: 0.05,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("the sub-face seen through the parent's hole is visible");
         assert!(
@@ -3945,6 +4654,8 @@ mod tests {
                 aperture: 0.6,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: Some(top),
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("the on-plane top corner is still snappable");
         assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -4059,7 +4770,7 @@ mod tests {
         let ray_origin = Point3::new(10.0, 0.0, 5.0);
         let ray_dir = Vec3::new(-1.0, 0.0, 0.0); // unit -X
 
-        let pt = closest_point_on_line_to_ray(line_origin, line_dir, ray_origin, ray_dir);
+        let pt = closest_point_on_line_to_ray(line_origin, line_dir, None, ray_origin, ray_dir);
 
         // The Z-axis point closest to this ray is at z=5 (same height as the
         // ray origin), i.e. (0, 0, 5). The wrong-sign formula gives (0, 0, -5).
@@ -4067,6 +4778,521 @@ mod tests {
             pt.approx_eq(Point3::new(0.0, 0.0, 5.0), tol::POINT_MERGE),
             "expected (0,0,5) but got {:?}",
             pt
+        );
+    }
+
+    /// Near (but not exactly) edge-on, `closest_point_on_line_to_ray`'s
+    /// result must stay within a bounded distance of `line_origin` —
+    /// playtest-2 review finding F. The 3° `SOFT_AXIS_EDGE_ON_DEG` guard
+    /// only excludes candidates BELOW that angle; it does nothing to bound
+    /// the result AT or just past it, where the function is still severely
+    /// ill-conditioned (`tol::NORMALIZE_MIN_LENGTH`'s own guard only catches
+    /// angles below roughly 0.00006°). Without a clamp, a ray exactly at the
+    /// 3° edge-on boundary — a perfectly ordinary "roughly edge-on" viewing
+    /// angle, not a contrived extreme — resolves to a point ~400m from the
+    /// line's own origin against a camera only ~35m away, and a single
+    /// pixel's worth of mouse movement (~0.06°) swings that point by several
+    /// METERS (empirically measured while investigating this finding).
+    #[test]
+    fn closest_point_on_line_to_ray_stays_bounded_near_the_edge_on_angle() {
+        let line_origin = Point3::ORIGIN;
+        let line_dir = Vec3::new(1.0, 0.0, 0.0); // world +X
+
+        // Camera ~34.6m from the line's origin, aimed 3° off parallel to the
+        // axis — exactly the boundary the edge-on guard admits.
+        let ray_origin = Point3::new(-20.0, 20.0, 20.0);
+        let ref_dist = (line_origin - ray_origin).length();
+        let theta = 3.0_f64.to_radians();
+        let ray_dir = Vec3::new(theta.cos(), theta.sin(), 0.0)
+            .normalized()
+            .unwrap();
+
+        let pt = closest_point_on_line_to_ray(line_origin, line_dir, None, ray_origin, ray_dir);
+        let reach = (pt - line_origin).length();
+        assert!(
+            reach <= ref_dist * MAX_AXIS_REACH_FACTOR + tol::POINT_MERGE,
+            "candidate reached {reach:.1}m along the axis from a camera only {ref_dist:.1}m away \
+             (bound was {:.1}m) — unbounded near the edge-on angle",
+            ref_dist * MAX_AXIS_REACH_FACTOR
+        );
+    }
+
+    /// The clamp does not distort a WELL-conditioned (broadside-ish) result:
+    /// the ordinary case pinned by `closest_point_on_line_to_ray_correct_sign`
+    /// above must still land exactly on the true closest point, unclamped.
+    #[test]
+    fn closest_point_on_line_to_ray_clamp_does_not_affect_well_conditioned_rays() {
+        let line_origin = Point3::ORIGIN;
+        let line_dir = Vec3::new(0.0, 0.0, 1.0);
+        let ray_origin = Point3::new(10.0, 0.0, 5.0);
+        let ray_dir = Vec3::new(-1.0, 0.0, 0.0);
+        let pt = closest_point_on_line_to_ray(line_origin, line_dir, None, ray_origin, ray_dir);
+        assert!(pt.approx_eq(Point3::new(0.0, 0.0, 5.0), tol::POINT_MERGE));
+    }
+
+    // -----------------------------------------------------------------------
+    // Soft axis inference (tool-parity playtest2 §2c)
+    // -----------------------------------------------------------------------
+
+    /// A ray genuinely broadside to the axis (the common case — looking down
+    /// at the ground while dragging along a horizontal axis) is never
+    /// edge-on, however far off-axis it drifts.
+    #[test]
+    fn axis_is_edge_on_false_when_broadside() {
+        let ray_dir = Vec3::new(0.0, 0.0, -1.0); // straight down
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0); // horizontal
+        assert!(!axis_is_edge_on(ray_dir, axis_dir));
+    }
+
+    /// A ray sighting nearly straight down the axis — either direction along
+    /// it — is edge-on. Orientation-free: `-axis_dir` is just as degenerate.
+    #[test]
+    fn axis_is_edge_on_true_when_nearly_parallel_either_direction() {
+        let axis_dir = Vec3::new(0.0, 0.0, 1.0);
+        let two_deg = (2.0_f64).to_radians();
+        let nearly_parallel = Vec3::new(two_deg.sin(), 0.0, two_deg.cos())
+            .normalized()
+            .unwrap();
+        assert!(axis_is_edge_on(nearly_parallel, axis_dir));
+        assert!(axis_is_edge_on(-nearly_parallel, axis_dir));
+    }
+
+    /// Just past the edge-on threshold, the axis reads as trustworthy again —
+    /// the guard isn't accidentally swallowing ordinary steep-but-valid
+    /// viewing angles.
+    #[test]
+    fn axis_is_edge_on_false_just_past_the_threshold() {
+        let axis_dir = Vec3::new(0.0, 0.0, 1.0);
+        let ten_deg = (10.0_f64).to_radians();
+        let mostly_parallel = Vec3::new(ten_deg.sin(), 0.0, ten_deg.cos())
+            .normalized()
+            .unwrap();
+        assert!(!axis_is_edge_on(mostly_parallel, axis_dir));
+    }
+
+    /// Exactly perpendicular is the least edge-on a ray can be — the opposite
+    /// end of the same test, pinning the guard doesn't fire on ordinary
+    /// geometry near it either.
+    #[test]
+    fn axis_is_edge_on_false_when_perpendicular() {
+        let ray_dir = Vec3::new(1.0, 0.0, 0.0);
+        let axis_dir = Vec3::new(0.0, 1.0, 0.0);
+        assert!(!axis_is_edge_on(ray_dir, axis_dir));
+    }
+
+    // -----------------------------------------------------------------------
+    // `soft_axis_deviation` (tool-parity delta-review finding 1): a matrix
+    // over camera position x drag length x true off-axis angle, so a single
+    // pair of point tests can't let a false-admission and a false-rejection
+    // bug both through unnoticed the way the first two generations of this
+    // function did (one over-admitted at any distance from a near-overhead
+    // camera; the other, its replacement, under-admitted a genuinely dead-on
+    // aim at any distance from anything BUT a near-overhead camera).
+    // -----------------------------------------------------------------------
+
+    /// The four `matrix_cameras` orientations as unit eye-to-anchor
+    /// directions, factored out so both the original far distances and the
+    /// close ones below (tool-parity delta-review finding: reach-clamp
+    /// regression) sight the axis from the same set of angles — only the
+    /// distance changes.
+    fn matrix_camera_directions() -> Vec<(&'static str, Vec3)> {
+        let five_deg = 5.0_f64.to_radians();
+        let near_edge_on_dir =
+            Vec3::new(five_deg.cos(), five_deg.sin() * 0.6, five_deg.sin() * 0.8)
+                .normalized()
+                .unwrap();
+        vec![
+            ("overhead", Vec3::new(0.0, 0.0, 1.0)),
+            (
+                "3/4 orbit",
+                Vec3::new(-10.0, -10.0, 8.0).normalized().unwrap(),
+            ),
+            (
+                "low oblique",
+                Vec3::new(16.0, 11.0, -5.0).normalized().unwrap(),
+            ),
+            ("near-edge-on (5deg)", -near_edge_on_dir),
+        ]
+    }
+
+    /// Four cameras spanning the ordinary range an orbiting user actually
+    /// uses: straight overhead (the shape every fixture before this finding
+    /// happened to use), an ordinary 3/4 orbit (the exact camera from the
+    /// finding that caught the second-generation bug), a low, shallow
+    /// oblique angle, and a camera just past the 3° `axis_is_edge_on`
+    /// cutoff — the most ill-conditioned non-excluded viewing angle there
+    /// is. None of these is a contrived or adversarial position. Eye
+    /// distances (31, √264, √402, 200 respectively) are the original
+    /// absolute camera positions this matrix has used since its
+    /// introduction, now expressed as `matrix_camera_directions` scaled by
+    /// distance instead of hardcoded points — same cameras, same numbers.
+    fn matrix_cameras(anchor: Point3) -> Vec<(&'static str, Point3)> {
+        let distances = [31.0, 264.0_f64.sqrt(), 402.0_f64.sqrt(), 200.0];
+        matrix_camera_directions()
+            .into_iter()
+            .zip(distances)
+            .map(|((name, dir), dist)| (name, anchor + dir * dist))
+            .collect()
+    }
+
+    /// Cameras sighted from CLOSE up — 0.3 to 2 units from the anchor,
+    /// rather than `matrix_cameras`'s 16-200 — at four different azimuths
+    /// around the axis, so the eye-to-anchor distance is small relative to
+    /// a multi-metre drag.
+    ///
+    /// This closes a blind spot in the original matrix (tool-parity
+    /// delta-review finding: reach-clamp regression): every camera there
+    /// sat far enough from the anchor, relative to the drag lengths tested,
+    /// that a since-removed clamp bounding `soft_axis_deviation`'s ray
+    /// parameter to `MAX_AXIS_REACH_FACTOR` (5x) the eye-to-anchor distance
+    /// was never actually approached — so a regression that fires only when
+    /// drag length exceeds roughly 5x eye distance (an everyday "zoom in
+    /// close, drag a long way along the axis" interaction) went undetected.
+    ///
+    /// Deliberately BROADSIDE (perpendicular to `axis_dir`) rather than
+    /// reusing `matrix_camera_directions`'s oblique orientations: for a
+    /// dead-on drag of length `len` from an eye `dist` from the anchor,
+    /// `anchor` itself stays in front of the ray (the precondition
+    /// `soft_axis_deviation` requires) only while `b_cam < dist / len`,
+    /// where `b_cam` is the dot of `axis_dir` with the eye-to-anchor
+    /// direction — a short derivation from the shared `w`/`b` setup, not an
+    /// empirical tuning, and since `dist / len` is always positive, only a
+    /// POSITIVE `b_cam` can ever violate it. At this sweep's tightest corner
+    /// (`dist` = 0.3, `len` = 30) that bound is `b_cam < 0.01`, i.e. under a
+    /// degree off exactly broadside: of `matrix_camera_directions`'s four
+    /// orientations, only "low oblique" (`b_cam` ≈ +0.80) is positive, and
+    /// it violates that bound well before the sweep's extremes, which is why
+    /// reusing it here would produce spurious `depth_anchor <= 0` rejections
+    /// that are about camera/target geometry going behind-the-eye, not about
+    /// the clamp regression this matrix exists to catch. ("3/4 orbit",
+    /// `b_cam` ≈ -0.62, never violates it at any `dist`/`len` — reusing it
+    /// would just duplicate what the broadside directions below already
+    /// cover.) A user who is both close to the anchor AND
+    /// dragging far along the axis is, by this same bound, necessarily
+    /// looking close to broadside at that point in the drag — so broadside
+    /// is not a narrowing of the regime, it is what the regime actually is.
+    ///
+    /// Each azimuth is paired with its own off-axis perturbation direction
+    /// (also perpendicular to `axis_dir`, and to the azimuth itself) for the
+    /// caller's 25-degrees-off check, rather than one fixed perpendicular
+    /// shared by every camera: a fixed choice coinciding with a camera's own
+    /// azimuth (e.g. perturbing toward +Y while sighting from along +Y)
+    /// makes eye, anchor, and the off-axis target coplanar — the disclosed
+    /// residual gap `soft_axis_deviation_can_still_be_fooled_by_a_near_coplanar_camera`
+    /// documents — which would make this matrix's rejection check spuriously
+    /// fail on exactly that known, already-accepted characteristic instead
+    /// of on anything this fix is about. The four azimuths here pair up
+    /// into two mutually-perpendicular sets (+Y/+Z, and the two diagonals),
+    /// so each is its partner's perturbation direction.
+    fn close_matrix_cameras(anchor: Point3) -> Vec<(String, Point3, Vec3)> {
+        let azimuths: [(&str, Vec3, Vec3); 4] = [
+            (
+                "broadside +Y",
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ),
+            (
+                "broadside +Z",
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+            (
+                "broadside +Y+Z",
+                Vec3::new(0.0, 1.0, 1.0).normalized().unwrap(),
+                Vec3::new(0.0, -1.0, 1.0).normalized().unwrap(),
+            ),
+            (
+                "broadside -Y+Z",
+                Vec3::new(0.0, -1.0, 1.0).normalized().unwrap(),
+                Vec3::new(0.0, 1.0, 1.0).normalized().unwrap(),
+            ),
+        ];
+        let distances = [0.3, 0.5, 1.0, 2.0];
+        azimuths
+            .into_iter()
+            .flat_map(|(name, dir, perp)| {
+                distances
+                    .into_iter()
+                    .map(move |dist| (format!("{name} @ {dist}m"), anchor + dir * dist, perp))
+            })
+            .collect()
+    }
+
+    /// The drag lengths the finding pinned explicitly (0.05m up to a
+    /// multi-metre wall at 20m), plus the finding's own anchor/axis so the
+    /// numbers here are directly comparable to the ones pasted in the
+    /// finding and in the fix's commit message.
+    #[test]
+    fn soft_axis_deviation_matrix_admits_dead_on_and_rejects_25_degrees_off() {
+        let anchor = Point3::new(2.0, 3.0, 9.0);
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0);
+        let perp = Vec3::new(0.0, 1.0, 0.0);
+        let lengths = [0.05, 1.0, 3.0, 10.0, 20.0];
+        let theta_off = 25.0_f64.to_radians(); // 5x SOFT_AXIS_APERTURE_DEG — the original bug's own angle
+
+        for (name, eye) in matrix_cameras(anchor) {
+            for &len in &lengths {
+                // Dead-on: the ray is aimed at a point genuinely ON the
+                // axis. Must ADMIT, at (numerically) exactly zero deviation,
+                // regardless of camera or drag length.
+                let dead_on = anchor + axis_dir * len;
+                let dir_dead_on = (dead_on - eye).normalized().unwrap();
+                let angle =
+                    soft_axis_deviation(anchor, axis_dir, eye, dir_dead_on, SOFT_AXIS_APERTURE);
+                assert!(
+                    angle.is_some_and(|a| a < 1e-6),
+                    "{name} at {len}m dead-on: expected ~0 deviation (admitted), got {angle:?}"
+                );
+
+                // 25 degrees off (five times the ~5 degree aperture): must
+                // REJECT, at every camera and every drag length, matching
+                // `soft_axis_admission_does_not_widen_with_an_oblique_camera`'s
+                // requirement but swept over camera x length instead of one
+                // fixed pair.
+                let off_axis =
+                    anchor + axis_dir * (len * theta_off.cos()) + perp * (len * theta_off.sin());
+                let dir_off = (off_axis - eye).normalized().unwrap();
+                let angle_off =
+                    soft_axis_deviation(anchor, axis_dir, eye, dir_off, SOFT_AXIS_APERTURE);
+                assert!(
+                    angle_off.is_none(),
+                    "{name} at {len}m, 25 degrees off axis: expected rejection, got {angle_off:?}"
+                );
+            }
+        }
+    }
+
+    /// The axis through `anchor` is a full line, not a ray from it: aiming
+    /// dead-on at a point on the axis on the anchor's OTHER side (negative
+    /// `t`) must read the same near-zero deviation as a forward drag —
+    /// pinning the `along.abs()` in `soft_axis_deviation`, without which a
+    /// backward drag would read close to 180 degrees instead of 0.
+    #[test]
+    fn soft_axis_deviation_backward_drag_reads_the_same_as_forward() {
+        let anchor = Point3::new(2.0, 3.0, 9.0);
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0);
+        let eye = Point3::new(-8.0, -7.0, 17.0);
+        for len in [-0.05, -1.0, -3.0, -10.0, -20.0] {
+            let target = anchor + axis_dir * len;
+            let dir = (target - eye).normalized().unwrap();
+            let angle = soft_axis_deviation(anchor, axis_dir, eye, dir, SOFT_AXIS_APERTURE);
+            assert!(
+                angle.is_some_and(|a| a < 1e-6),
+                "backward drag at {len}m: expected ~0 deviation (admitted), got {angle:?}"
+            );
+        }
+    }
+
+    /// A drag of essentially zero length — `Q` lands essentially on `anchor`
+    /// itself — is well-conditioned: no NaN, no panic, and (since the ray is
+    /// still dead-on) admission at ~zero deviation, not a spurious rejection
+    /// from `atan2`'s `(0, 0)` corner.
+    #[test]
+    fn soft_axis_deviation_near_zero_drag_is_well_conditioned() {
+        let anchor = Point3::new(2.0, 3.0, 9.0);
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0);
+        let eye = Point3::new(-8.0, -7.0, 17.0);
+        let target = anchor + axis_dir * 1e-6;
+        let dir = (target - eye).normalized().unwrap();
+        let angle = soft_axis_deviation(anchor, axis_dir, eye, dir, SOFT_AXIS_APERTURE);
+        assert!(
+            angle.is_some_and(|a| a.is_finite() && a < 1e-3),
+            "near-zero drag: expected a finite, ~0 deviation, got {angle:?}"
+        );
+    }
+
+    /// The exact counterexample from the reach-clamp regression finding: a
+    /// plain broadside camera 2 units from the anchor, dragging dead-on
+    /// along the axis for 20 units — an ordinary "zoom in close, then drag
+    /// a much longer line along an axis" interaction, not a contrived one.
+    /// The since-removed clamp bounded this function's ray parameter to
+    /// `MAX_AXIS_REACH_FACTOR` (5x) the eye-to-anchor distance (2m here, so
+    /// a 10m bound) — well inside the 20m drag — and so rejected a
+    /// mathematically exact (3e-12 degree) dead-on aim as if it were 5.77
+    /// degrees off.
+    #[test]
+    fn soft_axis_deviation_close_camera_long_drag_counterexample_is_admitted() {
+        let anchor = Point3::new(0.0, 0.0, 0.0);
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0);
+        let eye = Point3::new(0.0, 2.0, 0.0);
+        let target = Point3::new(20.0, 0.0, 0.0);
+        let dir = (target - eye).normalized().unwrap();
+        let angle = soft_axis_deviation(anchor, axis_dir, eye, dir, SOFT_AXIS_APERTURE);
+        assert!(
+            angle.is_some_and(|a| a < 1e-6),
+            "expected ~0 deviation (admitted), got {angle:?}"
+        );
+    }
+
+    /// The regime the original matrix missed entirely (tool-parity
+    /// delta-review finding: reach-clamp regression): camera CLOSE to the
+    /// anchor (0.3-2 units — `close_matrix_cameras`), drag LONG (2-30m, up
+    /// to 100x the eye distance). Dead-on must still admit at (numerically)
+    /// exactly zero deviation and a genuine 25-degree-off aim must still be
+    /// rejected, exactly as `soft_axis_deviation_matrix_admits_dead_on_and_rejects_25_degrees_off`
+    /// requires of its own (far-camera) matrix — this is that same
+    /// assertion, just over the opposite corner of camera-distance x
+    /// drag-length space.
+    ///
+    /// This is deliberately NOT extended here with a "camera far, drag very
+    /// long" case reusing `matrix_cameras`'s oblique orientations, because
+    /// that corner isn't uniformly coherent across all four of them: from
+    /// `close_matrix_cameras`'s doc, `depth_anchor = dist * (dist - len *
+    /// b_cam) / L` for some always-positive `L`, so `anchor` stays in front
+    /// of a dead-on ray (`depth_anchor > 0`) unless `b_cam >= dist / len` —
+    /// and since `dist / len` is always positive, that can only happen when
+    /// `b_cam` itself is positive. Of `matrix_cameras`'s four cameras, only
+    /// "low oblique" has positive `b_cam` (≈ +0.80), with a genuine finite
+    /// crossing at `len = dist / b_cam ≈ 20.05 / 0.80 ≈ 25.1m` — comfortably
+    /// past this matrix's own 20m cap, not "as short as ~13-16m" as an
+    /// earlier revision of this comment claimed. "3/4 orbit" (`b_cam` ≈
+    /// -0.62), "overhead" (`b_cam` = 0), and "near-edge-on" (`b_cam` ≈
+    /// -0.996) all have `b_cam <= 0`, so `dist - len * b_cam` is strictly
+    /// increasing in `len` and never crosses zero AT ANY drag length — for
+    /// those three, "camera far, drag very long" is exactly as geometrically
+    /// coherent as the close-camera corner this test covers, and was simply
+    /// untested: neither this matrix (capped at 20m) nor
+    /// `close_matrix_cameras`'s (which never puts a camera farther than 2
+    /// units out) ever paired a far eye with a drag long enough to approach,
+    /// let alone clear, `MAX_AXIS_REACH_FACTOR` (5x) that eye's own
+    /// distance — the regime the since-removed clamp actually misfired in.
+    /// `soft_axis_deviation_far_camera_long_drag_matrix_admits_dead_on_and_rejects_25_degrees_off`
+    /// closes that gap, restricted to "overhead" and "3/4 orbit" — two of
+    /// those three `b_cam <= 0` orientations, excluding "low oblique" for
+    /// the reason above, and ALSO excluding "near-edge-on" (see that test's
+    /// own doc for why: an independent, already-documented ill-conditioning
+    /// reason, not a `depth_anchor <= 0` one) — at drag lengths well beyond
+    /// 5x each included camera's eye distance.
+    #[test]
+    fn soft_axis_deviation_close_camera_matrix_admits_dead_on_and_rejects_25_degrees_off() {
+        let anchor = Point3::new(2.0, 3.0, 9.0);
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0);
+        let lengths = [2.0, 5.0, 10.0, 20.0, 30.0];
+        let theta_off = 25.0_f64.to_radians();
+
+        for (name, eye, perp) in close_matrix_cameras(anchor) {
+            for &len in &lengths {
+                let dead_on = anchor + axis_dir * len;
+                let dir_dead_on = (dead_on - eye).normalized().unwrap();
+                let angle =
+                    soft_axis_deviation(anchor, axis_dir, eye, dir_dead_on, SOFT_AXIS_APERTURE);
+                assert!(
+                    angle.is_some_and(|a| a < 1e-6),
+                    "{name} at {len}m dead-on: expected ~0 deviation (admitted), got {angle:?}"
+                );
+
+                let off_axis =
+                    anchor + axis_dir * (len * theta_off.cos()) + perp * (len * theta_off.sin());
+                let dir_off = (off_axis - eye).normalized().unwrap();
+                let angle_off =
+                    soft_axis_deviation(anchor, axis_dir, eye, dir_off, SOFT_AXIS_APERTURE);
+                assert!(
+                    angle_off.is_none(),
+                    "{name} at {len}m, 25 degrees off axis: expected rejection, got {angle_off:?}"
+                );
+            }
+        }
+    }
+
+    /// The far-camera counterpart to
+    /// `soft_axis_deviation_close_camera_matrix_admits_dead_on_and_rejects_25_degrees_off`,
+    /// closing the gap that test's doc identifies (tool-parity delta-review
+    /// finding: the doc comment there previously claimed this corner was
+    /// untestable, which was wrong for two of `matrix_cameras`'s four
+    /// cameras — see that test's doc for the corrected derivation): camera
+    /// FAR from the anchor (`matrix_cameras`'s 16-200 units) and drag long
+    /// enough to clear `MAX_AXIS_REACH_FACTOR` (5x) even the farther of the
+    /// two included cameras' own eye distance — the ratio at which the
+    /// since-removed eye-distance-scaled clamp on `soft_axis_deviation`'s
+    /// ray parameter misfired. Restricted to "overhead" and "3/4 orbit"
+    /// (both `b_cam <= 0`, so both stay in front of a dead-on ray at every
+    /// drag length): "low oblique" (`b_cam` ≈ +0.80) has its own genuine
+    /// finite crossing at ~25.1m and stays excluded for that reason, exactly
+    /// as before. "near-edge-on (5deg)" is ALSO excluded here, for a
+    /// different, already-documented reason: it is deliberately the most
+    /// ill-conditioned non-excluded camera in the matrix (see
+    /// `matrix_cameras`'s doc), sighted only 3 degrees off parallel with the
+    /// axis, and at these extreme drag lengths its 25-degree-off target
+    /// direction drifts into the same near-coplanar degeneracy documented on
+    /// `soft_axis_deviation_can_still_be_fooled_by_a_near_coplanar_camera`
+    /// (verified: it reads a genuine ~4.5-degree angle there, comfortably
+    /// under the aperture — a real instance of that disclosed gap, not a
+    /// `depth_anchor <= 0` rejection and not a new defect) — a second,
+    /// independent reason a real single click-drag wouldn't put it here
+    /// anyway, since edge-on cameras make the soft-axis candidate untrusted
+    /// well before this (see `axis_is_edge_on`, gating the real call site).
+    #[test]
+    fn soft_axis_deviation_far_camera_long_drag_matrix_admits_dead_on_and_rejects_25_degrees_off() {
+        let anchor = Point3::new(2.0, 3.0, 9.0);
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0);
+        let perp = Vec3::new(0.0, 1.0, 0.0);
+        // Well beyond 5x each included camera's own eye distance (31m and
+        // ~16.25m for "overhead" and "3/4 orbit" respectively — up to ~97x
+        // the closer of the two).
+        let lengths = [1200.0, 2000.0, 3000.0];
+        let theta_off = 25.0_f64.to_radians();
+
+        for (name, eye) in matrix_cameras(anchor)
+            .into_iter()
+            .filter(|(name, _)| *name == "overhead" || *name == "3/4 orbit")
+        {
+            for &len in &lengths {
+                let dead_on = anchor + axis_dir * len;
+                let dir_dead_on = (dead_on - eye).normalized().unwrap();
+                let angle =
+                    soft_axis_deviation(anchor, axis_dir, eye, dir_dead_on, SOFT_AXIS_APERTURE);
+                assert!(
+                    angle.is_some_and(|a| a < 1e-6),
+                    "{name} at {len}m dead-on: expected ~0 deviation (admitted), got {angle:?}"
+                );
+
+                let off_axis =
+                    anchor + axis_dir * (len * theta_off.cos()) + perp * (len * theta_off.sin());
+                let dir_off = (off_axis - eye).normalized().unwrap();
+                let angle_off =
+                    soft_axis_deviation(anchor, axis_dir, eye, dir_off, SOFT_AXIS_APERTURE);
+                assert!(
+                    angle_off.is_none(),
+                    "{name} at {len}m, 25 degrees off axis: expected rejection, got {angle_off:?}"
+                );
+            }
+        }
+    }
+
+    /// Disclosed, accepted residual gap (see `soft_axis_deviation`'s doc):
+    /// being exactly zero for a dead-on aim at every drag length and every
+    /// camera forces this measure to be equivalent to whether the ray and
+    /// the axis, as infinite lines, are coplanar — and an off-axis target
+    /// whose direction from `anchor` happens to lie in the plane spanned by
+    /// the axis and the eye-to-anchor vector reads as zero deviation
+    /// regardless of how far off-axis it actually is. This camera is
+    /// ordinary (a near-overhead 3/4 orbit, not edge-on, not contrived) and
+    /// the drag is a genuine 25 degrees off axis — five times the aperture —
+    /// yet it is admitted well inside tolerance. This is a known
+    /// characteristic pinned so a future change to this function doesn't
+    /// silently narrow or widen it without the change being visible here;
+    /// it is not something this fix claims to have closed (closing it for
+    /// good needs real screen-space information this function doesn't
+    /// receive).
+    #[test]
+    fn soft_axis_deviation_can_still_be_fooled_by_a_near_coplanar_camera() {
+        let anchor = Point3::new(2.0, 3.0, 9.0);
+        let axis_dir = Vec3::new(1.0, 0.0, 0.0);
+        // Directly above `anchor` (same x, y) — coplanar with the axis and
+        // with any drag confined to the x/z plane.
+        let eye = Point3::new(2.0, 3.0, 40.0);
+        let theta = 25.0_f64.to_radians();
+        let len = 3.0;
+        // Off-axis toward +Z — in the SAME (x, z) plane as `eye` and the
+        // axis, which is exactly the degenerate alignment.
+        let perp = Vec3::new(0.0, 0.0, 1.0);
+        let target = anchor + axis_dir * (len * theta.cos()) + perp * (len * theta.sin());
+        let dir = (target - eye).normalized().unwrap();
+        let angle = soft_axis_deviation(anchor, axis_dir, eye, dir, SOFT_AXIS_APERTURE);
+        assert!(
+            angle.is_some(),
+            "documenting the known gap: a genuinely 25-degree-off aim from a near-coplanar \
+             camera is still admitted (got {angle:?}) — see this test's doc"
         );
     }
 
@@ -4096,6 +5322,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("X-axis point (5,0,0) is within the cone");
         assert_eq!(snap.kind, SnapKind::OnAxis, "kind should be OnAxis");
@@ -4125,6 +5353,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("origin is directly on the ray");
         assert_eq!(snap.kind, SnapKind::Endpoint, "origin snaps as Endpoint");
@@ -4155,6 +5385,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("cube vertex (1,0,0) is on this ray");
         assert_eq!(
@@ -4201,6 +5433,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("ray passes through the guide line");
         assert_eq!(snap.kind, SnapKind::OnGuide);
@@ -4235,6 +5469,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("ray points straight at the guide point");
         assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -4270,6 +5506,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("cube vertex and guide line are both on this ray");
         assert_eq!(
@@ -4295,6 +5533,8 @@ mod tests {
                 aperture: 0.05,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("cube edge midpoint and guide line are both on this ray");
         assert_eq!(
@@ -4310,17 +5550,25 @@ mod tests {
     #[test]
     fn constraint_plane_drops_off_plane_guide() {
         let mut scene = InferenceScene::new();
-        // A horizontal guide line at z=5, well off the z=0 constraint plane.
+        // A horizontal guide line at x=10, z=5, well off the z=0 constraint
+        // plane AND well clear of the world axes/origin: a guide placed ON
+        // an axis — the original x=0 fixture coincidentally was — would let
+        // this test's ray tie against the origin's own Z-axis candidate
+        // instead of exercising the guide filter this test is actually
+        // about (a guide now outranks OnAxis regardless — playtest-2 review
+        // finding D — but the tie would still muddy which mechanism the
+        // test is checking); x=10 keeps every axis candidate well outside
+        // the aperture.
         scene.add_guide(
             GuideId::default(),
             &Guide::Line {
-                origin: Point3::new(0.0, 0.0, 5.0),
+                origin: Point3::new(10.0, 0.0, 5.0),
                 direction: Vec3::new(1.0, 0.0, 0.0),
             },
         );
 
         let ray = PickRay {
-            origin: Point3::new(0.0, 5.0, 5.0),
+            origin: Point3::new(10.0, 5.0, 5.0),
             direction: Vec3::new(0.0, -1.0, 0.0),
         };
 
@@ -4334,6 +5582,8 @@ mod tests {
                 aperture: 0.3,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("the guide line is on this ray");
         assert_eq!(free.kind, SnapKind::OnGuide);
@@ -4349,12 +5599,143 @@ mod tests {
             aperture: 0.3,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: Some(ground),
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         });
         assert!(
             constrained.is_none(),
             "off-plane guide must be filtered out, got {:?}",
             constrained
         );
+    }
+
+    /// A deliberately-placed guide must win over a soft-axis inference, even
+    /// when both resolve to the SAME point (playtest-2 review finding D): a
+    /// user placed the guide on purpose; an inferred axis (a cue the system
+    /// is merely GUESSING at) must not silently outrank it.
+    ///
+    /// The guide line and the anchor-relative soft-axis line are set up as
+    /// the exact same infinite line (both run along world +X through y=3),
+    /// so both candidates resolve to the literal same position, angle, and
+    /// depth — the tie can only be broken by `SnapKind` rank, not distance.
+    #[test]
+    fn guide_outranks_a_coincident_soft_axis_inference() {
+        let mut scene = InferenceScene::new();
+        // A guide along world +X through y=3 — NOT the literal drawing axis
+        // (which runs through the origin, y=0) — placed well clear of it so
+        // this can't accidentally exercise the origin-relative OnAxis
+        // candidate instead of the anchor-relative soft-axis one.
+        scene.add_guide(
+            GuideId::default(),
+            &Guide::Line {
+                origin: Point3::new(-5.0, 3.0, 0.0),
+                direction: Vec3::new(1.0, 0.0, 0.0),
+            },
+        );
+
+        // The anchor sits ON that same line, so the soft-axis candidate
+        // through it (world +X from the anchor) is the exact same infinite
+        // line as the guide — dragging from here "roughly along +X" is
+        // indistinguishable, at the resolved point, from being on the guide.
+        let anchor = Point3::new(0.0, 3.0, 0.0);
+
+        // Ray aimed straight down at (5, 3, 0) — exactly on that shared line.
+        let snap = scene
+            .resolve(&SnapQuery {
+                weights: SnapWeights::default(),
+                ray: PickRay {
+                    origin: Point3::new(5.0, 3.0, 10.0),
+                    direction: Vec3::new(0.0, 0.0, -1.0),
+                },
+                anchor: Some(anchor),
+                lock: None,
+                aperture: 0.05,
+                aperture_mode: ApertureMode::Cone,
+                constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
+            })
+            .expect("both the guide and the soft-axis line pass through this ray");
+        assert_eq!(
+            snap.kind,
+            SnapKind::OnGuide,
+            "a deliberately-placed guide must outrank a coincident soft-axis inference, got {:?}",
+            snap
+        );
+    }
+
+    /// The anchor-relative soft-axis candidate honors
+    /// `soft_axis_aperture_scale` (playtest-2 review finding E) — this is
+    /// what lets the app's magnetic-hysteresis RELEASE query hold onto an
+    /// already-acquired soft-axis snap, since that candidate never reads
+    /// the widened `aperture` every other sticky kind's hysteresis works
+    /// through (see `SnapQuery::soft_axis_aperture_scale`'s doc).
+    ///
+    /// The line-to-line separation between the ray and the anchor-relative
+    /// +X line, referenced against how far along the axis the closest
+    /// approach actually lands (`soft_axis_deviation`'s admission angle —
+    /// see its doc, tool-parity delta-review finding 1), sits at EXACTLY
+    /// 7° — comfortably past the base `SOFT_AXIS_APERTURE_DEG` (5°, so an
+    /// ordinary/unscaled query must NOT snap) but comfortably within a
+    /// 2x-scaled aperture (10°, the app's own acquire/release radius ratio
+    /// — `SNAP_BREAK_RADIUS_PX / SNAP_RADIUS_PX` in `snapService.ts`).
+    ///
+    /// `h` here is `tan(7°) * 5`, not `* 3`: the reference length is the
+    /// axis-relative reach of the ray's closest approach to the anchor-
+    /// relative X line, not (as an earlier, now-corrected generation of
+    /// `soft_axis_deviation` used) the eye-relative depth at which the ray
+    /// reaches the anchor's OWN depth. For this ray (perpendicular to the
+    /// axis, x held constant at 5 throughout) those are two genuinely
+    /// different lengths — 5 (the eye's, and so the ray's, x-offset from
+    /// the anchor) vs. 3 (the eye's y-offset from the anchor) — and every
+    /// OTHER near-overhead fixture in this suite happens not to notice
+    /// because it was built with those two lengths equal by construction
+    /// (eye positioned directly above the TARGET, drop height matching drag
+    /// length). This fixture is the one place that asymmetry was exposed
+    /// once `soft_axis_deviation` stopped using the eye-relative one.
+    #[test]
+    fn soft_axis_snap_honors_soft_axis_aperture_scale_for_hysteresis() {
+        let scene = InferenceScene::new();
+        let anchor = Point3::new(0.0, 0.0, 0.0);
+        // Right-triangle construction (mirrors `resolve_snaps_to_x_axis`):
+        // ray origin (5, 3, h) looking along -Y. Because the ray direction
+        // is perpendicular to the X axis, the closest point on the
+        // anchor-relative X line is exactly (5, 0, 0) regardless of `h` —
+        // at axis-relative reach 5 — so the perpendicular separation is
+        // exactly `h` and the resulting angle is exactly `atan(h / 5)`.
+        let seven_deg: f64 = 7.0_f64.to_radians();
+        let h = seven_deg.tan() * 5.0;
+        let ray = PickRay {
+            origin: Point3::new(5.0, 3.0, h),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+        };
+
+        let unscaled = SnapQuery {
+            weights: SnapWeights::default(),
+            ray,
+            anchor: Some(anchor),
+            lock: None,
+            aperture: 0.01, // tight point-snap aperture — irrelevant to OnAxis's own tolerance
+            aperture_mode: ApertureMode::Cone,
+            constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
+        };
+        assert!(
+            scene.resolve(&unscaled).is_none(),
+            "7° off the anchor-relative soft-axis line must miss the unscaled 5° tolerance"
+        );
+
+        let widened = SnapQuery {
+            soft_axis_aperture_scale: Some(2.0),
+            off_plane_points: false,
+            ..unscaled
+        };
+        let snap = scene
+            .resolve(&widened)
+            .expect("a 2x-scaled query (the app's hysteresis release query) must still reach 7°");
+        assert_eq!(snap.kind, SnapKind::OnAxis);
+        assert_eq!(snap.direction, Some(Vec3::new(1.0, 0.0, 0.0)));
     }
 
     /// `remove_guide` is idempotent and unregisters: a removed guide no
@@ -4385,6 +5766,8 @@ mod tests {
             aperture: 0.05,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         assert!(scene.resolve(&query).is_some());
 
@@ -4432,6 +5815,8 @@ mod tests {
                 aperture: 0.05,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("sketch endpoint is on this ray");
         assert_eq!(endpoint_snap.kind, SnapKind::Endpoint);
@@ -4451,6 +5836,8 @@ mod tests {
                 aperture: 0.05,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("sketch midpoint is on this ray");
         assert_eq!(mid_snap.kind, SnapKind::Midpoint);
@@ -4471,8 +5858,13 @@ mod tests {
         let mut scene = InferenceScene::new();
         let sid = SketchId::default();
         let eid = SketchEdgeId::default();
-        let a = Point3::new(0.0, 0.0, 0.0);
-        let b = Point3::new(2.0, 0.0, 0.0);
+        // y=3 (not 0): kept clear of the world X axis (tool-parity playtest2
+        // §2c — `OnAxis` now outranks `OnEdge`) so this edge's on-edge point
+        // doesn't coincidentally tie against the ambient origin-relative
+        // axis candidate; this test is about sketch provenance, not axis
+        // ranking.
+        let a = Point3::new(0.0, 3.0, 0.0);
+        let b = Point3::new(2.0, 3.0, 0.0);
         scene.add_sketch(sid, &[(eid, a, b)]);
 
         let query_at = |target: Point3| SnapQuery {
@@ -4486,18 +5878,20 @@ mod tests {
             aperture: 0.05,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
 
         // Midpoint: carries the sketch provenance.
         let mid = scene
-            .resolve(&query_at(Point3::new(1.0, 0.0, 0.0)))
+            .resolve(&query_at(Point3::new(1.0, 3.0, 0.0)))
             .expect("midpoint on ray");
         assert_eq!(mid.kind, SnapKind::Midpoint);
         assert_eq!(mid.sketch_source, Some((sid, eid)));
 
         // On-edge (off-midpoint interior point): carries it too.
         let on_edge = scene
-            .resolve(&query_at(Point3::new(0.5, 0.0, 0.0)))
+            .resolve(&query_at(Point3::new(0.5, 3.0, 0.0)))
             .expect("on-edge on ray");
         assert_eq!(on_edge.kind, SnapKind::OnEdge);
         assert_eq!(on_edge.sketch_source, Some((sid, eid)));
@@ -4511,7 +5905,7 @@ mod tests {
         let mut scene2 = InferenceScene::new();
         scene2.add_transient_segment(a, b);
         let t_mid = scene2
-            .resolve(&query_at(Point3::new(1.0, 0.0, 0.0)))
+            .resolve(&query_at(Point3::new(1.0, 3.0, 0.0)))
             .expect("transient midpoint on ray");
         assert_eq!(t_mid.kind, SnapKind::Midpoint);
         assert_eq!(t_mid.sketch_source, None);
@@ -4538,6 +5932,8 @@ mod tests {
             aperture: 0.05,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         assert!(scene.resolve(&query).is_some());
 
@@ -4587,6 +5983,8 @@ mod tests {
             aperture: 0.02,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
 
         let snap = scene
@@ -4658,6 +6056,8 @@ mod tests {
                 aperture: 0.02,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("the guide crossing snaps");
         assert_eq!(snap.kind, SnapKind::Intersection);
@@ -4779,6 +6179,8 @@ mod tests {
                 aperture: 0.05,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("a snap over the region fill");
         assert_eq!(over_fill.kind, SnapKind::OnFace);
@@ -4814,6 +6216,8 @@ mod tests {
                 aperture: 0.05,
                 aperture_mode: ApertureMode::Cone,
                 constraint_plane: None,
+                soft_axis_aperture_scale: None,
+                off_plane_points: false,
             })
             .expect("a snap past the region edge");
         assert_eq!(past_edge.kind, SnapKind::Endpoint);
@@ -4931,6 +6335,8 @@ mod tests {
             aperture: 0.05,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         let snap = scene
             .resolve(&query)

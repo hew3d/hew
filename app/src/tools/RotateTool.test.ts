@@ -7,6 +7,7 @@ import type { NodeRef } from '../panels/treeModel'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
+import type { DrawingAxes } from './drawingAxes'
 
 /** ~2° axis tolerance, matching RotateTool's own AXIS_SNAP_TOL_DOT. */
 const TOL = Math.cos((2 * Math.PI) / 180)
@@ -33,16 +34,112 @@ function makeKeyEvent(key: string, opts: { repeat?: boolean } = {}): KeyboardEve
   } as unknown as KeyboardEvent
 }
 
-/** Minimal WasmScene stub — only the members RotateTool calls. */
-function makeWasmScene(faceNormal?: [number, number, number]) {
+/** Type a string one key at a time (no Enter — callers add that explicitly). */
+function typeKeys(tool: RotateTool, text: string): void {
+  for (const ch of text) tool.onKey(makeKeyEvent(ch))
+}
+
+/** The rotation angle (radians) of a row-major 3×4 affine that is a pure
+ * rotation about world Z through the origin (pivot = (0,0,0) in every test
+ * gesture below, so `rotateAboutPivotAxis` reduces to `rotationZAffine`). */
+function thetaOfZAffine(affine: Float64Array): number {
+  return Math.atan2(affine[4], affine[0])
+}
+
+/** World-identity drawing axes (tool-parity §4) — the default frame every
+ *  test exercises unless it explicitly overrides `frame`. */
+const WORLD_FRAME_FLAT = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+/** Minimal WasmScene stub — only the members RotateTool calls. `frame` is
+ *  the flat 12-float buffer `Scene::axes()` would return — defaults to
+ *  world identity so existing tests are unaffected; a moved-frame test
+ *  overrides it to prove `axisDir` reads the CURRENT frame, not a literal
+ *  world constant. */
+function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = WORLD_FRAME_FLAT) {
+  let nextObjId = 100n
+  let nextSketchId = 900n
+  let nextEdge = 500n
+  let gen = 1n
   return {
+    axes: vi.fn(() => new Float64Array(frame)),
     face_normal: vi.fn((..._args: unknown[]) => {
       if (faceNormal === undefined) throw new Error('not a live world-object face')
       return new Float64Array(faceNormal)
     }),
     // No face under the ray → RotateTool's fallback returns world +Z.
     pick_face: vi.fn(() => undefined),
-    transform_selection: vi.fn(),
+    transform_selection: vi.fn(() => { gen++ }),
+    duplicate_selection_array: vi.fn(
+      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+        const out: { kind: string; id: bigint }[] = []
+        for (let k = 0; k < count; k++) {
+          for (let i = 0; i < ids.length; i++) {
+            out.push({ kind: 'object', id: nextObjId++ })
+          }
+        }
+        gen++
+        return out
+      },
+    ),
+    max_array_count: vi.fn(() => 1000),
+    scene_undo: vi.fn(() => { gen++; return { free: () => { /* no-op */ } } }),
+    scene_redo: vi.fn(() => { gen++; return { free: () => { /* no-op */ } } }),
+    history_generation: vi.fn(() => gen),
+    // --- sketch copy surface (Rotate+Alt sketch copies). Two sketches, both
+    // on the ground plane (point origin, normal +Z):
+    //   - sketch 3: two single-edge islands, 40 (edge 10, endpoints
+    //     (0,0,0)-(1,0,0)) and 41 (edge 20, endpoints (5,5,0)-(6,5,0)) — no
+    //     curve, plain lines, mirroring MoveTool.test.ts's fixture.
+    //   - sketch 6: one island, 45 (edge 30, endpoints (3,0,0)-(2,1,0)),
+    //     riding a drawn CIRCLE (curve 99, center (2,0,0), radius 1) — for
+    //     the curve-identity-through-rotation test.
+    // An IN-PLANE replay lands its new edges/island on the SAME sketch
+    // (island 78); an OUT-OF-PLANE (or flipping) copy lands a new sketch id
+    // whose sole island is 77.
+    sketch_plane: vi.fn((sketch: bigint) =>
+      sketch === 3n || sketch === 6n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined,
+    ),
+    sketch_island_ids: vi.fn((sketch: bigint) =>
+      sketch === 3n ? [40n, 41n] : sketch === 6n ? [45n] : sketch >= 900n ? [77n] : [],
+    ),
+    sketch_island_edges: vi.fn((_sketch: bigint, island: bigint) =>
+      island === 40n ? [10n] : island === 41n ? [20n] : island === 45n ? [30n] : [],
+    ),
+    sketch_edge_island: vi.fn((_sketch: bigint, edge: bigint) =>
+      edge >= 500n ? 78n : edge === 10n ? 40n : edge === 20n ? 41n : edge === 30n ? 45n : undefined,
+    ),
+    sketch_edge_endpoints: vi.fn((_sketch: bigint, edge: bigint) =>
+      edge === 10n ? [0, 0, 0, 1, 0, 0]
+      : edge === 20n ? [5, 5, 0, 6, 5, 0]
+      : edge === 30n ? [3, 0, 0, 2, 1, 0]
+      : undefined,
+    ),
+    sketch_edge_curve: vi.fn((_sketch: bigint, edge: bigint) => (edge === 30n ? 99n : undefined)),
+    sketch_curve_geom: vi.fn((_sketch: bigint, curve: bigint) => (curve === 99n ? [2, 0, 0, 1] : undefined)),
+    sketch_begin_gesture: vi.fn(),
+    sketch_end_gesture: vi.fn(() => { gen++ }),
+    sketch_begin_curve: vi.fn((_sketch: bigint) => 8n),
+    sketch_begin_curve_with: vi.fn(
+      (_sketch: bigint, _cx: number, _cy: number, _cz: number, _radius: number) => 8n,
+    ),
+    sketch_end_curve: vi.fn(),
+    sketch_add_segment: vi.fn(
+      (_sketch: bigint, _ax: number, _ay: number, _az: number, _bx: number, _by: number, _bz: number) => {
+        const id = nextEdge++
+        return { new_edges: () => [id], free: () => { /* no-op */ } }
+      },
+    ),
+    // The ghost preview builds a sketch-island NodeRef's lines regardless of
+    // objectsGroup (null in these logic tests) — no geometry needed to
+    // exercise the copy/array logic itself.
+    sketch_island_lines: vi.fn(() => new Float32Array(0)),
+    copy_sketch_islands: vi.fn(
+      (_sketch: bigint, _islands: BigUint64Array, _affine: Float64Array) => {
+        const id = nextSketchId++
+        gen++
+        return id
+      },
+    ),
   }
 }
 
@@ -50,12 +147,15 @@ function makeTool(opts: {
   faceNormal?: [number, number, number]
   selection?: NodeRef[]
   instance?: { id: bigint; group: THREE.Group }
+  frame?: number[]
 } = {}) {
   const preview = new THREE.Group()
   const onCommit = vi.fn()
+  const onArrayCommit = vi.fn()
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
-  const wasmScene = makeWasmScene(opts.faceNormal)
+  const onCopyModeChange = vi.fn()
+  const wasmScene = makeWasmScene(opts.faceNormal, opts.frame)
   const selection: NodeRef[] = opts.selection ?? [{ kind: 'object', id: 1n }]
   const tool = new RotateTool(
     wasmScene as never,
@@ -68,8 +168,10 @@ function makeTool(opts: {
       ? null
       : (id) => id === opts.instance!.id ? opts.instance!.group : null,
     onMeasurement,
+    onCopyModeChange,
+    onArrayCommit,
   )
-  return { tool, preview, onCommit, onToast, onMeasurement, wasmScene }
+  return { tool, preview, onCommit, onArrayCommit, onToast, onMeasurement, onCopyModeChange, wasmScene }
 }
 
 // ── disk inspection helpers ──────────────────────────────────────────────────
@@ -92,11 +194,12 @@ function lineSegmentCount(preview: THREE.Group): number {
   return diskGroup(preview).children.filter((c) => c instanceof THREE.LineSegments).length
 }
 
-/** The color RotateTool assigns a ring whose normal points along `dir`, run
+/** The color RotateTool assigns a ring whose normal points along `dir`
+ * (against `frame`, defaulting to world identity — tool-parity §4), run
  * through a LineBasicMaterial so color-management matches the tool's own path. */
-function axisColorHex(dir: [number, number, number]): number {
-  const match = axisColorForDirection(dir, TOL, axisColorsForTheme(getResolvedTheme()))
-  expect(match, `${dir} should map to a world axis color`).not.toBeNull()
+function axisColorHex(dir: [number, number, number], frame?: DrawingAxes): number {
+  const match = axisColorForDirection(dir, TOL, axisColorsForTheme(getResolvedTheme()), frame)
+  expect(match, `${dir} should map to an axis color`).not.toBeNull()
   return new THREE.LineBasicMaterial({ color: match!.color }).color.getHex()
 }
 
@@ -130,6 +233,25 @@ describe('RotateTool — axis locking', () => {
     expect(ev.defaultPrevented).toBe(true)
     expect(ringColorHex(preview)).toBe(axisColorHex([1, 0, 0]))
     expect(lineSegmentCount(preview)).toBe(1) // locked → normal tick added
+  })
+
+  it('ArrowRight locks the CURRENT frame\'s red axis, not literal world X, under a moved frame', () => {
+    // Frame with red/green swapped relative to world: x=[0,1,0], y=[-1,0,0],
+    // z=[0,0,1] — an orthonormal, right-handed frame (tool-parity §4).
+    const frame = [0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1]
+    const frameObj: DrawingAxes = { origin: [0, 0, 0], x: [0, 1, 0], y: [-1, 0, 0], z: [0, 0, 1] }
+    const { tool, preview } = makeTool({ frame })
+    tool.onPointerDown(makeSnap(), rayThrough(0, 0)) // place a pivot so snapConstraint can resolve
+    tool.onKey(makeKeyEvent('ArrowRight'))
+    const constraint = tool.snapConstraint()
+    expect(constraint).not.toBeNull()
+    expect(constraint!.constraintPlane.normal).toEqual([0, 1, 0])
+    // The disk tint + axis tag (axisColorForDirection's other named consumer,
+    // finding 3) must ALSO read the moved frame: the locked normal [0,1,0]
+    // is world Y, not world X — a primitive still comparing against literal
+    // world axes would tint this red (matching [1,0,0]) instead of green.
+    expect(ringColorHex(preview)).toBe(axisColorHex([0, 1, 0], frameObj))
+    expect(ringColorHex(preview)).not.toBe(axisColorHex([0, 1, 0]))
   })
 
   it('ArrowDown clears the lock, returning to the inferred (ground Z) axis', () => {
@@ -489,5 +611,514 @@ describe('RotateTool — setEditContext aborts an armed gesture on a genuine cha
     tool.setEditContext({ kind: 'instance', id: 9n, component: 90n })
 
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+/** Run pivot (origin) → reference (+X) → sweep to +Y (90°) → commit, the same
+ * three-click shape as the "commits a rotation" test above. */
+function runNinetyDegreeGesture(tool: RotateTool): void {
+  tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+  tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+  tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference (+X, 0°)
+  tool.onPointerMove(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // sweep to +Y (90°)
+  tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // commit
+}
+
+describe('RotateTool — durable Alt copy toggle', () => {
+  it('tapping Alt toggles copy mode on and off (not hold-to-copy)', () => {
+    const { tool, onCopyModeChange } = makeTool()
+    expect(tool.statusHint()).toContain('center of rotation')
+
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(tool.statusHint()).toContain('Copy is on')
+
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+    expect(tool.statusHint()).not.toContain('Copy is on')
+  })
+
+  it('ignores Alt autorepeat (a held Alt toggles exactly once)', () => {
+    const { tool, onCopyModeChange } = makeTool()
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onKey(makeKeyEvent('Alt', { repeat: true }))
+    tool.onKey(makeKeyEvent('Alt', { repeat: true }))
+    expect(onCopyModeChange).toHaveBeenCalledTimes(1)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+  })
+
+  it('a full gesture commits a COPY (via duplicate_selection_array) while toggled on — Alt long released', () => {
+    const { tool, wasmScene, onCommit } = makeTool()
+    tool.onKey(makeKeyEvent('Alt')) // tap, release — durable
+    runNinetyDegreeGesture(tool)
+
+    expect(wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    const [kinds, ids, affine, count] = wasmScene.duplicate_selection_array.mock.calls[0]
+    expect(Array.from(kinds as Uint8Array)).toEqual([0])
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n])
+    expect(thetaOfZAffine(affine as Float64Array)).toBeCloseTo(Math.PI / 2)
+    expect(count).toBe(1)
+    expect(wasmScene.transform_selection).not.toHaveBeenCalled()
+    // The fresh clone becomes the committed selection.
+    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 100n }])
+  })
+
+  it('a full gesture commits a plain ROTATE (transform_selection) after toggling back off', () => {
+    const { tool, wasmScene } = makeTool()
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onKey(makeKeyEvent('Alt')) // back off
+    runNinetyDegreeGesture(tool)
+
+    expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('prefixes the readout with "Copy ·" while toggled on', () => {
+    const { tool, onMeasurement } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference
+    tool.onKey(makeKeyEvent('Alt'))
+    const last = onMeasurement.mock.calls.at(-1)?.[0] as string
+    expect(last.startsWith('Copy ·')).toBe(true)
+  })
+})
+
+describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelope)', () => {
+  // `runNinetyDegreeGesture` rotates 90° about the origin on the inferred
+  // (default) axis, world +Z — exactly normal to sketch 3's ground plane,
+  // with the pivot ON that plane. That is the in-plane case (spokes/petals/
+  // bolt-ring): the copy must REPLAY into the SAME sketch, not detach onto a
+  // new one.
+  it('an in-plane copy REPLAYS into the SAME sketch id, with the geometry already rotated', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+
+    // One gesture bracket on the SOURCE sketch — never a new one.
+    expect(t.wasmScene.sketch_begin_gesture).toHaveBeenCalledWith(3n)
+    expect(t.wasmScene.sketch_end_gesture).toHaveBeenCalledWith(3n)
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+
+    // The edge (0,0,0)-(1,0,0) rotated 90° about Z through the origin lands
+    // at (0,0,0)-(0,1,0) — the geometry itself arrives already rotated, not
+    // merely offset.
+    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1)
+    const [sketch, ax, ay, az, bx, by, bz] = t.wasmScene.sketch_add_segment.mock.calls[0]
+    expect(sketch).toBe(3n)
+    expect(ax).toBeCloseTo(0, 9)
+    expect(ay).toBeCloseTo(0, 9)
+    expect(az).toBeCloseTo(0, 9)
+    expect(bx).toBeCloseTo(0, 9)
+    expect(by).toBeCloseTo(1, 9)
+    expect(bz).toBeCloseTo(0, 9)
+
+    // A COPY, not a rotate — and no object-duplicate call for a pure sketch
+    // selection.
+    expect(t.wasmScene.transform_selection).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
+    // The new island becomes the committed selection, on the SOURCE sketch.
+    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 78n, sketch: 3n }])
+    expect(t.onToast).not.toHaveBeenCalled()
+  })
+
+  it('an in-plane copy of a drawn-circle island keeps curve identity: rotated center, same radius', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 45n, sketch: 6n }] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    // Curve 99's center (2,0,0), radius 1, rotated 90° about Z through the
+    // origin: the center moves to (0,2,0), the radius survives untouched —
+    // a rotated circle stays a true circle, not just rotated facets.
+    expect(t.wasmScene.sketch_begin_curve_with).toHaveBeenCalledTimes(1)
+    const [sketch, cx, cy, cz, radius] = t.wasmScene.sketch_begin_curve_with.mock.calls[0]
+    expect(sketch).toBe(6n)
+    expect(cx).toBeCloseTo(0, 9)
+    expect(cy).toBeCloseTo(2, 9)
+    expect(cz).toBeCloseTo(0, 9)
+    expect(radius).toBe(1) // untouched — not recomputed, just carried through
+    expect(t.wasmScene.sketch_begin_curve).not.toHaveBeenCalled() // it has geom — not an identity-only chain
+    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 78n, sketch: 6n }])
+  })
+
+  it('an out-of-plane rotation (axis not normal to the sketch) still lands a new sketch', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    t.tool.onKey(makeKeyEvent('ArrowLeft')) // lock Y — in the sketch's own plane, NOT its normal
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference (+X, on the Y-locked plane)
+    t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1 }), rayThrough(0, 0)) // sweep toward +Z (~90° about Y)
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1 }), rayThrough(0, 0)) // commit
+
+    expect(t.wasmScene.copy_sketch_islands).toHaveBeenCalledTimes(1)
+    const [sketch, islands] = t.wasmScene.copy_sketch_islands.mock.calls[0]
+    expect(sketch).toBe(3n)
+    expect(Array.from(islands as BigUint64Array)).toEqual([40n])
+    expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled() // never a same-sketch replay
+    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 77n, sketch: 900n }])
+  })
+
+  it('an orientation-flipping rotation (180° about an in-plane axis) routes to the new-sketch arm, never a reflective in-plane replay', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    t.tool.onKey(makeKeyEvent('ArrowRight')) // lock X — in the sketch's own plane
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(1, 0)) // reference (+Y, on the X-locked plane)
+    t.tool.onPointerMove(makeSnap({ x: 0, y: -1, z: 0 }), rayThrough(0, -1)) // sweep to −Y: 180°
+    t.tool.onPointerDown(makeSnap({ x: 0, y: -1, z: 0 }), rayThrough(0, -1)) // commit
+
+    expect(t.wasmScene.copy_sketch_islands).toHaveBeenCalledTimes(1)
+    const [sketch] = t.wasmScene.copy_sketch_islands.mock.calls[0]
+    expect(sketch).toBe(3n)
+    expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled() // never a reflective in-plane replay
+    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 77n, sketch: 900n }])
+  })
+
+  it('a sketch copy ARMS the ×N array window: typing 5x retracts the single-copy commit with ONE scene undo, then replays 5 cumulative copies into the SAME sketch inside a SECOND (still singular) gesture bracket', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+
+    // The initial commit: one copy, one gesture bracket, one segment.
+    expect(t.wasmScene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.sketch_end_gesture).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, 'x5')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    // Retracts the single-copy commit (it recorded exactly ONE history
+    // entry) with exactly ONE scene_undo, then replays 5 cumulative copies
+    // into the SOURCE sketch inside ONE further gesture bracket — never a
+    // new sketch, never one bracket per rep. A single further scene_undo
+    // (the WHOLE-array undo step) would retract every rep, matching the
+    // object array's undo shape.
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.sketch_begin_gesture).toHaveBeenCalledTimes(2)
+    expect(t.wasmScene.sketch_end_gesture).toHaveBeenCalledTimes(2)
+    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1 + 5)
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
+    for (const call of t.wasmScene.sketch_add_segment.mock.calls) {
+      expect(call[0]).toBe(3n) // every rep lands on the SOURCE sketch
+    }
+    expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('a mixed selection duplicates objects AND copies sketches, and BOTH array together when ×N is typed (retracting BOTH prior entries)', () => {
+    const t = makeTool({
+      selection: [
+        { kind: 'object', id: 1n },
+        { kind: 'sketch-island', id: 40n, sketch: 3n },
+      ],
+    })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    // The default gesture (Z axis, pivot at the origin) is in-plane for
+    // sketch 3 — the sketch half replays into the source sketch, it does
+    // not detach onto a new one.
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1)
+    expect(t.onCommit).toHaveBeenCalledWith([
+      { kind: 'sketch-island', id: 78n, sketch: 3n },
+      { kind: 'object', id: 100n },
+    ])
+
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    // The initial commit recorded TWO history entries (one sketch replay,
+    // one object array) — both get retracted before the array reissues at
+    // count 3.
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1 + 3)
+    expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('RotateTool — ×N / /N array copy', () => {
+  /** Tap Alt, rotate one selected object 90° about the origin via a full
+   * gesture — the copy commit that arms the array refinement. */
+  function commitOneCopy(t: ReturnType<typeof makeTool>): void {
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+  }
+
+  it('teaches the refinement in the status hint after a copy commits (SketchUp 3x form first)', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+    expect(t.tool.statusHint()).toContain('3x')
+    expect(t.tool.statusHint()).toContain('3/')
+  })
+
+  it('the SketchUp trailing form 3x + Enter resolves exactly like x3, at the SAME angular step', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, '3x')
+    // The trailing form's leading digit is buffer input, and it reads back
+    // with the display glyph: "3×".
+    expect(t.onMeasurement).toHaveBeenLastCalledWith('3×')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
+    const [, ids, affine, count] = t.wasmScene.duplicate_selection_array.mock.calls[1]
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n]) // the ORIGINAL source
+    expect(thetaOfZAffine(affine as Float64Array)).toBeCloseTo(Math.PI / 2)
+    expect(count).toBe(3)
+  })
+
+  it('the leading form x3 resolves the same way (both token orders produce the same step)', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2)
+    expect(call[3]).toBe(3)
+  })
+
+  it('the trailing divide form 4/ + Enter divides the swept angle across the copies', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, '4/')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2 / 4)
+    expect(call[3]).toBe(4)
+  })
+
+  it('the leading divide form /4 resolves the same way (both token orders)', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, '/4')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2 / 4)
+    expect(call[3]).toBe(4)
+  })
+
+  it('re-entering a different count while hot retracts the previous array with ONE undo and replaces it', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, 'x3')
+    expect(t.tool.capturingInput()).toBe(true) // digits must not switch tools
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    // All three clones become the selection via the full-refresh commit path.
+    expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
+    expect((t.onArrayCommit.mock.calls[0][0] as NodeRef[]).length).toBe(3)
+
+    typeKeys(t.tool, '/5')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    // A SECOND refinement retracts with exactly one more undo — never one
+    // undo per element of the array being replaced.
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(3)
+    const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(call[3]).toBe(5)
+    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2 / 5)
+    expect(t.onArrayCommit).toHaveBeenCalledTimes(2)
+  })
+
+  it('a refused refinement restores the retracted copies with redo and keeps the window hot', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    t.wasmScene.duplicate_selection_array.mockImplementationOnce(() => {
+      throw new Error('Transform: refused')
+    })
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.scene_redo).toHaveBeenCalledTimes(1)
+    expect(t.onToast).toHaveBeenCalled()
+
+    // The recovery undo+redo moved the history generation; the window
+    // re-stamped its token, so a fresh count still resolves.
+    typeKeys(t.tool, 'x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(2)
+    const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(call[3]).toBe(2)
+    expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses the refinement when the HISTORY moved since the copy (history-generation guard)', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    // Force the generation on so the window's stamped token is stale — the
+    // same guard MoveTool relies on to survive a net-zero content edit.
+    t.wasmScene.transform_selection() // an unrelated recorded action
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    expect(t.wasmScene.scene_undo).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.onToast).toHaveBeenCalledWith(expect.stringContaining('the model changed'))
+  })
+
+  it('refuses a count above the kernel cap with a toast, before any undo fires', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    typeKeys(t.tool, 'x1001')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalledWith(expect.stringContaining('1000'))
+    expect(t.wasmScene.scene_undo).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.max_array_count).toHaveBeenCalled()
+  })
+
+  it('disarmArray (explicit delete/undo/redo commands) closes the window cleanly', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+    expect(t.tool.capturingInput()).toBe(true)
+
+    t.tool.disarmArray()
+    expect(t.tool.capturingInput()).toBe(false)
+
+    // A later x3 + Enter does nothing — no wrong-action undo, no second
+    // array, no toast spam.
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_undo).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.onToast).not.toHaveBeenCalled()
+  })
+
+  it('the armed window captures only its buffer keys — Space and letters fall through (per-key capture)', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    // Armed: the buffer needs digits, mode tokens, Backspace, Enter — plus
+    // the bare Delete keystroke guard over the just-made copies.
+    for (const key of ['0', '9', 'x', 'X', '*', '/', 'Backspace', 'Delete', 'Enter']) {
+      expect(t.tool.capturesKey(key), `armed must capture ${JSON.stringify(key)}`).toBe(true)
+    }
+    // Space must NEVER be captured (it always resets to Select — the
+    // Viewport's fall-through does the switch and the switch cancels the
+    // tool, quietly ending the window). Tab and letter shortcuts fall
+    // through to their global meanings too.
+    for (const key of [' ', 'Tab', 'm', 'q', 'r', 'Escape']) {
+      expect(t.tool.capturesKey(key), `armed must not capture ${JSON.stringify(key)}`).toBe(false)
+    }
+  })
+
+  it('a mid-gesture VCB (REF stage) still captures the whole keyboard, mirroring MoveTool\'s base stage', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference — now sweeping (REF)
+
+    for (const key of ['5', '.', '-', 'Backspace', 'Enter', 'q', ' ']) {
+      expect(tool.capturesKey(key), `REF stage must capture ${JSON.stringify(key)}`).toBe(true)
+    }
+  })
+
+  it('Space exit is quiet: the tool-switch cancel disarms without undoing the copies', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+    typeKeys(t.tool, '5') // even with a partial buffer typed
+    expect(t.tool.capturesKey(' ')).toBe(false)
+
+    // What the Viewport does on the fall-through: switch tools, which
+    // cancels the outgoing RotateTool.
+    t.tool.cancel()
+
+    expect(t.tool.capturingInput()).toBe(false)
+    // The committed copy is untouched — no retraction, no toast.
+    expect(t.wasmScene.scene_undo).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.onToast).not.toHaveBeenCalled()
+    // A stray Enter afterwards is inert.
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_undo).not.toHaveBeenCalled()
+  })
+
+  it('the PIVOT stage lets tool-switch shortcuts fire but still guards Delete/Backspace (no angle to type, but a live gesture to protect)', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot only — no reference yet
+    expect(tool.capturingInput()).toBe(true) // still mid-gesture
+
+    // No numeric VCB is live yet (there is no reference to measure an angle
+    // from), so tool-switch letters/digits are free to fall through to the
+    // Viewport's shortcut routing instead of being silently eaten.
+    for (const key of ['3', 'm', 'q', 'r', '5', ' ']) {
+      expect(tool.capturesKey(key), `PIVOT stage must not capture ${JSON.stringify(key)}`).toBe(false)
+    }
+
+    // Delete/Backspace ARE captured in this stage regardless — the real
+    // routing path the Viewport/App actually consult (`isCapturingInput`,
+    // Viewport.tsx ~2191-2200) prioritizes `capturesKey` over
+    // `capturingInput()` once a key is given, so `capturingInput()` alone
+    // (asserted above by the round-1 fix) is not the predicate that guards
+    // Delete here — `capturesKey` is, and it must name these two keys
+    // explicitly or a bare Delete with a pivot placed falls through to
+    // App's edit-delete and destroys the node mid-gesture (see App.tsx's
+    // Delete handler and MoveTool's identical Delete-guard doc comment).
+    expect(tool.capturesKey('Delete'), 'PIVOT stage must capture Delete').toBe(true)
+    expect(tool.capturesKey('Backspace'), 'PIVOT stage must capture Backspace').toBe(true)
+
+    // Digits/letters/Delete reaching onKey anyway (e.g. via the Viewport's
+    // uncaptured-key fallback, or because capturesKey routed it there) are
+    // harmlessly ignored in this stage — no crash, no stray measurement, no
+    // deletion (the stage has no VCB and no delete action of its own).
+    tool.onKey(makeKeyEvent('3'))
+    expect(tool.capturingInput()).toBe(true) // still just the pivot, unchanged
+    tool.onKey(makeKeyEvent('Delete'))
+    expect(tool.capturingInput()).toBe(true) // pivot untouched — no delete happened inside the tool
+
+    // Once the reference is placed (REF stage), the same keys DO capture.
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0))
+    expect(tool.capturesKey('3')).toBe(true)
+  })
+
+  it('a bare Delete keystroke mid-pivot never reaches the app-level delete handler (Viewport.isCapturingInput\'s real per-key routing)', () => {
+    // Mirrors Viewport.tsx's `isCapturingInput` (~2191-2200) exactly: with a
+    // key given, a tool with `capturesKey` is asked THAT, not
+    // `capturingInput()` — this is the actual predicate App.tsx's Delete
+    // handler consults, and the one the round-1 fix's test got wrong.
+    function isCapturingInputLike(t: RotateTool, key: string): boolean {
+      return t.capturesKey(key)
+    }
+
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot placed, mid-gesture
+
+    // What App.tsx's onDeleteKey does: skip menuActionRef('edit-delete')
+    // when isCapturingInput(ev.key) is true. It must be true here, or the
+    // pivoted node gets deleted out from under the live gesture.
+    expect(isCapturingInputLike(tool, 'Delete')).toBe(true)
+    expect(isCapturingInputLike(tool, 'Backspace')).toBe(true)
+  })
+
+  it('a new gesture (new pivot click) ends the window entirely', () => {
+    const t = makeTool()
+    commitOneCopy(t)
+
+    t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // new pivot
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Escape')) // cancel the new gesture
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_undo).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
   })
 })

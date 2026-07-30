@@ -28,6 +28,12 @@ To finish a chain *without* closing it: double-click, press `Enter` with nothing
 
 **Axis locking:** hold `Shift` to lock the segment to whichever axis it's already leaning toward, or press an arrow key for an explicit lock: `→` locks to X (red), `←` to Y (green), `↑` to Z (blue). Press `↓` (or the same arrow again) to unlock.
 
+**Axis inference:** you usually don't need the lock at all. Move roughly along an axis and the segment snaps onto it by itself, the rubber band turning that axis's colour and the tooltip naming it. Move away and it lets go — it's a suggestion, not a commitment. A held lock draws a heavier line, so you can always tell which one you have. A point you snap to always wins over an inferred axis, and so does a construction guide you placed yourself.
+
+**Locking after the first click:** an arrow key works at any point up to the moment a segment commits, not just before you start. Locking to an axis that leaves the plane you're drawing on is allowed — the line keeps going into space, and Hew starts a fresh sketch on the plane that contains your last segment and the new direction, so an L-shape drawn this way stays on one plane and can still close a face. What it won't do is silently drag the point back onto the old plane.
+
+One consequence worth knowing: an outline that ends up spread across two planes can't become a single face, because a face needs one plane. If you close a shape like that back onto its own start point, Hew tells you so rather than leaving you wondering why no face appeared.
+
 ## Rectangle (`R`)
 
 1. Click to set the first corner.
@@ -39,6 +45,10 @@ To finish a chain *without* closing it: double-click, press `Enter` with nothing
 
 1. Click to set the center.
 2. Move outward (the readout shows the radius) and click to set a point on the rim, or type an exact radius and press `Enter`.
+
+**Standing a shape up:** the arrow keys choose which plane you're drawing on, and they work *after* you've placed the centre as well as before. Press `→` with a centre already down and the circle stands vertical, hinged through that centre — the same for Rectangle, Polygon, and an Arc you haven't finished. Press the same arrow again to release it.
+
+Note the difference from the line tool: there, an arrow picks the *direction* a segment runs, so `↑` draws straight up. Here an arrow picks the *plane's own axis* — the direction it faces — so `→` and `←` give you upright planes, and `↑` gives you a flat one at the height of the point you clicked.
 
 Hew's circles are stored as regular polygons, but they remember the exact circle you drew — center and radius ride along with the shape, power the Center/Quadrant/Tangent snaps, keep extruded walls smooth on screen, and let STL export re-facet the wall at whatever resolution you pick. The stored facet count adapts to the size of the circle: small circles get 24 sides, larger ones up to 96, keeping the worst chord deviation at about half a millimeter.
 

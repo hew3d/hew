@@ -289,6 +289,19 @@ describe('MenuBar', () => {
     expect(onToggleAxes).toHaveBeenCalledOnce()
   })
 
+  it('calls onResetAxes when View > Reset Axes is mousedown-clicked', () => {
+    // Reset Axes shipped as a web-only MenuBar item with no native-menu
+    // counterpart, making it unreachable on macOS (finding 1, tool-parity
+    // §4) — App.tsx now routes this prop through the same menuActionRef
+    // dispatch the native menu uses; this test only proves the MenuBar
+    // click still reaches the prop, which the App.tsx-level wiring depends on.
+    const onResetAxes = vi.fn()
+    render(<MenuBar {...defaultProps} onResetAxes={onResetAxes} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(screen.getByText('Reset Axes'))
+    expect(onResetAxes).toHaveBeenCalledOnce()
+  })
+
   it('shows a checkmark for Grid when showGrid=true', () => {
     render(<MenuBar {...defaultProps} showGrid={true} onToggleGrid={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))

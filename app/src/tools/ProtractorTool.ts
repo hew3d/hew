@@ -21,9 +21,12 @@
  *     lighter, so lock state is visually obvious.
  *   - Shift toggles the plane lock (ignoring keydown autorepeat): unlocked →
  *     locks to the current `candidateNormal`; locked → unlocks. Arrow keys
- *     force-lock to a world axis: Up/Down → Z, Right → X, Left → Y (a
+ *     force-lock to a drawing axis: Up/Down → Z, Right → X, Left → Y (a
  *     best-effort mapping of SketchUp's arrow-axis locking — flagged for
- *     confirmation, see report). The lock PERSISTS across stages and across
+ *     confirmation, see report), read from the CURRENT drawing-axes frame
+ *     (tool-parity §4, via `axisDir` below) rather than literal world X/Y/Z —
+ *     the same conversion MoveTool/RotateTool's arrow-key locks already went
+ *     through. The lock PERSISTS across stages and across
  *     a commit (back to idle, still locked) — only Escape or a Shift-toggle
  *     -off clears it.
  *
@@ -105,6 +108,7 @@ import {
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import { planeFromSketch, SketchPickCache } from './drawPlane'
+import { getDrawingAxes } from './drawingAxes'
 
 export type OnGuideCreated = () => void
 export type OnToast = (message: string, code?: string) => void
@@ -297,7 +301,9 @@ export class ProtractorTool implements Tool {
         ...cursorDir,
       )
 
-      const match = axisColorForDirection(cursorDir, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
+      const match = axisColorForDirection(
+        cursorDir, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()), getDrawingAxes(this.wasmScene),
+      )
       const sweptDir = match !== null ? match.snapped : cursorDir
       const previewColor = match !== null ? match.color : NEUTRAL_PREVIEW_COLOR
 
@@ -395,11 +401,11 @@ export class ProtractorTool implements Tool {
     ) {
       ev.preventDefault()
       if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
-        this.lockedNormal = [0, 0, 1]
+        this.lockedNormal = this.axisDir(2)
       } else if (ev.key === 'ArrowRight') {
-        this.lockedNormal = [1, 0, 0]
+        this.lockedNormal = this.axisDir(0)
       } else {
-        this.lockedNormal = [0, 1, 0]
+        this.lockedNormal = this.axisDir(1)
       }
       this._refreshIdleDiskFromLastKnown()
       return
@@ -432,6 +438,20 @@ export class ProtractorTool implements Tool {
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────
+
+  /**
+   * Unit direction of drawing axis `axis` (0=red/X, 1=green/Y, 2=blue/Z) in
+   * the CURRENT frame (tool-parity design §4 — movable drawing axes). Reads
+   * the kernel's live frame every call (cheap — a handful of float reads
+   * through `getDrawingAxes`) rather than caching it, mirroring
+   * `MoveTool`/`RotateTool`'s identical `axisDir` helper. Replaces the old
+   * world-constant `[0,0,1]`/`[1,0,0]`/`[0,1,0]` literals the arrow-key lock
+   * used to assign directly.
+   */
+  private axisDir(axis: 0 | 1 | 2): [number, number, number] {
+    const f = getDrawingAxes(this.wasmScene)
+    return axis === 0 ? f.x : axis === 1 ? f.y : f.z
+  }
 
   /**
    * Resolve the candidate measurement-plane normal for a hover/apex snap, in
@@ -496,7 +516,9 @@ export class ProtractorTool implements Tool {
     ]
     const dir = normalize(rotated) ?? baselineDir
 
-    const match = axisColorForDirection(dir, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
+    const match = axisColorForDirection(
+      dir, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()), getDrawingAxes(this.wasmScene),
+    )
     const finalDir = match !== null ? match.snapped : dir
 
     this._commitGuide(apex, finalDir)
@@ -595,7 +617,9 @@ export class ProtractorTool implements Tool {
     const unitNormal = normalize(normal) ?? WORLD_UP
     const { u, v } = planeBasis(unitNormal)
 
-    const match = axisColorForDirection(unitNormal, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
+    const match = axisColorForDirection(
+      unitNormal, AXIS_SNAP_TOL_DOT, axisColorsForTheme(getResolvedTheme()), getDrawingAxes(this.wasmScene),
+    )
     const color = match !== null ? match.color : NEUTRAL_PREVIEW_COLOR
 
     const ringPts = new Float32Array(DISK_SEGMENTS * 3)

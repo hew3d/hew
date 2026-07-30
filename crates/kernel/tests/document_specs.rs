@@ -11,10 +11,11 @@
 //! stable across undo/redo.
 
 use kernel::{
-    BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId, Guide, ImageFormat,
-    ImportNode, ImportScene, KernelOp, KernelOpReport, Material, MaterialId, MeshRecipe, NodeId,
-    Object, ObjectId, Operand, Plane, Point3, Rgba8, SketchEdgeId, SketchError, SketchId,
-    SketchRegionId, SketchVertexId, Texture, Transform, TransformError, Vec3, WatertightState,
+    AxesFrame, AxesFrameError, BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId,
+    Guide, ImageFormat, ImportNode, ImportScene, KernelOp, KernelOpReport, Material, MaterialId,
+    MeshRecipe, NodeId, Object, ObjectId, Operand, Plane, Point3, Rgba8, SketchEdgeId, SketchError,
+    SketchId, SketchRegionId, SketchVertexId, Texture, Transform, TransformError, Vec3,
+    WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -1153,6 +1154,489 @@ fn transform_selection_refuses_empty_stale_and_degenerate() {
         approx_pt(centroid(doc.object(a).unwrap()), ca),
         "object untouched after refused transforms"
     );
+}
+
+// ------------------------------------------------------- rescale_document
+
+/// A point scaled by `factor` about the world origin — the test-side mirror
+/// of what `rescale_document` bakes into every coordinate it touches.
+fn scaled(p: Point3, factor: f64) -> Point3 {
+    Point3::ORIGIN + p.to_vec() * factor
+}
+
+/// `rescale_document` scales every world Object, every free-standing sketch,
+/// and every construction guide about the world origin, and composes into
+/// every component instance's pose — while leaving the instance's shared
+/// DEFINITION geometry untouched (SketchUp parity: an external rescale never
+/// mutates a symbol's internal geometry, only the placements of it). One
+/// undo step covers the whole document, and the `DocChange` names everything
+/// touched.
+#[test]
+fn rescale_document_scales_world_geometry_sketches_and_guides_and_composes_instance_poses() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 1.0, 1.0, 2.0, 2.0, 0.0, 1.0);
+    let (comp, inst, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+    let (inst2, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(5.0, 0.0, 0.0)))
+        .unwrap();
+
+    let s = doc.add_sketch(ground());
+    draw_rect(&mut doc, s, 3.0, 3.0, 4.0, 4.0);
+    let sc0 = sketch_centroid(&doc, s);
+
+    let line_origin = Point3::new(2.0, 3.0, 0.0);
+    let line_dir = Vec3::new(0.0, 1.0, 0.0);
+    let gl = doc.add_guide_line(line_origin, line_dir).unwrap();
+    let point_pos = Point3::new(1.0, 2.0, 3.0);
+    let gp = doc.add_guide_point(point_pos).unwrap();
+
+    let def_before: Vec<Object> = doc
+        .def_members(comp)
+        .unwrap()
+        .iter()
+        .map(|&o| doc.object(o).unwrap().clone())
+        .collect();
+    let pose1_before = doc.instance_pose(inst).unwrap();
+    let pose2_before = doc.instance_pose(inst2).unwrap();
+    let probe = Point3::new(0.3, 0.7, 0.2);
+
+    let factor = 2.5;
+    let change = doc.rescale_document(factor).expect("rescale");
+
+    // Free-standing sketch geometry scaled about the origin.
+    assert!(approx_pt(sketch_centroid(&doc, s), scaled(sc0, factor)));
+
+    // Guides scaled about the origin; a positive scale never rotates or
+    // flips a guide's direction.
+    match doc.guide(gl).unwrap() {
+        Guide::Line { origin, direction } => {
+            assert!(approx_pt(*origin, scaled(line_origin, factor)));
+            assert!(direction.approx_eq(line_dir, 1e-12));
+        }
+        Guide::Point { .. } => panic!("expected a line guide"),
+    }
+    match doc.guide(gp).unwrap() {
+        Guide::Point { position } => {
+            assert!(approx_pt(*position, scaled(point_pos, factor)));
+        }
+        Guide::Line { .. } => panic!("expected a point guide"),
+    }
+
+    // The component DEFINITION's own geometry never changes.
+    let def_after: Vec<Object> = doc
+        .def_members(comp)
+        .unwrap()
+        .iter()
+        .map(|&o| doc.object(o).unwrap().clone())
+        .collect();
+    assert_eq!(def_before.len(), def_after.len());
+    for (before, after) in def_before.iter().zip(def_after.iter()) {
+        assert!(
+            objects_equivalent(before, after),
+            "a rescale must never touch a component definition's geometry"
+        );
+    }
+
+    // Only each instance's PLACING POSE composes with the scale.
+    let world_scale = Transform::uniform_scale(factor);
+    let expected1 = pose1_before.then(&world_scale);
+    let expected2 = pose2_before.then(&world_scale);
+    assert!(
+        doc.instance_pose(inst)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(expected1.apply_point(probe), 1e-9)
+    );
+    assert!(
+        doc.instance_pose(inst2)
+            .unwrap()
+            .apply_point(probe)
+            .approx_eq(expected2.apply_point(probe), 1e-9)
+    );
+
+    // The DocChange names every touched entity...
+    assert!(change.sketches_touched.contains(&s));
+    assert!(change.guides_touched.contains(&gl));
+    assert!(change.guides_touched.contains(&gp));
+    assert!(change.instances_touched.contains(&inst));
+    assert!(change.instances_touched.contains(&inst2));
+    // ...but never a definition member: those are not world objects.
+    for &member in &doc.def_members(comp).unwrap() {
+        assert!(
+            !change.objects_touched.contains(&member),
+            "a component definition member is not a world object"
+        );
+    }
+}
+
+/// Undo restores the exact pre-scale coordinates — bit for bit, not a
+/// recomputed `1/factor` inverse (rule 9 posture: floating-point division is
+/// not multiplication's exact inverse in general, `(p·f)/f ≠ p`). Redo then
+/// reproduces the exact original post-scale coordinates, and the pair keeps
+/// doing so across several undo/redo cycles without drifting.
+#[test]
+fn rescale_document_undo_redo_is_bit_exact_never_drifts() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let gp = doc.add_guide_point(Point3::new(0.1, 0.2, 0.3)).unwrap();
+
+    let before_obj = doc.object(a).unwrap().to_polygons();
+    let before_guide = *doc.guide(gp).unwrap();
+
+    doc.rescale_document(0.1).expect("rescale");
+    let after_obj = doc.object(a).unwrap().to_polygons();
+    let after_guide = *doc.guide(gp).unwrap();
+
+    for cycle in 0..4 {
+        doc.undo().expect("undo the rescale");
+        assert_eq!(
+            doc.object(a).unwrap().to_polygons(),
+            before_obj,
+            "cycle {cycle}: undo restores the exact pre-scale vertex positions"
+        );
+        assert_eq!(
+            *doc.guide(gp).unwrap(),
+            before_guide,
+            "cycle {cycle}: undo restores the exact pre-scale guide"
+        );
+
+        doc.redo().expect("redo the rescale");
+        assert_eq!(
+            doc.object(a).unwrap().to_polygons(),
+            after_obj,
+            "cycle {cycle}: redo reproduces the exact original post-scale positions"
+        );
+        assert_eq!(
+            *doc.guide(gp).unwrap(),
+            after_guide,
+            "cycle {cycle}: redo reproduces the exact original post-scale guide"
+        );
+    }
+}
+
+/// A rescale simply skips a currently-hidden (tombstoned-undo) object — it
+/// can never resurface while the rescale stays applied (reaching it again
+/// means undoing back past the rescale itself first, which restores it in
+/// lockstep, or redoing a creation that committing the rescale already made
+/// unreachable — see the doc comment on `Document::rescale_document`). This
+/// confirms the skip is benign: visible state is unaffected either way, and
+/// undoing the rescale leaves the hidden object exactly as it was.
+#[test]
+fn rescale_document_leaves_a_hidden_object_alone() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let _b = extrude_box(&mut doc, 4.0, 4.0, 5.0, 5.0, 0.0, 1.0);
+    doc.undo().expect("undo b's creation");
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![a],
+        "b is hidden (tombstoned)"
+    );
+
+    let ca0 = centroid(doc.object(a).unwrap());
+    doc.rescale_document(3.0)
+        .expect("rescale while b is hidden");
+    assert!(approx_pt(
+        centroid(doc.object(a).unwrap()),
+        scaled(ca0, 3.0)
+    ));
+    assert_eq!(doc.visible_object_ids(), vec![a], "b stays hidden");
+
+    doc.undo().expect("undo the rescale");
+    assert!(approx_pt(centroid(doc.object(a).unwrap()), ca0));
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![a],
+        "b is still hidden after undoing the rescale"
+    );
+}
+
+/// A rescale must carry the movable drawing axes' origin along with the rest
+/// of the model (delta-review Finding 2): after moving the axes off the
+/// world origin, everything frame-relative (the axes gizmo, frame-relative
+/// drawing/inference) reads through [`Document::axes`], so a rescale that
+/// scales the geometry but leaves the frame's origin fixed detaches the two.
+/// Directions (`x`/`y`) are unit vectors and stay untouched. Undo restores
+/// the RECORDED pre-scale origin verbatim (rule 9 posture, same as every
+/// other entity this op touches), and the whole document hash — which
+/// already covers `axes` via `save()` — round-trips exactly.
+#[test]
+fn rescale_document_scales_the_movable_axes_frame_origin_and_undo_restores_it_verbatim() {
+    let mut doc = Document::new();
+    let _a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_axes(
+        Point3::new(10.0, 5.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    )
+    .expect("valid frame");
+    let axes_before = doc.axes();
+    let hash_before = doc.state_hash();
+
+    doc.rescale_document(2.0).expect("rescale");
+
+    let axes_after = doc.axes();
+    assert!(
+        approx_pt(axes_after.origin, Point3::new(20.0, 10.0, 0.0)),
+        "the axes frame's origin must scale in lockstep with the geometry it anchors, \
+         got {:?}",
+        axes_after.origin
+    );
+    assert_eq!(
+        axes_after.x, axes_before.x,
+        "x is a unit direction, untouched by a rescale"
+    );
+    assert_eq!(
+        axes_after.y, axes_before.y,
+        "y is a unit direction, untouched by a rescale"
+    );
+
+    doc.undo().expect("undo the rescale");
+    assert_eq!(
+        doc.axes(),
+        axes_before,
+        "undo restores the exact pre-scale axes frame verbatim"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash_before,
+        "undo round-trips the whole document hash (which already covers axes via save())"
+    );
+}
+
+/// Non-finite, zero, and negative factors are refused typed; the document is
+/// untouched by every refusal (DEVELOPMENT.md rule 4 — nothing is silently
+/// clamped or repaired).
+#[test]
+fn rescale_document_refuses_non_finite_zero_and_negative_factors() {
+    let mut doc = Document::new();
+    let _a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let hash0 = doc.state_hash();
+
+    for bad in [
+        0.0,
+        -1.0,
+        -0.0001,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        assert_eq!(
+            doc.rescale_document(bad),
+            Err(DocumentError::InvalidRescaleFactor),
+            "factor {bad} must be refused"
+        );
+    }
+    assert_eq!(
+        doc.state_hash(),
+        hash0,
+        "the document is untouched by every refused factor"
+    );
+}
+
+// ------------------------------------------------------- movable drawing axes
+
+/// A fresh document's axes are world identity; `set_axes` moves the frame,
+/// updates the derived blue axis, and reports nothing touched (no geometry
+/// moves — only the frame itself changes).
+#[test]
+fn set_axes_moves_the_frame_and_touches_no_geometry() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    assert_eq!(doc.axes(), AxesFrame::IDENTITY);
+
+    let before = centroid(doc.object(a).unwrap());
+    let origin = Point3::new(1.0, 2.0, 3.0);
+    let x = Vec3::new(0.0, 1.0, 0.0);
+    let y = Vec3::new(-1.0, 0.0, 0.0);
+    let change = doc.set_axes(origin, x, y).expect("valid orthonormal frame");
+
+    let frame = doc.axes();
+    assert_eq!(frame.origin, origin);
+    assert_eq!(frame.x, x);
+    assert_eq!(frame.y, y);
+    assert!((frame.z() - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-12);
+
+    assert!(change.objects_touched.is_empty());
+    assert!(change.sketches_touched.is_empty());
+    assert!(change.instances_touched.is_empty());
+    assert!(change.guides_touched.is_empty());
+    assert!(
+        approx_pt(centroid(doc.object(a).unwrap()), before),
+        "set_axes must not move any geometry"
+    );
+}
+
+/// Non-finite, non-unit, and non-perpendicular candidates are refused typed;
+/// the document (both its axes and every other bit of state) is untouched by
+/// every refusal (DEVELOPMENT.md rule 4 — nothing is silently renormalized).
+#[test]
+fn set_axes_refuses_non_finite_and_non_orthonormal_frames() {
+    let mut doc = Document::new();
+    let hash0 = doc.state_hash();
+
+    // Non-finite origin.
+    assert_eq!(
+        doc.set_axes(
+            Point3::new(f64::NAN, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ),
+        Err(DocumentError::InvalidAxesFrame(AxesFrameError::NonFinite))
+    );
+    // Non-finite direction.
+    assert_eq!(
+        doc.set_axes(
+            Point3::ORIGIN,
+            Vec3::new(f64::INFINITY, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ),
+        Err(DocumentError::InvalidAxesFrame(AxesFrameError::NonFinite))
+    );
+    // Non-unit length.
+    assert_eq!(
+        doc.set_axes(
+            Point3::ORIGIN,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ),
+        Err(DocumentError::InvalidAxesFrame(
+            AxesFrameError::NonOrthonormal
+        ))
+    );
+    // Not perpendicular.
+    assert_eq!(
+        doc.set_axes(
+            Point3::ORIGIN,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.6, 0.8, 0.0),
+        ),
+        Err(DocumentError::InvalidAxesFrame(
+            AxesFrameError::NonOrthonormal
+        ))
+    );
+
+    assert_eq!(doc.axes(), AxesFrame::IDENTITY, "axes stay at identity");
+    assert_eq!(
+        doc.state_hash(),
+        hash0,
+        "the document is untouched by every refused frame"
+    );
+}
+
+/// Undo restores the exact RECORDED prior frame — bit for bit, never a
+/// recomputed inverse (rule 9 posture: an `AxesFrame` is a stored value
+/// swapped in and out, not a transform baked into geometry). Redo then
+/// reproduces the exact committed frame, and the pair keeps doing so across
+/// several undo/redo cycles without drifting.
+#[test]
+fn set_axes_undo_redo_is_bit_exact_never_drifts() {
+    let mut doc = Document::new();
+    let before = doc.axes();
+    assert_eq!(before, AxesFrame::IDENTITY);
+
+    let origin = Point3::new(3.0, -1.0, 2.0);
+    let x = Vec3::new(0.0, 0.0, 1.0);
+    let y = Vec3::new(0.0, 1.0, 0.0);
+    doc.set_axes(origin, x, y).expect("valid frame");
+    let after = doc.axes();
+
+    for cycle in 0..4 {
+        doc.undo().expect("undo the axes move");
+        assert_eq!(
+            doc.axes(),
+            before,
+            "cycle {cycle}: undo restores the exact prior frame"
+        );
+
+        doc.redo().expect("redo the axes move");
+        assert_eq!(
+            doc.axes(),
+            after,
+            "cycle {cycle}: redo reproduces the exact committed frame"
+        );
+    }
+}
+
+/// A second `set_axes` (e.g. the Axes tool run twice, or a "Reset Axes" back
+/// to identity) is its own undo step layered on the first — undoing twice
+/// walks back through both frames in reverse.
+#[test]
+fn set_axes_stacks_as_independent_undo_steps() {
+    let mut doc = Document::new();
+    let identity = doc.axes();
+
+    doc.set_axes(
+        Point3::new(1.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    )
+    .expect("first move");
+    let first = doc.axes();
+
+    doc.set_axes(
+        Point3::new(2.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+    )
+    .expect("second move");
+    let second = doc.axes();
+    assert_ne!(first, second);
+
+    doc.undo().expect("undo the second move");
+    assert_eq!(doc.axes(), first);
+    doc.undo().expect("undo the first move");
+    assert_eq!(doc.axes(), identity);
+}
+
+proptest! {
+    /// Property (DEVELOPMENT.md rule 3): for an arbitrary positive factor,
+    /// rescaling a mixed document (object + sketch + guide + component
+    /// instance) scales every baked centroid and guide position by exactly
+    /// the factor, scales enclosed volume by the factor cubed, never touches
+    /// the component definition, and one undo restores the exact pre-scale
+    /// object bit for bit.
+    #[test]
+    fn rescale_document_scales_by_exactly_the_factor_and_round_trips(
+        factor in 0.1..8.0f64,
+    ) {
+        let mut doc = Document::new();
+        let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+        let (comp, inst, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+        let s = doc.add_sketch(ground());
+        draw_rect(&mut doc, s, 2.0, 2.0, 3.0, 3.0);
+        let gp = doc.add_guide_point(Point3::new(1.5, 0.5, 0.0)).unwrap();
+
+        let def_before = doc.object(*doc.def_members(comp).unwrap().first().unwrap()).unwrap().clone();
+        let before_polys = doc.object(*doc.def_members(comp).unwrap().first().unwrap()).unwrap().to_polygons();
+        let v0 = def_before.to_polygons().1.len(); // sanity: a real solid has faces
+        prop_assert!(v0 > 0);
+        let sc0 = sketch_centroid(&doc, s);
+        let pose0 = doc.instance_pose(inst).unwrap();
+        let probe = Point3::new(0.2, 0.4, 0.1);
+
+        doc.rescale_document(factor).expect("rescale");
+
+        let member = *doc.def_members(comp).unwrap().first().unwrap();
+        // The definition member's OWN geometry is untouched by the rescale
+        // (only the instance pose composes with it).
+        prop_assert!(objects_equivalent(doc.object(member).unwrap(), &def_before));
+        prop_assert!(approx_pt(sketch_centroid(&doc, s), scaled(sc0, factor)));
+        match doc.guide(gp).unwrap() {
+            Guide::Point { position } => {
+                prop_assert!(approx_pt(*position, scaled(Point3::new(1.5, 0.5, 0.0), factor)));
+            }
+            Guide::Line { .. } => prop_assert!(false, "expected a point guide"),
+        }
+        let expected_pose = pose0.then(&Transform::uniform_scale(factor));
+        prop_assert!(
+            doc.instance_pose(inst).unwrap().apply_point(probe)
+                .approx_eq(expected_pose.apply_point(probe), 1e-6)
+        );
+
+        doc.undo().expect("undo the rescale");
+        prop_assert_eq!(doc.object(member).unwrap().to_polygons(), before_polys);
+    }
 }
 
 /// Group then ungroup restores the original top-level shape; the members keep
@@ -6463,6 +6947,137 @@ fn follow_me_face_profile_sweeps_a_separate_object() {
     assert!(doc.visible_object_ids().contains(&cube));
     doc.redo().expect("redo sweep");
     assert!(doc.visible_object_ids().contains(&swept));
+}
+
+/// `extrude_face_as_new_object` (design tool-parity §2, Ctrl-push/pull):
+/// straight-extrudes a solid face's own boundary into a NEW top-level
+/// Object, leaving the source untouched — a straight-line sibling of
+/// `follow_me_face_profile_sweeps_a_separate_object` above, sharing the
+/// same non-merging insertion.
+#[test]
+fn extrude_face_as_new_object_births_a_coincident_solid_leaving_the_source_untouched() {
+    let (mut doc, cube) = boxed_document();
+    let original = doc.object(cube).unwrap().clone();
+    let top = {
+        let obj = doc.object(cube).expect("box live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("z = 1 top face")
+    };
+
+    let (boss, change) = doc
+        .extrude_face_as_new_object(cube, top, 2.0)
+        .expect("extrude the top face into a new object");
+
+    assert_ne!(boss, cube);
+    assert!(doc.visible_object_ids().contains(&boss));
+    assert!(doc.visible_object_ids().contains(&cube), "source untouched");
+    assert!(
+        objects_equivalent(doc.object(cube).unwrap(), &original),
+        "the source solid's geometry is byte-for-byte untouched"
+    );
+    assert_eq!(change.objects_touched, vec![boss]);
+
+    let new_obj = doc.object(boss).expect("new object live");
+    assert_eq!(new_obj.watertight(), WatertightState::Watertight);
+    // The 4 x 2 top face extruded by 2.0: an exact 4 x 2 x 2 slab, coincident
+    // with (sharing a footprint with, not merged into) the source's top face.
+    assert!((signed_volume(new_obj).abs() - 16.0).abs() < 1e-9);
+    assert!(approx_pt(centroid(new_obj), Point3::new(2.0, 1.0, 2.0)));
+
+    // One undo hides only the new object; the source stays exactly as it was
+    // the whole time. Redo restores it.
+    doc.undo().expect("undo the extrude");
+    assert!(!doc.visible_object_ids().contains(&boss));
+    assert!(doc.visible_object_ids().contains(&cube));
+    assert!(objects_equivalent(doc.object(cube).unwrap(), &original));
+    doc.redo().expect("redo the extrude");
+    assert!(doc.visible_object_ids().contains(&boss));
+}
+
+/// A NEGATIVE distance is honored too — Hew's solids interpenetrate freely
+/// (ARCHITECTURE.md), so extruding "into" the source simply births a new
+/// solid occupying that space, still leaving the source's own volume
+/// untouched.
+#[test]
+fn extrude_face_as_new_object_accepts_a_negative_distance() {
+    let (mut doc, cube) = boxed_document();
+    let original = doc.object(cube).unwrap().clone();
+    let top = {
+        let obj = doc.object(cube).expect("box live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("z = 1 top face")
+    };
+
+    let (boss, _) = doc
+        .extrude_face_as_new_object(cube, top, -0.5)
+        .expect("a negative distance extrudes the other way");
+    let new_obj = doc.object(boss).expect("new object live");
+    assert_eq!(new_obj.watertight(), WatertightState::Watertight);
+    assert!((signed_volume(new_obj).abs() - 4.0).abs() < 1e-9);
+    assert!(
+        objects_equivalent(doc.object(cube).unwrap(), &original),
+        "the source is untouched even when the new solid overlaps its interior"
+    );
+}
+
+/// Typed refusals: a stale/hidden object, a stale face, a definition-member
+/// face (only world objects have a face to extrude at world scale), and a
+/// degenerate distance. The document is untouched by every refusal.
+#[test]
+fn extrude_face_as_new_object_refuses_stale_inputs_and_touches_nothing() {
+    let (mut doc, cube) = boxed_document();
+    let top = {
+        let obj = doc.object(cube).expect("box live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("top face")
+    };
+    let hash0 = doc.state_hash();
+
+    assert_eq!(
+        doc.extrude_face_as_new_object(ObjectId::default(), top, 1.0),
+        Err(DocumentError::UnknownObject)
+    );
+    assert_eq!(
+        doc.extrude_face_as_new_object(cube, FaceId::default(), 1.0),
+        Err(DocumentError::UnknownFace)
+    );
+    assert_eq!(
+        doc.extrude_face_as_new_object(cube, top, 1e-12),
+        Err(DocumentError::Extrude(
+            kernel::ExtrudeError::DistanceTooSmall
+        ))
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash0,
+        "the document is untouched by every refusal so far"
+    );
+
+    // A definition member's face is not reachable at world scale — `cube`
+    // itself becomes one via `make_component` (a real, successful mutation,
+    // not a refusal), so the untouched-check below is against the hash
+    // AFTER that legitimate change.
+    let (_comp, _inst, _) = doc.make_component(&[NodeId::Object(cube)]).unwrap();
+    let hash1 = doc.state_hash();
+    assert_eq!(
+        doc.extrude_face_as_new_object(cube, top, 1.0),
+        Err(DocumentError::UnknownObject),
+        "cube is now a definition member, not a world object"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash1,
+        "the document is untouched by the definition-member refusal"
+    );
 }
 
 #[test]

@@ -32,7 +32,7 @@ import type { DrawPlane } from '../tools/drawPlane'
 import { SnapService } from './snapService'
 import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
-import { SectionManager } from './sectionManager'
+import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import * as inputRecorder from '../recording/inputRecorder'
 import { exportSceneToGlb } from '../io/exporters/gltfExport'
 import { exportSceneToStl, type StlBuildResult } from '../io/exporters/stlExport'
@@ -50,7 +50,8 @@ import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
-import { TapeMeasureTool } from '../tools/TapeMeasureTool'
+import { TapeMeasureTool, type RescaleConfirmInfo } from '../tools/TapeMeasureTool'
+export type { RescaleConfirmInfo } from '../tools/TapeMeasureTool'
 import { ProtractorTool } from '../tools/ProtractorTool'
 import { SliceTool } from '../tools/SliceTool'
 import { SectionPlaneTool } from '../tools/SectionPlaneTool'
@@ -60,10 +61,22 @@ import { PositionCameraTool } from '../tools/PositionCameraTool'
 import { LookAroundTool } from '../tools/LookAroundTool'
 import { WalkTool } from '../tools/WalkTool'
 import { DEFAULT_EYE_HEIGHT_M, type V3 as WalkV3 } from '../tools/cameraWalkMath'
+import { AxesTool } from '../tools/AxesTool'
+import { getDrawingAxes, type DrawingAxes } from '../tools/drawingAxes'
 import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray, ApertureBasis } from './math'
-import { axisDashGapWorldFromWorldPerPixel, orthoZoomBounds, tanHalfFovRad } from './math'
+import {
+  axisDashGapWorld,
+  axisDashGapWorldFromWorldPerPixel,
+  orthoZoomBounds,
+  tanHalfFovRad,
+  scaleCameraAboutOrigin,
+  scaleViewLimits,
+  zoomExtentsViewLimits,
+  MOUNT_LIMITS,
+  HOME_EYE_OFFSET,
+} from './math'
 import { CameraRig, type Projection, isBehindCamera } from './cameraRig'
 import { fovReadoutText, activeCameraToolForName } from './fovReadout'
 import { parseFovEntry } from './fovUnits'
@@ -75,7 +88,7 @@ import {
   type FovDragState,
 } from './fovDrag'
 import { shouldSkipToolSwitch } from './toolSwitchGuard'
-import type { Snap, Tool, EditContext } from '../tools/types'
+import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
@@ -86,6 +99,7 @@ import {
   finishZoomWindowDrag as finishZoomWindowDragRect,
   type ZoomWindowDragState,
 } from './zoomWindowDrag'
+import { CleanModifierTap } from './cleanModifierTap'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme } from '../settings/theme'
@@ -180,12 +194,20 @@ function buildSoftwareNotice(onDismiss: () => void): HTMLDivElement {
  * can call `axisColorForDirection` itself, keeping this callback a thin,
  * additive forward of data already available at the existing pointer-move
  * call site — no new geometry logic added to Viewport.tsx.
+ *
+ * `frame` is the drawing-axes frame `direction` should be tested against
+ * (tool-parity §4 — movable drawing axes): `publishSnapCues` reads it fresh
+ * via `getDrawingAxes(wasmScene)` alongside `direction`, so the tooltip/dot
+ * color a moved frame's own axis correctly instead of dropping to neutral.
+ * Undefined only if a caller builds `InferenceInfo` without it (treated as
+ * world identity downstream, in `inferenceColor.ts`).
  */
 export interface InferenceInfo {
   kind: string
   screenX: number
   screenY: number
   direction?: [number, number, number]
+  frame?: DrawingAxes
 }
 
 interface Props {
@@ -273,6 +295,11 @@ interface Props {
   apiRef?: React.MutableRefObject<ViewportApi | null>
   /** Called with the live measurement text from tools that support VCB entry. */
   onMeasurement?: (text: string) => void
+  /** Fired when the Tape Measure tool arms a "resize the model?" confirmation
+   *  (design tool-parity §3): the parent renders the confirmation modal and
+   *  resolves it via `ViewportApi.confirmPendingRescale` /
+   *  `cancelPendingRescale`. */
+  onRescaleArmed?: (info: RescaleConfirmInfo) => void
   /** Fired when a pointer-drag camera navigation (orbit/pan/dolly-drag via
    * OrbitControls) starts (true) / ends (false) —; App.tsx fades the
    * contextual dock out while active. Wheel dollies are deliberately NOT
@@ -380,6 +407,15 @@ export interface ViewportApi {
   runExplodeInstance: (instanceId: bigint) => bigint[] | null
   /** Detach an instance onto a private copy of its definition. Returns the new component handle. */
   runMakeUnique: (instanceId: bigint) => bigint | null
+  /** Resolve a pending Tape Measure "resize the model?" confirmation
+   *  (design tool-parity §3): apply the armed `rescale_document` call and
+   *  refresh the whole scene. A no-op if the active tool isn't (still) the
+   *  Tape Measure tool with a pending confirmation. */
+  confirmPendingRescale: () => void
+  /** Decline a pending rescale confirmation: falls through to the normal
+   *  guide-point commit the typed distance would have produced without the
+   *  arm. A no-op under the same conditions as `confirmPendingRescale`. */
+  cancelPendingRescale: () => void
   /**
    * Arms a one-shot 3D Text placement tool (docs/design/3d-text.md) with
    * the dialog's already-resolved glyph geometry — the ghost follows the
@@ -527,6 +563,10 @@ export interface ViewportApi {
   setGuidesVisible: (visible: boolean) => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   deleteAllGuides: () => void
+  /** Reset the movable drawing axes (tool-parity §4) to world identity
+   *  (View ▸ Reset Axes) — same commit path as the Axes tool's own
+   *  `set_axes`, one undo step. */
+  resetAxes: () => void
   /** Delete a single picked construction guide. */
   runDeleteGuide: (id: bigint) => void
   /**
@@ -650,10 +690,20 @@ const ORIGIN_AXIS_COLORS: Record<'light' | 'dark', { x: [number, number, number]
   light: { x: [0.839, 0.271, 0.294], y: [0.157, 0.627, 0.333], z: [0.176, 0.471, 0.882] },
 }
 
-/** World origin axis lines, colored for `theme`, long enough (150 — beyond
- * the camera's far-clip of 100) to always run off the edge of the visible
- * world in every direction, reading as "infinite" without needing a shader
- *.
+/** Each axis half's nominal world length — beyond the camera's DEFAULT
+ * far-clip of 100 (see `buildOriginAxes`) — before any Tape Measure rescale
+ * has scaled it. Exported as a named constant (not just a literal `150` at
+ * the one call site) because `Viewport.tsx`'s mount effect also needs it as
+ * the SEED value for `axesHalfLength`, the running length a rescale scales
+ * in lockstep with the camera's far-clip (see `applyRescaleToView`) so the
+ * "always beyond far" invariant below keeps holding after the model's size
+ * changes. */
+export const AXIS_HALF_LENGTH_DEFAULT = 150
+
+/** World origin axis lines, colored for `theme`, `halfLength` long (beyond
+ * the camera's far-clip at whatever scale the document is currently at) to
+ * always run off the edge of the visible world in every direction, reading
+ * as "infinite" without needing a shader.
  *
  * Rendered as fat lines (`Line2`/`LineMaterial`) rather than `LineBasicMaterial`
  * because WebGL ignores `linewidth` on plain lines — every line is 1px, which
@@ -920,11 +970,11 @@ function clampOriginAxes(group: THREE.Group, rig: CameraRig, viewportHeightPx: n
 }
 const _axisView = new THREE.Matrix4()
 
-function buildOriginAxes(theme: 'light' | 'dark'): THREE.Group {
+function buildOriginAxes(theme: 'light' | 'dark', halfLength: number = AXIS_HALF_LENGTH_DEFAULT): THREE.Group {
   const group = new THREE.Group()
   group.name = 'OriginAxes'
 
-  const L = 150
+  const L = halfLength
   // Exactly at Z=0 — the axes must be geometrically coplanar with the ground
   // grid and ground sketches at every zoom (a former +0.002 world-space lift
   // read as the axes floating above a cm-scale sketch). The grid is a
@@ -943,6 +993,40 @@ function buildOriginAxes(theme: 'light' | 'dark'): THREE.Group {
   group.add(buildAxisLine([0, 0, 0], [0, 0, -L], zc, true))
 
   return group
+}
+
+// Scratch objects for `updateOriginAxesFrame`, reused across calls (every
+// render frame) to avoid an allocation per frame — same pattern as
+// `_axisView` above.
+const _axesBasis = new THREE.Matrix4()
+const _axesQuat = new THREE.Quaternion()
+
+/**
+ * Orient the `OriginAxes` group to the document's current movable drawing
+ * axes (tool-parity §4): the group's position becomes the frame's origin
+ * and its rotation the basis spanned by the frame's red/green/blue
+ * directions, so the gizmo built by `buildOriginAxes` (always in LOCAL
+ * space, at the local origin along local X/Y/Z) renders at wherever the
+ * frame currently is — while `buildOriginAxes`'s own per-segment coloring
+ * (X=red/Y=green/Z=blue, tied to axis INDEX) and `clampOriginAxes`'s
+ * frustum-clip math stay untouched, exactly as before a frame move.
+ *
+ * Cheap (a `Scene::axes()` call plus one quaternion-from-basis conversion)
+ * so this runs unconditionally every frame — no cache/dirty-check needed.
+ * At world identity this sets position (0,0,0) and an identity quaternion,
+ * so an untouched document's gizmo renders pixel-identical to before this
+ * existed.
+ */
+function updateOriginAxesFrame(group: THREE.Group, wasmScene: WasmScene): void {
+  const frame = getDrawingAxes(wasmScene)
+  _axesBasis.makeBasis(
+    new THREE.Vector3(...frame.x),
+    new THREE.Vector3(...frame.y),
+    new THREE.Vector3(...frame.z),
+  )
+  _axesQuat.setFromRotationMatrix(_axesBasis)
+  group.position.set(frame.origin[0], frame.origin[1], frame.origin[2])
+  group.quaternion.copy(_axesQuat)
 }
 
 /** Point every axis `LineMaterial` at the current canvas pixel size — required
@@ -1424,6 +1508,7 @@ export default function Viewport({
   onHistoryChanged,
   apiRef,
   onMeasurement,
+  onRescaleArmed,
   onCameraDragChange,
   onHoverSketchRegionChange,
   currentMaterialId = MATERIAL_SENTINEL,
@@ -1465,6 +1550,8 @@ export default function Viewport({
   apiRefRef.current = apiRef
   const onMeasurementRef = useRef(onMeasurement)
   onMeasurementRef.current = onMeasurement
+  const onRescaleArmedRef = useRef(onRescaleArmed)
+  onRescaleArmedRef.current = onRescaleArmed
   const onCameraDragChangeRef = useRef(onCameraDragChange)
   onCameraDragChangeRef.current = onCameraDragChange
   const onHoverSketchRegionChangeRef = useRef(onHoverSketchRegionChange)
@@ -1621,14 +1708,20 @@ export default function Viewport({
     // raycasting/render/pose call sites throughout this effect needed NO
     // change beyond this declaration and the projection-specific ones this
     // effort converts explicitly.
-    const rig = new CameraRig(el.clientWidth / el.clientHeight, 0.01, 100)
+    const rig = new CameraRig(el.clientWidth / el.clientHeight, MOUNT_LIMITS.near, MOUNT_LIMITS.far)
     let camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = rig.active
     // Person-scale default: frames a ~2–3 m region; classic SketchUp 3/4 angle.
     // Distance ≈ 4.7 m; a 1.8 m figure reads as substantial, not dwarfed.
     // Scaled down for small-scale display units (cm/mm/inches imply a small
     // model — see homeFramingScale); the direction is always the same 3/4 view.
+    // `HOME_EYE_OFFSET` (math.ts) is the single source `MOUNT_FIT_DISTANCE`
+    // is also derived from — see its doc comment (delta-review Finding 3).
     const homeScale = homeFramingScale(getLengthUnit())
-    rig.perspective.position.set(3.5 * homeScale, -3.0 * homeScale, 2.5 * homeScale)
+    rig.perspective.position.set(
+      HOME_EYE_OFFSET[0] * homeScale,
+      HOME_EYE_OFFSET[1] * homeScale,
+      HOME_EYE_OFFSET[2] * homeScale,
+    )
     rig.perspective.up.set(0, 0, 1)
     rig.perspective.lookAt(0, 0, 0)
 
@@ -1674,7 +1767,12 @@ export default function Viewport({
     // `let`, not `const`: rebuilt on a theme change (static vertex-color
     // geometry, not a material .color that can just be reassigned) — the
     // grid, in contrast, only needs a cheap uniform write via `setColors()`.
-    let originAxes = buildOriginAxes(getResolvedTheme())
+    // `axesHalfLength` tracks the CURRENT (possibly rescaled — see
+    // `applyRescaleToView`) half-length passed to every `buildOriginAxes`
+    // rebuild, theme swaps included, so a rescale's lengthening survives a
+    // later theme change instead of silently resetting to the default.
+    let axesHalfLength = AXIS_HALF_LENGTH_DEFAULT
+    let originAxes = buildOriginAxes(getResolvedTheme(), axesHalfLength)
     updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
     // Seed every other fat-line material (sketch edges, tool-preview
     // rubber-bands) at the initial canvas size too — mirrors the axes call
@@ -1700,6 +1798,20 @@ export default function Viewport({
       })
     }
 
+    // Shared dispose+rebuild used both by live theme reactivity (below) and
+    // by `applyRescaleToView`: rebuilds `originAxes` at `theme` and whatever
+    // `axesHalfLength` currently is (a rescale updates that variable BEFORE
+    // calling this), preserving visibility across the rebuild either way.
+    function rebuildOriginAxes(theme: 'light' | 'dark'): void {
+      const wasVisible = originAxes.visible
+      threeScene.remove(originAxes)
+      disposeOriginAxes(originAxes)
+      originAxes = buildOriginAxes(theme, axesHalfLength)
+      updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
+      originAxes.visible = wasVisible
+      threeScene.add(originAxes)
+    }
+
     // Live theme reactivity: Settings > Theme can change at any time while
     // the viewport is mounted, so the clear color, light rig, and ground
     // plane need to follow it without a reload — everything else in the app
@@ -1712,13 +1824,7 @@ export default function Viewport({
       dirLight.intensity = rig.directional
       const gridColors = GROUND_GRID_COLORS[theme]
       infiniteGrid.setColors(gridColors.ground, gridColors.minor, gridColors.major)
-      const wasVisible = originAxes.visible
-      threeScene.remove(originAxes)
-      disposeOriginAxes(originAxes)
-      originAxes = buildOriginAxes(theme)
-      updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
-      originAxes.visible = wasVisible
-      threeScene.add(originAxes)
+      rebuildOriginAxes(theme)
       // The edit-context dim opacity is theme-tuned too (component-edit-
       // parity.md Finding 2) — re-apply it so a context already active when
       // the toggle fires reads correctly right away.
@@ -2766,13 +2872,14 @@ export default function Viewport({
     }
 
     /**
-     * Quietly close Move's armed ×N / /N window, if any. Explicit document
-     * commands — delete, undo, redo — are deliberate and must execute, but
-     * they end the refinement: without this, the window's keyboard capture
-     * outlives it (Delete silently no-ops, bare-letter tool shortcuts feed
-     * a stale VCB buffer until Esc). Only the ambiguous bare
-     * Delete/Backspace KEYSTROKE stays guarded upstream by capturingInput —
-     * see MoveTool.capturingInput / disarmArray.
+     * Quietly close the active tool's armed ×N / /N window, if any (Move's
+     * or Rotate's). Explicit document commands — delete, undo, redo — are
+     * deliberate and must execute, but they end the refinement: without
+     * this, the window's keyboard capture outlives it (Delete silently
+     * no-ops, bare-letter tool shortcuts feed a stale VCB buffer until Esc).
+     * Only the ambiguous bare Delete/Backspace KEYSTROKE stays guarded
+     * upstream by capturingInput — see MoveTool/RotateTool's
+     * capturingInput / disarmArray.
      */
     function disarmActiveArrayWindow(): void {
       const activeTool = toolController.activeTool
@@ -2954,6 +3061,21 @@ export default function Viewport({
       }
     }
 
+    // The confirmation modal's Confirm/Cancel resolve into whichever
+    // TapeMeasureTool instance is currently active — the overlay blocks
+    // further viewport interaction while it's up, so the active tool cannot
+    // change out from under it, but re-resolving through `toolController`
+    // (rather than caching the instance at arm time) costs nothing and
+    // degrades safely (a silent no-op) if it somehow did.
+    function confirmPendingRescale(): void {
+      const at = toolController.activeTool
+      if (at instanceof TapeMeasureTool) at.confirmRescale()
+    }
+    function cancelPendingRescale(): void {
+      const at = toolController.activeTool
+      if (at instanceof TapeMeasureTool) at.cancelRescale()
+    }
+
     function notifyLoaded(): void {
       // A new/loaded document replaced the Scene — every plane's cached
       // sketch handle, and any handle the active tool cached itself, is now
@@ -3019,6 +3141,14 @@ export default function Viewport({
         change.free()
       }
       sceneRenderer.syncPaletteOpacity()
+      // Notify the active tool its own cached descriptions of committed
+      // kernel geometry may now be stale (`onHistoryChanged`, `types.ts`) —
+      // this function is the single choke point both `runUndo` and
+      // `runRedo` route through, so every undo/redo entry point reaches it.
+      const historyChangedTool = toolController.activeTool
+      if ('onHistoryChanged' in historyChangedTool) {
+        (historyChangedTool as { onHistoryChanged(): void }).onHistoryChanged()
+      }
     }
 
     // The shared undo/redo choke point: the Edit menu and command palette
@@ -3054,6 +3184,55 @@ export default function Viewport({
       }
     }
 
+    /**
+     * Rescales EVERY world-length view quantity that must stay in lockstep
+     * with the camera's far-clip — `near`/`far`/`minDistance`/`maxDistance`
+     * (`scaleViewLimits`), the ground grid's plane footprint
+     * (`InfiniteGrid.scaleAboutOrigin`), and the origin axes' half-length
+     * (`axesHalfLength` + `rebuildOriginAxes`) — by the SAME `ratio`
+     * (new-far / current-far, or an equivalent already-scaled-consistently
+     * ratio; see the two callers below for how each derives it).
+     *
+     * This is the ONE place all three call sites that change `far` route
+     * through (`applyRescaleToView`, `zoomExtents`, `setStandardView`), so
+     * the "grid/axes stay comfortably beyond the frustum's far clip"
+     * invariant holds BY CONSTRUCTION on every path that changes `far`,
+     * instead of needing to be re-established ad hoc at each one
+     * (delta-review Finding 1: `zoomExtents`' resync moved `far` to a fresh,
+     * ground-truth value without this, permanently desyncing the grid/axes
+     * from it — visibly, on any never-rescaled scene with model radius
+     * greater than roughly 2.7 m, since `far` there overshoots the fixed
+     * 150 m axis half-length).
+     *
+     * Deliberately does NOT touch the section plane — see
+     * `applyRescaleToView`, the one caller that also needs to move it, for
+     * why scaling it is conditional on THAT caller alone.
+     *
+     * A ratio of 1 is a no-op fast path (also avoids a spurious axes
+     * rebuild when nothing actually changed).
+     */
+    function syncWorldLengthViewState(ratio: number): void {
+      // A degenerate frame (a point-like visible bounding box gives fit
+      // distance 0, hence ratio 0; a previously zeroed far gives Infinity)
+      // must never multiply into the view state: unlike the absolute
+      // assignment this ratio form replaced, a single 0 or NaN would
+      // poison every later multiplicative sync unrecoverably.
+      if (ratio === 1 || !Number.isFinite(ratio) || ratio <= 0) return
+      const limits = scaleViewLimits(
+        { near: camera.near, far: camera.far, minDistance: controls.minDistance, maxDistance: controls.maxDistance },
+        ratio,
+      )
+      camera.near = limits.near
+      camera.far = limits.far
+      controls.minDistance = limits.minDistance
+      controls.maxDistance = limits.maxDistance
+      camera.updateProjectionMatrix()
+
+      infiniteGrid.scaleAboutOrigin(ratio)
+      axesHalfLength *= ratio
+      rebuildOriginAxes(getResolvedTheme())
+    }
+
     function zoomExtents(): void {
       // Compute the world bounding box over all rendered model geometry:
       // objects, instances, AND sketches — a document that is only a drawn
@@ -3083,6 +3262,36 @@ export default function Viewport({
       // distance at all.
       const halfDiag = box.getBoundingSphere(new THREE.Sphere()).radius
       const distance = rig.perspectiveFramingDistance(halfDiag, 1.2)
+
+      // Re-derive the view limits from THIS fit distance (delta-review
+      // Finding 1) — the scene bounding box just measured is the one piece
+      // of ground truth that is never stale, unlike `minDistance`/
+      // `maxDistance`/`near`/`far`, which a rescale scales but an UNDO of
+      // that rescale never restores (camera/view state is intentionally
+      // outside undo — see `applyRescaleToView`'s doc comment). Left at
+      // their old scaled values, they can permanently floor how far Zoom
+      // Extents can dolly back in, compounding across repeated rescales.
+      // Assigning fresh limits here — proportional to the SAME fit distance
+      // the re-pose below uses — makes Zoom Extents the universal recovery
+      // action at any model scale, and must happen BEFORE `controls.update()`
+      // clamps the eye→target distance, exactly like `applyRescaleToView`.
+      //
+      // Routed through the shared `syncWorldLengthViewState` (delta-review
+      // Finding 1) rather than assigning `limits` directly: the fresh
+      // `far` this resync computes must carry the grid footprint and axes
+      // half-length along with it in the same lockstep, or a big enough
+      // fit distance pushes `far` past the fixed axes/grid extent and their
+      // ends become visible mid-scene. The ratio is `far`'s own before/after
+      // — `scaleViewLimits` applied to the CURRENT (possibly already
+      // rescaled) limits at that ratio reproduces the exact same absolute
+      // `limits` `zoomExtentsViewLimits` derives from ground truth, because
+      // every path that has touched these limits already scaled all four
+      // fields by one consistent factor from `MOUNT_LIMITS` — so recovering
+      // via a ratio is exactly as self-healing here as the absolute
+      // recompute it replaces, while also being the form the grid/axes need.
+      const limits = zoomExtentsViewLimits(distance)
+      const ratio = limits.far / camera.far
+      syncWorldLengthViewState(ratio)
 
       // Keep the current view direction; re-target at box center.
       const dir = new THREE.Vector3()
@@ -3116,12 +3325,28 @@ export default function Viewport({
       let distance: number
       let radius = 0
       if (box.isEmpty()) {
+        // Nothing visible to derive a fit distance from — preserve the
+        // current framing verbatim, same as the pre-fix behavior. There is
+        // no ground-truth fit distance here to resync the limits against,
+        // so (like `zoomExtents`' own early return on an empty box) this
+        // branch skips `syncWorldLengthViewState` entirely rather than
+        // resyncing against a distance that doesn't describe the model.
         center.copy(controls.target)
         distance = controls.getDistance()
       } else {
         box.getCenter(center)
         radius = box.getBoundingSphere(new THREE.Sphere()).radius
         distance = rig.perspectiveFramingDistance(radius, 1.2)
+
+        // Resync the view limits from this same fit distance, exactly like
+        // `zoomExtents` (delta-review Finding 2) — Top/Front/Iso duplicated
+        // the framing pipeline but not the resync, so after a rescale+undo
+        // the standard views kept clamping at the stale limits even though
+        // `zoomExtents` had already recovered. Same shared helper, same
+        // ratio derivation.
+        const limits = zoomExtentsViewLimits(distance)
+        const ratio = limits.far / camera.far
+        syncWorldLengthViewState(ratio)
       }
 
       const eye = new THREE.Vector3(spec.eye[0], spec.eye[1], spec.eye[2]).normalize()
@@ -3174,6 +3399,7 @@ export default function Viewport({
       // frame is exactly what the loop would put on screen for this pose.
       const effDist = rig.projection === 'parallel' ? rig.effectiveDistance(controls.getDistance()) : null
       infiniteGrid.update(camera.position, effDist)
+      updateOriginAxesFrame(originAxes, wasmScene)
       clampOriginAxes(originAxes, rig, el.clientHeight)
       renderer.render(threeScene, camera)
       const gl = renderer.getContext()
@@ -3182,6 +3408,95 @@ export default function Viewport({
       const pixels = new Uint8Array(width * height * 4)
       gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
       return { width, height, pixels }
+    }
+
+    /**
+     * Tape Measure's "resize the model?" (design tool-parity §3): after
+     * `rescale_document(factor)` commits, the kernel has scaled every
+     * object/sketch/guide about the WORLD ORIGIN, but every view-side
+     * world-length quantity stayed at its OLD (pre-rescale) value — left
+     * staring at the OLD framing, with view limits sized for the OLD model.
+     * Scaling the eye/target about that SAME origin by the SAME factor
+     * (`scaleCameraAboutOrigin`) keeps the apparent view IDENTICAL: the
+     * model just "is" the new size, at the same apparent angular size,
+     * because camera-to-target distance grows/shrinks with it. But that
+     * alone isn't sufficient — every OTHER world-length view quantity must
+     * move in the same lockstep, or the rescale re-introduces exactly the
+     * kind of "old framing" mismatch this function exists to prevent, just
+     * one level down:
+     *
+     *  - `controls.minDistance`/`maxDistance` (`scaleViewLimits`) — left
+     *    fixed, a big enough factor pins the eye→target distance at the old
+     *    `maxDistance` instead of the intended (scaled) distance, and Zoom
+     *    Extents can't recover either (same clamp).
+     *  - `camera.near`/`far` (`scaleViewLimits`, then
+     *    `updateProjectionMatrix()`) — left fixed, `far` far-clips most of
+     *    the now-much-bigger model; on a SHRINK factor, `near` must shrink
+     *    too or it near-clips a model that now sits entirely closer than
+     *    the old fixed `near`. This also protects an UNDO of the rescale:
+     *    camera moves are outside undo by design (see below), so undoing
+     *    restores the pre-rescale model but leaves the camera limits at
+     *    their scaled values — which is exactly what keeps the restored
+     *    model inside the frustum instead of the old (comparatively tiny)
+     *    `far` far-clipping it into a blank viewport.
+     *  - the ground grid's plane footprint (`InfiniteGrid.scaleAboutOrigin`)
+     *    and the origin axes' half-length (`axesHalfLength` +
+     *    `rebuildOriginAxes`) — both fixed world lengths sized to stay
+     *    comfortably beyond the camera's far-clip at construction; left
+     *    unscaled, a big enough factor leaves the grid's edge or the axes'
+     *    endpoints visible inside the frustum instead of running off it.
+     *    (Shared with `zoomExtents`/`setStandardView` via
+     *    `syncWorldLengthViewState` — see its doc comment.)
+     *  - the active section plane's `origin` (`rescaleSectionPlane`) — a
+     *    session-only, app-side position the kernel rescale never touches;
+     *    left unscaled, an active cut lands at the wrong position in the
+     *    now-rescaled model. `normal` is a direction, not a position, and is
+     *    left unchanged. This is deliberately handled HERE ONLY, not inside
+     *    `syncWorldLengthViewState`: the plane is anchored to the MODEL, and
+     *    this is the one caller where the model itself actually changed
+     *    size. `zoomExtents`/`setStandardView` call the same shared helper
+     *    to recover from stale grid/axes/limits on a mere REFRAME — the
+     *    model never moved in either, so scaling the plane there would slide
+     *    an active cut away from the (unchanged) geometry it's slicing,
+     *    corrupting it for a reason that has nothing to do with a reframe.
+     *
+     * All of this is a view-side adjustment only — none of it has an undo
+     * of its own (camera moves, the grid, the axes, and the section plane
+     * are all outside undo by design in this app), so it is applied on the
+     * forward commit only; undoing the rescale does not restore any of
+     * these to their pre-rescale values. There is no generic hook to do so:
+     * `runUndo`/`runRedo` resolve through the kernel's `DocChange`, which
+     * carries no op-kind signal that would let them recognize "this undo
+     * was specifically a rescale" without new kernel plumbing this fix
+     * doesn't add.
+     */
+    function applyRescaleToView(factor: number): void {
+      const { eye, target } = scaleCameraAboutOrigin(
+        [camera.position.x, camera.position.y, camera.position.z],
+        [controls.target.x, controls.target.y, controls.target.z],
+        factor,
+      )
+      // Limits/grid/axes BEFORE the pose: `controls.update()` below clamps
+      // the eye→target distance to [minDistance, maxDistance] — scale those
+      // first via the shared sync helper, or the very re-pose this function
+      // exists to do gets clamped right back to the old (unscaled) bound.
+      // A document rescale's own factor already IS the far ratio this
+      // helper wants (unlike `zoomExtents`/`setStandardView`, which derive
+      // theirs from a freshly-measured fit distance).
+      syncWorldLengthViewState(factor)
+      camera.position.set(eye[0], eye[1], eye[2])
+      controls.target.set(target[0], target[1], target[2])
+      controls.update()
+
+      // The section plane is model-anchored — scale it here, and ONLY
+      // here (see this function's doc comment for the asymmetry vs
+      // `zoomExtents`/`setStandardView`, which never touch it).
+      const plane = sectionManager.current
+      if (plane !== null) {
+        sectionManager.setPlane(rescaleSectionPlane(plane, factor))
+        sceneRenderer.setSectionPlane(sectionManager.current)
+        onSectionChangedRef.current?.()
+      }
     }
 
     function getCamera(): {
@@ -3302,8 +3617,9 @@ export default function Viewport({
     function setHomeFraming(scale: number): void {
       // Re-pose the camera at the default 3/4 home view, `scale`× the
       // meter-scale distance (welcome-screen unit choice on a blank
-      // document). Same direction and target as the mount-time default.
-      camera.position.set(3.5 * scale, -3.0 * scale, 2.5 * scale)
+      // document). Same direction and target as the mount-time default —
+      // `HOME_EYE_OFFSET` (math.ts), the same constant used there.
+      camera.position.set(HOME_EYE_OFFSET[0] * scale, HOME_EYE_OFFSET[1] * scale, HOME_EYE_OFFSET[2] * scale)
       controls.target.set(0, 0, 0)
       camera.updateProjectionMatrix()
       controls.update()
@@ -3366,6 +3682,24 @@ export default function Viewport({
         return
       }
       sceneRenderer.refreshGuides()
+      onDocumentChangedRef.current?.()
+      scheduleRender()
+    }
+
+    /**
+     * Reset the movable drawing axes (tool-parity §4) to world identity —
+     * same commit path as the Axes tool's own `set_axes` gesture (one undo
+     * step, fully recorded/replayable). The origin-axes gizmo and inference
+     * both read the frame fresh every frame/query, so nothing else needs
+     * refreshing beyond the usual document-changed bookkeeping + a render.
+     */
+    function resetAxes(): void {
+      try {
+        wasmScene.set_axes(0, 0, 0, 1, 0, 0, 0, 1, 0)
+      } catch (err) {
+        handleToast(friendlyErrorText(err))
+        return
+      }
       onDocumentChangedRef.current?.()
       scheduleRender()
     }
@@ -3460,7 +3794,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -3608,6 +3942,11 @@ export default function Viewport({
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Durable extrude-as-new toggle → badge the Push/Pull cursor with a
+        // `+` (the same cursorFor pipeline as Move's copy toggle).
+        (on: boolean) => {
+          renderer.domElement.style.cursor = cursorFor('Push/Pull', on)
+        },
       )
       // Scope it to the current editing context (component-edit-parity.md
       // phase A1 — the single channel every tool consults; internally
@@ -3740,6 +4079,10 @@ export default function Viewport({
       // Select what's about to move so the highlight + dock follow the drag.
       if (dm.nodes.length === 1) onSelectRef.current?.(dm.nodes[0], false)
       else onSelectManyRef.current?.(dm.nodes, false)
+      // A tool switch that bypasses switchToolRef (this one) still needs the
+      // same mid-hold-tap reset — see switchToolRef's comment above.
+      ctrlTap.reset()
+      pushPullModifierTap.reset()
       const tool = makeMoveTool(dm.nodes)
       toolController.setTool(tool)
       renderer.domElement.style.cursor = cursorFor('Move')
@@ -3759,10 +4102,28 @@ export default function Viewport({
           // Rebuild sketch buffers so a rotated sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
+          // Select the committed nodes — for a copy these are the fresh
+          // clones, so a follow-up rotation chains off the new copies (see
+          // makeMoveTool).
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
+          else onSelectManyRef.current?.(nodes, false)
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Durable copy toggle → badge the Rotate cursor with a `+` (see
+        // makeMoveTool).
+        (on: boolean) => {
+          renderer.domElement.style.cursor = cursorFor('Rotate', on)
+        },
+        // ×N / /N array re-resolve: full scene refresh, same reasoning as
+        // makeMoveTool's onArrayCommit.
+        (nodes) => {
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], false)
+          else onSelectManyRef.current?.(nodes, false)
+        },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
@@ -3801,6 +4162,22 @@ export default function Viewport({
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Resize-the-model arm (design tool-parity §3): bubble up to the
+        // parent, which renders the confirmation modal and resolves it via
+        // ViewportApi.confirmPendingRescale/cancelPendingRescale below.
+        (info) => { onRescaleArmedRef.current?.(info) },
+        // A confirmed rescale bakes into every object, sketch, guide, and
+        // instance pose — a full refresh, unlike the guide-only commit
+        // above — AND leaves every view-side world-length quantity framing
+        // the OLD scale; re-scale all of it by the same factor about the
+        // same world-origin pivot so the view reads as unchanged (see
+        // `applyRescaleToView`'s doc comment).
+        (factor: number) => {
+          applyRescaleToView(factor)
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
+        },
       )
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
@@ -3997,6 +4374,24 @@ export default function Viewport({
       )
     }
 
+    function makeAxesTool(): AxesTool {
+      return new AxesTool(
+        wasmScene,
+        previewGroup,
+        // A moved frame is an undoable document edit (one `set_axes` step)
+        // but touches no geometry — no re-tessellation/refresh beyond the
+        // usual document-changed bookkeeping + a render. The origin-axes
+        // gizmo and inference both read the frame fresh every frame/query
+        // (see the render-loop position/quaternion update, and
+        // `getDrawingAxes`), so nothing else needs poking.
+        () => {
+          onDocumentChangedRef.current?.()
+          scheduleRender()
+        },
+        handleToast,
+      )
+    }
+
     // Shift-in-Orbit temporarily swaps to Pan, mirroring SketchUp.
     // Tracked here (not in switchToolRef's closure alone) so the keydown/keyup
     // handlers and the tool switch can all see/clear the same flag.
@@ -4075,6 +4470,17 @@ export default function Viewport({
       // case without ever clearing it, leaving the FOV readout stuck
       // showing the stale Zoom reading.
       activeCameraTool = activeCameraToolForName(toolName)
+      // A mid-hold Ctrl/Meta tap must not survive a tool switch: without
+      // this, holding Ctrl on Scale then clicking over to Push/Pull before
+      // releasing would leave a tap armed against the OLD tool, and the
+      // eventual keyup would resolve against whichever tool is active by
+      // then. `CleanModifierTap` also records the tool instance each tap
+      // armed against and re-checks it at keyup — this reset is the first
+      // line of defense for switches that go through switchToolRef; the
+      // instance check covers switches that don't (e.g. beginDragMove's
+      // direct toolController.setTool).
+      ctrlTap.reset()
+      pushPullModifierTap.reset()
       switch (toolName) {
         case 'Rectangle':
           cameraModeRef.current = false
@@ -4163,6 +4569,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeEditVertexTool())
+          break
+        case 'Axes':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeAxesTool())
           break
         case 'Position Camera':
           cameraModeRef.current = false
@@ -4502,22 +4913,28 @@ export default function Viewport({
     // Control pressed and released with NO other key in between. Toggling on
     // the leading keydown would also flip the anchor as a side effect of every
     // Ctrl chord (Ctrl+Z undo, Ctrl+A select-all, …), which the clean-tap
-    // guard prevents. `ctrlTapClean` is armed on a non-repeat Control keydown
-    // and disarmed by any other keydown before the matching keyup.
-    let ctrlTapClean = false
+    // guard prevents.
+    //
+    // This listener and the Push/Pull one just below both live at window
+    // scope and both watch the SAME bare Ctrl/Meta keydown, regardless of
+    // which tool is active — so a tap that starts while Scale is active but
+    // ends (keyup) after the user has switched to Push/Pull would otherwise
+    // fire Push/Pull's toggle (and the reverse fires Scale's). `CleanModifierTap`
+    // (see cleanModifierTap.ts) fixes this structurally: it records which
+    // tool instance was active AT KEYDOWN and only reports a fired tap if
+    // that same instance is STILL active at keyup, so a mid-hold switch
+    // silently drops the tap instead of misdirecting it. `.reset()` is also
+    // called on every tool switch (see switchToolRef/beginDragMove above) as
+    // a belt-and-suspenders clear.
+    const ctrlTap = new CleanModifierTap<Tool>((key) => key === 'Control')
     function onCtrlKeyDown(ev: KeyboardEvent): void {
-      if (ev.key === 'Control') {
-        if (!ev.repeat) ctrlTapClean = true
-        return
-      }
-      ctrlTapClean = false // another key joined the press → it's a chord, not a tap
+      ctrlTap.onKeyDown(ev, toolController.activeTool)
     }
     function onCtrlKeyUp(ev: KeyboardEvent): void {
-      if (ev.key !== 'Control' || !ctrlTapClean) return
-      ctrlTapClean = false
-      const at = toolController.activeTool
-      if ('toggleCenterAnchor' in at) {
-        (at as { toggleCenterAnchor(): void }).toggleCenterAnchor()
+      const armedTool = ctrlTap.onKeyUp(ev, toolController.activeTool)
+      if (armedTool === null) return
+      if ('toggleCenterAnchor' in armedTool) {
+        (armedTool as { toggleCenterAnchor(): void }).toggleCenterAnchor()
         scheduleRender()
       }
     }
@@ -4537,6 +4954,32 @@ export default function Viewport({
     window.addEventListener('keydown', onCtrlKeyDown, true)
     window.addEventListener('keyup', onCtrlKeyUp)
 
+    // Ctrl/Cmd toggles Push/Pull's durable extrude-as-new-object mode
+    // (design tool-parity §2 — SketchUp's "leave original face", the
+    // Move-copy idiom applied to Push/Pull). Same reasoning as the Ctrl
+    // listener just above (a bare Control/Meta keydown reports
+    // ctrlKey/metaKey: true on itself, so the generic `!isMod` key path
+    // never carries it) — a dedicated listener, watching EITHER key so Ctrl
+    // (Windows/Linux) and Cmd (macOS) both work. Fires on a CLEAN TAP of
+    // either, with no other key in between, for the same chord-safety
+    // reason as Scale's tap guard (Ctrl+Z / Ctrl+A / etc. must not toggle
+    // it as a side effect). Also tool-scoped at keydown/keyup for the same
+    // mid-hold-switch reason documented on `ctrlTap` above.
+    const pushPullModifierTap = new CleanModifierTap<Tool>((key) => key === 'Control' || key === 'Meta')
+    function onPushPullModifierKeyDown(ev: KeyboardEvent): void {
+      pushPullModifierTap.onKeyDown(ev, toolController.activeTool)
+    }
+    function onPushPullModifierKeyUp(ev: KeyboardEvent): void {
+      const armedTool = pushPullModifierTap.onKeyUp(ev, toolController.activeTool)
+      if (armedTool === null) return
+      if ('toggleExtrudeAsNew' in armedTool) {
+        (armedTool as { toggleExtrudeAsNew(): void }).toggleExtrudeAsNew()
+        scheduleRender()
+      }
+    }
+    window.addEventListener('keydown', onPushPullModifierKeyDown)
+    window.addEventListener('keyup', onPushPullModifierKeyUp)
+
     // Ctrl+Alt (⌘+⌥ on macOS) held = PRECISION SNAPPING. The kernel's default
     // snap gravity makes a circle's center and quadrant points out-pull the
     // facet endpoints crowding them; holding the chord flattens every weight
@@ -4545,12 +4988,14 @@ export default function Viewport({
     // Why a CHORD and not a bare modifier: all four bare modifiers are taken,
     // and a bare Alt would be actively wrong. Shift is the axis lock across
     // Move/Rotate/Scale/Line (`onShiftKeyDown` above) plus OrbitControls' pan
-    // inversion; a bare Control keydown arms Scale's center-anchor tap
-    // (`onCtrlKeyDown` above); a bare Alt keydown is MoveTool's durable copy
-    // toggle (`MoveTool.onKey`) and ArcTool's completion-mode cycle
-    // (`ArcTool.onKey`), both reached through onKeyDown's unconditional
-    // `if (!isMod) activeTool.onKey(ev)` fallback; and the arrow keys are the
-    // draw-plane / axis locks.
+    // inversion; a bare Control/Meta keydown arms Scale's center-anchor tap
+    // (`onCtrlKeyDown` above) or, while Push/Pull is active, its
+    // extrude-as-new toggle (`onPushPullModifierKeyDown` above); a bare Alt
+    // keydown is MoveTool's and RotateTool's durable copy toggle
+    // (`MoveTool.onKey` / `RotateTool.onKey`) and ArcTool's completion-mode
+    // cycle (`ArcTool.onKey`), all reached through onKeyDown's unconditional
+    // `if (!isMod) activeTool.onKey(ev)` fallback; and the arrow keys are
+    // the draw-plane / axis locks.
     //
     // Adding Ctrl/Cmd is exactly what makes the chord safe: `isMod` is
     // `metaKey || ctrlKey`, so with it held onKeyDown never forwards the key
@@ -4595,12 +5040,12 @@ export default function Viewport({
       if (cached !== null && snapPathLive) {
         const activeTool = toolController.activeTool
         const constraint = 'snapConstraint' in activeTool
-          ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(cached.ray)
+          ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
           : null
-        const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+        const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
         activeTool.onPointerMove(snap, cached.ray)
         cueLayer.update(snap)
-        drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+        drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
         publishSnapCues(snap, activeTool)
       }
       scheduleRender()
@@ -4667,6 +5112,10 @@ export default function Viewport({
         // every fragment must use the SAME (depth-independent) LOD instead
         // (see InfiniteGrid's uLodDistanceOverride doc comment).
         infiniteGrid.update(camera.position, rig.projection === 'parallel' ? effDist : null)
+        // Orient the origin-axes gizmo to the document's current movable
+        // drawing axes (tool-parity §4) before clamping — cheap, so this
+        // runs unconditionally every frame rather than only on a change.
+        updateOriginAxesFrame(originAxes, wasmScene)
         // Re-clip the axis halves to the enlarged frustum (float64 — see
         // clampOriginAxes; the fat-line shader's own handling of extreme
         // segments is what shimmered).
@@ -4941,11 +5390,11 @@ export default function Viewport({
       // stale/misleading inference cue floating over the scene while walking.
       const isRawDragTool = 'onPointerRawMove' in activeTool
       const constraint = !isRawDragTool && 'snapConstraint' in activeTool
-        ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+        ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
       const { snap } = isRawDragTool
         ? { snap: null }
-        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
       activeTool.onPointerMove(snap, ray)
       if (isRawDragTool) {
         const [rawX, rawY] = canvasPoint(ev)
@@ -4954,7 +5403,7 @@ export default function Viewport({
         }).onPointerRawMove(rawX, rawY, ev.buttons, { shift: ev.shiftKey })
       }
       cueLayer.update(snap)
-      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
       scheduleRender()
 
       publishSnapCues(snap, activeTool)
@@ -4988,6 +5437,7 @@ export default function Viewport({
           screenX: p.x,
           screenY: p.y,
           direction: snap.direction,
+          frame: getDrawingAxes(wasmScene),
         })
       }
     }
@@ -5177,9 +5627,9 @@ export default function Viewport({
       // no live Alt-modifier tracking here.)
 
       const constraint = 'snapConstraint' in activeTool
-        ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+        ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
       activeTool.onPointerDown(snap, ray)
       // Walk's press-relative drag (camera.md §4) — see Tool.onPointerRawDown's doc.
       if ('onPointerRawDown' in activeTool) {
@@ -5211,9 +5661,9 @@ export default function Viewport({
         const viewportH = el.clientHeight
         const basis = apertureBasis()
         const constraint = 'snapConstraint' in activeTool
-          ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+          ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
           : null
-        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
         const handled = (activeTool as { onDoubleClick(snap: Snap | null, ray: Ray): boolean }).onDoubleClick(snap, ray)
         if (handled) {
           scheduleRender()
@@ -5330,12 +5780,12 @@ export default function Viewport({
           const cached = lastRayRef.current
           if (cached !== null) {
             const constraint = 'snapConstraint' in activeTool
-              ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(cached.ray)
+              ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
               : null
-            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
             activeTool.onPointerMove(snap, cached.ray)
             cueLayer.update(snap)
-            drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+            drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
           }
           return
         }
@@ -5396,7 +5846,7 @@ export default function Viewport({
         // The idle arrow-key plane lock (design §5.2/§6) toggles here — the
         // capturing branch above only runs once a gesture has anchored, so
         // this is where a lock's ON/OFF/switch needs its own cue re-poll.
-        drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+        drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
         // A tool may have restyled its gizmo in response (e.g. Rotate /
         // Protractor / Slice locking the axis with Shift or an arrow during
         // the idle/hover phase, before capturingInput() is true). The
@@ -5447,9 +5897,9 @@ export default function Viewport({
           const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
           const ray = makeWorldRay(ndcX, ndcY, camera)
           const constraint = 'snapConstraint' in activeTool
-            ? (activeTool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+            ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
             : null
-          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
           ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
           scheduleRender()
         }
@@ -5473,9 +5923,9 @@ export default function Viewport({
             const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
             const ray = makeWorldRay(ndcX, ndcY, camera)
             const constraint = 'snapConstraint' in tool
-              ? (tool as { snapConstraint(ray?: Ray): { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null }).snapConstraint(ray)
+              ? (tool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
               : null
-            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane)
+            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
             tool.onPointerDown(snap, ray)
           }
           // (If the tool is no longer mid-gesture — a VCB Enter or Esc ended
@@ -5606,6 +6056,8 @@ export default function Viewport({
       window.removeEventListener('keyup', onShiftKeyUp)
       window.removeEventListener('keydown', onCtrlKeyDown, true)
       window.removeEventListener('keyup', onCtrlKeyUp)
+      window.removeEventListener('keydown', onPushPullModifierKeyDown)
+      window.removeEventListener('keyup', onPushPullModifierKeyUp)
       window.removeEventListener('keydown', onPrecisionKey)
       window.removeEventListener('keyup', onPrecisionKey)
       window.removeEventListener('blur', onWindowBlurClearsPrecision)

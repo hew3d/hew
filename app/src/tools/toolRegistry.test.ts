@@ -20,10 +20,10 @@ describe('toolRegistry', () => {
     expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Paint', 'Section Plane'])
   })
 
-  it('leaves Protractor/Slice/Edit Vertex/camera tools off the rail (no group)', () => {
+  it('leaves Protractor/Slice/Edit Vertex/Axes/camera tools off the rail (no group)', () => {
     const ungrouped = TOOL_REGISTRY.filter((t) => t.group === undefined).map((t) => t.name)
     expect(ungrouped).toEqual([
-      'Protractor', 'Slice', 'Edit Vertex', 'Orbit', 'Pan', 'Zoom', 'Zoom Window',
+      'Protractor', 'Slice', 'Edit Vertex', 'Axes', 'Orbit', 'Pan', 'Zoom', 'Zoom Window',
       'Position Camera', 'Look Around', 'Walk',
     ])
   })

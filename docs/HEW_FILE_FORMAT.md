@@ -116,7 +116,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     "eye": [4.0, -6.0, 3.0],
     "target": [0.0, 0.0, 0.0],
     "up": [0.0, 0.0, 1.0]
-  }
+  },
+  "axes": { "origin": [1.0, 2.0, 0.0],           // v13+; omitted entirely at world identity
+            "x": [0.0, 1.0, 0.0], "y": [-1.0, 0.0, 0.0] }
 }
 ```
 
@@ -141,6 +143,15 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 - **`tags`** — the tag metadata registry: known tag paths with their
   hidden-by-default flags.
 - **`camera`** (v13+, optional) — the camera's working view at last save.
+- **`axes`** (optional object, v13+) — the document-level movable drawing
+  axes frame: `origin` (`[f64;3]`), `x` and `y` (`[f64;3]`, unit length and
+  mutually perpendicular). The blue axis is never stored — it is always
+  `x × y`, recomputed on load — so a persisted frame can never itself
+  disagree with its own blue axis. Omitted entirely at world identity (the
+  only possibility before this field existed), so an unmoved document's
+  manifest is byte-identical to what it would write with no axes concept at
+  all. A reader MUST reject rather than repair a present-but-non-orthonormal
+  frame (rule 4: no silent geometry repair).
 
 ### `NodeRef`
 
@@ -190,12 +201,14 @@ of the manifest:
 | `sketches[].curves[].kind` | 12 | `"circle"` — the chain's edges are chord facets approximating the stored circle, which is what a `curves[]` entry meant at v10/v11 |
 | `sketches[].owner` | 13 | absent — world-owned (the only kind of sketch before v13) |
 | `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
+| `axes` (top-level object) | 13 | world identity (origin `[0,0,0]`, `x`=`[1,0,0]`, `y`=`[0,1,0]`) |
 
-Both `sketches[].owner` and `camera` landed in the same v13 bump (two
-efforts in flight at once) and are version-gated the same way the retired
-fields below are (just in the opposite direction — introduced, not
-retired): the gate is on the declared `format_version`, not on the field's
-presence.
+Three fields land in the same v13 bump (three efforts in flight at once) and
+are version-gated the same way the retired fields below are (just in the
+opposite direction — introduced, not retired): the gate is on the declared
+`format_version`, not on the field's presence. Each is gated independently
+by its own presence, not by the shared version number alone — a v13 file
+with any subset of them, or none, is perfectly ordinary.
 
 - A file that declares a version **older than 13** but still carries an
   `owner` field is malformed for its own declared version and MUST be
@@ -209,6 +222,9 @@ presence.
   error rather than accept "an early camera" — reject-not-repair, the same
   posture the `consumed`-list check below applies in the opposite
   direction.
+- Likewise, a file that declares `format_version < 13` and still carries an
+  `axes` key is malformed for its own declared version and is rejected, not
+  repaired.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -692,6 +708,29 @@ also persisted but not undoable) and typically does so once, right before
 a save, so the persisted view reflects "what you were looking at when you
 last saved" rather than every transient camera position visited along the
 way.
+
+### 4.11 Movable drawing axes
+
+The top-level `axes` object (manifest v13+) is a document-level coordinate
+frame that reorients drawing and inference away from the world frame — no
+geometry moves when it changes. It carries `origin` and two unit,
+mutually-perpendicular directions `x` (red) and `y` (green); the third
+("blue") axis is never stored — it is always `x × y` — so a reader
+recomputes it on load rather than trusting a stored value that could
+disagree with `x`/`y`.
+
+Omitted entirely at world identity (origin `[0,0,0]`, `x`=`[1,0,0]`,
+`y`=`[0,1,0]`) — the only state every pre-v13 file is in, so an unmoved
+document's manifest is unaffected by this field's existence. A reader MUST
+reject, never repair, a present `axes` whose `x`/`y` are not each unit
+length or not mutually perpendicular (rule 4), and MUST reject a file
+declaring `format_version < 13` that carries an `axes` key at all (a
+version-gated field smuggled into an older file — see the field-by-version
+table in §2).
+
+Ground-plane rendering (the ground grid) and Scale/Section/standard views
+are NOT affected by this frame — they stay world-aligned regardless of the
+document's axes.
 
 ## 5. Versioning policy
 

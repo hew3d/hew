@@ -50,7 +50,8 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
 import { editDimsBuffer, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
-import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
+import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
+import { getDrawingAxes } from './drawingAxes'
 import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 
 export type RectangleCommitResult = {
@@ -65,10 +66,19 @@ export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
 /** Plane stage: waiting for first click, or waiting for second click, on a
- *  frozen `DrawPlane`/`SketchTarget`. */
+ *  frozen `DrawPlane`/`SketchTarget`. `natural` (design §2a) is the plane/
+ *  target this gesture would have anchored onto at its own first click had
+ *  no idle lock been active — what a mid-gesture arrow-key lock reverts to
+ *  when toggled back off (see `nextGestureLockPlane` in drawPlane.ts). */
 type PlaneStage =
   | { kind: 'idle' }
-  | { kind: 'anchored'; plane: DrawPlane; target: SketchTarget; anchor: V3 }
+  | {
+      kind: 'anchored'
+      plane: DrawPlane
+      target: SketchTarget
+      anchor: V3
+      natural: { plane: DrawPlane; target: SketchTarget }
+    }
 
 /** Face stage: idle, or anchored on a specific face plane */
 type FaceStage =
@@ -368,6 +378,7 @@ export class RectangleTool implements Tool {
       anchoredThrough: null,
       idleLock: this.idlePlaneLock,
       idleHover: this._lastIdleHoverPoint,
+      frame: getDrawingAxes(this.wasmScene),
     })
   }
 
@@ -491,6 +502,29 @@ export class RectangleTool implements Tool {
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
         this._lastIdleHoverPoint = null
       }
+      return
+    }
+
+    // Mid-gesture plane re-lock (design §2a): once the first corner is
+    // placed, an arrow key still re-locks the plane — through that
+    // ALREADY-PLACED anchor, not the cursor — since nothing has reached the
+    // kernel yet (the rectangle commits only on the second click). Scoped to
+    // plane mode: a face-anchored gesture is locked to a REAL face's plane,
+    // which an arbitrary axis lock cannot honestly override without leaving
+    // that face (out of scope here — see the module's face-mode doc).
+    if (
+      this.planeStage.kind === 'anchored' &&
+      (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown')
+    ) {
+      const { anchor, natural } = this.planeStage
+      const next = nextGestureLockPlane(
+        this.idlePlaneLock, ev.key, anchor, natural, getDrawingAxes(this.wasmScene), this._editContext,
+      )
+      this.idlePlaneLock = next.lock
+      this.planeStage = { kind: 'anchored', plane: next.plane, target: next.target, anchor, natural }
+      this._lastPlaneCursor = null
+      this._clearPreview()
+      this.onMeasurementCb('')
       return
     }
 
@@ -649,7 +683,18 @@ export class RectangleTool implements Tool {
       const { plane, target } = resolved
       const anchor = this._planeCursor(snap, ray, plane)
       if (anchor === null) return
-      this.planeStage = { kind: 'anchored', plane, target, anchor }
+      // What a mid-gesture arrow-key lock reverts to when toggled back off
+      // (design §2a). No lock active for THIS click: `resolved` already IS
+      // the unlocked (sketch-hover-or-ground) resolution — reuse it at zero
+      // extra cost. A lock WAS active: its branch never probes sketch-hover
+      // ("an active lock beats face pick and sketch-hover adoption" means
+      // the probe itself never runs — design §5.2), so there is no hover
+      // result to remember; fall back to ground rather than reopen that
+      // probe here.
+      const natural = this.idlePlaneLock !== null
+        ? groundNaturalTarget(this._editContext, anchor)
+        : resolved
+      this.planeStage = { kind: 'anchored', plane, target, anchor, natural }
       this._lastPlaneCursor = null
     } else {
       // Second click: commit the rectangle.

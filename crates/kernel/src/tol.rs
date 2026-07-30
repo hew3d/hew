@@ -101,3 +101,16 @@ pub const OCCLUSION_REL: f64 = 1e-6;
 /// ~14° of a full reversal, where no usefully bounded miter exists
 /// (the follow-me design §3).
 pub const FOLLOW_ME_MITER_LIMIT: f64 = 8.0;
+
+/// Maximum deviation from unit length or from exact perpendicularity a
+/// candidate drawing-axes basis vector may carry and still count as
+/// orthonormal (dimensionless; `crate::axes::AxesFrame`).
+///
+/// Matches [`NORMAL_DIRECTION`]'s magnitude (two unit directions differing by
+/// less than this are the same direction): the tool-parity axes tool builds
+/// its candidate frame the same way — normalizing clicked/snapped directions
+/// in f64 — so the same few-ULP budget applies. Loose enough to admit any
+/// frame built from genuinely orthogonal input, tight enough to reject a
+/// frame that is only approximately orthonormal (rule 4: refused, never
+/// silently re-orthonormalized).
+pub const AXES_ORTHONORMAL: f64 = 1e-9;

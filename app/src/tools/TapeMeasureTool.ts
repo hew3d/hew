@@ -68,6 +68,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { planeFromSketch, axisDrawPlane, SketchPickCache, GROUND_PLANE_EPS, type DrawPlane } from './drawPlane'
+import { getDrawingAxes } from './drawingAxes'
 
 /** Whether a snap landed on real picked geometry, as opposed to a broad
  * empty-space fallback: 'ground' (ray∩ground) or 'plane' (ray∩constraint
@@ -80,6 +81,29 @@ function snapOnGeometry(snap: Snap): boolean {
 export type OnGuideCreated = () => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
+
+/** Info describing an armed "resize the model?" confirmation (design
+ *  tool-parity §3), passed to `OnRescaleArmed` so the Viewport/App can render
+ *  the confirmation modal. `factor` is the value `rescale_document` will be
+ *  called with on confirm — `typedDistance / currentDistance`. */
+export interface RescaleConfirmInfo {
+  /** The real, currently-measured distance between the two picked points. */
+  currentDistance: number
+  /** The length the user just typed. */
+  typedDistance: number
+  /** `typedDistance / currentDistance`. */
+  factor: number
+}
+
+export type OnRescaleArmed = (info: RescaleConfirmInfo) => void
+/** Fired when a rescale is actually applied (confirmRescale succeeded) — the
+ *  Viewport must do a FULL scene refresh, unlike a guide-point commit
+ *  (`OnGuideCreated`), since a rescale touches every object/sketch/guide.
+ *  Carries the applied `factor` so the Viewport can also re-scale the
+ *  CAMERA about the same world-origin pivot by the same factor (design
+ *  tool-parity §3's "the view jumps around" fix) — a view-side adjustment
+ *  the kernel has no part in and that has no undo of its own. */
+export type OnRescaleApplied = (factor: number) => void
 
 /** Construction guide color — matches SceneRenderer's GUIDE_COLOR. */
 const GUIDE_PREVIEW_COLOR = 0x9933cc
@@ -101,10 +125,27 @@ type Stage =
       kind: 'measure'
       /** First picked point, in world space. */
       p0: [number, number, number]
+      /** Whether `p0` itself rests on real geometry (vs. empty space) — the
+       *  rescale-confirm arm requires BOTH ends to be real, known points
+       *  (design tool-parity §3): resizing to preserve an arbitrary
+       *  empty-space-anchored distance has no meaningful "this distance". */
+      p0OnGeometry: boolean
       /** Last cursor point (snapped), in world space. */
       p1: [number, number, number]
       /** Whether the cursor is currently resting on real geometry (vs. empty space). */
       onGeometry: boolean
+    }
+  | {
+      kind: 'pendingRescale'
+      /** The measurement's first point — `cancelRescale`'s fallback commit
+       *  needs it to drop the guide point exactly as an ordinary typed
+       *  measure commit would have. */
+      p0: [number, number, number]
+      /** The typed-exact endpoint `cancelRescale` drops a guide point at
+       *  (mirrors the pre-existing typed-measure-commit target). */
+      endpoint: [number, number, number]
+      /** `rescale_document`'s argument on confirm. */
+      factor: number
     }
 
 /** v − (v·d)d for unit d: the component of v perpendicular to d. */
@@ -137,6 +178,8 @@ export class TapeMeasureTool implements Tool {
         return 'Click to place the parallel guide — or type an exact offset.'
       case 'measure':
         return 'Click the second point to read the distance — or type an exact distance to drop a guide there.'
+      case 'pendingRescale':
+        return 'Resize the model to the typed distance? Confirm in the dialog, or Esc to just drop a guide instead.'
       default:
         if (this.idlePlaneLock !== null) {
           return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
@@ -151,6 +194,8 @@ export class TapeMeasureTool implements Tool {
   private onGuideCreated: OnGuideCreated
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
+  private onRescaleArmed: OnRescaleArmed
+  private onRescaleApplied: OnRescaleApplied
 
   /** VCB buffer — raw string being typed by the user. */
   private typed: string = ''
@@ -182,12 +227,16 @@ export class TapeMeasureTool implements Tool {
     onGuideCreated: OnGuideCreated,
     onToast: OnToast,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    onRescaleArmed: OnRescaleArmed = () => { /* no-op */ },
+    onRescaleApplied: OnRescaleApplied = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onGuideCreated = onGuideCreated
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.onRescaleArmed = onRescaleArmed
+    this.onRescaleApplied = onRescaleApplied
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────
@@ -289,7 +338,8 @@ export class TapeMeasureTool implements Tool {
       }
 
       const p0: [number, number, number] = [snap.x, snap.y, snap.z]
-      this.stage = { kind: 'measure', p0, p1: p0, onGeometry: snapOnGeometry(snap) }
+      const p0OnGeometry = snapOnGeometry(snap)
+      this.stage = { kind: 'measure', p0, p0OnGeometry, p1: p0, onGeometry: p0OnGeometry }
       this._updatePreviewLine()
       return
     }
@@ -306,6 +356,13 @@ export class TapeMeasureTool implements Tool {
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      // A pending rescale confirmation: Escape is the dialog's "Cancel" —
+      // reverts to the normal guide behavior (design tool-parity §3), never
+      // a bare abort that would silently drop the typed distance entirely.
+      if (this.stage.kind === 'pendingRescale') {
+        this.cancelRescale()
+        return
+      }
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) is a no-op cancel (mirrors
       // the draw tools' idle plane lock — design §6 bullet 2).
@@ -321,6 +378,11 @@ export class TapeMeasureTool implements Tool {
       this.idlePlaneLock = lock
       return
     }
+
+    // While a rescale confirmation is pending, only Escape (above) and the
+    // dialog's own buttons (`confirmRescale`/`cancelRescale`) resolve it —
+    // no stray keystroke should start building a new VCB buffer underneath it.
+    if (this.stage.kind === 'pendingRescale') return
 
     if (this.stage.kind === 'idle') {
       // Idle plane lock via arrow keys (design §6 bullet 2) — consumed by
@@ -365,7 +427,7 @@ export class TapeMeasureTool implements Tool {
    */
   private _resolveGesturePlane(ray: Ray, clickedPoint: [number, number, number]): DrawPlane | null {
     if (this.idlePlaneLock !== null) {
-      const plane = axisDrawPlane(this.idlePlaneLock, clickedPoint)
+      const plane = axisDrawPlane(this.idlePlaneLock, clickedPoint, getDrawingAxes(this.wasmScene))
       return plane.ground ? null : plane
     }
     const handle = this._sketchPickCache.pickFor(this.wasmScene, ray)
@@ -522,15 +584,63 @@ export class TapeMeasureTool implements Tool {
     }
 
     if (this.stage.kind === 'measure') {
-      const { p0, p1 } = this.stage
+      const { p0, p0OnGeometry, p1, onGeometry } = this.stage
       const rel: [number, number, number] = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]]
       const relLen = Math.sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2])
       const dir: [number, number, number] = relLen < 1e-9 ? [1, 0, 0] : [rel[0] / relLen, rel[1] / relLen, rel[2] / relLen]
       const endpoint = pointAlong(p0, dir, dist)
+
+      // Resize-the-model arm (design tool-parity §3, SketchUp's flow):
+      // typing a length between two REAL, already-measured points — both
+      // ends resting on real geometry, so "this distance" names something
+      // concrete — arms a confirmation instead of the ordinary guide-point
+      // commit below. An empty-space endpoint (either end) or a degenerate
+      // current/typed length has no meaningful "this distance", and falls
+      // through to that ordinary commit unchanged.
+      if (p0OnGeometry && onGeometry && relLen > 1e-6 && dist > 1e-6) {
+        this.stage = { kind: 'pendingRescale', p0, endpoint, factor: dist / relLen }
+        this.typed = ''
+        this._clearPreviewLine()
+        this.onMeasurementCb('')
+        this.onRescaleArmed({ currentDistance: relLen, typedDistance: dist, factor: dist / relLen })
+        return
+      }
+
       // Typed-exact endpoints are, by definition, not resting on picked
       // geometry — always drop a guide point so the typed distance is preserved.
       this._commitMeasure(p0, endpoint, false)
     }
+  }
+
+  /**
+   * Apply the armed rescale (the confirmation modal's "Confirm"). No-op if
+   * nothing is armed (stray/late call — e.g. Escape and the dialog's own
+   * button both resolving the same arm). Errors (a refused factor) toast;
+   * either way the tool returns to idle.
+   */
+  confirmRescale(): void {
+    if (this.stage.kind !== 'pendingRescale') return
+    const { factor } = this.stage
+    try {
+      this.wasmScene.rescale_document(factor)
+      this.onRescaleApplied(factor)
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err)
+      this.onToast(`Couldn't resize the model: ${raw}`)
+    }
+    this._resetToIdle()
+  }
+
+  /**
+   * Decline the armed rescale (the confirmation modal's "Cancel", or Esc):
+   * falls through to the NORMAL guide-point commit the typed distance would
+   * have produced without the arm (design tool-parity §3 — "cancel reverts
+   * to the normal guide behavior"). No-op if nothing is armed.
+   */
+  cancelRescale(): void {
+    if (this.stage.kind !== 'pendingRescale') return
+    const { p0, endpoint } = this.stage
+    this._commitMeasure(p0, endpoint, false)
   }
 
   private _resetToIdle(): void {

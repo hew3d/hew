@@ -30,6 +30,10 @@ function makeWasmScene(opts: { sketchPick?: bigint } = {}) {
   const guidePoints: number[][] = []
   const planes = new Map<bigint, Float64Array>([[TILTED_SKETCH, TILTED_PLANE]])
   const scene = {
+    // World-identity drawing axes (tool-parity §4) — this suite pins the
+    // legacy world-axis fast paths; see drawPlane.test.ts for moved-frame
+    // coverage of `axisDrawPlane` itself.
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     edge_endpoints: vi.fn(() => new Float64Array([0, 0, 0, 2, 0, 0])),
     sketch_edge_endpoints: vi.fn(() => new Float64Array([0, 0, 0, 2, 0, 0])),
     add_guide_line: vi.fn(),

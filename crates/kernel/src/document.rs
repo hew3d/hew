@@ -36,6 +36,7 @@ use std::num::NonZeroU32;
 use slotmap::SlotMap;
 use tracing::info;
 
+use crate::axes::{AxesFrame, AxesFrameError};
 use crate::camera::CameraState;
 use crate::guide::Guide;
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
@@ -221,9 +222,12 @@ type TagListTransition = (NodeId, Vec<Vec<String>>, Vec<Vec<String>>);
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
 /// churns — redo just unhides, and a later `ObjectOp` still refers to a live
 /// handle.
-// `Transform` carries f64s, so this is `PartialEq` but not `Eq`; the `Vec`
-// fields (transform targets, grouped membership) make it non-`Copy`.
-#[derive(Debug, Clone, PartialEq)]
+// `Transform` carries f64s (no `Eq`) and the `Vec` fields (transform targets,
+// grouped membership) make this non-`Copy`. Not `PartialEq`: `Rescale` snapshots
+// full `Object`/`Sketch` clones, neither of which derives it, and nothing
+// outside this private enum ever compares two actions (`matches!` needs no
+// such bound) — a manual impl would be dead weight.
+#[derive(Debug, Clone)]
 enum DocAction {
     /// Several ordinary actions committed as one user gesture. Children stay
     /// in their original commit order; undo applies them in reverse and redo
@@ -283,9 +287,15 @@ enum DocAction {
     /// `hidden_operands`; redo reverses. Pure visibility flipping, all
     /// handles stable (hide-not-delete) — nothing is recomputed on replay.
     BooleanNodes {
-        /// The first operand's root node.
+        /// The first operand's root node. Undo/redo destructure this
+        /// variant with `..`, resolving purely from `hidden_operands` /
+        /// `result_objects` / `result_group`; kept for `Debug` diagnostics.
+        /// Previously read by the (now-removed) `DocAction: PartialEq`
+        /// derive, which is why `dead_code` did not flag it before.
+        #[allow(dead_code)]
         a: NodeId,
-        /// The second operand's root node.
+        /// The second operand's root node. See `a`.
+        #[allow(dead_code)]
         b: NodeId,
         /// Every node hidden by consuming the operands (both subtrees,
         /// pre-order), so undo unhides exactly this set and nothing else.
@@ -388,6 +398,48 @@ enum DocAction {
         forward: Transform,
         inverse: Transform,
     },
+    /// `rescale_document` uniformly scaled the WHOLE model about the world
+    /// origin (design tool-parity §3 — the Tape Measure "resize the model"
+    /// flow): every world Object, every Sketch, every guide, and every
+    /// instance pose. Unlike [`DocAction::TransformSelection`] (which bakes
+    /// a recomputed `inverse` matrix into objects/sketches, tolerating the
+    /// resulting ULP noise), EVERY touched entity's exact pre-scale state is
+    /// recorded here — a factor's inverse (`1/factor`) is not its own exact
+    /// floating-point undo (`(p·f)/f ≠ p` in general), and that imprecision
+    /// would be far more consequential spread across an entire document
+    /// than a single selection's move (rule 9 posture: undo restores
+    /// recorded state exactly, never recomputes). Undo restores every
+    /// snapshot verbatim; redo re-applies `factor` to that SAME snapshot,
+    /// which reproduces the original commit bit-for-bit (deterministic
+    /// float ops on identical operands) — so any number of undo/redo
+    /// cycles never drifts. All handles are stable across undo/redo
+    /// (nothing is created, hidden, or removed — every entity keeps its id
+    /// and its hidden/visible state).
+    Rescale {
+        factor: f64,
+        objects: Vec<(ObjectId, Object)>,
+        sketches: Vec<(SketchId, Sketch)>,
+        guides: Vec<(GuideId, Guide)>,
+        instances: Vec<(InstanceId, Transform)>,
+        /// The movable drawing axes' PRE-scale origin (tool-parity design
+        /// §4). A rescale moves this along with every other world-length
+        /// quantity — the axes gizmo and every frame-relative
+        /// drawing/inference operation read through
+        /// [`Document::axes`], so leaving the frame's origin fixed while the
+        /// geometry it anchors moves detaches the two. `x`/`y` are unit
+        /// directions, not positions, and are never touched by a rescale.
+        /// Recorded here (not recomputed) for the same rule-9 reason as
+        /// every other field above: undo restores it verbatim.
+        axes_origin: Point3,
+    },
+    /// `set_axes` swapped the document's movable drawing axes (tool-parity
+    /// design §4). Unlike every geometry-bearing action above, there is no
+    /// transform to invert or snapshot to restore-by-value against drift:
+    /// an [`AxesFrame`] IS the value, so undo/redo just swap `before`/`after`
+    /// back in verbatim — no arithmetic, so no drift is possible across any
+    /// number of undo/redo cycles. No handles are created, hidden, or
+    /// removed.
+    SetAxes { before: AxesFrame, after: AxesFrame },
     /// A single sketch vertex dragged to a new position (Phase D per-vertex
     /// edit). Topology-preserving, so the inverse is just the old position:
     /// undo restores `old_pos`, redo re-applies `new_pos`; both the `SketchId`
@@ -638,11 +690,15 @@ enum DocAction {
         nodes: Vec<TagListTransition>,
     },
     /// [`Document::follow_me_face`] swept a solid FACE profile into a new
-    /// object (design §3a). The source solid is untouched unless the sweep
-    /// MERGED with it — the profile face belonged to the path's own solid
-    /// (design §3b) — in which case `merged_base` is that solid, consumed
-    /// into the result exactly as a boolean operand. Undo hides the result
-    /// and restores the base; redo re-applies both.
+    /// object (design §3a), OR [`Document::extrude_face_as_new_object`]
+    /// straight-extruded one (design tool-parity §2, Ctrl-push/pull) — same
+    /// row shape either way: one new standalone Object born from a face
+    /// profile. The source solid is untouched unless the sweep MERGED with
+    /// it — the profile face belonged to the path's own solid (design
+    /// §3b) — in which case `merged_base` is that solid, consumed into the
+    /// result exactly as a boolean operand; `extrude_face_as_new_object`
+    /// never merges, so its `merged_base` is always `None`. Undo hides the
+    /// result and restores the base; redo re-applies both.
     FollowMeFace {
         result: ObjectId,
         merged_base: Option<ObjectId>,
@@ -652,7 +708,11 @@ enum DocAction {
     /// stay stable — hide-not-delete); redo unhides them. Materials added to
     /// the palette are not individually undone (matches `add_material`).
     Imported {
-        /// Top-level created node ids (ordering / tree-root list).
+        /// Top-level created node ids (ordering / tree-root list). Undo/redo
+        /// destructure this variant with `..`; kept for `Debug` diagnostics.
+        /// Previously read by the (now-removed) `DocAction: PartialEq`
+        /// derive, which is why `dead_code` did not flag it before.
+        #[allow(dead_code)]
         roots: Vec<NodeId>,
         /// ALL created `ObjectId`s — world objects and definition members alike.
         objects: Vec<ObjectId>,
@@ -967,6 +1027,15 @@ pub enum DocumentError {
     /// undo step; the top of the undo stack was not that gesture — a
     /// caller-contract violation. The document is untouched.
     UnexpectedGestureState,
+    /// `rescale_document` was called with a non-finite, zero, or negative
+    /// factor. Nothing is silently clamped or repaired (DEVELOPMENT.md rule
+    /// 4); the document is untouched.
+    InvalidRescaleFactor,
+    /// `set_axes` was called with a candidate frame that fails
+    /// [`AxesFrame::new`]'s validation (non-finite, or not orthonormal).
+    /// Nothing is silently renormalized or reoriented (DEVELOPMENT.md rule
+    /// 4); the document is untouched.
+    InvalidAxesFrame(AxesFrameError),
 }
 
 impl std::fmt::Display for DocumentError {
@@ -1071,6 +1140,10 @@ impl std::fmt::Display for DocumentError {
                 f,
                 "expected the just-closed sketch-drawing gesture at the top of the undo stack"
             ),
+            DocumentError::InvalidRescaleFactor => {
+                write!(f, "rescale factor must be a positive, finite number")
+            }
+            DocumentError::InvalidAxesFrame(e) => write!(f, "{e}"),
         }
     }
 }
@@ -1191,6 +1264,16 @@ pub struct Document {
     /// so it sits beside `tag_meta`/`user_hidden_*` rather than going through
     /// `undo`/`redo`.
     camera: Option<CameraState>,
+    /// Movable drawing axes (tool-parity design §4): the frame everything
+    /// that used to mean "world X/Y/Z" now reads through
+    /// [`Document::axes`] — axes rendering, Move/Rotate's arrow-key axis
+    /// locks, the active draw plane, and inference's axis snaps. Default is
+    /// [`AxesFrame::IDENTITY`] (world). Set only through
+    /// [`Document::set_axes`], so it is always a validated orthonormal
+    /// right-handed frame. The ground grid and Scale/Section/standard views
+    /// deliberately do NOT read this (design's v1 scope) — they stay
+    /// world-aligned.
+    axes: AxesFrame,
     undo: ActionStack,
     redo: ActionStack,
     /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
@@ -1219,6 +1302,60 @@ impl Document {
     /// Whether torture mode is enabled (see [`Document::set_torture_mode`]).
     pub fn torture_mode(&self) -> bool {
         self.torture
+    }
+
+    // --------------------------------------------------------------- axes
+
+    /// The current movable drawing axes (tool-parity design §4). Default
+    /// [`AxesFrame::IDENTITY`] (world) until [`Document::set_axes`] moves it.
+    pub fn axes(&self) -> AxesFrame {
+        self.axes
+    }
+
+    /// Sets the movable drawing axes to the frame spanned by `origin`, `x`,
+    /// and `y` (tool-parity design §4 — the Axes tool's three-click commit:
+    /// origin, red direction, green direction; Reset Axes passes
+    /// [`AxesFrame::IDENTITY`]'s own components). `z` is derived, never
+    /// accepted from the caller (see [`AxesFrame::new`]).
+    ///
+    /// One undo step. Undo/redo restore the exact RECORDED before/after
+    /// frame rather than computing an inverse transform: an [`AxesFrame`] is
+    /// not a transform composed onto geometry, it is a pair of stored
+    /// coordinate-system snapshots swapped in and out (the same posture as
+    /// [`Document::rescale_document`]'s recorded-state undo — DEVELOPMENT.md
+    /// rule 9). No geometry is touched, so `DocChange` reports nothing
+    /// touched; consumers re-read [`Document::axes`] directly.
+    ///
+    /// # Errors
+    /// [`DocumentError::InvalidAxesFrame`] — `origin`/`x`/`y` carry a
+    /// non-finite component, `x`/`y` are not each unit length or not
+    /// mutually perpendicular. Nothing is silently renormalized or
+    /// reoriented (DEVELOPMENT.md rule 4); the document is untouched.
+    pub fn set_axes(
+        &mut self,
+        origin: Point3,
+        x: Vec3,
+        y: Vec3,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "set_axes");
+        let frame = AxesFrame::new(origin, x, y).map_err(DocumentError::InvalidAxesFrame)?;
+        let before = self.axes;
+        self.axes = frame;
+        self.undo.push(DocAction::SetAxes {
+            before,
+            after: frame,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(DocChange {
+            objects_touched: Vec::new(),
+            sketches_touched: Vec::new(),
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        })
     }
 
     // ---------------------------------------------------------- persistence
@@ -1370,6 +1507,7 @@ impl Document {
             group_hidden: self.user_hidden_groups.clone(),
             instance_hidden: self.user_hidden_instances.clone(),
             camera: self.camera,
+            axes: self.axes,
         })
     }
 
@@ -1692,6 +1830,9 @@ impl Document {
 
         // ── Camera view state (manifest v13; absent pre-v13) ──────────────
         doc.camera = raw.camera;
+
+        // ── Movable drawing axes (manifest v13+; identity for older files) ─
+        doc.axes = raw.axes;
 
         // Undo/redo stacks are empty by construction (Document::new() gives empty).
         Ok(doc)
@@ -4044,6 +4185,75 @@ impl Document {
         Ok((id, change))
     }
 
+    /// Ctrl/Cmd-modified push/pull (design tool-parity §2): extrudes the
+    /// clicked solid FACE's own boundary into a NEW top-level Object,
+    /// straight-line rather than swept — [`Document::extrude_region`]
+    /// sourced from a face profile instead of a sketch region, exactly the
+    /// non-merging shape of [`Document::follow_me_face`] with
+    /// [`Object::from_extrusion`] in place of the sweep. SketchUp's "leave
+    /// original face" reinterpreted for Hew's freely-interpenetrating-
+    /// solids model: the source solid is completely untouched, and the two
+    /// solids end up sharing a coincident face — exactly like re-extruding
+    /// occupied ground already produces a second coincident solid
+    /// (ARCHITECTURE.md; the standing-solid gate was dropped everywhere).
+    /// One history entry ([`DocAction::FollowMeFace`], shared with the
+    /// sweep-from-face case: both insert one new standalone top-level
+    /// object with no merge — `merged_base` is always `None` here).
+    ///
+    /// # Errors
+    /// [`DocumentError::UnknownObject`] for a stale/hidden object handle, or
+    /// one that is a component-DEFINITION member (only world objects have a
+    /// face to extrude from at world scale); [`DocumentError::UnknownFace`]
+    /// for a stale face; [`DocumentError::Extrude`] for a degenerate
+    /// profile/distance (matches `extrude_region`'s refusals). The document
+    /// is untouched on error.
+    pub fn extrude_face_as_new_object(
+        &mut self,
+        object: ObjectId,
+        face: FaceId,
+        distance: f64,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "extrude_face_as_new_object", distance);
+        let rec = self
+            .objects
+            .get(object)
+            .filter(|r| !r.hidden && r.is_world())
+            .ok_or(DocumentError::UnknownObject)?;
+        let profile = rec
+            .object
+            .profile_from_face(face)
+            .ok_or(DocumentError::UnknownFace)?;
+        let new_object =
+            Object::from_extrusion(&profile, distance).map_err(DocumentError::Extrude)?;
+
+        // Everything that can fail has succeeded; commit — a fresh
+        // top-level world Object, born untethered from the source (see
+        // `follow_me_face`'s identical non-merging insertion).
+        let id = self.objects.insert(ObjectRecord {
+            object: new_object,
+            history: History::new(),
+            hidden: false,
+            owner: ObjectOwner::World { parent: None },
+            name: None,
+            tags: Vec::new(),
+        });
+        self.undo.push(DocAction::FollowMeFace {
+            result: id,
+            merged_base: None,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        let change = DocChange {
+            objects_touched: vec![id],
+            sketches_touched: Vec::new(),
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        };
+        Ok((id, change))
+    }
+
     /// Resolves a [`FollowMePath`] into the polyline
     /// [`Object::from_follow_me`] consumes: ordered points, whether the
     /// path closes, and each segment's analytic curve attribution (the
@@ -6030,6 +6240,143 @@ impl Document {
         }
     }
 
+    /// Uniformly scales the WHOLE document about the world origin (design
+    /// tool-parity §3 — the Tape Measure "resize the model" flow): every
+    /// world Object's geometry, every Sketch's geometry, every construction
+    /// guide, and every component instance's pose. Component DEFINITIONS
+    /// are never touched — an instance's shared geometry stays at its
+    /// authored size; only the placing pose scales, so every instance of a
+    /// definition still shows it scaled by that instance's own pose
+    /// (SketchUp parity: an external rescale never mutates a symbol's
+    /// internal geometry).
+    ///
+    /// Only currently VISIBLE entities are touched. A hidden (tombstoned-
+    /// undo) object can never resurface while this rescale stays applied:
+    /// reaching it again means undoing back past this very action first
+    /// (which restores it, in lockstep, to its own recorded pre-scale
+    /// snapshot), or redoing a creation that was undone before this action
+    /// committed — impossible, since committing ANY action (this one
+    /// included) clears the redo stack the moment it is undone. So scaling
+    /// a hidden entity here could never be observed; only visible ones are
+    /// worth the snapshot.
+    ///
+    /// One document history entry. Undo restores the exact RECORDED
+    /// pre-scale state (a snapshot taken before any mutation) rather than
+    /// recomputing a geometric `1/factor` inverse: floating-point multiply
+    /// is not its own exact inverse (`(p·f)/f ≠ p` in general), so
+    /// reapplying a computed inverse would leave every coordinate in the
+    /// document off by a few ULPs — unlike [`Document::transform_selection`]
+    /// (whose baked-inverse ULP noise is tolerated because it is scoped to
+    /// one selection), an op that touches the entire model at once cannot
+    /// accept that (DEVELOPMENT.md rule 9 posture). Redo reruns the SAME
+    /// deterministic scale against that recorded snapshot, reproducing the
+    /// original commit bit-for-bit — so undo/redo cycles never drift,
+    /// however many times they run.
+    ///
+    /// # Errors
+    /// [`DocumentError::InvalidRescaleFactor`] for a non-finite, zero, or
+    /// negative factor — nothing is silently clamped or repaired
+    /// (DEVELOPMENT.md rule 4). The document is untouched on error.
+    pub fn rescale_document(&mut self, factor: f64) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "rescale_document", factor);
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(DocumentError::InvalidRescaleFactor);
+        }
+        let scale = Transform::uniform_scale(factor);
+
+        // Snapshot every touched entity's PRE-scale state before mutating
+        // anything (see the doc comment above: undo restores this
+        // verbatim, never a recomputed inverse).
+        let object_ids: Vec<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|(_, rec)| !rec.hidden && rec.is_world())
+            .map(|(id, _)| id)
+            .collect();
+        let pre_objects: Vec<(ObjectId, Object)> = object_ids
+            .iter()
+            .map(|&id| (id, self.objects[id].object.clone()))
+            .collect();
+        let sketch_ids: Vec<SketchId> = self
+            .sketches
+            .keys()
+            .filter(|id| !self.hidden_sketches.contains(id))
+            .collect();
+        let pre_sketches: Vec<(SketchId, Sketch)> = sketch_ids
+            .iter()
+            .map(|&id| (id, self.sketches[id].clone()))
+            .collect();
+        let guide_ids: Vec<GuideId> = self
+            .guides
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, _)| id)
+            .collect();
+        let pre_guides: Vec<(GuideId, Guide)> = guide_ids
+            .iter()
+            .map(|&id| (id, self.guides[id].guide))
+            .collect();
+        let instance_ids: Vec<InstanceId> = self
+            .instances
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, _)| id)
+            .collect();
+        let pre_instances: Vec<(InstanceId, Transform)> = instance_ids
+            .iter()
+            .map(|&id| (id, self.instances[id].pose))
+            .collect();
+        let pre_axes_origin = self.axes.origin;
+
+        // A positive finite factor's uniform-scale transform is never
+        // singular nor orientation-flipping, so `apply_transform` cannot
+        // refuse — the guard above is the only fallible step, already past.
+        for &id in &object_ids {
+            self.objects[id]
+                .object
+                .apply_transform(&scale)
+                .expect("a positive finite uniform scale is never singular or reflecting");
+        }
+        for &id in &sketch_ids {
+            self.sketches[id]
+                .apply_transform(&scale)
+                .expect("a positive finite uniform scale is never singular or reflecting");
+        }
+        for &id in &guide_ids {
+            let rec = &mut self.guides[id];
+            rec.guide = scale_guide(rec.guide, &scale);
+        }
+        for &id in &instance_ids {
+            let rec = &mut self.instances[id];
+            rec.pose = rec.pose.then(&scale);
+        }
+        // The movable drawing axes' ORIGIN is a world-space position, exactly
+        // like an object vertex or a guide point — it must scale in lockstep
+        // or the frame detaches from the geometry it anchors. `x`/`y` are
+        // unit directions, unaffected by a uniform scale about the origin.
+        self.axes.origin = scale.apply_point(self.axes.origin);
+
+        self.undo.push(DocAction::Rescale {
+            factor,
+            objects: pre_objects,
+            sketches: pre_sketches,
+            guides: pre_guides,
+            instances: pre_instances,
+            axes_origin: pre_axes_origin,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(DocChange {
+            objects_touched: object_ids,
+            sketches_touched: sketch_ids,
+            groups_touched: Vec::new(),
+            instances_touched: instance_ids,
+            components_touched: Vec::new(),
+            guides_touched: guide_ids,
+        })
+    }
+
     // ------------------------------------------------- component mutations
 
     /// Folds a selection of sibling nodes into a new component definition plus
@@ -7683,17 +8030,43 @@ impl Document {
                     if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
                         self.groups[pg].members = prev.clone();
                     }
+                    // Any sketch owned by this definition that is still live
+                    // has no world home once the definition hides — hide it
+                    // too, exactly as the standalone `MadeComponent` undo
+                    // does (component-edit-parity.md phase K1). The text
+                    // placement's own glyph sketch is hidden again by the
+                    // bundle's `SketchGesture` arm right after this one
+                    // (idempotent), but a sketch drawn INTO the text
+                    // definition AFTER the placement (`begin_sketch_on_plane
+                    // _in_instance` pushes no undo action of its own until a
+                    // gesture lands) is invisible to the bundle — without
+                    // this it stayed live with its owner pointing at the
+                    // now-hidden definition, and `Document::save` panicked
+                    // encoding `sketch_owner` (the document_fuzz PlaceText →
+                    // refused FollowMe-in-instance → Undo seed). Recomputed
+                    // by ownership rather than stored, for the same LIFO-
+                    // replay reason as the standalone arm.
+                    let orphaned: Vec<SketchId> = self
+                        .def_sketches
+                        .iter()
+                        .filter(|&(sid, &c)| c == component && !self.hidden_sketches.contains(sid))
+                        .map(|(&sid, _)| sid)
+                        .collect();
+                    for &sid in &orphaned {
+                        self.hidden_sketches.insert(sid);
+                    }
                     self.instances[instance].hidden = true;
                     self.components[component].hidden = true;
                     let leaves: Vec<ObjectId> =
                         member_prior_parents.iter().map(|&(o, _)| o).collect();
-                    let c = made_component_change(
+                    let mut c = made_component_change(
                         component,
                         instance,
                         parent,
                         &leaves,
                         consumed_groups,
                     );
+                    c.sketches_touched = orphaned;
                     (c, inner.clone())
                 }
                 DocAction::SketchGesture {
@@ -7797,6 +8170,21 @@ impl Document {
                     for &g in consumed_groups {
                         self.groups[g].hidden = true;
                     }
+                    // Un-hide any sketch this definition owned when the
+                    // placement was undone — the matching undo arm's
+                    // counterpart, mirroring the standalone `MadeComponent`
+                    // redo (component-edit-parity.md phase K1). The glyph
+                    // sketch itself is then re-revealed by the bundle's
+                    // `SketchGesture` arm as well (idempotent).
+                    let restored: Vec<SketchId> = self
+                        .def_sketches
+                        .iter()
+                        .filter(|&(sid, &c)| c == component && self.hidden_sketches.contains(sid))
+                        .map(|(&sid, _)| sid)
+                        .collect();
+                    for &sid in &restored {
+                        self.hidden_sketches.remove(&sid);
+                    }
                     self.components[component].hidden = false;
                     self.instances[instance].hidden = false;
                     if let Some(pg) = parent {
@@ -7804,13 +8192,14 @@ impl Document {
                     }
                     let leaves: Vec<ObjectId> =
                         member_prior_parents.iter().map(|&(o, _)| o).collect();
-                    let c = made_component_change(
+                    let mut c = made_component_change(
                         component,
                         instance,
                         parent,
                         &leaves,
                         consumed_groups,
                     );
+                    c.sketches_touched = restored;
                     (c, inner.clone())
                 }
                 DocAction::SketchGesture {
@@ -7971,6 +8360,64 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched,
                     components_touched,
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::Rescale {
+                factor: _,
+                objects,
+                sketches,
+                guides,
+                instances,
+                axes_origin,
+            } => {
+                // Undo a rescale: restore every entity's RECORDED pre-scale
+                // state verbatim (never a recomputed `1/factor` inverse —
+                // see `Document::rescale_document`'s doc comment). The axes
+                // frame's origin is restored the same way; its directions
+                // were never touched, so there is nothing to restore there.
+                self.axes.origin = *axes_origin;
+                let mut objects_touched = Vec::with_capacity(objects.len());
+                for (id, obj) in objects {
+                    self.objects[*id].object = obj.clone();
+                    objects_touched.push(*id);
+                }
+                let mut sketches_touched = Vec::with_capacity(sketches.len());
+                for (id, sk) in sketches {
+                    self.sketches[*id] = sk.clone();
+                    sketches_touched.push(*id);
+                }
+                let mut guides_touched = Vec::with_capacity(guides.len());
+                for (id, g) in guides {
+                    self.guides[*id].guide = *g;
+                    guides_touched.push(*id);
+                }
+                let mut instances_touched = Vec::with_capacity(instances.len());
+                for (id, pose) in instances {
+                    self.instances[*id].pose = *pose;
+                    instances_touched.push(*id);
+                }
+                DocChange {
+                    objects_touched,
+                    sketches_touched,
+                    groups_touched: Vec::new(),
+                    instances_touched,
+                    components_touched: Vec::new(),
+                    guides_touched,
+                }
+            }
+            &DocAction::SetAxes { before, .. } => {
+                // Undo a frame swap: restore the RECORDED prior frame
+                // verbatim — an `AxesFrame` is a stored value, not a
+                // transform baked into geometry, so there is nothing to
+                // invert and nothing that can drift.
+                self.axes = before;
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
                     guides_touched: Vec::new(),
                 }
             }
@@ -8793,6 +9240,73 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched,
                     components_touched,
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::Rescale {
+                factor,
+                objects,
+                sketches,
+                guides,
+                instances,
+                axes_origin,
+            } => {
+                // Redo a rescale: re-apply `factor` to the SAME recorded
+                // pre-scale snapshot — deterministic float ops on identical
+                // operands reproduce the original commit bit-for-bit (see
+                // `Document::rescale_document`'s doc comment). Same for the
+                // axes frame's origin.
+                let scale = Transform::uniform_scale(*factor);
+                self.axes.origin = scale.apply_point(*axes_origin);
+                let mut objects_touched = Vec::with_capacity(objects.len());
+                for (id, obj) in objects {
+                    let mut fresh = obj.clone();
+                    fresh.apply_transform(&scale).expect(
+                        "re-scaling the recorded pre-scale snapshot cannot fail: the same \
+                         positive finite factor already applied once without refusing",
+                    );
+                    self.objects[*id].object = fresh;
+                    objects_touched.push(*id);
+                }
+                let mut sketches_touched = Vec::with_capacity(sketches.len());
+                for (id, sk) in sketches {
+                    let mut fresh = sk.clone();
+                    fresh.apply_transform(&scale).expect(
+                        "re-scaling the recorded pre-scale snapshot cannot fail: the same \
+                         positive finite factor already applied once without refusing",
+                    );
+                    self.sketches[*id] = fresh;
+                    sketches_touched.push(*id);
+                }
+                let mut guides_touched = Vec::with_capacity(guides.len());
+                for (id, g) in guides {
+                    self.guides[*id].guide = scale_guide(*g, &scale);
+                    guides_touched.push(*id);
+                }
+                let mut instances_touched = Vec::with_capacity(instances.len());
+                for (id, pose) in instances {
+                    self.instances[*id].pose = pose.then(&scale);
+                    instances_touched.push(*id);
+                }
+                DocChange {
+                    objects_touched,
+                    sketches_touched,
+                    groups_touched: Vec::new(),
+                    instances_touched,
+                    components_touched: Vec::new(),
+                    guides_touched,
+                }
+            }
+            &DocAction::SetAxes { after, .. } => {
+                // Redo a frame swap: re-apply the RECORDED after-frame
+                // verbatim (same non-transform posture as undo above).
+                self.axes = after;
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
                     guides_touched: Vec::new(),
                 }
             }
@@ -9751,6 +10265,24 @@ fn point_is_finite(p: Point3) -> bool {
 /// input (a NaN length compares false against the minimum-length tolerance).
 fn vec_is_finite(v: Vec3) -> bool {
     v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+/// Scales a [`Guide`]'s geometry by `scale` (a positive uniform scale about
+/// the world origin — [`Document::rescale_document`]'s only caller). The
+/// origin/position point moves like any other point; `direction` is left
+/// exactly as-is rather than run through `apply_vector` — a POSITIVE scale
+/// never rotates or flips it, and renormalizing a vector that is already
+/// unit-length would only add a spurious rounding step.
+fn scale_guide(guide: Guide, scale: &Transform) -> Guide {
+    match guide {
+        Guide::Line { origin, direction } => Guide::Line {
+            origin: scale.apply_point(origin),
+            direction,
+        },
+        Guide::Point { position } => Guide::Point {
+            position: scale.apply_point(position),
+        },
+    }
 }
 
 /// The [`DocChange`] for a group/ungroup: the group, its parent, and any member

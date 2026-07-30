@@ -83,6 +83,11 @@ export function classifySnapPick(snap: Snap | null): SnapPick {
 export interface SelectScene {
   sketch_curve_chain(sketch: bigint, edge: bigint): BigUint64Array | bigint[]
   sketch_curve_edges(sketch: bigint, curve: bigint): BigUint64Array | bigint[]
+  /** World endpoints `[ax,ay,az,bx,by,bz]` of a sketch edge, or `undefined`
+   *  for a stale/def-owned handle. Optional so a caller with no location
+   *  data (or a test double) degrades cleanly to `curveRef`'s tie path
+   *  rather than failing to resolve at all. */
+  sketch_edge_endpoints?(sketch: bigint, edge: bigint): Float64Array | number[] | undefined
   sketch_region_island(sketch: bigint, region: bigint): bigint | undefined
   pick_sketch_region(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
@@ -136,33 +141,95 @@ function edgeRef(scene: SelectScene, sketch: bigint, edge: bigint): NodeRef {
     : { kind: 'sketch-edge', id: edge, sketch }
 }
 
+/** Squared distance from `p` to the segment `a`–`b`, world space. Used only
+ * to RANK candidate fragments of one curve id by proximity to a click — a
+ * facet chord is a good enough proxy for "nearest point on the arc" at
+ * selection scale, and the ranking only needs to be consistent, not exact. */
+function pointSegmentDistSq(
+  p: readonly [number, number, number],
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+): number {
+  const abx = b[0] - a[0]
+  const aby = b[1] - a[1]
+  const abz = b[2] - a[2]
+  const abLenSq = abx * abx + aby * aby + abz * abz
+  const apx = p[0] - a[0]
+  const apy = p[1] - a[1]
+  const apz = p[2] - a[2]
+  const t = abLenSq > 0 ? Math.max(0, Math.min(1, (apx * abx + apy * aby + apz * abz) / abLenSq)) : 0
+  const dx = p[0] - (a[0] + abx * t)
+  const dy = p[1] - (a[1] + aby * t)
+  const dz = p[2] - (a[2] + abz * t)
+  return dx * dx + dy * dy + dz * dz
+}
+
+/** Squared-distance tolerance (world units²) below which two candidate
+ * fragments are treated as EQUIDISTANT from the click — the shared
+ * intersection vertex between two fragments lands here, both distances
+ * being (up to float noise) exactly zero. Matches
+ * [`tol::POINT_MERGE`](../../../crates/kernel/src/tol.rs) (1e-9 m) rather
+ * than reinventing a tolerance. */
+const TIE_DIST_SQ = 1e-18
+
 /** A drawn curve CHAIN → the ref a click on that curve selects, or null when
  * the chain has no live edges (a stale handle).
+ *
+ * Curve identity is durable across sticky splits (the true-curves design):
+ * once other geometry crosses a drawn circle, one curve id legitimately
+ * names several DISCONNECTED arc fragments (`sketch_curve_edges` returns
+ * every edge sharing the id, with no connectivity check). A click's snap
+ * resolves to a curve-level analytic point (center / quadrant / tangent),
+ * not an edge, so which fragment the user meant has to be recovered from
+ * WHERE they clicked: `point` is the resolved snap position, close to the
+ * actual cursor even when the snap itself is gravity-boosted onto an
+ * analytic point (`GRAVITY_ANALYTIC_POINT` pulls from further away than a
+ * plain edge, but not further than the fragment under the cursor).
+ *
+ * Ranks the curve's edges by distance from `point` to that edge's chord and
+ * hands the nearest one to `edgeRef`, which expands it through the
+ * connectivity-aware `curve_chain_at` — so the selection is the contiguous
+ * fragment under the cursor, the unit a user means by "this arc", not
+ * whichever fragment happens to hold the lowest id.
+ *
+ * Ties (within `TIE_DIST_SQ` — the point sits on the shared intersection
+ * vertex between two fragments, equidistant from both) resolve to the
+ * LOWEST edge id, so the outcome stays deterministic; the same rule covers
+ * a caller with no location data (every candidate then ties at the
+ * fallback distance), preserving `edgeRef`'s prior "lowest id" behaviour
+ * for that degenerate case.
  *
  * Routed deliberately through `edgeRef` rather than minting a ref from the
  * curve handle directly: a `NodeRef{kind: 'sketch-curve'}` is identified by a
  * representative EDGE everywhere else in the app (the Outliner, Object Info,
  * transform lifting), so an analytic-point click and a rim-edge click must
- * produce the *same* ref, not two spellings of one curve. For an intact circle
- * every facet shares one chain, so any facet's `edgeRef` canonicalizes to the
- * same representative — but `sketch_curve_edges` returns slotmap order, not id
- * order, so we pick the chain's LOWEST-id edge explicitly to keep the ref
- * deterministic and to match the representative `edgeRef` (via
- * `curve_chain_at`, which returns ascending) settles on.
- *
- * When sticky rules have split one curve into several chains that still share
- * the curve id (a line drawn across a circle), the analytic center is
- * genuinely shared by both arcs; it resolves to whichever chain holds the
- * lowest-id edge. A rim click on a different fragment selects that fragment
- * instead — an accepted ambiguity, since the center belongs to neither arc
- * more than the other, and both refs expose the same curve's Segments control.
- * When only one edge survives, `edgeRef` degrades to that `sketch-edge`. */
-function curveRef(scene: SelectScene, sketch: bigint, curve: bigint): NodeRef | null {
+ * produce the *same* ref, not two spellings of one curve. When only one edge
+ * survives, `edgeRef` degrades to that `sketch-edge`. */
+function curveRef(
+  scene: SelectScene,
+  sketch: bigint,
+  curve: bigint,
+  point: readonly [number, number, number],
+): NodeRef | null {
   const edges = scene.sketch_curve_edges(sketch, curve)
   if (edges.length === 0) return null
-  let lowest = edges[0]
-  for (const e of edges) if (e < lowest) lowest = e
-  return edgeRef(scene, sketch, lowest)
+  let best = edges[0]
+  let bestDistSq = Infinity
+  for (const e of edges) {
+    const ends = scene.sketch_edge_endpoints?.(sketch, e)
+    const distSq =
+      ends !== undefined && ends.length >= 6
+        ? pointSegmentDistSq(point, [ends[0], ends[1], ends[2]], [ends[3], ends[4], ends[5]])
+        : Infinity
+    if (distSq < bestDistSq - TIE_DIST_SQ) {
+      best = e
+      bestDistSq = distSq
+    } else if (distSq <= bestDistSq + TIE_DIST_SQ && e < best) {
+      best = e
+      bestDistSq = Math.min(bestDistSq, distSq)
+    }
+  }
+  return edgeRef(scene, sketch, best)
 }
 
 /** Reject a solid hit beyond the render far plane. `depth` is the RADIAL
@@ -290,9 +357,11 @@ export function resolveSelectableRef(
     case 'sketch-curve': {
       // Same context rule as the other sketch kinds. A curve whose edges are
       // all gone yields null here and falls through to the ray re-probe,
-      // rather than selecting nothing at all.
-      if (topLevel) {
-        const ref = curveRef(deps.scene, pick.sketch, pick.curve)
+      // rather than selecting nothing at all. `snap` is always non-null here
+      // (classifySnapPick only reaches 'sketch-curve' from a real snap) — the
+      // `snap` guard just keeps TypeScript's narrowing honest.
+      if (topLevel && snap) {
+        const ref = curveRef(deps.scene, pick.sketch, pick.curve, [snap.x, snap.y, snap.z])
         if (ref !== null) return ref
       }
       break

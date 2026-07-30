@@ -16,6 +16,7 @@ use std::io::{Cursor, Read, Seek, Write};
 use serde::{Deserialize, Serialize};
 use slotmap::SecondaryMap;
 
+use crate::axes::AxesFrame;
 use crate::camera::{CameraProjection, CameraState};
 use crate::error::TopologyError;
 use crate::guide::Guide;
@@ -138,10 +139,10 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// read direction; a v11 reader given a v12 file loses only the distinction
 /// (it would read a polygon as a circle), which is why the version moves.
 /// Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 5).
-/// v13: a shared landing spot — two branches in flight at the same time
-/// (component-edit, camera) both bumped `MANIFEST_FORMAT_VERSION` 12→13 for
-/// their own additive fields; both land together here rather than
-/// splitting into 13/14, per the note this replaces.
+/// v13: a shared landing spot — three branches in flight at the same time
+/// (component-edit, camera, tool-parity) each bumped
+/// `MANIFEST_FORMAT_VERSION` 12→13 for their own additive fields; all land
+/// together here rather than splitting into 13/14/15.
 ///
 /// - `sketches[].owner` (component-edit-parity.md phase K1) — the
 ///   `SketchOwner`: absent means world-owned (the only possibility before
@@ -155,9 +156,25 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 ///   undoable (`camera.rs`'s module doc) — this is view state, not a
 ///   document edit, mirroring the tag-visibility registry (v5) and
 ///   user-hidden-node flags (v6) already on this list.
+/// - `axes` (tool-parity design §4) — the document-level movable drawing
+///   axes frame, `{ origin: [f64;3], x: [f64;3], y: [f64;3] }` (`z = x×y`,
+///   never stored — HEW_FILE_FORMAT.md). Absent means world identity (every
+///   pre-v13 file, and any v13+ file whose axes were never moved), so old
+///   files load unchanged and an unmoved document still writes a
+///   byte-identical manifest with no `axes` key.
 ///
-/// Geometry buffer unchanged by either field (`GEOMETRY_FORMAT_VERSION`
+/// Geometry buffer unchanged by any of these fields (`GEOMETRY_FORMAT_VERSION`
 /// stays 6).
+///
+/// v13 is shared by sibling branches bumping independently for their own
+/// additive fields — expect this constant and its doc comment to conflict at
+/// rebase. Reconcile the prose; keep exactly ONE
+/// `pub const MANIFEST_FORMAT_VERSION: u32 = 13`. Each field stays
+/// independently gated by its own `_MIN_VERSION` constant (see
+/// `SKETCH_OWNER_MIN_VERSION`/`CAMERA_MANIFEST_VERSION`/`AXES_MIN_VERSION`
+/// below), never by the shared manifest version alone, so multiple fields
+/// coexisting under one version number is intentional, not a collision to
+/// design around.
 pub const MANIFEST_FORMAT_VERSION: u32 = 13;
 
 /// The manifest version at which the stored sketch–solid claim fields
@@ -183,6 +200,13 @@ pub(crate) const SKETCH_OWNER_MIN_VERSION: u32 = 13;
 /// writer ever emitted one, so its presence means a hand-edited or smuggled
 /// field, not a real older camera.
 pub(crate) const CAMERA_MANIFEST_VERSION: u32 = 13;
+
+/// The manifest version at which `axes` (tool-parity design §4) was
+/// introduced. Version-gated, not presence-gated, the mirror image of
+/// [`MANIFEST_CLAIMS_RETIRED_VERSION`]: a file declaring an OLDER version
+/// that still carries an `axes` field is malformed for its own declared
+/// version and is rejected, never silently honored (reject-not-repair).
+pub(crate) const AXES_MIN_VERSION: u32 = 13;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -1389,6 +1413,24 @@ pub(crate) struct Manifest {
     /// `Document::set_camera_state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<CameraDto>,
+    /// Movable drawing axes (manifest v13+, tool-parity design §4). Absent
+    /// means world identity — the only possibility before this field
+    /// existed, so every pre-v13 file loads unchanged, and a document whose
+    /// axes were never moved from identity still writes a byte-identical
+    /// manifest with no `axes` key ([`encode_document`] only emits it when
+    /// the frame differs from [`AxesFrame::IDENTITY`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axes: Option<AxesFrameDto>,
+}
+
+/// A document-level movable drawing axes frame (manifest v13+). `z` is not
+/// stored — it is always `x × y` ([`AxesFrame::z`]), so a persisted frame can
+/// never itself disagree with its own blue axis.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AxesFrameDto {
+    pub origin: [f64; 3],
+    pub x: [f64; 3],
+    pub y: [f64; 3],
 }
 
 /// The working camera view (manifest v13+; docs/design/camera.md §5). NOT
@@ -1712,6 +1754,8 @@ pub(crate) struct DocSaveData {
     /// camera.md §5), or `None` if none was ever set — NOT undoable (see
     /// `camera.rs`), same posture as the tag/hidden fields above.
     pub camera: Option<CameraState>,
+    /// Movable drawing axes (manifest v13+, tool-parity design §4).
+    pub axes: AxesFrame,
 }
 
 /// Encodes a complete document into `.hew` zip bytes (HEW_FILE_FORMAT.md).
@@ -1943,6 +1987,15 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             })
             .collect(),
         camera: data.camera.map(encode_camera),
+        axes: if data.axes == AxesFrame::IDENTITY {
+            None
+        } else {
+            Some(AxesFrameDto {
+                origin: [data.axes.origin.x, data.axes.origin.y, data.axes.origin.z],
+                x: [data.axes.x.x, data.axes.x.y, data.axes.x.z],
+                y: [data.axes.y.x, data.axes.y.y, data.axes.y.z],
+            })
+        },
     };
 
     let manifest_json =
@@ -2108,6 +2161,9 @@ pub(crate) struct DocLoadRaw {
     /// The working camera view at last save (manifest v13+; `None` for
     /// older files or a v13+ document that never saved one).
     pub camera: Option<CameraState>,
+    /// Movable drawing axes (manifest v13+; [`AxesFrame::IDENTITY`] for
+    /// older files or a v13+ file that never moved them).
+    pub axes: AxesFrame,
 }
 
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
@@ -2190,6 +2246,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
 
     // Validate manifest references.
     validate_manifest_references(&manifest, obj_count, mat_count)?;
+    let axes = decode_axes(&manifest)?;
 
     // Decode the camera block (manifest v13+; already confirmed absent for
     // older declared versions by `validate_manifest_references`).
@@ -2251,6 +2308,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         group_hidden: manifest.groups.iter().map(|g| g.hidden).collect(),
         instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
         camera,
+        axes,
     })
 }
 
@@ -2428,8 +2486,37 @@ fn validate_manifest_references(
         }
     }
 
+    // `axes` is a v13+ concept: a file declaring an older version that still
+    // carries one is malformed for its own declared version (hand-edited or
+    // a broken writer) and is rejected — never silently honored.
+    if manifest.axes.is_some() && manifest.format_version < AXES_MIN_VERSION {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry axes (introduced at v{})",
+                manifest.format_version, AXES_MIN_VERSION
+            ),
+        });
+    }
+
     let _ = mat_count; // used above
     Ok(())
+}
+
+/// Decodes the manifest's optional `axes` field into an [`AxesFrame`],
+/// defaulting to [`AxesFrame::IDENTITY`] when absent (pre-v13 files, or a
+/// v13+ file whose axes were never moved). Rejects rather than repairs a
+/// present-but-invalid frame (a hand-edited non-orthonormal basis, say) —
+/// the same reject-not-repair posture as every other manifest validation.
+fn decode_axes(manifest: &Manifest) -> Result<AxesFrame, LoadError> {
+    let Some(dto) = &manifest.axes else {
+        return Ok(AxesFrame::IDENTITY);
+    };
+    let origin = Point3::new(dto.origin[0], dto.origin[1], dto.origin[2]);
+    let x = Vec3::new(dto.x[0], dto.x[1], dto.x[2]);
+    let y = Vec3::new(dto.y[0], dto.y[1], dto.y[2]);
+    AxesFrame::new(origin, x, y).map_err(|e| LoadError::MalformedManifest {
+        what: format!("axes: {e}"),
+    })
 }
 
 fn materials_count_validate(manifest: &Manifest) -> Result<usize, LoadError> {
@@ -2766,6 +2853,7 @@ mod camera_manifest_tests {
             guides: Vec::new(),
             tags: Vec::new(),
             camera,
+            axes: None,
         }
     }
 

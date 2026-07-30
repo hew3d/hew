@@ -24,6 +24,7 @@ import type { DrawPlane } from '../tools/drawPlane'
 import type { V3 } from './geoHelpers'
 import { axisColorForDirection, axisColorsForTheme } from './axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import type { DrawingAxes } from '../tools/drawingAxes'
 
 /** Half-extent of the grid patch (meters) — "a few meters", fixed size,
  *  independent of camera zoom (unlike the adaptive InfiniteGrid). */
@@ -66,9 +67,10 @@ function buildPatchPositions(plane: DrawPlane, through: V3): Float32Array {
 }
 
 /** The patch's line color: the plane normal's axis color (theme-aware) when
- *  the normal is (essentially exactly) axis-aligned, neutral gray otherwise. */
-function patchColor(plane: DrawPlane): number {
-  const match = axisColorForDirection(plane.normal, AXIS_TOL_DOT, axisColorsForTheme(getResolvedTheme()))
+ *  the normal is (essentially exactly) axis-aligned WITH `frame` (tool-parity
+ *  §4 — defaults to world identity), neutral gray otherwise. */
+function patchColor(plane: DrawPlane, frame?: DrawingAxes): number {
+  const match = axisColorForDirection(plane.normal, AXIS_TOL_DOT, axisColorsForTheme(getResolvedTheme()), frame)
   return match !== null ? match.color : NEUTRAL_COLOR
 }
 
@@ -82,15 +84,18 @@ export class DrawPlaneCueLayer {
   }
 
   /** Rebuild the cue for `cue` (from the active tool's `activeDrawPlaneCue()`),
-   *  or clear it when `cue` is null. */
-  update(cue: { plane: DrawPlane; through: V3 } | null): void {
+   *  or clear it when `cue` is null. `frame` is the current drawing-axes
+   *  frame (tool-parity §4), read by the Viewport via `getDrawingAxes` and
+   *  passed through so the tint matches the CURRENT frame's axes rather
+   *  than literal world X/Y/Z; defaults to world identity. */
+  update(cue: { plane: DrawPlane; through: V3 } | null, frame?: DrawingAxes): void {
     this._dispose()
     if (cue === null) return
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(buildPatchPositions(cue.plane, cue.through), 3))
     const mat = new THREE.LineBasicMaterial({
-      color: patchColor(cue.plane),
+      color: patchColor(cue.plane, frame),
       transparent: true,
       opacity: LINE_OPACITY,
       depthTest: false,

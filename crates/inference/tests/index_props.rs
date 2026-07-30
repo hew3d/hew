@@ -324,6 +324,8 @@ fn to_query(spec: &QuerySpec) -> SnapQuery {
             Plane::from_point_normal(Point3::ORIGIN + axis.unit() * offset, axis.unit())
                 .expect("model axis is unit")
         }),
+        soft_axis_aperture_scale: None,
+        off_plane_points: false,
     }
 }
 
@@ -478,6 +480,8 @@ fn intersection_snaps_agree_between_indexed_and_linear_paths() {
             aperture: 0.01,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         let indexed = scene.resolve(&query);
         let linear = scene.resolve_linear(&query);
