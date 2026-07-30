@@ -26,6 +26,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 tauri-plugin-opener = "2.5.4"
+# System font enumeration for the 3D Text font picker (docs/design/3d-text.md's
+# font section) — pure Rust, MIT-licensed, no system font-library linking.
+# Shell-crate-only dependency; kernel crates never gain new dependencies for
+# this (DEVELOPMENT.md rule 1).
+fontdb = "0.23.0"
 
 [features]
 # The in-app auto-updater: a check on launch plus a manual "Check for

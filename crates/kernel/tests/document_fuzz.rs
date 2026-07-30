@@ -1,15 +1,22 @@
 //! Document-level fuzz harness (DEVELOPMENT.md rule 3): random document ops —
 //! object edits, booleans, transforms, duplicate/delete, group/ungroup,
-//! components, instances, and definition-member edits (`apply_def_op`),
-//! interleaved undo/redo — over a document seeded
-//! with sketch-extruded boxes, with torture mode on (the always-on validator
-//! panics at the offending op instead of committing a violation).
+//! components, instances, definition-member edits (`apply_def_op`), and 3D
+//! Text placement (`place_text`) — interleaved undo/redo — over a document
+//! seeded with sketch-extruded boxes, with torture mode on (the always-on
+//! validator panics at the offending op instead of committing a violation).
 //!
 //! Invariants:
 //! - after every op (applied or refused typed) every visible object validates
 //!   and stays watertight;
 //! - every undo/redo dispatch succeeds (DEVELOPMENT.md rule 9 — history
-//!   replay is guard-exempt with proof; no failure signature is tolerated);
+//!   replay is guard-exempt with proof; no failure signature is tolerated),
+//!   with the single tolerated exception of a typed `RestoreConflicts`
+//!   refusal against a plain (non-`PlaceTextCompound`) `CreatedObject` (see
+//!   `is_known_inverse_guard_gap`) — a `PlaceTextCompound` 3D-Text placement
+//!   is NOT exempted: `place_text` always retires its scratch sketch before
+//!   returning, so that refusal path is expected to be unreachable from
+//!   here, and its firing is treated as a genuine defect rather than
+//!   silently swallowed;
 //! - `save()` is deterministic, `load(save())` reproduces the same
 //!   `state_hash`, at the post-sequence and maximal states;
 //! - fully unwinding the document log and replaying it twice reproduces the
@@ -21,8 +28,8 @@
 //!   that noise is exactly what tolerance-aware equivalence exists for.
 
 use kernel::{
-    BooleanOp, Document, DocumentError, KernelOp, KernelOpError, NodeId, ObjectId, Plane, Point3,
-    PushPullError, Transform, Vec3,
+    BooleanOp, Document, DocumentError, KernelOp, KernelOpError, NodeId, ObjectId,
+    PendingActionKind, Plane, Point3, PushPullError, SketchError, SketchRegionId, Transform, Vec3,
 };
 use proptest::prelude::*;
 
@@ -222,6 +229,17 @@ enum DocOp {
         face_sel: usize,
         stop_len: Option<f64>,
     },
+    /// Places 3D Text: a glyph-like ring+counter (a rect with a smaller
+    /// rect hole, mirroring `document.rs`'s `glyph_o_sketch` unit-test
+    /// fixture) at a fuzzed ground position, selecting only the ring as
+    /// fill. `place_text` always retires (hides) its scratch sketch before
+    /// returning — the unselected counter/hole region included — so there
+    /// is no live residue of this op for any later op to reach or disturb.
+    PlaceText {
+        x: f64,
+        y: f64,
+        depth: f64,
+    },
     Undo,
     Redo,
 }
@@ -319,6 +337,9 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
             .prop_map(|(inst_sel, member_sel, face_sel, stop_len)| {
                 DocOp::FollowMeAroundMemberFaceInInstance { inst_sel, member_sel, face_sel, stop_len }
             }),
+        2 => (-20.0..20.0f64, -20.0..20.0f64, distance()).prop_map(|(x, y, depth)| {
+            DocOp::PlaceText { x, y, depth: depth.abs() }
+        }),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
@@ -356,12 +377,49 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
     oid
 }
 
-/// The one tolerated undo/redo gap surfacing through the document layer: the
-/// `UnbuildPushPull` inverse refusing typed when its recorded walls are no
-/// longer pristine quads (see `op_fuzz.rs::is_known_inverse_guard_gap` for the
-/// full rationale). The two op-level gaps this once also tolerated were
-/// retired by proof-carrying replay and are deliberately not accepted here.
+/// The tolerated undo/redo gaps surfacing through the document layer:
+/// - the `UnbuildPushPull` inverse refusing typed when its recorded walls are
+///   no longer pristine quads (see `op_fuzz.rs::is_known_inverse_guard_gap`
+///   for the full rationale). The two op-level gaps this once also
+///   tolerated were retired by proof-carrying replay and are deliberately
+///   not accepted here.
+/// - a typed `SketchError::RestoreConflicts` refusal against a plain
+///   (non-`PlaceTextCompound`) `CreatedObject`'s removed scaffolding —
+///   proven safe, atomic, document-untouched by
+///   `Document::undo_created_object`'s own push-back; torture mode still
+///   panics immediately on any actual corruption regardless of this
+///   tolerance, so abandoning the round-trip here never masks a real
+///   defect. Narrowed by
+///   `Document::peek_undo_action_kind`/`peek_redo_action_kind` to EXACTLY
+///   that one documented-intended case — mirroring the `UnbuildPushPull`
+///   peek-narrowing right below: a `RestoreConflicts` surfacing against
+///   `DetachedSketchIsland` (or anything else) is a DIFFERENT, unproven
+///   refusal path and must not be silently swallowed here.
+///
+///   A `PlaceTextCompound` 3D-Text placement is deliberately NOT in this
+///   list. `DocOp::TouchGlyphSketch` used to leave untracked geometry
+///   sitting on a bundled `CreatedObject`'s removed scaffolding position
+///   while `place_text`'s scratch sketch was still live, making
+///   `Document::undo_place_text_compound`'s feasibility pre-check refuse
+///   typed (pinned, before its deletion, by document.rs's
+///   `undo_compound_refuses_atomically_when_a_counter_glyph_kept_the_sketch_live`
+///   unit spec). `place_text` now always retires (hides) that sketch
+///   before returning (see its cleanup step and
+///   `Document::compound_reversal_feasible`'s doc comment), closing the
+///   only known window: nothing can touch the sketch while its
+///   `PlaceTextCompound` is still pending, so this refusal is expected to
+///   never fire again. If it ever does, that is a regression, not a
+///   tolerated gap — letting it fail loudly here is the correct trap
+///   posture, so `PlaceTextCompound` is not matched below.
 fn is_known_inverse_guard_gap(doc: &Document, e: &DocumentError, redo: bool) -> bool {
+    if matches!(e, DocumentError::Sketch(SketchError::RestoreConflicts)) {
+        let pending = if redo {
+            doc.peek_redo_action_kind()
+        } else {
+            doc.peek_undo_action_kind()
+        };
+        return matches!(pending, Some(PendingActionKind::CreatedObject));
+    }
     let signature = matches!(
         e,
         DocumentError::InverseFailed(KernelOpError::PushPull(PushPullError::NonManifoldResult))
@@ -572,6 +630,59 @@ fn nth<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     } else {
         Some(items[sel % items.len()])
     }
+}
+
+/// Builds a glyph-like ring+counter sketch (an outer square with a smaller
+/// concentric square hole — `document.rs`'s `glyph_o_sketch` fixture,
+/// re-expressed against the public API since this is an external test) at
+/// `(x, y)` and extrudes ONLY the ring via `place_text`. `None` on any
+/// refusal (typically a degenerate/overlapping position) or if the drawn
+/// geometry didn't resolve the expected two regions — always harmless to
+/// the caller.
+fn place_glyph(doc: &mut Document, x: f64, y: f64, depth: f64) -> Option<()> {
+    let plane =
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)).ok()?;
+    let sketch = doc.add_sketch(plane);
+    doc.begin_sketch_gesture(sketch).ok()?;
+    let outer = [
+        Point3::new(x - 1.0, y - 1.0, 0.0),
+        Point3::new(x + 1.0, y - 1.0, 0.0),
+        Point3::new(x + 1.0, y + 1.0, 0.0),
+        Point3::new(x - 1.0, y + 1.0, 0.0),
+    ];
+    let inner = [
+        Point3::new(x - 0.4, y - 0.4, 0.0),
+        Point3::new(x + 0.4, y - 0.4, 0.0),
+        Point3::new(x + 0.4, y + 0.4, 0.0),
+        Point3::new(x - 0.4, y + 0.4, 0.0),
+    ];
+    {
+        let sk = doc.sketch_mut(sketch)?;
+        for k in 0..4 {
+            sk.add_segment(outer[k], outer[(k + 1) % 4]).ok()?;
+        }
+        for k in 0..4 {
+            sk.add_segment(inner[k], inner[(k + 1) % 4]).ok()?;
+        }
+    }
+    doc.end_sketch_gesture(sketch).ok()?;
+
+    let regions: Vec<SketchRegionId> = doc.sketch(sketch)?.regions().keys().collect();
+    if regions.len() != 2 {
+        // A fuzzed position overlapping earlier geometry can resolve into
+        // more/fewer regions than the clean two-loop case — abandon
+        // harmlessly rather than guess which one is the "ring".
+        return None;
+    }
+    let ring = regions
+        .iter()
+        .copied()
+        .find(|&r| !doc.sketch(sketch).unwrap().regions()[r].holes.is_empty())?;
+
+    let (_component, _instance, _change) = doc
+        .place_text(sketch, &[ring], depth, "Fuzz Glyph".to_string(), None)
+        .ok()?;
+    Some(())
 }
 
 /// Applies one abstract op.
@@ -1053,6 +1164,9 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
                 face,
             };
             let _ = doc.follow_me_in_instance(iid, sid, region, &path, *stop_len);
+        }
+        DocOp::PlaceText { x, y, depth } => {
+            let _ = place_glyph(doc, *x, *y, *depth);
         }
         DocOp::Undo => {
             if doc.can_undo()

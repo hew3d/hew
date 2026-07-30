@@ -1175,6 +1175,55 @@ describe('App — toast severity', () => {
   })
 })
 
+describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('treats a runBoolean "mutated-failed" result as a committed mutation, not a no-op — it re-derives from the document instead of leaving the stale pre-explode state on screen', async () => {
+    // Two plain object operands so Edit ▸ Union's gate (canBoolean) opens.
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n]))
+    // `canUndo` (Edit ▸ Undo's gate) is read directly in App's render body
+    // every render — `sceneRef.current?.can_scene_undo() ?? false` — never
+    // memoized. The bug this guards against is `handleBoolean` treating
+    // `runBoolean`'s failure-after-mutation signal like a bare no-op and
+    // skipping `setDocRev` entirely, so nothing downstream ever re-read
+    // scene truth (finding 2). If — and only if — `setDocRev` actually
+    // fires, App re-renders and this mock is invoked again.
+    const priorCanUndo = mockScene.can_scene_undo
+    const canUndoMock = vi.fn(() => false)
+    mockScene.can_scene_undo = canUndoMock
+    try {
+      await renderAndLoad()
+      act(() => window.__hew_test!.selectObjects(['1', '2']))
+
+      // Populate the (mocked) Viewport's imperative apiRef with a
+      // `runBoolean` that reproduces finding 2's exact shape: auto-explode
+      // committed real mutations, but the retried boolean still failed.
+      const calls = vi.mocked(Viewport).mock.calls
+      const { apiRef } = calls[calls.length - 1][0] as unknown as {
+        apiRef?: { current: { runBoolean: (op: number, a: unknown, b: unknown) => unknown } | null }
+      }
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runBoolean: vi.fn(() => 'mutated-failed') }
+      })
+
+      const callsBeforeClick = canUndoMock.mock.calls.length
+
+      fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+      fireEvent.mouseDown(screen.getByText('Union'))
+
+      // A re-render happened — `setDocRev` fired, exactly as the success
+      // path already did, instead of the failure silently doing nothing.
+      expect(canUndoMock.mock.calls.length).toBeGreaterThan(callsBeforeClick)
+    } finally {
+      mockScene.object_ids = priorObjectIds
+      mockScene.can_scene_undo = priorCanUndo
+    }
+  })
+})
+
 describe('App — View > Section Plane menu state (D3, section-plane-polish)', () => {
   // Matches every other top-level describe block in this file (e.g. `App —
   // loaded state` above): without its own reset, `vi.mocked(Viewport).mock.calls`

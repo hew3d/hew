@@ -403,17 +403,27 @@ export function canGroup(
 
 /**
  * Whether the boolean commands (Union / Subtract / Intersect) apply: exactly
- * two distinct **top-level** operands, each a plain object or a group.
+ * two distinct **top-level** operands, each a plain object, a group, or a
+ * component instance.
  *
  * Top-level-ness mirrors the kernel's `GroupedOperand` refusal (a replacing
  * op consumes its operands and emits top-level results), so the gate never
  * lights up for a nested node picked in the Outliner only to be refused on
- * commit. Deeper eligibility — solidity, instances inside a group — stays
+ * commit. An instance operand is deliberately allowed to light up the
+ * command (playtest finding 4: the engrave/emboss use case needs a boolean
+ * against 3D text, which is always a component) — the kernel refuses an
+ * instance operand outright (`BooleanOperandHasInstance`), but the app
+ * transparently makes it unique, explodes it, and retries
+ * (`Viewport.tsx`'s `runBoolean`/`explodeInstanceOperand`) rather than
+ * leaving the command disabled for a selection the flow can actually
+ * handle. Deeper eligibility — solidity, an instance nested INSIDE a
+ * group operand's subtree (which the auto-explode does not reach) — stays
  * with the kernel, which refuses typed.
  *
- * `isOperand` reports whether the node is a live object/group in the scene
- * (the caller checks against the scene's id lists); `parentOf` returns the
- * containing group id, or undefined if top-level (as for `canGroup`).
+ * `isOperand` reports whether the node is a live object/group/instance in
+ * the scene (the caller checks against the scene's id lists); `parentOf`
+ * returns the containing group id, or undefined if top-level (as for
+ * `canGroup`).
  */
 export function canBoolean(
   selected: NodeRef[],
@@ -425,7 +435,7 @@ export function canBoolean(
   if (nodeKey(a) === nodeKey(b)) return false
   return selected.every(
     (n) =>
-      (n.kind === 'object' || n.kind === 'group') &&
+      (n.kind === 'object' || n.kind === 'group' || n.kind === 'instance') &&
       isOperand(n) &&
       parentOf(n) === undefined,
   )

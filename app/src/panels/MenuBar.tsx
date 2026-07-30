@@ -128,6 +128,8 @@ export interface MenuBarProps {
   }
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
+  /** Open the "3D Text…" dialog (Draw → 3D Text…, docs/design/3d-text.md). */
+  onDrawText?: () => void
   /** Reposition the camera to a standard view (Camera → Standard Views). */
   onStandardView?: (view: StandardView) => void
   /** Open document windows (Tauri multi-window only), rendered as a tail of
@@ -468,6 +470,7 @@ export function MenuBar({
   onEditAction,
   editGates,
   onZoomExtents,
+  onDrawText,
   onStandardView,
   onOpenSettings,
   onReportBug,
@@ -731,6 +734,11 @@ export function MenuBar({
               shortcut={keyFor('Line')}
               checked={activeTool === 'Line'}
               onClick={withClose(() => onSelectTool?.('Line'))}
+            />
+            <div style={{ borderTop: '1px solid var(--border-strong)', margin: '4px 0' }} />
+            <MenuItem
+              label="3D Text…"
+              onClick={withClose(() => onDrawText?.())}
             />
           </div>
         )}

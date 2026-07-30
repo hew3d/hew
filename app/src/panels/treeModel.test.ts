@@ -461,10 +461,16 @@ describe('canBoolean', () => {
   const topLevel = (_n: NodeRef) => undefined
   const live = (_n: NodeRef) => true
 
-  it('true for two top-level objects, object+group, and two groups', () => {
+  it('true for two top-level objects, object+group, two groups, and an instance operand', () => {
     expect(canBoolean([a, b], topLevel, live)).toBe(true)
     expect(canBoolean([a, g], topLevel, live)).toBe(true)
     expect(canBoolean([g, { kind: 'group', id: 5n }], topLevel, live)).toBe(true)
+    // A component instance is a valid operand (playtest finding 4): the
+    // kernel refuses it directly, but the app transparently explodes it and
+    // retries (Viewport.tsx's runBoolean) — the gate must not disable the
+    // command for a selection that flow can actually handle.
+    expect(canBoolean([a, inst], topLevel, live)).toBe(true)
+    expect(canBoolean([inst, { kind: 'instance', id: 6n }], topLevel, live)).toBe(true)
   })
 
   it('requires exactly two distinct operands', () => {
@@ -482,10 +488,11 @@ describe('canBoolean', () => {
     expect(canBoolean([a, b], bothNested, live)).toBe(false)
   })
 
-  it('false for instances and non-live operands', () => {
-    expect(canBoolean([a, inst], topLevel, live)).toBe(false)
+  it('false for non-live operands (a stale/hidden id, whatever the kind)', () => {
     const bStale = (n: NodeRef) => n.id !== 2n
     expect(canBoolean([a, b], topLevel, bStale)).toBe(false)
+    const instStale = (n: NodeRef) => n.id !== 4n
+    expect(canBoolean([a, inst], topLevel, instStale)).toBe(false)
   })
 })
 

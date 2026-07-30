@@ -21,6 +21,11 @@ use tauri::{
     Emitter, Manager,
 };
 
+// System font enumeration + reading for the 3D Text font picker — see
+// fonts.rs's top-of-file doc comment for the security model
+// (`read_font_file` takes an opaque token, never a path).
+mod fonts;
+
 // ---------------------------------------------------------------------------
 // In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
 //
@@ -1957,6 +1962,8 @@ fn main() {
             reproducer_write,
             check_for_updates,
             updater_available,
+            fonts::list_system_fonts,
+            fonts::read_font_file,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -2264,9 +2271,18 @@ fn main() {
                 .item(&draw_line)
                 .build()?;
 
+            // "3D Text…" opens a dialog rather than arming a tool, so it's a
+            // plain one-off item (no checked state — see `cam_zoom_extents`
+            // above for the same pattern), not `check_item`. Draw placement
+            // matches the web MenuBar and command palette (docs/design/3d-text.md).
+            let draw_3d_text =
+                MenuItemBuilder::with_id("draw-3d-text", "3D Text…").build(handle)?;
+
             let draw_menu = SubmenuBuilder::new(handle, "Draw")
                 .item(&draw_shapes)
                 .item(&draw_lines)
+                .separator()
+                .item(&draw_3d_text)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -2562,6 +2578,10 @@ fn main() {
             // file association, or drag-drop at the moment it happens.
             // ----------------------------------------------------------------
             app.manage(Mutex::new(ApprovedPaths::default()));
+            // System font enumeration state for the 3D Text picker — see
+            // fonts.rs's top-of-file doc comment for the token registry's
+            // security role.
+            app.manage(fonts::SystemFontState::default());
             for path in &recents {
                 approve_file(handle, Path::new(path), true);
             }
@@ -2759,6 +2779,7 @@ fn main() {
                 "draw-polygon" => "tool-polygon",
                 "draw-arc" => "tool-arc",
                 "draw-line" => "tool-line",
+                "draw-3d-text" => "draw-3d-text",
                 "tool-select" => "tool-select",
                 "tool-paint" => "tool-paint",
                 "tool-move" => "tool-move",

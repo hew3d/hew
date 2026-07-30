@@ -3283,6 +3283,57 @@ impl Scene {
         Ok(instance.data().as_ffi())
     }
 
+    /// The 3D Text placement pipeline's atomic tail (docs/design/3d-text.md).
+    /// Call this immediately after closing (`sketch_end_gesture`) the
+    /// sketch-drawing gesture that injected a text run's glyph outlines as
+    /// edges into `sketch`, with nothing else committed in between — the
+    /// caller contract [`kernel::Document::place_text`] verifies.
+    ///
+    /// `regions` are the sketch's closed regions to extrude — the FILL
+    /// ones the app selected (the font's own nonzero-winding rule decides
+    /// which of the resolver's regions are glyph material versus a
+    /// counter's own bare interior; see [`Scene::sketch_regions`] and
+    /// [`Scene::region_boundary`], and the doc comment on
+    /// [`kernel::Document::place_text`] for why "every region" would be
+    /// wrong). Each extrudes `distance`; the results fold into ONE new
+    /// component definition named `name`, whose one identity-posed instance
+    /// handle is returned. `group`, when given, births the placement inside
+    /// that group (mirrors `follow_me_along_edges`'s trailing `group`);
+    /// `undefined`/`None` births top-level. The whole placement — glyph
+    /// injection included — replays as ONE undo/redo step.
+    pub fn place_text(
+        &mut self,
+        sketch: u64,
+        regions: Vec<u64>,
+        distance: f64,
+        name: String,
+        group: Option<u64>,
+    ) -> Result<u64, ApiError> {
+        let region_ids: Vec<SketchRegionId> = regions
+            .iter()
+            .map(|&r| SketchRegionId::from(KeyData::from_ffi(r)))
+            .collect();
+        let (_component, instance, change) = self
+            .doc
+            .place_text(
+                sketch_id(sketch),
+                &region_ids,
+                distance,
+                name.clone(),
+                group.map(group_id),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::PlaceText {
+            sketch,
+            regions,
+            distance,
+            name,
+            group,
+        });
+        Ok(instance.data().as_ffi())
+    }
+
     /// Move/rotate/scale an instance by composing `affine` (row-major 3×4) into
     /// its pose — never baked. Mirror/non-uniform allowed; singular errors.
     pub fn transform_instance(&mut self, instance: u64, affine: &[f64]) -> Result<(), ApiError> {
@@ -6020,6 +6071,15 @@ impl Scene {
                     }
                     PlaceInstance { component, affine } => {
                         self.place_instance(component, &affine)?;
+                    }
+                    PlaceText {
+                        sketch,
+                        regions,
+                        distance,
+                        name,
+                        group,
+                    } => {
+                        self.place_text(sketch, regions, distance, name, group)?;
                     }
                     TransformInstance { instance, affine } => {
                         self.transform_instance(instance, &affine)?;
@@ -9265,6 +9325,125 @@ mod tests {
 
         assert_eq!(scene.active_inference_instance, None);
         assert!(scene.active_inference_sketches.is_empty());
+    }
+
+    /// Draws an 'O'-like glyph outline (an outer square loop plus a smaller
+    /// concentric "counter" square loop) through the exact FFI sequence the
+    /// 3D Text tool uses — `begin_ground_sketch` → gesture-bracketed
+    /// `sketch_add_segment` → `sketch_regions`/`region_boundary` to pick the
+    /// fill region (the larger-extent one; the app's real selection uses the
+    /// nesting-depth-parity rule this mirrors) — then `place_text`. Proves
+    /// the whole wasm surface end-to-end: only the ring extrudes (not the
+    /// counter's own disk), the fold names the definition, and the result is
+    /// watertight (the counter closed as a real tunnel, not a leak).
+    #[test]
+    fn place_text_o_glyph_via_full_gesture_pipeline_is_watertight() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        scene.sketch_begin_gesture(sketch).unwrap();
+        let outer = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        for i in 0..4 {
+            let (ax, ay) = outer[i];
+            let (bx, by) = outer[(i + 1) % 4];
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        let inner = [(-0.4, -0.4), (0.4, -0.4), (0.4, 0.4), (-0.4, 0.4)];
+        for i in 0..4 {
+            let (ax, ay) = inner[i];
+            let (bx, by) = inner[(i + 1) % 4];
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_gesture(sketch).unwrap();
+
+        let region_ids = scene.sketch_regions(sketch).unwrap();
+        assert_eq!(region_ids.len(), 2, "two nested loops trace as ring + disk");
+        let extent = |r: u64| -> f64 {
+            let pts = scene.region_boundary(sketch, r).unwrap();
+            pts.chunks(3)
+                .map(|p| ((p[0] * p[0] + p[1] * p[1]) as f64).sqrt())
+                .fold(0.0_f64, f64::max)
+        };
+        let (ring, disk) = if extent(region_ids[0]) > extent(region_ids[1]) {
+            (region_ids[0], region_ids[1])
+        } else {
+            (region_ids[1], region_ids[0])
+        };
+        let _ = disk; // the counter's own interior — deliberately never extruded
+
+        let instance = scene
+            .place_text(sketch, vec![ring], 0.5, "3D Text \"O\"".to_string(), None)
+            .unwrap();
+        let comp = scene.instance_def(instance).unwrap();
+        let members = scene.component_member_objects(comp);
+        assert_eq!(members.len(), 1, "only the ring's fill region extruded");
+        assert!(
+            scene.object_watertight(members[0]).unwrap(),
+            "the counter closes as a tunnel, not a leak"
+        );
+    }
+
+    /// `place_text` replays as ONE undo step across the FFI: the gesture and
+    /// the extrude+fold it bundles reproduce the golden state hash and
+    /// byte-identical saved document.
+    #[test]
+    fn record_then_replay_covers_place_text() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let sketch = scene.begin_ground_sketch();
+        scene.sketch_begin_gesture(sketch).unwrap();
+        let outer = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        for i in 0..4 {
+            let (ax, ay) = outer[i];
+            let (bx, by) = outer[(i + 1) % 4];
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        let inner = [(-0.4, -0.4), (0.4, -0.4), (0.4, 0.4), (-0.4, 0.4)];
+        for i in 0..4 {
+            let (ax, ay) = inner[i];
+            let (bx, by) = inner[(i + 1) % 4];
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_gesture(sketch).unwrap();
+        let region_ids = scene.sketch_regions(sketch).unwrap();
+        let extent = |r: u64| -> f64 {
+            let pts = scene.region_boundary(sketch, r).unwrap();
+            pts.chunks(3)
+                .map(|p| ((p[0] * p[0] + p[1] * p[1]) as f64).sqrt())
+                .fold(0.0_f64, f64::max)
+        };
+        let ring = if extent(region_ids[0]) > extent(region_ids[1]) {
+            region_ids[0]
+        } else {
+            region_ids[1]
+        };
+        scene
+            .place_text(sketch, vec![ring], 0.5, "3D Text \"O\"".to_string(), None)
+            .unwrap();
+
+        // An undo at the end exercises the compound stack shape too.
+        scene.scene_undo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        assert_eq!(
+            replayed.replay(&json).unwrap(),
+            golden,
+            "replaying a place_text session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
     /// Transform composes into the pose; explode bakes to a world object and

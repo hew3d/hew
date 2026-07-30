@@ -54,9 +54,15 @@ describe('deriveDockContext', () => {
 })
 
 describe('dockVerbsFor', () => {
-  it('empty: primary Rectangle, then Line, Circle, Arc', () => {
+  it('empty: primary Rectangle, then Line, Circle, Arc, 3D Text', () => {
     const verbs = dockVerbsFor('empty')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-rectangle', 'tool-line', 'tool-circle', 'tool-arc'])
+    expect(verbs.map((v) => v.id)).toEqual([
+      'tool-rectangle',
+      'tool-line',
+      'tool-circle',
+      'tool-arc',
+      'draw-3d-text',
+    ])
   })
 
   // Deliberate contract change (selection-UX overhaul): the Object and Group
