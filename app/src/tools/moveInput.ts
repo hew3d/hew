@@ -217,6 +217,47 @@ export function parseDistance(buf: string): number | null {
 }
 
 /**
+ * Immutably edit PositionTextureTool's green/blue-handle typed VCB buffer
+ * (paint-playtest2 §1's numeric-entry convention): `editNumericBuffer`
+ * (digits/`.`/`-`/Backspace) PLUS an optional trailing `x`/`X` marker that
+ * means "this is a scale factor, not degrees" (`2x`, `0.5x`) — see
+ * `parseScaleOrRotate`. Mirrors `editPolygonBuffer`'s "completed token
+ * frozen" posture: once `x` is typed, only Backspace edits the buffer
+ * (removing the `x` unfreezes it) — a stray digit after `2x` would append to
+ * neither grammar ("2x3") and silently wedge Enter.
+ */
+export function editScaleOrRotateBuffer(buf: string, key: string): string {
+  if (/x$/i.test(buf) && key !== 'Backspace') return buf
+  if (key === 'x' || key === 'X') {
+    return /^-?(?:\d+\.?\d*|\.\d+)$/.test(buf) ? buf + 'x' : buf
+  }
+  return editNumericBuffer(buf, key)
+}
+
+/**
+ * Parse PositionTextureTool's green/blue-handle typed VCB buffer to an exact
+ * target quantity (paint-playtest2 §1): a trailing `x`/`X` ALWAYS means a
+ * scale factor ("2x", "0.5x"), regardless of `defaultMode`; a bare number
+ * takes on `defaultMode` (Tab's rotate/scale toggle — "a bare number... [is]
+ * degrees" by default, "a number with an x... [is] a scaling factor" no
+ * matter what Tab last selected). Null for an empty/incomplete/non-finite
+ * buffer.
+ */
+export function parseScaleOrRotate(
+  buf: string,
+  defaultMode: 'rotate' | 'scale',
+): { mode: 'rotate' | 'scale'; value: number } | null {
+  const xMatch = /^(-?(?:\d+\.?\d*|\.\d+))x$/i.exec(buf)
+  if (xMatch !== null) {
+    const n = parseFloat(xMatch[1])
+    return isFinite(n) ? { mode: 'scale', value: n } : null
+  }
+  const n = parseDistance(buf)
+  if (n === null) return null
+  return { mode: defaultMode, value: n }
+}
+
+/**
  * Immutably edit a "dimensions" string buffer — like `editNumericBuffer` but
  * also tolerant of a separator between two values: comma or `x`/`X`
  * (e.g. while typing "3,4", "3x4", "3 x 4").

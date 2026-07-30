@@ -47,6 +47,7 @@ import { PushPullTool } from '../tools/PushPullTool'
 import { FollowMeTool } from '../tools/FollowMeTool'
 import { OffsetTool } from '../tools/OffsetTool'
 import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
+import { PositionTextureTool } from '../tools/PositionTextureTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
@@ -362,6 +363,10 @@ interface Props {
    * this exactly like a user clicking Select in the rail/menu.
    */
   onToolReverted?: () => void
+  /** Fired when Paint's Alt-click eyedropper samples a face — the parent
+   *  makes the sampled id current (`setCurrentMaterialId`), so the palette
+   *  selection follows exactly like picking the swatch directly. */
+  onSampleMaterial?: (id: bigint) => void
 }
 
 /** Imperative handle the viewport exposes to the parent. */
@@ -1577,6 +1582,7 @@ export default function Viewport({
   currentMaterialId = MATERIAL_SENTINEL,
   onProjectionChange,
   onToolReverted,
+  onSampleMaterial,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -1629,6 +1635,8 @@ export default function Viewport({
   onToolRevertedRef.current = onToolReverted
   const onInternalToolChangeRef = useRef(onInternalToolChange)
   onInternalToolChangeRef.current = onInternalToolChange
+  const onSampleMaterialRef = useRef(onSampleMaterial)
+  onSampleMaterialRef.current = onSampleMaterial
   // Latest context path, readable inside the stable event closures.
   const activeContextRef = useRef<NodeRef[]>(activeContext)
   // Latest selected ids, readable inside the stable event closures.
@@ -4318,7 +4326,56 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         handleToast,
+        // Alt-click sample: lift the sampled id to the parent, which makes it
+        // current — the palette selection follows, same as picking a swatch.
+        (id) => {
+          onSampleMaterialRef.current?.(id)
+        },
+        // Shift/Ctrl+Shift replace-everywhere commit: an object-scoped
+        // replace is confined to the clicked object (targeted refresh, same
+        // reach as a single paint); a document-wide one can touch an
+        // unbounded set of objects, so it falls back to the full rebuild
+        // (the same posture structural ops without a clean touched-set use).
+        (scope, objectId) => {
+          if (scope === 'object') {
+            handleSceneRefresh({ objectIds: [objectId] })
+          } else {
+            handleSceneRefresh()
+          }
+        },
       )
+    }
+
+    function makePositionTextureTool(): PositionTextureTool {
+      const tool = new PositionTextureTool(
+        wasmScene,
+        previewGroup,
+        // Live preview only — patches the already-rendered `uv` buffer in
+        // place (paint-tool design §3); no document mutation, no refresh.
+        (object, face, frame) => {
+          sceneRenderer.previewFaceUv(object, face, frame)
+        },
+        // Commit: one kernel call already landed by the time this fires —
+        // targeted refresh re-tessellates just the positioned object, same
+        // reach as a single paint_face.
+        (objectId) => {
+          handleSceneRefresh({ objectIds: [objectId] })
+        },
+        handleToast,
+        // Typed-precision readout while a pin is grabbed (paint-tool design
+        // §3 addendum; paint-playtest2 §1) — same status-bar measurement
+        // callback every other typed-VCB tool feeds.
+        (text: string) => { onMeasurementRef.current?.(text) },
+      )
+      // Scope the tool to the current editing context (paint-playtest2 §2):
+      // positioning an instanced face requires being INSIDE the component,
+      // since `set_face_uv_frame` on a member changes every placement of
+      // that definition. Same channel every other face tool uses — Paint
+      // itself is deliberately NOT wired this way in this round (its own
+      // out-of-context scoping is a separate design question).
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
+      tool.setFaceEligibility(faceDrawEligible)
+      return tool
     }
 
     function makeMoveTool(selection?: NodeRef[]): MoveTool {
@@ -4857,6 +4914,11 @@ export default function Viewport({
           toolController.setTool(pt)
           break
         }
+        case 'Position Texture':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makePositionTextureTool())
+          break
         case 'Move':
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
@@ -5316,6 +5378,63 @@ export default function Viewport({
     }
     window.addEventListener('keydown', onPushPullModifierKeyDown)
     window.addEventListener('keyup', onPushPullModifierKeyUp)
+    // Alt held while Paint is active = EYEDROPPER (paint-tool design §1).
+    // Unlike Move's bare-Alt durable copy TOGGLE (no live "held right now"
+    // signal to reuse — see the note below), the cursor needs the actual
+    // live state, so this is its own dedicated keydown/keyup pair, same
+    // posture as `onShiftKeyDown`/`onShiftKeyUp` above. `paintEyedropperActive`
+    // (not just `ev.altKey`) gates the keyup restore so it only fires when
+    // THIS handler is the one that changed the cursor.
+    let paintEyedropperActive = false
+    function onAltKeyDown(ev: KeyboardEvent): void {
+      if (ev.key !== 'Alt') return
+      const at = toolController.activeTool
+      if (!(at instanceof PaintTool)) return
+      at.setEyedropper(true)
+      if (paintEyedropperActive) return
+      paintEyedropperActive = true
+      renderer.domElement.style.cursor = cursorFor('Paint', false, true)
+    }
+    function onAltKeyUp(ev: KeyboardEvent): void {
+      if (ev.key !== 'Alt') return
+      const at = toolController.activeTool
+      if (at instanceof PaintTool) at.setEyedropper(false)
+      if (!paintEyedropperActive) return
+      paintEyedropperActive = false
+      if (at instanceof PaintTool) {
+        renderer.domElement.style.cursor = cursorFor('Paint')
+      }
+      // `onKeyDownTracked` (below) re-polls the status hint after every
+      // 'keydown' — including THIS modifier's own down-press — but there is
+      // no 'keyup' equivalent, so a plain Alt release must poll it itself.
+      // Without this the cursor and click behavior both correctly stop
+      // treating the next click as a sample (they read `PaintTool.eyedropper`
+      // live), but the DISPLAYED status text stays stuck on "Alt-click a
+      // face to sample" until some unrelated event happens to re-poll it.
+      reportToolHint()
+    }
+    window.addEventListener('keydown', onAltKeyDown)
+    window.addEventListener('keyup', onAltKeyUp)
+
+    // A blur (Cmd-Tab, devtools, another window) swallows the keyup that
+    // would otherwise release Alt — without this, `paintEyedropperActive`
+    // and `PaintTool.eyedropper` stay stuck true: the cursor and status line
+    // keep promising "sample" while a click would actually PAINT, since
+    // `pointerdown` re-reads `ev.altKey` live as the authority (paint-tool
+    // design §1). Same posture as `onWindowBlurClearsPrecision` below — and
+    // the same `reportToolHint()` gap `onAltKeyUp` just fixed above applies
+    // here too, for the same reason.
+    function onWindowBlurClearsEyedropper(): void {
+      const at = toolController.activeTool
+      if (at instanceof PaintTool) at.setEyedropper(false)
+      if (!paintEyedropperActive) return
+      paintEyedropperActive = false
+      if (at instanceof PaintTool) {
+        renderer.domElement.style.cursor = cursorFor('Paint')
+      }
+      reportToolHint()
+    }
+    window.addEventListener('blur', onWindowBlurClearsEyedropper)
 
     // Ctrl+Alt (⌘+⌥ on macOS) held = PRECISION SNAPPING. The kernel's default
     // snap gravity makes a circle's center and quadrant points out-pull the
@@ -5445,28 +5564,32 @@ export default function Viewport({
         // `instanceof PerspectiveCamera` guard needed on either side anymore.
         const worldPerPixelAt = (dist: number) => rig.worldPerPixel(dist, el.clientHeight)
         const activeToolForScale = toolController.activeTool
-        if ('updateDiskScale' in activeToolForScale) {
-          ;(activeToolForScale as { updateDiskScale(c: THREE.Camera, worldPerPixel: (dist: number) => number): void })
-            .updateDiskScale(camera, worldPerPixelAt)
-        }
+        // Optional CALL (`?.()`), not an `in` check plus a cast. Both hooks are
+        // declared optional on `Tool`, so this is fully type-checked against
+        // that one declaration: a tool whose signature drifts is a compile
+        // error, at the implementor AND here. The former shape — `'x' in tool`
+        // narrowing plus `as {...}` — could not be checked at all, because the
+        // asserted type was a hand-written duplicate of the interface's
+        // signature that nothing kept in sync; that is precisely how
+        // PositionTextureTool came to take a viewport height where the
+        // callback arrives, sizing every pin to NaN. (`in` narrowing alone
+        // does not satisfy the compiler here: it does not strip `undefined`
+        // from an optional call signature, so it fails with TS2722 — hence the
+        // optional call rather than a plain guarded invocation.)
+        activeToolForScale.updateDiskScale?.(camera, worldPerPixelAt)
         // ScaleTool's grip markers are screen-constant size too, but each
         // grip needs its OWN world-space size (they sit at different
         // distances from the camera, unlike a single-position disk) — see
         // ScaleTool.updateGripScale. Called here, before renderer.render(),
         // so the scale takes effect on THIS frame's updateMatrixWorld pass.
-        if ('updateGripScale' in activeToolForScale) {
-          ;(activeToolForScale as { updateGripScale(c: THREE.Camera, worldPerPixel: (dist: number) => number): void })
-            .updateGripScale(camera, worldPerPixelAt)
-        }
+        activeToolForScale.updateGripScale?.(camera, worldPerPixelAt)
         // DimensionTool/TextTool need the camera's actual view direction
         // (DimensionTool for `axisDimensionPlane`'s face-on candidate
         // scoring, annotationLayout.ts §3) — `onPointerMove`/`onPointerDown`
         // only carry a per-pixel cursor ray, never the camera itself, so
         // this is their one live feed for it, mirroring
         // updateDiskScale/updateGripScale's own pattern.
-        if ('updateCamera' in activeToolForScale) {
-          ;(activeToolForScale as { updateCamera(c: THREE.Camera): void }).updateCamera(camera)
-        }
+        activeToolForScale.updateCamera?.(camera)
         // Feed the shader grid the camera's current position so it can pick
         // the right cell-size decade per fragment; under parallel projection
         // every fragment must use the SAME (depth-independent) LOD instead
@@ -6064,9 +6187,22 @@ export default function Viewport({
       // normal point-by-point drawing is unaffected at any cadence.
       if (ev.detail >= 2 && 'onDoubleClick' in activeTool) return
 
-      // ⌘/Ctrl-click on the Paint tool fills the whole object (base material).
+      // Paint tool modifiers (paint-tool design §1–2), all read live off this
+      // pointerdown — the same idiom as the whole-object fill below. Alt is
+      // read here too even though the cursor already tracks it continuously
+      // (onAltKeyDown/onAltKeyUp below): belt-and-suspenders, and it keeps
+      // every modifier read from one place. Shift wins over plain ⌘/Ctrl (Alt
+      // wins over both, inside the tool itself) — Ctrl/Cmd+Shift replaces
+      // within the object, ⌘/Ctrl alone still fills the whole object.
       if (activeTool instanceof PaintTool) {
-        activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
+        activeTool.setEyedropper(ev.altKey)
+        if (ev.shiftKey) {
+          activeTool.setReplaceScope(ev.metaKey || ev.ctrlKey ? 'object' : 'document')
+          activeTool.setWholeObject(false)
+        } else {
+          activeTool.setReplaceScope(null)
+          activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
+        }
       }
       // ⌘/Ctrl-click on Follow Me's profile commits the MERGED sweep (design
       // §3b) — a live read of the real event, same precedent as Paint's
@@ -6574,6 +6710,9 @@ export default function Viewport({
       window.removeEventListener('keyup', onCtrlKeyUp)
       window.removeEventListener('keydown', onPushPullModifierKeyDown)
       window.removeEventListener('keyup', onPushPullModifierKeyUp)
+      window.removeEventListener('keydown', onAltKeyDown)
+      window.removeEventListener('keyup', onAltKeyUp)
+      window.removeEventListener('blur', onWindowBlurClearsEyedropper)
       window.removeEventListener('keydown', onPrecisionKey)
       window.removeEventListener('keyup', onPrecisionKey)
       window.removeEventListener('blur', onWindowBlurClearsPrecision)

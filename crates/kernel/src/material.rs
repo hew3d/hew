@@ -156,6 +156,20 @@ pub struct UvFrame {
     pub v0: f64,
 }
 
+/// Minimum acceptable length for a [`UvFrame`] gradient (`s` or `t`) — below
+/// this the gradient is indistinguishable from the zero vector (maps every
+/// point to the same coordinate along that axis). Well under any gradient a
+/// real texture assignment would produce: even a kilometer-wide tile gives
+/// `1 / 1000 = 0.001`.
+const MIN_UV_GRADIENT_LEN: f64 = 1e-9;
+
+/// Minimum acceptable `sin(angle(s, t))` for a [`UvFrame`] to count as
+/// non-singular. Scale-invariant (unlike a raw cross-product magnitude
+/// threshold): `|s × t| = |s|·|t|·sin(angle)`, so dividing it out treats a
+/// cm-scale tile's large gradients and a kilometer-scale tile's tiny ones
+/// the same way.
+const MIN_UV_FRAME_SIN: f64 = 1e-6;
+
 impl UvFrame {
     /// Create a new `UvFrame` from its components.
     pub fn new(s: Vec3, t: Vec3, u0: f64, v0: f64) -> UvFrame {
@@ -169,5 +183,34 @@ impl UvFrame {
         let u = self.s.x * p.x + self.s.y * p.y + self.s.z * p.z + self.u0;
         let v = self.t.x * p.x + self.t.y * p.y + self.t.z * p.z + self.v0;
         [u, v]
+    }
+
+    /// Finite components and a genuine (non-degenerate) 2D gradient: neither
+    /// `s` nor `t` is (near-)zero-length, and they are not (near-)parallel
+    /// (see [`MIN_UV_GRADIENT_LEN`]/[`MIN_UV_FRAME_SIN`]).
+    ///
+    /// `Document::set_face_uv_frame` refuses (`DocumentError::DegenerateUvFrame`)
+    /// rather than silently storing a frame that would map every point on the
+    /// face to the same UV (a zero or degenerate gradient) or to a single line
+    /// (parallel gradients) — no-silent-repair, same posture as
+    /// `add_guide_line`'s finite/nonzero-direction guard.
+    pub fn is_valid(&self) -> bool {
+        let finite = self.s.x.is_finite()
+            && self.s.y.is_finite()
+            && self.s.z.is_finite()
+            && self.t.x.is_finite()
+            && self.t.y.is_finite()
+            && self.t.z.is_finite()
+            && self.u0.is_finite()
+            && self.v0.is_finite();
+        if !finite {
+            return false;
+        }
+        let sl = self.s.length();
+        let tl = self.t.length();
+        if sl < MIN_UV_GRADIENT_LEN || tl < MIN_UV_GRADIENT_LEN {
+            return false;
+        }
+        self.s.cross(self.t).length() >= MIN_UV_FRAME_SIN * sl * tl
     }
 }

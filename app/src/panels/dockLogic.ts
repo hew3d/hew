@@ -73,6 +73,12 @@ const OBJECT_VERBS: DockVerb[] = [
   { id: 'tool-pushpull', label: 'Push/Pull' },
   { id: 'tool-move', label: 'Move' },
   { id: 'tool-paint', label: 'Paint' },
+  // Position Texture (paint-tool design §3): shown unconditionally, same
+  // posture as Paint — the dock has no per-face gate (no face-level
+  // selection model, see this module's doc comment), so the TOOL itself
+  // toasts on a click that misses a textured face rather than the dock
+  // hiding/disabling the verb.
+  { id: 'tool-position-texture', label: 'Position Texture' },
   { id: 'edit-make-component', label: 'Make Component' },
   { id: 'edit-delete', label: 'Erase' },
 ]

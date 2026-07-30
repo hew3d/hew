@@ -469,6 +469,32 @@ pub enum RecordedCall {
     },
     /// `set_object_material(object, material)` — `u64::MAX` = clear.
     SetObjectMaterial { object: u64, material: u64 },
+    /// `replace_material(document_wide, scope_object, from, to)` — the
+    /// Shift-click "replace everywhere" gesture (paint-tool design §2);
+    /// `scope_object` is meaningless when `document_wide` is true. `u64::MAX`
+    /// on `from`/`to` = the unpainted sentinel, same convention as
+    /// `paint_face`. Additive variant (the [`RecordedCall::SketchBeginCurveWith`]
+    /// posture): recordings that never replace-everywhere replay on older
+    /// builds unchanged; one that does fails to parse there — loudly, never
+    /// silently divergent.
+    ReplaceMaterial {
+        document_wide: bool,
+        scope_object: u64,
+        from: u64,
+        to: u64,
+    },
+    /// `set_face_uv_frame(object, face, frame)` — Position Texture's kernel
+    /// commit (paint-tool design §3: the whole drag/pin gesture collapses to
+    /// one call at commit). `frame: None` resets the face to the planar
+    /// projection default. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): recordings that never
+    /// position a texture replay on older builds unchanged; one that does
+    /// fails to parse there — loudly, never silently divergent.
+    SetFaceUvFrame {
+        object: u64,
+        face: u64,
+        frame: Option<UvFrameRecorded>,
+    },
     /// `add_guide_line(origin, dir)`.
     AddGuideLine { origin: [f64; 3], dir: [f64; 3] },
     /// `add_guide_point(p)`.
@@ -757,6 +783,21 @@ pub enum RecordedCall {
         islands: Vec<u64>,
         affine: [f64; 12],
     },
+}
+
+/// A [`kernel::UvFrame`]'s components, flattened for [`RecordedCall::SetFaceUvFrame`]
+/// (the kernel type has no `Serialize`/`Deserialize` — kernel crates stay free
+/// of that dependency, DEVELOPMENT.md rule 1).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct UvFrameRecorded {
+    pub sx: f64,
+    pub sy: f64,
+    pub sz: f64,
+    pub tx: f64,
+    pub ty: f64,
+    pub tz: f64,
+    pub u0: f64,
+    pub v0: f64,
 }
 
 /// One image of an [`RecordedCall::ImportDae`] call's image map.

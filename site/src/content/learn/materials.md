@@ -38,6 +38,38 @@ Click the swatch you want — that makes it the current material and switches yo
 
 The hovered face highlights so you can see what you're about to paint. To un-paint, select the **Default** swatch and paint again.
 
+## Sampling a material already in the model
+
+Hold `Alt` and click any face to pick up the material it's actually wearing — its own, or the object's base if it has never been painted individually. That material becomes current, and the Materials panel scrolls to its swatch so you can see what you picked up.
+
+## Replacing a material everywhere
+
+`Shift`-click a face to replace its material **everywhere in the document** with the current one, in a single undoable step. It's the fast way to change your mind about a color you've already used on fifty faces.
+
+`⌘`/`Ctrl`+`Shift`-click confines the same replacement to the object you clicked.
+
+## Positioning a texture
+
+A texture lands on a face at its default size and orientation, which is rarely where you want it. Choose **Position Texture** (Tools menu, or search it in the palette) and click a textured face. Three pins appear at the corners of one texture tile, right where you clicked, with the tile outlined between them:
+
+- **Red** sits at the tile corner nearest your click. Drag it to put that corner exactly where you want — it follows the cursor and snaps to endpoints, midpoints, and the rest of the usual inference points. Dragging anywhere else on the face slides the texture too.
+- **Green** is the next corner along the tile's width. Drag it to rotate and scale the texture around the red pin; the corner stays under your cursor, so the tile edge points where you point.
+- **Blue** is the next corner up the tile's height. Drag it to shear, for a texture that needs to lean with a slanted surface. Red and green stay put, which is what makes it a shear rather than a rotation.
+
+A dashed rectangle marks where the tile would sit at its natural size — that outline **is** 1× scale, at whatever angle the texture currently leans. The measurement box reads the same thing as numbers, `×1.00  0.0°`: scale relative to the material's natural size, and the angle measured from the face's own axes. Both are absolute — they describe where the texture *is*, not how far some drag has traveled.
+
+`Enter` commits the whole session as one undo step; `Esc` puts it back exactly where you started.
+
+You can type instead of dragging, any time the pins are up — no need to hold anything:
+
+- a plain number is the absolute **angle** — `45` puts the texture at 45°, whatever it was before
+- a number ending in `x` is the absolute **scale** — `2x` means twice natural size, `1x` means exactly natural
+- `Tab` flips what a bare number means; a first `Enter` applies the value, a second commits
+- click the blue pin first and the same forms set the tile's skew angle and height scale instead
+- while dragging the red pin, a plain number is a **distance** in your document's units
+
+Positioning works inside components too, but you have to be editing the component first — double-click into it, then position. That's deliberate: a texture on a definition's face belongs to every instance of it, so changing one changes them all, and it's better to see which one you're editing.
+
 ## Face paint vs. object base material
 
 Every object has an optional **base material** — the color its faces show when they haven't been painted individually. Individually painted faces override the base. The base is why painted models stay painted as you keep working: when an operation creates new faces (pulling a boss out of a painted box, slicing, booleans), the new faces inherit the object's base material instead of reverting to gray.

@@ -33,9 +33,9 @@ use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
     Anchor, Annotation, AnnotationId, BooleanOp, CapturedCurve, ComponentId, DocChange, Document,
     DocumentError, EdgeId, FaceId, GroupId, Guide, GuideId, ImageFormat, InstanceId, KernelOp,
-    KernelOpError, KernelOpReport, LoadError, Material, MaterialId, NodeId, Object, ObjectId,
-    Plane, Point3, RadialKind, Rgba8, SketchCurveRim, SketchEdgeId, SketchId, SketchRegionId,
-    Texture, Transform, WatertightState,
+    KernelOpError, KernelOpReport, LoadError, Material, MaterialId, MaterialScope, NodeId, Object,
+    ObjectId, Plane, Point3, RadialKind, Rgba8, SketchCurveRim, SketchEdgeId, SketchId,
+    SketchRegionId, Texture, Transform, UvFrame, Vec3, WatertightState,
 };
 use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
@@ -300,6 +300,13 @@ fn material_id_opt(handle: u64) -> Option<MaterialId> {
     } else {
         Some(MaterialId::from(KeyData::from_ffi(handle)))
     }
+}
+
+/// Flattens a [`recording::UvFrameRecorded`] into the 8-`f64` layout
+/// [`Scene::set_face_uv_frame`] accepts (`sx sy sz tx ty tz u0 v0`), so replay
+/// can drive the same public setter the original call went through.
+fn uv_frame_recorded_to_vec(f: recording::UvFrameRecorded) -> Vec<f64> {
+    vec![f.sx, f.sy, f.sz, f.tx, f.ty, f.tz, f.u0, f.v0]
 }
 
 fn sketch_id(handle: u64) -> SketchId {
@@ -623,6 +630,30 @@ impl MaterialJs {
     /// `has_texture` is false.
     pub fn world_h(&self) -> f64 {
         self.world_h
+    }
+}
+
+/// A face's own material AND its object's base material — the eyedropper's
+/// readback (paint-tool design §1). Both use the `u64::MAX` sentinel for
+/// `None`, the same convention `paint_face`/`set_object_material` use on the
+/// way in.
+#[wasm_bindgen]
+pub struct FaceMaterialJs {
+    face: u64,
+    object_default: u64,
+}
+
+#[wasm_bindgen]
+impl FaceMaterialJs {
+    /// The face's own material, or the sentinel if it carries none (in which
+    /// case it resolves through `object_default`).
+    pub fn face(&self) -> u64 {
+        self.face
+    }
+    /// The face's object's base material, or the sentinel if the object has
+    /// none either (in which case the face renders the plain default).
+    pub fn object_default(&self) -> u64 {
+        self.object_default
     }
 }
 
@@ -5674,6 +5705,21 @@ impl Scene {
         mat.texture.as_ref().map(|t| t.image.clone())
     }
 
+    /// The face's own material and its object's base material — the
+    /// eyedropper's readback (paint-tool design §1): Alt-click resolves the
+    /// effective material as `face`, else `object_default`, else the Default
+    /// swatch (both sentinels), and makes it current. `undefined` if `object`
+    /// is stale/hidden or `face` is not in it.
+    pub fn face_material(&self, object: u64, face: u64) -> Option<FaceMaterialJs> {
+        let oid = object_id(object);
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let (face_mat, default_mat) = self.doc.face_material_pair(oid, fid)?;
+        Some(FaceMaterialJs {
+            face: face_mat.map(|id| id.data().as_ffi()).unwrap_or(u64::MAX),
+            object_default: default_mat.map(|id| id.data().as_ffi()).unwrap_or(u64::MAX),
+        })
+    }
+
     /// Paint `face` of `object` with `material`. Sentinel `u64::MAX`
     /// resets the face to the default (unpainted) material. Painting is
     /// undoable; the kernel records a `PaintFace` document action. Touching a
@@ -5715,6 +5761,161 @@ impl Scene {
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SetObjectMaterial { object, material });
         Ok(())
+    }
+
+    /// Replace every assignment of `from` with `to` in one atomic step — the
+    /// Shift-click "replace everywhere" gesture (paint-tool design §2).
+    /// `document_wide: true` sweeps every object (world objects and
+    /// component-definition members alike); `false` confines the sweep to
+    /// `scope_object` (ignored when `document_wide` is true) —
+    /// Ctrl/Cmd+Shift-click. Sentinel `u64::MAX` for `from`/`to` means
+    /// "default / unpainted", same convention as `paint_face`; a sentinel
+    /// `from` fills every genuinely-unpainted face/object (not one merely
+    /// *inheriting* a painted base — see `Document::replace_material`).
+    /// Undoable as one document action regardless of how many objects it
+    /// touches.
+    ///
+    /// # Errors
+    /// - `UnknownObject` — `document_wide` is false and `scope_object` is a
+    ///   stale/hidden handle.
+    /// - `UnknownMaterial` — `from`/`to` (when not the sentinel) is not in
+    ///   the palette.
+    pub fn replace_material(
+        &mut self,
+        document_wide: bool,
+        scope_object: u64,
+        from: u64,
+        to: u64,
+    ) -> Result<(), ApiError> {
+        let scope = if document_wide {
+            MaterialScope::Document
+        } else {
+            MaterialScope::Object(object_id(scope_object))
+        };
+        let from_id = material_id_opt(from);
+        let to_id = material_id_opt(to);
+        let change = self
+            .doc
+            .replace_material(scope, from_id, to_id)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ReplaceMaterial {
+            document_wide,
+            scope_object,
+            from,
+            to,
+        });
+        Ok(())
+    }
+
+    /// `face`'s explicit UV positioning frame — the Position Texture tool's
+    /// readback (paint-tool design §3). `undefined` if `object`/`face` is
+    /// stale; an empty array if the face carries no explicit frame (the
+    /// planar-projection default); otherwise 8 floats
+    /// `[sx, sy, sz, tx, ty, tz, u0, v0]` (`kernel::UvFrame`'s components,
+    /// world-space gradients `s`/`t` then the `u0`/`v0` offsets — see
+    /// `UvFrame`'s doc comment for the exact `uv = s·p + u0, t·p + v0`
+    /// convention the tool's math must match).
+    pub fn face_uv_frame(&self, object: u64, face: u64) -> Option<Vec<f64>> {
+        let oid = object_id(object);
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let frame = self.doc.face_uv_frame(oid, fid)?;
+        Some(match frame {
+            None => Vec::new(),
+            Some(f) => vec![f.s.x, f.s.y, f.s.z, f.t.x, f.t.y, f.t.z, f.u0, f.v0],
+        })
+    }
+
+    /// Sets `face`'s UV positioning frame — the kernel commit for one
+    /// Position Texture gesture (paint-tool design §3). `frame: None` (or the
+    /// JS `undefined`) resets the face to the planar-projection default;
+    /// `Some` must be exactly 8 floats, same layout as [`Self::face_uv_frame`].
+    /// Undoable; the kernel records a `SetFaceUvFrame` document action storing
+    /// the exact prior frame (`Option<UvFrame>`), so undo/redo round-trip
+    /// `None <-> Some` in either direction. Works on world objects and
+    /// component-definition members alike (repositions the texture in every
+    /// instance of that definition) — same reach as `paint_face`.
+    ///
+    /// # Errors
+    /// - `BadUvFrame` — `frame` is `Some` but not exactly 8 floats.
+    /// - `DegenerateUvFrame` — the 8 floats parse but describe a degenerate
+    ///   frame: a non-finite component, a (near-)zero-length gradient, or
+    ///   (near-)parallel `s`/`t` gradients.
+    /// - `UnknownObject` — stale or hidden object handle.
+    /// - `UnknownFace` — face is not in the object.
+    pub fn set_face_uv_frame(
+        &mut self,
+        object: u64,
+        face: u64,
+        frame: Option<Vec<f64>>,
+    ) -> Result<(), ApiError> {
+        let oid = object_id(object);
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let uv_frame = match &frame {
+            None => None,
+            Some(v) => {
+                let a: &[f64; 8] = v.as_slice().try_into().map_err(|_| {
+                    ApiError::new(
+                        "BadUvFrame",
+                        "frame must be 8 floats (sx sy sz tx ty tz u0 v0)",
+                    )
+                })?;
+                Some(UvFrame::new(
+                    Vec3::new(a[0], a[1], a[2]),
+                    Vec3::new(a[3], a[4], a[5]),
+                    a[6],
+                    a[7],
+                ))
+            }
+        };
+        let change = self
+            .doc
+            .set_face_uv_frame(oid, fid, uv_frame)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetFaceUvFrame {
+            object,
+            face,
+            frame: uv_frame.map(|f| recording::UvFrameRecorded {
+                sx: f.s.x,
+                sy: f.s.y,
+                sz: f.s.z,
+                tx: f.t.x,
+                ty: f.t.y,
+                tz: f.t.z,
+                u0: f.u0,
+                v0: f.v0,
+            }),
+        });
+        Ok(())
+    }
+
+    /// The vertex range `[base, count]` one Object face occupies in its
+    /// tessellated render mesh (`MeshJs::positions`/`uvs`, both duplicated
+    /// per face and laid out in face order — see `RenderMesh`'s doc comment).
+    /// `undefined` if `object`/`face` is stale. Lets the Position Texture
+    /// tool patch just this face's `uv` attribute range in place while
+    /// dragging (docs/DEVELOPMENT.md B4-style targeted refresh) instead of
+    /// re-tessellating the whole object on every pointer move — the frame
+    /// isn't committed to the document until the gesture ends, so there is
+    /// nothing for a real re-tessellation to reflect yet anyway. Computed
+    /// from the same cached `RenderMesh` `object_mesh` fills (tessellating
+    /// on demand if the cache is cold, e.g. this is the first call for the
+    /// object), so it costs nothing extra on the common path.
+    pub fn face_mesh_range(&mut self, object: u64, face: u64) -> Option<Vec<u32>> {
+        let id = object_id(object);
+        if !self.mesh_cache.contains_key(id) {
+            let palette = self.doc.materials();
+            let obj = self.doc.object(id)?;
+            let mesh = tessellate(obj, palette).ok()?;
+            self.mesh_cache.insert(id, mesh);
+        }
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let mesh = &self.mesh_cache[id];
+        mesh.face_ranges
+            .iter()
+            .find(|(f, _, _)| *f == fid)
+            .map(|&(_, base, count)| vec![base, count])
     }
 
     // ------------------------------------------------------------- guides
@@ -7096,6 +7297,21 @@ impl Scene {
                     }
                     SetObjectMaterial { object, material } => {
                         self.set_object_material(object, material)?;
+                    }
+                    ReplaceMaterial {
+                        document_wide,
+                        scope_object,
+                        from,
+                        to,
+                    } => {
+                        self.replace_material(document_wide, scope_object, from, to)?;
+                    }
+                    SetFaceUvFrame {
+                        object,
+                        face,
+                        frame,
+                    } => {
+                        self.set_face_uv_frame(object, face, frame.map(uv_frame_recorded_to_vec))?;
                     }
                     AddGuideLine { origin, dir } => {
                         self.add_guide_line(
@@ -9210,10 +9426,35 @@ mod tests {
         scene.make_unique(placed).unwrap();
         scene.explode_instance(placed).unwrap();
 
-        // Materials.
+        // Materials. `paint_face`/`replace_material` were not previously
+        // exercised by this record/replay coverage sweep — closing that gap
+        // alongside `replace_material`'s own new coverage. `a` sits at
+        // x=[0.5,1.5] y=[0,1] z=[0,1] by now (the earlier `SHIFT_HALF_X`
+        // group transform moved it); (1.0, 0.5, 10.0) straight down lands
+        // safely inside its top face, well clear of any edge — the
+        // `pick.object()` assert makes that assumption self-checking.
         let m = scene.add_material("Red".to_string(), 255, 0, 0, 255);
+        let m2 = scene.add_material("Blue".to_string(), 0, 0, 255, 255);
         scene.set_object_material(a, m).unwrap();
         scene.set_material_alpha(m, 128).unwrap();
+        let pick = scene.pick_face(1.0, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a, "picked object `a`'s top face as expected");
+        scene.paint_face(pick.object(), pick.face(), m2).unwrap();
+        scene.replace_material(true, u64::MAX, m2, m).unwrap();
+
+        // Position Texture (paint-tool design §3): set an explicit frame,
+        // then reset it back to the planar default — exercises both
+        // directions (`None -> Some` and `Some -> None`) through record/replay.
+        scene
+            .set_face_uv_frame(
+                pick.object(),
+                pick.face(),
+                Some(vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.25, -0.5]),
+            )
+            .unwrap();
+        scene
+            .set_face_uv_frame(pick.object(), pick.face(), None)
+            .unwrap();
 
         // Guides.
         scene.add_guide_line(0.0, 0.0, 0.0, 1.0, 0.0, 0.0).unwrap();
@@ -9450,6 +9691,155 @@ mod tests {
             .sketch_begin_curve_with(sketch, 0.0, 0.0, 0.0, 0.0)
             .unwrap_err();
         assert!(err.0.starts_with("DegenerateCurve:"), "got: {}", err.0);
+    }
+
+    /// `face_uv_frame`/`set_face_uv_frame` round-trip an explicit frame, and
+    /// `None` resets it back to the planar-default empty-vec reading
+    /// (paint-tool design §3).
+    #[test]
+    fn face_uv_frame_round_trips_through_set() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+        let (object, face) = (pick.object(), pick.face());
+
+        assert_eq!(
+            scene.face_uv_frame(object, face),
+            Some(Vec::new()),
+            "unset reads back as the planar-default empty vec"
+        );
+
+        let frame = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.25, -0.5];
+        scene
+            .set_face_uv_frame(object, face, Some(frame.clone()))
+            .unwrap();
+        assert_eq!(scene.face_uv_frame(object, face), Some(frame));
+
+        scene.set_face_uv_frame(object, face, None).unwrap();
+        assert_eq!(scene.face_uv_frame(object, face), Some(Vec::new()));
+    }
+
+    /// A malformed frame (not exactly 8 floats) is refused typed, not
+    /// silently truncated/padded.
+    #[test]
+    fn set_face_uv_frame_rejects_malformed_length() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+
+        let err = scene
+            .set_face_uv_frame(pick.object(), pick.face(), Some(vec![1.0, 2.0]))
+            .unwrap_err();
+        assert!(err.0.starts_with("BadUvFrame:"), "got: {}", err.0);
+    }
+
+    /// An 8-float frame that IS well-formed length-wise but geometrically
+    /// degenerate (non-finite, zero-gradient, or singular/parallel `s`/`t`)
+    /// is refused typed through the kernel's own validation
+    /// (`DocumentError::DegenerateUvFrame`), not silently stored — same
+    /// no-silent-repair posture as the malformed-length case above, one
+    /// layer deeper.
+    #[test]
+    fn set_face_uv_frame_rejects_degenerate_frame() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+        let (object, face) = (pick.object(), pick.face());
+
+        let non_finite = vec![f64::NAN, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let err = scene
+            .set_face_uv_frame(object, face, Some(non_finite))
+            .unwrap_err();
+        assert!(err.0.starts_with("DegenerateUvFrame:"), "got: {}", err.0);
+
+        let parallel = vec![1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0];
+        let err = scene
+            .set_face_uv_frame(object, face, Some(parallel))
+            .unwrap_err();
+        assert!(err.0.starts_with("DegenerateUvFrame:"), "got: {}", err.0);
+
+        assert_eq!(
+            scene.face_uv_frame(object, face),
+            Some(Vec::new()),
+            "both refusals left the face at its unset planar default"
+        );
+    }
+
+    /// Stale object/face handles are refused typed, matching `paint_face`'s
+    /// posture.
+    #[test]
+    fn set_face_uv_frame_rejects_unknown_inputs() {
+        let mut scene = Scene::new();
+        let err = scene
+            .set_face_uv_frame(u64::MAX, u64::MAX, None)
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownObject:"), "got: {}", err.0);
+    }
+
+    /// `set_face_uv_frame` is undoable through the normal `scene_undo`/
+    /// `scene_redo` path, same as `paint_face`.
+    #[test]
+    fn set_face_uv_frame_is_undoable_via_scene() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+        let (object, face) = (pick.object(), pick.face());
+
+        let frame = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        scene
+            .set_face_uv_frame(object, face, Some(frame.clone()))
+            .unwrap();
+        assert_eq!(scene.face_uv_frame(object, face), Some(frame.clone()));
+
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            scene.face_uv_frame(object, face),
+            Some(Vec::new()),
+            "undo restores the planar default"
+        );
+
+        scene.scene_redo().unwrap();
+        assert_eq!(scene.face_uv_frame(object, face), Some(frame));
+    }
+
+    /// `face_mesh_range` gives a `[base, count]` vertex range that actually
+    /// indexes into `object_mesh`'s `uvs`/`positions` — the Position Texture
+    /// tool's live-preview patch target (paint-tool design §3).
+    #[test]
+    fn face_mesh_range_indexes_into_the_object_mesh() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+        let (object, face) = (pick.object(), pick.face());
+
+        let range = scene.face_mesh_range(object, face).expect("live face");
+        let (base, count) = (range[0] as usize, range[1] as usize);
+        assert!(count >= 3, "a face has at least 3 vertices");
+
+        let mesh = scene.object_mesh(object).unwrap();
+        let uvs = mesh.uvs();
+        let positions = mesh.positions();
+        assert!(
+            (base + count) * 2 <= uvs.len(),
+            "range must fit inside the mesh's uv buffer"
+        );
+        assert!(
+            (base + count) * 3 <= positions.len(),
+            "range must fit inside the mesh's position buffer"
+        );
+
+        // Stale object/face reads back undefined, not a stale range.
+        assert_eq!(scene.face_mesh_range(u64::MAX, face), None);
     }
 
     /// A version mismatch in a recording artifact is rejected, not mis-replayed.

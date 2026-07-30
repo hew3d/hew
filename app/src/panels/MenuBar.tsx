@@ -775,6 +775,11 @@ export function MenuBar({
               onClick={withClose(() => onSelectTool?.('Paint'))}
             />
             <CheckMenuItem
+              label="Position Texture"
+              checked={activeTool === 'Position Texture'}
+              onClick={withClose(() => onSelectTool?.('Position Texture'))}
+            />
+            <CheckMenuItem
               label="Move"
               shortcut={keyFor('Move')}
               checked={activeTool === 'Move'}

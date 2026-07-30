@@ -511,6 +511,64 @@ export interface HewTestHarness {
    */
   paintFace(object: string, face: string, material: string | null): void
 
+  /**
+   * Read back `face`'s own material and its object's base material — wraps
+   * the eyedropper's `face_material` getter (paint-tool design §1). `null`
+   * in either slot is the unpainted/default sentinel; `null` for the whole
+   * result means `object`/`face` is stale. Read-only, not undoable.
+   */
+  getFaceMaterial(object: string, face: string): { face: string | null; objectDefault: string | null } | null
+
+  /**
+   * Replace every assignment of `from` with `to` in one atomic step — wraps
+   * `replace_material` (paint-tool design §2). `documentWide: true` sweeps
+   * every object; `false` confines the sweep to `scopeObject`. `null` for
+   * `from`/`to` is the unpainted sentinel, same convention as `paintFace`.
+   * Undoable as one document action.
+   */
+  replaceMaterial(
+    documentWide: boolean,
+    scopeObject: string | null,
+    from: string | null,
+    to: string | null,
+  ): void
+
+  /**
+   * Add a textured material to the palette and return its handle. Wraps
+   * `add_texture_material`. `format`: 0 = PNG, 1 = JPEG. `worldW`/`worldH`
+   * are the real-world meters one tile covers (the planar-default UV
+   * divides by these — paint-tool design §3). Test-only: E2E has no file
+   * upload flow, so this is the only way to get a textured material into a
+   * scene under test.
+   */
+  addTextureMaterial(
+    name: string,
+    r: number,
+    g: number,
+    b: number,
+    a: number,
+    image: number[],
+    format: number,
+    worldW: number,
+    worldH: number,
+  ): string
+
+  /**
+   * `face`'s explicit UV positioning frame — wraps `face_uv_frame`
+   * (paint-tool design §3). `null` if `object`/`face` is stale; `[]` if the
+   * face carries no explicit frame (the planar-projection default);
+   * otherwise 8 numbers `[sx, sy, sz, tx, ty, tz, u0, v0]`. Read-only, not
+   * undoable.
+   */
+  getFaceUvFrame(object: string, face: string): number[] | null
+
+  /**
+   * Sets `face`'s UV positioning frame — wraps `set_face_uv_frame`
+   * (paint-tool design §3). `null` resets to the planar-projection default;
+   * otherwise exactly 8 numbers, same layout as `getFaceUvFrame`. Undoable.
+   */
+  setFaceUvFrame(object: string, face: string, frame: number[] | null): void
+
   // -------- components --------
 
   /**
@@ -1416,6 +1474,52 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     paintFace: (object, face, material) => {
       act((s) => s.paint_face(BigInt(object), BigInt(face), materialHandle(material)))
+    },
+
+    getFaceMaterial: (object, face) =>
+      query((s) => {
+        const info = s.face_material(BigInt(object), BigInt(face))
+        if (info === undefined) return null
+        try {
+          const own = info.face()
+          const base = info.object_default()
+          return {
+            face: own === MATERIAL_NONE ? null : own.toString(),
+            objectDefault: base === MATERIAL_NONE ? null : base.toString(),
+          }
+        } finally {
+          info.free()
+        }
+      }),
+
+    replaceMaterial: (documentWide, scopeObject, from, to) => {
+      act((s) =>
+        s.replace_material(
+          documentWide,
+          scopeObject === null ? MATERIAL_NONE : BigInt(scopeObject),
+          materialHandle(from),
+          materialHandle(to),
+        ),
+      )
+    },
+
+    addTextureMaterial: (name, r, g, b, a, image, format, worldW, worldH) =>
+      act((s) =>
+        s
+          .add_texture_material(name, r, g, b, a, new Uint8Array(image), format, worldW, worldH)
+          .toString(),
+      ),
+
+    getFaceUvFrame: (object, face) =>
+      query((s) => {
+        const frame = s.face_uv_frame(BigInt(object), BigInt(face))
+        return frame === undefined ? null : Array.from(frame)
+      }),
+
+    setFaceUvFrame: (object, face, frame) => {
+      act((s) =>
+        s.set_face_uv_frame(BigInt(object), BigInt(face), frame === null ? undefined : new Float64Array(frame)),
+      )
     },
 
     // -------- follow me --------

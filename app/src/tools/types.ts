@@ -3,6 +3,7 @@
  * See docs/DEVELOPMENT.md for the design.
  */
 
+import type * as THREE from 'three'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
 
@@ -112,6 +113,35 @@ export interface Tool {
   cancel(): void
   /** Human-readable name shown in the status bar */
   readonly name: string
+
+  /**
+   * (optional) Per-render-tick hooks for tools that draw screen-constant
+   * widgets — grips (ScaleTool, FollowMeTool, PositionTextureTool) and single
+   * disks (RotateTool, ProtractorTool, SliceTool, SectionPlaneTool). The
+   * Viewport's render loop feature-detects these and calls them once per
+   * frame BEFORE `renderer.render()`, passing a `worldPerPixel(dist)`
+   * callback derived from the active `CameraRig` — projection-agnostic, so
+   * the same widget sizing works under perspective and parallel alike.
+   *
+   * Declared HERE, on `Tool`, rather than left to the Viewport's `as` cast:
+   * a cast asserts a shape without checking any implementor, so a tool that
+   * wrote its own incompatible signature (taking a viewport height in pixels
+   * where the callback actually arrives) type-checked cleanly and then
+   * computed NaN sizes at runtime — invisible, unpickable widgets. With the
+   * members declared, that mismatch is a compile error in the tool itself.
+   */
+  updateGripScale?(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void
+  updateDiskScale?(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void
+
+  /**
+   * (optional) The live camera, pushed once per render tick by the same loop.
+   * `onPointerMove`/`onPointerDown` carry only a per-pixel cursor ray, never
+   * the camera itself, so this is the one feed for tools that need the actual
+   * view direction — DimensionTool and TextTool, for `axisDimensionPlane`'s
+   * face-on candidate scoring. Declared here for the same reason as the two
+   * hooks above: a cast at the call site checks nothing.
+   */
+  updateCamera?(camera: THREE.Camera): void
 
   /**
    * (optional) Return snap constraints the tool wants injected into the next

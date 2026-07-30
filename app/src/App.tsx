@@ -119,6 +119,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   'Follow Me': 'tool-follow-me',
   Offset: 'tool-offset',
   Paint: 'tool-paint',
+  'Position Texture': 'tool-position-texture',
   Move: 'tool-move',
   Rotate: 'tool-rotate',
   Scale: 'tool-scale',
@@ -2153,6 +2154,7 @@ export default function App() {
       case 'tool-follow-me': setActiveTool('Follow Me'); break
       case 'tool-offset':    setActiveTool('Offset'); break
       case 'tool-paint':     setActiveTool('Paint'); break
+      case 'tool-position-texture': setActiveTool('Position Texture'); break
       case 'tool-move':      setActiveTool('Move'); break
       case 'tool-rotate':    setActiveTool('Rotate'); break
       case 'tool-scale':     setActiveTool('Scale'); break
@@ -3274,6 +3276,7 @@ export default function App() {
             currentMaterialId={currentMaterialId}
             onProjectionChange={(projection) => setParallelProjection(projection === 'parallel')}
             onToolReverted={() => setActiveTool('Select')}
+            onSampleMaterial={setCurrentMaterialId}
           />
 
           {/* Inference & viewport feedback (`07_inference_feedback.md`)

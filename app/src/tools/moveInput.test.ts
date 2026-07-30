@@ -6,12 +6,14 @@ import {
   editLengthBuffer,
   editDimsBuffer,
   editPolygonBuffer,
+  editScaleOrRotateBuffer,
   isLengthInputKey,
   isPolygonInputKey,
   parseArraySpec,
   parseDistance,
   parseDimensions,
   parsePolygonSideCount,
+  parseScaleOrRotate,
   pointAlong,
 } from './moveInput'
 
@@ -114,6 +116,55 @@ describe('parseDistance', () => {
     // editNumericBuffer can produce ".5" only if user types dot then digits from empty
     // parseFloat('.5') === 0.5
     expect(parseDistance('.5')).toBeCloseTo(0.5)
+  })
+})
+
+describe('editScaleOrRotateBuffer (PositionTextureTool green/blue typed entry, paint-playtest2 §1)', () => {
+  it('digits/dot/minus/Backspace behave exactly like editNumericBuffer', () => {
+    expect(editScaleOrRotateBuffer('', '4')).toBe('4')
+    expect(editScaleOrRotateBuffer('4', '5')).toBe('45')
+    expect(editScaleOrRotateBuffer('4.5', '.')).toBe('4.5') // reject 2nd dot
+    expect(editScaleOrRotateBuffer('45', 'Backspace')).toBe('4')
+    expect(editScaleOrRotateBuffer('', '-')).toBe('-')
+  })
+
+  it('appends a trailing x marker after a completed numeric token, normalizing X to lowercase (mirrors editArrayBuffer)', () => {
+    expect(editScaleOrRotateBuffer('2', 'x')).toBe('2x')
+    expect(editScaleOrRotateBuffer('0.5', 'X')).toBe('0.5x')
+    expect(editScaleOrRotateBuffer('-3', 'x')).toBe('-3x')
+  })
+
+  it('refuses x on an empty or incomplete buffer (no digits yet)', () => {
+    expect(editScaleOrRotateBuffer('', 'x')).toBe('')
+    expect(editScaleOrRotateBuffer('-', 'x')).toBe('-')
+  })
+
+  it('freezes the buffer once x is present — only Backspace edits it', () => {
+    expect(editScaleOrRotateBuffer('2x', '3')).toBe('2x')
+    expect(editScaleOrRotateBuffer('2x', '.')).toBe('2x')
+    expect(editScaleOrRotateBuffer('2x', 'x')).toBe('2x') // no second x
+    expect(editScaleOrRotateBuffer('2x', 'Backspace')).toBe('2')
+  })
+})
+
+describe('parseScaleOrRotate (PositionTextureTool green/blue typed entry, paint-playtest2 §1)', () => {
+  it('a bare number takes on the caller-supplied default mode (Tab toggle)', () => {
+    expect(parseScaleOrRotate('45', 'rotate')).toEqual({ mode: 'rotate', value: 45 })
+    expect(parseScaleOrRotate('45', 'scale')).toEqual({ mode: 'scale', value: 45 })
+    expect(parseScaleOrRotate('-30', 'rotate')).toEqual({ mode: 'rotate', value: -30 })
+  })
+
+  it('a trailing x/X ALWAYS means scale, regardless of defaultMode', () => {
+    expect(parseScaleOrRotate('2x', 'rotate')).toEqual({ mode: 'scale', value: 2 })
+    expect(parseScaleOrRotate('0.5X', 'rotate')).toEqual({ mode: 'scale', value: 0.5 })
+    expect(parseScaleOrRotate('2x', 'scale')).toEqual({ mode: 'scale', value: 2 })
+  })
+
+  it('returns null for an empty/incomplete/non-finite buffer', () => {
+    expect(parseScaleOrRotate('', 'rotate')).toBeNull()
+    expect(parseScaleOrRotate('-', 'rotate')).toBeNull()
+    expect(parseScaleOrRotate('.', 'scale')).toBeNull()
+    expect(parseScaleOrRotate('x', 'rotate')).toBeNull()
   })
 })
 

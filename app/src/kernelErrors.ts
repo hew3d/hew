@@ -54,6 +54,8 @@ const DESCRIPTIONS: Record<string, string> = {
   UnknownGuide: stale('guide'),
   UnknownMaterial: 'That material is no longer in the palette. Pick another swatch.',
   DegenerateFace: 'That face has no usable area. Pick a different face.',
+  ReplaceMaterialReplayStale:
+    'Some of the faces that material swap touched have since been reshaped, so it can no longer be undone or redone on its own. Nothing was changed.',
 
   // ---------------------------------------------------------- drawing
   PointOffPlane:
@@ -87,6 +89,10 @@ const DESCRIPTIONS: Record<string, string> = {
     'The drawing tools got out of step. Press Escape and try again.',
   DegenerateGuide:
     'The guide needs a definite direction. Drag a little further before dropping it.',
+  DegenerateUvFrame:
+    "That texture position isn't valid. Drag the handle further before releasing it.",
+  BadUvFrame:
+    "That texture position couldn't be read. Press Escape and start the positioning again.",
 
   // ------------------------------------------------- extrude / push-pull
   DistanceTooSmall:

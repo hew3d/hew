@@ -68,9 +68,9 @@ describe('dockVerbsFor', () => {
   // Deliberate contract change (selection-UX overhaul): the Object and Group
   // rows gained Make Component and the Multi row gained Group, so the two
   // structural commands are one click from the selection that enables them.
-  it('object: primary Push/Pull, then Move, Paint, Make Component, Erase', () => {
+  it('object: primary Push/Pull, then Move, Paint, Position Texture, Make Component, Erase', () => {
     const verbs = dockVerbsFor('object')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'edit-make-component', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-make-component', 'edit-delete'])
   })
 
   it('group: primary Edit, then Move, Scale, Make Component, Ungroup, Erase', () => {
@@ -96,7 +96,7 @@ describe('dockVerbsFor', () => {
     // Object inside an editing context (canMakeComponent is top-level-only).
     expect(
       dockVerbsFor('object', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
-    ).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'edit-delete'])
+    ).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-delete'])
     expect(
       dockVerbsFor('group', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
     ).toEqual(['enter-context', 'tool-move', 'tool-scale', 'ungroup', 'edit-delete'])

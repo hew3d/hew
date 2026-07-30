@@ -99,6 +99,15 @@ pub struct RenderMesh {
     /// against unattributed faces stay hard. Derived at tessellation time
     /// from surface equality; nothing new is persisted.
     pub soft_edge_positions: Vec<f32>,
+    /// Per-face vertex range into `positions`/`normals`/`colors`/`uvs`:
+    /// `(face, base, count)`, `base`/`count` in VERTICES (not floats) — face
+    /// `f`'s vertices occupy `[base*3, (base+count)*3)` of `positions` and
+    /// `[base*2, (base+count)*2)` of `uvs`. Lets a caller patch one face's
+    /// `uv` range in place (the Position Texture tool's live preview,
+    /// paint-tool design §3) without re-tessellating the whole object. Empty
+    /// faces (a degenerate 0-vertex outer loop) never occur — tessellation
+    /// would already have failed with `DegenerateFace` before this is built.
+    pub face_ranges: Vec<(FaceId, u32, u32)>,
 }
 
 /// Tessellates an Object into flat-shaded triangle and edge-line buffers.
@@ -290,6 +299,7 @@ pub fn tessellate(
             };
             mesh.uvs.extend([fu, fv]);
         }
+        mesh.face_ranges.push((face_id, base, poly.len() as u32));
 
         // Run ear clipping (local indices into poly).
         let triangles = ear_clip(&poly);
