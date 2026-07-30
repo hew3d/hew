@@ -38,6 +38,8 @@ import personPinSvg from '@material-symbols/svg-400/outlined/person_pin.svg?raw'
 import threeSixtySvg from '@material-symbols/svg-400/outlined/360.svg?raw'
 import directionsWalkSvg from '@material-symbols/svg-400/outlined/directions_walk.svg?raw'
 import lineAxisSvg from '@material-symbols/svg-400/outlined/line_axis.svg?raw'
+import squareFootSvg from '@material-symbols/svg-400/outlined/square_foot.svg?raw'
+import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
 
 /** Keep in sync with the `ToolName` union in App.tsx (not imported here to
  * avoid a UI-module -> App.tsx dependency edge; the key set is asserted by
@@ -57,11 +59,13 @@ export type ToolName =
   | 'Rotate'
   | 'Scale'
   | 'Tape Measure'
+  | 'Dimension'
   | 'Protractor'
   | 'Slice'
   | 'Section Plane'
   | 'Edit Vertex'
   | 'Axes'
+  | 'Text'
   | 'Orbit'
   | 'Pan'
   | 'Zoom'
@@ -86,11 +90,13 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Rotate': rotateRightSvg,
   'Scale': aspectRatioSvg,
   'Tape Measure': straightenSvg,
+  'Dimension': squareFootSvg,
   'Protractor': architectureSvg,
   'Slice': contentCutSvg,
   'Section Plane': verticalSplitSvg,
   'Edit Vertex': dragPanSvg,
   'Axes': lineAxisSvg,
+  'Text': textFieldsSvg,
   'Orbit': threeDRotationSvg,
   'Pan': panToolSvg,
   'Zoom': zoomInSvg,
@@ -118,11 +124,13 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Rotate': { x: 0.5, y: 0.5 },
   'Scale': { x: 0.5, y: 0.5 },
   'Tape Measure': { x: 0.1, y: 0.9 },
+  'Dimension': { x: 0.1, y: 0.9 },
   'Protractor': { x: 0.1, y: 0.9 },
   'Slice': { x: 0.1, y: 0.9 },
   'Section Plane': { x: 0.1, y: 0.9 },
   'Edit Vertex': { x: 0.5, y: 0.5 },
   'Axes': { x: 0.1, y: 0.9 },
+  'Text': { x: 0.1, y: 0.9 },
   'Orbit': { x: 0.5, y: 0.5 },
   'Pan': { x: 0.5, y: 0.5 },
   'Zoom': { x: 0.5, y: 0.5 },

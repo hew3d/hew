@@ -30,8 +30,9 @@
 //!   that noise is exactly what tolerance-aware equivalence exists for.
 
 use kernel::{
-    BooleanOp, Document, DocumentError, KernelOp, KernelOpError, NodeId, ObjectId,
-    PendingActionKind, Plane, Point3, PushPullError, SketchError, SketchRegionId, Transform, Vec3,
+    Anchor, Annotation, BooleanOp, CapturedCurve, Document, DocumentError, KernelOp, KernelOpError,
+    NodeId, ObjectId, PendingActionKind, Plane, Point3, PushPullError, RadialKind, SketchError,
+    SketchRegionId, Transform, Vec3,
 };
 use proptest::prelude::*;
 
@@ -77,6 +78,17 @@ enum DocOp {
     Duplicate {
         obj_sel: usize,
         offset: (f64, f64, f64),
+    },
+    /// A NON-SIMILARITY transform (non-uniform scale) baked into a visible
+    /// object — the class of transform `Annotation::reanchor` cannot carry
+    /// a `RadialDimension`'s captured circle through (it would turn the
+    /// circle into an ellipse) and, for a `LinearDimension` with only one
+    /// touched anchor, cannot always re-derive a sane placement either.
+    /// Every other transform DocOp here is a similarity (pure translation),
+    /// so without this variant that whole detach class was unreachable.
+    NonUniformScale {
+        obj_sel: usize,
+        factors: (f64, f64, f64),
     },
     /// Delete the `node_sel`-th top-level node.
     Delete {
@@ -257,6 +269,46 @@ enum DocOp {
         axis: (f64, f64, f64),
         angle: f64,
     },
+    /// Add a linear dimension anchored on two of the `obj_sel`-th visible
+    /// object's own vertices (exercises re-anchoring: later transforms/
+    /// deletes on `obj_sel` touch this annotation).
+    AddLinearDimension {
+        obj_sel: usize,
+        v_a: usize,
+        v_b: usize,
+        offset: (f64, f64, f64),
+    },
+    /// Add a radial dimension anchored on one of the `obj_sel`-th visible
+    /// object's own vertices, with a synthetic captured circle (the kernel
+    /// never cross-validates the curve against the object's actual
+    /// geometry — see `Document::add_radial_dimension`) — exercises the
+    /// non-similarity-transform detach path this DocOp family previously
+    /// left unreachable.
+    AddRadialDimension {
+        obj_sel: usize,
+        v_sel: usize,
+        radius: f64,
+        leader: (f64, f64, f64),
+    },
+    /// Add a free-floating leader text (no anchored node — never
+    /// re-anchored, never detaches; the control case beside the anchored
+    /// variants above).
+    AddLeaderText {
+        p: (f64, f64, f64),
+    },
+    /// Delete the `ann_sel`-th live annotation.
+    DeleteAnnotation {
+        ann_sel: usize,
+    },
+    /// Replace the `ann_sel`-th live annotation's text/override in place,
+    /// keeping its kind and anchors — `update_annotation`'s "same variant"
+    /// contract. A text-only edit like this one leaves `detached` exactly as
+    /// it was (only a change to an anchor/geometry field clears it — see
+    /// `Document::update_annotation`'s doc comment).
+    UpdateAnnotationText {
+        ann_sel: usize,
+        text: String,
+    },
     Undo,
     Redo,
 }
@@ -310,6 +362,9 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         2 => (any::<usize>(), arb_offset()).prop_map(|(obj_sel, offset)| {
             DocOp::Duplicate { obj_sel, offset }
         }),
+        2 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
+            |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
+        ),
         1 => any::<usize>().prop_map(|node_sel| DocOp::Delete { node_sel }),
         1 => (2usize..4).prop_map(|count| DocOp::Group { count }),
         1 => any::<usize>().prop_map(|group_sel| DocOp::Ungroup { group_sel }),
@@ -361,6 +416,19 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => (arb_offset(), arb_offset(), 0.0..std::f64::consts::TAU).prop_map(
             |(origin, axis, angle)| DocOp::SetAxes { origin, axis, angle }
         ),
+        2 => (any::<usize>(), any::<usize>(), any::<usize>(), arb_offset()).prop_map(
+            |(obj_sel, v_a, v_b, offset)| DocOp::AddLinearDimension { obj_sel, v_a, v_b, offset }
+        ),
+        2 => (any::<usize>(), any::<usize>(), 0.1..5.0f64, arb_offset()).prop_map(
+            |(obj_sel, v_sel, radius, leader)| DocOp::AddRadialDimension {
+                obj_sel, v_sel, radius, leader,
+            }
+        ),
+        1 => arb_offset().prop_map(|p| DocOp::AddLeaderText { p }),
+        1 => any::<usize>().prop_map(|ann_sel| DocOp::DeleteAnnotation { ann_sel }),
+        1 => (any::<usize>(), "[a-z]{0,6}").prop_map(|(ann_sel, text)| {
+            DocOp::UpdateAnnotationText { ann_sel, text }
+        }),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
@@ -628,9 +696,24 @@ fn doc_fingerprint(doc: &Document) -> String {
         q(axes.y.y),
         q(axes.y.z),
     );
+    // Annotations: kind + quantized geometry + whether each anchor still
+    // names a node + `detached`. Quantized for the same reason object
+    // vertices are: re-anchoring composes transforms exactly like a baked
+    // object move does, so it inherits the identical ulp-noise trap.
+    // Node identity is deliberately NOT embedded (ids can differ across a
+    // hypothetical fresh replay, matching the id-independent philosophy
+    // `object_print` above already follows); "has a node" is enough to catch
+    // a reanchor/detach regression.
+    let mut annotations: Vec<String> = doc
+        .annotations()
+        .into_iter()
+        .map(|(_, a, detached)| annotation_print(&a, detached, q))
+        .collect();
+    annotations.sort_unstable();
     format!(
         "objs={objects:?} defs={defs:?} poses={poses:?} groups={} \
-         world_sketches={world_sketches:?} def_sketches={def_sketches:?} axes={axes_print:?}",
+         world_sketches={world_sketches:?} def_sketches={def_sketches:?} axes={axes_print:?} \
+         annotations={annotations:?}",
         doc.group_ids().len()
     )
 }
@@ -660,6 +743,64 @@ fn sketch_print(s: &kernel::Sketch) -> String {
         .collect();
     edges.sort_unstable();
     format!("{edges:?}|regions={}", s.regions().len())
+}
+
+/// Quantized, id-independent fingerprint of one annotation — see
+/// `doc_fingerprint`'s doc comment for why quantization is needed here too.
+fn annotation_print(a: &Annotation, detached: bool, q: impl Fn(f64) -> i64) -> String {
+    let qp = |p: Point3| (q(p.x), q(p.y), q(p.z));
+    let qv = |v: Vec3| (q(v.x), q(v.y), q(v.z));
+    // Quantized plane identity: normal direction plus the representative
+    // point `Plane::point()` returns — covers a plane re-derivation
+    // regression (findings around `LinearDimension`'s one-anchor-touched
+    // re-derivation and `RadialDimension`'s frozen curve) that a print
+    // omitting the plane entirely would silently miss.
+    let qplane = |p: &Plane| (qv(p.normal()), qp(p.point()));
+    let has_node = |anchor: &Anchor| anchor.node.is_some();
+    match a {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            plane,
+            text_override,
+        } => format!(
+            "linear|{}|{:?}|{}|{:?}|{:?}|{:?}|{text_override:?}|{detached}",
+            has_node(a),
+            qp(a.point),
+            has_node(b),
+            qp(b.point),
+            qv(*offset),
+            qplane(plane),
+        ),
+        Annotation::RadialDimension {
+            anchor,
+            kind,
+            curve,
+            leader_dir,
+            text_override,
+        } => {
+            let radius = q(curve.radius);
+            format!(
+                "radial|{}|{:?}|{kind:?}|{radius}|{:?}|{:?}|{:?}|{text_override:?}|{detached}",
+                has_node(anchor),
+                qp(anchor.point),
+                qp(curve.center),
+                qplane(&curve.plane),
+                qv(*leader_dir),
+            )
+        }
+        Annotation::LeaderText {
+            anchor,
+            offset,
+            text,
+        } => format!(
+            "leader|{}|{:?}|{:?}|{text:?}|{detached}",
+            has_node(anchor),
+            qp(anchor.point),
+            qv(*offset),
+        ),
+    }
 }
 
 fn nth<T: Copy>(items: &[T], sel: usize) -> Option<T> {
@@ -862,6 +1003,13 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.duplicate_node(NodeId::Object(oid), &t);
+        }
+        DocOp::NonUniformScale { obj_sel, factors } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let t = Transform::scale(Vec3::new(factors.0, factors.1, factors.2));
+            let _ = doc.transform_object(oid, &t);
         }
         DocOp::Delete { node_sel } => {
             let Some(node) = nth(&doc.top_level_nodes(), *node_sel) else {
@@ -1229,6 +1377,136 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
             let o = Point3::new(origin.0, origin.1, origin.2);
             doc.set_axes(o, x, y)
                 .expect("a rotated identity basis is always a valid axes frame");
+        }
+        DocOp::AddLinearDimension {
+            obj_sel,
+            v_a,
+            v_b,
+            offset,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let (points, _) = obj.to_polygons();
+            if points.len() < 2 {
+                return Ok(true);
+            }
+            let pa = points[v_a % points.len()];
+            let pb = points[v_b % points.len()];
+            let plane =
+                Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+                    .expect("unit normal");
+            let _ = doc.add_linear_dimension(
+                Anchor {
+                    node: Some(NodeId::Object(oid)),
+                    point: pa,
+                },
+                Anchor {
+                    node: Some(NodeId::Object(oid)),
+                    point: pb,
+                },
+                Vec3::new(offset.0, offset.1, offset.2),
+                plane,
+                None,
+            );
+        }
+        DocOp::AddRadialDimension {
+            obj_sel,
+            v_sel,
+            radius,
+            leader,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let (points, _) = obj.to_polygons();
+            if points.is_empty() {
+                return Ok(true);
+            }
+            // The kernel never cross-validates a captured curve against the
+            // object's actual geometry (`Document::add_radial_dimension`'s
+            // doc comment) — reuse the anchor point as the synthetic
+            // circle's center so every field stays finite and the radius
+            // stays positive.
+            let anchor_point = points[v_sel % points.len()];
+            let plane =
+                Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+                    .expect("unit normal");
+            let curve = CapturedCurve {
+                center: anchor_point,
+                radius: *radius,
+                plane,
+            };
+            let _ = doc.add_radial_dimension(
+                Anchor {
+                    node: Some(NodeId::Object(oid)),
+                    point: anchor_point,
+                },
+                RadialKind::Radius,
+                curve,
+                Vec3::new(leader.0, leader.1, leader.2),
+                None,
+            );
+        }
+        DocOp::AddLeaderText { p } => {
+            let _ = doc.add_leader_text(
+                Anchor {
+                    node: None,
+                    point: Point3::new(p.0, p.1, p.2),
+                },
+                Vec3::ZERO,
+                "note".to_string(),
+            );
+        }
+        DocOp::DeleteAnnotation { ann_sel } => {
+            let Some(id) = nth(&doc.annotation_ids(), *ann_sel) else {
+                return Ok(true);
+            };
+            let _ = doc.delete_annotation(id);
+        }
+        DocOp::UpdateAnnotationText { ann_sel, text } => {
+            let Some(id) = nth(&doc.annotation_ids(), *ann_sel) else {
+                return Ok(true);
+            };
+            let Some(current) = doc.annotation(id).cloned() else {
+                return Ok(true);
+            };
+            let updated = match current {
+                Annotation::LinearDimension {
+                    a,
+                    b,
+                    offset,
+                    plane,
+                    ..
+                } => Annotation::LinearDimension {
+                    a,
+                    b,
+                    offset,
+                    plane,
+                    text_override: Some(text.clone()),
+                },
+                Annotation::RadialDimension {
+                    anchor,
+                    kind,
+                    curve,
+                    leader_dir,
+                    ..
+                } => Annotation::RadialDimension {
+                    anchor,
+                    kind,
+                    curve,
+                    leader_dir,
+                    text_override: Some(text.clone()),
+                },
+                Annotation::LeaderText { anchor, offset, .. } => Annotation::LeaderText {
+                    anchor,
+                    offset,
+                    text: text.clone(),
+                },
+            };
+            let _ = doc.update_annotation(id, updated);
         }
         DocOp::Undo => {
             if doc.can_undo()

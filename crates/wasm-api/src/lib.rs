@@ -31,10 +31,11 @@ use inference::{
 };
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
-    BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId, Guide,
-    GuideId, ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, LoadError, Material,
-    MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchCurveRim, SketchEdgeId,
-    SketchId, SketchRegionId, Texture, Transform, WatertightState,
+    Anchor, Annotation, AnnotationId, BooleanOp, CapturedCurve, ComponentId, DocChange, Document,
+    DocumentError, EdgeId, FaceId, GroupId, Guide, GuideId, ImageFormat, InstanceId, KernelOp,
+    KernelOpError, KernelOpReport, LoadError, Material, MaterialId, NodeId, Object, ObjectId,
+    Plane, Point3, RadialKind, Rgba8, SketchCurveRim, SketchEdgeId, SketchId, SketchRegionId,
+    Texture, Transform, WatertightState,
 };
 use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
@@ -327,6 +328,94 @@ fn component_id(handle: u64) -> ComponentId {
 
 fn guide_id(handle: u64) -> GuideId {
     GuideId::from(KeyData::from_ffi(handle))
+}
+
+fn annotation_id(handle: u64) -> AnnotationId {
+    AnnotationId::from(KeyData::from_ffi(handle))
+}
+
+/// Decode a 3-float FFI slice into a [`Point3`].
+fn point3(p: &[f64]) -> Result<Point3, ApiError> {
+    let p: &[f64; 3] = p
+        .try_into()
+        .map_err(|_| ApiError("BadPoint: point must be 3 floats [x,y,z]".to_string()))?;
+    Ok(Point3::new(p[0], p[1], p[2]))
+}
+
+/// Decode a 3-float FFI slice into a [`kernel::Vec3`].
+fn vec3(v: &[f64]) -> Result<kernel::Vec3, ApiError> {
+    let v: &[f64; 3] = v
+        .try_into()
+        .map_err(|_| ApiError("BadVec: vector must be 3 floats [x,y,z]".to_string()))?;
+    Ok(kernel::Vec3::new(v[0], v[1], v[2]))
+}
+
+/// Decode a 6-float FFI slice `[px,py,pz,nx,ny,nz]` (a point on the plane and
+/// its normal) into a [`Plane`].
+fn plane_slice(p: &[f64]) -> Result<Plane, ApiError> {
+    let p: &[f64; 6] = p.try_into().map_err(|_| {
+        ApiError("BadPlane: plane must be 6 floats [px,py,pz,nx,ny,nz]".to_string())
+    })?;
+    let point = Point3::new(p[0], p[1], p[2]);
+    let normal = kernel::Vec3::new(p[3], p[4], p[5]);
+    Plane::from_point_normal(point, normal)
+        .map_err(|_| ApiError("DegeneratePlane: plane normal has no direction".to_string()))
+}
+
+/// Encode a [`Plane`] back to `[px,py,pz,nx,ny,nz]`.
+fn plane_to_slice(plane: &Plane) -> Vec<f64> {
+    let p = plane.point();
+    let n = plane.normal();
+    vec![p.x, p.y, p.z, n.x, n.y, n.z]
+}
+
+/// Decode an anchor's `(node_kind, node_id)` FFI pair into `Option<NodeId>`.
+/// `node_kind < 0` means a free-floating anchor (no node) — [`node_id`]'s `0`/
+/// `1`/`2` convention otherwise applies.
+fn anchor_node(node_kind: i8, node_id_: u64) -> Result<Option<NodeId>, ApiError> {
+    if node_kind < 0 {
+        return Ok(None);
+    }
+    node_id(node_kind as u8, node_id_).map(Some)
+}
+
+/// Encode `Option<NodeId>` back to an FFI node-kind tag: `-1` = no node, else
+/// [`node_id`]'s `0`/`1`/`2` convention.
+fn anchor_node_kind_out(node: Option<NodeId>) -> i8 {
+    match node {
+        None => -1,
+        Some(NodeId::Object(_)) => 0,
+        Some(NodeId::Group(_)) => 1,
+        Some(NodeId::Instance(_)) => 2,
+    }
+}
+
+/// Encode `Option<NodeId>`'s handle, or `None` when the anchor is free.
+fn anchor_node_id_out(node: Option<NodeId>) -> Option<u64> {
+    match node {
+        None => None,
+        Some(NodeId::Object(id)) => Some(id.data().as_ffi()),
+        Some(NodeId::Group(id)) => Some(id.data().as_ffi()),
+        Some(NodeId::Instance(id)) => Some(id.data().as_ffi()),
+    }
+}
+
+/// Decode a `RadialKind` FFI string: `"radius"` | `"diameter"`.
+fn radial_kind(kind: &str) -> Result<RadialKind, ApiError> {
+    match kind {
+        "radius" => Ok(RadialKind::Radius),
+        "diameter" => Ok(RadialKind::Diameter),
+        _ => Err(ApiError(
+            "BadRadialKind: kind must be \"radius\" or \"diameter\"".to_string(),
+        )),
+    }
+}
+
+fn radial_kind_str(kind: RadialKind) -> String {
+    match kind {
+        RadialKind::Radius => "radius".to_string(),
+        RadialKind::Diameter => "diameter".to_string(),
+    }
 }
 
 /// Decode a row-major 3×4 affine (12 floats) from the FFI boundary.
@@ -5749,6 +5838,495 @@ impl Scene {
         }
     }
 
+    // -------------------------------------------------------- annotations
+    //
+    // Dimension / leader-text annotations (docs/design/dimensions-text.md).
+    // Kernel owns the geometry (`crates/kernel/src/annotation.rs`); the app
+    // computes and lays out the displayed measurement text. An anchor's node
+    // crosses the FFI as an `(i8, u64)` pair: `node_kind < 0` means a
+    // free-floating anchor (no node), else it's [`node_id`]'s `0`/`1`/`2`
+    // convention. Points/vectors cross as 3-float slices, planes as 6-float
+    // `[px,py,pz,nx,ny,nz]` slices — [`slice_object`]'s convention, not a
+    // scalar-per-component argument list.
+
+    /// Adds a linear dimension between two anchors (`a`/`b`, each an
+    /// optionally-node-attached point), with the dimension line offset out of
+    /// the `a`-`b` line by `offset` and drawn in `plane`. `text_override`
+    /// replaces the app-computed measurement text when present.
+    ///
+    /// # Errors
+    /// - `BadNodeKind` / `BadPoint` / `BadVec` / `BadPlane` /
+    ///   `DegeneratePlane` — malformed FFI arguments.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` — an anchor
+    ///   names a stale/hidden node.
+    /// - `DegenerateAnnotation` — a non-finite coordinate, or `a`/`b` coincide.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_linear_dimension(
+        &mut self,
+        a_node_kind: i8,
+        a_node_id: u64,
+        a_point: &[f64],
+        b_node_kind: i8,
+        b_node_id: u64,
+        b_point: &[f64],
+        offset: &[f64],
+        plane: &[f64],
+        text_override: Option<String>,
+    ) -> Result<u64, ApiError> {
+        let a = Anchor {
+            node: anchor_node(a_node_kind, a_node_id)?,
+            point: point3(a_point)?,
+        };
+        let b = Anchor {
+            node: anchor_node(b_node_kind, b_node_id)?,
+            point: point3(b_point)?,
+        };
+        let offset_v = vec3(offset)?;
+        let plane_v = plane_slice(plane)?;
+        let id = self
+            .doc
+            .add_linear_dimension(a, b, offset_v, plane_v, text_override.clone())
+            .map_err(doc_err)?;
+        self.reconcile(&DocChange::default());
+        recording::record(recording::RecordedCall::AddLinearDimension {
+            a_node_kind,
+            a_node_id,
+            a_point: [a.point.x, a.point.y, a.point.z],
+            b_node_kind,
+            b_node_id,
+            b_point: [b.point.x, b.point.y, b.point.z],
+            offset: [offset_v.x, offset_v.y, offset_v.z],
+            plane: plane_to_slice(&plane_v).try_into().expect("6 floats"),
+            text_override,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Adds a radius/diameter dimension measuring the analytic circle/arc
+    /// captured at creation (`curve_center`/`curve_radius`/`curve_plane` —
+    /// the app resolves this from the drawn geometry; the kernel does not
+    /// re-derive it). `kind` is `"radius"` | `"diameter"`.
+    ///
+    /// # Errors
+    /// - `BadNodeKind` / `BadPoint` / `BadVec` / `BadPlane` /
+    ///   `DegeneratePlane` / `BadRadialKind` — malformed FFI arguments.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` — `anchor`
+    ///   names a stale/hidden node.
+    /// - `DegenerateAnnotation` — a non-finite coordinate, or a non-positive
+    ///   `curve_radius`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_radial_dimension(
+        &mut self,
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: &[f64],
+        kind: &str,
+        curve_center: &[f64],
+        curve_radius: f64,
+        curve_plane: &[f64],
+        leader_dir: &[f64],
+        text_override: Option<String>,
+    ) -> Result<u64, ApiError> {
+        let anchor = Anchor {
+            node: anchor_node(anchor_node_kind, anchor_node_id)?,
+            point: point3(anchor_point)?,
+        };
+        let radial_kind_v = radial_kind(kind)?;
+        let curve = CapturedCurve {
+            center: point3(curve_center)?,
+            radius: curve_radius,
+            plane: plane_slice(curve_plane)?,
+        };
+        let leader_dir_v = vec3(leader_dir)?;
+        let id = self
+            .doc
+            .add_radial_dimension(
+                anchor,
+                radial_kind_v,
+                curve,
+                leader_dir_v,
+                text_override.clone(),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&DocChange::default());
+        recording::record(recording::RecordedCall::AddRadialDimension {
+            anchor_node_kind,
+            anchor_node_id,
+            anchor_point: [anchor.point.x, anchor.point.y, anchor.point.z],
+            kind: kind.to_string(),
+            curve_center: [curve.center.x, curve.center.y, curve.center.z],
+            curve_radius,
+            curve_plane: plane_to_slice(&curve.plane).try_into().expect("6 floats"),
+            leader_dir: [leader_dir_v.x, leader_dir_v.y, leader_dir_v.z],
+            text_override,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Adds a free-form leader-text annotation: `anchor` is the point the
+    /// leader points to, `offset` places the text relative to it.
+    ///
+    /// # Errors
+    /// - `BadNodeKind` / `BadPoint` / `BadVec` — malformed FFI arguments.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` — `anchor`
+    ///   names a stale/hidden node.
+    /// - `DegenerateAnnotation` — a non-finite coordinate.
+    pub fn add_leader_text(
+        &mut self,
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: &[f64],
+        offset: &[f64],
+        text: String,
+    ) -> Result<u64, ApiError> {
+        let anchor = Anchor {
+            node: anchor_node(anchor_node_kind, anchor_node_id)?,
+            point: point3(anchor_point)?,
+        };
+        let offset_v = vec3(offset)?;
+        let id = self
+            .doc
+            .add_leader_text(anchor, offset_v, text.clone())
+            .map_err(doc_err)?;
+        self.reconcile(&DocChange::default());
+        recording::record(recording::RecordedCall::AddLeaderText {
+            anchor_node_kind,
+            anchor_node_id,
+            anchor_point: [anchor.point.x, anchor.point.y, anchor.point.z],
+            offset: [offset_v.x, offset_v.y, offset_v.z],
+            text,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// Replaces a live linear dimension's anchors/offset/plane/override in
+    /// place (the app re-picking geometry to clear a `detached` flag, or a
+    /// drag-offset commit, or a `text_override` edit). Clears `detached`
+    /// only when an anchor/offset/plane field actually changed — a
+    /// `text_override`-only edit leaves an existing `detached` warning in
+    /// place (`Document::update_annotation`).
+    ///
+    /// # Errors
+    /// - `BadNodeKind` / `BadPoint` / `BadVec` / `BadPlane` /
+    ///   `DegeneratePlane` — malformed FFI arguments.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` — an anchor
+    ///   names a stale/hidden node.
+    /// - `UnknownAnnotation` — stale, hidden, or foreign handle.
+    /// - `MismatchedAnnotationKind` — `id` does not currently name a linear
+    ///   dimension.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_linear_dimension(
+        &mut self,
+        id: u64,
+        a_node_kind: i8,
+        a_node_id: u64,
+        a_point: &[f64],
+        b_node_kind: i8,
+        b_node_id: u64,
+        b_point: &[f64],
+        offset: &[f64],
+        plane: &[f64],
+        text_override: Option<String>,
+    ) -> Result<(), ApiError> {
+        let a = Anchor {
+            node: anchor_node(a_node_kind, a_node_id)?,
+            point: point3(a_point)?,
+        };
+        let b = Anchor {
+            node: anchor_node(b_node_kind, b_node_id)?,
+            point: point3(b_point)?,
+        };
+        let offset_v = vec3(offset)?;
+        let plane_v = plane_slice(plane)?;
+        let new = Annotation::LinearDimension {
+            a,
+            b,
+            offset: offset_v,
+            plane: plane_v,
+            text_override: text_override.clone(),
+        };
+        let change = self
+            .doc
+            .update_annotation(annotation_id(id), new)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::UpdateLinearDimension {
+            id,
+            a_node_kind,
+            a_node_id,
+            a_point: [a.point.x, a.point.y, a.point.z],
+            b_node_kind,
+            b_node_id,
+            b_point: [b.point.x, b.point.y, b.point.z],
+            offset: [offset_v.x, offset_v.y, offset_v.z],
+            plane: plane_to_slice(&plane_v).try_into().expect("6 floats"),
+            text_override,
+        });
+        Ok(())
+    }
+
+    /// Replaces a live radial dimension's anchor/kind/curve/leader/override in
+    /// place. Clears `detached` only when an anchor/kind/curve/leader field
+    /// actually changed — a `text_override`-only edit leaves an existing
+    /// `detached` warning in place, same as [`Scene::update_linear_dimension`].
+    ///
+    /// # Errors
+    /// Same as [`Scene::add_radial_dimension`], plus `UnknownAnnotation` /
+    /// `MismatchedAnnotationKind` as [`Scene::update_linear_dimension`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_radial_dimension(
+        &mut self,
+        id: u64,
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: &[f64],
+        kind: &str,
+        curve_center: &[f64],
+        curve_radius: f64,
+        curve_plane: &[f64],
+        leader_dir: &[f64],
+        text_override: Option<String>,
+    ) -> Result<(), ApiError> {
+        let anchor = Anchor {
+            node: anchor_node(anchor_node_kind, anchor_node_id)?,
+            point: point3(anchor_point)?,
+        };
+        let radial_kind_v = radial_kind(kind)?;
+        let curve = CapturedCurve {
+            center: point3(curve_center)?,
+            radius: curve_radius,
+            plane: plane_slice(curve_plane)?,
+        };
+        let leader_dir_v = vec3(leader_dir)?;
+        let new = Annotation::RadialDimension {
+            anchor,
+            kind: radial_kind_v,
+            curve,
+            leader_dir: leader_dir_v,
+            text_override: text_override.clone(),
+        };
+        let change = self
+            .doc
+            .update_annotation(annotation_id(id), new)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::UpdateRadialDimension {
+            id,
+            anchor_node_kind,
+            anchor_node_id,
+            anchor_point: [anchor.point.x, anchor.point.y, anchor.point.z],
+            kind: kind.to_string(),
+            curve_center: [curve.center.x, curve.center.y, curve.center.z],
+            curve_radius,
+            curve_plane: plane_to_slice(&curve.plane).try_into().expect("6 floats"),
+            leader_dir: [leader_dir_v.x, leader_dir_v.y, leader_dir_v.z],
+            text_override,
+        });
+        Ok(())
+    }
+
+    /// Replaces a live leader-text annotation's anchor/offset/text in place.
+    /// Clears `detached` only when the anchor/offset actually changed — an
+    /// edit to `text` alone leaves an existing `detached` warning in place,
+    /// same as [`Scene::update_linear_dimension`].
+    ///
+    /// # Errors
+    /// Same as [`Scene::add_leader_text`], plus `UnknownAnnotation` /
+    /// `MismatchedAnnotationKind` as [`Scene::update_linear_dimension`].
+    pub fn update_leader_text(
+        &mut self,
+        id: u64,
+        anchor_node_kind: i8,
+        anchor_node_id: u64,
+        anchor_point: &[f64],
+        offset: &[f64],
+        text: String,
+    ) -> Result<(), ApiError> {
+        let anchor = Anchor {
+            node: anchor_node(anchor_node_kind, anchor_node_id)?,
+            point: point3(anchor_point)?,
+        };
+        let offset_v = vec3(offset)?;
+        let new = Annotation::LeaderText {
+            anchor,
+            offset: offset_v,
+            text: text.clone(),
+        };
+        let change = self
+            .doc
+            .update_annotation(annotation_id(id), new)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::UpdateLeaderText {
+            id,
+            anchor_node_kind,
+            anchor_node_id,
+            anchor_point: [anchor.point.x, anchor.point.y, anchor.point.z],
+            offset: [offset_v.x, offset_v.y, offset_v.z],
+            text,
+        });
+        Ok(())
+    }
+
+    /// Deletes (hides) one annotation. Undoable; the handle stays valid for
+    /// redo.
+    ///
+    /// # Errors
+    /// - `UnknownAnnotation` — stale, hidden, or foreign handle.
+    pub fn delete_annotation(&mut self, id: u64) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .delete_annotation(annotation_id(id))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteAnnotation { id });
+        Ok(())
+    }
+
+    /// Handles of every currently live (visible) annotation, in kernel order.
+    pub fn annotation_ids(&self) -> Vec<u64> {
+        self.doc
+            .annotation_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// `"linear"` | `"radial"` | `"leader"`, or `undefined` if stale/hidden.
+    pub fn annotation_kind(&self, id: u64) -> Option<String> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::LinearDimension { .. } => Some("linear".to_string()),
+            Annotation::RadialDimension { .. } => Some("radial".to_string()),
+            Annotation::LeaderText { .. } => Some("leader".to_string()),
+        }
+    }
+
+    /// Whether a live annotation is currently `detached` — the warning-color
+    /// render cue (docs/design/dimensions-text.md). `undefined` if
+    /// stale/hidden.
+    pub fn annotation_detached(&self, id: u64) -> Option<bool> {
+        self.doc.annotation_detached(annotation_id(id))
+    }
+
+    /// The `which`-th anchor's node-kind tag (`-1` = free anchor, else
+    /// [`node_id`]'s `0`/`1`/`2` convention): `which` is `0` for
+    /// `radial`/`leader`'s single anchor, or linear's `a`; `1` for linear's
+    /// `b`. `undefined` if `id`/`which` don't resolve to an anchor.
+    pub fn annotation_anchor_node_kind(&self, id: u64, which: u8) -> Option<i8> {
+        let node = match (self.doc.annotation(annotation_id(id))?, which) {
+            (Annotation::LinearDimension { a, .. }, 0) => a.node,
+            (Annotation::LinearDimension { b, .. }, 1) => b.node,
+            (Annotation::RadialDimension { anchor, .. }, 0) => anchor.node,
+            (Annotation::LeaderText { anchor, .. }, 0) => anchor.node,
+            _ => return None,
+        };
+        Some(anchor_node_kind_out(node))
+    }
+
+    /// The `which`-th anchor's node handle, or `undefined` when that anchor
+    /// is free-floating or `id`/`which` don't resolve. See
+    /// [`Scene::annotation_anchor_node_kind`] for `which`'s convention.
+    pub fn annotation_anchor_node_id(&self, id: u64, which: u8) -> Option<u64> {
+        let node = match (self.doc.annotation(annotation_id(id))?, which) {
+            (Annotation::LinearDimension { a, .. }, 0) => a.node,
+            (Annotation::LinearDimension { b, .. }, 1) => b.node,
+            (Annotation::RadialDimension { anchor, .. }, 0) => anchor.node,
+            (Annotation::LeaderText { anchor, .. }, 0) => anchor.node,
+            _ => return None,
+        };
+        anchor_node_id_out(node)
+    }
+
+    /// The `which`-th anchor's world-space point `[x,y,z]`, or `undefined` if
+    /// `id`/`which` don't resolve. See [`Scene::annotation_anchor_node_kind`]
+    /// for `which`'s convention.
+    pub fn annotation_anchor_point(&self, id: u64, which: u8) -> Option<Vec<f64>> {
+        let p = match (self.doc.annotation(annotation_id(id))?, which) {
+            (Annotation::LinearDimension { a, .. }, 0) => a.point,
+            (Annotation::LinearDimension { b, .. }, 1) => b.point,
+            (Annotation::RadialDimension { anchor, .. }, 0) => anchor.point,
+            (Annotation::LeaderText { anchor, .. }, 0) => anchor.point,
+            _ => return None,
+        };
+        Some(vec![p.x, p.y, p.z])
+    }
+
+    /// A linear dimension's placement offset `[x,y,z]` off the `a`-`b` line,
+    /// or a leader-text's text placement offset off its anchor. `undefined`
+    /// for a radial dimension (see [`Scene::annotation_leader_dir`]) or a
+    /// stale/hidden id.
+    pub fn annotation_offset(&self, id: u64) -> Option<Vec<f64>> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::LinearDimension { offset, .. } | Annotation::LeaderText { offset, .. } => {
+                Some(vec![offset.x, offset.y, offset.z])
+            }
+            Annotation::RadialDimension { .. } => None,
+        }
+    }
+
+    /// A linear dimension's dimension-line plane, `[px,py,pz,nx,ny,nz]`.
+    /// `undefined` for any other kind, or a stale/hidden id.
+    pub fn annotation_plane(&self, id: u64) -> Option<Vec<f64>> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::LinearDimension { plane, .. } => Some(plane_to_slice(plane)),
+            _ => None,
+        }
+    }
+
+    /// A radial dimension's presentation, `"radius"` | `"diameter"`.
+    /// `undefined` for any other kind, or a stale/hidden id.
+    pub fn annotation_radial_kind(&self, id: u64) -> Option<String> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::RadialDimension { kind, .. } => Some(radial_kind_str(*kind)),
+            _ => None,
+        }
+    }
+
+    /// A radial dimension's captured analytic circle/arc, `[cx, cy, cz,
+    /// radius, px, py, pz, nx, ny, nz]` (center, radius, then the circle's
+    /// plane). `undefined` for any other kind, or a stale/hidden id.
+    pub fn annotation_curve(&self, id: u64) -> Option<Vec<f64>> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::RadialDimension { curve, .. } => {
+                let mut out = vec![curve.center.x, curve.center.y, curve.center.z, curve.radius];
+                out.extend(plane_to_slice(&curve.plane));
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    /// A radial dimension's leader-line direction `[x,y,z]` from its anchor.
+    /// `undefined` for any other kind, or a stale/hidden id.
+    pub fn annotation_leader_dir(&self, id: u64) -> Option<Vec<f64>> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::RadialDimension { leader_dir, .. } => {
+                Some(vec![leader_dir.x, leader_dir.y, leader_dir.z])
+            }
+            _ => None,
+        }
+    }
+
+    /// A leader-text annotation's text content. `undefined` for any other
+    /// kind, or a stale/hidden id.
+    pub fn annotation_text(&self, id: u64) -> Option<String> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::LeaderText { text, .. } => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    /// A linear/radial dimension's `text_override`, or `undefined` when
+    /// unset (or the id is stale/hidden, or names a leader-text — see
+    /// [`Scene::annotation_text`] for that kind's content).
+    pub fn annotation_text_override(&self, id: u64) -> Option<String> {
+        match self.doc.annotation(annotation_id(id))? {
+            Annotation::LinearDimension { text_override, .. }
+            | Annotation::RadialDimension { text_override, .. } => text_override.clone(),
+            Annotation::LeaderText { .. } => None,
+        }
+    }
+
     // ------------------------------------------------------------ import
 
     /// Import COLLADA bytes (+ host-resolved images) into the current document.
@@ -6532,6 +7110,137 @@ impl Scene {
                     }
                     DeleteAllGuides => {
                         self.delete_all_guides()?;
+                    }
+                    AddLinearDimension {
+                        a_node_kind,
+                        a_node_id,
+                        a_point,
+                        b_node_kind,
+                        b_node_id,
+                        b_point,
+                        offset,
+                        plane,
+                        text_override,
+                    } => {
+                        self.add_linear_dimension(
+                            a_node_kind,
+                            a_node_id,
+                            &a_point,
+                            b_node_kind,
+                            b_node_id,
+                            &b_point,
+                            &offset,
+                            &plane,
+                            text_override,
+                        )?;
+                    }
+                    AddRadialDimension {
+                        anchor_node_kind,
+                        anchor_node_id,
+                        anchor_point,
+                        kind,
+                        curve_center,
+                        curve_radius,
+                        curve_plane,
+                        leader_dir,
+                        text_override,
+                    } => {
+                        self.add_radial_dimension(
+                            anchor_node_kind,
+                            anchor_node_id,
+                            &anchor_point,
+                            &kind,
+                            &curve_center,
+                            curve_radius,
+                            &curve_plane,
+                            &leader_dir,
+                            text_override,
+                        )?;
+                    }
+                    AddLeaderText {
+                        anchor_node_kind,
+                        anchor_node_id,
+                        anchor_point,
+                        offset,
+                        text,
+                    } => {
+                        self.add_leader_text(
+                            anchor_node_kind,
+                            anchor_node_id,
+                            &anchor_point,
+                            &offset,
+                            text,
+                        )?;
+                    }
+                    UpdateLinearDimension {
+                        id,
+                        a_node_kind,
+                        a_node_id,
+                        a_point,
+                        b_node_kind,
+                        b_node_id,
+                        b_point,
+                        offset,
+                        plane,
+                        text_override,
+                    } => {
+                        self.update_linear_dimension(
+                            id,
+                            a_node_kind,
+                            a_node_id,
+                            &a_point,
+                            b_node_kind,
+                            b_node_id,
+                            &b_point,
+                            &offset,
+                            &plane,
+                            text_override,
+                        )?;
+                    }
+                    UpdateRadialDimension {
+                        id,
+                        anchor_node_kind,
+                        anchor_node_id,
+                        anchor_point,
+                        kind,
+                        curve_center,
+                        curve_radius,
+                        curve_plane,
+                        leader_dir,
+                        text_override,
+                    } => {
+                        self.update_radial_dimension(
+                            id,
+                            anchor_node_kind,
+                            anchor_node_id,
+                            &anchor_point,
+                            &kind,
+                            &curve_center,
+                            curve_radius,
+                            &curve_plane,
+                            &leader_dir,
+                            text_override,
+                        )?;
+                    }
+                    UpdateLeaderText {
+                        id,
+                        anchor_node_kind,
+                        anchor_node_id,
+                        anchor_point,
+                        offset,
+                        text,
+                    } => {
+                        self.update_leader_text(
+                            id,
+                            anchor_node_kind,
+                            anchor_node_id,
+                            &anchor_point,
+                            &offset,
+                            text,
+                        )?;
+                    }
+                    DeleteAnnotation { id } => {
+                        self.delete_annotation(id)?;
                     }
                     ImportDae { bytes, images } => {
                         let mut image_map: ImageMap = ImageMap::new();
@@ -11332,6 +12041,403 @@ mod tests {
             .unwrap()
             .expect("1 m off-axis is inside a 1.5 m cylinder, regardless of depth");
         assert_eq!(cylinder_hit.kind(), "endpoint");
+    }
+
+    // ---------------------------------------------------------------- annotations
+
+    /// A free-floating (no node) linear dimension round-trips its anchors,
+    /// offset, plane, and query surface; `text_override` starts unset.
+    #[test]
+    fn add_linear_dimension_round_trips_and_queries() {
+        let mut scene = Scene::new();
+        let id = scene
+            .add_linear_dimension(
+                -1,
+                0,
+                &[0.0, 0.0, 0.0],
+                -1,
+                0,
+                &[3.0, 0.0, 0.0],
+                &[0.0, 1.0, 0.0],
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(scene.annotation_kind(id).as_deref(), Some("linear"));
+        assert_eq!(scene.annotation_detached(id), Some(false));
+        assert_eq!(scene.annotation_anchor_node_kind(id, 0), Some(-1));
+        assert_eq!(
+            scene.annotation_anchor_point(id, 0),
+            Some(vec![0.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            scene.annotation_anchor_point(id, 1),
+            Some(vec![3.0, 0.0, 0.0])
+        );
+        assert_eq!(scene.annotation_offset(id), Some(vec![0.0, 1.0, 0.0]));
+        assert_eq!(scene.annotation_text_override(id), None);
+        assert!(scene.annotation_ids().contains(&id));
+
+        // Setting a text_override, then clearing it, round-trips through
+        // update_linear_dimension — the SketchUp `<>` re-pick semantics.
+        scene
+            .update_linear_dimension(
+                id,
+                -1,
+                0,
+                &[0.0, 0.0, 0.0],
+                -1,
+                0,
+                &[3.0, 0.0, 0.0],
+                &[0.0, 1.0, 0.0],
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                Some("3m even".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            scene.annotation_text_override(id).as_deref(),
+            Some("3m even")
+        );
+
+        scene.delete_annotation(id).unwrap();
+        assert_eq!(
+            scene.annotation_kind(id),
+            None,
+            "deleted annotation is hidden"
+        );
+    }
+
+    /// A radial dimension captures its analytic circle and presents as
+    /// radius/diameter via `kind`.
+    #[test]
+    fn add_radial_dimension_round_trips_curve_and_kind() {
+        let mut scene = Scene::new();
+        let id = scene
+            .add_radial_dimension(
+                -1,
+                0,
+                &[5.0, 0.0, 0.0],
+                "radius",
+                &[0.0, 0.0, 0.0],
+                5.0,
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(scene.annotation_kind(id).as_deref(), Some("radial"));
+        assert_eq!(scene.annotation_radial_kind(id).as_deref(), Some("radius"));
+        assert_eq!(
+            scene.annotation_curve(id),
+            Some(vec![0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        );
+        assert_eq!(scene.annotation_leader_dir(id), Some(vec![1.0, 0.0, 0.0]));
+
+        // Tab-toggle to diameter is an update with the SAME curve.
+        scene
+            .update_radial_dimension(
+                id,
+                -1,
+                0,
+                &[5.0, 0.0, 0.0],
+                "diameter",
+                &[0.0, 0.0, 0.0],
+                5.0,
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            scene.annotation_radial_kind(id).as_deref(),
+            Some("diameter")
+        );
+    }
+
+    /// Leader text stores its content and is distinguishable from a
+    /// dimension's `text_override` field.
+    #[test]
+    fn add_leader_text_round_trips_content() {
+        let mut scene = Scene::new();
+        let id = scene
+            .add_leader_text(
+                -1,
+                0,
+                &[1.0, 2.0, 3.0],
+                &[0.5, 0.5, 0.0],
+                "Note".to_string(),
+            )
+            .unwrap();
+        assert_eq!(scene.annotation_kind(id).as_deref(), Some("leader"));
+        assert_eq!(scene.annotation_text(id).as_deref(), Some("Note"));
+        assert_eq!(scene.annotation_text_override(id), None);
+
+        scene
+            .update_leader_text(
+                id,
+                -1,
+                0,
+                &[1.0, 2.0, 3.0],
+                &[0.5, 0.5, 0.0],
+                "Edited".to_string(),
+            )
+            .unwrap();
+        assert_eq!(scene.annotation_text(id).as_deref(), Some("Edited"));
+    }
+
+    /// An anchor naming a live object round-trips its node kind/id, and
+    /// deleting the object detaches the annotation (rather than silently
+    /// keeping a stale point) — the re-anchoring contract
+    /// (docs/design/dimensions-text.md).
+    #[test]
+    fn linear_dimension_anchored_to_object_detaches_on_delete() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        scene
+            .sketch_add_segment(sketch, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(sketch, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(sketch, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0)
+            .unwrap();
+        let report = scene
+            .sketch_add_segment(sketch, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+            .unwrap();
+        let region = report.inner.regions_created[0].data().as_ffi();
+        let object = scene.extrude_region(sketch, region, 1.0).unwrap();
+
+        let id = scene
+            .add_linear_dimension(
+                0,
+                object,
+                &[0.0, 0.0, 0.0],
+                -1,
+                0,
+                &[1.0, 0.0, 0.0],
+                &[0.0, -1.0, 0.0],
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(scene.annotation_anchor_node_kind(id, 0), Some(0));
+        assert_eq!(scene.annotation_anchor_node_id(id, 0), Some(object));
+        assert_eq!(scene.annotation_detached(id), Some(false));
+
+        scene.delete_node(0, object).unwrap();
+        assert_eq!(
+            scene.annotation_detached(id),
+            Some(true),
+            "deleting the anchored object detaches the dimension"
+        );
+    }
+
+    /// Recording + replaying a session that creates, updates, and deletes
+    /// annotations reproduces the golden `state_hash` — the same regression
+    /// guarantee every other mutating call already carries. Covers every
+    /// annotation-mutating call (including `update_linear_dimension` /
+    /// `update_radial_dimension`, not just `update_leader_text`) AND every
+    /// anchor shape: free (`node: None`, the original coverage), a live
+    /// OBJECT node, and a live INSTANCE node — `instance`'s pose is MIRRORED
+    /// (negative determinant) before the LINEAR dimension anchors to it, so
+    /// this shape covers anchoring onto an already-transformed instance, not
+    /// a reanchor triggered during the session: `transform_instance` here
+    /// precedes `add_linear_dimension`, and by `Transform::similarity_scale`'s
+    /// definition a pure mirror IS a similarity anyway (its columns stay
+    /// orthonormal — only the sign flips), so `reanchor_touched`'s
+    /// non-similarity branch never runs for it.
+    ///
+    /// The genuine non-similarity case — `Document::reanchor_touched`'s doc
+    /// comment singles out a captured `RadialDimension` circle possibly not
+    /// surviving the map — needs a transform that is NOT a similarity
+    /// (squash/shear, not mirror) applied AFTER the annotation anchors, so
+    /// `reanchor_touched` actually runs mid-session. `instance2`/
+    /// `radial_on_instance2` below cover exactly that: anchored while
+    /// `instance2` is still identity-posed, then squashed non-uniformly,
+    /// flipping `detached` to `true` — asserted immediately, and again after
+    /// replay, so the flag itself (not just the aggregate hash) is proven to
+    /// round-trip.
+    #[test]
+    fn record_then_replay_reproduces_annotation_session() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        // A plain solid (for the object-anchored annotation) and a second
+        // solid folded into a mirrored component instance (for the
+        // instance-anchored one).
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let object = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 3.0, 0.0);
+        let base = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let instance = scene.make_component(&[0], &[base]).unwrap();
+        // Reflect across X (determinant < 0) — `transform_instance` allows a
+        // mirrored pose (only explode/make_unique refuse one).
+        const MIRROR_X: [f64; 12] = [-1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.transform_instance(instance, &MIRROR_X).unwrap();
+
+        let id = scene
+            .add_linear_dimension(
+                -1,
+                0,
+                &[0.0, 0.0, 0.0],
+                -1,
+                0,
+                &[2.0, 0.0, 0.0],
+                &[0.0, 1.0, 0.0],
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                None,
+            )
+            .unwrap();
+        let radial = scene
+            .add_radial_dimension(
+                -1,
+                0,
+                &[5.0, 0.0, 0.0],
+                "radius",
+                &[0.0, 0.0, 0.0],
+                5.0,
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        let leader = scene
+            .add_leader_text(
+                -1,
+                0,
+                &[1.0, 1.0, 0.0],
+                &[0.5, 0.5, 0.0],
+                "Note".to_string(),
+            )
+            .unwrap();
+        scene
+            .update_leader_text(
+                leader,
+                -1,
+                0,
+                &[1.0, 1.0, 0.0],
+                &[0.5, 0.5, 0.0],
+                "Edited".to_string(),
+            )
+            .unwrap();
+
+        // Node-anchored annotations: one on the live object, one on the
+        // mirrored instance.
+        let object_anchored = scene
+            .add_leader_text(
+                0,
+                object,
+                &[0.5, 0.5, 1.0],
+                &[0.2, 0.2, 0.0],
+                "On object".to_string(),
+            )
+            .unwrap();
+        let instance_anchored = scene
+            .add_linear_dimension(
+                2,
+                instance,
+                &[3.0, 0.0, 0.0],
+                -1,
+                0,
+                &[4.0, 0.0, 0.0],
+                &[0.0, -1.0, 0.0],
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(scene.annotation_detached(object_anchored), Some(false));
+        assert_eq!(scene.annotation_detached(instance_anchored), Some(false));
+
+        // The genuine non-similarity reanchor case: a THIRD solid, folded
+        // into its own component instance, anchors a RADIAL dimension while
+        // `instance2` is still identity-posed — unlike `instance` above
+        // (already mirrored before anything anchored to it), so the
+        // transform below is what actually runs `reanchor_touched` during
+        // this recorded session.
+        let (s3, r3) = ground_unit_square_at(&mut scene, 6.0, 0.0);
+        let base2 = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let instance2 = scene.make_component(&[0], &[base2]).unwrap();
+        let radial_on_instance2 = scene
+            .add_radial_dimension(
+                2,
+                instance2,
+                &[6.5, 0.5, 1.0],
+                "radius",
+                &[6.5, 0.5, 1.0],
+                0.5,
+                &[6.5, 0.5, 1.0, 0.0, 0.0, 1.0],
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        assert_eq!(scene.annotation_detached(radial_on_instance2), Some(false));
+
+        // Scale x by 2, leave y/z alone: `similarity_scale` requires every
+        // column of the linear part to share one magnitude, which this
+        // violates (unlike MIRROR_X's orthonormal-but-flipped columns
+        // above) — a genuine non-similarity map.
+        const SQUASH_X: [f64; 12] = [2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.transform_instance(instance2, &SQUASH_X).unwrap();
+        assert_eq!(
+            scene.annotation_detached(radial_on_instance2),
+            Some(true),
+            "a non-similarity transform on the anchored instance detaches the radial dimension"
+        );
+
+        // `update_linear_dimension`/`update_radial_dimension` themselves —
+        // the original session only ever exercised `update_leader_text`.
+        scene
+            .update_linear_dimension(
+                id,
+                -1,
+                0,
+                &[0.0, 0.0, 0.0],
+                -1,
+                0,
+                &[2.0, 0.0, 0.0],
+                &[0.0, 2.0, 0.0],
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                Some("2m even".to_string()),
+            )
+            .unwrap();
+        scene
+            .update_radial_dimension(
+                radial,
+                -1,
+                0,
+                &[5.0, 0.0, 0.0],
+                "diameter",
+                &[0.0, 0.0, 0.0],
+                5.0,
+                &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+
+        scene.delete_annotation(id).unwrap();
+
+        let recording_json = scene.take_recording();
+        let golden = scene.state_hash();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&recording_json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying an annotation session reproduces the golden state_hash"
+        );
+        // The genuine non-similarity case, checked directly rather than only
+        // through the aggregate hash: `radial_on_instance2`'s `detached: true`
+        // (set mid-session by the squash above) round-trips through
+        // record/replay, not just the annotation's other fields.
+        assert_eq!(
+            replayed.annotation_detached(radial_on_instance2),
+            Some(true),
+            "the non-similarity detach round-trips through record/replay"
+        );
     }
 
     // ---------------------------------------------------------- begin_sketch_on_plane

@@ -11,7 +11,7 @@
  * `document.documentElement` directly, which works identically for both.
  */
 
-import { getResolvedTheme, getThemeSetting, subscribe } from '../settings/theme'
+import { getResolvedTheme, getThemeSetting, subscribe, type ResolvedTheme } from '../settings/theme'
 import { isTauri } from '../io/fileHost'
 
 function apply(): void {
@@ -62,4 +62,22 @@ export function initThemeSync(): () => void {
     unsubscribeSetting()
     unsubscribeMedia()
   }
+}
+
+/**
+ * Read the theme currently applied to the document — reactive to BOTH an
+ * explicit Settings > Theme change AND (under 'auto') an OS-level
+ * `prefers-color-scheme` flip, since `apply()` above keeps `dataset.theme`
+ * current for both (the setting-change listener AND the `matchMedia`
+ * listener both call it). A caller that needs the live theme on every
+ * render frame — e.g. Viewport's annotation billboards — should call this
+ * instead of caching a value updated only by `subscribe()` from
+ * `settings/theme.ts`: that subscription fires on explicit setting changes
+ * (including the cross-window broadcast) but NOT on an OS-level flip while
+ * 'auto' is in effect, so a cache built from it alone goes stale on a
+ * day/night flip. This is just a DOM attribute read, not `getResolvedTheme`'s
+ * `matchMedia()` query, so it's cheap enough to call every frame.
+ */
+export function readAppliedTheme(): ResolvedTheme {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
 }

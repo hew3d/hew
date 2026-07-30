@@ -39,4 +39,8 @@ new_key_type! {
     /// Handle to a [`crate::guide::Guide`] construction-geometry entity in a
     /// [`crate::document::Document`] (ARCHITECTURE.md).
     pub struct GuideId;
+    /// Handle to a [`crate::annotation::Annotation`] (dimension or
+    /// leader-text entity) in a [`crate::document::Document`]
+    /// (ARCHITECTURE.md).
+    pub struct AnnotationId;
 }

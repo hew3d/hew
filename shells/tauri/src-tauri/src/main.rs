@@ -2363,6 +2363,14 @@ fn main() {
                 Some("CmdOrCtrl+D"),
                 Some("T"),
             )?;
+            let tool_dimension = check_item(
+                handle,
+                &mut checks,
+                "tool-dimension",
+                "Dimension",
+                None,
+                None,
+            )?;
             let tool_protractor = check_item(
                 handle,
                 &mut checks,
@@ -2389,6 +2397,7 @@ fn main() {
                 None,
             )?;
             let tool_axes = check_item(handle, &mut checks, "tool-axes", "Axes", None, None)?;
+            let tool_text = check_item(handle, &mut checks, "tool-text", "Text", None, None)?;
 
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
@@ -2401,11 +2410,13 @@ fn main() {
                 .item(&tool_offset)
                 .separator()
                 .item(&tool_tape_measure)
+                .item(&tool_dimension)
                 .item(&tool_protractor)
                 .item(&tool_slice)
                 .item(&tool_section_plane)
                 .item(&tool_edit_vertex)
                 .item(&tool_axes)
+                .item(&tool_text)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -2856,11 +2867,13 @@ fn main() {
                 "tool-follow-me" => "tool-follow-me",
                 "tool-offset" => "tool-offset",
                 "tool-tape-measure" => "tool-tape-measure",
+                "tool-dimension" => "tool-dimension",
                 "tool-protractor" => "tool-protractor",
                 "tool-slice" => "tool-slice",
                 "tool-section-plane" => "tool-section-plane",
                 "tool-edit-vertex" => "tool-edit-vertex",
                 "tool-axes" => "tool-axes",
+                "tool-text" => "tool-text",
                 "cam-orbit" => "tool-orbit",
                 "cam-pan" => "tool-pan",
                 "cam-zoom" => "tool-zoom",

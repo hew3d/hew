@@ -19,6 +19,7 @@ mod build;
 mod geom2d;
 mod validate;
 
+pub mod annotation;
 pub mod axes;
 pub mod camera;
 pub mod document;
@@ -37,6 +38,7 @@ pub mod tol;
 pub mod topo;
 pub mod transform;
 
+pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
 pub use document::{DocChange, Document, DocumentError, FollowMePath, NodeId, PendingActionKind};
@@ -44,8 +46,8 @@ pub use error::TopologyError;
 pub use guide::Guide;
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 pub use ids::{
-    ComponentId, EdgeId, FaceId, GroupId, GuideId, HalfEdgeId, InstanceId, LoopId, MaterialId,
-    ObjectId, ShellId, SketchId, VertexId,
+    AnnotationId, ComponentId, EdgeId, FaceId, GroupId, GuideId, HalfEdgeId, InstanceId, LoopId,
+    MaterialId, ObjectId, ShellId, SketchId, VertexId,
 };
 pub use import::{
     DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, ImportTag, MeshRecipe,

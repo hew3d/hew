@@ -16,12 +16,13 @@ use std::io::{Cursor, Read, Seek, Write};
 use serde::{Deserialize, Serialize};
 use slotmap::SecondaryMap;
 
+use crate::annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 use crate::axes::AxesFrame;
 use crate::camera::{CameraProjection, CameraState};
 use crate::error::TopologyError;
 use crate::guide::Guide;
 use crate::ids::{
-    ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
+    AnnotationId, ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
 };
 use crate::material::{ImageFormat, Material, Texture, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
@@ -139,10 +140,10 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// read direction; a v11 reader given a v12 file loses only the distinction
 /// (it would read a polygon as a circle), which is why the version moves.
 /// Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION` stays 5).
-/// v13: a shared landing spot — three branches in flight at the same time
-/// (component-edit, camera, tool-parity) each bumped
+/// v13: a shared landing spot — four riders in flight at the same time
+/// (component-edit, camera, tool-parity, dimensions-text) each bumped
 /// `MANIFEST_FORMAT_VERSION` 12→13 for their own additive fields; all land
-/// together here rather than splitting into 13/14/15.
+/// together here rather than splitting into 13/14/15/16.
 ///
 /// - `sketches[].owner` (component-edit-parity.md phase K1) — the
 ///   `SketchOwner`: absent means world-owned (the only possibility before
@@ -162,6 +163,12 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 ///   pre-v13 file, and any v13+ file whose axes were never moved), so old
 ///   files load unchanged and an unmoved document still writes a
 ///   byte-identical manifest with no `axes` key.
+/// - an optional top-level `annotations: Vec<AnnotationDto>` — dimension and
+///   leader-text entities (docs/design/dimensions-text.md), a guides-style
+///   side collection outside the node tree. The field is
+///   `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so v1-v12
+///   files still load (no annotations) — back-compatible. See
+///   `docs/HEW_FILE_FORMAT.md` §4.8 for the DTO shape.
 ///
 /// Geometry buffer unchanged by any of these fields (`GEOMETRY_FORMAT_VERSION`
 /// stays 6).
@@ -171,10 +178,10 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// rebase. Reconcile the prose; keep exactly ONE
 /// `pub const MANIFEST_FORMAT_VERSION: u32 = 13`. Each field stays
 /// independently gated by its own `_MIN_VERSION` constant (see
-/// `SKETCH_OWNER_MIN_VERSION`/`CAMERA_MANIFEST_VERSION`/`AXES_MIN_VERSION`
-/// below), never by the shared manifest version alone, so multiple fields
-/// coexisting under one version number is intentional, not a collision to
-/// design around.
+/// `SKETCH_OWNER_MIN_VERSION`/`CAMERA_MANIFEST_VERSION`/`AXES_MIN_VERSION`/
+/// `ANNOTATIONS_MANIFEST_VERSION` below), never by the shared manifest
+/// version alone, so multiple fields coexisting under one version number is
+/// intentional, not a collision to design around.
 pub const MANIFEST_FORMAT_VERSION: u32 = 13;
 
 /// The manifest version at which the stored sketch–solid claim fields
@@ -207,6 +214,17 @@ pub(crate) const CAMERA_MANIFEST_VERSION: u32 = 13;
 /// that still carries an `axes` field is malformed for its own declared
 /// version and is rejected, never silently honored (reject-not-repair).
 pub(crate) const AXES_MIN_VERSION: u32 = 13;
+
+/// The manifest version at which the top-level `annotations` field was
+/// introduced (dimension and leader-text entities). Presence is
+/// version-gated, not merely field-optional: a file declaring an OLDER
+/// version has no business carrying this field at all — same
+/// reject-not-repair posture as [`MANIFEST_CLAIMS_RETIRED_VERSION`], just in
+/// the opposite direction (a field introduced at this version, rather than
+/// one retired at it). A file that smuggles `annotations` under an older
+/// declared version is malformed for its own declared version and is
+/// rejected rather than silently loaded.
+pub(crate) const ANNOTATIONS_MANIFEST_VERSION: u32 = 13;
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -1421,6 +1439,10 @@ pub(crate) struct Manifest {
     /// the frame differs from [`AxesFrame::IDENTITY`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axes: Option<AxesFrameDto>,
+    /// Dimension/leader-text annotations (manifest v13+). Absent/empty in
+    /// v1-v12 files → no annotations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<AnnotationDto>,
 }
 
 /// A document-level movable drawing axes frame (manifest v13+). `z` is not
@@ -1475,6 +1497,80 @@ pub(crate) struct GuideDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<[f64; 3]>,
 }
+
+/// A dimension/leader-text annotation entry (manifest v13+, HEW_FILE_FORMAT.md
+/// §4.8). One flat DTO shared by all three [`Annotation`] kinds, following
+/// [`GuideDto`]'s convention: `kind` selects which of the optional
+/// kind-specific fields are populated, the rest are absent.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AnnotationDto {
+    pub id: u32,
+    /// `"linear"` | `"radial"` | `"leader"`.
+    pub kind: String,
+    /// linear: the dimension's first endpoint. radial/leader: the single
+    /// anchor (the circle/arc point, or the leader's target point).
+    pub a: AnchorDto,
+    /// linear only: the dimension's second endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b: Option<AnchorDto>,
+    /// linear/leader: placement offset (dimension-line offset, or leader
+    /// text offset), in world space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<[f64; 3]>,
+    /// linear only: [nx, ny, nz, offset] — the dimension/extension-line
+    /// plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<[f64; 4]>,
+    /// radial only: `"radius"` | `"diameter"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radial_kind: Option<String>,
+    /// radial only: the captured analytic circle/arc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<CapturedCurveDto>,
+    /// radial only: leader-line direction from `a`, in world space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_dir: Option<[f64; 3]>,
+    /// leader only: the text content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// linear/radial: replaces the computed measurement text when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_override: Option<String>,
+    /// Whether re-anchoring currently considers this annotation detached
+    /// (docs/design/dimensions-text.md) — stored, not derived (see
+    /// `annotation.rs`'s module doc comment for why).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
+}
+
+/// One annotation anchor: the node it tracks (absent = a free-floating
+/// point, never re-anchored), plus its world-space point.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AnchorDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeRefDto>,
+    pub p: [f64; 3],
+}
+
+/// A [`Annotation::RadialDimension`]'s captured analytic circle/arc.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CapturedCurveDto {
+    pub center: [f64; 3],
+    pub radius: f64,
+    /// [nx, ny, nz, offset].
+    pub plane: [f64; 4],
+}
+
+/// [`AnnotationDto::kind`] token for [`Annotation::LinearDimension`].
+pub(crate) const ANNOTATION_KIND_LINEAR: &str = "linear";
+/// [`AnnotationDto::kind`] token for [`Annotation::RadialDimension`].
+pub(crate) const ANNOTATION_KIND_RADIAL: &str = "radial";
+/// [`AnnotationDto::kind`] token for [`Annotation::LeaderText`].
+pub(crate) const ANNOTATION_KIND_LEADER: &str = "leader";
+/// [`AnnotationDto::radial_kind`] token for [`RadialKind::Radius`].
+pub(crate) const RADIAL_KIND_RADIUS: &str = "radius";
+/// [`AnnotationDto::radial_kind`] token for [`RadialKind::Diameter`].
+pub(crate) const RADIAL_KIND_DIAMETER: &str = "diameter";
 
 /// A material palette entry.
 #[derive(Debug, Serialize, Deserialize)]
@@ -1737,6 +1833,8 @@ pub(crate) struct DocSaveData {
     pub sketch_owner: std::collections::BTreeMap<SketchId, ComponentId>,
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
+    /// Live annotations, in slotmap key order: `(id, value, detached)`.
+    pub annotations: Vec<(AnnotationId, Annotation, bool)>,
     /// Per-object display name, keyed by id (covers world + def members).
     pub obj_names: std::collections::BTreeMap<ObjectId, Option<String>>,
     /// Per-object tag list, keyed by id (covers world + def members).
@@ -1962,6 +2060,63 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         })
         .collect();
 
+    // Annotations: dense ids in enumerate order (their own slotmap-derived
+    // order from `Document::save`). Anchor node refs resolve through the
+    // SAME dense object/group/instance ids `roots`/`groups` use — but
+    // CHECKED, unlike `node_to_dto`: an annotation can be `detached`
+    // (docs/design/dimensions-text.md) with its anchor still naming a node
+    // that is hidden/deleted and therefore absent from THIS save (hidden
+    // entities are tombstones, never serialized). Such an anchor degrades to
+    // `node: None` on save — the node genuinely does not exist in the file,
+    // so there is nothing valid to reference. No silent repair, though: if
+    // the stored `detached` flag is somehow still `false` here (every
+    // consuming op is expected to have already flagged it at the moment of
+    // consumption — see `Document::reevaluate_liveness_recorded` — but this
+    // is the save-time backstop), a dead anchor forces `detached: true` on
+    // the written DTO. Without this, a node-consuming op this build doesn't
+    // yet cover would round-trip its orphaned annotation as a
+    // healthy-looking free anchor — never distinguishable from one the user
+    // actually created free-floating.
+    let anchor_node_to_dto = |n: crate::document::NodeId| -> Option<NodeRefDto> {
+        match n {
+            crate::document::NodeId::Object(oid) => obj_to_dense.get(&oid).map(|&id| NodeRefDto {
+                kind: "object".to_string(),
+                id,
+            }),
+            crate::document::NodeId::Group(gid) => grp_to_dense.get(&gid).map(|&id| NodeRefDto {
+                kind: "group".to_string(),
+                id,
+            }),
+            crate::document::NodeId::Instance(iid) => {
+                inst_to_dense.get(&iid).map(|&id| NodeRefDto {
+                    kind: "instance".to_string(),
+                    id,
+                })
+            }
+        }
+    };
+    let anchor_to_dto = |a: &Anchor| AnchorDto {
+        node: a.node.and_then(anchor_node_to_dto),
+        p: [a.point.x, a.point.y, a.point.z],
+    };
+    let annotation_dtos: Vec<AnnotationDto> = data
+        .annotations
+        .iter()
+        .enumerate()
+        .map(|(i, (_, annotation, detached))| {
+            let dead_anchor = annotation
+                .anchored_nodes()
+                .into_iter()
+                .any(|n| anchor_node_to_dto(n).is_none());
+            encode_annotation(
+                i as u32,
+                annotation,
+                *detached || dead_anchor,
+                &anchor_to_dto,
+            )
+        })
+        .collect();
+
     let root_dtos: Vec<NodeRefDto> = data.roots.iter().map(&node_to_dto).collect();
 
     let manifest = Manifest {
@@ -1978,6 +2133,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         sketches: sketch_dtos,
         roots: root_dtos,
         guides: guide_dtos,
+        annotations: annotation_dtos,
         tags: data
             .tag_meta
             .iter()
@@ -2110,9 +2266,134 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
     }
 }
 
+/// Encodes a [`Plane`] as `[nx, ny, nz, offset]` — the same convention
+/// `encode_sketch` uses for a sketch plane.
+fn encode_plane(plane: &Plane) -> [f64; 4] {
+    let n = plane.normal();
+    let offset = -plane.signed_distance(Point3::ORIGIN);
+    [n.x, n.y, n.z, offset]
+}
+
+/// Encodes one [`Annotation`] into an [`AnnotationDto`], routing anchor node
+/// references through `node_to_dto` (the same dense-id closure `roots`/
+/// `groups` use).
+fn encode_annotation(
+    id: u32,
+    annotation: &Annotation,
+    detached: bool,
+    anchor_to_dto: &impl Fn(&Anchor) -> AnchorDto,
+) -> AnnotationDto {
+    let base = AnnotationDto {
+        id,
+        kind: String::new(),
+        a: AnchorDto {
+            node: None,
+            p: [0.0; 3],
+        },
+        b: None,
+        offset: None,
+        plane: None,
+        radial_kind: None,
+        curve: None,
+        leader_dir: None,
+        text: None,
+        text_override: None,
+        detached,
+    };
+    match annotation {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            plane,
+            text_override,
+        } => AnnotationDto {
+            kind: ANNOTATION_KIND_LINEAR.to_string(),
+            a: anchor_to_dto(a),
+            b: Some(anchor_to_dto(b)),
+            offset: Some([offset.x, offset.y, offset.z]),
+            plane: Some(encode_plane(plane)),
+            text_override: text_override.clone(),
+            ..base
+        },
+        Annotation::RadialDimension {
+            anchor,
+            kind,
+            curve,
+            leader_dir,
+            text_override,
+        } => AnnotationDto {
+            kind: ANNOTATION_KIND_RADIAL.to_string(),
+            a: anchor_to_dto(anchor),
+            radial_kind: Some(
+                match kind {
+                    RadialKind::Radius => RADIAL_KIND_RADIUS,
+                    RadialKind::Diameter => RADIAL_KIND_DIAMETER,
+                }
+                .to_string(),
+            ),
+            curve: Some(CapturedCurveDto {
+                center: [curve.center.x, curve.center.y, curve.center.z],
+                radius: curve.radius,
+                plane: encode_plane(&curve.plane),
+            }),
+            leader_dir: Some([leader_dir.x, leader_dir.y, leader_dir.z]),
+            text_override: text_override.clone(),
+            ..base
+        },
+        Annotation::LeaderText {
+            anchor,
+            offset,
+            text,
+        } => AnnotationDto {
+            kind: ANNOTATION_KIND_LEADER.to_string(),
+            a: anchor_to_dto(anchor),
+            offset: Some([offset.x, offset.y, offset.z]),
+            text: Some(text.clone()),
+            ..base
+        },
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Document load orchestration
 // ════════════════════════════════════════════════════════════════════════════
+
+/// One [`Anchor`] as decoded from an [`AnchorDto`]: `node` stays a dense,
+/// unresolved [`NodeRefDto`] until `Document::load` maps it to a live
+/// [`crate::document::NodeId`] via `resolve_node` (objects/groups/instances
+/// must all exist first).
+pub(crate) struct RawAnchor {
+    pub node: Option<NodeRefDto>,
+    pub point: Point3,
+}
+
+/// One [`Annotation`] as decoded from an [`AnnotationDto`], with every anchor
+/// still carrying a dense, unresolved node reference (see [`RawAnchor`]).
+pub(crate) enum RawAnnotation {
+    /// See [`Annotation::LinearDimension`].
+    Linear {
+        a: RawAnchor,
+        b: RawAnchor,
+        offset: Vec3,
+        plane: Plane,
+        text_override: Option<String>,
+    },
+    /// See [`Annotation::RadialDimension`].
+    Radial {
+        anchor: RawAnchor,
+        kind: RadialKind,
+        curve: CapturedCurve,
+        leader_dir: Vec3,
+        text_override: Option<String>,
+    },
+    /// See [`Annotation::LeaderText`].
+    Leader {
+        anchor: RawAnchor,
+        offset: Vec3,
+        text: String,
+    },
+}
 
 /// Raw data decoded from a `.hew` zip container. `Document::load` inserts
 /// materials first (to get live MaterialIds), then calls `Object::decode` for
@@ -2135,6 +2416,11 @@ pub(crate) struct DocLoadRaw {
     pub sketch_owner: Vec<Option<u32>>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
+    /// Annotations (manifest v13+), in manifest dense-id order, with
+    /// `detached`. Anchor node references stay dense (`RawAnchor::node`,
+    /// unresolved) until `Document::load` maps them to live ids — the same
+    /// two-phase resolution `groups`/`roots` already use via `resolve_node`.
+    pub annotations: Vec<(RawAnnotation, bool)>,
     /// Pre-v11 stored consumed pairs (dense sketch id, dense region id),
     /// for the loader's one-time retroactive consumption. Empty for v11+.
     pub consumed: Vec<[u32; 2]>,
@@ -2244,6 +2530,32 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         guides.push(decode_guide(guide_dto)?);
     }
 
+    // Decode annotations (manifest v13+; absent in v1-v12 files → empty).
+    // Anchor node refs stay dense/unresolved (`RawAnchor`) — validated for
+    // range below, resolved to live ids by `Document::load`.
+    //
+    // Presence is version-gated, not merely field-optional: a file
+    // declaring an older version has no business carrying this field at
+    // all (a smuggled/hand-edited `annotations` array under a stale
+    // declared version), and silently loading it would be exactly the kind
+    // of un-attributable state this format's version gates exist to
+    // prevent — same posture as `MANIFEST_CLAIMS_RETIRED_VERSION` rejecting
+    // a `consumed` list on a too-NEW declared version, just the mirror
+    // case: a field rejected on a too-OLD one.
+    if manifest.format_version < ANNOTATIONS_MANIFEST_VERSION && !manifest.annotations.is_empty() {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry annotations (introduced at v{})",
+                manifest.format_version, ANNOTATIONS_MANIFEST_VERSION
+            ),
+        });
+    }
+    let mut annotations: Vec<(RawAnnotation, bool)> =
+        Vec::with_capacity(manifest.annotations.len());
+    for annotation_dto in &manifest.annotations {
+        annotations.push(decode_annotation(annotation_dto)?);
+    }
+
     // Validate manifest references.
     validate_manifest_references(&manifest, obj_count, mat_count)?;
     let axes = decode_axes(&manifest)?;
@@ -2290,6 +2602,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketches,
         sketch_owner,
         guides,
+        annotations,
         consumed: manifest.consumed.clone(),
         def_membership,
         obj_names,
@@ -2438,6 +2751,49 @@ fn validate_manifest_references(
             return Err(LoadError::DanglingReference {
                 what: format!("object {} base_material id {} out of range", obj_dto.id, bm),
             });
+        }
+    }
+
+    for ann in &manifest.annotations {
+        for anchor in [Some(&ann.a), ann.b.as_ref()].into_iter().flatten() {
+            let Some(node) = &anchor.node else { continue };
+            match node.kind.as_str() {
+                "object" => {
+                    if node.id as usize >= obj_count {
+                        return Err(LoadError::DanglingReference {
+                            what: format!(
+                                "annotation {} anchor object id {} out of range",
+                                ann.id, node.id
+                            ),
+                        });
+                    }
+                }
+                "group" => {
+                    if node.id as usize >= manifest.groups.len() {
+                        return Err(LoadError::DanglingReference {
+                            what: format!(
+                                "annotation {} anchor group id {} out of range",
+                                ann.id, node.id
+                            ),
+                        });
+                    }
+                }
+                "instance" => {
+                    if node.id as usize >= manifest.instances.len() {
+                        return Err(LoadError::DanglingReference {
+                            what: format!(
+                                "annotation {} anchor instance id {} out of range",
+                                ann.id, node.id
+                            ),
+                        });
+                    }
+                }
+                _ => {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!("unknown node kind '{}' in annotation anchor", node.kind),
+                    });
+                }
+            }
         }
     }
 
@@ -2854,6 +3210,7 @@ mod camera_manifest_tests {
             tags: Vec::new(),
             camera,
             axes: None,
+            annotations: Vec::new(),
         }
     }
 
@@ -2943,6 +3300,149 @@ mod camera_manifest_tests {
             Err(LoadError::MalformedManifest { .. })
         ));
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Annotation reconstruction
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Decodes `[nx, ny, nz, offset]` into a [`Plane`], rejecting a non-finite or
+/// degenerate (zero-length) normal — never repairing or guessing one.
+fn decode_plane(arr: [f64; 4], what: &str) -> Result<Plane, LoadError> {
+    let n = Vec3::new(arr[0], arr[1], arr[2]);
+    if !n.x.is_finite() || !n.y.is_finite() || !n.z.is_finite() || !arr[3].is_finite() {
+        return Err(LoadError::MalformedManifest {
+            what: format!("{what} has a non-finite plane"),
+        });
+    }
+    // A representative point on the plane: any p with normal·p == offset;
+    // offset·n satisfies that when n is unit length, which
+    // `from_point_normal` verifies (and re-normalizes) below.
+    let point = Point3::new(n.x * arr[3], n.y * arr[3], n.z * arr[3]);
+    Plane::from_point_normal(point, n).map_err(|_| LoadError::MalformedManifest {
+        what: format!("{what} has a degenerate plane normal"),
+    })
+}
+
+/// Decodes one [`AnchorDto`] into a [`RawAnchor`] — the node reference stays
+/// dense/unresolved (see [`RawAnchor`]'s doc comment). Rejects a non-finite
+/// point.
+fn decode_anchor(dto: &AnchorDto, what: &str) -> Result<RawAnchor, LoadError> {
+    let p = Point3::new(dto.p[0], dto.p[1], dto.p[2]);
+    if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+        return Err(LoadError::MalformedManifest {
+            what: format!("{what} has a non-finite anchor point"),
+        });
+    }
+    Ok(RawAnchor {
+        node: dto.node.clone(),
+        point: p,
+    })
+}
+
+/// Decodes one [`AnnotationDto`] into a [`RawAnnotation`] plus its `detached`
+/// flag, rejecting (never repairing) a malformed entry: an unknown `kind`, a
+/// missing kind-specific field, a non-finite coordinate, coincident linear-
+/// dimension anchors, or a non-positive radial-dimension radius — the same
+/// invariants [`crate::document::Document::add_linear_dimension`] /
+/// `add_radial_dimension` enforce on a fresh `add_*` call, re-checked here
+/// against a hand-tampered or foreign-written file.
+fn decode_annotation(dto: &AnnotationDto) -> Result<(RawAnnotation, bool), LoadError> {
+    let missing = |field: &str| LoadError::MalformedManifest {
+        what: format!("annotation {} ({}) is missing '{field}'", dto.id, dto.kind),
+    };
+    let a = decode_anchor(&dto.a, &format!("annotation {}", dto.id))?;
+    let raw = match dto.kind.as_str() {
+        ANNOTATION_KIND_LINEAR => {
+            let b = dto.b.as_ref().ok_or_else(|| missing("b"))?;
+            let b = decode_anchor(b, &format!("annotation {}", dto.id))?;
+            let offset = dto.offset.ok_or_else(|| missing("offset"))?;
+            let offset = Vec3::new(offset[0], offset[1], offset[2]);
+            if !offset.x.is_finite() || !offset.y.is_finite() || !offset.z.is_finite() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("annotation {} has a non-finite offset", dto.id),
+                });
+            }
+            let plane = dto.plane.ok_or_else(|| missing("plane"))?;
+            let plane = decode_plane(plane, &format!("annotation {}", dto.id))?;
+            if a.point.approx_eq(b.point, crate::tol::POINT_MERGE) {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("annotation {} has coincident dimension anchors", dto.id),
+                });
+            }
+            RawAnnotation::Linear {
+                a,
+                b,
+                offset,
+                plane,
+                text_override: dto.text_override.clone(),
+            }
+        }
+        ANNOTATION_KIND_RADIAL => {
+            let kind = match dto.radial_kind.as_deref() {
+                Some(RADIAL_KIND_RADIUS) => RadialKind::Radius,
+                Some(RADIAL_KIND_DIAMETER) => RadialKind::Diameter,
+                Some(other) => {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!("annotation {} has unknown radial kind '{other}'", dto.id),
+                    });
+                }
+                None => return Err(missing("radial_kind")),
+            };
+            let curve = dto.curve.as_ref().ok_or_else(|| missing("curve"))?;
+            let center = Point3::new(curve.center[0], curve.center[1], curve.center[2]);
+            if !center.x.is_finite() || !center.y.is_finite() || !center.z.is_finite() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("annotation {} has a non-finite curve center", dto.id),
+                });
+            }
+            if !curve.radius.is_finite() || curve.radius <= 0.0 {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("annotation {} has a non-positive curve radius", dto.id),
+                });
+            }
+            let plane = decode_plane(curve.plane, &format!("annotation {}", dto.id))?;
+            let leader_dir = dto.leader_dir.ok_or_else(|| missing("leader_dir"))?;
+            let leader_dir = Vec3::new(leader_dir[0], leader_dir[1], leader_dir[2]);
+            if !leader_dir.x.is_finite() || !leader_dir.y.is_finite() || !leader_dir.z.is_finite() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("annotation {} has a non-finite leader direction", dto.id),
+                });
+            }
+            RawAnnotation::Radial {
+                anchor: a,
+                kind,
+                curve: CapturedCurve {
+                    center,
+                    radius: curve.radius,
+                    plane,
+                },
+                leader_dir,
+                text_override: dto.text_override.clone(),
+            }
+        }
+        ANNOTATION_KIND_LEADER => {
+            let offset = dto.offset.ok_or_else(|| missing("offset"))?;
+            let offset = Vec3::new(offset[0], offset[1], offset[2]);
+            if !offset.x.is_finite() || !offset.y.is_finite() || !offset.z.is_finite() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("annotation {} has a non-finite offset", dto.id),
+                });
+            }
+            let text = dto.text.clone().ok_or_else(|| missing("text"))?;
+            RawAnnotation::Leader {
+                anchor: a,
+                offset,
+                text,
+            }
+        }
+        other => {
+            return Err(LoadError::MalformedManifest {
+                what: format!("annotation {} has unknown kind '{other}'", dto.id),
+            });
+        }
+    };
+    Ok((raw, dto.detached))
 }
 
 // ════════════════════════════════════════════════════════════════════════════

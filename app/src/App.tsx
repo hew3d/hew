@@ -8,6 +8,7 @@ import Viewport, {
   type RescaleConfirmInfo,
 } from './viewport/Viewport'
 import { InferenceTooltip } from './viewport/InferenceTooltip'
+import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
 import { ViewportHUD } from './viewport/ViewportHUD'
@@ -122,11 +123,13 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Rotate: 'tool-rotate',
   Scale: 'tool-scale',
   'Tape Measure': 'tool-tape-measure',
+  Dimension: 'tool-dimension',
   Protractor: 'tool-protractor',
   Slice: 'tool-slice',
   'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
   Axes: 'tool-axes',
+  Text: 'tool-text',
   Orbit: 'cam-orbit',
   Pan: 'cam-pan',
   Zoom: 'cam-zoom',
@@ -233,6 +236,10 @@ export default function App() {
   /** Selected construction guide, mutually exclusive with node
    * selection. Deleted via the same Edit ▸ Delete / Delete-key path as nodes. */
   const [selectedGuide, setSelectedGuide] = useState<bigint | null>(null)
+  /** Selected dimension/leader-text annotation, mutually exclusive with node
+   * and guide selection (docs/design/dimensions-text.md). Deleted via the
+   * same Edit ▸ Delete / Delete-key path. */
+  const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Active context path. Empty = top level. */
@@ -607,8 +614,9 @@ export default function App() {
   }, [])
 
   const handleSelect = useCallback((node: NodeRef | null, additive: boolean) => {
-    // Node and guide selection are mutually exclusive.
+    // Node, guide, and annotation selection are mutually exclusive.
     setSelectedGuide(null)
+    setSelectedAnnotation(null)
     setSelectedIds((cur) => nextSelection(cur, node, additive))
   }, [])
 
@@ -616,6 +624,7 @@ export default function App() {
    * Non-additive replaces; additive (shift-drag) merges without duplicates. */
   const handleSelectMany = useCallback((nodes: NodeRef[], additive: boolean) => {
     setSelectedGuide(null)
+    setSelectedAnnotation(null)
     setSelectedIds((cur) => {
       if (!additive) return nodes
       const seen = new Set(cur.map(nodeKey))
@@ -629,10 +638,50 @@ export default function App() {
     [handleSelectMany],
   )
 
-  /** Lift a guide pick from the viewport; clears node selection. */
+  /** Lift a guide pick from the viewport; clears node/annotation selection. */
   const handleSelectGuide = useCallback((id: bigint | null) => {
     setSelectedGuide(id)
+    setSelectedAnnotation(null)
     if (id !== null) setSelectedIds([])
+  }, [])
+
+  /** Lift an annotation pick from the viewport; clears node/guide selection. */
+  const handleSelectAnnotation = useCallback((id: bigint | null) => {
+    setSelectedAnnotation(id)
+    setSelectedGuide(null)
+    if (id !== null) setSelectedIds([])
+  }, [])
+
+  /** The in-viewport annotation text editor's pending target — either an
+   * existing annotation being edited (`id` set, double-click) or a
+   * brand-new leader the Text tool just placed (`id` null). `null` = the
+   * editor is closed. Viewport.tsx tracks the actual anchor/geometry
+   * internally; this only carries what the DOM editor needs to render
+   * (docs/design/dimensions-text.md). */
+  const [annotationEditor, setAnnotationEditor] = useState<{
+    id: bigint | null
+    screenX: number
+    screenY: number
+    initialText: string
+    placeholder: string
+  } | null>(null)
+
+  const handleOpenAnnotationEditor = useCallback(
+    (info: { id: bigint | null; screenX: number; screenY: number; initialText: string; placeholder: string }) => {
+      setAnnotationEditor(info)
+    },
+    [],
+  )
+
+  const handleCommitAnnotationEditor = useCallback((text: string) => {
+    viewportApi.current?.commitAnnotationEditorText(text)
+    setAnnotationEditor(null)
+    setDocRev((r) => r + 1)
+  }, [])
+
+  const handleCancelAnnotationEditor = useCallback(() => {
+    viewportApi.current?.cancelAnnotationEditor()
+    setAnnotationEditor(null)
   }, [])
 
   const handleEnterContext = useCallback((node: NodeRef) => {
@@ -759,6 +808,7 @@ export default function App() {
         setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
       setSelection: (nodes) => {
         setSelectedGuide(null)
+        setSelectedAnnotation(null)
         setSelectedIds(nodes)
       },
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
@@ -2024,11 +2074,17 @@ export default function App() {
   // sees the current `selectedIds` (the ref is reassigned fresh every render;
   // see the Fast-Refresh note above `menuActionRef`).
   const deleteSelection = () => {
-    // A selected guide deletes via the same path; mutually exclusive
-    // with node selection.
+    // A selected guide/annotation deletes via the same path; mutually
+    // exclusive with node selection.
     if (selectedGuide !== null) {
       viewportApi.current?.runDeleteGuide(selectedGuide)
       setSelectedGuide(null)
+      setDocRev((r) => r + 1)
+      return
+    }
+    if (selectedAnnotation !== null) {
+      viewportApi.current?.runDeleteAnnotation(selectedAnnotation)
+      setSelectedAnnotation(null)
       setDocRev((r) => r + 1)
       return
     }
@@ -2049,6 +2105,7 @@ export default function App() {
       const kind = kindStr as NodeRef['kind']
       if ((kind === 'object' || kind === 'group' || kind === 'instance') && /^\d+$/.test(idStr)) {
         setSelectedGuide(null)
+        setSelectedAnnotation(null)
         setSelectedIds([{ kind, id: BigInt(idStr) }])
         setShowModelInfo(true)
         setShowObjectInfo(true)
@@ -2100,11 +2157,13 @@ export default function App() {
       case 'tool-rotate':    setActiveTool('Rotate'); break
       case 'tool-scale':     setActiveTool('Scale'); break
       case 'tool-tape-measure': setActiveTool('Tape Measure'); break
+      case 'tool-dimension': setActiveTool('Dimension'); break
       case 'tool-protractor': setActiveTool('Protractor'); break
       case 'tool-slice':     setActiveTool('Slice'); break
       case 'tool-section-plane': setActiveTool('Section Plane'); break
       case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
       case 'tool-axes':        setActiveTool('Axes'); break
+      case 'tool-text':      setActiveTool('Text'); break
       case 'tool-orbit':     activateTool('Orbit'); break
       case 'tool-pan':       activateTool('Pan'); break
       case 'tool-zoom':      activateTool('Zoom'); break
@@ -2655,7 +2714,7 @@ export default function App() {
       checked[id] = tool === activeTool
     }
     const enabled: Record<string, boolean> = {
-      'edit-delete': selectedIds.length > 0 || selectedGuide !== null,
+      'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
       'edit-group': menuGates?.canGroup ?? false,
       'edit-ungroup': menuGates?.canUngroup ?? false,
       'edit-make-component': menuGates?.canMakeComponent ?? false,
@@ -2683,6 +2742,7 @@ export default function App() {
     showDebugLog,
     selectedIds,
     selectedGuide,
+    selectedAnnotation,
     menuGates,
     menuFocusTick,
     parallelProjection,
@@ -3197,6 +3257,9 @@ export default function App() {
             onSelectMany={handleSelectMany}
             onSelectGuide={handleSelectGuide}
             selectedGuide={selectedGuide}
+            onSelectAnnotation={handleSelectAnnotation}
+            selectedAnnotation={selectedAnnotation}
+            onOpenAnnotationEditor={handleOpenAnnotationEditor}
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
             onDocumentChanged={handleDocumentChanged}
@@ -3218,6 +3281,19 @@ export default function App() {
               before this milestone. */}
           <SnapDot info={inferenceInfo} />
           <InferenceTooltip info={inferenceInfo} />
+          {/* The in-viewport annotation text editor (docs/design/
+              dimensions-text.md): double-click-to-edit an existing dimension/
+              leader, or the Text tool's second click wording a new leader. */}
+          {annotationEditor !== null && (
+            <AnnotationEditor
+              screenX={annotationEditor.screenX}
+              screenY={annotationEditor.screenY}
+              initialText={annotationEditor.initialText}
+              placeholder={annotationEditor.placeholder}
+              onCommit={handleCommitAnnotationEditor}
+              onCancel={handleCancelAnnotationEditor}
+            />
+          )}
           {/* Overlays that live INSIDE the viewport container: hovering them
               also hides the inference cursor (the container's pointerleave
               can't see moves into its own children). display:contents keeps
@@ -3644,7 +3720,7 @@ export default function App() {
         onRun={(id) => menuActionRef.current(id)}
         extraEntries={paletteModelEntries}
         gates={{
-          selection: selectedIds.length > 0 || selectedGuide !== null,
+          selection: selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
           canGroup: menuGates?.canGroup ?? false,
           canUngroup: menuGates?.canUngroup ?? false,
           canMakeComponent: menuGates?.canMakeComponent ?? false,

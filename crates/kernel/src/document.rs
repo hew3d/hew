@@ -36,22 +36,27 @@ use std::num::NonZeroU32;
 use slotmap::SlotMap;
 use tracing::info;
 
+use crate::annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 use crate::axes::{AxesFrame, AxesFrameError};
 use crate::camera::CameraState;
 use crate::guide::Guide;
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 use crate::ids::{
-    ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
+    AnnotationId, ComponentId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId, SketchId,
 };
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::Material;
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError};
-use crate::serialize::{DocSaveData, LoadError, NodeRefDto, decode_document_raw, encode_document};
+use crate::serialize::{
+    DocSaveData, LoadError, NodeRefDto, RawAnchor, RawAnnotation, decode_document_raw,
+    encode_document,
+};
 use crate::sketch::{
     CurveGeom, Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
     SketchVertexId,
 };
+use crate::tol;
 use crate::topo::{Object, WatertightState};
 use crate::transform::{Transform, TransformError};
 
@@ -191,6 +196,49 @@ struct GuideRecord {
     hidden: bool,
 }
 
+/// A dimension/leader-text annotation plus its visibility and re-anchoring
+/// state. `hidden` marks an undone creation or a delete, kept so the
+/// [`AnnotationId`] stays valid for redo — the same tombstone pattern as
+/// [`GuideRecord`]. `detached` is set when the annotation can no longer
+/// follow its anchored node(s) (deleted node, or a captured circle that
+/// can't survive a non-similarity transform) — see `annotation.rs`'s module
+/// doc comment for why this is stored rather than derived.
+#[derive(Debug, Clone, PartialEq)]
+struct AnnotationRecord {
+    annotation: Annotation,
+    hidden: bool,
+    detached: bool,
+}
+
+/// One annotation a document mutation changed the re-anchoring/liveness
+/// state of — [`Document::reanchor_touched`] carrying a
+/// [`DocAction::Transform`]/[`DocAction::TransformSelection`]/
+/// [`DocAction::TransformInstance`] through, or
+/// [`Document::reevaluate_liveness_recorded`] re-evaluating `detached` for a
+/// [`DocAction::Deleted`] or an operand-consuming op ([`DocAction::Boolean`]
+/// and its family). Either way this is the exact pre- and post-mutation
+/// value (both the annotation's content AND its `detached` flag), so
+/// undo/redo restore it by **verbatim replay** instead of re-deriving it —
+/// see `reanchor_touched`'s doc comment for why that re-derivation is
+/// unsound for a detached [`Annotation::RadialDimension`] or
+/// [`Annotation::LinearDimension`], and why a liveness recompute at undo
+/// time cannot recover a detach whose cause was something other than this
+/// node's own liveness (`reevaluate_liveness_recorded`'s doc comment).
+#[derive(Debug, Clone, PartialEq)]
+struct AnnotationReanchor {
+    annotation: AnnotationId,
+    before: Annotation,
+    after: Annotation,
+    /// `detached` immediately before this mutation. Always `false` for a
+    /// [`Document::reanchor_touched`] entry (it only ever touches an
+    /// annotation that was not already `detached`); for
+    /// [`Document::reevaluate_liveness_recorded`] this can be `true` (an
+    /// annotation already detached by an earlier, unrelated cause whose
+    /// liveness state this mutation is separately recording).
+    before_detached: bool,
+    after_detached: bool,
+}
+
 /// Every entity created while deep-cloning a subtree in
 /// [`Document::duplicate_node`], accumulated so the clone is one atomic,
 /// reversible action — and so a partial clone can be rolled back on error.
@@ -268,6 +316,12 @@ enum DocAction {
         /// restores it alongside the scaffolding; redo consumes it again.
         /// `None` for every plain extrusion/sweep.
         merged_base: Option<ObjectId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed for
+        /// `merged_base`'s consumption (empty when `merged_base` is
+        /// `None`) — undo/redo restore it verbatim, mirroring
+        /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// A per-Object op (push/pull, split, merge) ran; undo/redo delegate to that
     /// Object's [`History`].
@@ -279,6 +333,11 @@ enum DocAction {
         result: ObjectId,
         a: ObjectId,
         b: ObjectId,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed when `a`/`b`
+        /// were consumed — undo/redo restore it verbatim, mirroring
+        /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `boolean_nodes` combined two tree nodes (each a plain Object or a
     /// whole Group; the group-ops design) into a result of one Object per
@@ -305,6 +364,11 @@ enum DocAction {
         /// The result container group, present iff there was more than one
         /// piece.
         result_group: Option<GroupId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed for
+        /// `hidden_operands` — undo/redo restore it verbatim, mirroring
+        /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// A slice cut one solid into two. Undo hides both pieces and unhides
     /// the source; redo reverses. Like `Boolean`, all three handles stay stable
@@ -313,6 +377,11 @@ enum DocAction {
         source: ObjectId,
         a: ObjectId,
         b: ObjectId,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed when `source`
+        /// was consumed — undo/redo restore it verbatim, mirroring
+        /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// A push-through subtract removed material from one solid, replacing
     /// it with one or more result shells (`results` — more than one when the cut
@@ -321,15 +390,24 @@ enum DocAction {
     PushThrough {
         source: ObjectId,
         results: Vec<ObjectId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed when `source`
+        /// was consumed — undo/redo restore it verbatim, mirroring
+        /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// A move/rotate/scale baked into one or more objects' geometry. A single
     /// object carries one target; a group transform carries every leaf object
     /// beneath it. Undo bakes `inverse` into each, redo bakes `forward`;
     /// the transform is handle-stable so the `ObjectId`s never change.
+    /// `reanchored` is the exact before/after snapshot of every annotation
+    /// this bake re-anchored — undo/redo restore it verbatim (see
+    /// [`Document::reanchor_touched`]).
     Transform {
         objects: Vec<ObjectId>,
         forward: Transform,
         inverse: Transform,
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// A move/rotate/scale baked into a free-standing sketch's geometry (Phase
     /// D). The sketch analogue of [`DocAction::Transform`]: undo bakes
@@ -397,6 +475,9 @@ enum DocAction {
         instances: Vec<(InstanceId, Transform)>,
         forward: Transform,
         inverse: Transform,
+        /// The exact before/after snapshot of every annotation this bake
+        /// re-anchored — see [`Document::reanchor_touched`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `rescale_document` uniformly scaled the WHOLE model about the world
     /// origin (design tool-parity §3 — the Tape Measure "resize the model"
@@ -488,6 +569,13 @@ enum DocAction {
         group: GroupId,
         parent: Option<GroupId>,
         prev_parent_members: Option<Vec<NodeId>>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed for the
+        /// dissolved `group` node itself (its members are reparented, not
+        /// hidden, so only an annotation anchored to the GROUP node — never
+        /// one anchored to a member — can be affected here) — undo/redo
+        /// restore it verbatim, mirroring [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `delete_node` hid a whole tree node — an Object, Group, or
     /// Instance — and its entire subtree in one undoable step (tombstone, not a
@@ -508,6 +596,13 @@ enum DocAction {
         /// descendant (groups, objects, instances) beneath it — captured so
         /// undo unhides exactly this set and nothing else.
         hidden_subtree: Vec<NodeId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed for
+        /// `hidden_subtree` — undo/redo restore it verbatim, never by
+        /// calling that re-evaluation again (see its doc comment for why
+        /// that would silently re-attach an annotation detached for an
+        /// earlier, unrelated reason).
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `make_component` folded a selection into a new definition plus
     /// one identity-posed instance. Undo dissolves it: each def member returns
@@ -533,6 +628,14 @@ enum DocAction {
         /// (mirrors [`DocAction::Grouped::prev_parent_members`]); `None` at the
         /// top level.
         prev_parent_members: Option<Vec<NodeId>>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed for the fold:
+        /// every world object in `leaves` stops being a world node (it
+        /// becomes a definition member) and every group in `consumed_groups`
+        /// is hidden. Anchor REMAP onto the new instance is future work —
+        /// today this only detaches; undo/redo restore it verbatim,
+        /// mirroring [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `place_instance` stamped another instance of an existing
     /// definition. Undo hides it; redo unhides. The `InstanceId` stays stable.
@@ -581,6 +684,30 @@ enum DocAction {
     /// then-visible guide in one step. Undo unhides exactly these; redo
     /// re-hides them.
     DeletedGuides { guides: Vec<GuideId> },
+    /// `add_linear_dimension`/`add_radial_dimension`/`add_leader_text`
+    /// created an annotation. Undo hides it; redo unhides. The
+    /// `AnnotationId` stays stable. Mirrors [`DocAction::CreatedGuide`].
+    CreatedAnnotation { annotation: AnnotationId },
+    /// `delete_annotation` hid one annotation (tombstone, not a real
+    /// delete). Undo unhides it; redo re-hides it. Mirrors
+    /// [`DocAction::DeletedGuide`].
+    DeletedAnnotation { annotation: AnnotationId },
+    /// `update_annotation` replaced an annotation's value in place (offset,
+    /// text override, or anchors). `before`/`before_detached` are the exact
+    /// pre-update snapshot; undo restores them verbatim. `after` is the
+    /// post-update value; `after_detached` is the exact `detached` the
+    /// original call computed (`false` for a geometry-changing edit, else
+    /// carried over from `before_detached` — see
+    /// `Document::update_annotation`) — redo re-applies both verbatim rather
+    /// than re-deriving `after_detached` from `before`/`after` a second time,
+    /// mirroring [`AnnotationReanchor`]'s own before/after snapshot pattern.
+    UpdatedAnnotation {
+        annotation: AnnotationId,
+        before: Annotation,
+        before_detached: bool,
+        after: Annotation,
+        after_detached: bool,
+    },
     /// `delete_sketch` hid a free-standing sketch (tombstone, not a real
     /// delete — the `SketchId` stays valid for redo). Undo un-hides it; redo
     /// re-hides it. Mirrors [`DocAction::DeletedGuide`].
@@ -588,10 +715,13 @@ enum DocAction {
     /// `transform_instance` changed an instance's pose. Undo restores
     /// `prev` exactly; redo re-applies `next`. No bake — the pose is mutable
     /// instance state, so this is exact rather than an inverse-transform.
+    /// `reanchored` is the exact before/after snapshot of every annotation
+    /// this pose change re-anchored — see [`Document::reanchor_touched`].
     TransformInstance {
         instance: InstanceId,
         prev: Transform,
         next: Transform,
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// A per-Object op ran on a definition member (editing shared geometry,
     ///). Undo/redo delegate to that member object's [`History`]; the change
@@ -613,6 +743,13 @@ enum DocAction {
         instance: InstanceId,
         created: Vec<ObjectId>,
         created_sketches: Vec<SketchId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed for the hidden
+        /// `instance` node — an annotation anchored to it detaches rather
+        /// than silently riding along with the freshly baked `created`
+        /// objects (anchor REMAP onto them is future work). Undo/redo
+        /// restore it verbatim, mirroring [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `make_unique` repointed an instance from its shared definition onto
     /// a fresh private copy. Undo repoints to `prev_def` and hides `new_def`;
@@ -702,6 +839,12 @@ enum DocAction {
     FollowMeFace {
         result: ObjectId,
         merged_base: Option<ObjectId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed for
+        /// `merged_base`'s consumption (empty when `merged_base` is
+        /// `None`) — undo/redo restore it verbatim, mirroring
+        /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `Document::ingest` merged an imported scene into this document.
     /// Undo hides every created node/object/group/instance/component (ids
@@ -918,6 +1061,18 @@ pub enum DocumentError {
     UnknownInstance,
     /// The guide handle is stale, hidden, or from another Document.
     UnknownGuide,
+    /// The annotation handle is stale, hidden, or from another Document.
+    UnknownAnnotation,
+    /// Annotation geometry is degenerate: a non-finite anchor/offset/curve
+    /// value, a zero-length linear dimension (its two anchors coincide), or a
+    /// non-positive radial-dimension radius. Nothing is silently repaired or
+    /// guessed.
+    DegenerateAnnotation,
+    /// `update_annotation` was given a replacement of a different
+    /// [`Annotation`] variant than the one it targets (e.g. replacing a
+    /// `LinearDimension` with a `LeaderText`) — refused rather than silently
+    /// changing the entity's kind.
+    MismatchedAnnotationKind,
     /// `begin_sketch_gesture` while another gesture is already open. Gestures
     /// never nest or interleave — a tool brackets exactly one commit batch.
     SketchGestureAlreadyOpen,
@@ -1051,6 +1206,15 @@ impl std::fmt::Display for DocumentError {
             }
             DocumentError::UnknownInstance => write!(f, "no such instance in this document"),
             DocumentError::UnknownGuide => write!(f, "no such guide in this document"),
+            DocumentError::UnknownAnnotation => write!(f, "no such annotation in this document"),
+            DocumentError::DegenerateAnnotation => write!(
+                f,
+                "annotation geometry is degenerate (non-finite value, coincident dimension \
+                 anchors, or non-positive radius)"
+            ),
+            DocumentError::MismatchedAnnotationKind => {
+                write!(f, "update_annotation cannot change an annotation's kind")
+            }
             DocumentError::SketchGestureAlreadyOpen => {
                 write!(f, "a sketch gesture is already open")
             }
@@ -1202,6 +1366,9 @@ pub struct Document {
     materials: SlotMap<MaterialId, Material>,
     /// Construction guides: non-solid alignment helpers (lines + points).
     guides: SlotMap<GuideId, GuideRecord>,
+    /// Dimension/leader-text annotations: non-solid, guides-style document
+    /// entities (docs/design/dimensions-text.md).
+    annotations: SlotMap<AnnotationId, AnnotationRecord>,
     /// Sketches hidden by [`Document::delete_sketch`] (tombstone, not a real
     /// delete — the id stays valid for redo). A document-level visibility
     /// concern, not a field on [`Sketch`] itself, mirroring how object/group/
@@ -1479,6 +1646,14 @@ impl Document {
             .map(|(id, rec)| (id, rec.guide))
             .collect();
 
+        // ── Collect live annotations (in slotmap key order) ────────────────
+        let annotations: Vec<(AnnotationId, Annotation, bool)> = self
+            .annotations
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, rec)| (id, rec.annotation.clone(), rec.detached))
+            .collect();
+
         // ── Collect root nodes: top-level visible world nodes ─────────────
         // Roots = all live objects/groups/instances whose parent is None.
         // We emit objects first, then groups, then instances (same order as
@@ -1499,6 +1674,7 @@ impl Document {
             sketches,
             sketch_owner,
             guides,
+            annotations,
             roots,
             obj_names,
             obj_tags,
@@ -1756,6 +1932,61 @@ impl Document {
                     }
                 }
             }
+        }
+
+        // ── Insert annotations (manifest v13+) — after every node kind is
+        // live, so an anchor's node reference resolves; order relative to
+        // guides/roots doesn't matter (independent collections).
+        let resolve_anchor = |a: RawAnchor| -> Result<Anchor, LoadError> {
+            let node = a.node.as_ref().map(&resolve_node).transpose()?;
+            Ok(Anchor {
+                node,
+                point: a.point,
+            })
+        };
+        for (raw_ann, detached) in raw.annotations {
+            let annotation = match raw_ann {
+                RawAnnotation::Linear {
+                    a,
+                    b,
+                    offset,
+                    plane,
+                    text_override,
+                } => Annotation::LinearDimension {
+                    a: resolve_anchor(a)?,
+                    b: resolve_anchor(b)?,
+                    offset,
+                    plane,
+                    text_override,
+                },
+                RawAnnotation::Radial {
+                    anchor,
+                    kind,
+                    curve,
+                    leader_dir,
+                    text_override,
+                } => Annotation::RadialDimension {
+                    anchor: resolve_anchor(anchor)?,
+                    kind,
+                    curve,
+                    leader_dir,
+                    text_override,
+                },
+                RawAnnotation::Leader {
+                    anchor,
+                    offset,
+                    text,
+                } => Annotation::LeaderText {
+                    anchor: resolve_anchor(anchor)?,
+                    offset,
+                    text,
+                },
+            };
+            doc.annotations.insert(AnnotationRecord {
+                annotation,
+                hidden: false,
+                detached,
+            });
         }
 
         // ── Pre-v11 consumed index: becoming, retroactively ───────────────
@@ -2601,6 +2832,412 @@ impl Document {
             .get(id)
             .filter(|rec| !rec.hidden)
             .map(|rec| &rec.guide)
+    }
+
+    // ------------------------------------------------------------- annotations
+
+    /// An anchor's named node must be live (visible) — a stale/hidden/foreign
+    /// handle is refused rather than silently accepted as a free anchor.
+    /// `node: None` (a free-floating anchor) always passes.
+    fn validate_anchor(&self, anchor: &Anchor) -> Result<(), DocumentError> {
+        if !point_is_finite(anchor.point) {
+            return Err(DocumentError::DegenerateAnnotation);
+        }
+        match anchor.node {
+            None => Ok(()),
+            Some(node) if self.node_is_live(node) => Ok(()),
+            Some(NodeId::Object(_)) => Err(DocumentError::UnknownObject),
+            Some(NodeId::Group(_)) => Err(DocumentError::UnknownGroup),
+            Some(NodeId::Instance(_)) => Err(DocumentError::UnknownInstance),
+        }
+    }
+
+    /// Adds a linear dimension between two anchors, with its dimension line
+    /// offset out of the `a`-`b` line by `offset` and drawn in `plane`.
+    /// Undoable ([`DocAction::CreatedAnnotation`]); the returned
+    /// [`AnnotationId`] is stable across undo/redo.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — an anchor names a stale/hidden
+    ///   node.
+    /// - [`DocumentError::DegenerateAnnotation`] — a non-finite coordinate,
+    ///   or `a`/`b` coincide (a zero-length dimension).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn add_linear_dimension(
+        &mut self,
+        a: Anchor,
+        b: Anchor,
+        offset: Vec3,
+        plane: Plane,
+        text_override: Option<String>,
+    ) -> Result<AnnotationId, DocumentError> {
+        self.validate_anchor(&a)?;
+        self.validate_anchor(&b)?;
+        if !vec_is_finite(offset) {
+            return Err(DocumentError::DegenerateAnnotation);
+        }
+        if a.point.approx_eq(b.point, tol::POINT_MERGE) {
+            return Err(DocumentError::DegenerateAnnotation);
+        }
+        let annotation = Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            plane,
+            text_override,
+        };
+        let id = self.annotations.insert(AnnotationRecord {
+            annotation,
+            hidden: false,
+            detached: false,
+        });
+        self.undo
+            .push(DocAction::CreatedAnnotation { annotation: id });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(id)
+    }
+
+    /// Adds a radius/diameter dimension measuring `curve` (the analytic
+    /// circle/arc captured at creation — the caller resolves this from the
+    /// drawn geometry; the kernel does not re-derive it). Undoable
+    /// ([`DocAction::CreatedAnnotation`]).
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — `anchor` names a stale/hidden
+    ///   node.
+    /// - [`DocumentError::DegenerateAnnotation`] — a non-finite coordinate,
+    ///   or a non-positive `curve.radius`.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn add_radial_dimension(
+        &mut self,
+        anchor: Anchor,
+        kind: RadialKind,
+        curve: CapturedCurve,
+        leader_dir: Vec3,
+        text_override: Option<String>,
+    ) -> Result<AnnotationId, DocumentError> {
+        self.validate_anchor(&anchor)?;
+        if !vec_is_finite(leader_dir) || !point_is_finite(curve.center) {
+            return Err(DocumentError::DegenerateAnnotation);
+        }
+        if !curve.radius.is_finite() || curve.radius <= 0.0 {
+            return Err(DocumentError::DegenerateAnnotation);
+        }
+        let annotation = Annotation::RadialDimension {
+            anchor,
+            kind,
+            curve,
+            leader_dir,
+            text_override,
+        };
+        let id = self.annotations.insert(AnnotationRecord {
+            annotation,
+            hidden: false,
+            detached: false,
+        });
+        self.undo
+            .push(DocAction::CreatedAnnotation { annotation: id });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(id)
+    }
+
+    /// Adds a free-form leader-text annotation: `anchor` is the point the
+    /// leader points to, `offset` places the text relative to it. Undoable
+    /// ([`DocAction::CreatedAnnotation`]).
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — `anchor` names a stale/hidden
+    ///   node.
+    /// - [`DocumentError::DegenerateAnnotation`] — a non-finite coordinate.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn add_leader_text(
+        &mut self,
+        anchor: Anchor,
+        offset: Vec3,
+        text: String,
+    ) -> Result<AnnotationId, DocumentError> {
+        self.validate_anchor(&anchor)?;
+        if !vec_is_finite(offset) {
+            return Err(DocumentError::DegenerateAnnotation);
+        }
+        let annotation = Annotation::LeaderText {
+            anchor,
+            offset,
+            text,
+        };
+        let id = self.annotations.insert(AnnotationRecord {
+            annotation,
+            hidden: false,
+            detached: false,
+        });
+        self.undo
+            .push(DocAction::CreatedAnnotation { annotation: id });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(id)
+    }
+
+    /// Replaces a live annotation's value in place — offset, text/text
+    /// override, or a fresh set of anchors (the app re-picking geometry to
+    /// clear a `detached` flag, SketchUp's `<>` re-pick simplified). `new`
+    /// must be the SAME [`Annotation`] variant as the target (refused,
+    /// [`DocumentError::MismatchedAnnotationKind`], rather than silently
+    /// changing what kind of entity this id names).
+    ///
+    /// Clears `detached` only when `new` actually changes an anchor/geometry
+    /// field from the stored value ([`Annotation::geometry_eq`], a
+    /// whole-value compare that ignores only the display-text field): the
+    /// caller is then asserting this placement is fresh and valid, which the
+    /// kernel does not independently re-verify (D1 does not search for a
+    /// nearer snap point; see `annotation.rs`'s module doc comment). A
+    /// text-only edit — typing a `text_override`, Tab-toggling it back to
+    /// `<>`, or editing a leader's `text` — touches none of that and leaves
+    /// an existing `detached` warning exactly as it was: "only an explicit
+    /// update clears it" means an update that actually re-picks the
+    /// geometry, not any call that happens to go through this method.
+    /// Undoable ([`DocAction::UpdatedAnnotation`]), exact in both directions.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownAnnotation`] — stale, hidden, or foreign id.
+    /// - [`DocumentError::MismatchedAnnotationKind`] — `new` is a different
+    ///   [`Annotation`] variant than the current value.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn update_annotation(
+        &mut self,
+        id: AnnotationId,
+        new: Annotation,
+    ) -> Result<DocChange, DocumentError> {
+        let rec = match self.annotations.get(id) {
+            Some(rec) if !rec.hidden => rec,
+            _ => return Err(DocumentError::UnknownAnnotation),
+        };
+        if std::mem::discriminant(&rec.annotation) != std::mem::discriminant(&new) {
+            return Err(DocumentError::MismatchedAnnotationKind);
+        }
+        let before = rec.annotation.clone();
+        let before_detached = rec.detached;
+        // A geometry-changing edit clears `detached`; a text-only edit
+        // (before.geometry_eq(&new) is true — nothing but the display-text
+        // field differs) leaves it exactly as it was.
+        let after_detached = if before.geometry_eq(&new) {
+            before_detached
+        } else {
+            false
+        };
+        let rec = &mut self.annotations[id];
+        rec.annotation = new.clone();
+        rec.detached = after_detached;
+        self.undo.push(DocAction::UpdatedAnnotation {
+            annotation: id,
+            before,
+            before_detached,
+            after: new,
+            after_detached,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange::default())
+    }
+
+    /// Delete one annotation (hide-not-delete; the id stays valid for redo).
+    /// Stale or already-hidden id → [`DocumentError::UnknownAnnotation`].
+    /// Undoable ([`DocAction::DeletedAnnotation`]).
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownAnnotation`] — stale, hidden, or foreign id.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn delete_annotation(&mut self, id: AnnotationId) -> Result<DocChange, DocumentError> {
+        match self.annotations.get_mut(id) {
+            Some(rec) if !rec.hidden => rec.hidden = true,
+            _ => return Err(DocumentError::UnknownAnnotation),
+        }
+        self.undo
+            .push(DocAction::DeletedAnnotation { annotation: id });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange::default())
+    }
+
+    /// Live (visible) annotation ids in slotmap key order (deterministic).
+    pub fn annotation_ids(&self) -> Vec<AnnotationId> {
+        self.annotations
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The annotation behind a live (visible) id, else `None`.
+    pub fn annotation(&self, id: AnnotationId) -> Option<&Annotation> {
+        self.annotations
+            .get(id)
+            .filter(|rec| !rec.hidden)
+            .map(|rec| &rec.annotation)
+    }
+
+    /// Whether a live annotation is currently `detached` (its anchored node
+    /// was deleted, or a captured circle couldn't survive a non-similarity
+    /// transform) — `None` for a stale/hidden id. The query the app renders
+    /// the warning-color convention from (docs/design/dimensions-text.md).
+    pub fn annotation_detached(&self, id: AnnotationId) -> Option<bool> {
+        self.annotations
+            .get(id)
+            .filter(|rec| !rec.hidden)
+            .map(|rec| rec.detached)
+    }
+
+    /// Every live (visible) annotation, in slotmap key order: `(id, value,
+    /// detached)`. The single query the app renders every dimension/leader
+    /// from — cheaper than round-tripping `annotation_ids` into per-id
+    /// lookups.
+    pub fn annotations(&self) -> Vec<(AnnotationId, Annotation, bool)> {
+        self.annotations
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(id, rec)| (id, rec.annotation.clone(), rec.detached))
+            .collect()
+    }
+
+    /// Carries every live, non-`detached` annotation's anchors on a node in
+    /// `touched` through the exact world-space map `t` — the same map a
+    /// caller just baked into an Object's geometry or composed into an
+    /// Instance's pose. This is exact, not a heuristic search: any point
+    /// already correct in world space before `t` is correct as
+    /// `t.apply_point(point)` after, because `t` **is** the map every vertex
+    /// on `touched` just moved by (docs/design/dimensions-text.md's
+    /// "geometric re-anchoring"; D1 restricts the mechanism to nodes that
+    /// carry their own vertex geometry — [`NodeId::Object`] and
+    /// [`NodeId::Instance`] — a bare [`NodeId::Group`] has none of its own).
+    ///
+    /// A `detached` annotation is left alone here — automatic re-anchoring
+    /// never silently "heals" a detach; only an explicit
+    /// [`Document::update_annotation`] (the user re-picking anchors) clears
+    /// it. This keeps every detach exactly attributable to the event that
+    /// caused it instead of a later, unrelated transform quietly discarding
+    /// the warning.
+    ///
+    /// Returns the exact before/after snapshot of every annotation this call
+    /// changed. Callers fold this into the enclosing [`DocAction`]
+    /// (`Transform`/`TransformSelection`/`TransformInstance`) so undo/redo
+    /// restore both the point AND the `detached` flag by **verbatim
+    /// replay** of these recorded values, rather than by re-deriving them
+    /// through `t`'s inverse: a [`Annotation::RadialDimension`]'s
+    /// non-similarity "detached" outcome is not otherwise invertible by
+    /// direction alone — `t` and its exact inverse are BOTH non-similarity
+    /// whenever `t` is, so re-running this same check at undo time cannot
+    /// tell "this transform caused the detach" apart from "this transform
+    /// reverses it". Since the guard above only ever touches an annotation
+    /// that was NOT `detached` beforehand, `before`'s implicit detached
+    /// state is always `false` and does not need to be recorded separately.
+    fn reanchor_touched(&mut self, touched: &[NodeId], t: &Transform) -> Vec<AnnotationReanchor> {
+        if touched.is_empty() {
+            return Vec::new();
+        }
+        let mut changes = Vec::new();
+        for (id, rec) in self.annotations.iter_mut() {
+            if rec.hidden || rec.detached {
+                continue;
+            }
+            let before = rec.annotation.clone();
+            if let Some(ok) = rec.annotation.reanchor(touched, t) {
+                let after_detached = !ok;
+                rec.detached = after_detached;
+                changes.push(AnnotationReanchor {
+                    annotation: id,
+                    before,
+                    after: rec.annotation.clone(),
+                    before_detached: false,
+                    after_detached,
+                });
+            }
+        }
+        changes
+    }
+
+    /// Re-evaluates `detached` for every live annotation touching a node in
+    /// `nodes` whose liveness (world-visible ⇄ hidden/consumed) this
+    /// mutation just changed: `detached` clears iff EVERY node the
+    /// annotation anchors to is currently live. Called by every op that
+    /// hides or consumes a node WITHOUT moving geometry — `delete_node`,
+    /// `ungroup` (the dissolved group node itself; its members are only
+    /// reparented, never hidden), the operand-consuming family
+    /// ([`Document::boolean`], [`Document::boolean_nodes`],
+    /// [`Document::slice_node`], [`Document::push_pull_through`], and a
+    /// Follow Me/extrusion merge's consumed base), and the definition-fold
+    /// family ([`Document::make_component`]'s folded world objects and
+    /// consumed groups, [`Document::explode_instance`]'s hidden instance
+    /// node) — so consumption detaches VISIBLY at the moment it happens,
+    /// with a recorded snapshot, rather than leaving a stale
+    /// `detached: false` for an annotation whose anchor no longer names a
+    /// live node. [`Document::make_unique`] is the one member of the
+    /// definition-fold family that does NOT call this: it repoints an
+    /// instance onto a fresh private definition without ever hiding the
+    /// instance or changing any world object's liveness (a definition
+    /// member was never a live, anchorable node to begin with — `node_is_live`
+    /// requires [`ObjectOwner::World`]), so there is no liveness edge for it
+    /// to record.
+    ///
+    /// Returns the exact before/after `detached` snapshot of every
+    /// annotation this call changed (the annotation's own content never
+    /// moves here — only liveness changed). Callers fold this into the
+    /// enclosing [`DocAction`] so undo/redo restore `detached` by
+    /// **verbatim replay**, never by calling this again: a naive re-run at
+    /// undo time would derive `detached` from CURRENT liveness alone,
+    /// blind to an annotation that was already `detached` for an unrelated
+    /// reason (say, an earlier non-similarity transform) before this
+    /// mutation ever touched it — silently re-attaching a stale record and,
+    /// for a [`Annotation::RadialDimension`], reopening exactly the
+    /// incoherence `Annotation::reanchor`'s non-similarity branch exists to
+    /// prevent. Symmetric by construction: forward apply, undo, and redo
+    /// all call this (or replay its recorded output) against the same node
+    /// set, so a detach and its exact inverse always round-trip.
+    fn reevaluate_liveness_recorded(&mut self, nodes: &[NodeId]) -> Vec<AnnotationReanchor> {
+        if nodes.is_empty() {
+            return Vec::new();
+        }
+        // Two passes: the liveness check needs `&self` (to query nodes
+        // outside the `annotations` map), which can't overlap a mutable
+        // borrow of `self.annotations` — so compute every update against a
+        // shared borrow first, then write them back in a second pass.
+        let updates: Vec<(AnnotationId, bool, bool)> = self
+            .annotations
+            .iter()
+            .filter(|(_, rec)| !rec.hidden && rec.annotation.touches_any(nodes))
+            .map(|(id, rec)| {
+                let live = rec
+                    .annotation
+                    .anchored_nodes()
+                    .into_iter()
+                    .all(|n| self.node_is_live(n));
+                (id, rec.detached, !live)
+            })
+            .collect();
+        let mut changes = Vec::new();
+        for (id, before_detached, after_detached) in updates {
+            if before_detached == after_detached {
+                continue;
+            }
+            let value = self.annotations[id].annotation.clone();
+            self.annotations[id].detached = after_detached;
+            changes.push(AnnotationReanchor {
+                annotation: id,
+                before: value.clone(),
+                after: value,
+                before_detached,
+                after_detached,
+            });
+        }
+        changes
     }
 
     // -------------------------------------------------- node metadata ops / getters
@@ -3871,6 +4508,7 @@ impl Document {
             self.undo.push(DocAction::FollowMeFace {
                 result: id,
                 merged_base: None,
+                reanchored: Vec::new(),
             });
             self.redo.clear();
             self.debug_validate();
@@ -3913,9 +4551,11 @@ impl Document {
             tags: Vec::new(),
         });
         self.objects[object].hidden = true;
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::FollowMeFace {
             result: id,
             merged_base: Some(object),
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -4133,6 +4773,7 @@ impl Document {
             self.undo.push(DocAction::FollowMeFace {
                 result: id,
                 merged_base: None,
+                reanchored: Vec::new(),
             });
             self.redo.clear();
             self.debug_validate();
@@ -4169,9 +4810,11 @@ impl Document {
         });
         self.objects[object].hidden = true;
         self.components[component].members.push(id);
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::FollowMeFace {
             result: id,
             merged_base: Some(object),
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -4240,6 +4883,7 @@ impl Document {
         self.undo.push(DocAction::FollowMeFace {
             result: id,
             merged_base: None,
+            reanchored: Vec::new(),
         });
         self.redo.clear();
         self.debug_validate();
@@ -4514,10 +5158,12 @@ impl Document {
             groups_touched.push(gid);
         }
         let mut objects_touched = vec![id];
+        let mut reanchored = Vec::new();
         if let Some(base) = merged_base {
             // The merged sweep consumed the path's own solid (design §3b).
             self.objects[base].hidden = true;
             objects_touched.push(base);
+            reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(base)]);
         }
 
         self.undo.push(DocAction::CreatedObject {
@@ -4526,6 +5172,7 @@ impl Document {
             removed,
             emptied,
             merged_base,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -4635,7 +5282,13 @@ impl Document {
         });
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
-        self.undo.push(DocAction::Boolean { result: id, a, b });
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
+        self.undo.push(DocAction::Boolean {
+            result: id,
+            a,
+            b,
+            reanchored,
+        });
         self.redo.clear();
         self.debug_validate();
 
@@ -4730,7 +5383,13 @@ impl Document {
         // membership is structural; a hidden operand stays listed exactly
         // like `delete_def_member`'s tombstone (see `DocAction::DeletedDefMember`).
         self.components[component].members.push(id);
-        self.undo.push(DocAction::Boolean { result: id, a, b });
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
+        self.undo.push(DocAction::Boolean {
+            result: id,
+            a,
+            b,
+            reanchored,
+        });
         self.redo.clear();
         self.debug_validate();
 
@@ -4864,6 +5523,7 @@ impl Document {
                 NodeId::Instance(_) => unreachable!("instance operands were refused"),
             }
         }
+        let reanchored = self.reevaluate_liveness_recorded(&hidden_operands);
 
         let result_group = group_name.map(|name| {
             self.groups.insert(GroupRecord {
@@ -4903,6 +5563,7 @@ impl Document {
             hidden_operands,
             result_objects,
             result_group,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5025,10 +5686,12 @@ impl Document {
             tags: Vec::new(),
         });
         self.objects[object].hidden = true;
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::Sliced {
             source: object,
             a,
             b,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5113,10 +5776,12 @@ impl Document {
         // `boolean_in_component`'s matching comment.
         self.components[component].members.push(a);
         self.components[component].members.push(b);
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::Sliced {
             source: object,
             a,
             b,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5177,9 +5842,11 @@ impl Document {
             results.push(id);
         }
         self.objects[object].hidden = true;
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::PushThrough {
             source: object,
             results: results.clone(),
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5252,9 +5919,11 @@ impl Document {
             results.push(id);
         }
         self.objects[object].hidden = true;
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::PushThrough {
             source: object,
             results: results.clone(),
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5292,10 +5961,12 @@ impl Document {
         rec.object
             .apply_transform(t)
             .map_err(DocumentError::Transform)?;
+        let reanchored = self.reanchor_touched(&[NodeId::Object(object)], t);
         self.undo.push(DocAction::Transform {
             objects: vec![object],
             forward: *t,
             inverse,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5368,10 +6039,12 @@ impl Document {
         rec.object
             .apply_transform(&local_t)
             .map_err(DocumentError::Transform)?;
+        let reanchored = self.reanchor_touched(&[NodeId::Object(object)], &local_t);
         self.undo.push(DocAction::Transform {
             objects: vec![object],
             forward: local_t,
             inverse,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5918,6 +6591,12 @@ impl Document {
     /// members keep their subtrees). The exact inverse of [`group_nodes`]. The
     /// `GroupId` is retained but hidden, so redo can re-form it. `Err` (document
     /// untouched) if the group handle is stale or already hidden.
+    ///
+    /// Hiding the group node is a consumption event for any annotation
+    /// anchored to it directly (its members are only reparented, never
+    /// hidden, so they stay live throughout) — the liveness pass runs over
+    /// exactly `[NodeId::Group(group)]`, mirroring `delete_node`'s treatment
+    /// of the same node kind.
     pub fn ungroup(&mut self, group: GroupId) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "ungroup");
         if !self.group_is_live(group) {
@@ -5935,10 +6614,12 @@ impl Document {
         }
         self.groups[group].hidden = true;
 
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Group(group)]);
         self.undo.push(DocAction::Ungrouped {
             group,
             parent,
             prev_parent_members,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -5991,11 +6672,13 @@ impl Document {
             self.splice_out_parent(pg, node, &[]);
         }
 
+        let reanchored = self.reevaluate_liveness_recorded(&hidden_subtree);
         self.undo.push(DocAction::Deleted {
             node,
             parent,
             prev_parent_members,
             hidden_subtree: hidden_subtree.clone(),
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -6044,10 +6727,22 @@ impl Document {
             }
         }
 
+        // A group holds no vertex geometry of its own, but the bake above
+        // applies the SAME `t` uniformly across the whole subtree — so an
+        // annotation anchored to the group node (or any nested subgroup
+        // node) is carried by `t` exactly as one anchored to a leaf object
+        // would be. Include every group in the subtree, not just `group`
+        // itself, so a nested subgroup anchor re-anchors too.
+        let mut touched: Vec<NodeId> = leaves.iter().map(|&o| NodeId::Object(o)).collect();
+        let mut subgroups = Vec::new();
+        self.collect_groups(NodeId::Group(group), &mut subgroups);
+        touched.extend(subgroups.iter().map(|&g| NodeId::Group(g)));
+        let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::Transform {
             objects: leaves.clone(),
             forward: *t,
             inverse,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -6190,20 +6885,39 @@ impl Document {
             instance_prevs.push((inst, prev));
         }
 
-        let groups_touched: Vec<GroupId> = nodes
-            .iter()
-            .filter_map(|&n| match n {
-                NodeId::Group(g) => Some(g),
-                _ => None,
-            })
-            .collect();
+        // Flatten every listed group AND its nested subgroups (mirrors the
+        // object/instance flattening above) — a group holds no vertex
+        // geometry, but every one of these rides the same baked `t` its
+        // leaves do, so an annotation anchored to any of them (not just a
+        // directly-listed one) must reanchor too.
+        let mut groups_touched: Vec<GroupId> = Vec::new();
+        let mut group_set: BTreeSet<GroupId> = BTreeSet::new();
+        for &node in nodes {
+            if matches!(node, NodeId::Group(_)) {
+                let mut found = Vec::new();
+                self.collect_groups(node, &mut found);
+                for g in found {
+                    if group_set.insert(g) {
+                        groups_touched.push(g);
+                    }
+                }
+            }
+        }
 
+        let touched: Vec<NodeId> = objects
+            .iter()
+            .map(|&o| NodeId::Object(o))
+            .chain(instances.iter().map(|&i| NodeId::Instance(i)))
+            .chain(groups_touched.iter().map(|&g| NodeId::Group(g)))
+            .collect();
+        let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::TransformSelection {
             objects: objects.clone(),
             sketches: sketch_targets.clone(),
             instances: instance_prevs,
             forward: *t,
             inverse,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -6407,6 +7121,16 @@ impl Document {
     /// definition already uses), so every definition always has a name and
     /// all instances of one definition always read identically.
     ///
+    /// An annotation anchored to a folded world object or a consumed group
+    /// detaches at this call ([`Document::reevaluate_liveness_recorded`]) —
+    /// the object stops being a world node and the group is hidden, so
+    /// neither is live any more. This is a plain detach, not a remap onto
+    /// the new instance: an annotation anchored to the instance itself
+    /// (rather than to the folded object) is unaffected and keeps tracking
+    /// it normally through a later [`Document::transform_instance`].
+    /// Retargeting a folded object's anchor onto the instance automatically
+    /// is future work.
+    ///
     /// Returns the new definition, its first instance, and the [`DocChange`].
     /// The whole act is one undoable step ([`DocAction::MadeComponent`]), exactly
     /// reversible and handle-stable (hide-not-delete).
@@ -6503,6 +7227,16 @@ impl Document {
         for &g in &consumed_groups {
             self.groups[g].hidden = true;
         }
+
+        // The fold just killed liveness for every leaf (world -> definition
+        // member) and every consumed group (hidden) in one step — run the
+        // same recorded liveness pass the delete/boolean family runs, so an
+        // annotation anchored to any of them detaches visibly right here,
+        // not silently until the next transform or the save-time backstop.
+        let mut folded: Vec<NodeId> = leaves.iter().map(|&o| NodeId::Object(o)).collect();
+        folded.extend(consumed_groups.iter().map(|&g| NodeId::Group(g)));
+        let reanchored = self.reevaluate_liveness_recorded(&folded);
+
         let instance = self.instances.insert(InstanceRecord {
             def: component,
             pose: Transform::IDENTITY,
@@ -6523,6 +7257,7 @@ impl Document {
             member_prior_parents,
             consumed_groups: consumed_groups.clone(),
             prev_parent_members,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -6788,10 +7523,16 @@ impl Document {
         let prev = rec.pose;
         let next = prev.then(t);
         rec.pose = next;
+        // `t` is exactly the world-space delta this call composed into the
+        // pose (`next = prev.then(t)`), so it carries a world-space anchor
+        // point through precisely the same way a baked object transform
+        // does — see `Document::reanchor_touched`.
+        let reanchored = self.reanchor_touched(&[NodeId::Instance(instance)], t);
         self.undo.push(DocAction::TransformInstance {
             instance,
             prev,
             next,
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -6945,6 +7686,13 @@ impl Document {
     /// copies shared content, it never moves it, so sibling instances keep
     /// seeing the original.
     ///
+    /// An annotation anchored to the instance node itself detaches at this
+    /// call ([`Document::reevaluate_liveness_recorded`]) — the instance is
+    /// hidden, so its own former geometry keeps whatever pose it had at
+    /// explode time rather than silently tracking whichever baked `created`
+    /// object stands in for it. Retargeting such an anchor onto the baked
+    /// object automatically is future work.
+    ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
     /// - [`DocumentError::CannotExplodeReflected`] — the pose mirrors
@@ -7053,10 +7801,16 @@ impl Document {
             let nodes: Vec<NodeId> = created.iter().map(|&o| NodeId::Object(o)).collect();
             self.splice_out_parent(pg, NodeId::Instance(instance), &nodes);
         }
+        // The instance node just went non-live — run the same recorded
+        // liveness pass the delete/boolean family runs, so an annotation
+        // anchored to it detaches visibly right here rather than freezing
+        // un-detached while the baked `created` objects move independently.
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Instance(instance)]);
         self.undo.push(DocAction::Exploded {
             instance,
             created: created.clone(),
             created_sketches: created_sketches.clone(),
+            reanchored,
         });
         self.redo.clear();
         self.debug_validate();
@@ -7632,6 +8386,7 @@ impl Document {
             removed,
             emptied,
             merged_base,
+            reanchored,
         } = action
         else {
             unreachable!("dispatched on CreatedObject");
@@ -7650,6 +8405,7 @@ impl Document {
                 removed,
                 emptied,
                 merged_base,
+                reanchored,
             });
             return Err(DocumentError::Sketch(e));
         }
@@ -7688,12 +8444,19 @@ impl Document {
             }
             _ => (Vec::new(), Vec::new()),
         };
+        // Verbatim restore, not a re-derived liveness check — see
+        // `Document::reevaluate_liveness_recorded`'s doc comment.
+        for r in &reanchored {
+            self.annotations[r.annotation].annotation = r.before.clone();
+            self.annotations[r.annotation].detached = r.before_detached;
+        }
         let redo_action = DocAction::CreatedObject {
             id,
             sketch,
             removed,
             emptied,
             merged_base,
+            reanchored,
         };
         self.debug_validate();
         Ok((
@@ -7731,6 +8494,7 @@ impl Document {
             removed,
             emptied: _,
             merged_base,
+            reanchored,
         } = action
         else {
             unreachable!("dispatched on CreatedObject");
@@ -7777,12 +8541,19 @@ impl Document {
             }
             _ => (Vec::new(), Vec::new()),
         };
+        // Verbatim replay — see `undo_created_object` and
+        // `Document::reevaluate_liveness_recorded`'s doc comment.
+        for r in &reanchored {
+            self.annotations[r.annotation].annotation = r.after.clone();
+            self.annotations[r.annotation].detached = r.after_detached;
+        }
         let undo_action = DocAction::CreatedObject {
             id,
             sketch,
             removed,
             emptied,
             merged_base,
+            reanchored,
         };
         self.debug_validate();
         Ok((
@@ -8335,9 +9106,10 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::FollowMeFace {
+            DocAction::FollowMeFace {
                 result,
                 merged_base,
+                reanchored,
             } => {
                 // Undo a face-profile sweep: hide the result; a merged
                 // base comes back like a boolean operand. A definition-owned
@@ -8345,6 +9117,7 @@ impl Document {
                 // `follow_me_face_in_instance`) needs every instance to
                 // re-resolve, exactly like `undo_created_object`'s matching
                 // comment.
+                let (result, merged_base) = (*result, *merged_base);
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = true;
                 }
@@ -8354,6 +9127,12 @@ impl Document {
                     touched.push(base);
                 }
                 let (components_touched, instances_touched) = self.def_owner_change(result);
+                // Verbatim restore — see
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 DocChange {
                     objects_touched: touched,
                     sketches_touched: Vec::new(),
@@ -8421,17 +9200,27 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::Boolean { result, a, b } => {
+            DocAction::Boolean {
+                result,
+                a,
+                b,
+                reanchored,
+            } => {
                 // Undo a combine: hide the result, bring the operands back.
                 // A definition-owned result (component-edit-parity.md phase
                 // K2: `boolean_in_component`) needs every instance to
                 // re-resolve.
+                let (result, a, b) = (*result, *a, *b);
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = true;
                 }
                 self.objects[a].hidden = false;
                 self.objects[b].hidden = false;
                 let (components_touched, instances_touched) = self.def_owner_change(result);
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 DocChange {
                     objects_touched: vec![result, a, b],
                     sketches_touched: Vec::new(),
@@ -8445,6 +9234,7 @@ impl Document {
                 hidden_operands,
                 result_objects,
                 result_group,
+                reanchored,
                 ..
             } => {
                 // Undo a node combine: hide the result (pieces + container
@@ -8462,13 +9252,23 @@ impl Document {
                         NodeId::Instance(id) => self.instances[id].hidden = false,
                     }
                 }
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 boolean_nodes_change(hidden_operands, result_objects, *result_group)
             }
-            &DocAction::Sliced { source, a, b } => {
+            DocAction::Sliced {
+                source,
+                a,
+                b,
+                reanchored,
+            } => {
                 // Undo a slice: hide both pieces, bring the source back. A
                 // definition-owned source (component-edit-parity.md phase
                 // K2: `slice_def_member`) needs every instance to
                 // re-resolve.
+                let (source, a, b) = (*source, *a, *b);
                 if let Some(rec) = self.objects.get_mut(a) {
                     rec.hidden = true;
                 }
@@ -8477,6 +9277,10 @@ impl Document {
                 }
                 self.objects[source].hidden = false;
                 let (components_touched, instances_touched) = self.def_owner_change(source);
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 DocChange {
                     objects_touched: vec![source, a, b],
                     sketches_touched: Vec::new(),
@@ -8486,7 +9290,11 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            DocAction::PushThrough { source, results } => {
+            DocAction::PushThrough {
+                source,
+                results,
+                reanchored,
+            } => {
                 // Undo a push-through: hide the result pieces, bring the source back.
                 let source = *source;
                 let results = results.clone();
@@ -8496,6 +9304,10 @@ impl Document {
                     }
                 }
                 self.objects[source].hidden = false;
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 let mut objects_touched = results;
                 objects_touched.push(source);
                 let (components_touched, instances_touched) = self.def_owner_change(source);
@@ -8509,7 +9321,10 @@ impl Document {
                 }
             }
             DocAction::Transform {
-                objects, inverse, ..
+                objects,
+                inverse,
+                reanchored,
+                ..
             } => {
                 // Undo a transform by baking its exact inverse into every target.
                 for &obj in objects {
@@ -8537,6 +9352,12 @@ impl Document {
                             instances_touched.push(ii);
                         }
                     }
+                }
+                // Verbatim restore, not a re-derived reanchor — see
+                // `Document::reanchor_touched`'s doc comment for why.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
                 }
                 DocChange {
                     objects_touched: objects.clone(),
@@ -8616,6 +9437,7 @@ impl Document {
                 sketches,
                 instances,
                 inverse,
+                reanchored,
                 ..
             } => {
                 // Undo by baking the exact inverse into every baked target and
@@ -8633,6 +9455,12 @@ impl Document {
                 }
                 for &(inst, prev) in instances {
                     self.instances[inst].pose = prev;
+                }
+                // Verbatim restore, not a re-derived reanchor — see
+                // `Document::reanchor_touched`'s doc comment for why.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
                 }
                 DocChange {
                     objects_touched: objects.clone(),
@@ -8710,6 +9538,7 @@ impl Document {
                 group,
                 parent,
                 prev_parent_members,
+                reanchored,
             } => {
                 // Undo ungroup = re-form: reparent members back into the group,
                 // restore the parent's order, unhide the group.
@@ -8722,6 +9551,12 @@ impl Document {
                 if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
                     self.groups[pg].members = prev.clone();
                 }
+                // Verbatim restore, not a re-derived liveness check — see
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 group_change(group, parent, &members)
             }
             DocAction::Deleted {
@@ -8729,6 +9564,7 @@ impl Document {
                 parent,
                 prev_parent_members,
                 hidden_subtree,
+                reanchored,
             } => {
                 // Undo delete = unhide exactly the hidden subtree and re-splice
                 // `node` back into its parent at the original position.
@@ -8742,6 +9578,16 @@ impl Document {
                 }
                 if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
                     self.groups[pg].members = prev.clone();
+                }
+                // Verbatim restore, not a re-derived liveness check — see
+                // `Document::reevaluate_liveness_recorded`'s doc comment
+                // for why: an annotation already `detached` for an
+                // unrelated reason before this delete must come back
+                // exactly that way, not re-attached just because its node
+                // is live again.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
                 }
                 delete_change(node, parent, hidden_subtree)
             }
@@ -8764,6 +9610,7 @@ impl Document {
                 member_prior_parents,
                 consumed_groups,
                 prev_parent_members,
+                reanchored,
                 ..
             } => {
                 // Dissolve: return each def member to its prior world parent,
@@ -8799,6 +9646,12 @@ impl Document {
                 }
                 self.instances[instance].hidden = true;
                 self.components[component].hidden = true;
+                // Verbatim restore, not a re-derived liveness check — see
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 let leaves: Vec<ObjectId> = member_prior_parents.iter().map(|&(o, _)| o).collect();
                 let mut change =
                     made_component_change(component, instance, parent, &leaves, consumed_groups);
@@ -8910,6 +9763,30 @@ impl Document {
                     ..Default::default()
                 }
             }
+            &DocAction::CreatedAnnotation { annotation } => {
+                if let Some(rec) = self.annotations.get_mut(annotation) {
+                    rec.hidden = true;
+                }
+                DocChange::default()
+            }
+            &DocAction::DeletedAnnotation { annotation } => {
+                if let Some(rec) = self.annotations.get_mut(annotation) {
+                    rec.hidden = false;
+                }
+                DocChange::default()
+            }
+            DocAction::UpdatedAnnotation {
+                annotation,
+                before,
+                before_detached,
+                ..
+            } => {
+                if let Some(rec) = self.annotations.get_mut(*annotation) {
+                    rec.annotation = before.clone();
+                    rec.detached = *before_detached;
+                }
+                DocChange::default()
+            }
             &DocAction::DeletedSketch { sketch } => {
                 self.hidden_sketches.remove(&sketch);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -8920,8 +9797,20 @@ impl Document {
                     ..Default::default()
                 }
             }
-            &DocAction::TransformInstance { instance, prev, .. } => {
-                self.instances[instance].pose = prev;
+            DocAction::TransformInstance {
+                instance,
+                prev,
+                reanchored,
+                ..
+            } => {
+                let instance = *instance;
+                self.instances[instance].pose = *prev;
+                // Verbatim restore, not a re-derived reanchor — see
+                // `Document::reanchor_touched`'s doc comment for why.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
                 DocChange {
                     instances_touched: vec![instance],
                     ..Default::default()
@@ -8952,6 +9841,7 @@ impl Document {
                 instance,
                 created,
                 created_sketches,
+                reanchored,
             } => {
                 // Hide the baked world objects and sketches, bring the
                 // instance back, and re-splice it into its parent in their
@@ -8968,6 +9858,12 @@ impl Document {
                 if let Some(pg) = parent {
                     let nodes: Vec<NodeId> = created.iter().map(|&o| NodeId::Object(o)).collect();
                     self.splice_in_parent(pg, &nodes, NodeId::Instance(instance));
+                }
+                // Verbatim restore, not a re-derived liveness check — see
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
                 }
                 let mut change = DocChange {
                     objects_touched: created.clone(),
@@ -9218,13 +10114,15 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::FollowMeFace {
+            DocAction::FollowMeFace {
                 result,
                 merged_base,
+                reanchored,
             } => {
                 // Redo a face-profile sweep: show the result; a merged
                 // base is consumed again. See the matching undo comment for
                 // the def-owned-result touched-list rationale.
+                let (result, merged_base) = (*result, *merged_base);
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = false;
                 }
@@ -9234,6 +10132,10 @@ impl Document {
                     touched.push(base);
                 }
                 let (components_touched, instances_touched) = self.def_owner_change(result);
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
                 DocChange {
                     objects_touched: touched,
                     sketches_touched: Vec::new(),
@@ -9310,14 +10212,24 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::Boolean { result, a, b } => {
+            DocAction::Boolean {
+                result,
+                a,
+                b,
+                reanchored,
+            } => {
                 // Redo a combine: hide the operands again, show the result.
+                let (result, a, b) = (*result, *a, *b);
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = false;
                 }
                 self.objects[a].hidden = true;
                 self.objects[b].hidden = true;
                 let (components_touched, instances_touched) = self.def_owner_change(result);
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
                 DocChange {
                     objects_touched: vec![result, a, b],
                     sketches_touched: Vec::new(),
@@ -9331,6 +10243,7 @@ impl Document {
                 hidden_operands,
                 result_objects,
                 result_group,
+                reanchored,
                 ..
             } => {
                 // Redo a node combine: re-hide the operand subtrees, show the
@@ -9348,10 +10261,20 @@ impl Document {
                 for &o in result_objects {
                     self.objects[o].hidden = false;
                 }
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
                 boolean_nodes_change(hidden_operands, result_objects, *result_group)
             }
-            &DocAction::Sliced { source, a, b } => {
+            DocAction::Sliced {
+                source,
+                a,
+                b,
+                reanchored,
+            } => {
                 // Redo a slice: hide the source again, show both pieces.
+                let (source, a, b) = (*source, *a, *b);
                 self.objects[source].hidden = true;
                 if let Some(rec) = self.objects.get_mut(a) {
                     rec.hidden = false;
@@ -9360,6 +10283,10 @@ impl Document {
                     rec.hidden = false;
                 }
                 let (components_touched, instances_touched) = self.def_owner_change(source);
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
                 DocChange {
                     objects_touched: vec![source, a, b],
                     sketches_touched: Vec::new(),
@@ -9369,7 +10296,11 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            DocAction::PushThrough { source, results } => {
+            DocAction::PushThrough {
+                source,
+                results,
+                reanchored,
+            } => {
                 // Redo a push-through: hide the source again, show the pieces.
                 let source = *source;
                 let results = results.clone();
@@ -9378,6 +10309,10 @@ impl Document {
                     if let Some(rec) = self.objects.get_mut(r) {
                         rec.hidden = false;
                     }
+                }
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
                 }
                 let mut objects_touched = results;
                 objects_touched.push(source);
@@ -9392,7 +10327,10 @@ impl Document {
                 }
             }
             DocAction::Transform {
-                objects, forward, ..
+                objects,
+                forward,
+                reanchored,
+                ..
             } => {
                 // Redo a transform by re-baking the forward into every target.
                 for &obj in objects {
@@ -9417,6 +10355,12 @@ impl Document {
                             instances_touched.push(ii);
                         }
                     }
+                }
+                // Verbatim replay, not a re-derived reanchor — see
+                // `Document::reanchor_touched`'s doc comment for why.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
                 }
                 DocChange {
                     objects_touched: objects.clone(),
@@ -9495,6 +10439,7 @@ impl Document {
                 sketches,
                 instances,
                 forward,
+                reanchored,
                 ..
             } => {
                 // Redo by re-baking the forward and re-composing each prior
@@ -9513,6 +10458,12 @@ impl Document {
                 }
                 for &(inst, prev) in instances.iter() {
                     self.instances[inst].pose = prev.then(forward);
+                }
+                // Verbatim replay, not a re-derived reanchor — see
+                // `Document::reanchor_touched`'s doc comment for why.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
                 }
                 DocChange {
                     objects_touched: objects.clone(),
@@ -9578,8 +10529,14 @@ impl Document {
                 }
                 group_change(group, parent, &members)
             }
-            &DocAction::Ungrouped { group, parent, .. } => {
+            DocAction::Ungrouped {
+                group,
+                parent,
+                reanchored,
+                ..
+            } => {
                 // Redo ungroup: dissolve the group again.
+                let (group, parent) = (*group, *parent);
                 let members = self.groups[group].members.clone();
                 for &m in &members {
                     self.set_node_parent(m, parent);
@@ -9588,12 +10545,19 @@ impl Document {
                     self.splice_out_parent(pg, NodeId::Group(group), &members);
                 }
                 self.groups[group].hidden = true;
+                // Verbatim replay — see the undo arm above and
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
                 group_change(group, parent, &members)
             }
             DocAction::Deleted {
                 node,
                 parent,
                 hidden_subtree,
+                reanchored,
                 ..
             } => {
                 // Redo delete: re-hide the subtree and splice `node` out
@@ -9608,6 +10572,12 @@ impl Document {
                 }
                 if let Some(pg) = parent {
                     self.splice_out_parent(pg, node, &[]);
+                }
+                // Verbatim replay — see the undo arm above and
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
                 }
                 delete_change(node, parent, hidden_subtree)
             }
@@ -9628,6 +10598,7 @@ impl Document {
                 parent,
                 member_prior_parents,
                 consumed_groups,
+                reanchored,
                 ..
             } => {
                 // Re-fold: re-own members as definition members, re-hide the
@@ -9655,6 +10626,12 @@ impl Document {
                 self.instances[instance].hidden = false;
                 if let Some(pg) = parent {
                     self.splice_in_parent(pg, selected, NodeId::Instance(instance));
+                }
+                // Verbatim replay — see the undo arm above and
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
                 }
                 let leaves: Vec<ObjectId> = member_prior_parents.iter().map(|&(o, _)| o).collect();
                 let mut change =
@@ -9768,6 +10745,30 @@ impl Document {
                     ..Default::default()
                 }
             }
+            &DocAction::CreatedAnnotation { annotation } => {
+                if let Some(rec) = self.annotations.get_mut(annotation) {
+                    rec.hidden = false;
+                }
+                DocChange::default()
+            }
+            &DocAction::DeletedAnnotation { annotation } => {
+                if let Some(rec) = self.annotations.get_mut(annotation) {
+                    rec.hidden = true;
+                }
+                DocChange::default()
+            }
+            DocAction::UpdatedAnnotation {
+                annotation,
+                after,
+                after_detached,
+                ..
+            } => {
+                if let Some(rec) = self.annotations.get_mut(*annotation) {
+                    rec.annotation = after.clone();
+                    rec.detached = *after_detached;
+                }
+                DocChange::default()
+            }
             &DocAction::DeletedSketch { sketch } => {
                 self.hidden_sketches.insert(sketch);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -9778,8 +10779,20 @@ impl Document {
                     ..Default::default()
                 }
             }
-            &DocAction::TransformInstance { instance, next, .. } => {
-                self.instances[instance].pose = next;
+            DocAction::TransformInstance {
+                instance,
+                next,
+                reanchored,
+                ..
+            } => {
+                let instance = *instance;
+                self.instances[instance].pose = *next;
+                // Verbatim replay, not a re-derived reanchor — see
+                // `Document::reanchor_touched`'s doc comment for why.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
                 DocChange {
                     instances_touched: vec![instance],
                     ..Default::default()
@@ -9805,6 +10818,7 @@ impl Document {
                 instance,
                 created,
                 created_sketches,
+                reanchored,
             } => {
                 let instance = *instance;
                 self.instances[instance].hidden = true;
@@ -9818,6 +10832,12 @@ impl Document {
                 if let Some(pg) = parent {
                     let nodes: Vec<NodeId> = created.iter().map(|&o| NodeId::Object(o)).collect();
                     self.splice_out_parent(pg, NodeId::Instance(instance), &nodes);
+                }
+                // Verbatim replay — see the undo arm above and
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
                 }
                 let mut change = DocChange {
                     objects_touched: created.clone(),

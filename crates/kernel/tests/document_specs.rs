@@ -11,11 +11,11 @@
 //! stable across undo/redo.
 
 use kernel::{
-    AxesFrame, AxesFrameError, BooleanError, BooleanOp, Document, DocumentError, FaceId, GroupId,
-    Guide, ImageFormat, ImportNode, ImportScene, KernelOp, KernelOpReport, Material, MaterialId,
-    MeshRecipe, NodeId, Object, ObjectId, Operand, Plane, Point3, Rgba8, SketchEdgeId, SketchError,
-    SketchId, SketchRegionId, SketchVertexId, Texture, Transform, TransformError, Vec3,
-    WatertightState,
+    Anchor, Annotation, AxesFrame, AxesFrameError, BooleanError, BooleanOp, CapturedCurve,
+    Document, DocumentError, FaceId, GroupId, Guide, ImageFormat, ImportNode, ImportScene,
+    KernelOp, KernelOpReport, Material, MaterialId, MeshRecipe, NodeId, Object, ObjectId, Operand,
+    Plane, Point3, RadialKind, Rgba8, SketchEdgeId, SketchError, SketchId, SketchRegionId,
+    SketchVertexId, Texture, Transform, TransformError, Vec3, WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -7389,4 +7389,1658 @@ fn island_transform_undo_survives_a_consume_and_restore_cycle() {
     d2.extrude_region(ps2, r2, 1.0).expect("extrude");
     d2.undo().expect("undo extrude");
     d2.undo().expect("undo island move after extrusion cycle");
+}
+
+// --------------------------------------------------------------- annotations
+
+/// A plane whose normal is +Z through the origin (matches [`ground`], spelled
+/// out locally so these tests read standalone).
+fn xy_plane() -> Plane {
+    ground()
+}
+
+fn point_anchor(node: Option<NodeId>, p: Point3) -> Anchor {
+    Anchor { node, point: p }
+}
+
+#[test]
+fn add_linear_dimension_is_queryable_and_undoable() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a = point_anchor(Some(NodeId::Object(obj)), Point3::new(0.0, 0.0, 0.0));
+    let b = point_anchor(Some(NodeId::Object(obj)), Point3::new(1.0, 0.0, 0.0));
+    let id = doc
+        .add_linear_dimension(a, b, Vec3::new(0.0, -0.5, 0.0), xy_plane(), None)
+        .expect("add linear dimension");
+
+    assert_eq!(doc.annotation_ids(), vec![id]);
+    assert_eq!(doc.annotation_detached(id), Some(false));
+    match doc.annotation(id).expect("live") {
+        Annotation::LinearDimension { a, b, .. } => {
+            assert_eq!(a.point, Point3::new(0.0, 0.0, 0.0));
+            assert_eq!(b.point, Point3::new(1.0, 0.0, 0.0));
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+
+    doc.undo().expect("undo create");
+    assert!(
+        doc.annotation_ids().is_empty(),
+        "undo hides the created annotation"
+    );
+    assert!(doc.annotation(id).is_none());
+
+    doc.redo().expect("redo create");
+    assert_eq!(
+        doc.annotation_ids(),
+        vec![id],
+        "redo unhides with the SAME AnnotationId"
+    );
+}
+
+#[test]
+fn add_radial_dimension_is_queryable() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let anchor = point_anchor(Some(NodeId::Object(obj)), Point3::new(1.0, 0.5, 0.0));
+    let curve = CapturedCurve {
+        center: Point3::new(0.5, 0.5, 0.0),
+        radius: 0.5,
+        plane: xy_plane(),
+    };
+    let id = doc
+        .add_radial_dimension(
+            anchor,
+            RadialKind::Radius,
+            curve,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+        )
+        .expect("add radial dimension");
+    match doc.annotation(id).expect("live") {
+        Annotation::RadialDimension { kind, curve, .. } => {
+            assert_eq!(*kind, RadialKind::Radius);
+            assert_eq!(curve.radius, 0.5);
+        }
+        other => panic!("expected RadialDimension, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_leader_text_roundtrip() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let anchor = point_anchor(Some(NodeId::Object(obj)), Point3::new(0.0, 0.0, 1.0));
+    let id = doc
+        .add_leader_text(anchor, Vec3::new(0.2, 0.2, 0.0), "note".to_string())
+        .expect("add leader text");
+    match doc.annotation(id).expect("live") {
+        Annotation::LeaderText { text, .. } => assert_eq!(text, "note"),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_linear_dimension_rejects_coincident_anchors() {
+    let mut doc = Document::new();
+    let p = Point3::new(1.0, 1.0, 1.0);
+    let a = point_anchor(None, p);
+    let b = point_anchor(None, p);
+    assert_eq!(
+        doc.add_linear_dimension(a, b, Vec3::ZERO, xy_plane(), None),
+        Err(DocumentError::DegenerateAnnotation)
+    );
+    assert!(doc.annotation_ids().is_empty(), "document untouched on Err");
+}
+
+#[test]
+fn add_linear_dimension_rejects_non_finite_coordinates() {
+    let mut doc = Document::new();
+    let nan = f64::NAN;
+    let a = point_anchor(None, Point3::new(nan, 0.0, 0.0));
+    let b = point_anchor(None, Point3::new(1.0, 0.0, 0.0));
+    assert_eq!(
+        doc.add_linear_dimension(a, b, Vec3::ZERO, xy_plane(), None),
+        Err(DocumentError::DegenerateAnnotation)
+    );
+}
+
+#[test]
+fn add_radial_dimension_rejects_non_positive_radius() {
+    let mut doc = Document::new();
+    let anchor = point_anchor(None, Point3::ORIGIN);
+    let bad_curve = CapturedCurve {
+        center: Point3::ORIGIN,
+        radius: 0.0,
+        plane: xy_plane(),
+    };
+    assert_eq!(
+        doc.add_radial_dimension(
+            anchor,
+            RadialKind::Radius,
+            bad_curve,
+            Vec3::new(1.0, 0.0, 0.0),
+            None
+        ),
+        Err(DocumentError::DegenerateAnnotation)
+    );
+}
+
+#[test]
+fn add_annotation_rejects_stale_anchor_node() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.delete_node(NodeId::Object(obj)).expect("delete");
+    let a = point_anchor(Some(NodeId::Object(obj)), Point3::ORIGIN);
+    let b = point_anchor(None, Point3::new(1.0, 0.0, 0.0));
+    assert_eq!(
+        doc.add_linear_dimension(a, b, Vec3::ZERO, xy_plane(), None),
+        Err(DocumentError::UnknownObject)
+    );
+}
+
+#[test]
+fn delete_annotation_undo_redo_round_trips() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "x".to_string(),
+        )
+        .unwrap();
+    doc.delete_annotation(id).expect("delete");
+    assert!(
+        doc.annotation_ids().is_empty(),
+        "deleted annotation is hidden"
+    );
+
+    doc.undo().expect("undo delete");
+    assert_eq!(doc.annotation_ids(), vec![id], "undo unhides it");
+
+    doc.redo().expect("redo delete");
+    assert!(doc.annotation_ids().is_empty(), "redo re-hides it");
+}
+
+#[test]
+fn delete_annotation_rejects_unknown_or_already_hidden() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "x".to_string(),
+        )
+        .unwrap();
+    doc.delete_annotation(id).unwrap();
+    assert_eq!(
+        doc.delete_annotation(id),
+        Err(DocumentError::UnknownAnnotation)
+    );
+
+    let mut other = Document::new();
+    let stray = other
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "y".to_string(),
+        )
+        .unwrap();
+    assert_eq!(
+        doc.delete_annotation(stray),
+        Err(DocumentError::UnknownAnnotation)
+    );
+}
+
+#[test]
+fn update_annotation_replaces_value_clears_detached_and_is_undoable() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(obj)), Point3::ORIGIN),
+            Vec3::ZERO,
+            "before".to_string(),
+        )
+        .unwrap();
+    // Force a detach so update_annotation's detached-clearing contract is
+    // actually exercised. (The replacement below changes the anchor/offset,
+    // not just the text, so this is a geometry-changing update — see
+    // `update_annotation_text_only_edit_preserves_detached` for the
+    // text-only case, which does NOT clear it.)
+    doc.delete_node(NodeId::Object(obj)).expect("delete node");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+    doc.undo().expect("undo delete to get the object back"); // restore geometry, detach recomputed clean
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    // Re-force detach without a live node, to prove update clears it.
+    let obj2 = NodeId::Object(obj);
+    doc.delete_node(obj2).unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    let new_value = Annotation::LeaderText {
+        anchor: point_anchor(None, Point3::new(2.0, 2.0, 2.0)),
+        offset: Vec3::new(1.0, 0.0, 0.0),
+        text: "after".to_string(),
+    };
+    doc.update_annotation(id, new_value.clone())
+        .expect("update");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "update clears detached"
+    );
+    assert_eq!(doc.annotation(id).unwrap(), &new_value);
+
+    doc.undo().expect("undo update");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { text, .. } => assert_eq!(text, "before"),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "undo restores the detached flag too"
+    );
+
+    doc.redo().expect("redo update");
+    assert_eq!(doc.annotation(id).unwrap(), &new_value);
+    assert_eq!(doc.annotation_detached(id), Some(false));
+}
+
+/// A text-only `update_annotation` (anchor/offset/plane/curve identical to
+/// the stored value — only `text`/`text_override` differs) leaves an
+/// existing `detached` warning exactly as it was; an update that ALSO
+/// changes an anchor/geometry field clears it. "Only an explicit update
+/// clears it" (the module doc comment) means a geometry-changing one — a
+/// Tab-toggle-style text edit is not itself an assertion that the placement
+/// is fresh (design-relevant refinement, see `Document::update_annotation`'s
+/// doc comment).
+#[test]
+fn update_annotation_text_only_edit_preserves_detached_geometry_edit_clears() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let anchor = point_anchor(Some(NodeId::Object(obj)), Point3::ORIGIN);
+    let offset = Vec3::new(1.0, 0.0, 0.0);
+    let id = doc
+        .add_leader_text(anchor, offset, "before".to_string())
+        .unwrap();
+    doc.delete_node(NodeId::Object(obj)).expect("delete node");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    // Text-only edit: SAME anchor/offset, different text. Detached stays set.
+    let text_only = Annotation::LeaderText {
+        anchor,
+        offset,
+        text: "renamed".to_string(),
+    };
+    doc.update_annotation(id, text_only.clone())
+        .expect("text-only update");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "a text-only edit does not clear a stale detached warning"
+    );
+    assert_eq!(doc.annotation(id).unwrap(), &text_only);
+
+    // Geometry edit: a different anchor point. Detached clears.
+    let geometry_edit = Annotation::LeaderText {
+        anchor: point_anchor(None, Point3::new(5.0, 5.0, 5.0)),
+        offset,
+        text: "renamed".to_string(),
+    };
+    doc.update_annotation(id, geometry_edit.clone())
+        .expect("geometry-changing update");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "an anchor-changing edit clears detached"
+    );
+    assert_eq!(doc.annotation(id).unwrap(), &geometry_edit);
+
+    // Undo the geometry edit restores the pre-edit (still detached) state.
+    doc.undo().expect("undo geometry edit");
+    assert_eq!(doc.annotation(id).unwrap(), &text_only);
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "undo restores the exact pre-edit detached flag"
+    );
+
+    // Redo re-applies the geometry edit and re-clears detached.
+    doc.redo().expect("redo geometry edit");
+    assert_eq!(doc.annotation(id).unwrap(), &geometry_edit);
+    assert_eq!(doc.annotation_detached(id), Some(false));
+}
+
+#[test]
+fn update_annotation_rejects_mismatched_kind() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "x".to_string(),
+        )
+        .unwrap();
+    let dimension = Annotation::LinearDimension {
+        a: point_anchor(None, Point3::ORIGIN),
+        b: point_anchor(None, Point3::new(1.0, 0.0, 0.0)),
+        offset: Vec3::ZERO,
+        plane: xy_plane(),
+        text_override: None,
+    };
+    assert_eq!(
+        doc.update_annotation(id, dimension),
+        Err(DocumentError::MismatchedAnnotationKind)
+    );
+    // Untouched on error.
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { text, .. } => assert_eq!(text, "x"),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+}
+
+#[test]
+fn update_annotation_rejects_unknown_id() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "x".to_string(),
+        )
+        .unwrap();
+    doc.delete_annotation(id).unwrap();
+    let replacement = Annotation::LeaderText {
+        anchor: point_anchor(None, Point3::ORIGIN),
+        offset: Vec3::ZERO,
+        text: "y".to_string(),
+    };
+    assert_eq!(
+        doc.update_annotation(id, replacement),
+        Err(DocumentError::UnknownAnnotation)
+    );
+}
+
+/// The headline re-anchoring spec: move the anchored node, and the
+/// dimension's anchor points, offset, and plane carry through EXACTLY (the
+/// design's "move the box, the dimension follows"); undo restores the
+/// pre-move state bit-for-bit.
+#[test]
+fn transform_object_reanchors_linear_dimension_and_undo_restores_exact_point() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let b0 = Point3::new(1.0, 0.0, 0.0);
+    let offset0 = Vec3::new(0.0, -0.5, 0.0);
+    let id = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            point_anchor(Some(NodeId::Object(obj)), b0),
+            offset0,
+            xy_plane(),
+            None,
+        )
+        .unwrap();
+
+    let t = Transform::translation(Vec3::new(2.0, 3.0, 4.0));
+    doc.transform_object(obj, &t).expect("move");
+
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension { a, b, offset, .. } => {
+            assert_eq!(
+                a.point,
+                Point3::new(2.0, 3.0, 4.0),
+                "a follows the move exactly"
+            );
+            assert_eq!(
+                b.point,
+                Point3::new(3.0, 3.0, 4.0),
+                "b follows the move exactly"
+            );
+            assert_eq!(
+                *offset, offset0,
+                "a translation doesn't change a placement vector"
+            );
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.undo().expect("undo move");
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension { a, b, offset, .. } => {
+            assert_eq!(a.point, a0, "undo restores the ORIGINAL point bit-for-bit");
+            assert_eq!(b.point, b0);
+            assert_eq!(*offset, offset0);
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+
+    doc.redo().expect("redo move");
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension { a, b, .. } => {
+            assert_eq!(a.point, Point3::new(2.0, 3.0, 4.0));
+            assert_eq!(b.point, Point3::new(3.0, 3.0, 4.0));
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+}
+
+/// Re-anchoring under a rotation (not just a translation), to prove the
+/// mechanism carries the FULL linear map, not merely an offset.
+#[test]
+fn transform_object_rotation_reanchors_linear_dimension() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a0 = Point3::new(1.0, 0.0, 0.0);
+    let id = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            point_anchor(None, Point3::new(0.0, 0.0, 1.0)),
+            Vec3::new(1.0, 0.0, 0.0),
+            xy_plane(),
+            None,
+        )
+        .unwrap();
+    // Quarter turn about Z: (1,0,0) -> (0,1,0).
+    let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2).unwrap();
+    doc.transform_object(obj, &t).expect("rotate");
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension { a, .. } => {
+            assert!(
+                a.point.approx_eq(Point3::new(0.0, 1.0, 0.0), 1e-9),
+                "expected ~ (0,1,0), got {:?}",
+                a.point
+            );
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+}
+
+/// A [`RadialDimension`]'s captured circle cannot survive a non-similarity
+/// (non-uniform-scale) transform — it flags `detached` rather than writing a
+/// silently-wrong radius. Undo restores the ORIGINAL attached state exactly
+/// (the regression this spec pins: undo must not re-derive `detached` by
+/// re-applying the inverse transform, since a non-similarity map's inverse
+/// is ALSO non-similarity — see `Document::reanchor_touched`'s doc comment).
+#[test]
+fn transform_object_non_similarity_scale_detaches_radial_dimension_and_undo_reattaches() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let curve0 = CapturedCurve {
+        center: Point3::new(0.5, 0.5, 0.0),
+        radius: 0.5,
+        plane: xy_plane(),
+    };
+    let anchor0 = Point3::new(1.0, 0.5, 0.0);
+    let id = doc
+        .add_radial_dimension(
+            point_anchor(Some(NodeId::Object(obj)), anchor0),
+            RadialKind::Radius,
+            curve0,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    // Non-uniform scale: x2, y1, z1 — not a similarity.
+    let t = Transform::scale(Vec3::new(2.0, 1.0, 1.0));
+    doc.transform_object(obj, &t).expect("scale");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "a squashed circle can't be represented — flagged detached"
+    );
+    match doc.annotation(id).unwrap() {
+        Annotation::RadialDimension { curve, .. } => {
+            assert_eq!(
+                curve.radius, 0.5,
+                "the stale radius is left as-is, not silently wrong"
+            );
+        }
+        other => panic!("expected RadialDimension, got {other:?}"),
+    }
+
+    doc.undo().expect("undo scale");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "undo restores the pre-scale attached state EXACTLY, not by re-deriving \
+         from the inverse (also non-similarity) transform"
+    );
+    match doc.annotation(id).unwrap() {
+        Annotation::RadialDimension { anchor, curve, .. } => {
+            assert_eq!(anchor.point, anchor0);
+            assert_eq!(curve.radius, 0.5);
+        }
+        other => panic!("expected RadialDimension, got {other:?}"),
+    }
+
+    doc.redo().expect("redo scale");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "redo re-applies the detach exactly"
+    );
+}
+
+/// The other headline spec: deleting an anchored node detaches the
+/// annotation (kept, not deleted, per the design), and undo re-attaches it
+/// exactly.
+#[test]
+fn delete_node_detaches_annotation_and_undo_reattaches() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(obj)), Point3::new(0.5, 0.5, 1.0)),
+            Vec3::new(0.1, 0.1, 0.0),
+            "label".to_string(),
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.delete_node(NodeId::Object(obj))
+        .expect("delete the anchored object");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "anchored node gone -> detached"
+    );
+    assert!(
+        doc.annotation_ids().contains(&id),
+        "detached annotations persist, not deleted"
+    );
+
+    doc.undo().expect("undo delete");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "node restored -> re-attached"
+    );
+
+    doc.redo().expect("redo delete");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+}
+
+/// A free-floating anchor (`node: None`) never reanchors and never detaches
+/// — it names no node to track.
+#[test]
+fn free_floating_anchor_is_never_touched_by_transforms_or_deletes() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let p0 = Point3::new(5.0, 5.0, 5.0);
+    let id = doc
+        .add_leader_text(point_anchor(None, p0), Vec3::ZERO, "free".to_string())
+        .unwrap();
+
+    doc.transform_object(obj, &Transform::translation(Vec3::new(1.0, 1.0, 1.0)))
+        .unwrap();
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => assert_eq!(anchor.point, p0),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.delete_node(NodeId::Object(obj)).unwrap();
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "no anchored node -> a deletion elsewhere cannot detach it"
+    );
+}
+
+/// `transform_group` re-anchors an annotation on a member object, exactly
+/// like `transform_object` (the group itself holds no pose — geometry is
+/// baked into its leaf objects).
+#[test]
+fn transform_group_reanchors_annotation_on_member_object() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(obj)]).expect("group");
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            Vec3::ZERO,
+            "g".to_string(),
+        )
+        .unwrap();
+
+    let t = Transform::translation(Vec3::new(10.0, 0.0, 0.0));
+    doc.transform_group(group, &t).expect("move group");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => {
+            assert_eq!(anchor.point, Point3::new(10.0, 0.0, 0.0));
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+
+    doc.undo().expect("undo group move");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => assert_eq!(anchor.point, a0),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+}
+
+/// `transform_selection` re-anchors annotations on any touched object,
+/// exercising the mixed-selection bake path.
+#[test]
+fn transform_selection_reanchors_annotation_on_touched_object() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            Vec3::ZERO,
+            "s".to_string(),
+        )
+        .unwrap();
+
+    let t = Transform::translation(Vec3::new(0.0, 7.0, 0.0));
+    doc.transform_selection(&[NodeId::Object(obj)], &[], &t)
+        .expect("transform selection");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => {
+            assert_eq!(anchor.point, Point3::new(0.0, 7.0, 0.0));
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+
+    doc.undo().expect("undo");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => assert_eq!(anchor.point, a0),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+}
+
+/// `transform_instance` composes a delta into a component instance's pose
+/// (never baked); an annotation anchored to the instance still re-anchors
+/// exactly, because the composed delta IS the exact world-space map any
+/// world point on the instance just moved by.
+#[test]
+fn transform_instance_reanchors_annotation() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (_component, instance, _) = doc
+        .make_component(&[NodeId::Object(obj)])
+        .expect("make component");
+
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Instance(instance)), a0),
+            Vec3::ZERO,
+            "i".to_string(),
+        )
+        .unwrap();
+
+    let t = Transform::translation(Vec3::new(0.0, 0.0, 9.0));
+    doc.transform_instance(instance, &t).expect("move instance");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => {
+            assert_eq!(anchor.point, Point3::new(0.0, 0.0, 9.0));
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.undo().expect("undo instance move");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => assert_eq!(anchor.point, a0),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+
+    doc.redo().expect("redo instance move");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => {
+            assert_eq!(anchor.point, Point3::new(0.0, 0.0, 9.0));
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+}
+
+/// A second, UNRELATED transform after a detach never silently "heals" it —
+/// only an explicit `update_annotation` clears `detached` (D1's scope
+/// decision, documented on `Document::reanchor_touched`).
+#[test]
+fn detached_annotation_is_not_silently_healed_by_a_later_transform() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let curve0 = CapturedCurve {
+        center: Point3::new(0.5, 0.5, 0.0),
+        radius: 0.5,
+        plane: xy_plane(),
+    };
+    let id = doc
+        .add_radial_dimension(
+            point_anchor(Some(NodeId::Object(obj)), Point3::new(1.0, 0.5, 0.0)),
+            RadialKind::Radius,
+            curve0,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+        )
+        .unwrap();
+
+    // Detach it via a non-similarity scale.
+    doc.transform_object(obj, &Transform::scale(Vec3::new(2.0, 1.0, 1.0)))
+        .expect("scale");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    // A SUBSEQUENT rigid translation (a similarity) must not silently
+    // re-attach it.
+    doc.transform_object(obj, &Transform::translation(Vec3::new(1.0, 0.0, 0.0)))
+        .expect("translate");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "a later unrelated transform must not silently clear a detach"
+    );
+}
+
+/// The adversarial-review repro for the `Deleted` undo/redo coherence
+/// finding: a detach caused by an EARLIER, unrelated mutation (a
+/// non-similarity scale) must survive a later delete-of-the-anchored-node
+/// and its undo/redo unchanged. Before the fix, undo/redo of `Deleted`
+/// re-derived `detached` from current liveness alone
+/// (`Document::reevaluate_liveness`), which cannot tell "this node's own
+/// liveness caused the detach" apart from "something else did" — undoing
+/// the delete made the node live again and silently cleared the flag,
+/// re-presenting a stale, incoherent `RadialDimension` as valid AND
+/// disabling `reanchor_touched`'s `detached` guard that was supposed to
+/// keep protecting it (the compounding half of the finding).
+#[test]
+fn undo_of_delete_does_not_rederive_a_detach_caused_by_an_earlier_transform() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let curve0 = CapturedCurve {
+        center: Point3::new(0.5, 0.5, 0.0),
+        radius: 0.5,
+        plane: xy_plane(),
+    };
+    let id = doc
+        .add_radial_dimension(
+            point_anchor(Some(NodeId::Object(obj)), Point3::new(1.0, 0.5, 0.0)),
+            RadialKind::Radius,
+            curve0,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+        )
+        .unwrap();
+
+    // Detach it via a non-similarity scale — a cause entirely unrelated to
+    // the delete that follows.
+    doc.transform_object(obj, &Transform::scale(Vec3::new(2.0, 1.0, 1.0)))
+        .expect("scale");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    // Delete the (already-detached) anchored object.
+    doc.delete_node(NodeId::Object(obj)).expect("delete");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "still detached post-delete"
+    );
+
+    // Undo the delete: the node comes back live, but the detach predates
+    // the delete and has nothing to do with it — undo must not silently
+    // re-attach it just because its node is live again.
+    doc.undo().expect("undo delete");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "undo of delete must not re-derive (and clear) a detach it didn't cause"
+    );
+
+    // The compounding half: with the node live again but the annotation
+    // STILL detached, `reanchor_touched`'s guard must keep skipping it —
+    // a further transform on the resurrected node must not silently touch
+    // the stale curve.
+    let curve_before = match doc.annotation(id).unwrap() {
+        Annotation::RadialDimension { curve, .. } => *curve,
+        other => panic!("expected RadialDimension, got {other:?}"),
+    };
+    doc.transform_object(obj, &Transform::translation(Vec3::new(3.0, 0.0, 0.0)))
+        .expect("translate the resurrected object");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "a detached annotation stays detached across a later unrelated transform"
+    );
+    match doc.annotation(id).unwrap() {
+        Annotation::RadialDimension { curve, .. } => {
+            assert_eq!(
+                *curve, curve_before,
+                "the stale curve is never silently touched"
+            )
+        }
+        other => panic!("expected RadialDimension, got {other:?}"),
+    }
+    doc.undo().expect("undo the translate");
+
+    // Redo the delete: still detached, verbatim.
+    doc.redo().expect("redo delete");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    // Unwind past the delete back to before the scale: the TRUE underlying
+    // cause reverses exactly, proving the mechanism still works end to end
+    // (this isn't just "detached never changes").
+    doc.undo().expect("undo delete again");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+    doc.undo().expect("undo the original scale");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "undoing the transform that actually caused the detach clears it exactly"
+    );
+}
+
+/// `RadialDimension`'s non-similarity detach freezes the WHOLE record
+/// coherently — `anchor.point` and `leader_dir`, not just `curve` — so the
+/// leader never ends up pointing away from the stale circle at a
+/// brand-new, unrelated position. This is a designed-behavior correction:
+/// before the fix, `anchor.point`/`leader_dir` were carried through `t`
+/// while `curve` was left frozen, an internally-inconsistent record no
+/// existing spec happened to assert against directly (the pre-existing
+/// `transform_object_non_similarity_scale_detaches_radial_dimension_and_undo_reattaches`
+/// spec only checked `curve.radius`, so it still passes unchanged).
+#[test]
+fn radial_dimension_non_similarity_detach_freezes_the_whole_record_coherently() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let curve0 = CapturedCurve {
+        center: Point3::new(0.5, 0.5, 0.0),
+        radius: 0.5,
+        plane: xy_plane(),
+    };
+    let anchor0 = Point3::new(1.0, 0.5, 0.0);
+    let leader0 = Vec3::new(1.0, 0.0, 0.0);
+    let id = doc
+        .add_radial_dimension(
+            point_anchor(Some(NodeId::Object(obj)), anchor0),
+            RadialKind::Radius,
+            curve0,
+            leader0,
+            None,
+        )
+        .unwrap();
+
+    doc.transform_object(obj, &Transform::scale(Vec3::new(2.0, 1.0, 1.0)))
+        .expect("non-similarity scale");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+    match doc.annotation(id).unwrap() {
+        Annotation::RadialDimension {
+            anchor,
+            curve,
+            leader_dir,
+            ..
+        } => {
+            assert_eq!(
+                anchor.point, anchor0,
+                "anchor stays at its pre-transform point"
+            );
+            assert_eq!(
+                *leader_dir, leader0,
+                "leader direction stays pre-transform too"
+            );
+            assert_eq!(*curve, curve0, "the captured curve is untouched");
+        }
+        other => panic!("expected RadialDimension, got {other:?}"),
+    }
+}
+
+/// `LinearDimension`'s rigid-assembly case: BOTH anchors ride the same
+/// touched transform under one `t` (here, two objects grouped together and
+/// the group moved) — the whole record carries through `t` exactly, same
+/// as carrying it through a single-object bake.
+///
+/// This alone does not discriminate the rigid both-anchor branch from the
+/// pre-fix code (01e852e), which unconditionally carried `offset`/`plane`
+/// through `t` whenever EITHER anchor was touched — for the both-touched
+/// case that unconditional carry and the current "both touched -> carry
+/// verbatim" branch compute the identical result, so this scenario alone
+/// passes on both revisions. To prove the both-anchor branch (not a
+/// collapsed one-anchor path) is actually what ran, a THIRD, uninvolved
+/// sibling anchor configuration rides the SAME `t` in the same step: `a2`
+/// on `obj_a` (touched), `b2` free-floating (never touched) — the
+/// one-anchor case, which 01e852e's unconditional carry gets wrong (it
+/// would still apply `t.apply_vector`/`t.apply_plane` to the OLD
+/// `offset2`/`plane2` even though only one endpoint moved, producing a
+/// placement no longer perpendicular to the new, partially-moved baseline).
+#[test]
+fn linear_dimension_rigid_both_anchor_case_is_exact() {
+    let mut doc = Document::new();
+    let obj_a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let obj_b = extrude_box(&mut doc, 5.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(obj_a), NodeId::Object(obj_b)])
+        .expect("group both");
+
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let b0 = Point3::new(5.0, 0.0, 0.0);
+    let offset0 = Vec3::new(0.0, 0.0, 0.5);
+    let plane0 = xy_plane();
+    let id = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj_a)), a0),
+            point_anchor(Some(NodeId::Object(obj_b)), b0),
+            offset0,
+            plane0,
+            None,
+        )
+        .unwrap();
+
+    // A sibling ONE-anchor dimension in the same group, riding the SAME
+    // `t`: only `a2`'s node (`obj_a`) is touched; `b2` is free-floating.
+    // This is the discriminator (see the doc comment above).
+    let a2_0 = Point3::new(0.5, 0.5, 0.0);
+    let b2_0 = Point3::new(9.0, 9.0, 9.0);
+    let offset2_0 = Vec3::new(0.3, -0.2, 0.7);
+    let id2 = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj_a)), a2_0),
+            point_anchor(None, b2_0),
+            offset2_0,
+            plane0,
+            None,
+        )
+        .unwrap();
+
+    let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.3)
+        .unwrap()
+        .then(&Transform::translation(Vec3::new(1.0, 2.0, 3.0)));
+    doc.transform_group(group, &t)
+        .expect("move the whole assembly");
+
+    let expected_a = t.apply_point(a0);
+    let expected_b = t.apply_point(b0);
+    let expected_offset = t.apply_vector(offset0);
+    let expected_plane = t.apply_plane(&plane0).unwrap();
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            plane,
+            ..
+        } => {
+            assert_eq!(a.point, expected_a, "a carries through t exactly");
+            assert_eq!(b.point, expected_b, "b carries through t exactly");
+            assert_eq!(*offset, expected_offset, "offset carries through t exactly");
+            assert_eq!(*plane, expected_plane, "plane carries through t exactly");
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    // The sibling one-anchor case must NOT take the both-anchor "carry
+    // verbatim" path: `b2` (never touched) stays exactly put, and the
+    // re-derived offset/plane must differ from what 01e852e's
+    // unconditional carry would have written (`t.apply_vector(offset2_0)`)
+    // — proof the both-anchor branch above ran because it took the SAME
+    // `t`, not because the two branches happen to agree.
+    match doc.annotation(id2).unwrap() {
+        Annotation::LinearDimension { a, b, offset, .. } => {
+            assert_eq!(a.point, t.apply_point(a2_0), "a2 carries through t exactly");
+            assert_eq!(b.point, b2_0, "b2, never touched, stays exactly put");
+            let unconditional_carry = t.apply_vector(offset2_0);
+            assert_ne!(
+                *offset, unconditional_carry,
+                "must not silently reuse 01e852e's unconditional carry, which \
+                 ignores that b2 never moved"
+            );
+            let dir = (b.point - a.point).normalized().unwrap();
+            assert!(
+                offset.dot(dir).abs() < 1e-9,
+                "the re-derived offset stays perpendicular to the NEW baseline"
+            );
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id2), Some(false));
+}
+
+/// `LinearDimension`'s one-anchor case, rotation sub-case: only `a`'s node
+/// is touched, by a rotation about `a`'s OWN point — both endpoints stay
+/// numerically unchanged, so `offset`/`plane` must stay unchanged too
+/// (not silently rotated, the bug this finding fixes).
+#[test]
+fn linear_dimension_one_anchor_rotation_about_its_own_point_leaves_offset_and_plane_unchanged() {
+    let mut doc = Document::new();
+    // A vertex at the world origin so "rotate about a's own point" is just
+    // a plain rotation (which already fixes the origin exactly).
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let b0 = Point3::new(1.0, 0.0, 0.0); // free-floating: never touched
+    let offset0 = Vec3::new(0.0, 1.0, 0.0); // already exactly perpendicular to b0-a0
+    let plane0 = xy_plane();
+    let id = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            point_anchor(None, b0),
+            offset0,
+            plane0,
+            None,
+        )
+        .unwrap();
+
+    let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2).unwrap();
+    doc.transform_object(obj, &t)
+        .expect("rotate about the origin");
+
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            plane,
+            ..
+        } => {
+            assert_eq!(
+                a.point, a0,
+                "a's own point is numerically unchanged by a rotation about it"
+            );
+            assert_eq!(b.point, b0, "b was never touched");
+            assert_eq!(
+                *offset, offset0,
+                "both endpoints unchanged -> the placement offset must not silently rotate"
+            );
+            assert_eq!(*plane, plane0, "nor the plane");
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id), Some(false));
+}
+
+/// `LinearDimension`'s one-anchor case, translation sub-case: only `a`
+/// moves, changing the a-b direction — `offset`/`plane` re-derive sanely
+/// (offset stays perpendicular to the NEW baseline; the plane still
+/// contains both endpoints), rather than either freezing wrongly or
+/// carrying the OLD offset/plane through `t` (which would no longer even
+/// be perpendicular to the new baseline).
+#[test]
+fn linear_dimension_one_anchor_translation_rederives_sanely() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let b0 = Point3::new(1.0, 0.0, 0.0);
+    let offset0 = Vec3::new(0.0, 1.0, 0.0);
+    let id = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            point_anchor(None, b0),
+            offset0,
+            xy_plane(),
+            None,
+        )
+        .unwrap();
+
+    // A generic (non-axis-aligned) translation of `a`'s object, so the new
+    // baseline direction is neither the old one nor trivially still
+    // orthogonal to `offset0` by coincidence.
+    let delta = Vec3::new(0.3, 0.4, 0.0);
+    doc.transform_object(obj, &Transform::translation(delta))
+        .expect("translate a's object");
+
+    let expected_a = a0 + delta;
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            plane,
+            ..
+        } => {
+            assert_eq!(a.point, expected_a, "a follows the translation exactly");
+            assert_eq!(b.point, b0, "b, never touched, stays exactly put");
+            let dir = (b.point - a.point).normalized().unwrap();
+            assert!(
+                offset.dot(dir).abs() < 1e-9,
+                "the re-derived offset stays perpendicular to the NEW baseline: {offset:?} . {dir:?}"
+            );
+            assert!(
+                plane.signed_distance(a.point).abs() < 1e-9,
+                "the re-derived plane still contains a"
+            );
+            assert!(
+                plane.signed_distance(b.point).abs() < 1e-9,
+                "the re-derived plane still contains b"
+            );
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id), Some(false));
+}
+
+/// `LinearDimension`'s one-anchor case, degenerate sub-case: the touched
+/// anchor moves exactly onto the untouched one, so no a-b direction
+/// survives to re-derive a placement from. Rather than write a
+/// zero-direction placement (garbage), the whole record freezes at its
+/// pre-transform values and the annotation flags `detached`.
+#[test]
+fn linear_dimension_one_anchor_degenerate_rederivation_detaches_instead_of_writing_garbage() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let b0 = Point3::new(5.0, 0.0, 0.0);
+    let offset0 = Vec3::new(0.0, 1.0, 0.0);
+    let plane0 = xy_plane();
+    let id = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            point_anchor(None, b0),
+            offset0,
+            plane0,
+            None,
+        )
+        .unwrap();
+
+    // Move `a`'s object exactly onto `b`'s point.
+    doc.transform_object(obj, &Transform::translation(Vec3::new(5.0, 0.0, 0.0)))
+        .expect("move a onto b");
+
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "coincident endpoints -> no direction to re-derive from -> detached"
+    );
+    match doc.annotation(id).unwrap() {
+        Annotation::LinearDimension {
+            a,
+            b,
+            offset,
+            plane,
+            ..
+        } => {
+            assert_eq!(
+                a.point, a0,
+                "frozen at the pre-transform value, not the coincident one"
+            );
+            assert_eq!(b.point, b0);
+            assert_eq!(*offset, offset0, "no garbage placement is ever written");
+            assert_eq!(*plane, plane0);
+        }
+        other => panic!("expected LinearDimension, got {other:?}"),
+    }
+}
+
+/// A `transform_group` bake must reanchor an annotation anchored to the
+/// GROUP NODE ITSELF, not only to a member object underneath it — the
+/// group holds no vertex geometry of its own, but every leaf bakes by the
+/// SAME `t`, so a group-anchored annotation must follow exactly like an
+/// object-anchored one.
+#[test]
+fn transform_group_reanchors_annotation_anchored_to_the_group_node_itself() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(obj)]).expect("group");
+    let a0 = Point3::new(2.0, 3.0, 0.0);
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Group(group)), a0),
+            Vec3::ZERO,
+            "grp".to_string(),
+        )
+        .unwrap();
+
+    let t = Transform::translation(Vec3::new(5.0, 0.0, 0.0));
+    doc.transform_group(group, &t).expect("move group");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => {
+            assert_eq!(anchor.point, Point3::new(7.0, 3.0, 0.0));
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.undo().expect("undo group move");
+    match doc.annotation(id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => assert_eq!(anchor.point, a0),
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+}
+
+/// Deleting a group detaches an annotation anchored to the group node
+/// (already held via `delete_node`'s whole-subtree liveness pass, which
+/// includes `node` itself — pinned explicitly per the finding).
+#[test]
+fn delete_node_detaches_annotation_anchored_to_a_group_node() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(obj)]).expect("group");
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Group(group)), Point3::new(1.0, 1.0, 1.0)),
+            Vec3::ZERO,
+            "grp".to_string(),
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.delete_node(NodeId::Group(group)).expect("delete group");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    doc.undo().expect("undo delete");
+    assert_eq!(doc.annotation_detached(id), Some(false));
+}
+
+/// Discriminates `delete_node_detaches_annotation_anchored_to_a_group_node`
+/// from a naive liveness recompute at undo time (that test alone passes
+/// even on a from-scratch re-derivation, since the group is dead both
+/// before AND after the delete in that scenario — nothing distinguishes
+/// verbatim replay from re-deriving). Mirrors
+/// `undo_of_delete_does_not_rederive_a_detach_caused_by_an_earlier_transform`'s
+/// OBJECT-anchor trap for a GROUP anchor: a radial dimension anchored to
+/// the group node is detached by an EARLIER, unrelated non-similarity
+/// transform; deleting the (already-detached) group and undoing it brings
+/// the group back live, but the detach predates the delete and has nothing
+/// to do with it — a re-derive-at-undo-time implementation would see the
+/// group live again and wrongly clear `detached`, while verbatim replay
+/// restores the pre-undo snapshot (still detached) exactly.
+#[test]
+fn delete_node_undo_does_not_rederive_a_group_anchored_detach_caused_by_an_earlier_transform() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(obj)]).expect("group");
+    let curve0 = CapturedCurve {
+        center: Point3::new(0.5, 0.5, 0.0),
+        radius: 0.5,
+        plane: xy_plane(),
+    };
+    let id = doc
+        .add_radial_dimension(
+            point_anchor(Some(NodeId::Group(group)), Point3::new(1.0, 0.5, 0.0)),
+            RadialKind::Radius,
+            curve0,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+        )
+        .unwrap();
+
+    // Detach it via a non-similarity scale of the GROUP — a cause entirely
+    // unrelated to the delete that follows.
+    doc.transform_group(group, &Transform::scale(Vec3::new(2.0, 1.0, 1.0)))
+        .expect("non-similarity scale of the group");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    // Delete the (already-detached) group node.
+    doc.delete_node(NodeId::Group(group)).expect("delete group");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "still detached post-delete"
+    );
+
+    // Undo the delete: the group comes back live, but the detach predates
+    // the delete and has nothing to do with it — undo must not silently
+    // re-attach it just because its node is live again.
+    doc.undo().expect("undo delete");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "undo of delete must not re-derive (and clear) a detach it didn't cause"
+    );
+}
+
+/// A `boolean` combine detaches an annotation anchored to a CONSUMED
+/// operand at the moment of consumption (not silently left `false`), and
+/// undo/redo restore the recorded snapshot verbatim.
+#[test]
+fn boolean_detaches_annotation_anchored_to_a_consumed_operand() {
+    let mut doc = Document::new();
+    let a_obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b_obj = extrude_box(&mut doc, 0.5, 0.5, 1.0, 1.0, 0.0, 1.0);
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(a_obj)), Point3::new(0.25, 0.25, 0.5)),
+            Vec3::ZERO,
+            "n".to_string(),
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.boolean(BooleanOp::Union, a_obj, b_obj)
+        .expect("union consumes both operands");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "consumption detaches visibly at op time, not silently"
+    );
+
+    doc.undo().expect("undo boolean");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "undo restores exactly"
+    );
+
+    doc.redo().expect("redo boolean");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "redo re-applies exactly"
+    );
+}
+
+/// `ungroup` is a missed consumption-family member without this fix: it
+/// hides the dissolved `GroupId` (a tombstone) but, unlike `delete_node`,
+/// never ran the recorded liveness pass over the group node itself — an
+/// annotation anchored to the GROUP stayed live-looking in-session forever
+/// (only `Document::save`'s backstop caught it). Members are only
+/// reparented, never hidden, so an annotation anchored to a MEMBER is
+/// unaffected. Undo/redo restore the recorded snapshot verbatim.
+#[test]
+fn ungroup_detaches_annotation_anchored_to_the_group_node() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc.group_nodes(&[NodeId::Object(obj)]).expect("group");
+    let group_id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Group(group)), Point3::new(1.0, 1.0, 1.0)),
+            Vec3::ZERO,
+            "grp".to_string(),
+        )
+        .unwrap();
+    let member_id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(obj)), Point3::new(0.5, 0.5, 0.5)),
+            Vec3::ZERO,
+            "member".to_string(),
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(group_id), Some(false));
+    assert_eq!(doc.annotation_detached(member_id), Some(false));
+
+    doc.ungroup(group).expect("ungroup");
+    assert_eq!(
+        doc.annotation_detached(group_id),
+        Some(true),
+        "the dissolved group node is gone -> detached at op time, not just \
+         once saved"
+    );
+    assert_eq!(
+        doc.annotation_detached(member_id),
+        Some(false),
+        "the member is reparented, not hidden -> stays attached"
+    );
+
+    doc.undo().expect("undo ungroup");
+    assert_eq!(
+        doc.annotation_detached(group_id),
+        Some(false),
+        "undo re-forms the group -> re-attached exactly"
+    );
+
+    doc.redo().expect("redo ungroup");
+    assert_eq!(
+        doc.annotation_detached(group_id),
+        Some(true),
+        "redo re-applies exactly"
+    );
+}
+
+/// `make_component` folding a plain OBJECT into a definition detaches an
+/// annotation anchored to that object at op time — the object stops being
+/// a world node (`ObjectOwner::Definition`) the instant it folds, same
+/// treatment as `delete_node`/`boolean`'s consumed operand. This is a plain
+/// detach, not a remap onto the new instance (future work, noted on
+/// `Document::make_component`'s doc comment): a LATER `transform_instance`
+/// on the folded instance must NOT silently drag the frozen annotation
+/// along, because its anchor still keys the ORIGINAL object node, which is
+/// never in `transform_instance`'s touched set
+/// (`[NodeId::Instance(instance)]`) — before this fix, the annotation
+/// stayed un-detached and simply stopped tracking anything, silently wrong
+/// for the rest of the session. The undo chain (fold, then move) restores
+/// exactly.
+#[test]
+fn make_component_detaches_annotation_anchored_to_the_folded_object_and_freezes_it_through_a_later_instance_move()
+ {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let a0 = Point3::new(0.0, 0.0, 0.0);
+    let b0 = Point3::new(1.0, 0.0, 0.0);
+    let id = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), a0),
+            point_anchor(None, b0),
+            Vec3::new(0.0, -0.5, 0.0),
+            xy_plane(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    let (_component, instance, _) = doc
+        .make_component(&[NodeId::Object(obj)])
+        .expect("fold the object into a definition");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "the folded object is no longer a world node -> detached at op time"
+    );
+    let frozen = doc.annotation(id).unwrap().clone();
+
+    // Moving the instance afterward must NOT touch this annotation: its
+    // anchor still keys the ORIGINAL object node, never the instance, and a
+    // detached record is never silently healed or dragged by an unrelated
+    // transform (`Document::reanchor_touched`'s doc comment).
+    doc.transform_instance(instance, &Transform::translation(Vec3::new(5.0, 5.0, 5.0)))
+        .expect("move the instance");
+    assert_eq!(
+        doc.annotation(id).unwrap(),
+        &frozen,
+        "frozen and detached, not dragged by the instance's later move"
+    );
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    doc.undo().expect("undo instance move");
+    assert_eq!(doc.annotation(id).unwrap(), &frozen);
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    doc.undo().expect("undo make_component");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "undo dissolves the fold -> re-attached exactly"
+    );
+
+    doc.redo().expect("redo make_component");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+
+    doc.redo().expect("redo instance move");
+    assert_eq!(doc.annotation(id).unwrap(), &frozen);
+    assert_eq!(doc.annotation_detached(id), Some(true));
+}
+
+/// Mirrors the fold-family fix for `explode_instance`: an annotation
+/// anchored to the INSTANCE NODE detaches the moment the instance is hidden
+/// (baked into independent world objects), not silently left `false` until
+/// the save-time backstop. Undo/redo restore the recorded snapshot
+/// verbatim.
+#[test]
+fn explode_instance_detaches_annotation_anchored_to_the_instance_node() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (_component, instance, _) = doc
+        .make_component(&[NodeId::Object(obj)])
+        .expect("make component");
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Instance(instance)), Point3::new(0.0, 0.0, 0.0)),
+            Vec3::ZERO,
+            "i".to_string(),
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.explode_instance(instance).expect("explode");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "the instance is hidden -> detached at op time"
+    );
+
+    doc.undo().expect("undo explode");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(false),
+        "undo unhides the instance -> re-attached exactly"
+    );
+
+    doc.redo().expect("redo explode");
+    assert_eq!(doc.annotation_detached(id), Some(true));
+}
+
+/// `make_component` folding a GROUP into a definition hides that group
+/// (`consumed_groups`) — a genuinely dead node (a hidden group is a
+/// tombstone, never serialized, per the format spec). This used to be a gap
+/// in forward liveness detection (`make_component` didn't run the same
+/// recorded liveness pass `delete_node` and the boolean/slice/push-through
+/// family do, so the stored `detached` flag lagged reality until the
+/// save-time backstop below caught it); the fold family fix closed it, so
+/// the group-anchored annotation now detaches immediately, at op time, same
+/// as every other consuming op.
+///
+/// This also still exercises `Document::save`'s own backstop: it never
+/// persists a dead anchor as a healthy-looking free anchor, forcing
+/// `detached: true` on the written entry regardless of the stored flag —
+/// still correct now that the flag is already `true` going in, and kept as
+/// defense-in-depth for any future consuming op that forgets to call the
+/// liveness pass. Note a bare OBJECT folded the same way is NOT such a
+/// case: a component-member object is still serialized (`manifest.objects`
+/// covers world AND definition members alike), so its anchor still resolves
+/// on save — only a node that actually disappears from the file exercises
+/// this backstop.
+#[test]
+fn make_component_group_fold_detaches_immediately_and_survives_save() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(obj)])
+        .expect("wrap the object in a group");
+    let id = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Group(group)), Point3::new(0.5, 0.5, 0.5)),
+            Vec3::ZERO,
+            "orphan".to_string(),
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(id), Some(false));
+
+    doc.make_component(&[NodeId::Group(group)])
+        .expect("fold the group into a fresh component definition");
+    assert_eq!(
+        doc.annotation_detached(id),
+        Some(true),
+        "the fold family fix: make_component now runs the recorded liveness \
+         pass over its consumed groups, so this detaches at op time, not \
+         only once saved"
+    );
+
+    let bytes = doc.save();
+    let loaded = Document::load(&bytes).expect("loads");
+    let loaded_id = *loaded
+        .annotation_ids()
+        .first()
+        .expect("the annotation itself still persists");
+    assert_eq!(
+        loaded.annotation_detached(loaded_id),
+        Some(true),
+        "save-time backstop: a dead anchor never round-trips as a healthy free anchor"
+    );
+    match loaded.annotation(loaded_id).unwrap() {
+        Annotation::LeaderText { anchor, .. } => {
+            assert_eq!(
+                anchor.node, None,
+                "the node genuinely does not exist in this file"
+            )
+        }
+        other => panic!("expected LeaderText, got {other:?}"),
+    }
+}
+
+/// A manifest declaring an OLDER version than 13 must never carry
+/// `annotations` — presence is version-gated, not merely field-optional
+/// (the established `MANIFEST_CLAIMS_RETIRED_VERSION`-style precedent,
+/// mirrored for a field introduced too early instead of retired too late).
+/// Red-checks with a smuggled-field fixture: a hand-built v12 manifest
+/// carrying a (structurally valid) `annotations` entry must be refused
+/// typed, never silently loaded.
+#[test]
+fn load_rejects_a_smuggled_annotations_field_on_a_pre_v13_manifest() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.add_leader_text(
+        point_anchor(Some(NodeId::Object(obj)), Point3::new(0.5, 0.5, 0.5)),
+        Vec3::ZERO,
+        "smuggled".to_string(),
+    )
+    .unwrap();
+
+    let bytes = doc.save();
+    let tampered = downgrade_manifest_version_keeping_annotations(&bytes, 12);
+    match Document::load(&tampered) {
+        Err(kernel::LoadError::MalformedManifest { .. }) => {}
+        other => panic!(
+            "expected a typed MalformedManifest refusal for a v12 manifest \
+             smuggling annotations, got {other:?}"
+        ),
+    }
+}
+
+/// Rewrites a saved `.hew` zip's `manifest.json` to declare
+/// `format_version: to_version`, leaving every other field (including a
+/// non-empty `annotations` array, if present) untouched — the "hand-edited
+/// or non-conforming file" fixture
+/// `load_rejects_a_smuggled_annotations_field_on_a_pre_v13_manifest` needs
+/// to red-check the version gate against a REAL zip container, not a
+/// synthetic one. Mirrors the manifest-patching helpers already used
+/// elsewhere in this file for the same reason (e.g. the v2-tags-stripped
+/// fixture).
+fn downgrade_manifest_version_keeping_annotations(bytes: &[u8], to_version: u32) -> Vec<u8> {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+
+    let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    manifest["format_version"] = serde_json::json!(to_version);
+    assert!(
+        manifest["annotations"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "fixture sanity: the source document must actually carry an annotation"
+    );
+    let patched_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut new_zip = zip::ZipWriter::new(out_cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    new_zip.start_file("manifest.json", opts).unwrap();
+    new_zip.write_all(&patched_manifest).unwrap();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).unwrap();
+        if entry.name() == "manifest.json" {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        let opts2 = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::default());
+        new_zip.start_file(&name, opts2).unwrap();
+        new_zip.write_all(&buf).unwrap();
+    }
+    new_zip.finish().unwrap().into_inner()
 }

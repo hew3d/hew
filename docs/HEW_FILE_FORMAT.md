@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `12`**, and **geometry buffer format version `6`**. Both are covered
+version `13`**, and **geometry buffer format version `6`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -107,6 +107,21 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     { "id": 0, "kind": "line", "p": [0.0, 0.0, 0.0], "dir": [1.0, 0.0, 0.0] },
     { "id": 1, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
+  "annotations": [
+    { "id": 0, "kind": "linear",
+      "a": { "node": {"kind":"object","id":0}, "p": [0.0, 0.0, 0.0] },
+      "b": { "node": {"kind":"object","id":0}, "p": [1.0, 0.0, 0.0] },
+      "offset": [0.0, -0.5, 0.0], "plane": [0.0, 0.0, 1.0, 0.0] },
+    { "id": 1, "kind": "radial", "radial_kind": "diameter",
+      "a": { "p": [1.0, 0.5, 0.0] },        // "a" omits "node": a free anchor
+      "curve": { "center": [0.5, 0.5, 0.0], "radius": 0.5,
+                 "plane": [0.0, 0.0, 1.0, 0.0] },
+      "leader_dir": [1.0, 0.0, 0.0] },
+    { "id": 2, "kind": "leader",
+      "a": { "node": {"kind":"object","id":0}, "p": [0.0, 0.0, 1.0] },
+      "offset": [0.2, 0.2, 0.0], "text": "Cut here",
+      "detached": true }
+  ],
   "roots": [ {"kind":"object","id":0}, {"kind":"instance","id":0} ],
   "tags": [ {"path": ["Architecture", "Walls"]},
             {"path": ["Mock Walls"], "hidden": true} ],
@@ -139,6 +154,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 - **`instances`** — placements of a component definition at a pose ().
 - **`sketches`** — first-class 2D sketches ().
 - **`guides`** — construction lines and points ().
+- **`annotations`** — dimension and leader-text entities ().
 - **`roots`** — the document's top-level nodes, in display order ().
 - **`tags`** — the tag metadata registry: known tag paths with their
   hidden-by-default flags.
@@ -202,8 +218,9 @@ of the manifest:
 | `sketches[].owner` | 13 | absent — world-owned (the only kind of sketch before v13) |
 | `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
 | `axes` (top-level object) | 13 | world identity (origin `[0,0,0]`, `x`=`[1,0,0]`, `y`=`[0,1,0]`) |
+| `annotations` (top-level array) | 13 | empty list (no dimensions/leader text) |
 
-Three fields land in the same v13 bump (three efforts in flight at once) and
+Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
 opposite direction — introduced, not retired): the gate is on the declared
 `format_version`, not on the field's presence. Each is gated independently
@@ -225,6 +242,10 @@ with any subset of them, or none, is perfectly ordinary.
 - Likewise, a file that declares `format_version < 13` and still carries an
   `axes` key is malformed for its own declared version and is rejected, not
   repaired.
+- The top-level `annotations` field is version-gated the same way, for the
+  same reason: a file declaring a version older than 13 that still carries
+  `annotations` is malformed for its own declared version and MUST be
+  rejected rather than silently loaded.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -621,7 +642,75 @@ origin and `dir` (required) is a unit direction; for `"point"`, `dir` is
 omitted. A zero/non-normalizable `dir`, or any non-finite coordinate, is a
 fatal load error — never defaulted or dropped.
 
-### 4.8 Document tree
+### 4.8 Annotations
+
+An **annotation** (`annotations[]`, v13+) is a dimension or leader-text
+entity: like a guide, non-solid and never affecting any object's
+watertightness, but a document entity with additional state a guide has
+none of (an editable text override, and a `detached` flag). Every entry has
+an id and a `kind` of `"linear"`, `"radial"`, or `"leader"`; which of the
+remaining fields are present depends on `kind`, following the same
+one-flat-DTO convention as a guide's `"line"`/`"point"` shape:
+
+- **`"linear"`** — a straight dimension between two anchors, `a` and `b`
+  (see `Anchor` below), with a placement `offset` (`[x,y,z]`, the drag-out
+  vector from the `a`–`b` line to where the dimension line sits) and a
+  `plane` (`[nx,ny,nz,offset]`, the same plane-encoding convention a sketch
+  uses (), the plane the dimension and its extension lines are drawn in).
+  Optional `text_override` replaces the app-computed measurement string.
+- **`"radial"`** — a radius/diameter dimension. `a` is the single anchor (the
+  point on the measured circle/arc the leader points to). `radial_kind` is
+  `"radius"` or `"diameter"` — a display choice only, it does not change
+  `curve`. `curve` is the analytic circle/arc captured at creation:
+  `{center: [x,y,z], radius: (> 0), plane: [nx,ny,nz,offset]}`. `leader_dir`
+  is the leader line's direction from `a`. Optional `text_override` as
+  above.
+- **`"leader"`** — free-form leader text. `a` is the anchor the leader
+  points to, `offset` places the text relative to it, and `text` (required)
+  is its content.
+
+**`Anchor`** (`a`, and `b` for a linear dimension) is `{node?, p}`: `p` is
+the anchor's point in world space; `node` (optional) is a `NodeRef` () to
+the node this anchor tracks for re-anchoring. `node` is entirely absent for
+a free-floating anchor (never re-anchored, never detached) — including one
+whose original node was hidden/deleted and therefore no longer exists in
+this file at all (a writer degrades such an anchor to node-less rather
+than emit a dangling reference; its point still round-trips). Unlike a
+genuinely free-floating anchor, though, a writer degrading a dead one this
+way ALWAYS emits `detached: true` on that entry, whatever the live
+document's stored flag happened to be — a node-less anchor that used to
+track something and a node-less anchor the user drew free-floating on
+purpose must never be indistinguishable on load; the former is never
+silently written as a healthy-looking free anchor.
+
+`detached` (`bool`, default `false`, omitted when `false`) marks an
+annotation whose anchored node was deleted or consumed (by a boolean,
+slice, push-through, or an equivalent operand-consuming op), or whose
+captured `curve` couldn't survive a non-similarity transform on its node (a
+squashed circle has no valid radius) — kept, not deleted, and rendered in a
+warning color rather than silently showing stale geometry. It is
+**stored**, not re-derived on load: the kernel decides it at the moment of
+the mutation that caused it (an event the file's post-mutation state alone
+cannot always reconstruct — a distorted `curve`, in particular, looks like
+any other valid circle without this flag) and it round-trips unchanged,
+except for the save-time backstop above.
+
+A reader MUST reject (never repair) an annotation with: an unknown `kind`
+or `radial_kind`; a non-finite coordinate anywhere (`p`, `offset`, `curve`);
+a non-positive `curve.radius`; coincident `a`/`b` anchors on a `"linear"`
+entry; or a missing field required by its own `kind` (e.g. `"leader"`
+without `text`).
+
+**Version gate.** `annotations` is not merely field-optional: a manifest
+declaring `format_version < 13` MUST NOT carry a non-empty `annotations`
+array at all. A reader encountering one anyway (a hand-edited or
+non-conforming file smuggling the field under a stale declared version)
+MUST reject the file with a typed, malformed-manifest error rather than
+silently loading it — the same reject-not-repair posture §2 applies to a
+too-NEW `consumed` list, mirrored for a field introduced too early instead
+of retired too late.
+
+### 4.9 Document tree
 
 `roots` is the ordered list of top-level `NodeRef`s — objects, groups, and
 instances with no parent group. Combined with `groups[].members`, recursively
@@ -629,7 +718,7 @@ expanding every `"group"` `NodeRef` from `roots` reaches every world-placed
 object and instance exactly once. Component-definition members () are
 reached only through an instance's `def`, never through `roots` or a group.
 
-### 4.9 Tags
+### 4.10 Tags
 
 `tags`, wherever it appears on a NODE entry (objects, groups, instances), is
 a list of **tag-paths** — each an ordered, root-first list of string
@@ -661,7 +750,7 @@ import and the UI's per-node eye toggle). Hiding a group or instance hides
 its whole subtree in the UI. The same rule applies: a reader MUST NOT drop
 user-hidden content.
 
-### 4.10 Camera
+### 4.11 Camera
 
 `camera` (manifest v13+, optional) is the camera's working view at the
 moment the document was last saved (docs/design/camera.md §5): which

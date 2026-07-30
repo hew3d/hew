@@ -27,6 +27,15 @@ const stale = (what: string): string =>
 const checkSolid = 'Check its solid status in the Object Info panel.'
 
 /**
+ * Second-sentence copy for a boundary-minted request-shape error (a
+ * malformed FFI argument, an unreplayable recording, …) — always an
+ * internal bug in Hew's own request to the kernel, never something the
+ * user's model or click caused, so there is no user-actionable first step
+ * beyond reporting it.
+ */
+const internalRequest = 'If this keeps happening, use Report Bug.'
+
+/**
  * Human copy for every kernel error code that can cross the wasm boundary,
  * keyed by the `"CODE: message"` prefix.
  */
@@ -151,8 +160,6 @@ const DESCRIPTIONS: Record<string, string> = {
   WouldCorrupt:
     'That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.',
   BadLoop: 'The outline needs at least three points.',
-  BadPath: 'The cut path needs at least two points.',
-  BadCurve: "The circle's center needs an exact x, y, z point.",
 
   // -------------------------------------------------------- booleans
   OperandNotSolid: `Combining needs watertight solids on both sides. ${checkSolid.replace('its', "each object's")}`,
@@ -169,7 +176,6 @@ const DESCRIPTIONS: Record<string, string> = {
     "The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.",
   Degenerate:
     "The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.",
-  BadPlane: "The cutting plane needs an exact point and direction.",
 
   // ------------------------------------------------------- transforms
   Singular:
@@ -178,8 +184,8 @@ const DESCRIPTIONS: Record<string, string> = {
     'The rotation axis needs two distinct points. Pick a second point further from the first.',
   Reflection:
     "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.",
-  BadAffine: 'That move, rotate, or scale was malformed and had to be dropped. Try the gesture again.',
-  BadOp: 'That combine mode is invalid. Retry with Union, Subtract, or Intersect.',
+  InvalidRescaleFactor:
+    "That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance.",
 
   // ------------------------------------------- groups & components
   // App-side refusal (not a kernel code): a selection containing sketch
@@ -197,6 +203,8 @@ const DESCRIPTIONS: Record<string, string> = {
     "A component can't contain another component yet. Explode the inner instance first, then try again.",
   CannotExplodeReflected:
     "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead.",
+  CannotExplodeNonUniformScale:
+    "This instance has an unfinished sketch inside it, and its scale isn't even across all three axes, so the sketch's circles and arcs can't be baked exactly. Even out the instance's scale first, or finish (extrude) the sketch before exploding.",
   DuplicateMember:
     'The same object is in the selection twice. Reselect and try again.',
   MixedParents:
@@ -223,6 +231,12 @@ const DESCRIPTIONS: Record<string, string> = {
     "This step couldn't be undone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.",
   InverseDiverged:
     'Undo produced a different result than expected, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session.',
+  // Raised only on the FORWARD commit of a 3D-text placement, where
+  // `place_text` folds the just-closed drawing gesture into one undo step
+  // and does not find it at the top of the history. Never raised by an
+  // actual undo or redo, so the copy must not blame one.
+  UnexpectedGestureState:
+    "Finishing this step needed the drawing it just closed and couldn't find it, so nothing was placed and the model was left unchanged. If this keeps happening, use Report Bug to capture the session.",
 
   // ------------------------------------------------------ file loading
   NotAContainer: "This file isn't a Hew document. Pick a .hew file saved by Hew.",
@@ -238,6 +252,41 @@ const DESCRIPTIONS: Record<string, string> = {
     'That direction is too short to work with. Pick points further apart.',
   DegeneratePlane:
     "Those points don't define a plane. Pick three points that aren't in a line.",
+
+  // -------------------------------------------------------- annotations
+  UnknownAnnotation: stale('dimension or label'),
+  DegenerateAnnotation:
+    "That dimension or label doesn't have a usable placement — its two " +
+    "points are on top of each other, or the circle it measures has no " +
+    'size. Drag to points with more room between them, or a bigger circle, and try again.',
+  MismatchedAnnotationKind:
+    "Hew tried to turn this dimension or label into a different kind of entity, which isn't allowed. " +
+    internalRequest,
+
+  // --------------------------------- malformed request (internal — a bug
+  // in Hew itself, never something the user's model or click caused).
+  BadNodeKind: `Hew's own request to the model kernel named an object kind it doesn't recognize. ${internalRequest}`,
+  BadPoint: `Hew's own request to the model kernel carried a malformed point. ${internalRequest}`,
+  BadVec: `Hew's own request to the model kernel carried a malformed direction. ${internalRequest}`,
+  // `triple()` checks a raw xyz array for the camera state's eye, target
+  // AND up — two positions and one direction — so this one cannot claim
+  // either shape, unlike BadPoint and BadVec above, whose typed decoders
+  // each carry exactly one.
+  BadVector: `Hew's own request to the model kernel carried a malformed xyz value. ${internalRequest}`,
+  BadProjection: `Hew's own request to the model kernel named a camera projection it doesn't recognize. ${internalRequest}`,
+  BadPlane: `Hew's own request to the model kernel carried a malformed plane. ${internalRequest}`,
+  BadRadialKind: `Hew's own request to the model kernel asked for a dimension style it doesn't recognize. ${internalRequest}`,
+  BadAffine: `Hew's own request to the model kernel carried a malformed move, rotate, or scale. ${internalRequest}`,
+  BadOp: `Hew's own request to the model kernel asked for a combine style it doesn't recognize. ${internalRequest}`,
+  BadNodeList: `Hew's own request to the model kernel carried a malformed selection list. ${internalRequest}`,
+  BadSelection: `Hew's own request to the model kernel carried a malformed selection. ${internalRequest}`,
+  BadCount: `Hew's own request to the model kernel asked for an invalid copy count. ${internalRequest}`,
+  BadCurve: `Hew's own request to the model kernel carried a malformed circle. ${internalRequest}`,
+  BadPath: `Hew's own request to the model kernel carried a malformed path. ${internalRequest}`,
+  BadAnchor: `Hew's own request to the model kernel carried a malformed snap point. ${internalRequest}`,
+  BadAxis: `Hew's own request to the model kernel named an axis it doesn't recognize. ${internalRequest}`,
+  BadFormat: `Hew's own request to the model kernel named an image format it doesn't recognize. ${internalRequest}`,
+  REPLAY: `This recorded session couldn't be replayed. ${internalRequest}`,
 }
 
 /**
@@ -271,8 +320,14 @@ export function kernelErrorMessage(code: string, rawMsg: string): string {
  * guidance, and `.stl`'s carries "This file isn't a valid STL." / "This STL
  * is empty." Unwrap the tag and show the payload as-is; running it through
  * the table's fallback would bury real guidance inside boilerplate.
+ *
+ * Exported so `kernelErrors.test.ts`'s structural exhaustiveness check can
+ * exclude these from "must have DESCRIPTIONS copy" — they're minted as
+ * `ApiError(format!("DAE: ..."))`-style literals in wasm-api too, so the
+ * source-derived code inventory sees them, but they deliberately bypass the
+ * table above.
  */
-const WRAPPER_CODES = new Set(['DAE', 'glTF', 'SKP', 'STL', 'LOAD'])
+export const WRAPPER_CODES = new Set(['DAE', 'glTF', 'SKP', 'STL', 'LOAD'])
 
 /**
  * One-step convenience for `catch` sites holding a raw thrown value: map a

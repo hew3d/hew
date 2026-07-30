@@ -67,6 +67,10 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Scale', group: 'Modify', macKey: 'S', winKey: 'S' },
   // ---- Inspect ----
   { name: 'Tape Measure', group: 'Inspect', macKey: 'T', winKey: 'T' },
+  // Dimension: SketchUp's own Dimension tool has no default bare-letter key
+  // either (it lives on the Tools/Construction toolbar, not the drawing
+  // rail) — rail + palette per the design doc, no shortcut.
+  { name: 'Dimension', group: 'Inspect', macKey: '', winKey: '' },
   { name: 'Paint', group: 'Inspect', macKey: 'B', winKey: 'B' },
   // Section Plane: SketchUp assigns no default key either.
   { name: 'Section Plane', group: 'Inspect', macKey: '', winKey: '' },
@@ -76,6 +80,9 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Edit Vertex', macKey: '', winKey: '' },
   // Axes: SketchUp assigns no default key either.
   { name: 'Axes', macKey: '', winKey: '' },
+  // Text: leader-text annotations (docs/design/dimensions-text.md) — menu/
+  // palette-only, like Protractor/Slice/Edit Vertex above.
+  { name: 'Text', macKey: '', winKey: '' },
   // Camera tools: SketchUp's real O / H / Z everywhere.
   { name: 'Orbit', macKey: 'O', winKey: 'O' },
   { name: 'Pan', macKey: 'H', winKey: 'H' },
