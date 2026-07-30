@@ -18,31 +18,85 @@ describe('MultiClickTracker', () => {
     // routed to the tool as an ordinary click.
     const tracker = new MultiClickTracker()
     expect(tracker.press(press(0))).toBe(1)
+    tracker.release(press(5))
     expect(tracker.press(press(80))).toBe(2)
+  })
+
+  it('does NOT pair a press that follows a DRAG back to where the drag started', () => {
+    // Measured against real Chromium: a press at P dragged to Q and released
+    // there, followed within the window by a fresh press back at P, fires NO
+    // `dblclick` — the browser pairs on where clicks are RELEASED, and these
+    // released in different places. Suppressing that second press would drop
+    // the gesture with nothing to replace it, since the tools that opt into
+    // suppression arm inside `onPointerDown` and have no later fallback.
+    //
+    // Held at this level deliberately. Suppression applies only to tools
+    // implementing `onDoubleClick`, and today both of those (Line, Push/Pull)
+    // are click-move-click rather than press-drag-release, so no end-to-end
+    // gesture currently reaches this shape — an e2e written against one of
+    // them exercises an ordinary double-click instead, and passes whatever
+    // the tracker does. The property still has to hold before a drag-based
+    // tool grows an `onDoubleClick`, which is exactly what this pins.
+    const tracker = new MultiClickTracker()
+    expect(tracker.press(press(0, 100, 100))).toBe(1)
+    tracker.release(press(60, 300, 300)) // travelled: a drag, not a click
+    expect(tracker.press(press(120, 100, 100))).toBe(1)
+  })
+
+  it('a drag breaks a run that had already started', () => {
+    const tracker = new MultiClickTracker()
+    tracker.press(press(0))
+    tracker.release(press(5))
+    expect(tracker.press(press(80))).toBe(2) // a genuine double-click so far
+    tracker.release(press(140, 400, 400)) // ...whose second press became a drag
+    expect(tracker.press(press(200))).toBe(1)
+  })
+
+  it('pairs against where the previous click was RELEASED, not where it was pressed', () => {
+    // A click that shifts a pixel or two between press and release is still a
+    // click; the browser compares the release points, so this does too.
+    const tracker = new MultiClickTracker()
+    tracker.press(press(0, 100, 100))
+    tracker.release(press(20, 103, 100)) // 3px: within slop, still a click
+    // Now a press at the RELEASE point pairs...
+    expect(tracker.press(press(80, 103, 100))).toBe(2)
+  })
+
+  it('an unreleased press anchors nothing — a second press cannot pair with it', () => {
+    // Without a release the first press is still in flight; it is not yet a
+    // click and must not be treated as one.
+    const tracker = new MultiClickTracker()
+    expect(tracker.press(press(0))).toBe(1)
+    expect(tracker.press(press(80))).toBe(1)
   })
 
   it('keeps counting past 2, like `detail` does', () => {
     const tracker = new MultiClickTracker()
     expect(tracker.press(press(0))).toBe(1)
+    tracker.release(press(5))
     expect(tracker.press(press(80))).toBe(2)
+    tracker.release(press(85))
     expect(tracker.press(press(160))).toBe(3)
   })
 
   it('restarts at 1 once the presses are too far apart in time', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0))
-    expect(tracker.press(press(MULTI_CLICK_MS + 1))).toBe(1)
+    tracker.release(press(5))
+    expect(tracker.press(press(MULTI_CLICK_MS + 6))).toBe(1)
   })
 
   it('treats a press exactly at the time limit as still paired (inclusive bound)', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0))
+    tracker.release(press(0))
     expect(tracker.press(press(MULTI_CLICK_MS))).toBe(2)
   })
 
   it('restarts at 1 once the presses are too far apart in space', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0, 100, 100))
+    tracker.release(press(5, 100, 100))
     expect(tracker.press(press(50, 100 + MULTI_CLICK_SLOP_PX + 1, 100))).toBe(1)
   })
 
@@ -52,24 +106,28 @@ describe('MultiClickTracker', () => {
     // accept a press up to 41% further away than intended.
     const tracker = new MultiClickTracker()
     tracker.press(press(0, 100, 100))
+    tracker.release(press(5, 100, 100))
     expect(tracker.press(press(50, 100 + MULTI_CLICK_SLOP_PX, 100 + MULTI_CLICK_SLOP_PX))).toBe(1)
   })
 
   it('pairs a press exactly on the slop radius (inclusive bound)', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0, 100, 100))
+    tracker.release(press(5, 100, 100))
     expect(tracker.press(press(50, 100 + MULTI_CLICK_SLOP_PX, 100))).toBe(2)
   })
 
   it('does not pair presses from different buttons', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0, 100, 100, 0))
+    tracker.release(press(5, 100, 100, 0))
     expect(tracker.press(press(50, 100, 100, 2))).toBe(1)
   })
 
   it('does not pair presses from different pointer types', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0, 100, 100, 0, 'mouse'))
+    tracker.release(press(5, 100, 100, 0, 'mouse'))
     expect(tracker.press(press(50, 100, 100, 0, 'pen'))).toBe(1)
   })
 
@@ -78,12 +136,14 @@ describe('MultiClickTracker', () => {
     // `dt >= 0` guard it would satisfy `dt <= MULTI_CLICK_MS` and pair up.
     const tracker = new MultiClickTracker()
     tracker.press(press(1000))
+    tracker.release(press(1005))
     expect(tracker.press(press(10))).toBe(1)
   })
 
   it('reset() breaks the sequence even for presses that would otherwise pair', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0))
+    tracker.release(press(5))
     tracker.reset()
     expect(tracker.press(press(80))).toBe(1)
   })
