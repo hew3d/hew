@@ -1,7 +1,7 @@
 ---
 title: "Move, Rotate, and Scale"
 description: "Move, Rotate, or Scale with full snapping, axis locks, and typed values — or just drag an object with Select. Copying is a Move with Alt tapped — and ×N multiplies it into an array."
-order: 8
+order: 9
 ---
 
 Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, clicking an object with any of the three selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. With a selection already made, the click places the first reference point as usual.

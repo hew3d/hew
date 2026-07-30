@@ -1,7 +1,7 @@
 ---
 title: "Dimensions and text"
 description: "Annotate a model with dimensions that follow the geometry they measure, radius and diameter callouts, and leader text."
-order: 9.5
+order: 11
 ---
 
 Dimensions and leader text annotate a model without becoming part of it. They're document entities like guides: they don't affect watertightness, they don't export as geometry, and they follow the shapes they're attached to when those shapes move.

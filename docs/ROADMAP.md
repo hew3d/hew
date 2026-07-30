@@ -162,6 +162,17 @@ below.
   so older files are unaffected and simply open to today's home framing
 - Full undo/redo across the whole document
 
+- 3D Text: extruded, watertight solid text placed on any face, the ground,
+  or an axis-locked plane, from bundled fonts or any font loaded from disk —
+  letter counters become genuine holes, and each placement folds into one
+  component so repeated words stay editable in one place
+- Full modeling-tool parity inside a component definition: sketching,
+  extrusion, Follow Me, booleans, slice, and transforms all work through any
+  instance, with edits propagating to every placement of that definition
+- Movable drawing axes: place and orient a document-level frame that axis
+  locks, draw planes, inference snapping, axis colors, and the rendered
+  triad all follow, with Reset Axes to return to the world frame
+
 ### Inference & precision
 
 - Snapping to endpoints, midpoints, edges, faces, and locked axes, with
@@ -220,6 +231,22 @@ below.
 - Materials survive splitting, imprinting, and boolean operations
 - Per-material opacity (glass, scrim, etc.), adjustable from the Materials
   panel and applying uniformly to flat colors and textures alike
+- Alt-click to sample a face's material into the current swatch, and
+  Shift-click to replace that material everywhere in the document (or, with
+  Ctrl/Cmd, only within the clicked object) in one undoable step
+- Position Texture: drag a texture's corner pins on a face to move, rotate,
+  scale, and shear it, or type an exact angle or scale factor
+- A searchable material palette, with the add-color and add-texture panels
+  collapsed until needed
+
+### Annotations
+
+- Linear and radial dimensions and leader text, anchored to the geometry
+  they describe so they follow it through moves, rotations, and scales — a
+  transform that would distort a radius detaches the annotation visibly
+  instead of reporting a wrong number
+- Annotations save with the document and read at a constant on-screen size,
+  staying legible at any zoom
 
 ### File format & persistence
 

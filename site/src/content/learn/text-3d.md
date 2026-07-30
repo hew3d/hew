@@ -1,7 +1,7 @@
 ---
 title: "3D Text"
 description: "Extruded, watertight lettering from any font on your machine — signs, labels, embossed and engraved text you can print."
-order: 7.5
+order: 8
 ---
 
 3D Text turns typed characters into real solids: watertight, printable, and made of the same geometry as anything else you model. Counters — the enclosed spaces in letters like **o**, **a**, and **B** — come out as genuine through-holes, not painted-on shapes.
