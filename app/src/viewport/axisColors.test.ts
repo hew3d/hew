@@ -6,6 +6,7 @@ import {
   DARK_AXIS_COLORS,
   LIGHT_AXIS_COLORS,
 } from './axisColors'
+import type { DrawingAxes } from '../tools/drawingAxes'
 
 const TOL_2DEG = Math.cos((2 * Math.PI) / 180)
 
@@ -56,6 +57,66 @@ describe('axisColorForDirection', () => {
     const rad = (5 * Math.PI) / 180
     const m = axisColorForDirection([Math.cos(rad), Math.sin(rad), 0], TOL_2DEG)
     expect(m).toBeNull()
+  })
+
+  // ── Movable drawing axes (tool-parity §4): a non-identity frame ──
+  const ROTATED_FRAME: DrawingAxes = {
+    origin: [0, 0, 0],
+    x: [0, 1, 0],
+    y: [-1, 0, 0],
+    z: [0, 0, 1],
+  }
+
+  it('world code path is unchanged at identity — no frame argument matches literal world axes', () => {
+    const m = axisColorForDirection([1, 0, 0], TOL_2DEG)
+    expect(m).not.toBeNull()
+    expect(m!.axis).toBe(0)
+    expect(m!.color).toBe(AXIS_COLORS[0])
+  })
+
+  it('a rotated frame\'s red (X) axis direction yields the red color and axis 0, not a miss', () => {
+    // The frame's red axis is world [0,1,0] — a direction that is NOT within
+    // tolerance of literal world X at all, so a pass under the un-fixed
+    // (world-only) primitive would return null here.
+    const m = axisColorForDirection(ROTATED_FRAME.x, TOL_2DEG, AXIS_COLORS, ROTATED_FRAME)
+    expect(m).not.toBeNull()
+    expect(m!.axis).toBe(0)
+    expect(m!.color).toBe(AXIS_COLORS[0])
+    expect(m!.snapped).toEqual(ROTATED_FRAME.x)
+  })
+
+  it('a rotated frame\'s green (Y) axis direction yields the green color and axis 1', () => {
+    const m = axisColorForDirection(ROTATED_FRAME.y, TOL_2DEG, AXIS_COLORS, ROTATED_FRAME)
+    expect(m).not.toBeNull()
+    expect(m!.axis).toBe(1)
+    expect(m!.color).toBe(AXIS_COLORS[1])
+  })
+
+  it('literal world X reads as the frame\'s green axis (not red) when the frame has rotated onto it', () => {
+    // ROTATED_FRAME.y is [-1,0,0] — world X is anti-parallel to the frame's
+    // OWN green axis here, so it must match axis 1 (green), never axis 0
+    // (red) as an unfixed world-only comparison would report.
+    const m = axisColorForDirection([1, 0, 0], TOL_2DEG, AXIS_COLORS, ROTATED_FRAME)
+    expect(m).not.toBeNull()
+    expect(m!.axis).toBe(1)
+    expect(m!.color).toBe(AXIS_COLORS[1])
+  })
+
+  it('a direction off every axis of BOTH frames returns null regardless of `frame`', () => {
+    const d = 1 / Math.sqrt(3)
+    const m = axisColorForDirection([d, d, d], TOL_2DEG, AXIS_COLORS, ROTATED_FRAME)
+    expect(m).toBeNull()
+  })
+
+  it('omitting `frame` still defaults to world identity (source-compatible with every existing caller)', () => {
+    const withDefault = axisColorForDirection([1, 0, 0], TOL_2DEG)
+    const withExplicitWorld = axisColorForDirection([1, 0, 0], TOL_2DEG, AXIS_COLORS, {
+      origin: [0, 0, 0],
+      x: [1, 0, 0],
+      y: [0, 1, 0],
+      z: [0, 0, 1],
+    })
+    expect(withDefault).toEqual(withExplicitWorld)
   })
 })
 

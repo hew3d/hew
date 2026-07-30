@@ -63,6 +63,12 @@ function makeWasmScene(opts: {
       return sketchCounter
     }),
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
+    // Drawing axes at the world frame (origin + X/Y/Z). These fixtures
+    // predate the movable axes, and draw-plane resolution now reads the
+    // frame on every click, so the neutral world frame keeps them meaning
+    // what they meant: this suite is about instance ROUTING, not about
+    // where the axes sit.
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   } as unknown as WasmScene

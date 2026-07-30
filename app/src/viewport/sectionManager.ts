@@ -65,6 +65,29 @@ export function toggleSectionPlaneActive(plane: SectionPlane): SectionPlane {
 }
 
 /**
+ * A copy of `plane` with `origin` scaled by `factor` about the WORLD ORIGIN
+ * — the same pivot and factor `rescale_document(factor)` scales the whole
+ * model by (tool-parity design §3, Tape Measure "resize the model?", see
+ * `scaleCameraAboutOrigin` in `math.ts`). A section plane is session-only
+ * app state (this module's own doc comment) — the kernel rescale never
+ * touches it, so without this the plane stays at its pre-rescale
+ * coordinates and an active cut lands at the wrong position in the
+ * now-rescaled model.
+ *
+ * `normal` is a DIRECTION, not a position — unit length and independent of
+ * where the plane sits in space — so it is unaffected by a scale about the
+ * origin and is left unchanged, as is `active`. Applied regardless of
+ * `active`: the origin is a spatial fact about the model even while the cut
+ * is toggled off, and must stay correct for whenever it's toggled back on.
+ */
+export function rescaleSectionPlane(plane: SectionPlane, factor: number): SectionPlane {
+  return {
+    ...plane,
+    origin: [plane.origin[0] * factor, plane.origin[1] * factor, plane.origin[2] * factor],
+  }
+}
+
+/**
  * Session-only manager: holds at most one `SectionPlane`. Not undo-wired —
  * view state, like the camera and overlay toggles (DESIGN §2). Owned by the
  * Viewport for the lifetime of one mounted viewport; a fresh document does

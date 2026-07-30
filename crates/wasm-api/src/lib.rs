@@ -218,6 +218,7 @@ fn doc_err(e: DocumentError) -> ApiError {
         DocumentError::Transform(inner) => api_err(inner, &e),
         DocumentError::Op(KernelOpError::PushPull(inner)) => api_err(inner, &e),
         DocumentError::Op(KernelOpError::Sticky(inner)) => api_err(inner, &e),
+        DocumentError::InvalidAxesFrame(inner) => api_err(inner, &e),
         // UnknownSketch/UnknownObject/UnknownFace/UnknownMaterial/NothingTo{Undo,Redo}/
         // InverseFailed carry no separate inner code: the variant name is the code.
         _ => api_err(&e, &e),
@@ -1232,6 +1233,15 @@ impl Scene {
     /// snap targets ([`SnapKind::OnGuide`] / [`SnapKind::Endpoint`] for a
     /// guide point).
     fn reconcile(&mut self, change: &DocChange) {
+        // Movable drawing axes (tool-parity design §4): re-push the
+        // document's current frame into inference on EVERY reconciled
+        // mutation, not just `set_axes` itself — `reconcile` is the
+        // universal post-mutation hook (see the comment at the bottom of
+        // this method), so this also re-syncs after undo/redo of an axes
+        // move. Cheap (a few floats) and always correct, since it just
+        // mirrors whatever `Document::axes` already holds.
+        self.inference.set_axes_frame(self.doc.axes());
+
         // Objects: drop the cached mesh, then (re)register *world* objects with
         // inference at identity, or drop hidden/gone ones. Definition members
         // are not world inference candidates — they reach inference only
@@ -2555,6 +2565,44 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// Ctrl/Cmd-modified push/pull (design tool-parity §2): straight-
+    /// extrudes a solid face's own boundary into a NEW top-level object,
+    /// leaving the source untouched — [`Scene::follow_me_face_along_edges`]'s
+    /// straight-line sibling with no path/sweep involved. SketchUp's "leave
+    /// original face" reinterpreted for Hew's freely-interpenetrating-solids
+    /// model: the two solids end up sharing a coincident face, exactly like
+    /// re-extruding occupied ground already produces a second coincident
+    /// solid.
+    ///
+    /// # Errors
+    /// `UnknownObject` — stale/hidden object, or a component-DEFINITION
+    /// member (only world objects have a face to extrude at world scale);
+    /// `UnknownFace` — stale face; `Extrude` — a degenerate profile/distance
+    /// (matches `extrude_region`'s refusals). The document is untouched on
+    /// error.
+    pub fn extrude_face_as_new_object(
+        &mut self,
+        object: u64,
+        face: u64,
+        distance: f64,
+    ) -> Result<u64, ApiError> {
+        let (id, change) = self
+            .doc
+            .extrude_face_as_new_object(
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+                distance,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ExtrudeFaceAsNewObject {
+            object,
+            face,
+            distance,
+        });
+        Ok(id.data().as_ffi())
+    }
+
     /// Follow Me around a face reached THROUGH a component instance
     /// (design §2e): the definition face's loop rides the instance's pose
     /// into world space and the profile region sweeps around it. The
@@ -3244,6 +3292,89 @@ impl Scene {
             ids: ids.to_vec(),
             sketches: sketches.to_vec(),
             affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// Uniformly rescale the WHOLE document about the world origin (design
+    /// tool-parity §3 — the Tape Measure "resize the model" flow): every
+    /// world object, every free-standing sketch, every construction guide,
+    /// and every component instance's placing pose scale by `factor`;
+    /// component DEFINITIONS are never touched (see
+    /// [`kernel::Document::rescale_document`] for the full contract). ONE
+    /// undo step; undo/redo are bit-exact (never a recomputed `1/factor`).
+    ///
+    /// # Errors
+    /// `InvalidRescaleFactor` — `factor` is non-finite, zero, or negative;
+    /// the document is untouched.
+    pub fn rescale_document(&mut self, factor: f64) -> Result<(), ApiError> {
+        let change = self.doc.rescale_document(factor).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::RescaleDocument { factor });
+        Ok(())
+    }
+
+    /// The current movable drawing axes (tool-parity design §4): 12 floats
+    /// `[ox,oy,oz, xx,xy,xz, yx,yy,yz, zx,zy,zz]` — origin, red, green, and
+    /// the derived blue direction. World identity
+    /// (`[0,0,0, 1,0,0, 0,1,0, 0,0,1]`) until [`Scene::set_axes`] moves it.
+    pub fn axes(&self) -> Vec<f64> {
+        let frame = self.doc.axes();
+        let z = frame.z();
+        vec![
+            frame.origin.x,
+            frame.origin.y,
+            frame.origin.z,
+            frame.x.x,
+            frame.x.y,
+            frame.x.z,
+            frame.y.x,
+            frame.y.y,
+            frame.y.z,
+            z.x,
+            z.y,
+            z.z,
+        ]
+    }
+
+    /// Moves the document's drawing axes to the frame spanned by origin
+    /// `(ox,oy,oz)`, red direction `(xx,xy,xz)`, and green direction
+    /// `(yx,yy,yz)` (tool-parity design §4 — the Axes tool's three-click
+    /// commit; Reset Axes passes world identity's own components:
+    /// `(0,0,0, 1,0,0, 0,1,0)`). The blue axis is always derived (`x × y`),
+    /// never accepted from the caller. One undo step.
+    ///
+    /// # Errors
+    /// - `NonFinite` — a non-finite origin or direction component.
+    /// - `NonOrthonormal` — the red/green directions are not each unit
+    ///   length, or not mutually perpendicular. Nothing is silently
+    ///   renormalized or reoriented.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_axes(
+        &mut self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        xx: f64,
+        xy: f64,
+        xz: f64,
+        yx: f64,
+        yy: f64,
+        yz: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .set_axes(
+                Point3::new(ox, oy, oz),
+                kernel::Vec3::new(xx, xy, xz),
+                kernel::Vec3::new(yx, yy, yz),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetAxes {
+            origin: [ox, oy, oz],
+            x: [xx, xy, xz],
+            y: [yx, yy, yz],
         });
         Ok(())
     }
@@ -4889,6 +5020,26 @@ impl Scene {
     /// selects it exactly when the active `CameraRig` projection is parallel.
     /// Omitted/false selects `Cone`, matching every caller before this
     /// parameter existed.
+    ///
+    /// `soft_axis_aperture_scale`, when present, multiplies the fixed
+    /// angular tolerance the soft-axis (`OnAxis`, anchor-relative) candidate
+    /// is admitted within (see [`SnapQuery::soft_axis_aperture_scale`]).
+    /// Omitted/`None` behaves exactly as before. This is how the app's
+    /// magnetic-hysteresis release query (`snapService.ts`) reaches a held
+    /// soft-axis snap: unlike every other sticky kind, that candidate's
+    /// admission cone is NOT `aperture` above, so widening `aperture` alone
+    /// (the release-query trick every other sticky kind uses) has no effect
+    /// on it.
+    ///
+    /// `off_plane_points`, when `true`, keeps precise POINT candidates
+    /// (endpoint/midpoint/center/quadrant/intersection) that lie off the
+    /// `constraint_plane` instead of filtering them (see
+    /// [`SnapQuery::off_plane_points`]). Only a tool that can HONOUR an
+    /// off-plane point — the Line tool's plane-mode chain, which re-homes
+    /// onto a new sketch plane at commit — may pass `true`; tools that
+    /// commit into one frozen plane must leave it unset, or they would
+    /// report a snap position they cannot commit. Omitted/`None` is `false`
+    /// (the pre-existing filter, unchanged).
     // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
@@ -4905,6 +5056,8 @@ impl Scene {
         constraint_plane: Option<Box<[f64]>>,
         precision: Option<bool>,
         cylinder: Option<bool>,
+        soft_axis_aperture_scale: Option<f64>,
+        off_plane_points: Option<bool>,
     ) -> Result<Option<SnapJs>, ApiError> {
         let anchor = match anchor {
             None => None,
@@ -4965,6 +5118,8 @@ impl Scene {
             } else {
                 SnapWeights::default()
             },
+            soft_axis_aperture_scale,
+            off_plane_points: off_plane_points.unwrap_or(false),
         };
         Ok(self.inference.resolve(&query).map(|snap| SnapJs { snap }))
     }
@@ -6129,6 +6284,9 @@ impl Scene {
                     } => {
                         self.transform_selection(&kinds, &ids, &sketches, &affine)?;
                     }
+                    RescaleDocument { factor } => {
+                        self.rescale_document(factor)?;
+                    }
                     DeleteNode { kind, id } => {
                         self.delete_node(kind, id)?;
                     }
@@ -6165,6 +6323,13 @@ impl Scene {
                         distance,
                     } => {
                         self.push_pull(object, face, distance)?;
+                    }
+                    ExtrudeFaceAsNewObject {
+                        object,
+                        face,
+                        distance,
+                    } => {
+                        self.extrude_face_as_new_object(object, face, distance)?;
                     }
                     SceneUndo => {
                         self.scene_undo()?;
@@ -6393,6 +6558,11 @@ impl Scene {
                     } => {
                         self.import_stl_core(&bytes, unit_scale, name)?;
                     }
+                    SetAxes { origin, x, y } => {
+                        self.set_axes(
+                            origin[0], origin[1], origin[2], x[0], x[1], x[2], y[0], y[1], y[2],
+                        )?;
+                    }
                     Load { bytes } => {
                         self.load_core(&bytes)?;
                     }
@@ -6580,6 +6750,11 @@ impl Scene {
         self.active_inference_instance = None;
         self.active_inference_sketches.clear();
 
+        // Movable drawing axes (tool-parity design §4): the fresh
+        // `InferenceScene` starts at world identity — sync it to whatever
+        // the loaded document's axes actually are before anything snaps.
+        self.inference.set_axes_frame(self.doc.axes());
+
         // Register every visible world object.
         for id in self.doc.visible_object_ids() {
             if let Some(object) = self.doc.object(id) {
@@ -6704,7 +6879,7 @@ mod tests {
         let (vx, vy) = p(0);
         let snap = loaded
             .snap(
-                vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None,
+                vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("loaded sketch vertex snaps");
@@ -6712,7 +6887,7 @@ mod tests {
         // …and the drawn circle's exact center snaps as Center.
         let snap = loaded
             .snap(
-                1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None,
+                1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("loaded circle center snaps");
@@ -6778,6 +6953,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
             .unwrap()
             .expect("something snaps at the copy center");
@@ -6787,7 +6964,7 @@ mod tests {
         // And the original center still snaps too.
         let snap0 = scene
             .snap(
-                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None,
+                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("original center snaps");
@@ -6841,7 +7018,7 @@ mod tests {
         // Center: the marquee case. Straight down onto the exact center.
         let c = scene
             .snap(
-                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None,
+                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("center snaps");
@@ -6861,7 +7038,7 @@ mod tests {
             let (wx, wy) = (cx + r * a.cos(), cy + r * a.sin());
             let snap = scene
                 .snap(
-                    wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None, None,
+                    wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None, None, None, None,
                 )
                 .unwrap()
                 .unwrap_or_else(|| panic!("a point on the rim always snaps (angle {a})"));
@@ -6949,7 +7126,7 @@ mod tests {
         // A polygon offers no rim, so the centre is its sole analytic point.
         let c = scene
             .snap(
-                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None,
+                cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("polygon center snaps");
@@ -7122,7 +7299,7 @@ mod tests {
 
         let default_snap = scene
             .snap(
-                ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None,
+                ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("something snaps");
@@ -7145,6 +7322,8 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
+                None,
                 None,
             )
             .unwrap()
@@ -7170,6 +7349,8 @@ mod tests {
                 None,
                 None,
                 Some(false),
+                None,
+                None,
                 None,
             )
             .unwrap()
@@ -7205,6 +7386,8 @@ mod tests {
             aperture: 0.05,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         let snap = scene.inference.resolve(&q).expect("a snap over the fill");
         assert_eq!(
@@ -7285,6 +7468,8 @@ mod tests {
             aperture: 0.01,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         let snap = scene
             .inference
@@ -7351,6 +7536,8 @@ mod tests {
             aperture: 0.05,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         let snap = scene.inference.resolve(&q).expect("a snap over the region");
         assert_eq!(snap.kind, SnapKind::OnFace);
@@ -7395,6 +7582,8 @@ mod tests {
             aperture: 0.05,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
         };
         let snap = scene.inference.resolve(&q).expect("a snap at the origin");
         assert_eq!(snap.kind, SnapKind::Endpoint, "the origin wins on kind");
@@ -7638,6 +7827,57 @@ mod tests {
         assert_eq!(
             final_hash, golden,
             "replaying a UI boolean session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// Push/Pull's Ctrl-extrude modifier and the Tape Measure rescale
+    /// (tool-parity §2/§3) both record and replay — an undo/redo pair pins
+    /// the stack shape for each, the way `ui_boolean_route_records_and_replays`
+    /// pins the boolean route.
+    #[test]
+    fn ctrl_extrude_and_rescale_record_and_replay() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        let boss = scene.extrude_face_as_new_object(obj, top, 1.0).unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+
+        scene.rescale_document(2.0).unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let live_ids = scene.object_ids();
+        assert!(live_ids.contains(&obj));
+        assert!(live_ids.contains(&boss));
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying a Ctrl-extrude + rescale session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save());
     }
@@ -8625,6 +8865,193 @@ mod tests {
         assert!(scene.object_ids().is_empty());
     }
 
+    /// Push/Pull's Ctrl/Cmd modifier: straight-extrudes the clicked face's
+    /// boundary into a NEW top-level object, leaving the source untouched —
+    /// undoable/redoable and replayable exactly like `push_pull`.
+    #[test]
+    fn extrude_face_as_new_object_births_a_new_object_and_undoes() {
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+
+        let boss = scene.extrude_face_as_new_object(obj, top, 1.0).unwrap();
+        assert_ne!(boss, obj);
+        assert!(scene.object_ids().contains(&obj), "source untouched");
+        assert!(scene.object_ids().contains(&boss));
+        assert!(scene.object_watertight(boss).unwrap());
+
+        scene.scene_undo().unwrap(); // undo the Ctrl-extrude
+        assert!(scene.object_ids().contains(&obj));
+        assert!(!scene.object_ids().contains(&boss));
+        scene.scene_redo().unwrap();
+        assert!(scene.object_ids().contains(&boss));
+    }
+
+    /// Bad inputs refuse typed and never touch the document.
+    #[test]
+    fn extrude_face_as_new_object_rejects_unknown_object_or_face() {
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let top = {
+            let object = scene.doc.object(object_id(obj)).unwrap();
+            object
+                .faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.normal().approx_eq(
+                        kernel::Vec3::new(0.0, 0.0, 1.0),
+                        kernel::tol::NORMAL_DIRECTION,
+                    )
+                })
+                .map(|(fid, _)| fid.data().as_ffi())
+                .unwrap()
+        };
+        assert!(scene.extrude_face_as_new_object(999_999, top, 1.0).is_err());
+        assert!(scene.extrude_face_as_new_object(obj, 999_999, 1.0).is_err());
+    }
+
+    /// `rescale_document` scales the model about the origin, refuses bad
+    /// factors typed, and undoes/redoes bit-exact.
+    #[test]
+    fn rescale_document_scales_the_model_and_undoes() {
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let before = scene.doc.object(object_id(obj)).unwrap().to_polygons();
+
+        assert!(scene.rescale_document(0.0).is_err());
+        assert!(scene.rescale_document(-1.0).is_err());
+        assert!(scene.rescale_document(f64::NAN).is_err());
+
+        scene.rescale_document(2.0).unwrap();
+        let after = scene.doc.object(object_id(obj)).unwrap().to_polygons();
+        assert_ne!(before, after, "geometry scaled");
+
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            scene.doc.object(object_id(obj)).unwrap().to_polygons(),
+            before,
+            "undo restores the exact pre-scale geometry"
+        );
+        scene.scene_redo().unwrap();
+        assert_eq!(
+            scene.doc.object(object_id(obj)).unwrap().to_polygons(),
+            after,
+            "redo reproduces the exact original post-scale geometry"
+        );
+    }
+
+    #[test]
+    fn set_axes_moves_the_frame_reorients_inference_and_undoes() {
+        let mut scene = Scene::new();
+        assert_eq!(
+            scene.axes(),
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "a fresh scene's axes are world identity"
+        );
+
+        // Non-orthonormal candidates are refused typed and change nothing.
+        assert!(
+            scene
+                .set_axes(0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+                .is_err()
+        );
+        assert_eq!(
+            scene.axes()[3],
+            1.0,
+            "the refused frame left axes at identity"
+        );
+
+        scene
+            .set_axes(1.0, 2.0, 3.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0)
+            .expect("valid orthonormal frame");
+        assert_eq!(
+            scene.axes(),
+            vec![1.0, 2.0, 3.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            "origin/x/y set, z derived as x cross y"
+        );
+
+        // Inference's axis-lock now resolves through the new frame, not
+        // world X/Y/Z (see `InferenceScene::set_axes_frame`).
+        let snap = scene
+            .snap(
+                1.4,
+                2.7,
+                8.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.3,
+                Some(vec![1.0, 2.0, 3.0].into_boxed_slice()),
+                Some(0), // lock_axis 0 = X
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("snap call succeeds")
+            .expect("axis lock with an anchor always resolves");
+        assert_eq!(
+            snap.direction(),
+            Some(vec![0.0, 1.0, 0.0]),
+            "the X lock now follows the frame's red axis (world +Y)"
+        );
+
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            scene.axes(),
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "undo restores world identity"
+        );
+        scene.scene_redo().unwrap();
+        assert_eq!(
+            scene.axes()[3],
+            0.0,
+            "redo reproduces the moved frame's x.x"
+        );
+    }
+
+    #[test]
+    fn set_axes_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        scene
+            .set_axes(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0)
+            .unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replay reproduces the axes-move state hash"
+        );
+        assert_eq!(replayed.axes(), scene.axes());
+    }
+
     #[test]
     fn face_plane_returns_point_on_face_plus_normal() {
         let mut scene = Scene::new();
@@ -9501,7 +9928,7 @@ mod tests {
 
         let posed = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("posed definition endpoint must snap");
@@ -9511,7 +9938,7 @@ mod tests {
         scene.set_hidden(&[], &[inst]);
         let hidden = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -9522,7 +9949,7 @@ mod tests {
         scene.set_hidden(&[], &[]);
         let shown = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("showing the active instance restores its posed sketch inference");
@@ -9531,7 +9958,7 @@ mod tests {
         scene.set_active_inference_instance(None);
         let after_exit = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -9541,7 +9968,7 @@ mod tests {
         );
         let local = scene
             .snap(
-                2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+                2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -9577,7 +10004,7 @@ mod tests {
 
         let mirrored = scene
             .snap(
-                3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None,
+                3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("mirrored definition endpoint must snap");
@@ -10784,7 +11211,7 @@ mod tests {
             .snap(
                 5.0, 5.0, 3.0, // ray origin
                 0.0, 0.0, -1.0, // ray direction (-Z)
-                0.05, None, None, None, None, None,
+                0.05, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("ray crosses the guide line");
@@ -10800,7 +11227,7 @@ mod tests {
 
         let snap = scene
             .snap(
-                5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None,
+                5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
             )
             .unwrap();
         assert!(
@@ -10822,6 +11249,7 @@ mod tests {
             scene
                 .snap(
                     ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None, None, None,
+                    None, None,
                 )
                 .unwrap()
         };
@@ -10854,7 +11282,7 @@ mod tests {
 
         let snap = scene
             .snap(
-                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None,
+                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("ray points straight at the guide point");
@@ -10876,7 +11304,7 @@ mod tests {
 
         let cone_miss = scene
             .snap(
-                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None,
+                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
             )
             .unwrap();
         assert!(
@@ -10898,6 +11326,8 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
+                None,
             )
             .unwrap()
             .expect("1 m off-axis is inside a 1.5 m cylinder, regardless of depth");

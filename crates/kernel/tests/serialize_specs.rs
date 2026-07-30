@@ -2188,3 +2188,121 @@ fn soft_edges_round_trip_v6() {
     assert_eq!(soft_before, soft_after, "soft marks round-trip exactly");
     assert_eq!(loaded.save(), bytes, "canonical bytes stable");
 }
+
+// ------------------------------------------------------- movable drawing axes
+
+/// A document whose axes were never moved from identity writes a manifest
+/// with NO `axes` key at all — the absent-field-means-identity contract
+/// (manifest v13, tool-parity design §4), so a pre-v13-shaped save is
+/// byte-for-byte unaffected by this field's existence.
+#[test]
+fn unmoved_axes_write_no_manifest_key() {
+    use std::io::{Cursor, Read as _};
+
+    let mut doc = Document::new();
+    let _a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    assert_eq!(doc.axes(), kernel::AxesFrame::IDENTITY);
+    let bytes = doc.save();
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert!(
+        manifest.get("axes").is_none(),
+        "an unmoved document must not write an axes key"
+    );
+    assert_eq!(manifest["format_version"], serde_json::json!(13));
+}
+
+/// Moving the axes round-trips exactly through save/load: origin, x, y, and
+/// the derived z all survive, and the reloaded document's canonical bytes
+/// match the original (determinism, HEW_FILE_FORMAT.md).
+#[test]
+fn moved_axes_round_trip_exactly() {
+    use std::io::{Cursor, Read as _};
+
+    let mut doc = Document::new();
+    let origin = Point3::new(1.5, -2.0, 0.25);
+    let x = Vec3::new(0.0, 1.0, 0.0);
+    let y = Vec3::new(-1.0, 0.0, 0.0);
+    doc.set_axes(origin, x, y).expect("valid frame");
+    let bytes = doc.save();
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert!(manifest.get("axes").is_some(), "a moved frame must persist");
+
+    let loaded = Document::load(&bytes).expect("load v13 axes");
+    let frame = loaded.axes();
+    assert_eq!(frame.origin, origin);
+    assert_eq!(frame.x, x);
+    assert_eq!(frame.y, y);
+    assert!((frame.z() - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-12);
+    assert_eq!(loaded.save(), bytes, "canonical bytes stable");
+}
+
+/// `axes` is version-gated, not presence-gated, the mirror image of the
+/// retired `consumed` field: a file that declares a format OLDER than the
+/// field's introduction (v13) but carries an `axes` key is malformed for its
+/// own declared version — hand-edited or produced by a broken writer — and
+/// is rejected typed, never silently honored.
+#[test]
+fn axes_field_smuggled_into_an_older_file_is_rejected() {
+    let mut doc = Document::new();
+    let _a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_axes(
+        Point3::new(1.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    )
+    .expect("valid frame");
+    let bytes = doc.save();
+
+    let smuggled = patch_manifest(&bytes, |m| {
+        m["format_version"] = serde_json::json!(12);
+    });
+    assert!(
+        matches!(
+            Document::load(&smuggled),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a v12-declared file carrying axes is malformed, not repaired"
+    );
+}
+
+/// A present-but-invalid `axes` field (non-orthonormal, hand-edited) is
+/// rejected typed rather than silently renormalized or dropped — the same
+/// reject-not-repair posture as every other manifest validation.
+#[test]
+fn non_orthonormal_axes_field_is_rejected() {
+    let mut doc = Document::new();
+    let _a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.set_axes(
+        Point3::new(1.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    )
+    .expect("valid frame");
+    let bytes = doc.save();
+
+    let corrupted = patch_manifest(&bytes, |m| {
+        // Stretch x to length 2 — no longer unit, so no longer orthonormal.
+        m["axes"]["x"] = serde_json::json!([2.0, 0.0, 0.0]);
+    });
+    assert!(
+        matches!(
+            Document::load(&corrupted),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a non-orthonormal axes field is malformed, not repaired"
+    );
+}

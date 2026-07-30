@@ -146,3 +146,46 @@ describe('3D Text one-off action parity (not a TOOL_REGISTRY tool)', () => {
     expect(ids).toContain(id)
   })
 })
+
+describe('native menu parity — non-tool commands', () => {
+  // Reset Axes (tool-parity §4) shipped as a web-only MenuBar item with a
+  // direct callback prop — unreachable on macOS, which renders the native
+  // menu exclusively and never falls back to the in-app MenuBar. Not a
+  // TOOL_MENU_IDS entry (it isn't a tool radio-group member), so it needs
+  // its own drift check, mirroring the three checks above: built as a
+  // native item, attached to its submenu, and given a dispatch arm.
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const NON_TOOL_MENU_ACTIONS: Record<string, string> = {
+    'reset-axes': 'view-reset-axes',
+  }
+
+  it('every mapped id is built as a native menu item (plain MenuItemBuilder — not checkable)', () => {
+    const missing = Object.entries(NON_TOOL_MENU_ACTIONS)
+      .filter(([, id]) => !source.includes(`"${id}"`))
+      .map(([action, id]) => `${action} (${id})`)
+    expect(missing, `native menu items missing from ${MAIN_RS}`).toEqual([])
+  })
+
+  it('every mapped id has a dispatch arm forwarding to the app', () => {
+    const missing = Object.entries(NON_TOOL_MENU_ACTIONS).filter(
+      ([action, id]) => !new RegExp(`"${id}"\\s*=>\\s*"${action}"`).test(source),
+    )
+    expect(missing, 'native menu ids with no dispatch arm to their action').toEqual([])
+  })
+
+  it('every built item is attached to a submenu', () => {
+    const missing: string[] = []
+    for (const [action, id] of Object.entries(NON_TOOL_MENU_ACTIONS)) {
+      const binding = new RegExp(
+        `let\\s+(\\w+)\\s*=\\s*MenuItemBuilder::with_id\\(\\s*"${id}"`,
+        's',
+      ).exec(source)
+      expect(binding, `no MenuItemBuilder binding found for ${action} (${id})`).not.toBeNull()
+      const variable = (binding as RegExpExecArray)[1]
+      if (!source.includes(`.item(&${variable})`)) {
+        missing.push(`${action} (${id} -> ${variable})`)
+      }
+    }
+    expect(missing, 'menu items built but never attached to a SubmenuBuilder chain').toEqual([])
+  })
+})

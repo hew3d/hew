@@ -44,6 +44,26 @@ describe('InfiniteGrid', () => {
     expect(() => grid.dispose()).not.toThrow()
   })
 
+  // Tape Measure's "resize the model?" (design tool-parity §3): the plane's
+  // fixed 600-unit footprint is only "comfortably beyond far-clip" at the
+  // document's ORIGINAL scale; after a rescale it must grow (or shrink) by
+  // the same factor as the camera's far-clip or its edge shows up inside the
+  // frustum for a much-enlarged model.
+  it('scaleAboutOrigin() multiplies the mesh scale uniformly by factor', () => {
+    const grid = new InfiniteGrid(0x0c0e11, 0x282c32, 0x454b54)
+    grid.scaleAboutOrigin(100)
+    expect(grid.mesh.scale.x).toBeCloseTo(100, 10)
+    expect(grid.mesh.scale.y).toBeCloseTo(100, 10)
+    expect(grid.mesh.scale.z).toBeCloseTo(100, 10)
+  })
+
+  it('scaleAboutOrigin() compounds across repeated calls, like scaleCameraAboutOrigin', () => {
+    const grid = new InfiniteGrid(0x0c0e11, 0x282c32, 0x454b54)
+    grid.scaleAboutOrigin(100)
+    grid.scaleAboutOrigin(0.01)
+    expect(grid.mesh.scale.x).toBeCloseTo(1, 10)
+  })
+
   it('defaults uAxesVisible to 1 (axes visible by default, matching originAxes.visible in Viewport.tsx)', () => {
     const grid = new InfiniteGrid(0x0c0e11, 0x282c32, 0x454b54)
     const material = grid.mesh.material as THREE.ShaderMaterial

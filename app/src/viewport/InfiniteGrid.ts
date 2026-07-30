@@ -206,6 +206,24 @@ export class InfiniteGrid {
     this.material.uniforms.uLodDistanceOverride.value = lodDistanceOverride ?? -1
   }
 
+  /**
+   * Scale the plane's world footprint by `factor`, about the world origin —
+   * called after a Tape Measure rescale (`Viewport.tsx`'s
+   * `applyRescaleToView`) scales the camera's far-clip by the same factor,
+   * so `PLANE_SIZE`'s "comfortably beyond far" margin (this module's doc
+   * comment) still holds at the new scale instead of the plane's fixed
+   * 600-unit footprint being dwarfed by a much-enlarged model and showing
+   * its edge inside the frustum. A plain uniform mesh scale about the
+   * plane's own (world-origin-centered) local frame — the shader's own math
+   * (grid-cell density, colors) reads real WORLD positions via
+   * `modelMatrix` already, so it needs no separate change and stays exactly
+   * as it was. Compounds correctly across repeated rescales, same as
+   * `scaleCameraAboutOrigin`.
+   */
+  scaleAboutOrigin(factor: number): void {
+    this.mesh.scale.multiplyScalar(factor)
+  }
+
   /** Call on every theme change — cheap uniform write, no rebuild. */
   setColors(groundColor: number, minorColor: number, majorColor: number): void {
     (this.material.uniforms.uGroundColor.value as THREE.Color).set(groundColor)

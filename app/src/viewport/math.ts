@@ -60,6 +60,150 @@ export function intersectGroundPlane(ray: Ray): Vec3 | null {
   }
 }
 
+/**
+ * Scale a camera pose by the SAME similarity `rescale_document(factor)` just
+ * applied to the whole model (tool-parity design §3, Tape Measure "resize
+ * the model?"): the kernel scales every object/sketch/guide about the WORLD
+ * ORIGIN ([`Transform::uniform_scale`] — see `crates/kernel/src/transform.rs`
+ * — composed with `Transform::scale`, itself "per-axis scale about the
+ * origin"), so scaling the eye and target about that SAME pivot by the SAME
+ * factor keeps the view visually IDENTICAL: the model just "is" the new
+ * size, at the same apparent angular size, because the camera-to-target
+ * distance grows/shrinks in lockstep with the model. Scaling about the
+ * origin is `p' = pivot + factor·(p − pivot)`, which for `pivot = (0,0,0)`
+ * reduces to the plain `p' = factor·p` this function computes.
+ *
+ * This is a view-side adjustment only — it has no undo of its own (camera
+ * moves are outside undo by design in this app); the caller decides when to
+ * apply it (typically once, right after a rescale commits).
+ */
+export function scaleCameraAboutOrigin(
+  eye: [number, number, number],
+  target: [number, number, number],
+  factor: number,
+): { eye: [number, number, number]; target: [number, number, number] } {
+  return {
+    eye: [eye[0] * factor, eye[1] * factor, eye[2] * factor],
+    target: [target[0] * factor, target[1] * factor, target[2] * factor],
+  }
+}
+
+/** The camera/controls world-LENGTH bounds `scaleViewLimits` rescales —
+ * everything besides the eye/target pose that is measured in world meters
+ * rather than a dimensionless ratio or an angle (see that function's doc
+ * comment for why the distinction matters). */
+export interface CameraViewLimits {
+  near: number
+  far: number
+  minDistance: number
+  maxDistance: number
+}
+
+/**
+ * Scale a camera's near/far clip planes and an OrbitControls' min/max orbit
+ * distance by the SAME `rescale_document(factor)` that `scaleCameraAboutOrigin`
+ * re-poses the eye/target for (tool-parity design §3).
+ *
+ * These four are the OTHER world-length quantities the view holds besides
+ * the eye/target pose itself, and every one of them must move in the same
+ * lockstep or the rescale stops being visually identical:
+ *
+ *  - `minDistance`/`maxDistance` clamp the eye→target distance on every
+ *    `OrbitControls.update()`. Left fixed, a big-enough factor pins the
+ *    camera at the old `maxDistance` instead of the intended (scaled)
+ *    distance — the model is orders of magnitude bigger than the view can
+ *    back away to, and Zoom Extents can't recover either (same clamp).
+ *  - `near`/`far` bound the perspective frustum. Left fixed, `far` stays at
+ *    its old (now comparatively tiny) value and far-clips most or all of
+ *    the rescaled model — including, after an undo restores the
+ *    PRE-rescale model but leaves the (still-scaled) camera in place, the
+ *    restored model itself, which can end up entirely outside `[near,
+ *    far]` (a blank viewport). `near` must shrink on a SHRINK factor too —
+ *    otherwise a big enough reduction near-clips a model that now sits
+ *    entirely closer than the old fixed `near`.
+ *
+ * A factor of 1 is a no-op (returns `limits` unchanged in value, a fresh
+ * object). Ratios and angles elsewhere on the camera/controls (fov,
+ * dampingFactor, min/maxPolarAngle, zoomSpeed, …) are NOT world lengths and
+ * are deliberately left out of this function — scaling an angle by a
+ * document rescale factor would be a bug, not a fix.
+ */
+export function scaleViewLimits(limits: CameraViewLimits, factor: number): CameraViewLimits {
+  return {
+    near: limits.near * factor,
+    far: limits.far * factor,
+    minDistance: limits.minDistance * factor,
+    maxDistance: limits.maxDistance * factor,
+  }
+}
+
+/**
+ * The default home-framing 3/4-view eye OFFSET (unscaled, home scale 1) —
+ * `camera.position.set(HOME_EYE_OFFSET[0] * scale, HOME_EYE_OFFSET[1] *
+ * scale, HOME_EYE_OFFSET[2] * scale)` against `target = (0,0,0)` — used at
+ * BOTH Viewport.tsx's mount time and `setHomeFraming`'s re-pose (welcome
+ * screen unit choice). Kept as ONE literal, not re-typed at each call site,
+ * so `MOUNT_FIT_DISTANCE` below — which needs this exact offset to derive
+ * the mount-time fit distance — cannot silently drift from what the mount
+ * pose actually is (tool-parity delta-review Finding 3).
+ */
+export const HOME_EYE_OFFSET: [number, number, number] = [3.5, -3.0, 2.5]
+
+/**
+ * The camera/controls' MOUNT-TIME view limits (Viewport.tsx's `new
+ * THREE.PerspectiveCamera(45, …, MOUNT_LIMITS.near, MOUNT_LIMITS.far)` and
+ * `controls.minDistance = MOUNT_LIMITS.minDistance; controls.maxDistance =
+ * MOUNT_LIMITS.maxDistance` — both consume this module's constants
+ * directly rather than restating the numbers, so the two can't drift apart,
+ * delta-review Finding 3), and the fit distance Zoom Extents' own framing
+ * formula (`(radius * 1.2) / Math.tan(fovRad / 2)`) produces at mount time
+ * for the default home-framing pose (`HOME_EYE_OFFSET`, `target = (0,0,0)`,
+ * home scale 1): `Math.hypot(...HOME_EYE_OFFSET)`. `MOUNT_LIMITS` were
+ * tuned BY EYE for a scene that frames at approximately this distance —
+ * see `zoomExtentsViewLimits`'s doc comment for why they must be re-derived
+ * as RATIOS of it rather than reused as flat constants.
+ */
+export const MOUNT_FIT_DISTANCE = Math.hypot(...HOME_EYE_OFFSET)
+
+/** Mount-time `CameraViewLimits` (see `MOUNT_FIT_DISTANCE`'s doc comment) —
+ * the values `zoomExtentsViewLimits` reproduces exactly when handed a fit
+ * distance of `MOUNT_FIT_DISTANCE`. */
+export const MOUNT_LIMITS: CameraViewLimits = { near: 0.01, far: 100, minDistance: 0.1, maxDistance: 50 }
+
+/**
+ * Derives fresh `CameraViewLimits` from a Zoom Extents fit distance
+ * (tool-parity delta-review Finding 1): a Tape Measure rescale scales
+ * `minDistance`/`maxDistance`/`near`/`far` by its factor (`scaleViewLimits`),
+ * but that scale is permanent even after the rescale is UNDone — undo
+ * restores the (tiny) pre-rescale model but deliberately never touches view
+ * state (see `applyRescaleToView`'s doc comment), so `OrbitControls.update()`
+ * keeps clamping the eye→target distance to the OLD scaled `minDistance`.
+ * Repeated rescale/undo cycles compound the mismatch, and Zoom Extents —
+ * the view's universal "recover the framing" action — couldn't break out of
+ * it either, because it re-posed the camera without ever touching the very
+ * limits that clamp that re-pose.
+ *
+ * The fix: Zoom Extents already computes a `fitDistance` from the scene's
+ * OWN bounding sphere — the one piece of ground truth that is never stale,
+ * unlike the view limits. Re-deriving `near`/`far`/`minDistance`/
+ * `maxDistance` from THAT distance every time makes Zoom Extents a full
+ * resync, recovering from any prior state (never rescaled, forward-rescaled,
+ * undone, or any mix) in one call.
+ *
+ * The four bounds keep their ORIGINAL mount-time RATIOS to the fit distance
+ * — `scaleViewLimits(MOUNT_LIMITS, fitDistance / MOUNT_FIT_DISTANCE)` — so a
+ * plain unscaled scene, framed at exactly `MOUNT_FIT_DISTANCE`, reproduces
+ * `MOUNT_LIMITS` exactly (ratio 1); any other fit distance scales all four
+ * in the same lockstep `scaleViewLimits` already uses for a rescale. Since
+ * `minDistance`/`maxDistance` bracket the fit distance itself by a wide
+ * margin (~0.02x and ~10x it, from the mount-time ratios), the pose Zoom
+ * Extents is about to set is never clamped by the very limits this function
+ * just derived for it.
+ */
+export function zoomExtentsViewLimits(fitDistance: number): CameraViewLimits {
+  return scaleViewLimits(MOUNT_LIMITS, fitDistance / MOUNT_FIT_DISTANCE)
+}
+
 // ── screen-constant sizing ───────────────────────────────────────────────────
 //
 // Shared math for widgets that must keep a fixed apparent PIXEL size on screen

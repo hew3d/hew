@@ -6,7 +6,7 @@
  * a supplied `constraintPlane` is the fallback target instead of ground.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { SnapService, SNAP_RADIUS_PX } from './snapService'
+import { SnapService, SNAP_RADIUS_PX, SOFT_AXIS_BREAK_APERTURE_SCALE } from './snapService'
 import type { Scene } from '../wasm/pkg/wasm_api.js'
 import { pixelRadiusToAperture, type ApertureBasis, type Ray } from './math'
 
@@ -60,17 +60,35 @@ describe('SnapService — fallback tier', () => {
     expect(fromKernel).toBe(false)
     expect(snap).toBeNull()
   })
-})
 
-describe('SnapService — precision mode', () => {
-  it('passes the precision flag through to Scene.snap() as the second-to-last argument (cylinder is now the trailing one)', () => {
+  it('forwards offPlanePoints to Scene.snap as the trailing argument (false when omitted)', () => {
+    // The 3d-line staircase fix rides entirely on this bit reaching the
+    // engine: LineTool opts in via `snapConstraint().offPlanePoints` and the
+    // Viewport passes it through here.
     const scene = fakeScene()
     const svc = new SnapService(scene)
     const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
-    const precisionArg = () => snapFn.mock.calls.at(-1)?.at(-2)
+
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(false)
+
+    const constraintPlane = { point: [0, 1, 1] as [number, number, number], normal: [0, 1, 0] as [number, number, number] }
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, [1, 1, 1], undefined, constraintPlane, true)
+    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(true)
+  })
+})
+
+describe('SnapService — precision mode', () => {
+  it('passes the precision flag through to Scene.snap() as the fourth-to-last argument (cylinder, soft_axis_aperture_scale, off_plane_points trail it)', () => {
+    const scene = fakeScene()
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+    const precisionArg = () => snapFn.mock.calls.at(-1)?.at(-4)
 
     svc.resolve(DOWN, 800, PERSPECTIVE_45)
     // The kernel owns the weighting; only this boolean crosses the boundary.
+    // (The trailing arguments after precision are `cylinder`, then
+    // `soft_axis_aperture_scale` — finding E — then `off_plane_points`.)
     expect(precisionArg()).toBe(false)
 
     expect(svc.setPrecision(true)).toBe(true)
@@ -176,6 +194,44 @@ describe('SnapService — precision mode', () => {
     const released = svc.resolve(DOWN, 800, PERSPECTIVE_45).snap
     expect(released?.kind).toBe('ground')
     expect(released?.sketchCurve).toBeUndefined()
+  })
+
+  it('the resist-release query widens the soft-axis candidate\'s OWN aperture too, not just the pixel-derived one (finding E)', () => {
+    // `on-axis` is a STICKY_KINDS member whose candidate never reads the
+    // widened `aperture` the release query normally relies on (it has its
+    // own fixed cone in the kernel) — without a dedicated scale argument, a
+    // held soft-axis snap would have no hysteresis at all.
+    const axisSnap = {
+      x: () => 1, y: () => 0, z: () => 0,
+      kind: () => 'on-axis',
+      direction: () => new Float64Array([1, 0, 0]),
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => undefined,
+      element_kind: () => undefined,
+      sketch: () => undefined,
+      sketch_region: () => undefined,
+      sketch_curve: () => undefined,
+      free: () => {},
+    }
+    let hit = true
+    const snapFn = vi.fn(() => (hit ? axisSnap : undefined))
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('on-axis')
+    // The acquire query passes no scale (unscaled — the ordinary behavior).
+    // The scale is the second-to-last positional arg of `Scene.snap`; the
+    // trailing one is `off_plane_points`.
+    expect(snapFn.mock.calls[0].at(-2)).toBeNull()
+
+    hit = false
+    snapFn.mockClear()
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    // Two queries: acquire (unscaled), then the wider release-resist query,
+    // which must ALSO widen the soft-axis candidate's own tolerance.
+    expect(snapFn.mock.calls.length).toBe(2)
+    expect(snapFn.mock.calls[0].at(-2)).toBeNull()
+    expect(snapFn.mock.calls[1].at(-2)).toBe(SOFT_AXIS_BREAK_APERTURE_SCALE)
   })
 })
 

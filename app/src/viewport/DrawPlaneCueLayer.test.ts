@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
 import { axisDrawPlane, groundDrawPlane } from '../tools/drawPlane'
 import type { DrawPlane } from '../tools/drawPlane'
+import type { DrawingAxes } from '../tools/drawingAxes'
 
 describe('DrawPlaneCueLayer', () => {
   it('update(null) leaves the group empty', () => {
@@ -51,6 +52,34 @@ describe('DrawPlaneCueLayer', () => {
     // Dark-theme red axis color (default theme in the test environment) —
     // just assert it's NOT the neutral gray, the theme-specific hex is
     // covered by axisColors.test.ts.
+    expect(mat.color.getHex()).not.toBe(0x888888)
+  })
+
+  // ── Movable drawing axes (tool-parity §4) ──────────────────────────────
+  it('under a moved frame, a plane along the frame\'s (non-world) red axis still tints red, not neutral', () => {
+    const ROTATED_FRAME: DrawingAxes = { origin: [0, 0, 0], x: [0, 1, 0], y: [-1, 0, 0], z: [0, 0, 1] }
+    const plane = axisDrawPlane(0, [1, 2, 3], ROTATED_FRAME) // normal = frame.x = world [0,1,0]
+    const layer = new DrawPlaneCueLayer()
+    layer.update({ plane, through: [1, 2, 3] }, ROTATED_FRAME)
+    const mesh = layer.group.children[0] as THREE.LineSegments
+    const mat = mesh.material as THREE.LineBasicMaterial
+    // The un-fixed primitive (world-only comparison) would see world [0,1,0]
+    // as green (world Y), or neutral if outside its 1° tolerance of literal
+    // world axes — either way NOT the frame's red. Passing `frame` here must
+    // color it red.
+    expect(mat.color.getHex()).not.toBe(0x888888)
+  })
+
+  it('the SAME plane, without passing `frame`, defaults to world-axis comparison (source-compatible)', () => {
+    const ROTATED_FRAME: DrawingAxes = { origin: [0, 0, 0], x: [0, 1, 0], y: [-1, 0, 0], z: [0, 0, 1] }
+    const plane = axisDrawPlane(0, [1, 2, 3], ROTATED_FRAME) // normal = world [0,1,0] = world Y
+    const layer = new DrawPlaneCueLayer()
+    layer.update({ plane, through: [1, 2, 3] }) // no frame passed
+    const mesh = layer.group.children[0] as THREE.LineSegments
+    const mat = mesh.material as THREE.LineBasicMaterial
+    // Still not neutral — [0,1,0] is exactly world Y — but a DIFFERENT color
+    // (green) than the frame-aware call above (red), proving `frame` is what
+    // changed the result, not some other side effect.
     expect(mat.color.getHex()).not.toBe(0x888888)
   })
 

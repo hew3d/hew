@@ -1,9 +1,11 @@
 //! Document-level fuzz harness (DEVELOPMENT.md rule 3): random document ops —
 //! object edits, booleans, transforms, duplicate/delete, group/ungroup,
-//! components, instances, definition-member edits (`apply_def_op`), and 3D
-//! Text placement (`place_text`) — interleaved undo/redo — over a document
-//! seeded with sketch-extruded boxes, with torture mode on (the always-on
-//! validator panics at the offending op instead of committing a violation).
+//! components, instances, definition-member edits (`apply_def_op`), 3D
+//! Text placement (`place_text`), whole-document rescales
+//! (`rescale_document`), and movable-axes moves (`set_axes`) — interleaved
+//! undo/redo — over a document seeded with sketch-extruded boxes, with
+//! torture mode on (the always-on validator panics at the offending op
+//! instead of committing a violation).
 //!
 //! Invariants:
 //! - after every op (applied or refused typed) every visible object validates
@@ -240,6 +242,21 @@ enum DocOp {
         y: f64,
         depth: f64,
     },
+    /// Uniformly rescale the whole document about the world origin
+    /// (tool-parity §3 — the Tape Measure "resize the model" flow).
+    Rescale {
+        factor: f64,
+    },
+    /// Move the document's drawing axes (tool-parity §4) to an arbitrary
+    /// orthonormal right-handed frame: `axis`/`angle` describe a rotation
+    /// applied to the identity basis, which is always orthonormal and
+    /// right-handed by construction (a pure rotation preserves both), so
+    /// this can never refuse.
+    SetAxes {
+        origin: (f64, f64, f64),
+        axis: (f64, f64, f64),
+        angle: f64,
+    },
     Undo,
     Redo,
 }
@@ -340,6 +357,10 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         2 => (-20.0..20.0f64, -20.0..20.0f64, distance()).prop_map(|(x, y, depth)| {
             DocOp::PlaceText { x, y, depth: depth.abs() }
         }),
+        1 => (0.2..5.0f64).prop_map(|factor| DocOp::Rescale { factor }),
+        1 => (arb_offset(), arb_offset(), 0.0..std::f64::consts::TAU).prop_map(
+            |(origin, axis, angle)| DocOp::SetAxes { origin, axis, angle }
+        ),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
@@ -590,9 +611,26 @@ fn doc_fingerprint(doc: &Document) -> String {
         })
         .collect();
     def_sketches.sort_unstable();
+    // The movable drawing axes frame (tool-parity design §4): both `Rescale`
+    // and `SetAxes` mutate it (directly or, for `Rescale`, only its origin —
+    // see `Document::rescale_document`'s doc comment), so it must be in the
+    // fingerprint or a replay that drops/corrupts it compares equal to one
+    // that doesn't.
+    let axes = doc.axes();
+    let axes_print = (
+        q(axes.origin.x),
+        q(axes.origin.y),
+        q(axes.origin.z),
+        q(axes.x.x),
+        q(axes.x.y),
+        q(axes.x.z),
+        q(axes.y.x),
+        q(axes.y.y),
+        q(axes.y.z),
+    );
     format!(
         "objs={objects:?} defs={defs:?} poses={poses:?} groups={} \
-         world_sketches={world_sketches:?} def_sketches={def_sketches:?}",
+         world_sketches={world_sketches:?} def_sketches={def_sketches:?} axes={axes_print:?}",
         doc.group_ids().len()
     )
 }
@@ -1167,6 +1205,30 @@ fn apply_doc_op(doc: &mut Document, step: usize, op: &DocOp) -> Result<bool, Tes
         }
         DocOp::PlaceText { x, y, depth } => {
             let _ = place_glyph(doc, *x, *y, *depth);
+        }
+        DocOp::Rescale { factor } => {
+            // Always a valid (finite, positive) factor by construction
+            // (`arb_doc_op`'s `0.2..5.0` range), so this cannot refuse.
+            doc.rescale_document(*factor)
+                .expect("rescale never refuses a valid factor");
+        }
+        DocOp::SetAxes {
+            origin,
+            axis,
+            angle,
+        } => {
+            // A pure rotation's image of the identity basis is always
+            // orthonormal and right-handed, so this can never refuse
+            // (unlike `Rescale`, no arithmetic guard is needed at all).
+            let raw_axis = Vec3::new(axis.0, axis.1, axis.2);
+            let unit_axis = raw_axis.normalized().unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+            let rot = Transform::rotation(unit_axis, *angle)
+                .expect("a unit axis rotation is never singular");
+            let x = rot.apply_vector(Vec3::new(1.0, 0.0, 0.0));
+            let y = rot.apply_vector(Vec3::new(0.0, 1.0, 0.0));
+            let o = Point3::new(origin.0, origin.1, origin.2);
+            doc.set_axes(o, x, y)
+                .expect("a rotated identity basis is always a valid axes frame");
         }
         DocOp::Undo => {
             if doc.can_undo()

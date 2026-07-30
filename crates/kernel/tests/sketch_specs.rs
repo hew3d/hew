@@ -791,6 +791,140 @@ fn curve_rims_work_on_a_standing_plane() {
     }
 }
 
+/// The midpoint angle (degrees, in `[0, 360)`) of `eid`'s chord about the
+/// world origin — used only to bucket a 12-facet circle's edges into
+/// quarters by where they sit, independent of slotmap/id order.
+fn edge_mid_angle_deg(s: &Sketch, eid: kernel::SketchEdgeId) -> f64 {
+    let e = s.edges()[eid];
+    let a = s.vertices()[e.from].position;
+    let b = s.vertices()[e.to].position;
+    let deg = ((a.y + b.y) * 0.5).atan2((a.x + b.x) * 0.5).to_degrees();
+    if deg < 0.0 { deg + 360.0 } else { deg }
+}
+
+/// tool-parity playtest2 (Part 1): the rosette bug's root cause is that
+/// `curve_rims` unions angular coverage over every live edge sharing a
+/// curve id with NO connectivity check — so once a drawn circle has been
+/// split into several DISCONNECTED chain fragments (a rotate-copy array
+/// crossing it at multiple points, exactly like `curve_chain_stops_at_junctions`)
+/// and the user deletes some of those fragments, does `curve_rims` still
+/// report a span bridging the gap where a deleted fragment used to be? If it
+/// did, quadrant/tangent snaps would be offered on an arc that no longer
+/// exists — a second latent defect in the same family as the selection bug.
+///
+/// This is a read-first spec: it asserts the CORRECT (non-bridging) behavior
+/// and is expected to already pass, since `merge_angular_intervals` only
+/// merges intervals that are angularly adjacent (within `tol::POINT_MERGE`),
+/// never across a real gap. It stands as the regression lock for that
+/// finding either way.
+#[test]
+fn curve_rims_does_not_bridge_coverage_across_disconnected_surviving_fragments() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 12);
+
+    // Two diameters through the circle's own quadrant vertices (0/90/180/270
+    // are all facet vertices at n = 12) split the ring into four 90-degree
+    // chains WITHOUT splitting any circle edge itself — junctions land
+    // exactly on existing vertices, the same mechanism
+    // `curve_chain_stops_at_junctions` pins for a diamond.
+    s.add_segment(pt(1.0, 0.0), pt(-1.0, 0.0)).unwrap();
+    s.add_segment(pt(0.0, 1.0), pt(0.0, -1.0)).unwrap();
+
+    // Delete the second and fourth quarters — the "interior petal" fragments
+    // in Kurt's repro — leaving two disjoint surviving arcs: [0,90] and
+    // [180,270], with a genuine 90-degree gap on both sides.
+    for eid in s.curve_edges(id) {
+        let deg = edge_mid_angle_deg(&s, eid);
+        if (90.0..180.0).contains(&deg) || (270.0..360.0).contains(&deg) {
+            s.remove_edge(eid).unwrap();
+        }
+    }
+    assert_eq!(s.curve_edges(id).len(), 6, "two 3-edge quarters survive");
+
+    let rims = s.curve_rims();
+    assert_eq!(rims.len(), 1);
+    let rim = &rims[0];
+    let coverage = rim
+        .coverage
+        .clone()
+        .expect("partial coverage, not the full-circle None");
+    assert_eq!(
+        coverage.len(),
+        2,
+        "two disjoint surviving arcs must stay separate entries, never bridged into one: {coverage:?}"
+    );
+
+    let frame_angle = |d: kernel::Vec3| d.dot(rim.basis_v).atan2(d.dot(rim.basis_u));
+    // Interior of each surviving quarter: covered.
+    assert!(rim.covers(frame_angle(kernel::Vec3::new(1.0, 1.0, 0.0)))); // ~45deg, inside [0,90]
+    assert!(rim.covers(frame_angle(kernel::Vec3::new(-1.0, -1.0, 0.0)))); // ~225deg, inside [180,270]
+    // Interior of each DELETED quarter — the phantom span, if one existed —
+    // must read as NOT covered: no quadrant/tangent candidate belongs there.
+    assert!(!rim.covers(frame_angle(kernel::Vec3::new(-1.0, 1.0, 0.0)))); // ~135deg, deleted
+    assert!(!rim.covers(frame_angle(kernel::Vec3::new(1.0, -1.0, 0.0)))); // ~315deg, deleted
+}
+
+/// Kurt's actual goal in the repro isn't just "select the right fragment" —
+/// it's "delete it and keep the rest of the flower". The app's delete path
+/// re-derives the connectivity-aware chain via `curve_chain_at` (never the
+/// connectivity-blind `curve_edges`) before erasing
+/// (`Viewport.tsx`'s `runDelete`/`removeEdgeBatch`), so deleting one
+/// fragment of a curve id split into several disconnected pieces must leave
+/// every sibling fragment — including ones sharing the very same curve id —
+/// completely untouched. This pins that contract at the kernel level, where
+/// `curve_chain_at` and `remove_edge` actually live.
+#[test]
+fn deleting_one_disconnected_fragment_via_its_chain_leaves_sibling_fragments_untouched() {
+    let mut s = xy_sketch();
+    let id = circle_chain(&mut s, pt(0.0, 0.0), 1.0, 12);
+    s.add_segment(pt(1.0, 0.0), pt(-1.0, 0.0)).unwrap();
+    s.add_segment(pt(0.0, 1.0), pt(0.0, -1.0)).unwrap();
+
+    let quarter = |s: &Sketch, lo: f64, hi: f64| -> Vec<kernel::SketchEdgeId> {
+        s.curve_edges(id)
+            .into_iter()
+            .filter(|&e| (lo..hi).contains(&edge_mid_angle_deg(s, e)))
+            .collect()
+    };
+    let q0 = quarter(&s, 0.0, 90.0);
+    let q1 = quarter(&s, 90.0, 180.0);
+    let q2 = quarter(&s, 180.0, 270.0);
+    let q3 = quarter(&s, 270.0, 360.0);
+    assert_eq!([q0.len(), q1.len(), q2.len(), q3.len()], [3, 3, 3, 3]);
+
+    // Delete only q1's chain, exactly as the app's delete path does: derive
+    // the connected chain from one of its edges, then erase each member.
+    let chain = s.curve_chain_at(q1[0]);
+    assert_eq!(
+        chain.len(),
+        3,
+        "the chain is exactly this one quarter, never the whole curve id"
+    );
+    for &eid in &chain {
+        s.remove_edge(eid).unwrap();
+    }
+
+    let remaining = s.curve_edges(id);
+    assert_eq!(remaining.len(), 9, "the other three quarters survive");
+    for eid in q0.iter().chain(q2.iter()).chain(q3.iter()) {
+        assert!(
+            remaining.contains(eid),
+            "sibling fragment edge {eid:?} survives"
+        );
+    }
+    for eid in &q1 {
+        assert!(
+            !remaining.contains(eid),
+            "the deleted fragment is actually gone"
+        );
+    }
+    // Survivors are each still one coherent connected chain, not fragmented
+    // further by the deletion.
+    assert_eq!(s.curve_chain_at(q0[0]).len(), 3);
+    assert_eq!(s.curve_chain_at(q2[0]).len(), 3);
+    assert_eq!(s.curve_chain_at(q3[0]).len(), 3);
+}
+
 // ------------------------------------------------------- refacet_curve
 //
 // Editing a drawn circle's segment count is a REBUILD of that circle, not a

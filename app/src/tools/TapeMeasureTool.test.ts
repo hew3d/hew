@@ -34,6 +34,7 @@ function makeWasmScene() {
     // sketch-hover-adopt is covered separately in TapeMeasureTool.plane.test.ts).
     pick_sketch: vi.fn(() => undefined),
     sketch_plane: vi.fn(() => undefined),
+    rescale_document: vi.fn(),
   }
   return { scene: scene as unknown as WasmScene, guideLines, guidePoints }
 }
@@ -42,8 +43,25 @@ function makeTool(scene: WasmScene) {
   const onGuideCreated = vi.fn()
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
-  const tool = new TapeMeasureTool(scene, new THREE.Group(), onGuideCreated, onToast, onMeasurement)
-  return { tool, onGuideCreated, onToast, onMeasurement }
+  const onRescaleArmed = vi.fn()
+  const onRescaleApplied = vi.fn()
+  const tool = new TapeMeasureTool(
+    scene,
+    new THREE.Group(),
+    onGuideCreated,
+    onToast,
+    onMeasurement,
+    onRescaleArmed,
+    onRescaleApplied,
+  )
+  return { tool, onGuideCreated, onToast, onMeasurement, onRescaleArmed, onRescaleApplied }
+}
+
+/** Feed a plain digit/decimal string then Enter into the tool's VCB. */
+const typeAndEnter = (tool: TapeMeasureTool, buf: string): void => {
+  const key = (k: string) => ({ key: k, preventDefault: () => { /* no-op */ } }) as unknown as KeyboardEvent
+  for (const ch of buf) tool.onKey(key(ch))
+  tool.onKey(key('Enter'))
 }
 
 describe('TapeMeasureTool — parallel-guide mode entry', () => {
@@ -219,5 +237,130 @@ describe('TapeMeasureTool — parallel guides from axes and guide lines (playtes
 
     expect(guidePoints).toEqual([[2, 1, 0]])
     expect(onGuideCreated).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Resize-the-model confirmation (design tool-parity §3): typing a length
+// right after measuring between two REAL, already-known points arms a
+// confirmation instead of dropping a guide point immediately.
+describe('TapeMeasureTool — resize-the-model confirmation', () => {
+  it('arms the confirmation when both measured points rest on real geometry', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onRescaleArmed } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).toHaveBeenCalledTimes(1)
+    const info = onRescaleArmed.mock.calls[0][0]
+    expect(info.currentDistance).toBeCloseTo(2)
+    expect(info.typedDistance).toBeCloseTo(3)
+    expect(info.factor).toBeCloseTo(1.5)
+    // Nothing committed yet — the decision is still pending.
+    expect(guidePoints.length).toBe(0)
+    expect(scene.rescale_document).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(true)
+  })
+
+  it('confirmRescale applies rescale_document with the armed factor and returns to idle', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleApplied } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+
+    tool.confirmRescale()
+
+    expect(scene.rescale_document).toHaveBeenCalledWith(1.5)
+    // The factor is passed through to the callback so the Viewport can
+    // re-scale the camera about the same world-origin pivot (tool-parity §3
+    // "the view jumps around" fix) — see viewport/math.test.ts for the pure
+    // scaling math itself.
+    expect(onRescaleApplied).toHaveBeenCalledWith(1.5)
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('cancelRescale falls through to the normal guide-point commit', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onGuideCreated } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+
+    tool.cancelRescale()
+
+    expect(scene.rescale_document).not.toHaveBeenCalled()
+    expect(guidePoints.length).toBe(1)
+    // The 3 m typed distance along +X from the origin.
+    expect(guidePoints[0][0]).toBeCloseTo(3)
+    expect(onGuideCreated).toHaveBeenCalledTimes(1)
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('Escape while pending behaves like Cancel (drops the guide, no rescale)', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+
+    expect(scene.rescale_document).not.toHaveBeenCalled()
+    expect(guidePoints.length).toBe(1)
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('does not arm when either endpoint is in empty space — commits the guide normally', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onRescaleArmed } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'ground' }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(guidePoints.length).toBe(1)
+  })
+
+  it('does not arm for a non-positive typed length', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onRescaleArmed } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '-3')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(guidePoints.length).toBe(1) // the normal (recessed-direction) commit still ran
+  })
+
+  it('confirmRescale/cancelRescale are safe no-ops when nothing is pending', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    expect(() => tool.confirmRescale()).not.toThrow()
+    expect(() => tool.cancelRescale()).not.toThrow()
+    expect(scene.rescale_document).not.toHaveBeenCalled()
+  })
+
+  it('a refused rescale_document toasts and still returns to idle', () => {
+    const { scene } = makeWasmScene()
+    ;(scene as unknown as { rescale_document: ReturnType<typeof vi.fn> }).rescale_document.mockImplementation(() => {
+      throw new Error('InvalidRescaleFactor: rescale factor must be a positive, finite number')
+    })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+    tool.confirmRescale()
+
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(tool.capturingInput()).toBe(false)
   })
 })

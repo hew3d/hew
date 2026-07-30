@@ -6,6 +6,11 @@ import {
   screenConstantWorldHalf,
   legacyScreenConstantToPixels,
   axisDashGapWorld,
+  scaleCameraAboutOrigin,
+  scaleViewLimits,
+  zoomExtentsViewLimits,
+  MOUNT_FIT_DISTANCE,
+  MOUNT_LIMITS,
   LEGACY_REFERENCE_FOV_DEG,
   LEGACY_REFERENCE_VIEWPORT_HEIGHT_PX,
   worldPerPixelPerspective,
@@ -377,5 +382,144 @@ describe('apertureModeFor', () => {
 
   it('parallel basis selects cylinder', () => {
     expect(apertureModeFor({ kind: 'parallel', worldPerPixel: 0.02 })).toBe('cylinder')
+  })
+})
+
+// Tape Measure's "resize the model?" camera-follow fix (design tool-parity
+// §3): rescale_document(factor) scales the whole model about the WORLD
+// ORIGIN, so the camera must scale about that SAME pivot by the SAME factor
+// to keep the view visually identical.
+describe('scaleCameraAboutOrigin', () => {
+  it('scales both eye and target by the factor about the origin', () => {
+    const { eye, target } = scaleCameraAboutOrigin([4, -6, 8], [1, 2, 3], 2)
+    expect(eye).toEqual([8, -12, 16])
+    expect(target).toEqual([2, 4, 6])
+  })
+
+  it('preserves the eye→target direction and scales the distance by the factor', () => {
+    const eye0: [number, number, number] = [10, 0, 5]
+    const target0: [number, number, number] = [0, 0, 0]
+    const factor = 3
+    const { eye, target } = scaleCameraAboutOrigin(eye0, target0, factor)
+
+    const distBefore = Math.hypot(eye0[0] - target0[0], eye0[1] - target0[1], eye0[2] - target0[2])
+    const distAfter = Math.hypot(eye[0] - target[0], eye[1] - target[1], eye[2] - target[2])
+    expect(distAfter).toBeCloseTo(distBefore * factor, 9)
+
+    // Direction unchanged (same angular size at the new scale — the whole
+    // point of scaling the camera in lockstep with the model).
+    const dirBefore = [(eye0[0] - target0[0]) / distBefore, (eye0[1] - target0[1]) / distBefore, (eye0[2] - target0[2]) / distBefore]
+    const dirAfter = [(eye[0] - target[0]) / distAfter, (eye[1] - target[1]) / distAfter, (eye[2] - target[2]) / distAfter]
+    expect(dirAfter[0]).toBeCloseTo(dirBefore[0], 9)
+    expect(dirAfter[1]).toBeCloseTo(dirBefore[1], 9)
+    expect(dirAfter[2]).toBeCloseTo(dirBefore[2], 9)
+  })
+
+  it('a factor of 1 is a no-op', () => {
+    const { eye, target } = scaleCameraAboutOrigin([3, -2, 7], [1, 1, 1], 1)
+    expect(eye).toEqual([3, -2, 7])
+    expect(target).toEqual([1, 1, 1])
+  })
+
+  it('a target already at the origin stays at the origin (the origin is a fixed point of the scale)', () => {
+    const { eye, target } = scaleCameraAboutOrigin([5, 5, 5], [0, 0, 0], 4)
+    expect(eye).toEqual([20, 20, 20])
+    expect(target).toEqual([0, 0, 0])
+  })
+})
+
+// Companion to scaleCameraAboutOrigin: the OTHER world-length view state
+// (OrbitControls' orbit-distance clamp, the camera's clip planes) must scale
+// by the same factor or the pose re-computed above gets clamped/clipped
+// right back to the pre-rescale scale (delta-review Findings 1 & 2 — see
+// `applyRescaleToView`'s doc comment in Viewport.tsx).
+describe('scaleViewLimits', () => {
+  it('scales near, far, minDistance, and maxDistance all by the same factor', () => {
+    const limits = scaleViewLimits({ near: 0.01, far: 100, minDistance: 0.1, maxDistance: 50 }, 100)
+    expect(limits).toEqual({ near: 1, far: 10000, minDistance: 10, maxDistance: 5000 })
+  })
+
+  it('a factor of 1 is a no-op', () => {
+    const original = { near: 0.01, far: 100, minDistance: 0.1, maxDistance: 50 }
+    expect(scaleViewLimits(original, 1)).toEqual(original)
+  })
+
+  it('a shrink factor (< 1) scales every bound DOWN, including near — a shrunk model must not stay near-clipped by the old (now comparatively huge) near plane', () => {
+    const limits = scaleViewLimits({ near: 0.01, far: 100, minDistance: 0.1, maxDistance: 50 }, 0.01)
+    expect(limits.near).toBeCloseTo(0.0001, 10)
+    expect(limits.far).toBeCloseTo(1, 10)
+    expect(limits.minDistance).toBeCloseTo(0.001, 10)
+    expect(limits.maxDistance).toBeCloseTo(0.5, 10)
+  })
+
+  it('preserves the near < far and minDistance < maxDistance orderings (scaling by a positive factor cannot invert them)', () => {
+    const before = { near: 0.01, far: 100, minDistance: 0.1, maxDistance: 50 }
+    for (const factor of [100, 0.01, 1, 3.7]) {
+      const after = scaleViewLimits(before, factor)
+      expect(after.near).toBeLessThan(after.far)
+      expect(after.minDistance).toBeLessThan(after.maxDistance)
+    }
+  })
+
+  it('does not mutate the input', () => {
+    const original = { near: 0.01, far: 100, minDistance: 0.1, maxDistance: 50 }
+    const copy = { ...original }
+    scaleViewLimits(original, 100)
+    expect(original).toEqual(copy)
+  })
+})
+
+// Zoom Extents' own view-limit resync (delta-review Finding 1): re-derives
+// near/far/minDistance/maxDistance as RATIOS of the fit distance it just
+// computed, rather than reusing whatever `scaleViewLimits` last left in
+// place — a rescale scales those bounds, but undoing the rescale never
+// restores them (camera/view state is outside undo by design), so they can
+// be stuck at a stale scale no matter what Zoom Extents' OWN fit distance
+// says the scene actually needs right now.
+describe('zoomExtentsViewLimits', () => {
+  it('a fit distance of exactly MOUNT_FIT_DISTANCE reproduces MOUNT_LIMITS exactly (the mount-time tuning is the ratio-1 fixed point)', () => {
+    const limits = zoomExtentsViewLimits(MOUNT_FIT_DISTANCE)
+    expect(limits.near).toBeCloseTo(MOUNT_LIMITS.near, 12)
+    expect(limits.far).toBeCloseTo(MOUNT_LIMITS.far, 12)
+    expect(limits.minDistance).toBeCloseTo(MOUNT_LIMITS.minDistance, 12)
+    expect(limits.maxDistance).toBeCloseTo(MOUNT_LIMITS.maxDistance, 12)
+  })
+
+  it('scales all four bounds proportionally to the fit distance, exactly like scaleViewLimits', () => {
+    const factor = 17.3
+    const limits = zoomExtentsViewLimits(MOUNT_FIT_DISTANCE * factor)
+    expect(limits).toEqual(scaleViewLimits(MOUNT_LIMITS, factor))
+  })
+
+  it('the refuters repro: a stale minDistance of 10 (0.1 mount value scaled 100x by a prior rescale) does not survive a resync at the true (small) post-undo fit distance', () => {
+    // Mirrors the exact numbers from the delta-review repro: a 100x rescale
+    // scales minDistance to 0.1 * 100 = 10; undoing it reverts the model to
+    // a small bounding sphere whose fit distance is well under that stale
+    // floor (the refuters measured ~2.51 for their scene).
+    const staleMinDistance = MOUNT_LIMITS.minDistance * 100
+    const trueFitDistance = 2.51
+    expect(trueFitDistance).toBeLessThan(staleMinDistance)
+    const resynced = zoomExtentsViewLimits(trueFitDistance)
+    expect(resynced.minDistance).toBeLessThan(trueFitDistance)
+    expect(resynced.maxDistance).toBeGreaterThan(trueFitDistance)
+    expect(resynced.minDistance).not.toBeCloseTo(staleMinDistance, 0)
+  })
+
+  it('minDistance/maxDistance always bracket the fit distance itself, at any scale — the pose Zoom Extents is about to set can never be clamped by the limits it just derived', () => {
+    for (const fitDistance of [0.001, 0.05, MOUNT_FIT_DISTANCE, 12, 500, 1e6]) {
+      const limits = zoomExtentsViewLimits(fitDistance)
+      expect(limits.minDistance).toBeLessThan(fitDistance)
+      expect(limits.maxDistance).toBeGreaterThan(fitDistance)
+      expect(limits.near).toBeLessThan(fitDistance)
+      expect(limits.far).toBeGreaterThan(fitDistance)
+    }
+  })
+
+  it('preserves the near < far and minDistance < maxDistance orderings at any fit distance', () => {
+    for (const fitDistance of [0.001, 1, MOUNT_FIT_DISTANCE, 1000]) {
+      const limits = zoomExtentsViewLimits(fitDistance)
+      expect(limits.near).toBeLessThan(limits.far)
+      expect(limits.minDistance).toBeLessThan(limits.maxDistance)
+    }
   })
 })

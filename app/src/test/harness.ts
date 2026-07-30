@@ -234,6 +234,15 @@ export interface HewTestHarness {
   getObjectIds(): string[]
   getSelection(): { kind: string; id: string }[]
   getLastError(): string | null
+  /**
+   * The document's current movable drawing axes (tool-parity §4): the flat
+   * 12-float `Scene::axes()` buffer — `[ox,oy,oz, xx,xy,xz, yx,yy,yz,
+   * zx,zy,zz]` (origin, unit red/X, unit green/Y, derived unit blue/Z).
+   * World identity (`[0,0,0, 1,0,0, 0,1,0, 0,0,1]`) until the Axes tool or
+   * `resetAxes` moves it. Test-only accessor for E2E specs that verify a
+   * draw gesture landed on a MOVED frame, not the world ground plane.
+   */
+  getDrawingAxes(): number[]
 
   // -------- NEW in  --------
 
@@ -528,6 +537,12 @@ export interface HewTestHarness {
    * `[ax,ay,az, bx,by,bz, ...]` — the geometry probe for asserting where a
    * sketch's lines actually stand (e.g. upright after a rotate). */
   getSketchLines(sketch: string): number[]
+
+  /** `sketch`'s plane as `[px,py,pz, nx,ny,nz]` (point + unit normal), or
+   *  `null` for a stale/hidden sketch — the probe for asserting a gesture
+   *  landed on a MOVED drawing-axes frame's plane (tool-parity §4) rather
+   *  than the world ground plane. */
+  getSketchPlane(sketch: string): number[] | null
 
   /** `sketch`'s islands (connected components) with their member edges, as
    * decimal strings — the probe for asserting what one path click should
@@ -1027,6 +1042,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getSelection: () =>
       deps.getSelection().map((n) => ({ kind: n.kind, id: n.id.toString() })),
     getLastError: () => lastError,
+    getDrawingAxes: () => query((s) => Array.from(s.axes())),
 
     // -------- NEW in  --------
 
@@ -1328,6 +1344,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getSketchIds: () => query((s) => Array.from(s.sketch_ids(), (id) => id.toString())),
 
     getSketchLines: (sketch) => query((s) => Array.from(s.sketch_lines(BigInt(sketch)))),
+    getSketchPlane: (sketch) =>
+      query((s) => {
+        const p = s.sketch_plane(BigInt(sketch))
+        return p === undefined ? null : Array.from(p)
+      }),
 
     getSketchEdgeIds: (sketch) =>
       query((s) => {

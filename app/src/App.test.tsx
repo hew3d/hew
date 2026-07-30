@@ -1435,6 +1435,36 @@ describe('App — View > Section Plane menu state (D3, section-plane-polish)', (
   })
 })
 
+describe('App — View > Reset Axes command (tool-parity §4, finding 1)', () => {
+  // Reset Axes used to be a web-only MenuBar item wired to a direct callback
+  // prop (`onResetAxes={() => viewportApi.current?.resetAxes()}`) with no
+  // 'reset-axes' menuActionRef case and no native-menu counterpart — so it
+  // rendered fine but silently did nothing on macOS, whose Tauri shell
+  // renders the native menu exclusively and never falls back to this
+  // in-app MenuBar. App.tsx now gives it a real command id ('reset-axes')
+  // routed through the same menuActionRef switch every other menu command
+  // uses; this test drives the WEB path (MenuBar click) end to end and
+  // proves it reaches `viewportApi.current.resetAxes()` — the native-menu
+  // side of the same path is covered by nativeMenuParity.test.ts's
+  // "non-tool commands" suite (main.rs has no JS-visible surface to click).
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('clicking View > Reset Axes calls viewportApi.current.resetAxes()', async () => {
+    await renderAndLoad()
+    const resetAxes = vi.fn()
+    const calls = vi.mocked(Viewport).mock.calls
+    const { apiRef } = calls[calls.length - 1][0] as { apiRef?: { current: { resetAxes: () => void } | null } }
+    act(() => {
+      if (apiRef !== undefined) apiRef.current = { resetAxes }
+    })
+    fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(menubar().getByText('Reset Axes'))
+    expect(resetAxes).toHaveBeenCalledOnce()
+  })
+})
+
 describe('App — welcome screen', () => {
   it('opens on a bare launch and closes into the blank document', async () => {
     setShowWelcome(true)

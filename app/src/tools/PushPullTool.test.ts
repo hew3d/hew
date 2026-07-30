@@ -86,6 +86,7 @@ function makeWasmScene(opts: {
       free: vi.fn(),
     })),
     component_member_sketches: vi.fn(() => new BigUint64Array(opts.memberSketches ?? [])),
+    extrude_face_as_new_object: vi.fn(() => 42n),
   } as unknown as WasmScene
 }
 
@@ -94,8 +95,16 @@ function makeTool(scene: WasmScene) {
   const onCommit = vi.fn()
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
-  const tool = new PushPullTool(scene, preview, onCommit, onToast, onMeasurement)
-  return { tool, preview, onCommit, onToast, onMeasurement }
+  const onExtrudeAsNewModeChange = vi.fn()
+  const tool = new PushPullTool(
+    scene,
+    preview,
+    onCommit,
+    onToast,
+    onMeasurement,
+    onExtrudeAsNewModeChange,
+  )
+  return { tool, preview, onCommit, onToast, onMeasurement, onExtrudeAsNewModeChange }
 }
 
 describe('PushPullTool — Path A (object face)', () => {
@@ -684,5 +693,180 @@ describe('PushPullTool — setEditContext aborts an armed gesture on a genuine c
     tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
 
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+// Double-click repeat (design tool-parity §2): repeats `lastCommittedDistance`
+// on whatever face/region a fresh double-click lands on. The gesture's FIRST
+// click always routes through the normal onPointerDown first (the Viewport
+// only skips the phantom SECOND pointerdown), so these tests always issue a
+// real onPointerDown immediately before calling onDoubleClick, mirroring the
+// real event sequence.
+describe('PushPullTool — double-click repeat', () => {
+  it('with nothing committed yet, a double-click does not repeat and falls through', () => {
+    const facePick = makeFacePick(3n, 4n)
+    const scene = makeWasmScene({ facePick })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    expect(tool.capturingInput()).toBe(true) // click 1 started the drag
+
+    const handled = tool.onDoubleClick(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(handled).toBe(false)
+    expect(tool.capturingInput()).toBe(false) // the phantom drag was reset
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('repeats the last committed distance on a double-clicked face', () => {
+    const facePick = makeFacePick(3n, 4n)
+    const scene = makeWasmScene({ facePick })
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    const handled = tool.onDoubleClick(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(handled).toBe(true)
+    expect(scene.push_pull).toHaveBeenCalledTimes(2)
+    const call = (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[1]
+    expect(call[0]).toBe(3n)
+    expect(call[1]).toBe(4n)
+    expect(call[2]).toBeCloseTo(2)
+    expect(onCommit).toHaveBeenCalledTimes(2)
+  })
+
+  it('repeats a signed (recessed) distance with the same sign', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    for (const ch of '-0.5') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    expect((scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[0][2]).toBeCloseTo(-0.5)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onDoubleClick(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(scene.push_pull).toHaveBeenCalledTimes(2)
+    expect((scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[1][2]).toBeCloseTo(-0.5)
+  })
+
+  it('repeats onto a sketch region target too (extrude_region)', () => {
+    const regionPick = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({ facePick: undefined, regionPick })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 3, kind: 'endpoint' }), RAY)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    const handled = tool.onDoubleClick(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(handled).toBe(true)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(2)
+    expect((scene.extrude_region as ReturnType<typeof vi.fn>).mock.calls[1][2]).toBeCloseTo(3)
+  })
+
+  it('an ineligible face click never starts a drag, so the double-click falls through', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      parents: new Map([[3n, 9n]]), // grouped → ineligible
+    })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // toasts, stays idle
+    const handled = tool.onDoubleClick(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(handled).toBe(false)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+})
+
+// Ctrl/Cmd extrude-as-new-object modifier (design tool-parity §2): a durable
+// per-gesture toggle (Move-copy idiom — driven externally via
+// toggleExtrudeAsNew(), mirroring how the Viewport's dedicated Ctrl/Cmd
+// listener calls it; see PushPullTool.onKey's note on why a bare Control/Meta
+// keydown can't ride the tool's own onKey).
+describe('PushPullTool — Ctrl/Cmd extrude-as-new-object modifier', () => {
+  it('routes a face commit through extrude_face_as_new_object while the mode is on', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onCommit } = makeTool(scene)
+
+    tool.toggleExtrudeAsNew()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+
+    expect(scene.extrude_face_as_new_object).toHaveBeenCalledTimes(1)
+    const call = (scene.extrude_face_as_new_object as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(3n)
+    expect(call[1]).toBe(4n)
+    expect(call[2]).toBeCloseTo(2)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(42n)
+  })
+
+  it('tapping the toggle twice returns to the normal push_pull commit', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+
+    tool.toggleExtrudeAsNew()
+    tool.toggleExtrudeAsNew()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    expect(scene.extrude_face_as_new_object).not.toHaveBeenCalled()
+  })
+
+  it('does not apply to a sketch-region target — extrude_region commits normally', () => {
+    const regionPick = makeRegionPick(99n, 7n)
+    const scene = makeWasmScene({ facePick: undefined, regionPick })
+    const { tool } = makeTool(scene)
+
+    tool.toggleExtrudeAsNew()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 3, kind: 'endpoint' }), RAY)
+
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+    expect(scene.extrude_face_as_new_object).not.toHaveBeenCalled()
+  })
+
+  it('falls back to push_pull_in_component inside a component context (no definition-member surface)', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 42n) })
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+    tool.setFaceEligibility(() => true)
+    tool.toggleExtrudeAsNew()
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+
+    expect(scene.extrude_face_as_new_object).not.toHaveBeenCalled()
+    expect(scene.push_pull_in_component).toHaveBeenCalledTimes(1)
+  })
+
+  it('notifies the mode-change callback on each toggle', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onExtrudeAsNewModeChange } = makeTool(scene)
+
+    tool.toggleExtrudeAsNew()
+    expect(onExtrudeAsNewModeChange).toHaveBeenCalledWith(true)
+    tool.toggleExtrudeAsNew()
+    expect(onExtrudeAsNewModeChange).toHaveBeenCalledWith(false)
+  })
+
+  it('the status hint reflects the toggle', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+
+    expect(tool.statusHint()).not.toContain('Ctrl is on')
+    tool.toggleExtrudeAsNew()
+    expect(tool.statusHint()).toContain('Ctrl is on')
   })
 })

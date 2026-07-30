@@ -83,6 +83,7 @@ export type PushPullTarget =
 export type OnPushPullCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
+export type OnExtrudeAsNewModeChange = (on: boolean) => void
 
 type Stage =
   | { kind: 'idle' }
@@ -99,9 +100,13 @@ export class PushPullTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
-    return this.stage.kind === 'idle'
-      ? 'Click a face to push or pull it.'
-      : 'Move to extrude, click to commit — or type an exact distance.'
+    if (this.stage.kind === 'idle') {
+      const base = 'Click a face to push or pull it — double-click repeats the last distance.'
+      return this.extrudeAsNewMode ? `${base} Ctrl is on — extrudes a new object.` : base
+    }
+    return this.extrudeAsNewMode
+      ? 'Move to extrude a NEW object, click to commit — or type an exact distance. Tap Ctrl to push/pull instead.'
+      : 'Move to extrude, click to commit — or type an exact distance. Tap Ctrl to extrude a new object instead.'
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -117,24 +122,83 @@ export class PushPullTool implements Tool {
   /** The snap last seen on hover (for highlight logic) */
   lastSnap: Snap | null = null
 
+  /**
+   * Last successfully committed signed distance (meters, along the face
+   * normal — negative recesses), session-lived on this tool instance:
+   * double-click repeats it on whatever face/region is clicked next. `null`
+   * until the first commit this activation; a fresh `PushPullTool` (every
+   * tool switch mints one — see Viewport's `makePushPullTool`) starts with
+   * no repeat armed, matching SketchUp's per-activation memory.
+   */
+  private lastCommittedDistance: number | null = null
+
+  /**
+   * Durable per-gesture toggle (tap Ctrl/Cmd to flip — the Move-copy idiom:
+   * `MoveTool.ts` reads Alt the same way in `onKey`, not a live per-click
+   * modifier read like Paint's whole-object fill in `Viewport.tsx`). A live
+   * read doesn't fit here: Push/Pull is a click-drag-click gesture, and the
+   * modifier must survive released keys through the whole drag exactly like
+   * Move's copy toggle, not just whatever was held at one instant. While
+   * on, a solid-face commit routes through `extrude_face_as_new_object`
+   * (a NEW coincident object, source untouched) instead of `push_pull`.
+   */
+  private extrudeAsNewMode: boolean = false
+  private onExtrudeAsNewModeChange: OnExtrudeAsNewModeChange
+
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
     onCommit: OnPushPullCommit,
     onToast: OnToast,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    onExtrudeAsNewModeChange: OnExtrudeAsNewModeChange = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.onExtrudeAsNewModeChange = onExtrudeAsNewModeChange
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
 
   capturingInput(): boolean {
     return this.stage.kind === 'dragging'
+  }
+
+  /**
+   * Double-click repeats `lastCommittedDistance` on the clicked face/region
+   * (SketchUp parity), honoring the same validity refusals as any other
+   * commit (`_commit` already toasts a kernel refusal). The gesture's FIRST
+   * click ran through the normal `onPointerDown` and picked/validated a
+   * target into `this.stage` — the Viewport skips routing the second,
+   * phantom pointerdown once a tool implements `onDoubleClick` (see the
+   * Tool interface doc) — so this reuses that already-validated target
+   * rather than re-picking. Always resets the phantom drag click one
+   * started, so it never lingers as a stray in-progress gesture regardless
+   * of the outcome.
+   *
+   * Returns `false` — falling through to the Viewport's default "enter
+   * context" gesture, exactly PushPullTool's behavior before this method
+   * existed — when there is nothing to repeat: no target was picked (an
+   * ineligible-face click already toasted and stayed idle), or nothing has
+   * been committed yet this tool activation. Once a repeat IS attempted,
+   * returns `true` unconditionally (even on a refused commit) — a
+   * double-click is a deliberate repeat attempt, not a fallback-worthy miss.
+   */
+  onDoubleClick(_snap: Snap | null, _ray: Ray): boolean {
+    const stage = this.stage
+    this.stage = { kind: 'idle' }
+    this.typed = ''
+    clearPreview(this.preview)
+    this.onMeasurementCb('')
+
+    if (stage.kind !== 'dragging' || this.lastCommittedDistance === null) {
+      return false
+    }
+    this._commit(stage.target, this.lastCommittedDistance)
+    return true
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
@@ -314,6 +378,13 @@ export class PushPullTool implements Tool {
       return
     }
 
+    // NB: the Ctrl/Cmd extrude-as-new toggle is NOT handled here — a bare
+    // Control/Meta keydown reports ctrlKey/metaKey: true on itself, so the
+    // Viewport's generic key path (gated on `!isMod`) never routes it to a
+    // tool's onKey (same reason Scale's Ctrl center-anchor toggle and
+    // Shift's axis lock each have their own listener). It arrives via
+    // `toggleExtrudeAsNew()`, driven by a dedicated Ctrl/Cmd listener in the
+    // Viewport.
     if (this.stage.kind !== 'dragging') return
 
     // ── Numeric VCB ──
@@ -339,6 +410,20 @@ export class PushPullTool implements Tool {
    * like `'`/`"` are already visible in the buffer itself). */
   private _typedReadout(): string {
     return typedReadout(this.typed)
+  }
+
+  /**
+   * Flip the durable extrude-as-new-object mode (SketchUp's Ctrl/Cmd "leave
+   * original face", reinterpreted per the tool-parity design). A TAP toggle,
+   * not hold: set it before starting a drag, or flip it mid-drag to change
+   * what the NEXT click commits. Called by the Viewport's dedicated
+   * Ctrl/Cmd listener on a clean tap of either key — see the onKey note
+   * above for why this can't ride the generic key path. Autorepeat / the
+   * combo-vs-tap distinction are the Viewport listener's concern.
+   */
+  toggleExtrudeAsNew(): void {
+    this.extrudeAsNewMode = !this.extrudeAsNewMode
+    this.onExtrudeAsNewModeChange(this.extrudeAsNewMode)
   }
 
   cancel(): void {
@@ -532,6 +617,20 @@ export class PushPullTool implements Tool {
               distance,
             )
         this.onCommit(objectId)
+      } else if (this.extrudeAsNewMode && this._activeComponent === null) {
+        // Ctrl/Cmd modifier (design tool-parity §2): extrude a NEW
+        // coincident object from the clicked face instead of pushing/
+        // pulling the source — SketchUp's "leave original face". Not
+        // offered inside a component editing context: the kernel op only
+        // reaches WORLD faces (a definition member has no face to extrude
+        // at world scale), so that combination silently falls back to the
+        // ordinary `push_pull_in_component` commit below.
+        const objectId = this.wasmScene.extrude_face_as_new_object(
+          target.objectHandle,
+          target.faceHandle,
+          distance,
+        )
+        this.onCommit(objectId)
       } else {
         // Route through push_pull_in_component when the face was picked
         // through a component instance — `target.instance` (the instance the
@@ -568,6 +667,10 @@ export class PushPullTool implements Tool {
           report.free()
         }
       }
+      // Record on every successful commit, however it was invoked (drag,
+      // typed Enter, or a double-click repeat) — a double-click always
+      // repeats the MOST RECENT distance, chainable like SketchUp's.
+      this.lastCommittedDistance = distance
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

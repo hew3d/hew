@@ -5,7 +5,17 @@
  * axis-coloring + axis-snapping preview behavior.
  *
  * No three.js import — pure math, testable in Node/vitest.
+ *
+ * `axisColorForDirection` matches against a `DrawingAxes` frame (tool-parity
+ * design §4 — movable drawing axes), defaulting to `WORLD_DRAWING_AXES` so
+ * every call site that doesn't pass one keeps its exact legacy (world-only)
+ * behavior — this module has no wasm/kernel access of its own, so callers
+ * that care about the CURRENT frame resolve it themselves (`getDrawingAxes`)
+ * and pass it in, the same way they already resolve `colors` themselves via
+ * `axisColorsForTheme(getResolvedTheme())`.
  */
+import type { DrawingAxes } from '../tools/drawingAxes'
+import { WORLD_DRAWING_AXES } from '../tools/drawingAxes'
 
 /**
  * World axis colors: X=red, Y=green, Z=blue. Index = axis (0=X, 1=Y, 2=Z).
@@ -31,12 +41,6 @@ export function axisColorsForTheme(theme: 'light' | 'dark'): [number, number, nu
   return theme === 'light' ? LIGHT_AXIS_COLORS : DARK_AXIS_COLORS
 }
 
-const WORLD_AXIS: readonly [number, number, number][] = [
-  [1, 0, 0],
-  [0, 1, 0],
-  [0, 0, 1],
-]
-
 export interface AxisColorMatch {
   color: number
   axis: 0 | 1 | 2
@@ -46,8 +50,9 @@ export interface AxisColorMatch {
 
 /**
  * Test whether a (unit) direction lies within `tolDot` (a cosine threshold,
- * e.g. `Math.cos(2 * Math.PI / 180)` for a 2° tolerance) of a world axis,
- * in either polarity (+X/-X both match axis 0, etc).
+ * e.g. `Math.cos(2 * Math.PI / 180)` for a 2° tolerance) of a drawing axis
+ * (tool-parity design §4 — movable drawing axes), in either polarity (+X/-X
+ * both match axis 0, etc).
  *
  * Returns the matched axis's color, axis index, and the direction snapped
  * exactly onto that axis (preserving the input's sign along that axis, zero
@@ -60,19 +65,28 @@ export interface AxisColorMatch {
  * callers that care about the light/dark distinction pass
  * `axisColorsForTheme(getResolvedTheme())` explicitly — see
  * `ProtractorTool.ts`/`SliceTool.ts`.
+ *
+ * `frame` defaults to `WORLD_DRAWING_AXES` for the same source-compatibility
+ * reason: this module has no wasm/kernel access to resolve the CURRENT frame
+ * on its own (unlike `MoveTool`/`RotateTool`'s `axisDir`, which reads it
+ * straight off their own `wasmScene` field), so a caller that cares about a
+ * moved frame resolves it themselves (`getDrawingAxes(wasmScene)`) and passes
+ * it in here, exactly as they already do for `colors`.
  */
 export function axisColorForDirection(
   dir: readonly [number, number, number],
   tolDot: number,
   colors: readonly [number, number, number] = AXIS_COLORS,
+  frame: DrawingAxes = WORLD_DRAWING_AXES,
 ): AxisColorMatch | null {
   const [x, y, z] = dir
   const len = Math.sqrt(x * x + y * y + z * z)
   if (len < 1e-9) return null
   const ux = x / len, uy = y / len, uz = z / len
 
+  const frameAxis: readonly [number, number, number][] = [frame.x, frame.y, frame.z]
   for (let axis = 0 as 0 | 1 | 2; axis < 3; axis++) {
-    const [ax, ay, az] = WORLD_AXIS[axis]
+    const [ax, ay, az] = frameAxis[axis]
     const dot = ux * ax + uy * ay + uz * az
     if (Math.abs(dot) > tolDot) {
       const sign = dot >= 0 ? 1 : -1

@@ -29,6 +29,10 @@ function makeWasmScene(opts: { sketchPick?: bigint } = {}): WasmScene {
     add_guide_line: vi.fn(() => 1n),
     pick_sketch: vi.fn(() => opts.sketchPick),
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
+    // World-identity drawing axes (tool-parity §4) — this file doesn't
+    // exercise a moved frame, only the disk's frame-aware color path
+    // (`_updatePreviewDisk` reads `getDrawingAxes` unconditionally).
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
   } as unknown as WasmScene
 }
 

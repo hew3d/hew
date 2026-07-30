@@ -100,7 +100,8 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 import { segmentLength, directionBetween } from './lineInput'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
-import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
+import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
+import { getDrawingAxes } from './drawingAxes'
 import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 import {
   ARC_MIN_CHORD_M,
@@ -138,11 +139,29 @@ const COMPLETION_LABEL: Record<ArcCompletion, string> = {
 }
 
 /** Plane gesture: idle → endpoint A placed (chord) → chord (A,B) placed
- *  (bulge), on a frozen `DrawPlane`/`SketchTarget`. */
+ *  (bulge), on a frozen `DrawPlane`/`SketchTarget`. `natural` (design §2a) is
+ *  the plane/target the chord would have anchored onto at endpoint A's own
+ *  click had no idle lock been active — carried through `bulge` (unused
+ *  there; mid-gesture re-lock is scoped to the `chord` stage — see the
+ *  onKey doc) only so `_stepBack` can restore it verbatim when it steps
+ *  bulge back to chord. */
 type PlaneStage =
   | { kind: 'idle' }
-  | { kind: 'chord'; plane: DrawPlane; target: SketchTarget; a: V3 }
-  | { kind: 'bulge'; plane: DrawPlane; target: SketchTarget; a: V3; b: V3 }
+  | {
+      kind: 'chord'
+      plane: DrawPlane
+      target: SketchTarget
+      a: V3
+      natural: { plane: DrawPlane; target: SketchTarget }
+    }
+  | {
+      kind: 'bulge'
+      plane: DrawPlane
+      target: SketchTarget
+      a: V3
+      b: V3
+      natural: { plane: DrawPlane; target: SketchTarget }
+    }
 
 /** Face gesture: same stages, on a locked face plane. */
 type FaceStage =
@@ -469,6 +488,7 @@ export class ArcTool implements Tool {
       anchoredThrough: null,
       idleLock: this.idlePlaneLock,
       idleHover: this._lastIdleHoverPoint,
+      frame: getDrawingAxes(this.wasmScene),
     })
   }
 
@@ -539,6 +559,31 @@ export class ArcTool implements Tool {
       return
     }
 
+    // Mid-gesture plane re-lock (design §2a): once endpoint A is placed, an
+    // arrow key still re-locks the plane — through A, not the cursor —
+    // since nothing has reached the kernel yet at the CHORD stage (the arc
+    // commits only on the third click). Scoped to the chord stage: once B is
+    // also placed (bulge stage), the plane is pinned by BOTH A and B — an
+    // arbitrary axis lock through A alone could no longer honestly contain
+    // B, so re-locking there is out of scope (see the module doc). Also
+    // scoped to plane mode, for the same face-plane reason every other draw
+    // tool's §2a block is.
+    if (
+      this.planeStage.kind === 'chord' &&
+      (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown')
+    ) {
+      const { a, natural } = this.planeStage
+      const next = nextGestureLockPlane(
+        this.idlePlaneLock, ev.key, a, natural, getDrawingAxes(this.wasmScene), this._editContext,
+      )
+      this.idlePlaneLock = next.lock
+      this.planeStage = { kind: 'chord', plane: next.plane, target: next.target, a, natural }
+      this._lastPlaneCursor = null
+      this._clearPreview()
+      this.onMeasurementCb('')
+      return
+    }
+
     if (ev.key === 'Alt') {
       // SketchUp's Alt/Option toggle, extended with the chord close. Guard
       // key autorepeat so holding Alt doesn't spin through the cycle.
@@ -588,8 +633,8 @@ export class ArcTool implements Tool {
   /** Esc steps back one stage: bulge → chord (A kept), chord → idle. */
   private _stepBack(): void {
     if (this.planeStage.kind === 'bulge') {
-      const { plane, target, a } = this.planeStage
-      this.planeStage = { kind: 'chord', plane, target, a }
+      const { plane, target, a, natural } = this.planeStage
+      this.planeStage = { kind: 'chord', plane, target, a, natural }
       this.typed = ''
       this._lastPlaneCursor = null
       this._lastSagittaSign = null
@@ -837,7 +882,13 @@ export class ArcTool implements Tool {
       const { plane, target } = resolved
       const a = this._planeCursor(snap, ray, plane)
       if (a === null) return
-      this.planeStage = { kind: 'chord', plane, target, a }
+      // The unlocked resolution at this SAME click (design §2a) — reuse it
+      // for free when no lock was active; fall back to ground WITHOUT
+      // probing when one was (see RectangleTool's identical comment).
+      const natural = this.idlePlaneLock !== null
+        ? groundNaturalTarget(this._editContext, a)
+        : resolved
+      this.planeStage = { kind: 'chord', plane, target, a, natural }
       this.typed = ''
       this._lastPlaneCursor = null
       return
@@ -878,9 +929,9 @@ export class ArcTool implements Tool {
    *  (sub-ARC_MIN_CHORD_M) chord. */
   private _placePlaneB(b: V3): void {
     if (this.planeStage.kind !== 'chord') return
-    const { plane, target, a } = this.planeStage
+    const { plane, target, a, natural } = this.planeStage
     if (segmentLength(a, b) < ARC_MIN_CHORD_M) return
-    this.planeStage = { kind: 'bulge', plane, target, a, b }
+    this.planeStage = { kind: 'bulge', plane, target, a, b, natural }
     this.typed = ''
     this._lastPlaneCursor = null
     this._lastSagittaSign = null

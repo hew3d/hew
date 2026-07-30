@@ -16,13 +16,23 @@ import {
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import type { EditContext } from './types'
+import type { V3 } from '../viewport/geoHelpers'
+import type { DrawingAxes } from './drawingAxes'
 
 const TOP: EditContext = { kind: 'top' }
 
-function makeScene(sketchPlanes: Map<bigint, Float64Array | undefined>): WasmScene {
+/** World-identity drawing axes (tool-parity §4) — the default frame every
+ *  test here exercises unless it explicitly overrides `frame`. */
+const WORLD_FRAME_FLAT = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+function makeScene(
+  sketchPlanes: Map<bigint, Float64Array | undefined>,
+  frame: number[] = WORLD_FRAME_FLAT,
+): WasmScene {
   return {
     sketch_plane: vi.fn((h: bigint) => sketchPlanes.get(h)),
     pick_sketch: vi.fn(),
+    axes: vi.fn(() => new Float64Array(frame)),
   } as unknown as WasmScene
 }
 
@@ -169,6 +179,58 @@ describe('axisDrawPlane', () => {
     expect(plane.normal).toEqual([0, 1, 0])
     expect(plane.ground).toBe(false)
   })
+
+  // ── Movable drawing axes (tool-parity §4): a non-identity frame ──
+  const ROTATED_FRAME: DrawingAxes = {
+    origin: [5, 0, 0],
+    x: [0, 1, 0],
+    y: [-1, 0, 0],
+    z: [0, 0, 1],
+  }
+
+  /** A valid right-handed in-plane basis: unit u/v, mutually perpendicular,
+   *  cross(u, v) matching `normal` (within float tolerance). */
+  function expectValidBasis(plane: DrawPlane): void {
+    const dot = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    const len = (v: V3): number => Math.sqrt(dot(v, v))
+    const cross = (a: V3, b: V3): V3 => [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ]
+    expect(len(plane.u)).toBeCloseTo(1, 9)
+    expect(len(plane.v)).toBeCloseTo(1, 9)
+    expect(dot(plane.u, plane.v)).toBeCloseTo(0, 9)
+    const c = cross(plane.u, plane.v)
+    expect(c[0]).toBeCloseTo(plane.normal[0], 9)
+    expect(c[1]).toBeCloseTo(plane.normal[1], 9)
+    expect(c[2]).toBeCloseTo(plane.normal[2], 9)
+  }
+
+  it('axis 0 (red) under a rotated frame is a plane along the frame\'s X, never ground', () => {
+    const plane = axisDrawPlane(0, [1, 2, 3], ROTATED_FRAME)
+    expect(plane.normal).toEqual(ROTATED_FRAME.x)
+    expect(plane.ground).toBe(false)
+    expectValidBasis(plane)
+  })
+
+  it('axis 2 (blue) under a rotated frame through a z=0 point is STILL not the ground fast path', () => {
+    // The frame's blue axis happens to be world +Z here, and `through` sits
+    // at z=0 — but the frame itself is not world identity, so this must NOT
+    // take the ground fast path (SketchUp's Axes tool doesn't re-grid the
+    // world; a moved frame's ground-like plane is still just a plane).
+    const plane = axisDrawPlane(2, [1, 2, 0], ROTATED_FRAME)
+    expect(plane.ground).toBe(false)
+    expect(plane.normal).toEqual(ROTATED_FRAME.z)
+    expectValidBasis(plane)
+  })
+
+  it('axis 1 (green) under a rotated frame is a plane along the frame\'s Y', () => {
+    const plane = axisDrawPlane(1, [0, 0, 0], ROTATED_FRAME)
+    expect(plane.normal).toEqual(ROTATED_FRAME.y)
+    expect(plane.ground).toBe(false)
+    expectValidBasis(plane)
+  })
 })
 
 describe('pointOnPlane', () => {
@@ -267,6 +329,61 @@ describe('drawPlaneCue', () => {
   it('a Z-axis lock through a hover OFF z=0 does produce a cue (a horizontal plane elevated off ground)', () => {
     const cue = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 2, idleHover: [1, 2, 5] })
     expect(cue).toEqual({ plane: axisDrawPlane(2, [1, 2, 5]), through: [1, 2, 5] })
+  })
+
+  // ── Movable drawing axes (tool-parity §4): the idle-lock cue must resolve
+  // the CURRENT frame, not world identity — mirrors `resolveClickDrawTarget`'s
+  // own moved-frame coverage above, since the cue must show exactly where a
+  // click through the same hover point would land.
+  const ROTATED_FRAME: DrawingAxes = {
+    origin: [5, 0, 0],
+    x: [0, 1, 0],
+    y: [-1, 0, 0],
+    z: [0, 0, 1],
+  }
+
+  it('under a moved frame, the cue plane equals what a click at the same point/lock would resolve onto', () => {
+    const cue = drawPlaneCue({
+      anchoredPlane: null,
+      anchoredThrough: null,
+      idleLock: 0,
+      idleHover: [4, 5, 6],
+      frame: ROTATED_FRAME,
+    })
+    const clickPlane = axisDrawPlane(0, [4, 5, 6], ROTATED_FRAME)
+    expect(cue).toEqual({ plane: clickPlane, through: [4, 5, 6] })
+    // Axis 0 (red) of the moved frame is world [0,1,0], not world [1,0,0] —
+    // so the un-fixed bug (defaulting to world identity) would have produced
+    // a different plane here.
+    expect(cue!.plane.normal).toEqual([0, 1, 0])
+  })
+
+  it('the literal-ground suppression only fires at world identity — a moved frame\'s blue axis through z=0 still cues', () => {
+    // The frame's blue axis happens to be world +Z here (same as ground's
+    // normal) and the hover sits at z=0 — but the frame itself is not world
+    // identity, so this must NOT suppress to null (mirrors `axisDrawPlane`'s
+    // own "never ground for a moved frame" rule).
+    const cue = drawPlaneCue({
+      anchoredPlane: null,
+      anchoredThrough: null,
+      idleLock: 2,
+      idleHover: [1, 2, 0],
+      frame: ROTATED_FRAME,
+    })
+    expect(cue).not.toBeNull()
+    expect(cue!.plane.ground).toBe(false)
+  })
+
+  it('omitting `frame` still defaults to world identity (source-compatible with every existing caller)', () => {
+    const withDefault = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: [4, 5, 6] })
+    const withExplicitWorld = drawPlaneCue({
+      anchoredPlane: null,
+      anchoredThrough: null,
+      idleLock: 0,
+      idleHover: [4, 5, 6],
+      frame: { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] },
+    })
+    expect(withDefault).toEqual(withExplicitWorld)
   })
 })
 
@@ -561,7 +678,10 @@ describe('resolveIdleDrawTarget', () => {
 
 describe('resolveClickDrawTarget', () => {
   const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
-  const scene = { pick_sketch: vi.fn(() => undefined) } as unknown as WasmScene
+  const scene = {
+    pick_sketch: vi.fn(() => undefined),
+    axes: vi.fn(() => new Float64Array(WORLD_FRAME_FLAT)),
+  } as unknown as WasmScene
 
   it('an active idle plane lock beats sketch/ground resolution', () => {
     const resolved = resolveClickDrawTarget(
@@ -588,5 +708,18 @@ describe('resolveClickDrawTarget', () => {
       plane: axisDrawPlane(1, [2, 3, 4]),
       target: { kind: 'plane', plane: axisDrawPlane(1, [2, 3, 4]), instance: 42n },
     })
+  })
+
+  it('an idle lock reads the CURRENT drawing-axes frame from the scene, not literal world axes', () => {
+    const rotatedScene = {
+      pick_sketch: vi.fn(() => undefined),
+      axes: vi.fn(() => new Float64Array([5, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1])),
+    } as unknown as WasmScene
+    const resolved = resolveClickDrawTarget(
+      rotatedScene, new SketchPickCache(), 0, { x: 2, y: 3, z: 4, kind: 'endpoint' }, RAY, TOP,
+    )
+    // Axis 0 (red) of the moved frame is world [0,1,0], not world [1,0,0].
+    expect(resolved?.plane.normal).toEqual([0, 1, 0])
+    expect(resolved?.plane.ground).toBe(false)
   })
 })

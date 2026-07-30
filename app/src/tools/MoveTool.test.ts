@@ -42,11 +42,16 @@ function typeKeys(tool: MoveTool, text: string): void {
  * on every commit/undo/redo, never on view-state edits). Tests mutate them
  * independently to simulate the two classes of external change.
  */
-function makeWasmScene() {
+/** World-identity drawing axes (tool-parity §4) — the default frame every
+ *  test exercises unless it explicitly overrides `frame`. */
+const WORLD_FRAME_FLAT = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
   let nextId = 100n
   let nextEdge = 500n
   const state = { hash: 1n, gen: 1n }
   const scene = {
+    axes: vi.fn(() => new Float64Array(frame)),
     // --- sketch replay surface (Move+Alt sketch copies). One sketch with
     // two single-edge islands: 40 (edge 10) and 41 (edge 20); replayed
     // edges get fresh ids >= 500 and land in island 77.
@@ -91,7 +96,12 @@ function makeWasmScene() {
         return out
       },
     ),
-    transform_selection: vi.fn(() => { state.hash++; state.gen++ }),
+    transform_selection: vi.fn(
+      (_kinds: Uint8Array, _ids: BigUint64Array, _sketches: BigUint64Array, _affine: Float64Array) => {
+        state.hash++
+        state.gen++
+      },
+    ),
     state_hash: vi.fn(() => state.hash),
     history_generation: vi.fn(() => state.gen),
     max_array_count: vi.fn(() => 1000),
@@ -101,14 +111,14 @@ function makeWasmScene() {
   return { scene, state }
 }
 
-function makeTool(selection?: NodeRef[]) {
+function makeTool(selection?: NodeRef[], frame?: number[]) {
   const preview = new THREE.Group()
   const onCommit = vi.fn()
   const onArrayCommit = vi.fn()
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
   const onCopyModeChange = vi.fn()
-  const { scene, state } = makeWasmScene()
+  const { scene, state } = makeWasmScene(frame)
   const tool = new MoveTool(
     scene as never,
     preview,
@@ -134,6 +144,75 @@ function beginGestureLockedX(tool: MoveTool): void {
 function translationOf(affine: Float64Array): [number, number, number] {
   return [affine[3], affine[7], affine[11]]
 }
+
+describe('MoveTool — movable drawing axes (arrow-key lock)', () => {
+  it('ArrowRight locks to the CURRENT frame\'s red axis, not literal world X, under a moved frame', () => {
+    // Frame with red/green swapped relative to world: x=[0,1,0], y=[-1,0,0],
+    // z=[0,0,1] — an orthonormal, right-handed frame (tool-parity §4).
+    const frame = [0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1]
+    const { tool, scene } = makeTool(undefined, frame)
+    beginGestureLockedX(tool)
+    typeKeys(tool, '2')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    // 2 units along the frame's red axis [0,1,0] — NOT world X [1,0,0].
+    expect(translationOf(affine as Float64Array)).toEqual([0, 2, 0])
+  })
+})
+
+describe('MoveTool — locked typed-entry direction (signed by the cursor\'s side of the base)', () => {
+  // The typed commit's direction under a lock is `sign((dest - base) ·
+  // lockDir) * lockDir`, with the sign defaulting POSITIVE when dest sits
+  // exactly on the base. These three pin the whole contract the inference
+  // engine's locked resolve feeds: hovering the base resolves the base
+  // EXACTLY (never a noise-signed station — the Move+Alt donut e2e's
+  // wrong-way copy), so the zero-displacement default must be +lock; and a
+  // genuine dest on either side must sign the typed distance toward it.
+
+  /** Begin at the origin, lock Z, and (optionally) track a locked dest. */
+  function lockZAt(tool: MoveTool, dest?: [number, number, number]): void {
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onKey(makeKeyEvent('ArrowUp'))
+    if (dest !== undefined) {
+      tool.onPointerMove(makeSnap(...dest), rayThrough(dest[0], dest[1]))
+    }
+  }
+
+  it('dest exactly on the base (hovering the grab point): typed distance goes +lock', () => {
+    const { tool, scene } = makeTool()
+    lockZAt(tool) // no pointer move: dest === base, the on-anchor resolve
+    typeKeys(tool, '0.5')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    expect(translationOf(affine as Float64Array)).toEqual([0, 0, 0.5])
+  })
+
+  it('dest on the NEGATIVE side (real geometry below the base): typed distance follows it down', () => {
+    const { tool, scene } = makeTool()
+    lockZAt(tool, [0, 0, -2]) // e.g. a hovered edge 2 m below, Z-locked
+    typeKeys(tool, '0.5')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    expect(translationOf(affine as Float64Array)).toEqual([0, 0, -0.5])
+  })
+
+  it('dest on the POSITIVE side: typed distance follows it up', () => {
+    const { tool, scene } = makeTool()
+    lockZAt(tool, [0, 0, 2])
+    typeKeys(tool, '0.5')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    expect(translationOf(affine as Float64Array)).toEqual([0, 0, 0.5])
+  })
+})
 
 describe('MoveTool — durable Alt copy toggle', () => {
   it('tapping Alt toggles copy mode on and off (not hold-to-copy)', () => {

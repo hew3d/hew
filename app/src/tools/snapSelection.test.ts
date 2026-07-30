@@ -20,6 +20,16 @@ const edgeSnap = (sketch: bigint, edge: bigint): Snap => ({ ...base, kind: 'on-e
  * / polygon center): names the CHAIN, carries no `element`. `kind` is cosmetic
  * here — the resolver keys off `elementKind` + `sketchCurve`. */
 const curveSnap = (sketch: bigint, curve: bigint, kind = 'center'): Snap => ({ ...base, kind, elementKind: 'sketch-curve', sketch, sketchCurve: curve })
+/** A curve-provenance snap resolved AT a specific world point — the shape a
+ * real click near one fragment of a multi-fragment curve produces (Kurt's
+ * rosette): the analytic candidate's own position, close to the cursor even
+ * though it may name a curve id shared by several disconnected fragments. */
+const curveSnapAt = (sketch: bigint, curve: bigint, point: readonly [number, number, number], kind = 'center'): Snap => ({
+  ...curveSnap(sketch, curve, kind),
+  x: point[0],
+  y: point[1],
+  z: point[2],
+})
 const bareSnap = (): Snap => ({ ...base, kind: 'endpoint' })
 
 /** A ray straight down -Z (dead-centre) unless a direction is given. */
@@ -33,6 +43,11 @@ interface SceneStubs {
   face?: { object: bigint; instance?: bigint; depth: number }
   curveChain?: (edge: bigint) => bigint[]
   curveEdges?: (curve: bigint) => bigint[]
+  /** World endpoints `[ax,ay,az,bx,by,bz]` per edge, or `undefined` for an
+   *  edge the double doesn't model — omit entirely to simulate a host with
+   *  no `sketch_edge_endpoints` at all (the pre-fix / no-location-data
+   *  degenerate case, which must still fall back to lowest-id). */
+  edgeEndpoints?: (edge: bigint) => number[] | undefined
   islandOf?: (region: bigint) => bigint | undefined
   instanceRegion?: { sketch: bigint; region: bigint; depth?: number }
   instanceEdge?: { sketch: bigint; edge: bigint; depth?: number }
@@ -42,6 +57,7 @@ function fakeScene(s: SceneStubs): SelectScene {
   return {
     sketch_curve_chain: (_sk: bigint, edge: bigint) => (s.curveChain ? s.curveChain(edge) : [edge]),
     sketch_curve_edges: (_sk: bigint, curve: bigint) => (s.curveEdges ? s.curveEdges(curve) : []),
+    ...(s.edgeEndpoints ? { sketch_edge_endpoints: (_sk: bigint, edge: bigint) => s.edgeEndpoints!(edge) } : {}),
     sketch_region_island: (_sk: bigint, region: bigint) => (s.islandOf ? s.islandOf(region) : 900n),
     pick_sketch_region: () =>
       s.region && { sketch: () => s.region!.sketch, region: () => s.region!.region, free: vi.fn() },
@@ -313,5 +329,69 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     for (const e of CURVE_EDGES) {
       expect(resolveSelectableRef(edgeSnap(11n, e), DOWN, deps(scene(), []))).toEqual(expected)
     }
+  })
+
+  it("Kurt's rosette: a curve id split into SIX disconnected fragments by neighbouring copies resolves each click to the fragment under the cursor, never a fragment on the opposite side", () => {
+    // Mirrors what `duplicateSketchSelectionByAffineArray` + the kernel's
+    // sticky splits actually produce for "circle, rotate-copy 60°, ×5": one
+    // curve id (8) whose 12 edges form six mutually disconnected 2-edge
+    // chains, spread out in world space (a rosette's petals, flattened onto
+    // a line here since only relative distance matters to the resolver).
+    // Fragment k occupies edges [200+2k, 200+2k+1] around x = 10k.
+    const fragment = (k: number) => [200 + 2 * k, 200 + 2 * k + 1].map(BigInt) as [bigint, bigint]
+    const chainOfEdge = (e: bigint): bigint[] => {
+      const k = Math.floor((Number(e) - 200) / 2)
+      return fragment(k)
+    }
+    const endpointsOfEdge = (e: bigint): number[] => {
+      const k = Math.floor((Number(e) - 200) / 2)
+      const cx = k * 10
+      const isFirstHalf = (Number(e) - 200) % 2 === 0
+      return isFirstHalf ? [cx - 0.3, 0, 0, cx, 0, 0] : [cx, 0, 0, cx + 0.3, 0, 0]
+    }
+    const ALL_EDGES = Array.from({ length: 6 }, (_v, k) => fragment(k)).flat()
+    const scene = () => fakeScene({
+      curveEdges: () => ALL_EDGES,
+      curveChain: chainOfEdge,
+      edgeEndpoints: endpointsOfEdge,
+    })
+
+    // A click resolved near fragment k's shared vertex (a quadrant-style
+    // analytic point genuinely ON that fragment) selects fragment k's own
+    // chain — not the lowest-id fragment (k=0), not a neighbour, not a
+    // fragment "on the opposite side" (Kurt's exact complaint).
+    for (let k = 0; k < 6; k++) {
+      const clickPoint: [number, number, number] = [k * 10, 0, 0]
+      const ref = resolveSelectableRef(curveSnapAt(11n, 8n, clickPoint, 'quadrant'), DOWN, deps(scene(), []))
+      expect(ref).toEqual({ kind: 'sketch-curve', id: fragment(k)[0], sketch: 11n })
+    }
+    // Explicitly: a click on the far fragment (k=3) must NOT collapse to the
+    // globally-lowest edge id (fragment 0) the way the pre-fix resolver did.
+    const oppositeSide = resolveSelectableRef(curveSnapAt(11n, 8n, [30, 0, 0], 'quadrant'), DOWN, deps(scene(), []))
+    expect(oppositeSide).not.toEqual({ kind: 'sketch-curve', id: 200n, sketch: 11n })
+  })
+
+  it('a curve split into exactly TWO disconnected single-edge fragments: clicking each resolves to that edge, not the other', () => {
+    const scene = () => fakeScene({
+      curveEdges: () => [50n, 60n],
+      // Each fragment is its own single-edge chain (no merge across the gap).
+      curveChain: (e) => [e],
+      edgeEndpoints: (e) => (e === 50n ? [0, 0, 0, 1, 0, 0] : [100, 0, 0, 101, 0, 0]),
+    })
+    expect(resolveSelectableRef(curveSnapAt(11n, 8n, [0.5, 0, 0], 'quadrant'), DOWN, deps(scene(), [])))
+      .toEqual({ kind: 'sketch-edge', id: 50n, sketch: 11n })
+    expect(resolveSelectableRef(curveSnapAt(11n, 8n, [100.5, 0, 0], 'quadrant'), DOWN, deps(scene(), [])))
+      .toEqual({ kind: 'sketch-edge', id: 60n, sketch: 11n })
+  })
+
+  it('the equidistant tie (a point exactly on the shared intersection vertex between two fragments) resolves to the LOWER edge id, deterministically regardless of scan order', () => {
+    const endpointsOf = (e: bigint) => (e === 40n ? [-1, 0, 0, 0, 0, 0] : [0, 0, 0, 1, 0, 0])
+    // `curve_edges` slotmap order is not guaranteed ascending — assert the
+    // tie-break holds whichever order the host returns them in.
+    const ascending = fakeScene({ curveEdges: () => [40n, 41n], curveChain: (e) => [e], edgeEndpoints: endpointsOf })
+    const descending = fakeScene({ curveEdges: () => [41n, 40n], curveChain: (e) => [e], edgeEndpoints: endpointsOf })
+    const tiedClick = curveSnapAt(11n, 8n, [0, 0, 0], 'center')
+    expect(resolveSelectableRef(tiedClick, DOWN, deps(ascending, []))).toEqual({ kind: 'sketch-edge', id: 40n, sketch: 11n })
+    expect(resolveSelectableRef(tiedClick, DOWN, deps(descending, []))).toEqual({ kind: 'sketch-edge', id: 40n, sketch: 11n })
   })
 })

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createSectionPlane,
   offsetSectionPlane,
+  rescaleSectionPlane,
   SectionManager,
   toggleSectionPlaneActive,
   type SectionPlane,
@@ -131,6 +132,50 @@ describe('toggleSectionPlaneActive', () => {
     const plane = createSectionPlane([0, 0, 0], [0, 0, 1])
     toggleSectionPlaneActive(plane)
     expect(plane.active).toBe(true)
+  })
+})
+
+// Tape Measure's "resize the model?" (design tool-parity §3): a section
+// plane is session-only app state, never touched by the kernel's
+// rescale_document(factor), so without this an active cut lands at the
+// wrong position in the now-rescaled model (delta-review Finding 3).
+describe('rescaleSectionPlane', () => {
+  it('scales origin by the factor about the world origin', () => {
+    const plane = createSectionPlane([2, -3, 5], [0, 0, 1])
+    const rescaled = rescaleSectionPlane(plane, 100)
+    expect(rescaled.origin).toEqual([200, -300, 500])
+  })
+
+  it('leaves normal unchanged — it is a direction, not a position', () => {
+    const plane = createSectionPlane([2, -3, 5], [0, 1, 0])
+    const rescaled = rescaleSectionPlane(plane, 100)
+    expect(rescaled.normal).toEqual(plane.normal)
+  })
+
+  it('leaves active unchanged', () => {
+    const active = createSectionPlane([1, 1, 1], [0, 0, 1])
+    expect(rescaleSectionPlane(active, 2).active).toBe(true)
+    const inactive = { ...createSectionPlane([1, 1, 1], [0, 0, 1]), active: false }
+    expect(rescaleSectionPlane(inactive, 2).active).toBe(false)
+  })
+
+  it('a factor of 1 is a no-op on origin', () => {
+    const plane = createSectionPlane([4, -6, 8], [1, 0, 0])
+    expect(rescaleSectionPlane(plane, 1).origin).toEqual([4, -6, 8])
+  })
+
+  it('a shrink factor (< 1) scales origin down toward the world origin', () => {
+    const plane = createSectionPlane([10, 20, -30], [0, 0, 1])
+    const rescaled = rescaleSectionPlane(plane, 0.01)
+    expect(rescaled.origin[0]).toBeCloseTo(0.1, 10)
+    expect(rescaled.origin[1]).toBeCloseTo(0.2, 10)
+    expect(rescaled.origin[2]).toBeCloseTo(-0.3, 10)
+  })
+
+  it('does not mutate the input plane', () => {
+    const plane = createSectionPlane([2, -3, 5], [0, 0, 1])
+    rescaleSectionPlane(plane, 100)
+    expect(plane.origin).toEqual([2, -3, 5])
   })
 })
 

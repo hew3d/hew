@@ -11,9 +11,12 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   commitSelectionTransform,
   duplicateSketchSelection,
+  duplicateSketchSelectionByAffine,
+  duplicateSketchSelectionByAffineArray,
   planSketchTransforms,
   resolveSketchIsland,
 } from './transformSelection'
+import { affineToFloat64, rotateAboutPivotAxis } from './transformMath'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 
@@ -626,5 +629,176 @@ describe('duplicateSketchSelection', () => {
     // unchanged sketch), never with the non-restoring cancel.
     expect(raw.sketch_end_gesture).toHaveBeenCalledTimes(1)
     expect(raw.sketch_cancel_gesture).not.toHaveBeenCalled()
+  })
+})
+
+describe('duplicateSketchSelectionByAffine — data-driven plane routing', () => {
+  /**
+   * A minimal fake Scene for the Rotate+Alt sketch-copy path. One sketch
+   * (id 1) on the ground plane (point origin, normal +Z) with a single
+   * island (10) riding one plain edge (100) from (0,0,0) to (1,0,0) — a
+   * point exactly 1 m from the origin/pivot, so an axis tilt off the true
+   * normal shows up as a real, measurable displacement at that radius (the
+   * "spokes/petals/bolt-ring" case this routing exists for is routinely
+   * meters from its pivot, same as here).
+   */
+  function makeAffineScene() {
+    let gen = 0n
+    let nextEdge = 200n
+    const raw = {
+      sketch_island_ids: vi.fn((s: bigint) => (s === 1n ? [10n] : s === 900n ? [77n] : [])),
+      sketch_edge_island: vi.fn((_s: bigint, e: bigint) => (e >= 200n ? 99n : e === 100n ? 10n : undefined)),
+      sketch_plane: vi.fn((s: bigint) => (s === 1n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined)),
+      sketch_island_edges: vi.fn((_s: bigint, island: bigint) => (island === 10n ? [100n] : [])),
+      sketch_edge_endpoints: vi.fn((_s: bigint, e: bigint) => (e === 100n ? [0, 0, 0, 1, 0, 0] : undefined)),
+      sketch_edge_curve: vi.fn(() => undefined),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(() => { gen += 1n }),
+      sketch_begin_curve: vi.fn(() => 1n),
+      sketch_begin_curve_with: vi.fn(() => 1n),
+      sketch_end_curve: vi.fn(),
+      sketch_add_segment: vi.fn(
+        (_s: bigint, _ax: number, _ay: number, _az: number, _bx: number, _by: number, _bz: number) => {
+          const id = nextEdge++
+          return { new_edges: () => [id], free: () => { /* no-op */ } }
+        },
+      ),
+      history_generation: vi.fn(() => gen),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: () => { /* no-op */ } } }),
+      copy_sketch_islands: vi.fn(() => 900n),
+    }
+    return { scene: raw as unknown as WasmScene, raw }
+  }
+
+  const SELECTION: NodeRef[] = [{ kind: 'sketch-island', id: 10n, sketch: 1n }]
+
+  it('an axis tilted ~1e-5 rad off the plane normal — inside the OLD cosine tolerance — routes to the NEW-SKETCH arm once real geometry ~1 m from the axis is measured', () => {
+    // This tilt is well inside the prior analytic classifier's cosine gate
+    // (dot(transformedNormal, normal) > 1 - 1e-9, i.e. angles up to ~4.5e-5
+    // rad): the prior code would have classified this as in-plane and
+    // replayed via sketch_add_segment, which the real kernel's PLANE_DIST
+    // (1e-9 m) would then throw on for a point this far from the axis. The
+    // data-driven check must catch what the analytic one could not.
+    const { scene, raw } = makeAffineScene()
+    const tilt = 1e-5
+    const affine = affineToFloat64(
+      rotateAboutPivotAxis(0, 0, 0, Math.sin(tilt), 0, Math.cos(tilt), Math.PI / 2),
+    )
+
+    const result = duplicateSketchSelectionByAffine(scene, SELECTION, affine)
+
+    expect(raw.copy_sketch_islands).toHaveBeenCalledTimes(1)
+    expect(raw.sketch_add_segment).not.toHaveBeenCalled() // never a same-sketch replay
+    expect(result).toEqual([{ kind: 'sketch-island', id: 77n, sketch: 900n }])
+  })
+
+  it('an exactly-normal axis still replays into the SAME sketch, with the fed point already on the plane', () => {
+    const { scene, raw } = makeAffineScene()
+    const affine = affineToFloat64(rotateAboutPivotAxis(0, 0, 0, 0, 0, 1, Math.PI / 2))
+
+    const result = duplicateSketchSelectionByAffine(scene, SELECTION, affine)
+
+    expect(raw.sketch_add_segment).toHaveBeenCalledTimes(1)
+    expect(raw.copy_sketch_islands).not.toHaveBeenCalled()
+    const [sketch, ax, ay, az, bx, by, bz] = raw.sketch_add_segment.mock.calls[0]
+    expect(sketch).toBe(1n)
+    expect(ax).toBeCloseTo(0, 9)
+    expect(ay).toBeCloseTo(0, 9)
+    expect(az).toBe(0)
+    expect(bx).toBeCloseTo(0, 9)
+    expect(by).toBeCloseTo(1, 9)
+    expect(bz).toBe(0)
+    expect(result).toEqual([{ kind: 'sketch-island', id: 99n, sketch: 1n }])
+  })
+
+  it('a within-margin tilt still replays same-sketch, with the fed point projected EXACTLY onto the plane (not merely close)', () => {
+    // sin(1e-10) ≈ 1e-10 m of RAW displacement at r=1 m — comfortably
+    // inside the 0.5e-9 m data-driven margin, so this routes same-sketch;
+    // the assertion below proves the fed point is the exact projection
+    // (bit-exact zero plane distance), not that small raw residual.
+    const { scene, raw } = makeAffineScene()
+    const tilt = 1e-10
+    const affine = affineToFloat64(
+      rotateAboutPivotAxis(0, 0, 0, Math.sin(tilt), 0, Math.cos(tilt), Math.PI / 2),
+    )
+
+    duplicateSketchSelectionByAffine(scene, SELECTION, affine)
+
+    expect(raw.copy_sketch_islands).not.toHaveBeenCalled()
+    expect(raw.sketch_add_segment).toHaveBeenCalledTimes(1)
+    const [, , , , , , bz] = raw.sketch_add_segment.mock.calls[0]
+    expect(bz).toBe(0) // exact projection, not the ~1e-10 raw offset
+  })
+
+  // Rotate+Alt's ×N / ÷N array refinement applied to sketch sources
+  // (tool-parity playtest fix): `duplicateSketchSelectionByAffineArray`
+  // generalizes the single-affine function above to an ORDERED array of
+  // cumulative affines, one per copy. Same fixture (`makeAffineScene`,
+  // `SELECTION`) as the single-affine tests above.
+  it('an in-plane N-rep array replays every rep into the SAME sketch inside ONE gesture bracket (edge count = N, ONE undo restores the whole array)', () => {
+    const { scene, raw } = makeAffineScene()
+    // 5 cumulative 90° reps about the source plane's own normal (+Z through
+    // the origin) — always in-plane, whatever the multiple.
+    const affines = [1, 2, 3, 4, 5].map((k) =>
+      affineToFloat64(rotateAboutPivotAxis(0, 0, 0, 0, 0, 1, k * (Math.PI / 2))),
+    )
+
+    const result = duplicateSketchSelectionByAffineArray(scene, SELECTION, affines)
+
+    expect(raw.copy_sketch_islands).not.toHaveBeenCalled()
+    // ONE edge per rep (island 10 rides a single plain edge) — 5 total.
+    expect(raw.sketch_add_segment).toHaveBeenCalledTimes(5)
+    // Every add lands on the SOURCE sketch, never a new one.
+    for (const call of raw.sketch_add_segment.mock.calls) expect(call[0]).toBe(1n)
+    // ONE bracket for all 5 reps — the kernel invariant that makes this ONE
+    // undo step regardless of N (verified at the kernel level; this is the
+    // JS-side guarantee that funnels all N reps through it).
+    expect(raw.sketch_begin_gesture).toHaveBeenCalledTimes(1)
+    expect(raw.sketch_end_gesture).toHaveBeenCalledTimes(1)
+
+    // The 5 reps land at 90°, 180°, 270°, 360°(=0°), 450°(=90°) — the first
+    // rep's far endpoint (1,0,0) rotated 90° about Z lands at (0,1,0).
+    const [, , , , bx0, by0] = raw.sketch_add_segment.mock.calls[0]
+    expect(bx0).toBeCloseTo(0, 9)
+    expect(by0).toBeCloseTo(1, 9)
+    // The second rep (180°) lands the far endpoint at (-1,0,0).
+    const [, , , , bx1, by1] = raw.sketch_add_segment.mock.calls[1]
+    expect(bx1).toBeCloseTo(-1, 9)
+    expect(by1).toBeCloseTo(0, 9)
+
+    expect(result.length).toBeGreaterThan(0)
+  })
+
+  it('an out-of-plane N-rep array costs one copy_sketch_islands call PER rep (no batching primitive exists), each with its OWN cumulative affine', () => {
+    const { scene, raw } = makeAffineScene()
+    // An axis tilted well outside the data-driven margin (matches the
+    // existing single-affine "routes to the new-sketch arm" case above),
+    // applied at 3 cumulative steps.
+    const tilt = 1e-5
+    const affines = [1, 2, 3].map((k) =>
+      affineToFloat64(
+        rotateAboutPivotAxis(0, 0, 0, Math.sin(tilt), 0, Math.cos(tilt), k * (Math.PI / 2)),
+      ),
+    )
+
+    const result = duplicateSketchSelectionByAffineArray(scene, SELECTION, affines)
+
+    expect(raw.sketch_add_segment).not.toHaveBeenCalled() // never a same-sketch replay
+    // One call PER rep — no kernel primitive batches these (unlike the
+    // in-plane bracket above), so 3 reps cost 3 atomic copies.
+    expect(raw.copy_sketch_islands).toHaveBeenCalledTimes(3)
+    // Each call carries a DIFFERENT (cumulative) affine, not the same one 3×.
+    const passedAffines = raw.copy_sketch_islands.mock.calls.map((c: unknown[]) => c[2])
+    expect(passedAffines[0]).not.toEqual(passedAffines[1])
+    expect(passedAffines[1]).not.toEqual(passedAffines[2])
+    // This fixture's `copy_sketch_islands` always returns the same fixed
+    // sketch id (900n, unlike RotateTool.test.ts's incrementing version) —
+    // so all 3 reps report the same new sketch/island pair; the call count
+    // above is what proves all 3 reps actually ran.
+    expect(result).toEqual([
+      { kind: 'sketch-island', id: 77n, sketch: 900n },
+      { kind: 'sketch-island', id: 77n, sketch: 900n },
+      { kind: 'sketch-island', id: 77n, sketch: 900n },
+    ])
   })
 })

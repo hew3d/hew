@@ -15,6 +15,9 @@ import type { V3 } from '../viewport/geoHelpers'
 import { applyAffine3x4, facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
+import type { DrawingAxes } from './drawingAxes'
+import { getDrawingAxes, isWorldIdentity, WORLD_DRAWING_AXES } from './drawingAxes'
+import { nextIdlePlaneLock } from './moveInput'
 import type { SketchTarget } from './sketchGesture'
 import type { EditContext, Snap } from './types'
 
@@ -53,6 +56,24 @@ export function isGroundPlane(point: V3, normal: V3): boolean {
     Math.abs(ny) <= GROUND_PLANE_EPS &&
     Math.abs(offset) <= GROUND_PLANE_EPS
   )
+}
+
+/**
+ * True iff `point` lies on `plane` within `GROUND_PLANE_EPS` — the same
+ * tolerance the kernel's own `PLANE_DIST` uses for `SketchError::
+ * PointOffPlane`, so this predicts the kernel's verdict exactly rather than
+ * using an looser/independent UI tolerance that could disagree with it in
+ * either direction. Used by LineTool's mid-gesture re-homing (tool-parity
+ * playtest2 §2b) to detect an off-plane locked point BEFORE committing,
+ * instead of committing speculatively and catching the kernel's refusal.
+ */
+export function isPointOnDrawPlane(point: V3, plane: DrawPlane): boolean {
+  const [nx, ny, nz] = plane.normal
+  const dist =
+    nx * (point[0] - plane.origin[0]) +
+    ny * (point[1] - plane.origin[1]) +
+    nz * (point[2] - plane.origin[2])
+  return Math.abs(dist) <= GROUND_PLANE_EPS
 }
 
 /**
@@ -116,22 +137,36 @@ export function planeFromSketch(
 }
 
 /**
- * The `DrawPlane` through `through` with unit normal along world axis
- * `axis` (0=X, 1=Y, 2=Z) — the idle plane lock (Phase 3; implemented now
- * because it's trivial and shares this module's shape). Uses the exact
- * ground frame (u=[1,0,0], v=[0,1,0]) when the result IS the ground plane
- * (axis === 2 and `through` already has z = 0), matching `groundDrawPlane`'s
- * basis instead of `facePlaneBasis`'s (which would also be valid, just a
- * different in-plane rotation).
+ * The `DrawPlane` through `through` with unit normal along drawing-axis
+ * `axis` (0=red/X, 1=green/Y, 2=blue/Z) of `frame` — the idle plane lock
+ * (Phase 3), extended by the movable-drawing-axes design (tool-parity §4)
+ * to read the CURRENT frame instead of literal world X/Y/Z. `frame`
+ * defaults to `WORLD_DRAWING_AXES` so every existing call site/test that
+ * doesn't pass one keeps its exact legacy behavior.
+ *
+ * Uses the exact ground frame (u=[1,0,0], v=[0,1,0]) — matching
+ * `groundDrawPlane`'s basis instead of `facePlaneBasis`'s (which would also
+ * be valid, just a different in-plane rotation) — ONLY when `frame` is
+ * world identity AND the result IS the literal ground plane (axis === 2,
+ * `through` already has z = 0): the one case that must stay bit-identical
+ * to the pre-movable-axes fast path (committed coordinates, state hashes,
+ * recordings). A moved frame never takes this branch, even when its own
+ * blue axis happens to be +Z through a point at z = 0 — SketchUp's Axes
+ * tool doesn't re-grid the world, so a moved frame's "ground-like" plane is
+ * still just a drawing plane, not THE ground plane.
  */
-export function axisDrawPlane(axis: 0 | 1 | 2, through: V3): DrawPlane {
-  const normal: V3 = axis === 0 ? [1, 0, 0] : axis === 1 ? [0, 1, 0] : [0, 0, 1]
-  if (axis === 2 && through[2] === 0) {
-    return { origin: through, normal, u: [1, 0, 0], v: [0, 1, 0], ground: true }
+export function axisDrawPlane(
+  axis: 0 | 1 | 2,
+  through: V3,
+  frame: DrawingAxes = WORLD_DRAWING_AXES,
+): DrawPlane {
+  if (isWorldIdentity(frame) && axis === 2 && through[2] === 0) {
+    return { origin: through, normal: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0], ground: true }
   }
-  // An axis-aligned unit normal never degenerates facePlaneBasis; the
-  // fallback below is unreachable but keeps this total without a non-null
-  // assertion.
+  const normal: V3 = axis === 0 ? frame.x : axis === 1 ? frame.y : frame.z
+  // An axis-aligned (frame-orthonormal) unit normal never degenerates
+  // facePlaneBasis; the fallback below is unreachable but keeps this total
+  // without a non-null assertion.
   const basis = facePlaneBasis(normal) ?? { u: [1, 0, 0] as V3, v: [0, 1, 0] as V3 }
   return { origin: through, normal, u: basis.u, v: basis.v, ground: false }
 }
@@ -196,6 +231,17 @@ export function drawPlaneCue(params: {
   idleLock: 0 | 1 | 2 | null
   /** The last-tracked hover point while idle-locked, or null before any hover. */
   idleHover: V3 | null
+  /**
+   * The current drawing-axes frame (tool-parity design §4), read ONLY by the
+   * idle-lock case below — mirrors `resolveClickDrawTarget`, which threads
+   * this same frame into its own `axisDrawPlane` call so the idle-lock
+   * PREVIEW resolves `idleLock`'s axis against the CURRENT frame instead of
+   * literal world X/Y/Z, landing on the exact plane a click would resolve
+   * onto. Defaults to `WORLD_DRAWING_AXES` so the anchored-plane branch
+   * (which never reads it — it already has a fully resolved `DrawPlane`)
+   * doesn't need to pass anything.
+   */
+  frame?: DrawingAxes
 }): { plane: DrawPlane; through: V3 } | null {
   if (params.anchoredPlane !== null && params.anchoredThrough !== null) {
     return params.anchoredPlane.ground
@@ -203,10 +249,12 @@ export function drawPlaneCue(params: {
       : { plane: params.anchoredPlane, through: params.anchoredThrough }
   }
   if (params.idleLock !== null && params.idleHover !== null) {
-    const plane = axisDrawPlane(params.idleLock, params.idleHover)
+    const plane = axisDrawPlane(params.idleLock, params.idleHover, params.frame ?? WORLD_DRAWING_AXES)
     // A Z lock through a hover point that happens to sit at z=0 resolves to
     // the exact ground plane (mirrors the click-time `begin_ground_sketch`
-    // fast path) — still no cue; the world grid already covers it.
+    // fast path) — still no cue; the world grid already covers it. Only
+    // reachable at world identity: a moved frame's blue axis is never THE
+    // ground plane, per `axisDrawPlane`'s doc comment.
     return plane.ground ? null : { plane, through: params.idleHover }
   }
   return null
@@ -476,8 +524,114 @@ export function resolveClickDrawTarget(
   if (idlePlaneLock !== null) {
     if (snap === null) return null
     const clickedPoint: V3 = [snap.x, snap.y, snap.z]
-    const plane = axisDrawPlane(idlePlaneLock, clickedPoint)
+    const plane = axisDrawPlane(idlePlaneLock, clickedPoint, getDrawingAxes(wasmScene))
     return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
   }
   return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext)
+}
+
+/**
+ * Re-lock (or release) a PLANE-anchored gesture's drawing plane THROUGH ITS
+ * OWN ANCHOR, in response to an arrow key pressed AFTER the first click —
+ * tool-parity playtest2 §2a, the "smaller half" of Kurt's finding 1 ("I can
+ * set an axis lock before I start drawing a shape but as soon as I click the
+ * starting point, that ability goes away"). Shared by Rectangle/Circle/
+ * Polygon (a single `anchored` stage) and Arc's `chord` stage (the anchor is
+ * endpoint A) — every one of them commits NOTHING to the kernel until the
+ * gesture's LAST click, so re-locking here is just swapping which plane/
+ * target the tool computes the REST of the gesture's points against; unlike
+ * LineTool's chain (§2b), there is no partially-committed kernel state to
+ * re-home.
+ *
+ * `current` is the mid-gesture lock axis already armed (or null — the SAME
+ * field a tool's idle plane lock uses, since it's the same user choice,
+ * merely exercised at a different moment); `key` is the arrow just pressed.
+ * `nextIdlePlaneLock`'s ordinary toggle semantics apply: the same axis
+ * pressed again (or ArrowDown) clears the lock. A cleared lock REVERTS to
+ * `natural` — the plane/target the gesture would have anchored onto at its
+ * own first click had no lock been active (the caller captures this via
+ * `resolveIdleDrawTarget` at that same click, alongside the actually-used
+ * `resolveClickDrawTarget` result) — rather than to the ground plane, so
+ * releasing the lock returns to face/sketch/ground exactly as the first
+ * click would have resolved it unlocked.
+ *
+ * The anchor point is passed through unchanged by the caller — it lies on
+ * the new plane by construction (`axisDrawPlane`'s `through` IS the plane's
+ * origin), so no repositioning or re-snapping is needed.
+ */
+export function nextGestureLockPlane(
+  current: 0 | 1 | 2 | null,
+  key: string,
+  anchor: V3,
+  natural: { plane: DrawPlane; target: SketchTarget },
+  frame: DrawingAxes,
+  editContext: EditContext,
+): { lock: 0 | 1 | 2 | null; plane: DrawPlane; target: SketchTarget } {
+  const lock = nextIdlePlaneLock(current, key)
+  if (lock === null) return { lock, plane: natural.plane, target: natural.target }
+  const plane = axisDrawPlane(lock, anchor, frame)
+  return { lock, plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
+}
+
+/**
+ * The `natural` plane/target a tool's first click should record for
+ * `nextGestureLockPlane` above, WITHOUT probing sketch-hover — a plane
+ * through `anchor` (the point that first click actually resolved, on the
+ * ACTIVE lock's plane) with the LITERAL ground orientation (normal
+ * [0,0,1]), namespaced to `editContext`'s instance exactly like any other
+ * plane-mode target.
+ *
+ * Used only when the first click itself happened WHILE an idle plane lock
+ * was already active (design §5.2): `resolveClickDrawTarget`'s locked
+ * branch deliberately never calls `resolveIdleDrawTarget` for that click —
+ * "an active lock beats face pick and sketch-hover adoption" means the
+ * probe itself never runs, not merely that its result is discarded — so
+ * there is no genuine hover result to remember for a LATER mid-gesture
+ * release to revert to.
+ *
+ * MUST be anchored through `anchor`, not the world origin: the locked click
+ * that produced `anchor` built its plane via `axisDrawPlane` through the
+ * CLICKED point, so `anchor` can sit anywhere in space (e.g. a corner
+ * picked while locked to a vertical plane) — that is entirely normal, not
+ * an edge case. A release fallback of `groundDrawPlane()` verbatim would not
+ * contain that anchor; the rest of the gesture would then resolve against a
+ * plane that silently drops the anchor's own elevation, computing the WRONG
+ * shape with no refusal (tool-parity playtest-2 review finding A).
+ *
+ * MUST use the LITERAL world Z as the normal — `axisDrawPlane(2, anchor,
+ * WORLD_DRAWING_AXES)`, not the CURRENT drawing-axes `frame` — because that
+ * is what this is standing in for: the unlocked resolution `anchor`'s own
+ * click would have gotten instead, i.e. `resolveIdleDrawTarget`'s
+ * plane-mode default, which is frame-agnostic (it always falls back to the
+ * literal `groundDrawPlane()`, never reading the drawing-axes frame at all).
+ * A movable drawing-axes frame's blue axis is only x×y with no verticality
+ * constraint (`Scene::set_axes`) — AxesTool lets a user park it anywhere —
+ * so passing the live `frame` here would anchor the release fallback to a
+ * TILTED plane while the real unlocked click always lands on literal
+ * ground: a gesture anchored off-lock, then released, would commit onto a
+ * plane no unlocked click could ever produce (tool-parity DELTA review
+ * finding 1). `axisDrawPlane`'s own fast path still collapses this to the
+ * exact literal ground plane whenever the anchor really is on it, so the
+ * ordinary (unmoved-frame or z=0-anchor) case is unchanged either way.
+ * Repeating the sketch-hover probe at release time (the key event has no
+ * ray to do it with) or eagerly probing at click time (which would violate
+ * the "never probes while locked" invariant above) are not options. When
+ * the first click was UNLOCKED, by contrast, `resolveClickDrawTarget`'s own
+ * result already ties resolveIdleDrawTarget's answer — callers reuse that
+ * directly instead of calling this, at no extra cost.
+ *
+ * (Open design question, not resolved here: arguably the movable axes frame
+ * SHOULD redefine the default drawing plane everywhere — SketchUp's own
+ * Axes tool works that way — in which case `resolveIdleDrawTarget`'s
+ * ground-literal fallback would be the thing to change, and this function
+ * would then want to follow `frame` again. That is a scope expansion beyond
+ * a fix round; this function instead stays consistent with today's actual
+ * unlocked-click behavior.)
+ */
+export function groundNaturalTarget(
+  editContext: EditContext,
+  anchor: V3,
+): { plane: DrawPlane; target: SketchTarget } {
+  const plane = axisDrawPlane(2, anchor, WORLD_DRAWING_AXES)
+  return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
 }

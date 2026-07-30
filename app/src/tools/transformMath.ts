@@ -354,3 +354,35 @@ export function meshBoundingBoxCenter(positions: Float32Array): [number, number,
 export function affineToFloat64(a: Affine): Float64Array {
   return new Float64Array(a)
 }
+
+/**
+ * Apply a row-major 3×4 affine (as a flat 12-element array, e.g. the
+ * `Float64Array` form passed to the WASM boundary) to a point: the full
+ * transform, linear part plus translation.
+ */
+export function applyAffineToPoint(
+  affine: ArrayLike<number>,
+  p: readonly [number, number, number],
+): [number, number, number] {
+  return [
+    affine[0] * p[0] + affine[1] * p[1] + affine[2] * p[2] + affine[3],
+    affine[4] * p[0] + affine[5] * p[1] + affine[6] * p[2] + affine[7],
+    affine[8] * p[0] + affine[9] * p[1] + affine[10] * p[2] + affine[11],
+  ]
+}
+
+/**
+ * Apply only the LINEAR part (no translation) of a row-major 3×4 affine to a
+ * vector — for carrying a direction (a plane normal, an axis) through the
+ * transform without picking up a spurious offset.
+ */
+export function applyAffineLinear(
+  affine: ArrayLike<number>,
+  v: readonly [number, number, number],
+): [number, number, number] {
+  return [
+    affine[0] * v[0] + affine[1] * v[1] + affine[2] * v[2],
+    affine[4] * v[0] + affine[5] * v[1] + affine[6] * v[2],
+    affine[8] * v[0] + affine[9] * v[1] + affine[10] * v[2],
+  ]
+}

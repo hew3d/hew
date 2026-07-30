@@ -5,6 +5,12 @@ import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
+import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
+import { getResolvedTheme } from '../settings/theme'
+import type { DrawingAxes } from './drawingAxes'
+
+/** ~2° axis tolerance, matching ProtractorTool's own AXIS_SNAP_TOL_DOT. */
+const TOL = Math.cos((2 * Math.PI) / 180)
 
 const RAY: Ray = { origin: [0, 0, 0], direction: [0, 0, -1] }
 
@@ -31,25 +37,57 @@ function makeKeyEvent(key: string, opts: { repeat?: boolean } = {}): KeyboardEve
   } as unknown as KeyboardEvent
 }
 
-/** Minimal WasmScene stub — only the members ProtractorTool calls. */
-function makeWasmScene(faceNormal?: [number, number, number]): WasmScene {
+/** World-identity drawing axes (tool-parity §4) — the default frame every
+ *  test in this file exercises unless it explicitly overrides `frame`. */
+const WORLD_FRAME_FLAT = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+/** Minimal WasmScene stub — only the members ProtractorTool calls. `frame`
+ *  is the flat 12-float buffer `Scene::axes()` would return — defaults to
+ *  world identity so existing tests are unaffected; a moved-frame test
+ *  overrides it to prove `axisDir` reads the CURRENT frame, not a literal
+ *  world constant (mirrors MoveTool.test.ts / RotateTool.test.ts). */
+function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = WORLD_FRAME_FLAT): WasmScene {
   return {
     face_normal: vi.fn((..._args: unknown[]) => {
       if (faceNormal === undefined) throw new Error('not a live world-object face')
       return new Float64Array(faceNormal)
     }),
     add_guide_line: vi.fn(() => 1n),
+    axes: vi.fn(() => new Float64Array(frame)),
   } as unknown as WasmScene
 }
 
-function makeTool(faceNormal?: [number, number, number]) {
+function makeTool(faceNormal?: [number, number, number], frame?: number[]) {
   const preview = new THREE.Group()
   const onGuideCreated = vi.fn()
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
-  const wasmScene = makeWasmScene(faceNormal)
+  const wasmScene = makeWasmScene(faceNormal, frame)
   const tool = new ProtractorTool(wasmScene, preview, onGuideCreated, onToast, onMeasurement)
   return { tool, preview, onGuideCreated, onToast, onMeasurement, wasmScene }
+}
+
+// ── disk inspection helpers ──────────────────────────────────────────────────
+
+function diskGroup(preview: THREE.Group): THREE.Group {
+  const g = preview.children.find((c) => c instanceof THREE.Group)
+  expect(g, 'a protractor disk group should exist').toBeDefined()
+  return g as THREE.Group
+}
+
+function ringColorHex(preview: THREE.Group): number {
+  const ring = diskGroup(preview).children.find((c) => c instanceof THREE.LineLoop) as THREE.LineLoop
+  expect(ring, 'the disk should have a ring (LineLoop)').toBeDefined()
+  return (ring.material as THREE.LineBasicMaterial).color.getHex()
+}
+
+/** The color ProtractorTool assigns a ring whose normal points along `dir`
+ * (against `frame`, defaulting to world identity — tool-parity §4), run
+ * through a LineBasicMaterial so color-management matches the tool's own path. */
+function axisColorHex(dir: [number, number, number], frame?: DrawingAxes): number {
+  const match = axisColorForDirection(dir, TOL, axisColorsForTheme(getResolvedTheme()), frame)
+  expect(match, `${dir} should map to an axis color`).not.toBeNull()
+  return new THREE.LineBasicMaterial({ color: match!.color }).color.getHex()
 }
 
 describe('ProtractorTool — plane inference (hover phase)', () => {
@@ -166,6 +204,49 @@ describe('ProtractorTool — arrow-key axis lock', () => {
     const up = makeKeyEvent('ArrowUp')
     tool.onKey(up)
     expect(up.defaultPrevented).toBe(true)
+  })
+
+  // ── Movable drawing axes (tool-parity §4) ──────────────────────────────
+  it('ArrowRight locks the CURRENT frame\'s red axis, not literal world X, under a moved frame', () => {
+    // Frame with red/green swapped relative to world: x=[0,1,0], y=[-1,0,0],
+    // z=[0,0,1] — the same orthonormal, right-handed fixture
+    // MoveTool.test.ts / RotateTool.test.ts use for their own moved-frame
+    // arrow-key regressions.
+    const frame = [0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1]
+    const frameObj: DrawingAxes = { origin: [0, 0, 0], x: [0, 1, 0], y: [-1, 0, 0], z: [0, 0, 1] }
+    const { tool, wasmScene, preview } = makeTool(undefined, frame)
+
+    tool.onPointerMove(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), RAY)
+    tool.onKey(makeKeyEvent('ArrowRight')) // locks to the frame's red axis, [0,1,0]
+    // The disk (Protractor's only axis-lock signal) must tint to the frame's
+    // red — a primitive still comparing against literal world axes would
+    // instead find [0,1,0] closest to world Y and render it green.
+    expect(ringColorHex(preview)).toBe(axisColorHex([0, 1, 0], frameObj))
+    expect(ringColorHex(preview)).not.toBe(axisColorHex([0, 1, 0]))
+
+    tool.onPointerDown(makeSnap({ kind: 'ground', x: 0, y: 0, z: 0 }), RAY) // apex at origin
+    // The apex re-render (a second `_updatePreviewDisk` call site) must stay
+    // frame-red too.
+    expect(ringColorHex(preview)).toBe(axisColorHex([0, 1, 0], frameObj))
+    // Baseline click at (1,1,1): projecting onto the plane ⊥ [0,1,0] removes
+    // the y-component (v·n = 1), leaving normalize([1,0,1]) ≈ (0.707,0,0.707)
+    // — the un-fixed bug (planeNormal = literal world X, [1,0,0]) would
+    // instead remove the x-component and leave (0,0.707,0.707), a direction
+    // with a NON-zero Y and a ZERO X — the discriminator this test checks.
+    tool.onPointerDown(makeSnap({ kind: 'ground', x: 1, y: 1, z: 1 }), RAY)
+    // No sweep move — commit right at the baseline (0° swept angle), so the
+    // committed direction IS the baseline direction, unmodified by any
+    // axis-snap (45° off every axis, comfortably outside the 2° tolerance).
+    tool.onPointerDown(makeSnap({ kind: 'ground', x: 1, y: 1, z: 1 }), RAY)
+
+    expect(wasmScene.add_guide_line).toHaveBeenCalledTimes(1)
+    const args = (wasmScene.add_guide_line as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(args[0]).toBeCloseTo(0) // apex x
+    expect(args[1]).toBeCloseTo(0) // apex y
+    expect(args[2]).toBeCloseTo(0) // apex z
+    expect(args[3]).toBeCloseTo(Math.SQRT1_2) // dir x — nonzero only under the frame-aware fix
+    expect(args[4]).toBeCloseTo(0) // dir y — zero only under the frame-aware fix
+    expect(args[5]).toBeCloseTo(Math.SQRT1_2) // dir z
   })
 })
 

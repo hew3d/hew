@@ -237,6 +237,13 @@ pub enum RecordedCall {
         sketches: Vec<u64>,
         affine: [f64; 12],
     },
+    /// `rescale_document(factor)` — the Tape Measure "resize the model"
+    /// flow (tool-parity §3): the whole document uniformly scaled about the
+    /// world origin in one undo step. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
+    /// replay unchanged; one that rescales fails to parse on older builds —
+    /// loudly, never silently divergent.
+    RescaleDocument { factor: f64 },
     /// `delete_node(kind, id)`.
     DeleteNode { kind: u8, id: u64 },
     /// `duplicate_selection_array(kinds, ids, affine, count)` — the Move
@@ -270,6 +277,17 @@ pub enum RecordedCall {
     /// Additive variant (same posture as the others); enables a draw-on-face
     /// imprint to be pushed through in replay (the true-curves design, C3).
     PushPull {
+        object: u64,
+        face: u64,
+        distance: f64,
+    },
+    /// `extrude_face_as_new_object(object, face, distance)` — Push/Pull's
+    /// Ctrl/Cmd modifier (tool-parity §2): straight-extrudes a solid face's
+    /// boundary into a NEW top-level object, leaving the source untouched.
+    /// Additive variant (the [`RecordedCall::SketchBeginCurveWith`] posture):
+    /// old recordings replay unchanged; one that uses the modifier fails to
+    /// parse on older builds — loudly, never silently divergent.
+    ExtrudeFaceAsNewObject {
         object: u64,
         face: u64,
         distance: f64,
@@ -482,6 +500,18 @@ pub enum RecordedCall {
         bytes: Vec<u8>,
         unit_scale: f64,
         name: Option<String>,
+    },
+    /// `set_axes(origin, x, y)` — the Axes tool's commit, or Reset Axes
+    /// passing world identity's own components (tool-parity design §4).
+    /// `z` is not recorded — it is always `x × y`, re-derived on replay
+    /// exactly as the kernel derives it live. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
+    /// replay unchanged; one that moves the axes fails to parse on older
+    /// builds — loudly, never silently divergent.
+    SetAxes {
+        origin: [f64; 3],
+        x: [f64; 3],
+        y: [f64; 3],
     },
     /// `load(bytes)` — a mid-session File ▸ Open/New replaces the whole
     /// document; embedding the `.hew` bytes keeps everything after it

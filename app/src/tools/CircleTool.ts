@@ -70,7 +70,8 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 import { editLengthBuffer, isLengthInputKey, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { segmentLength } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
-import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
+import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
+import { getDrawingAxes } from './drawingAxes'
 import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 
 import { segmentsPerTurn } from './arcMath'
@@ -105,10 +106,19 @@ export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
 /** Plane stage: waiting for first click, or waiting for second click, on a
- *  frozen `DrawPlane`/`SketchTarget`. */
+ *  frozen `DrawPlane`/`SketchTarget`. `natural` (design §2a) is the plane/
+ *  target this gesture would have anchored onto at its own first click had
+ *  no idle lock been active — what a mid-gesture arrow-key lock reverts to
+ *  when toggled back off (see `nextGestureLockPlane` in drawPlane.ts). */
 type PlaneStage =
   | { kind: 'idle' }
-  | { kind: 'anchored'; plane: DrawPlane; target: SketchTarget; center: V3 }
+  | {
+      kind: 'anchored'
+      plane: DrawPlane
+      target: SketchTarget
+      center: V3
+      natural: { plane: DrawPlane; target: SketchTarget }
+    }
 
 /** Face stage: idle, or anchored on a specific face plane */
 type FaceStage =
@@ -405,6 +415,7 @@ export class CircleTool implements Tool {
       anchoredThrough: null,
       idleLock: this.idlePlaneLock,
       idleHover: this._lastIdleHoverPoint,
+      frame: getDrawingAxes(this.wasmScene),
     })
   }
 
@@ -535,6 +546,29 @@ export class CircleTool implements Tool {
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
         this._lastIdleHoverPoint = null
       }
+      return
+    }
+
+    // Mid-gesture plane re-lock (design §2a): once the center is placed, an
+    // arrow key still re-locks the plane — through that ALREADY-PLACED
+    // anchor, not the cursor — since nothing has reached the kernel yet (the
+    // circle commits only on the second click). Scoped to plane mode: a
+    // face-anchored gesture is locked to a REAL face's plane, which an
+    // arbitrary axis lock cannot honestly override without leaving that face
+    // (out of scope here — see the module's face-mode doc).
+    if (
+      this.planeStage.kind === 'anchored' &&
+      (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown')
+    ) {
+      const { center, natural } = this.planeStage
+      const next = nextGestureLockPlane(
+        this.idlePlaneLock, ev.key, center, natural, getDrawingAxes(this.wasmScene), this._editContext,
+      )
+      this.idlePlaneLock = next.lock
+      this.planeStage = { kind: 'anchored', plane: next.plane, target: next.target, center, natural }
+      this._lastPlaneCursor = null
+      this._clearPreview()
+      this.onMeasurementCb('')
       return
     }
 
@@ -683,7 +717,13 @@ export class CircleTool implements Tool {
       const center = this._planeCursor(snap, ray, plane)
       if (center === null) return
 
-      this.planeStage = { kind: 'anchored', plane, target, center }
+      // The unlocked resolution at this SAME click (design §2a) — reuse it
+      // for free when no lock was active; fall back to ground WITHOUT
+      // probing when one was (see RectangleTool's identical comment).
+      const natural = this.idlePlaneLock !== null
+        ? groundNaturalTarget(this._editContext, center)
+        : resolved
+      this.planeStage = { kind: 'anchored', plane, target, center, natural }
       this._lastPlaneCursor = null
     } else {
       // Second click: commit the circle.
