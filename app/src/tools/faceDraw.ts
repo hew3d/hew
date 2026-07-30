@@ -34,6 +34,8 @@
 
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
+import type { V3 } from '../viewport/geoHelpers'
+import { transformNormalThroughPose } from '../viewport/geoHelpers'
 
 /** May the face on `object` (hit through `instance`, when the ray struck
  *  instanced geometry) be drawn on directly? */
@@ -43,6 +45,44 @@ export type FaceEligible = (object: bigint, instance: bigint | undefined) => boo
 export interface EligibleFacePick {
   object: bigint
   face: bigint
+}
+
+/**
+ * The WORLD-space unit normal of `object`'s `face` — the mapping every draw
+ * tool (Line/Rectangle/Circle/Polygon/Arc) and PushPullTool need before
+ * using `face_normal`'s result in world-space math (`rayPlaneIntersect`,
+ * the push/pull drag axis, …).
+ *
+ * `face_normal` is documented (`crates/wasm-api/src/lib.rs`) as answering in
+ * the Object's OWN LOCAL frame — which equals world space for a world
+ * object (identity-placed) or a Group member (Groups bake every transform
+ * into member geometry, never carry their own pose), but NOT for a
+ * component INSTANCE's member: an instance carries a real, un-baked pose
+ * that may rotate, mirror, or non-uniformly scale (component-edit-parity.md
+ * phase A2 — the first time these tools ever draw on a face inside such a
+ * context). `activeInstance` is the tool's own entered-instance id (null at
+ * top level, inside an object/group context, or when `object` isn't reached
+ * through an instance at all) — when set, the local normal is posed forward
+ * through `activeInstance`'s pose via the inverse-transpose (`
+ * transformNormalThroughPose`), never the plain linear part, which would
+ * silently mis-tilt the result under any non-uniform scale.
+ *
+ * Returns `null` for a stale instance or a degenerate/singular pose —
+ * callers should treat that exactly like a missing/stale face pick (stay
+ * idle), never fall back to the raw local normal.
+ */
+export function worldFaceNormal(
+  wasmScene: WasmScene,
+  object: bigint,
+  face: bigint,
+  activeInstance: bigint | null,
+): V3 | null {
+  const normalArr = wasmScene.face_normal(object, face)
+  const local: V3 = [normalArr[0], normalArr[1], normalArr[2]]
+  if (activeInstance === null) return local
+  const pose = wasmScene.instance_pose(activeInstance)
+  if (pose === undefined) return null
+  return transformNormalThroughPose(pose, local)
 }
 
 /**

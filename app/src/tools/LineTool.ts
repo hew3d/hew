@@ -61,7 +61,8 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
@@ -73,7 +74,7 @@ import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePl
 import { segmentLength, directionBetween } from './lineInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
-import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
+import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
 export type OnFaceImprint = (objectId: bigint) => void
@@ -130,8 +131,27 @@ export class LineTool implements Tool {
    *  sketch per plane. */
   private readonly sketchCache: SketchPlaneCache
 
-  /** The currently active editing context (entered object), or null at top level. */
-  private _activeContext: bigint | null = null
+  /** The current editing context (component-edit-parity.md phase A1) — a
+   *  single value replacing the old `_activeContext`/`_activeComponent`
+   *  duck-typed fields. `_activeContext`/`_activeInstance` below are
+   *  read-only views derived from it, kept so the rest of this file's
+   *  object-context logic (which predates this refactor) is untouched. */
+  private _editContext: EditContext = { kind: 'top' }
+
+  /** The entered OBJECT id, or null — unchanged meaning/behavior from the
+   *  old `_activeContext` field. */
+  private get _activeContext(): bigint | null {
+    return this._editContext.kind === 'object' ? this._editContext.id : null
+  }
+
+  /** The entered component INSTANCE id, or null (component-edit-parity.md
+   *  phase A2) — the new case this refactor adds. Plane-mode drawing routes
+   *  through `begin_sketch_on_plane_in_instance`/def-owned sketches, and
+   *  face-mode cuts route through `split_face_in_instance`, whenever this is
+   *  set. */
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
+  }
 
   /** VCB buffer — raw string being typed by the user (length, in display units) */
   private typed: string = ''
@@ -153,7 +173,7 @@ export class LineTool implements Tool {
    *  sketch-hover adoption on the next click (SketchUp: an explicit lock
    *  beats inference) — see `_currentMode`/`_resolveClickTarget`. Survives a
    *  completed gesture (cleared only by `cancel()`, which
-   *  `onDocumentReset()`/`setActiveContext()` already route through). */
+   *  `onDocumentReset()`/`setEditContext()` already route through). */
   private idlePlaneLock: 0 | 1 | 2 | null = null
 
   /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
@@ -192,10 +212,12 @@ export class LineTool implements Tool {
     this.sketchCache = sketchCache
   }
 
-  /** Set the active editing context (entered object), or null for top level. */
-  setActiveContext(id: bigint | null): void {
-    if (id === this._activeContext) return  // re-asserting the same context must not abort an in-progress gesture
-    this._activeContext = id
+  /** The single editing-context channel (component-edit-parity.md phase A1;
+   *  replaces `setActiveContext`). Re-asserting the SAME context must not
+   *  abort an in-progress gesture — mirrors the old field's guard. */
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
     this.cancel()
   }
 
@@ -368,7 +390,7 @@ export class LineTool implements Tool {
    * re-check is needed here.
    */
   private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray)
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
   }
 
   /**
@@ -382,7 +404,9 @@ export class LineTool implements Tool {
    * point yet (nothing to click through).
    */
   private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
-    return resolveClickDrawTarget(this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray)
+    return resolveClickDrawTarget(
+      this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+    )
   }
 
   /** The cursor's position on `plane`. On the ground plane this is EXACTLY
@@ -546,6 +570,18 @@ export class LineTool implements Tool {
    */
   capturingInput(): boolean {
     return this.planeStage.kind === 'anchored' || this.faceStage.kind === 'anchored'
+  }
+
+  /**
+   * True while a gesture is anchored OR an idle plane lock is armed — Escape
+   * has tool-local work to do (clear the lock, or step the gesture back)
+   * before a context-pop is appropriate (component-edit-parity.md phase A2;
+   * see `toolHasArmedGesture` in tools/types.ts). `capturingInput()` alone
+   * misses the idle-locked case: locked-but-idle is not "capturing input"
+   * but IS armed for Escape's purposes.
+   */
+  hasArmedGesture(): boolean {
+    return this.capturingInput() || this.idlePlaneLock !== null
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -798,11 +834,17 @@ export class LineTool implements Tool {
     try {
       // Each committed segment is its own gesture — one Cmd+Z undoes exactly
       // that segment, matching LineTool's chain-forward-per-click semantics.
-      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
+        // `toLocal` is the identity for a world target and pose⁻¹ for a
+        // definition-owned one (component-edit-parity.md phase A2) — see
+        // `runSketchGesture`'s doc for why an ordinary `sketch_add_segment`
+        // needs this and `begin_sketch_on_plane_in_instance` doesn't.
+        const a = toLocal(anchor)
+        const b = toLocal(cursor)
         const report = this.wasmScene.sketch_add_segment(
           sketch,
-          anchor[0], anchor[1], anchor[2],
-          cursor[0], cursor[1], cursor[2],
+          a[0], a[1], a[2],
+          b[0], b[1], b[2],
         )
         let closed: boolean
         try {
@@ -852,8 +894,8 @@ export class LineTool implements Tool {
       if (eligible === null) return
 
       const { object: objectHandle, face: faceHandle } = eligible
-      const normalArr = this.wasmScene.face_normal(objectHandle, faceHandle)
-      const normal: V3 = [normalArr[0], normalArr[1], normalArr[2]]
+      const normal = worldFaceNormal(this.wasmScene, objectHandle, faceHandle, this._activeInstance)
+      if (normal === null) return // stale instance/degenerate pose — treat as no eligible face
       const anchor: V3 = [snap.x, snap.y, snap.z]
 
       this.faceStage = {
@@ -900,8 +942,19 @@ export class LineTool implements Tool {
     }
 
     try {
-      const report = this.wasmScene.split_face(object, face, path)
-      report.free()
+      // Inside a component instance's editing context (component-edit-
+      // parity.md phase A2), `object` is a definition member — the world
+      // `split_face` refuses it outright (`apply_object_op`'s `is_world`
+      // guard); `split_face_in_instance` maps `path` through the instance's
+      // pose⁻¹ and routes through `apply_def_op` instead. Every instance of
+      // the definition sees the cut at once.
+      if (this._activeInstance !== null) {
+        const report = this.wasmScene.split_face_in_instance(this._activeInstance, object, face, path)
+        report.free()
+      } else {
+        const report = this.wasmScene.split_face(object, face, path)
+        report.free()
+      }
       this.onFaceImprint(object)
     } catch (err) {
       const code = parseKernelErrorCode(err)

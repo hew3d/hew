@@ -54,6 +54,15 @@ function makeWasmScene(opts: {
       kind: () => 'split',
       free: vi.fn(),
     })),
+    split_face_in_instance: vi.fn(() => ({
+      kind: () => 'split',
+      free: vi.fn(),
+    })),
+    begin_sketch_on_plane_in_instance: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
+    instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   } as unknown as WasmScene
@@ -77,7 +86,7 @@ describe('LineTool — editing-context scoping', () => {
   it('in-context clicks on empty ground do NOT start a top-level ground sketch', () => {
     const scene = makeWasmScene() // pick_face misses — bare ground under the ray
     const { tool } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), rayThrough(1, 1))
@@ -90,7 +99,7 @@ describe('LineTool — editing-context scoping', () => {
   it('in-context clicks on a DIFFERENT object\'s face are ignored', () => {
     const scene = makeWasmScene({ pick: () => makePick(999n, 3n) })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1 }), rayThrough(0, 0))
 
@@ -101,7 +110,7 @@ describe('LineTool — editing-context scoping', () => {
   it('in-context clicks on the ENTERED object\'s face anchor a face chain', () => {
     const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), rayThrough(0, 0))
 
@@ -143,5 +152,70 @@ describe('LineTool — top-level plain-object policy (parity with RectangleTool)
 
     expect(scene.sketch_add_segment).toHaveBeenCalledTimes(1)
     expect(scene.split_face).not.toHaveBeenCalled()
+  })
+})
+
+// Component-edit-parity.md phase A2: inside an INSTANCE editing context,
+// draw tools route to the definition-owned wasm surface instead of the
+// world one — the fix for the axis-lock symptom (see the idle-lock case
+// below, the flagship repro) and for face-mode cuts refusing outright.
+describe('LineTool — instance editing context (component-edit-parity.md phase A2)', () => {
+  const INSTANCE = 42n
+  const COMPONENT = 5n
+  const INSTANCE_CTX = { kind: 'instance' as const, id: INSTANCE, component: COMPONENT }
+
+  it('face mode routes to split_face_in_instance, never the world split_face', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n, INSTANCE) })
+    const { tool, onFaceImprint } = makeTool(scene)
+    tool.setEditContext(INSTANCE_CTX)
+
+    // `faceDrawEligible` isn't injected in this unit test, but the default
+    // fallback policy (defaultFaceEligible) refuses any instanced pick —
+    // inject the richer predicate directly, mirroring what the Viewport's
+    // `faceDrawEligible` would report for a member of the entered instance.
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 1, kind: 'face' }), rayThrough(1, 0))
+    tool.onDoubleClick(null, rayThrough(1, 0)) // ends the chain, commits the cut
+
+    expect(scene.split_face_in_instance).toHaveBeenCalledTimes(1)
+    expect(scene.split_face_in_instance).toHaveBeenCalledWith(
+      INSTANCE, 7n, 3n, expect.any(Float64Array),
+    )
+    expect(scene.split_face).not.toHaveBeenCalled()
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+  })
+
+  it('plane mode (idle-locked, THE original axis-lock symptom) mints via begin_sketch_on_plane_in_instance, never begin_ground_sketch', () => {
+    const scene = makeWasmScene({ pick: () => undefined }) // no face under the cursor
+    const { tool } = makeTool(scene)
+    tool.setEditContext(INSTANCE_CTX)
+
+    // Arrow-key idle lock (Z/blue axis) — the exact repro named in the design.
+    tool.onKey({ key: 'ArrowUp', repeat: false } as unknown as KeyboardEvent)
+    tool.onPointerDown(makeSnap({ x: 6, y: 1, z: 0.5 }), rayThrough(6, 1))
+    tool.onPointerDown(makeSnap({ x: 6, y: 2, z: 0.5 }), rayThrough(6, 2))
+
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledWith(INSTANCE, 6, 1, 0.5, 0, 0, 1)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    // The segment's points are mapped into DEFINITION-local space (pose⁻¹ of
+    // the +5-in-x translation): world (6,1,0.5) → local (1,1,0.5).
+    expect(scene.sketch_add_segment).toHaveBeenCalledWith(
+      expect.any(BigInt), 1, 1, 0.5, 1, 2, 0.5,
+    )
+  })
+
+  it('plane mode on empty space (no idle lock) ALSO mints a def-owned sketch, not a world one', () => {
+    const scene = makeWasmScene({ pick: () => undefined })
+    const { tool } = makeTool(scene)
+    tool.setEditContext(INSTANCE_CTX)
+
+    tool.onPointerDown(makeSnap({ x: 6, y: 1, z: 0 }), rayThrough(6, 1))
+    tool.onPointerDown(makeSnap({ x: 7, y: 1, z: 0 }), rayThrough(7, 1))
+
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
   })
 })

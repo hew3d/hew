@@ -254,6 +254,26 @@ impl Plane {
         let v = self.normal * self.offset;
         Point3::new(v.x, v.y, v.z)
     }
+
+    /// Reconstructs a plane from a normal and offset stored exactly as
+    /// serialized (HEW_FILE_FORMAT.md's `[nx, ny, nz, offset]`) — used only
+    /// by sketch-plane decode. Takes both fields **verbatim**, unlike
+    /// [`Plane::from_point_normal`]: that constructor renormalizes `normal`
+    /// and recomputes `offset` via a dot product against a derived point,
+    /// which silently drifts by a few ULPs whenever the stored normal is not
+    /// *bit-exactly* unit length — routine after a composed rotation
+    /// transform — and would otherwise break `Document::save`/`load`'s exact
+    /// `state_hash` round-trip for any sketch on such a plane.
+    ///
+    /// Fails with [`MathError::DegenerateVector`] if `normal`'s length is not
+    /// within [`tol::NORMAL_DIRECTION`] of 1 (a corrupt/tampered file) —
+    /// rejected typed rather than silently renormalized or accepted as-is.
+    pub(crate) fn from_unit_normal_offset(normal: Vec3, offset: f64) -> Result<Plane, MathError> {
+        if (normal.length() - 1.0).abs() > tol::NORMAL_DIRECTION {
+            return Err(MathError::DegenerateVector);
+        }
+        Ok(Plane { normal, offset })
+    }
 }
 
 #[cfg(test)]

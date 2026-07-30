@@ -80,6 +80,18 @@ describe('CommandPalette', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
+    render(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} />)
+    const windowKeyDown = vi.fn()
+    window.addEventListener('keydown', windowKeyDown)
+    try {
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+      expect(windowKeyDown).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', windowKeyDown)
+    }
+  })
+
   it('Enter runs the first (auto-selected) result and closes', () => {
     const onClose = vi.fn()
     const onRun = vi.fn()

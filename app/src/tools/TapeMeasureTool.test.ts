@@ -102,6 +102,30 @@ describe('TapeMeasureTool — parallel-guide mode entry', () => {
     expect(guidePoints.length).toBe(1)
   })
 
+  // component-edit-parity.md phase A2: guides stay world-space in v1 by
+  // design (the module doc's OUT-OF-SCOPE note) — `edge_endpoints` still
+  // only resolves live world Objects, so a component member's edge (which
+  // reports `undefined` here, exactly like the K1 fix made `sketch_edge_
+  // endpoints` do for a def-owned sketch edge above) continues to degrade
+  // to measure mode instead of a misplaced or crashing guide. `setEditContext`
+  // is exercised too — it changes nothing about this fallback, on purpose.
+  it('a member OBJECT edge (endpoints undefined) falls back to measure mode, even inside its own instance context', () => {
+    const { scene, guideLines, guidePoints } = makeWasmScene()
+    ;(scene as unknown as { edge_endpoints: ReturnType<typeof vi.fn> })
+      .edge_endpoints.mockReturnValue(undefined)
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+
+    tool.onPointerDown(
+      makeSnap({ x: 1, y: 0, z: 0, kind: 'on-edge', elementKind: 'edge', object: 7n, element: 3n }),
+      RAY,
+    )
+    tool.onPointerDown(makeSnap({ x: 3, y: 3, z: 0, kind: 'ground' }), RAY)
+
+    expect(guideLines.length).toBe(0)
+    expect(guidePoints.length).toBe(1)
+  })
+
   it('a plain ground click (no edge provenance) stays in measure mode', () => {
     const { scene, guideLines, guidePoints } = makeWasmScene()
     const { tool } = makeTool(scene)

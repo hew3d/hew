@@ -125,21 +125,44 @@
  * outright (its geometry is stored in definition-local space); it is now a
  * legal PATH — `follow_me_around_instance_face` (design §2e) takes the
  * instance handle too and poses the loop into world space kernel-side, a
- * reflected placement refusing typed — but never a legal PROFILE (no
- * `follow_me_face_*` variant takes an instance either). A face reached while
- * editing a component INSTANCE's shared DEFINITION (`setComponentContext`,
- * mirroring `PushPullTool`) stays refused wholesale — there is no
- * `follow_me_in_component`/birth-into-definition surface (a scoped gap,
- * unlike push/pull's `push_pull_in_component`) — but a GROUP editing context
- * is fully legal now: `follow_me_grouped`/the trailing `group` arg births the
- * result inside the group being edited (design §2f), threaded from the
- * Viewport's active-context stack via `setActiveGroup`. Sketch-EDGE paths
- * carry their own world coordinates and are not gated at all.
+ * reflected placement refusing typed — but never a legal PROFILE through
+ * THAT entry point (no world `follow_me_face_*` variant takes an instance).
+ *
+ * A face reached while EDITING a component INSTANCE's shared DEFINITION
+ * (`_activeInstance`/`_componentContext`, component-edit-parity.md phase A2)
+ * is a member — definition-local coordinates too, but now with its own
+ * dedicated `_in_instance`/`_in_component` family for BOTH roles:
+ * `follow_me_around_face_in_instance`/`follow_me_merged_around_face_in_
+ * instance` for a member-face PATH, `follow_me_face_along_edges_in_instance`/
+ * `follow_me_face_around_face_in_instance` for a member-face PROFILE — the
+ * wholesale refusal this tool used to apply for the whole editing context is
+ * gone (`_faceFollowable` now scopes to THAT instance's own members, exactly
+ * like every other face tool). A member-face PATH's preview/hover geometry
+ * is posed into world space the same way an un-entered instance's face
+ * already was (`_faceLoopWorld`, generalized to take an explicit instance).
+ *
+ * Sketch-EDGE paths carry their own world coordinates for a WORLD sketch
+ * (`sketch_edge_endpoints`) but that accessor explicitly REFUSES a def-owned
+ * sketch (K1's fix, `component-edit-parity.md`'s "guides stay world-space in
+ * v1" boundary) — there is no instance-aware sibling, and no app-side gate
+ * catches this at PICK time either (edge picks were never context-gated, on
+ * purpose — sketch edges carry their own coordinates regardless of context).
+ * A def-owned sketch's edges therefore still ARM as a path (no highlight,
+ * since the endpoint read comes back empty) but the kernel's own
+ * `resolve_follow_me_path` chokepoint refuses the def-owned path sketch typed
+ * at COMMIT (the same K1 fix) — safe (no wrong geometry, no crash) but not
+ * yet a polished UX; a scoped gap, matching the group-birth gap below.
+ *
+ * A GROUP editing context is fully legal (unrelated to the above):
+ * `follow_me_grouped`/the trailing `group` arg births the result inside the
+ * group being edited (design §2f), threaded from the Viewport's
+ * active-context stack via `setEditContext`.
  */
 
 import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
@@ -175,9 +198,11 @@ export type PathTarget =
   // instance-aware entry point at all.
   | { kind: 'face'; objectHandle: bigint; faceHandle: bigint; instance: bigint | undefined }
 
-/** A solid face picked as the PROFILE (design §3a) — always a plain,
- *  non-instanced object (`_faceFollowable`'s frame guard); holes tunnel
- *  through via `follow_me_face_along_edges`/`follow_me_face_around_face`. */
+/** A solid face picked as the PROFILE (design §3a) — a plain, non-instanced
+ *  object OUTSIDE any instance context, or a definition MEMBER while editing
+ *  INSIDE its own instance's context (component-edit-parity.md phase A2 —
+ *  `_faceFollowable`'s frame guard scopes which); holes tunnel through via
+ *  `follow_me_face_along_edges`/`follow_me_face_around_face`(`_in_instance`). */
 interface ProfileFaceTarget {
   objectHandle: bigint
   faceHandle: bigint
@@ -459,10 +484,37 @@ export class FollowMeTool implements Tool {
   /** The live station marker at the drag point. */
   private stationMarker: THREE.Object3D | null = null
 
+  /** The current editing context (component-edit-parity.md phase A1) — a
+   *  single value replacing the old `_activeContext`/`_componentContext`/
+   *  `_contextScoped`/`_activeGroup` duck-typed fields (`setActiveContext`/
+   *  `setComponentContext`/`setContextScoped`/`setActiveGroup`). The getters
+   *  below preserve their exact old read semantics so the rest of this file
+   *  is unchanged, except `_componentContext`'s effect: Follow Me now ROUTES
+   *  through the `_in_instance` wasm family instead of refusing wholesale
+   *  (component-edit-parity.md phase A2 — see `_faceFollowable`). */
+  private _editContext: EditContext = { kind: 'top' }
+
+  /** True once `setEditContext` has been called at least once. The Viewport
+   *  always calls it once right after constructing a tool, to prime it with
+   *  the CURRENT context (`Tool.setEditContext`'s own doc) — but unlike
+   *  every other context-aware tool, this constructor can itself pre-arm the
+   *  tool at `pick-profile` from a preselection (`initialSelection` above).
+   *  If that first priming call were treated as a genuine change from the
+   *  hardcoded `{kind:'top'}` default (the normal abort-on-change rule below,
+   *  component-edit-parity.md phase A2), it would immediately cancel and
+   *  wipe out a perfectly valid preselected path the instant the tool was
+   *  constructed while already inside a non-top context — before the user
+   *  did anything at all. So the first call after construction only
+   *  assigns; the abort rule starts protecting real, user-armed gestures
+   *  from the SECOND call on. */
+  private _editContextPrimed = false
+
   /** The entered-object context id (null at top level); mirrors PushPullTool.
    *  Only the shared `defaultFaceEligible` fallback reads it — in production
    *  the Viewport injects `faceDrawEligible`, which knows the full path. */
-  private _activeContext: bigint | null = null
+  private get _activeContext(): bigint | null {
+    return this._editContext.kind === 'object' ? this._editContext.id : null
+  }
   /** Richer eligibility injected by the Viewport (knows the full
    *  group/instance context path); null = the shared default policy. */
   private _faceEligible: FaceEligible | null = null
@@ -471,21 +523,33 @@ export class FollowMeTool implements Tool {
    *  matching `PushPullTool`'s own `_contextScoped`; eligibility itself comes
    *  from `_faceEligible`/`_componentContext` below, which already understand
    *  the full context path (see the FACE FRAME GUARD note). */
-  private _contextScoped = false
+  private get _contextScoped(): boolean {
+    return this._editContext.kind !== 'top'
+  }
   /** The component DEFINITION being edited (double-click into an instance),
-   *  or null; mirrors `PushPullTool.setComponentContext` but with the
-   *  OPPOSITE effect — push/pull can operate inside one
-   *  (`push_pull_in_component`), Follow Me has no equivalent
-   *  birth-into-definition surface, so this refuses every face interaction
-   *  (path AND profile) wholesale while set (a scoped gap, not a policy
-   *  choice — see the FACE FRAME GUARD note). */
-  private _componentContext: bigint | null = null
+   *  or null. Unchanged meaning from the old `_componentContext` field — but
+   *  Follow Me now routes through the `_in_instance` family instead of
+   *  refusing every face interaction wholesale (component-edit-parity.md
+   *  phase A2 — see the FACE FRAME GUARD note, updated). */
+  private get _componentContext(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.component : null
+  }
+  /** The entered component INSTANCE id, or null — the handle every
+   *  `*_in_instance` follow-me surface needs (component-edit-parity.md phase
+   *  A2; `_componentContext` above is the DEFINITION, which the world
+   *  `follow_me_around_instance_face` used instead — the new surfaces key on
+   *  the instance so the kernel can map through its specific pose). */
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
+  }
   /** The group being edited (double-click into a group), or null; threaded as
    *  the trailing `group` arg on `follow_me_along_edges`/`follow_me_around_face`
    *  so the sweep births inside it (design §2f) instead of at top level. The
    *  other follow-me entry points (merged, face-profile, instance-face path)
    *  have no group-birth surface yet and always land top-level regardless. */
-  private _activeGroup: bigint | null = null
+  private get _activeGroup(): bigint | null {
+    return this._editContext.kind === 'group' ? this._editContext.id : null
+  }
   /** Live Ctrl/Cmd modifier state at the moment of commit — read fresh by the
    *  Viewport from the real `PointerEvent` right before dispatching
    *  `onPointerDown`/`onPointerUp` (`activeTool instanceof FollowMeTool`,
@@ -577,8 +641,15 @@ export class FollowMeTool implements Tool {
       const path = this.stage.path
       const autoMerges =
         path.kind === 'face' &&
-        path.instance === undefined &&
-        path.objectHandle === this.hoveredProfileFace.objectHandle
+        path.objectHandle === this.hoveredProfileFace.objectHandle &&
+        // A plain path (never instanced), OR a member-face path while
+        // editing INSIDE that same instance (component-edit-parity.md phase
+        // A2 — `follow_me_face_around_face_in_instance` auto-merges from
+        // object identity exactly like the world variant). An instance-face
+        // path referenced from OUTSIDE its own context (read-only, no merge
+        // entry point) still shows the generic hint.
+        (path.instance === undefined ||
+          (this._activeInstance !== null && path.instance === this._activeInstance))
       const base = autoMerges
         ? 'Click this face to sweep it as the profile — it merges straight into the solid the path runs on.'
         : 'Click this face to use it as the profile.'
@@ -602,7 +673,13 @@ export class FollowMeTool implements Tool {
     if (
       this.stage.kind === 'pick-profile' &&
       this.stage.path.kind === 'face' &&
-      this.stage.path.instance === undefined
+      // A plain path, OR a member-face path while editing INSIDE that same
+      // instance (`follow_me_merged_around_face_in_instance` exists too,
+      // component-edit-parity.md phase A2) — never an instance-face path
+      // referenced from OUTSIDE its own context (read-only, no merge entry
+      // point there).
+      (this.stage.path.instance === undefined ||
+        (this._activeInstance !== null && this.stage.path.instance === this._activeInstance))
     ) {
       return ' Ctrl/Cmd-click to merge with the solid.'
     }
@@ -638,6 +715,20 @@ export class FollowMeTool implements Tool {
   }
 
   /**
+   * True once a path is picked (`pick-profile`) or a sweep is underway
+   * (`dragging`) — anything past the idle `pick-path` stage. Unlike
+   * `capturesKey` (which deliberately never captures Escape, so cancel
+   * always reaches the tool), this is the Viewport's signal — mirroring
+   * MoveTool/PushPullTool/etc.'s `capturingInput` — that Escape itself
+   * belongs to THIS gesture rather than to a context-exit: an armed Follow
+   * Me sweep must step its own stage back on Escape, not have the edit
+   * context pop out from under it first.
+   */
+  capturingInput(): boolean {
+    return this.stage.kind !== 'pick-path'
+  }
+
+  /**
    * Per-key VCB capture (see the routing note at MoveTool.capturesKey).
    * `isLengthInputKey` accepts unit-suffix letters (m/c/k/f/t/i/n) so an
    * explicit unit can be typed in any display format — but several of those
@@ -669,10 +760,18 @@ export class FollowMeTool implements Tool {
     return key === 'Backspace' || /^[0-9.\-'"/ ]$/.test(key)
   }
 
-  /** Set the active editing context (entered object), or null for top level.
-   *  Wired by the Viewport exactly like PushPullTool. */
-  setActiveContext(objectId: bigint | null): void {
-    this._activeContext = objectId
+  /** The single editing-context channel (component-edit-parity.md phase A1;
+   *  replaces `setActiveContext`/`setComponentContext`/`setContextScoped`/
+   *  `setActiveGroup`). */
+  setEditContext(ctx: EditContext): void {
+    if (!this._editContextPrimed) {
+      this._editContextPrimed = true
+      this._editContext = ctx
+      return
+    }
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
+    this.cancel()
   }
 
   /** Inject the Viewport's context-path-aware face policy (or null for the
@@ -680,28 +779,6 @@ export class FollowMeTool implements Tool {
    *  face-eligibility system as every other face tool. */
   setFaceEligibility(pred: FaceEligible | null): void {
     this._faceEligible = pred
-  }
-
-  /** True while any editing context is entered — the Viewport sets it (the
-   *  object/instance id channels don't cover a GROUP context). Hint wording
-   *  only; see the field doc. */
-  setContextScoped(scoped: boolean): void {
-    this._contextScoped = scoped
-  }
-
-  /** Set the component DEFINITION being edited, or null — mirrors
-   *  `PushPullTool.setComponentContext`'s wiring (the Viewport's generic
-   *  per-context-change effect duck-types this the same way for every tool
-   *  that implements it), but Follow Me refuses wholesale instead of routing
-   *  through an in-component surface (see the field doc). */
-  setComponentContext(componentId: bigint | null): void {
-    this._componentContext = componentId
-  }
-
-  /** Set the group being edited, or null — births the next sweep inside it
-   *  (design §2f). See the field doc. */
-  setActiveGroup(groupId: bigint | null): void {
-    this._activeGroup = groupId
   }
 
   /** Live Ctrl/Cmd modifier read, called by the Viewport right before
@@ -713,20 +790,24 @@ export class FollowMeTool implements Tool {
   /**
    * Whether the face on `object` (hit through `instance`) may become a PATH
    * (`forProfile: false`) or a PROFILE (`forProfile: true`) — see the FACE
-   * FRAME GUARD note. A component-DEFINITION context refuses EVERYTHING (no
-   * birth-into-definition surface), instance or not.
+   * FRAME GUARD note. Inside a component INSTANCE's editing context
+   * (component-edit-parity.md phase A2), only THAT instance's own members
+   * are in scope, for path AND profile alike (`follow_me_*_in_instance`/
+   * `follow_me_face_*_in_instance` both exist now — the wholesale refusal
+   * this tool used to apply here is gone).
    *
-   * An instanced face is a legal PATH unconditionally otherwise (never a
-   * legal PROFILE — no kernel surface takes one): unlike every other face
-   * interaction here, sweeping AROUND an instance's face never touches the
-   * instance or its definition — it is a read-only geometric reference, the
-   * same as clicking any other visible face — so it deliberately BYPASSES
-   * the injected `_faceEligible` policy (`faceDrawEligible`), which exists
-   * to gate DIRECT EDITS (draw/push-pull) behind having entered the
-   * component first. Routing an instance path through that policy would
-   * refuse it at the top level (`resolvePickToSelectable` resolves an
-   * un-entered instanced pick to the INSTANCE node, never `'object'`),
-   * defeating the whole point of the relaxation.
+   * Outside an instance context, an instanced face is a legal PATH
+   * unconditionally (never a legal PROFILE — no WORLD kernel surface takes
+   * one): unlike every other face interaction here, sweeping AROUND an
+   * instance's face never touches the instance or its definition — it is a
+   * read-only geometric reference, the same as clicking any other visible
+   * face — so it deliberately BYPASSES the injected `_faceEligible` policy
+   * (`faceDrawEligible`), which exists to gate DIRECT EDITS (draw/push-pull)
+   * behind having entered the component first. Routing an instance path
+   * through that policy would refuse it at the top level
+   * (`resolvePickToSelectable` resolves an un-entered instanced pick to the
+   * INSTANCE node, never `'object'`), defeating the whole point of the
+   * relaxation.
    *
    * A PLAIN face (no instance) keeps the shared context-path-aware policy
    * every other face tool uses — Follow Me adds no separate group/top-level
@@ -735,7 +816,8 @@ export class FollowMeTool implements Tool {
    * that field's doc — no longer overrides it).
    */
   private _faceFollowable(object: bigint, instance: bigint | undefined, forProfile: boolean): boolean {
-    if (this._componentContext !== null) return false
+    const activeInstance = this._activeInstance
+    if (activeInstance !== null) return instance === activeInstance
     if (instance !== undefined) return !forProfile
     return this._faceEligible !== null
       ? this._faceEligible(object, instance)
@@ -744,11 +826,13 @@ export class FollowMeTool implements Tool {
 
   /** Why an ineligible face refused, phrased as the way in — mirrors
    *  `PushPullTool._ineligibleFaceHint`'s shape, with Follow Me's
-   *  component-definition refusal (a scoped gap, not a "step out" scope
-   *  question) checked first. */
+   *  instance-scoping refusal (an out-of-scope member, not a policy gap)
+   *  checked first. */
   private _ineligibleFaceHint(instance: bigint | undefined, forProfile: boolean): string {
-    if (this._componentContext !== null) {
-      return 'Follow Me can’t sweep while editing a component’s definition — press Esc to step out first.'
+    if (this._activeInstance !== null) {
+      return instance === undefined
+        ? 'That face isn’t part of the component you’re editing — press Esc to step out first.'
+        : 'That face belongs to a different component instance — press Esc to step out first.'
     }
     if (this._contextScoped || this._activeContext !== null) {
       return 'That face isn’t part of what you’re editing — press Esc to step out first.'
@@ -848,10 +932,24 @@ export class FollowMeTool implements Tool {
     //    holes tunneling through. A near-miss of a small profile's interior
     //    (no region AND no eligible face) stays quiet either way; surfacing
     //    a toast on every near-miss would be noise, not guidance.
-    const regionPick = this.wasmScene.pick_sketch_region(
-      ray.origin[0], ray.origin[1], ray.origin[2],
-      ray.direction[0], ray.direction[1], ray.direction[2],
-    )
+    //
+    // `pick_sketch_region` only ever walks WORLD-tree sketches
+    // (`Document::sketch_ids()` deliberately excludes definition-owned
+    // ones) — inside an instance's own editing context, a plane-mode
+    // profile drawn there (`begin_sketch_on_plane_in_instance`) is reached
+    // through the scoped, pose-mapping `pick_sketch_region_in_instance`
+    // sibling instead.
+    const regionPickInstance = this._activeInstance
+    const regionPick = regionPickInstance !== null
+      ? this.wasmScene.pick_sketch_region_in_instance(
+          regionPickInstance,
+          ray.origin[0], ray.origin[1], ray.origin[2],
+          ray.direction[0], ray.direction[1], ray.direction[2],
+        )
+      : this.wasmScene.pick_sketch_region(
+          ray.origin[0], ray.origin[1], ray.origin[2],
+          ray.direction[0], ray.direction[1], ray.direction[2],
+        )
     if (regionPick === undefined) {
       const facePick = this.wasmScene.pick_face(
         ray.origin[0], ray.origin[1], ray.origin[2],
@@ -885,10 +983,20 @@ export class FollowMeTool implements Tool {
         return
       }
       // in-tool: try the face as a PROFILE instead. No kernel entry point
-      // combines a face profile with an instance-face PATH — that specific
-      // pairing stays quiet (a near-miss) rather than a confusing toast for
-      // an edge case with no home yet.
-      if (this.stage.path.kind === 'face' && this.stage.path.instance !== undefined) return
+      // combines a face profile with an instance-face PATH reached from
+      // OUTSIDE that instance's own editing context (read-only reference,
+      // via `follow_me_around_instance_face`) — that specific pairing stays
+      // quiet (a near-miss) rather than a confusing toast for an edge case
+      // with no home yet. Editing INSIDE that SAME instance's definition
+      // (component-edit-parity.md phase A2) is different: `_commitFaceProfile`
+      // routes both sides through the `_in_instance` family, so a member-face
+      // path there must fall through to the profile pick below, not bail here.
+      const activeInstance = this._activeInstance
+      const pathIsOutsideInstanceFace =
+        this.stage.path.kind === 'face' &&
+        this.stage.path.instance !== undefined &&
+        (activeInstance === null || this.stage.path.instance !== activeInstance)
+      if (pathIsOutsideInstanceFace) return
       if (!this._faceFollowable(object, instance, true)) {
         this._notifyMiss(this._ineligibleFaceHint(instance, true))
         return
@@ -1384,6 +1492,22 @@ export class FollowMeTool implements Tool {
         this._activeGroup,
       )
     }
+    const activeInstance = this._activeInstance
+    if (activeInstance !== null) {
+      // Editing INSIDE a component instance's own definition (component-
+      // edit-parity.md phase A2): `_faceFollowable` already scoped the path
+      // pick to a member of THIS instance, so `path.objectHandle` is a
+      // definition member — route through the `_in_instance` family instead
+      // of the world one. No group-birth surface here either (mirrors the
+      // world variants' merge entry point, which also has none).
+      return merge
+        ? this.wasmScene.follow_me_merged_around_face_in_instance(
+            activeInstance, sketchHandle, regionHandle, path.objectHandle, path.faceHandle, stopLen,
+          )
+        : this.wasmScene.follow_me_around_face_in_instance(
+            activeInstance, sketchHandle, regionHandle, path.objectHandle, path.faceHandle, stopLen,
+          )
+    }
     if (path.instance !== undefined) {
       // No group-birth surface on the instance-face entry point — always
       // top-level, regardless of `_activeGroup` (the kernel scoped it that
@@ -1433,22 +1557,45 @@ export class FollowMeTool implements Tool {
     stopLen?: number,
   ): void {
     const fallback: Stage = { kind: 'pick-profile', path, pathSource }
+    const activeInstance = this._activeInstance
     try {
-      const objectId = path.kind === 'edges'
-        ? this.wasmScene.follow_me_face_along_edges(
-            profileObject,
-            profileFace,
-            path.sketchHandle,
-            new BigUint64Array(path.edgeHandles),
-            stopLen,
-          )
-        : this.wasmScene.follow_me_face_around_face(
-            profileObject,
-            profileFace,
-            path.objectHandle,
-            path.faceHandle,
-            stopLen,
-          )
+      // Editing INSIDE a component instance's own definition (component-
+      // edit-parity.md phase A2): `profileObject` is a definition member
+      // (`_faceFollowable` scoped the profile pick to THIS instance too) —
+      // route through the `_in_instance` family.
+      const objectId = activeInstance !== null
+        ? (path.kind === 'edges'
+            ? this.wasmScene.follow_me_face_along_edges_in_instance(
+                activeInstance,
+                profileObject,
+                profileFace,
+                path.sketchHandle,
+                new BigUint64Array(path.edgeHandles),
+                stopLen,
+              )
+            : this.wasmScene.follow_me_face_around_face_in_instance(
+                activeInstance,
+                profileObject,
+                profileFace,
+                path.objectHandle,
+                path.faceHandle,
+                stopLen,
+              ))
+        : (path.kind === 'edges'
+            ? this.wasmScene.follow_me_face_along_edges(
+                profileObject,
+                profileFace,
+                path.sketchHandle,
+                new BigUint64Array(path.edgeHandles),
+                stopLen,
+              )
+            : this.wasmScene.follow_me_face_around_face(
+                profileObject,
+                profileFace,
+                path.objectHandle,
+                path.faceHandle,
+                stopLen,
+              ))
       this._finishCommit(objectId)
     } catch (err) {
       this._refuseCommit(path, fallback, err, stopLen)
@@ -1542,10 +1689,20 @@ export class FollowMeTool implements Tool {
     let sketchHandle: bigint
     let regionHandle: bigint
     try {
-      const pick = this.wasmScene.pick_sketch_region(
-        ray.origin[0], ray.origin[1], ray.origin[2],
-        ray.direction[0], ray.direction[1], ray.direction[2],
-      )
+      // Same instance-scoped pick as the commit path (`onPointerDown`
+      // above) — `pick_sketch_region` alone would never find a def-owned
+      // profile region drawn inside the entered instance's own definition.
+      const hoverInstance = this._activeInstance
+      const pick = hoverInstance !== null
+        ? this.wasmScene.pick_sketch_region_in_instance(
+            hoverInstance,
+            ray.origin[0], ray.origin[1], ray.origin[2],
+            ray.direction[0], ray.direction[1], ray.direction[2],
+          )
+        : this.wasmScene.pick_sketch_region(
+            ray.origin[0], ray.origin[1], ray.origin[2],
+            ray.direction[0], ray.direction[1], ray.direction[2],
+          )
       if (pick === undefined) {
         this.profileHoverKey = null
         this.profileVerdict = null
@@ -1642,13 +1799,23 @@ export class FollowMeTool implements Tool {
    * path stage gives a face-loop path. Only offered once a path is picked
    * DELIBERATELY in-tool (a leftover preselection's face click is still the
    * path-recovery gesture — see `onPointerDown`'s doc), and never for an
-   * instance-face path (no kernel entry point combines the two).
+   * instance-face path reached from OUTSIDE that instance's own editing
+   * context (no kernel entry point combines the two there) — but editing
+   * INSIDE that same instance (component-edit-parity.md phase A2) routes
+   * both sides through the `_in_instance` family, so the fallback profile
+   * IS offered then (see `onPointerDown`'s identical exception).
    */
   private _hoverProfileFace(ray: Ray): void {
+    const activeInstance = this._activeInstance
+    const pathIsOutsideInstanceFace =
+      this.stage.kind === 'pick-profile' &&
+      this.stage.path.kind === 'face' &&
+      this.stage.path.instance !== undefined &&
+      (activeInstance === null || this.stage.path.instance !== activeInstance)
     if (
       this.stage.kind !== 'pick-profile' ||
       this.stage.pathSource !== 'in-tool' ||
-      (this.stage.path.kind === 'face' && this.stage.path.instance !== undefined)
+      pathIsOutsideInstanceFace
     ) {
       this.hoveredProfileFace = null
       this._clearHover()
@@ -1688,7 +1855,14 @@ export class FollowMeTool implements Tool {
     if (key === this.hoverKey) return // same face — nothing to rebuild
     let points: number[] = []
     try {
-      const loop = this.wasmScene.face_boundary(object, face)
+      // Editing INSIDE a component instance's own definition (component-
+      // edit-parity.md phase A2): `object` is a definition member, so
+      // `face_boundary` answers in DEFINITION-local space — pose-map through
+      // the entered instance, exactly like `_faceLoopWorld` does for a
+      // face-loop PATH.
+      const loop = this._activeInstance !== null
+        ? this._faceLoopWorld(object, face, this._activeInstance)
+        : Array.from(this.wasmScene.face_boundary(object, face))
       for (let i = 0; i < loop.length; i += 3) {
         const j = (i + 3) % loop.length
         points.push(loop[i], loop[i + 1], loop[i + 2], loop[j], loop[j + 1], loop[j + 2])

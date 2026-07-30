@@ -13,7 +13,8 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import { intersectGroundPlane } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -22,7 +23,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
-import { defaultFaceEligible, type FaceEligible } from './faceDraw'
+import { defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
  * cursor was parked on a real feature. `on-face` is excluded on purpose: it
@@ -52,8 +53,32 @@ const HARD_SNAP_KINDS = new Set([
 const MIN_INWARD_DRAG_M = 1e-9
 
 export type PushPullTarget =
-  | { kind: 'region'; sketchHandle: bigint; regionHandle: bigint; normal: [number, number, number] }
-  | { kind: 'face'; objectHandle: bigint; faceHandle: bigint; normal: [number, number, number] }
+  | {
+      kind: 'region'
+      sketchHandle: bigint
+      regionHandle: bigint
+      normal: [number, number, number]
+      /** The instance to extrude THROUGH (component-edit-parity.md phase
+       *  A2) — set when the region's sketch is a member of the entered
+       *  instance's definition, else null (a world sketch, extruded via the
+       *  plain `extrude_region`). Doubles as the ghost preview's pose source
+       *  (`_drawGhostPreview`): `region_boundary` answers in DEFINITION-local
+       *  coordinates for a def-owned sketch, so the swept-prism ghost maps
+       *  it through this instance's pose before drawing. */
+      instance: bigint | null
+    }
+  | {
+      kind: 'face'
+      objectHandle: bigint
+      faceHandle: bigint
+      normal: [number, number, number]
+      /** The instance the face was picked THROUGH (component-edit-parity.md
+       *  phase A2) — null for a plain world object. `face_boundary` answers
+       *  in the object's own LOCAL (definition) frame for a component
+       *  member, exactly like `region_boundary` above, so the ghost preview
+       *  maps it through this same pose. */
+      instance: bigint | null
+    }
 
 export type OnPushPullCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -152,8 +177,15 @@ export class PushPullTool implements Tool {
           // scope is editable, so isolated editing can't disturb neighbors.
           if (this._isEligible(objectHandle, instanceHandle)) {
             const faceHandle = pick.face()
-            const normalArr = this.wasmScene.face_normal(objectHandle, faceHandle)
-            const normal: [number, number, number] = [normalArr[0], normalArr[1], normalArr[2]]
+            // `face_normal` answers in `objectHandle`'s own LOCAL frame — the
+            // instance the face was actually picked THROUGH (`instanceHandle`,
+            // not necessarily `this._activeInstance`: an injected eligibility
+            // predicate could in principle allow a different one) carries the
+            // real, un-baked pose that maps it into world space. `null` means
+            // a stale instance or a degenerate mapped normal — treated exactly
+            // like a miss (component-edit-parity.md phase A2).
+            const normal = worldFaceNormal(this.wasmScene, objectHandle, faceHandle, instanceHandle ?? null)
+            if (normal === null) return
             // Prefer the snap position as anchor (snapped to a real point on the
             // surface); fall back to ground hit, then ray origin.
             if (snap !== null) {
@@ -162,7 +194,7 @@ export class PushPullTool implements Tool {
               const hit = intersectGroundPlane(ray)
               anchor = hit !== null ? [hit.x, hit.y, hit.z] : [...ray.origin]
             }
-            target = { kind: 'face', objectHandle, faceHandle, normal }
+            target = { kind: 'face', objectHandle, faceHandle, normal, instance: instanceHandle ?? null }
           } else {
             // FAIL CLOSED: an ineligible face CONSUMES the click. Falling
             // through to Path B would let a sketch region along the same ray
@@ -182,13 +214,30 @@ export class PushPullTool implements Tool {
       // no objects in scene yet). `pick_sketch_region` resolves the smallest
       // containing region across ALL live sketches kernel-side (nested rings
       // resolve to the innermost — the app no longer has to walk sketch_regions
-      // + region_boundary + point-in-polygon itself).
-      // Region extrusion is a top-level act; suppress it inside a context.
+      // + region_boundary + point-in-polygon itself). `pick_sketch_region`
+      // only ever walks WORLD-tree sketches (`Document::sketch_ids()`
+      // deliberately excludes definition-owned ones) — it can NEVER find a
+      // region drawn inside a component's own definition, so an instance
+      // context calls the `_in_instance` sibling instead, which is scoped to
+      // (and pose-maps the ray for) exactly that definition's own sketches;
+      // there is nothing left to filter by membership afterward, unlike the
+      // stale approach this replaced.
+      // Region extrusion is a top-level (or instance-context) act; suppress
+      // it inside an OBJECT editing context (component-edit-parity.md phase
+      // A2 — an instance context now has its own def-owned regions too).
       if (target === null && this._activeContext === null) {
-        const regionPick = this.wasmScene.pick_sketch_region(
-          ray.origin[0], ray.origin[1], ray.origin[2],
-          ray.direction[0], ray.direction[1], ray.direction[2],
-        )
+        const activeInstance = this._activeInstance
+        const regionPick =
+          activeInstance !== null
+            ? this.wasmScene.pick_sketch_region_in_instance(
+                activeInstance,
+                ray.origin[0], ray.origin[1], ray.origin[2],
+                ray.direction[0], ray.direction[1], ray.direction[2],
+              )
+            : this.wasmScene.pick_sketch_region(
+                ray.origin[0], ray.origin[1], ray.origin[2],
+                ray.direction[0], ray.direction[1], ray.direction[2],
+              )
         if (regionPick !== undefined) {
           try {
             const sketchHandle = regionPick.sketch()
@@ -199,6 +248,26 @@ export class PushPullTool implements Tool {
             // query is a miss, not a fallback to ground.
             const plane = this.wasmScene.sketch_plane(sketchHandle)
             if (plane === undefined) return // stale handle — treat as a miss
+            let normal: [number, number, number] = [plane[3], plane[4], plane[5]]
+            if (activeInstance !== null) {
+              // A def-owned sketch's plane is DEFINITION-LOCAL — `sketch_plane`
+              // has no `_in_instance` sibling, so the normal is pose-mapped
+              // here the same approximate way `sketchGesture.ts`'s
+              // `isStillOnPlane` does (linear part, re-normalized): exact for
+              // rotation/uniform-scale/mirror/translation, and even a non-
+              // uniform-scale pose can only skew the drag axis/preview, never
+              // the actual commit, which goes through the kernel's own exact
+              // pose⁻¹ regardless.
+              const pose = this.wasmScene.instance_pose(activeInstance)
+              if (pose === undefined) return
+              const [nx, ny, nz] = normal
+              const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
+              const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
+              const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
+              const len = Math.hypot(rnx, rny, rnz)
+              if (len <= 1e-12) return
+              normal = [rnx / len, rny / len, rnz / len]
+            }
             if (snap !== null) {
               anchor = [snap.x, snap.y, snap.z]
             } else {
@@ -209,7 +278,8 @@ export class PushPullTool implements Tool {
               kind: 'region',
               sketchHandle,
               regionHandle,
-              normal: [plane[3], plane[4], plane[5]],
+              normal,
+              instance: activeInstance,
             }
           } finally {
             regionPick.free()
@@ -324,11 +394,29 @@ export class PushPullTool implements Tool {
     this._commit(target, signed)
   }
 
-  /** Set the active editing context (entered object), or null for top level.
-   *  When set, push/pull only acts on that object's faces ( scoped editing). */
-  private _activeContext: bigint | null = null
-  setActiveContext(objectId: bigint | null): void {
-    this._activeContext = objectId
+  /** The current editing context (component-edit-parity.md phase A1) — a
+   *  single value replacing the old `_activeContext`/`_activeComponent`/
+   *  `_contextScoped` duck-typed fields. The getters below preserve their
+   *  exact old read semantics so the rest of this file is unchanged. */
+  private _editContext: EditContext = { kind: 'top' }
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
+    this.cancel()
+  }
+
+  /** The entered OBJECT id, or null — unchanged meaning from the old
+   *  `_activeContext` field. When set, push/pull only acts on that object's
+   *  faces (scoped editing). */
+  private get _activeContext(): bigint | null {
+    return this._editContext.kind === 'object' ? this._editContext.id : null
+  }
+
+  /** The entered component INSTANCE id, or null (component-edit-parity.md
+   *  phase A2) — new: `extrude_region_in_instance` needs the instance (not
+   *  just the definition) to map a region's birth through its pose. */
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
   }
 
   /** Optional richer eligibility, injected by the Viewport (which knows the
@@ -351,26 +439,25 @@ export class PushPullTool implements Tool {
   }
 
   /**
-   * Set the active component context: when the user has double-clicked into an
-   * instance, push/pull routes face operations through `push_pull_in_component`
-   * instead of `push_pull`. `componentId` is the definition handle (from
-   * `instance_def`), or null for normal (non-instance) context.
+   * The component DEFINITION being edited (double-click into an instance),
+   * or null; when set, push/pull routes face operations through
+   * `push_pull_in_component` instead of `push_pull`. Unchanged meaning from
+   * the old `_activeComponent` field (the definition handle from
+   * `instance_def`, NOT the instance itself — `_activeInstance` above is the
+   * new addition).
    */
-  private _activeComponent: bigint | null = null
-  setComponentContext(componentId: bigint | null): void {
-    this._activeComponent = componentId
+  private get _activeComponent(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.component : null
   }
 
   /**
    * True while ANY editing context is entered — object, GROUP, or component.
-   * The two id channels above only carry object/instance contexts (a group
-   * context leaves both null), so the Viewport sets this alongside them.
-   * Affects only the refusal hint's wording; eligibility itself comes from
-   * the injected predicate, which already understands the full context path.
+   * Unchanged meaning from the old `_contextScoped` field. Affects only the
+   * refusal hint's wording; eligibility itself comes from the injected
+   * predicate, which already understands the full context path.
    */
-  private _contextScoped = false
-  setContextScoped(scoped: boolean): void {
-    this._contextScoped = scoped
+  private get _contextScoped(): boolean {
+    return this._editContext.kind !== 'top'
   }
 
   /** Why an ineligible face refused, phrased as the way in. Inside ANY
@@ -429,17 +516,35 @@ export class PushPullTool implements Tool {
 
     try {
       if (target.kind === 'region') {
-        const objectId = this.wasmScene.extrude_region(
-          target.sketchHandle,
-          target.regionHandle,
-          distance,
-        )
+        // A def-owned region (component-edit-parity.md phase A2) births the
+        // solid as a new DEFINITION member via `extrude_region_in_instance`
+        // (seen by every instance at once), instead of a world Object.
+        const objectId = target.instance !== null
+          ? this.wasmScene.extrude_region_in_instance(
+              target.instance,
+              target.sketchHandle,
+              target.regionHandle,
+              distance,
+            )
+          : this.wasmScene.extrude_region(
+              target.sketchHandle,
+              target.regionHandle,
+              distance,
+            )
         this.onCommit(objectId)
       } else {
-        // Route through push_pull_in_component when inside a component editing context.
-        const report = this._activeComponent !== null
+        // Route through push_pull_in_component when the face was picked
+        // through a component instance — `target.instance` (the instance the
+        // ghost preview's pose came from), not necessarily `this._activeInstance`
+        // (an injected eligibility predicate could in principle allow a
+        // different one; same rationale as the `normal` lookup above).
+        // `distance` is the WORLD drag distance the ghost swept; the kernel
+        // maps it through `target.instance`'s pose (delta-review fix —
+        // previously committed raw, diverging from the ghost on a scaled
+        // instance).
+        const report = target.instance !== null
           ? this.wasmScene.push_pull_in_component(
-              this._activeComponent,
+              target.instance,
               target.objectHandle,
               target.faceHandle,
               distance,
@@ -453,7 +558,7 @@ export class PushPullTool implements Tool {
           // A through-cut consumes the source object and replaces it with
           // one or more new objects; commit the first of those so selection/
           // highlight lands on real geometry instead of the now-gone source.
-          if (this._activeComponent === null && report.is_through()) {
+          if (report.is_through()) {
             const results = report.result_objects()
             this.onCommit(results.length > 0 ? results[0] : target.objectHandle)
           } else {
@@ -495,33 +600,62 @@ export class PushPullTool implements Tool {
     if (Math.abs(distance) < 1e-6) return
 
     // Prefer the live swept-solid ghost (the actual prism push/pull will
-    // produce). It needs a real face/region boundary in world space:
-    //  - `face_boundary` returns DEFINITION-local coords inside a component
-    //    editing context, which would not match the placed instance's world
-    //    pose — fall back to the arrow there rather than draw a misplaced
-    //    ghost.
-    //  - A stale handle mid-drag (e.g. the target object/sketch changed
-    //    underneath us) throws from wasm; fall back silently, no toast.
+    // produce) — plain object/region AND in-instance targets alike
+    // (component-edit-parity.md Finding 3: the in-instance path used to
+    // fall straight to the bare arrow, the only visible difference from a
+    // plain-object push/pull). `face_boundary`/`region_boundary` answer in
+    // DEFINITION-local coordinates for a component member/def-owned sketch,
+    // so `target.instance` (non-null there) maps the boundary through that
+    // instance's pose into world space before building the ghost — the same
+    // frame `_commit` already puts the actual solid in.
     if (this.stage.kind === 'dragging') {
       const { target } = this.stage
-      const insideComponent = target.kind === 'face' && this._activeComponent !== null
-      if (!insideComponent) {
-        try {
-          const boundary = target.kind === 'region'
-            ? this.wasmScene.region_boundary(target.sketchHandle, target.regionHandle)
-            : this.wasmScene.face_boundary(target.objectHandle, target.faceHandle)
-          const prism = buildSweptPrismPreview(boundary, normal, distance)
+      try {
+        const boundary = target.kind === 'region'
+          ? this.wasmScene.region_boundary(target.sketchHandle, target.regionHandle)
+          : this.wasmScene.face_boundary(target.objectHandle, target.faceHandle)
+        const worldBoundary =
+          target.instance !== null ? this._poseMapBoundary(boundary, target.instance) : boundary
+        // A stale/unresolvable instance pose (rare: the instance vanished
+        // mid-drag) degrades to the arrow rather than drawing a misplaced
+        // ghost — `worldBoundary` is null exactly then.
+        if (worldBoundary !== null) {
+          const prism = buildSweptPrismPreview(worldBoundary, normal, distance)
           if (prism !== null) {
             this.preview.add(prism)
             return
           }
-        } catch {
-          // Stale handle mid-drag — fall through to the arrow.
         }
+      } catch {
+        // Stale handle mid-drag (e.g. the target object/sketch changed
+        // underneath us) — fall through to the arrow, no toast.
       }
     }
 
     this._drawArrowFallback(anchor, normal, distance)
+  }
+
+  /**
+   * Map a flat `[x0,y0,z0, x1,y1,z1, …]` boundary from DEFINITION-local
+   * coordinates into WORLD space through `instance`'s current pose
+   * (row-major 3×4 affine, the same convention `SceneRenderer`/the kernel
+   * use everywhere else). Returns `null` for a stale/unknown instance so the
+   * caller can fall back to the arrow instead of drawing a misplaced ghost.
+   */
+  private _poseMapBoundary(boundary: Float32Array | number[], instance: bigint): Float32Array | null {
+    const pose = this.wasmScene.instance_pose(instance)
+    if (pose === undefined) return null
+    const n = Math.floor(boundary.length / 3)
+    const out = new Float32Array(n * 3)
+    for (let i = 0; i < n; i++) {
+      const x = boundary[i * 3]
+      const y = boundary[i * 3 + 1]
+      const z = boundary[i * 3 + 2]
+      out[i * 3] = pose[0] * x + pose[1] * y + pose[2] * z + pose[3]
+      out[i * 3 + 1] = pose[4] * x + pose[5] * y + pose[6] * z + pose[7]
+      out[i * 3 + 2] = pose[8] * x + pose[9] * y + pose[10] * z + pose[11]
+    }
+    return out
   }
 
   /**

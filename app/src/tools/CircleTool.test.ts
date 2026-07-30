@@ -21,11 +21,11 @@ function makeKeyEvent(key: string): KeyboardEvent {
 }
 
 /** A fake `FacePickJs` returning the seeded handles. */
-function makePick(object: bigint, face: bigint) {
+function makePick(object: bigint, face: bigint, instance?: bigint) {
   return {
     object: () => object,
     face: () => face,
-    instance: () => undefined,
+    instance: () => instance,
     free: vi.fn(),
   }
 }
@@ -82,6 +82,13 @@ function makeWasmScene(opts: {
       if (opts.splitFaceThrows) throw new Error('LoopSelfIntersects: edges cross')
       return 99n
     }),
+    split_face_inner_in_instance: vi.fn(() => 99n),
+    split_face_inner_with_curve_in_instance: vi.fn(() => 99n),
+    begin_sketch_on_plane_in_instance: vi.fn(() => {
+      sketchCounter += 1n
+      return sketchCounter
+    }),
+    instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
   } as unknown as WasmScene
 }
 
@@ -248,7 +255,7 @@ describe('CircleTool — face mode', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center on face
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim click
@@ -273,7 +280,7 @@ describe('CircleTool — face mode', () => {
     const pick = makePick(999n, 3n) // not the active context (7n)
     const scene = makeWasmScene({ pick })
     const { tool } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     expect(tool.capturingInput()).toBe(false)
@@ -283,7 +290,7 @@ describe('CircleTool — face mode', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, splitFaceThrows: true })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
-    tool.setActiveContext(7n)
+    tool.setEditContext({ kind: 'object', id: 7n })
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
@@ -329,5 +336,48 @@ describe('CircleTool — capturingInput scoping', () => {
     expect(tool.capturingInput()).toBe(false)
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+describe('CircleTool — instance editing context (component-edit-parity.md phase A2)', () => {
+  const INSTANCE = 42n
+  const COMPONENT = 5n
+
+  it('face mode routes to split_face_inner_with_curve_in_instance, never the world variant', () => {
+    const pick = makePick(7n, 3n, INSTANCE)
+    const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
+    const { tool, onFaceImprint } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
+
+    expect(scene.split_face_inner_with_curve_in_instance).toHaveBeenCalledTimes(1)
+    const callArgs = (scene.split_face_inner_with_curve_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(callArgs[0]).toBe(INSTANCE)
+    expect(callArgs[1]).toBe(7n)
+    expect(callArgs[2]).toBe(3n)
+    expect(scene.split_face_inner_with_curve).not.toHaveBeenCalled()
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+  })
+
+  it('plane mode on empty space mints a def-owned sketch, mapping the curve center into local space', () => {
+    const scene = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+
+    // Center at world (6,1,0), rim 3 away — identity-plane (ground), so no
+    // idle lock needed to reach plane mode inside the instance context.
+    tool.onPointerDown(makeSnap({ x: 6, y: 1, z: 0 }), { origin: [6, 1, 5], direction: [0, 0, -1] })
+    tool.onPointerDown(makeSnap({ x: 9, y: 1, z: 0 }), { origin: [9, 1, 5], direction: [0, 0, -1] })
+
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    // The curve's analytic center travels mapped into LOCAL space: world
+    // (6,1,0) → local (1,1,0) under the pose⁻¹ of a +5-in-x translation.
+    expect(scene.sketch_begin_curve_with).toHaveBeenCalledWith(
+      expect.any(BigInt), 1, 1, 0, expect.closeTo(3, 6),
+    )
   })
 })

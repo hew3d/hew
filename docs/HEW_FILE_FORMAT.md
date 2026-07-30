@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 12,
+  "format_version": 13,
   "geometry_version": 5,
   "app": "hew",
   "app_version": "0.1.0",
@@ -98,7 +98,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "edges":    [ {"id":0, "from":0, "to":1, "curve":0} ],
       "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ],
       "curves":   [ {"id":0, "center":[1.0, 2.0, 0.0], "radius":0.75,
-                     "kind":"polygon"} ]  // v10+; "kind" is v12+, optional
+                     "kind":"polygon"} ], // v10+; "kind" is v12+, optional
+      "owner":    0   // v13+, optional; dense `components[]` id. Omitted =
+                       // world-owned (the only possibility before v13)
     }
   ],
   "guides": [
@@ -113,7 +115,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `12`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `13`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `5`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -178,6 +180,17 @@ of the manifest:
 | `sketches[].edges[].curve` | 7 | absent (a plain line, not part of a curve chain) |
 | `sketches[].curves` | 10 | empty list (every curve chain is identity-only, no analytic definition) |
 | `sketches[].curves[].kind` | 12 | `"circle"` — the chain's edges are chord facets approximating the stored circle, which is what a `curves[]` entry meant at v10/v11 |
+| `sketches[].owner` | 13 | absent — world-owned (the only kind of sketch before v13) |
+
+`sketches[].owner` is version-gated the same way the retired fields below
+are (just in the opposite direction — introduced, not retired): the gate is
+on the declared `format_version`, not on the field's presence. A file that
+declares a version **older than 13** but still carries an `owner` field is
+malformed for its own declared version and MUST be rejected with a typed
+error, never honored — a pre-v13 writer could never have produced it, and
+silently attaching a sketch to a definition on the strength of a field that
+version claims not to have would be exactly the silent repair this format
+refuses everywhere else.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -464,7 +477,10 @@ recompute face-plane orientation from winding alone ().
 - **Component definitions** (`components[]`) are an ordered, flat list of
   member object dense ids (`members`), plus an optional name. A definition
   is never placed directly, carries no transform/tags/position, and exists
-  purely to be instanced.
+  purely to be instanced. Its shared geometry may also include not-yet-
+  extruded sketches — those are found by scanning `sketches[].owner` (§4.6,
+  v13+) for this definition's dense id, not listed on the `components[]`
+  entry itself.
 - **Instances** (`instances[]`) place one component definition (`def`, a
   dense component id) at a **pose**: a row-major 3×4 affine matrix
   `[m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz]`, read as `world_point =
@@ -551,6 +567,16 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   would hand a shape an analytic identity it does not have. A v11 reader
   handed a v12 file loses the distinction (it reads a polygon as a circle),
   which is why the manifest version moves.
+
+- `owner` (v13+, optional) — the dense `components[]` id of the component
+  definition whose shared geometry this sketch belongs to, in DEFINITION-
+  LOCAL coordinates (its `plane` is expressed in that definition's own
+  frame, exactly like a definition-member object's geometry — ). Absent
+  means world-owned, expressed in world coordinates: the only kind of
+  sketch before v13. A definition-owned sketch is never placed directly; it
+  reaches the scene only through that definition's instances, at each
+  instance's pose, exactly like a member object. A reader MUST reject an
+  out-of-range `owner`, like any other dangling reference.
 
 ### 4.7 Guides
 

@@ -26,7 +26,7 @@
  * plain-object style as `panels/scenePanels.test.tsx`.
  */
 
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, afterEach } from 'vitest'
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { SceneRenderer, type SectionWidgetCoverage } from './SceneRenderer'
@@ -35,6 +35,8 @@ import { buildInstancePreviewClone } from '../tools/transformPreview'
 import { buildSelectionPreview } from '../tools/transformSelection'
 import { ScaleTool } from '../tools/ScaleTool'
 import type { NodeRef } from '../panels/treeModel'
+import { setThemeSetting } from '../settings/theme'
+import type { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 
 const SENTINEL = BigInt('18446744073709551615') // u64::MAX — default material group
 
@@ -83,6 +85,10 @@ function makeScene(opts: {
       const inst = Object.values(instances).find((i) => i.def === componentId)
       return BigUint64Array.from(inst?.memberIds ?? [])
     },
+    // No def-owned sketches by default — overridden by callers that seed
+    // `defSketches` (see `makeSceneWithDefSketches` in the def-sketch
+    // rendering describe block below).
+    component_member_sketches: () => new BigUint64Array(),
     sketch_ids: () => new BigUint64Array(),
     guide_ids: () => new BigUint64Array(),
   } as unknown as WasmScene
@@ -359,6 +365,44 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
     expect(batches[0]).not.toBe(batchBefore)
   })
 
+  it('a definition member BORN by an in-instance op (Follow Me / extrude-in-instance) renders on every instance, from objectIds alone (component-edit-parity gap)', () => {
+    // Mirrors the real commit path: `follow_me_around_face_in_instance` /
+    // `extrude_region_in_instance` return only the new member's own object
+    // id (no DocChange, no instance/component id) — Viewport's commit
+    // handler for both tools calls exactly `refreshTouched({ objectIds:
+    // [objectId] })`. The new member is a definition member, so it is
+    // excluded from `object_ids()` (world objects only) and was never
+    // cached, so a naive "invalidate if cached" check misses it entirely.
+    const instances: Record<
+      string,
+      { def: bigint; pose: number[]; memberIds: bigint[]; memberWatertight: Record<string, boolean> }
+    > = {
+      '10': { def: 100n, pose: [...IDENTITY_POSE], memberIds: [1n], memberWatertight: { '1': true } },
+      '11': { def: 100n, pose: [...IDENTITY_POSE], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(instancedBatches(renderer.instancesGroup)).toHaveLength(1)
+
+    // The definition gains a second member (2n) — the kernel lands it on
+    // every instance of the definition at once, exactly like a sweep or an
+    // extrude committed inside one instance's own editing context.
+    instances['10'].memberIds = [1n, 2n]
+    instances['10'].memberWatertight = { ...instances['10'].memberWatertight, '2': true }
+    instances['11'].memberIds = [1n, 2n]
+    instances['11'].memberWatertight = { ...instances['11'].memberWatertight, '2': true }
+
+    renderer.refreshTouched({ objectIds: [2n] })
+
+    const batches = instancedBatches(renderer.instancesGroup)
+    const newMemberBatch = batches.find((b) => b.name.startsWith('InstanceBatch_2_'))
+    expect(newMemberBatch).toBeDefined()
+    // BOTH instances gained render geometry for the new member, not just
+    // whichever instance happened to be edited.
+    expect(newMemberBatch?.count).toBe(2)
+  })
+
   it('full refresh() still rebuilds every group (fallback path unchanged)', () => {
     const scene = makeScene({ objects: { '1': true, '2': true } })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
@@ -446,6 +490,31 @@ describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
 
     expect(renderer.instancesGroup.getObjectByName('Instance_11')).toBeUndefined()
     expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(0)
+  })
+
+  it('highlights only selected definition members in the active placement', () => {
+    const scene = makeScene({
+      instances: {
+        '10': {
+          def: 100n,
+          pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+          memberIds: [1n, 2n],
+          memberWatertight: { '1': true, '2': true },
+        },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSelectedInstanceMembers(10n, [2n])
+
+    const group = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+    const first = group.getObjectByName('InstanceEdge_10_1') as THREE.LineSegments
+    const second = group.getObjectByName('InstanceEdge_10_2') as THREE.LineSegments
+    expect((first.material as THREE.LineBasicMaterial).color.getHex()).not.toBe(0xffaa00)
+    expect((second.material as THREE.LineBasicMaterial).color.getHex()).toBe(0xffaa00)
+
+    renderer.setSelectedInstanceMembers(10n, [])
+    expect((second.material as THREE.LineBasicMaterial).color.getHex()).not.toBe(0xffaa00)
   })
 
   it('hidden instances zero their slot without materializing; setHidden round-trips', () => {
@@ -1069,10 +1138,13 @@ describe('SceneRenderer — hidden/selected/isolation interactions (RR17)', () =
     expect(faceMat.opacity).toBe(1)
     // ...its batch slot is suppressed so it doesn't double-draw...
     expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
-    // ...and the remaining batched placements dim.
-    expect(batchMaterial(batch).opacity).toBeCloseTo(0.15)
+    // ...and the remaining batched placements dim — the theme-tuned
+    // CONTEXT_DIM_OPACITY (component-edit-parity.md Finding 2; this suite
+    // runs in the node env, where `getResolvedTheme()` has no `matchMedia`
+    // to resolve 'auto' against and falls back to 'dark').
+    expect(batchMaterial(batch).opacity).toBeCloseTo(0.55)
     const batchEdges = instancedEdges(renderer.instancesGroup)[0]
-    expect((batchEdges.material as THREE.LineBasicMaterial).opacity).toBeCloseTo(0.15)
+    expect((batchEdges.material as THREE.LineBasicMaterial).opacity).toBeCloseTo(0.55)
 
     renderer.setActiveContext(null, null)
 
@@ -1081,6 +1153,242 @@ describe('SceneRenderer — hidden/selected/isolation interactions (RR17)', () =
     expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(0)
     expect(batchMaterial(batch).opacity).toBe(1)
     expect((batchEdges.material as THREE.LineBasicMaterial).opacity).toBe(1)
+  })
+})
+
+describe('SceneRenderer — definition-owned sketch rendering (component-edit-parity.md Finding 1)', () => {
+  /**
+   * Two placements (10n at the origin, 11n translated +5 in X) of one
+   * definition (100n) with a single def-owned sketch (500n, handle-space
+   * region 1n: the unit square). `live` toggles whether
+   * `component_member_sketches` reports the sketch at all — the wasm-api
+   * fix (`crates/wasm-api/src/lib.rs`) is what actually excludes an undone/
+   * deleted sketch there; this only has to prove the RENDERER reacts
+   * correctly to what that accessor reports, mirroring member OBJECTS.
+   */
+  function makeDefSketchScene(live: boolean): WasmScene {
+    const instances = {
+      '10': { def: 100n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      '11': { def: 100n, pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances }) as unknown as Record<string, unknown>
+    scene.component_member_sketches = (componentId: bigint) =>
+      live && componentId === 100n ? BigUint64Array.from([500n]) : new BigUint64Array()
+    // A closed unit square in DEFINITION-LOCAL coordinates (z=0 plane).
+    scene.sketch_lines = (id: bigint) =>
+      id === 500n
+        ? new Float32Array([
+            0, 0, 0, 1, 0, 0,
+            1, 0, 0, 1, 1, 0,
+            1, 1, 0, 0, 1, 0,
+            0, 1, 0, 0, 0, 0,
+          ])
+        : new Float32Array()
+    scene.sketch_regions = (id: bigint) => (id === 500n ? BigUint64Array.from([1n]) : new BigUint64Array())
+    scene.region_boundary = (sketch: bigint, region: bigint) =>
+      sketch === 500n && region === 1n
+        ? new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+        : new Float32Array()
+    return scene as unknown as WasmScene
+  }
+
+  /** Every rendered def-sketch group under the renderer's sketch group. */
+  function defSketchGroups(root: THREE.Group): THREE.Group[] {
+    return root.children.filter((c): c is THREE.Group => c.name.startsWith('DefSketch_'))
+  }
+
+  it('a live def sketch renders one group per instance of its definition, each transformed by that instance\'s own pose', () => {
+    const scene = makeDefSketchScene(true)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    const groups = defSketchGroups(renderer.sketchGroup)
+    expect(groups.map((g) => g.name).sort()).toEqual(['DefSketch_10', 'DefSketch_11'])
+
+    // Each group carries a fat-line (edges) and a fill mesh (the one region) —
+    // the SAME definition-local geometry reused verbatim per instance.
+    for (const g of groups) {
+      expect(g.children.some((c) => (c as THREE.Mesh).isMesh === true)).toBe(true)
+    }
+
+    // The pose difference is on the GROUP's own transform, not baked into
+    // the (shared) geometry: instance 10 sits at the origin, instance 11 is
+    // translated +5 in X.
+    const g10 = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    const g11 = renderer.sketchGroup.getObjectByName('DefSketch_11') as THREE.Group
+    expect(g10.matrix.elements[12]).toBe(0)
+    expect(g11.matrix.elements[12]).toBe(5)
+  })
+
+  it('an undone/deleted def sketch (component_member_sketches no longer reports it) renders NO group', () => {
+    const scene = makeDefSketchScene(false)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    expect(defSketchGroups(renderer.sketchGroup)).toHaveLength(0)
+  })
+
+  it('refreshAllSketches rebuilds def sketches too, so a draw/undo inside an instance updates without a separate call', () => {
+    const scene = makeDefSketchScene(true) as unknown as Record<string, unknown>
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    expect(defSketchGroups(renderer.sketchGroup)).toHaveLength(2)
+
+    // Simulate the sketch's creation being undone: the wasm accessor now
+    // reports no live sketches for the component.
+    scene.component_member_sketches = () => new BigUint64Array()
+    renderer.refreshAllSketches()
+
+    expect(defSketchGroups(renderer.sketchGroup)).toHaveLength(0)
+  })
+
+  it('hiding an instance hides its DefSketch group too, and it stays hidden through a targeted refresh (delta-review Finding 1)', () => {
+    const scene = makeDefSketchScene(true)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(defSketchGroups(renderer.sketchGroup).map((g) => g.name).sort()).toEqual([
+      'DefSketch_10',
+      'DefSketch_11',
+    ])
+
+    renderer.setHidden([], [10n])
+
+    const hidden = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    const visible = renderer.sketchGroup.getObjectByName('DefSketch_11') as THREE.Group
+    expect(hidden.visible).toBe(false)
+    expect(visible.visible).toBe(true)
+
+    // `_refreshDefSketches` rebuilds every def-sketch group from scratch
+    // (fresh THREE.Group, defaults to visible) — a targeted refresh touching
+    // the hidden instance must not let it slip back into view.
+    renderer.refreshTouched({ instanceIds: [10n] })
+
+    const rebuilt = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    expect(rebuilt.visible).toBe(false)
+
+    renderer.setHidden([], [])
+    expect((renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group).visible).toBe(true)
+  })
+
+  it('stays hidden through refreshAllSketches and refreshInstances too — every rebuild path reasserts it', () => {
+    const scene = makeDefSketchScene(true)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setHidden([], [10n])
+
+    renderer.refreshAllSketches()
+    expect((renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group).visible).toBe(false)
+
+    renderer.refreshInstances()
+    expect((renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group).visible).toBe(false)
+    // The sibling instance was never hidden.
+    expect((renderer.sketchGroup.getObjectByName('DefSketch_11') as THREE.Group).visible).toBe(true)
+  })
+})
+
+describe('SceneRenderer — edit-context dimming (component-edit-parity.md Finding 2)', () => {
+  // These literals mirror `CONTEXT_DIM_OPACITY` in SceneRenderer.ts — kept
+  // as plain numbers here (not exported) so this suite pins the OBSERVABLE
+  // contract (what opacity actually lands on the geometry) rather than
+  // reaching into the module's internals.
+  const DIM = { light: 0.65, dark: 0.55 } as const
+
+  afterEach(() => {
+    // `theme.ts` is a module-level singleton — restore the default so a
+    // theme choice here can't leak into another test file's assumptions.
+    setThemeSetting('auto')
+  })
+
+  /** One world object (1n) plus two placements (10n, 11n) of one definition
+   * (100n member object 2n) — enough to exercise "edited" (instance 10, its
+   * own member object 2n lit), "sibling" (instance 11, same definition, same
+   * member geometry — batched dimming is the only thing that can tell them
+   * apart), and "world" (object 1n) side by side. */
+  function makeMixedScene(): WasmScene {
+    return makeScene({
+      objects: { '1': true },
+      instances: {
+        '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [2n], memberWatertight: { '2': true } },
+        '11': { def: 100n, pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [2n], memberWatertight: { '2': true } },
+      },
+    })
+  }
+
+  for (const theme of ['light', 'dark'] as const) {
+    it(`${theme} theme: edited instance ≈ full opacity; its sibling and the world dim to ${DIM[theme]}`, () => {
+      setThemeSetting(theme)
+      const scene = makeMixedScene()
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+
+      // Enter instance 10's editing context — the real Viewport wiring
+      // lights the definition's member OBJECT ids (`activeLitSet`) AND the
+      // specific instance being edited (`activeLitInstanceSet`).
+      renderer.setActiveContext(new Set([2n]), new Set([10n]))
+
+      // World object 1n: never the thing being edited from inside an
+      // instance context, so it takes the theme's dim value.
+      expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBeCloseTo(DIM[theme])
+
+      // Edited instance (10n): materializes at (near-)full opacity.
+      const edited = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+      expect(edited).toBeDefined()
+      const editedFace = edited.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+      const editedMat = (Array.isArray(editedFace.material) ? editedFace.material[0] : editedFace.material) as THREE.MeshPhongMaterial
+      expect(editedMat.opacity).toBe(1)
+
+      // Sibling instance (11n) of the SAME definition: stays batched (never
+      // individually lit) and its batch dims — this is the placement the
+      // pre-fix bug dimmed identically to the edited one, since member ids
+      // alone can't tell two instances of one definition apart.
+      const batch = instancedBatches(renderer.instancesGroup)[0]
+      expect(batchMaterial(batch).opacity).toBeCloseTo(DIM[theme])
+
+      // Exiting the context restores everyone to full opacity regardless of
+      // theme.
+      renderer.setActiveContext(null, null)
+      expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBe(1)
+      expect(batchMaterial(instancedBatches(renderer.instancesGroup)[0]).opacity).toBe(1)
+    })
+  }
+
+  it('sketches inside the edited instance stay full-contrast while a world sketch and a sibling instance\'s sketch dim', () => {
+    setThemeSetting('dark')
+    const instances = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [2n], memberWatertight: { '2': true } },
+      '11': { def: 100n, pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [2n], memberWatertight: { '2': true } },
+    }
+    const scene = makeScene({ instances }) as unknown as Record<string, unknown>
+    // A def-owned sketch (500n) shared by both instances of definition 100n —
+    // component_member_sketches answers per-DEFINITION, so the SAME sketch
+    // renders through both instances' poses (the sole scenario Finding 1
+    // exists for).
+    const square = new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
+    scene.component_member_sketches = (c: bigint) => (c === 100n ? BigUint64Array.from([500n]) : new BigUint64Array())
+    scene.sketch_lines = (id: bigint) => (id === 500n ? square : new Float32Array())
+    scene.sketch_regions = () => new BigUint64Array()
+    scene.region_boundary = () => new Float32Array()
+    // A world sketch too, so the "world sketches always dim" half of the
+    // fix is exercised in the same test.
+    scene.sketch_ids = () => BigUint64Array.from([999n])
+    const worldSketchLines = scene.sketch_lines as (id: bigint) => Float32Array
+    scene.sketch_lines = (id: bigint) => (id === 999n ? square : worldSketchLines(id))
+
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    renderer.refreshAllSketches()
+
+    renderer.setActiveContext(new Set([2n]), new Set([10n]))
+
+    const worldLineMat = (renderer as unknown as { sketchLines: { material: LineMaterial } | null }).sketchLines?.material
+    expect(worldLineMat?.opacity).toBeCloseTo(DIM.dark)
+
+    const editedGroup = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    const siblingGroup = renderer.sketchGroup.getObjectByName('DefSketch_11') as THREE.Group
+    const editedLine = editedGroup.children.find((c) => 'isLineSegments2' in c) as unknown as { material: LineMaterial }
+    const siblingLine = siblingGroup.children.find((c) => 'isLineSegments2' in c) as unknown as { material: LineMaterial }
+    expect(editedLine.material.opacity).toBe(1)
+    expect(siblingLine.material.opacity).toBeCloseTo(DIM.dark)
   })
 })
 
@@ -1379,6 +1687,7 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
       instance_def: () => undefined,
       instance_pose: () => undefined,
       component_member_objects: () => new BigUint64Array(),
+      component_member_sketches: () => new BigUint64Array(),
       sketch_ids: () => new BigUint64Array(),
       guide_ids: () => new BigUint64Array(),
     } as unknown as WasmScene

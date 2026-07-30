@@ -39,7 +39,8 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
+import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
@@ -50,7 +51,7 @@ import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings
 import { editDimsBuffer, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
 import { pointOnPlane, drawPlaneCue, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
-import { FacePickCache, defaultFaceEligible, type FaceEligible } from './faceDraw'
+import { FacePickCache, defaultFaceEligible, worldFaceNormal, type FaceEligible } from './faceDraw'
 
 export type RectangleCommitResult = {
   sketchHandle: bigint
@@ -110,8 +111,21 @@ export class RectangleTool implements Tool {
    *  sketch per plane. */
   private readonly sketchCache: SketchPlaneCache
 
-  /** The currently active editing context (entered object), or null at top level. */
-  private _activeContext: bigint | null = null
+  /** The current editing context (component-edit-parity.md phase A1) — see
+   *  LineTool's identical fields for the full rationale. */
+  private _editContext: EditContext = { kind: 'top' }
+
+  /** The entered OBJECT id, or null — unchanged meaning from the old
+   *  `_activeContext` field. */
+  private get _activeContext(): bigint | null {
+    return this._editContext.kind === 'object' ? this._editContext.id : null
+  }
+
+  /** The entered component INSTANCE id, or null (component-edit-parity.md
+   *  phase A2). */
+  private get _activeInstance(): bigint | null {
+    return this._editContext.kind === 'instance' ? this._editContext.id : null
+  }
 
   /** VCB buffer — raw string being typed by the user (W,D in display units) */
   private typed: string = ''
@@ -127,7 +141,7 @@ export class RectangleTool implements Tool {
    *  sketch-hover adoption on the next click (SketchUp: an explicit lock
    *  beats inference) — see `_currentMode`/`_resolveClickTarget`. Survives a
    *  completed gesture (cleared only by `cancel()`, which
-   *  `onDocumentReset()`/`setActiveContext()` already route through). */
+   *  `onDocumentReset()`/`setEditContext()` already route through). */
   private idlePlaneLock: 0 | 1 | 2 | null = null
 
   /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
@@ -153,10 +167,11 @@ export class RectangleTool implements Tool {
     this.sketchCache = sketchCache
   }
 
-  /** Set the active editing context (entered object), or null for top level. */
-  setActiveContext(id: bigint | null): void {
-    if (id === this._activeContext) return  // re-asserting the same context must not abort an in-progress gesture
-    this._activeContext = id
+  /** The single editing-context channel (component-edit-parity.md phase A1;
+   *  replaces `setActiveContext`). */
+  setEditContext(ctx: EditContext): void {
+    if (editContextEq(ctx, this._editContext)) return
+    this._editContext = ctx
     this.cancel()
   }
 
@@ -195,7 +210,7 @@ export class RectangleTool implements Tool {
    * re-check is needed here.
    */
   private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray)
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
   }
 
   /**
@@ -209,7 +224,9 @@ export class RectangleTool implements Tool {
    * point yet (nothing to click through).
    */
   private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
-    return resolveClickDrawTarget(this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray)
+    return resolveClickDrawTarget(
+      this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+    )
   }
 
   /** The cursor's position on `plane`. On the ground plane this is EXACTLY
@@ -433,6 +450,18 @@ export class RectangleTool implements Tool {
    */
   capturingInput(): boolean {
     return this.planeStage.kind === 'anchored' || this.faceStage.kind === 'anchored'
+  }
+
+  /**
+   * True while a gesture is anchored OR an idle plane lock is armed — Escape
+   * has tool-local work to do (clear the lock, or step the gesture back)
+   * before a context-pop is appropriate (component-edit-parity.md phase A2;
+   * see `toolHasArmedGesture` in tools/types.ts). `capturingInput()` alone
+   * misses the idle-locked case: locked-but-idle is not "capturing input"
+   * but IS armed for Escape's purposes.
+   */
+  hasArmedGesture(): boolean {
+    return this.capturingInput() || this.idlePlaneLock !== null
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -662,7 +691,7 @@ export class RectangleTool implements Tool {
    *  `_commitFaceCorners`). */
   private _commitPlaneRectangle(target: SketchTarget, corners: [V3, V3, V3, V3]): void {
     try {
-      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch) => {
+      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
         // Four edges: 0→1, 1→2, 2→3, 3→0
         const edges = [
           [corners[0], corners[1]],
@@ -672,7 +701,12 @@ export class RectangleTool implements Tool {
         ] as const
 
         let lastRegionsCreated: bigint[] = []
-        for (const [p, q] of edges) {
+        for (const [p0, q0] of edges) {
+          // `toLocal`: identity for a world target, pose⁻¹ for a definition-
+          // owned one (component-edit-parity.md phase A2) — see
+          // `runSketchGesture`'s doc.
+          const p = toLocal(p0)
+          const q = toLocal(q0)
           const report = this.wasmScene.sketch_add_segment(
             sketch,
             p[0], p[1], p[2],
@@ -706,8 +740,8 @@ export class RectangleTool implements Tool {
       const eligible = this._eligiblePickFor(ray)
       if (eligible === null) return
 
-      const normalArr = this.wasmScene.face_normal(eligible.object, eligible.face)
-      const normal: V3 = [normalArr[0], normalArr[1], normalArr[2]]
+      const normal = worldFaceNormal(this.wasmScene, eligible.object, eligible.face, this._activeInstance)
+      if (normal === null) return // stale instance/degenerate pose — treat as no eligible face
       const anchor: V3 = [snap.x, snap.y, snap.z]
 
       this.faceStage = {
@@ -751,7 +785,16 @@ export class RectangleTool implements Tool {
     }
 
     try {
-      this.wasmScene.split_face_inner(object, face, loopPts)
+      // Inside a component instance's editing context (component-edit-
+      // parity.md phase A2), `object` is a definition member — the world
+      // `split_face_inner` refuses it (`is_world` guard);
+      // `split_face_inner_in_instance` maps the loop through the instance's
+      // pose⁻¹ and routes through `apply_def_op` instead.
+      if (this._activeInstance !== null) {
+        this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, loopPts)
+      } else {
+        this.wasmScene.split_face_inner(object, face, loopPts)
+      }
       this.onFaceImprint(object)
     } catch (err) {
       const code = parseKernelErrorCode(err)

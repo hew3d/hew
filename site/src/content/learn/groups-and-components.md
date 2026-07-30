@@ -24,7 +24,11 @@ A component is shared geometry: one **definition**, any number of placed **insta
 
 - **Create a definition:** select an object or group and choose **Edit ▸ Make Component**, or click **Make Component** on the contextual dock. The selection becomes the definition's geometry, and what you had selected is replaced by the first instance.
 - **Place more instances:** select an instance and choose **Edit ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with copy mode on (tap `Option`/`Alt`) to drop copies where you want them — and type `x5` right after a copy to place a whole row ([Move](/learn/moving-and-transforming/)).
-- **Edit the definition:** double-click any instance. Changes — push/pulls, added detail, paint — appear in every instance when you step out.
+- **Edit the definition:** double-click any instance. You're inside the component's own context now — everything else dims, and every tool works on the shared members, not just push/pull and paint: draw new geometry (on a member's face, or on any plane — press an arrow key to lock it, exactly like drawing at the top level), Push/Pull, Follow Me, Union/Subtract/Intersect between two members, Slice, and Move/Rotate/Scale on an individual member all edit the *definition*. Step out (`Esc`) and every instance shows the change, wherever it's placed, however it's rotated, scaled, or mirrored — there's still only one shape underneath.
+
+Deleting a member works the same way, with one guard: a definition needs at least one member, so deleting its last one is refused — that would leave every instance showing nothing. Delete the instances themselves instead, or add another member first.
+
+Construction guides (Tape Measure, Protractor) stay ground-truthed to the world even while you're inside a component — a guide dropped there won't follow the member around. Use guides at the top level, or on an exploded copy, when you need them for a component's own shape.
 
 ### Names and tags
 

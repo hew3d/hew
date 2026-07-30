@@ -90,6 +90,14 @@ export interface SelectScene {
   pick_sketch_edge(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { sketch(): bigint; edge(): bigint; free(): void } | undefined
+  pick_sketch_region_in_instance?(
+    instance: bigint,
+    ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
+  ): { sketch(): bigint; region(): bigint; depth(): number; free(): void } | undefined
+  pick_sketch_edge_in_instance?(
+    instance: bigint,
+    ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
+  ): { sketch(): bigint; edge(): bigint; depth(): number; free(): void } | undefined
   pick_face(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { object(): bigint; instance(): bigint | undefined; depth(): number; free(): void } | undefined
@@ -169,6 +177,25 @@ function withinFarPlane(depth: number, ray: Ray, deps: ResolveDeps): boolean {
   return depth * cos <= deps.cameraFar
 }
 
+/** A scoped sketch is selectable only where it is actually rendered: before
+ * the far plane and not behind the nearest solid face. The relative depth skin
+ * mirrors the inference layer's occlusion rule, keeping coplanar linework
+ * selectable at every model scale without exposing sketches behind thin walls. */
+function scopedSketchVisible(depth: number, ray: Ray, deps: ResolveDeps): boolean {
+  if (!withinFarPlane(depth, ray, deps)) return false
+  const face = deps.scene.pick_face(
+    ray.origin[0], ray.origin[1], ray.origin[2],
+    ray.direction[0], ray.direction[1], ray.direction[2],
+  )
+  if (face === undefined) return true
+  try {
+    const faceDepth = face.depth()
+    return depth <= faceDepth + Math.max(Math.abs(faceDepth) * 1e-6, 1e-9)
+  } finally {
+    face.free()
+  }
+}
+
 /** The VISIBLE solid under the ray (bounded to the far plane), context-scoped,
  * or null. Shared by the `fallback` path, so a click and a drag are bounded
  * alike: a solid beyond the render far plane is not drawn, and selecting an
@@ -206,6 +233,48 @@ export function resolveSelectableRef(
   deps: ResolveDeps,
 ): NodeRef | null {
   const topLevel = deps.context.length === 0
+  const deepest = topLevel ? undefined : deps.context[deps.context.length - 1]
+  const activeInstance = deepest?.kind === 'instance' ? deepest.id : undefined
+  // Definition sketches are rendered through the active instance but are not
+  // duplicated into the global inference index per placement. Probe that
+  // scoped geometry before interpreting a solid snap, otherwise the member
+  // face beneath a visible sketch would always win and the sketch would
+  // remain unselectable. Edge first preserves the usual "line on a filled
+  // region selects the line; interior selects the region" behavior.
+  if (
+    activeInstance !== undefined &&
+    deps.scene.pick_sketch_region_in_instance !== undefined &&
+    deps.scene.pick_sketch_edge_in_instance !== undefined
+  ) {
+    const edgePick = deps.scene.pick_sketch_edge_in_instance(
+      activeInstance,
+      ray.origin[0], ray.origin[1], ray.origin[2],
+      ray.direction[0], ray.direction[1], ray.direction[2],
+    )
+    if (edgePick !== undefined) {
+      try {
+        if (scopedSketchVisible(edgePick.depth(), ray, deps)) {
+          return edgeRef(deps.scene, edgePick.sketch(), edgePick.edge())
+        }
+      } finally {
+        edgePick.free()
+      }
+    }
+    const regionPick = deps.scene.pick_sketch_region_in_instance(
+      activeInstance,
+      ray.origin[0], ray.origin[1], ray.origin[2],
+      ray.direction[0], ray.direction[1], ray.direction[2],
+    )
+    if (regionPick !== undefined) {
+      try {
+        if (scopedSketchVisible(regionPick.depth(), ray, deps)) {
+          return regionRef(deps.scene, regionPick.sketch(), regionPick.region())
+        }
+      } finally {
+        regionPick.free()
+      }
+    }
+  }
   const pick = classifySnapPick(snap)
   switch (pick.kind) {
     case 'object':

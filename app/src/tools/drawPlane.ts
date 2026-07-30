@@ -12,11 +12,11 @@
  */
 
 import type { V3 } from '../viewport/geoHelpers'
-import { facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
+import { applyAffine3x4, facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { SketchTarget } from './sketchGesture'
-import type { Snap } from './types'
+import type { EditContext, Snap } from './types'
 
 /** A drawing plane: any point on it, its unit normal, and a right-handed
  *  in-plane basis (u, v) with `cross(u, v) === normal`. */
@@ -72,11 +72,41 @@ export function groundDrawPlane(): DrawPlane {
  * path. Returns `null` for a stale/hidden sketch (`sketch_plane` undefined)
  * or a degenerate plane (shouldn't happen for a live sketch, but
  * `facePlaneBasis` is the authority).
+ *
+ * `instance`, when set, means `handle` is DEFINITION-owned: `sketch_plane`
+ * then answers in DEFINITION-local space, not world (`sketch_plane` has no
+ * `_in_instance` sibling — unlike `sketch_edge_endpoints`, which explicitly
+ * refuses a def-owned sketch rather than silently answer in the wrong
+ * frame). The plane is posed forward through `instance` before being
+ * returned, so every caller gets a genuinely WORLD-space `DrawPlane` either
+ * way — mirrors `sketchGesture.ts`'s `isStillOnPlane`, including its
+ * approximate (linear-part, re-normalized) normal transform rather than the
+ * exact inverse-transpose a non-uniform-scale pose would technically need;
+ * see that function's doc for why that's safe here (this only gates
+ * SKETCH-MODE adoption — every actual commit still goes through the
+ * kernel's own exact pose⁻¹ mapping regardless of this plane's precision).
+ * Returns `null` (never falls back to the raw local plane) for a
+ * stale/unknown instance or a degenerate posed normal.
  */
-export function planeFromSketch(wasmScene: WasmScene, handle: bigint): DrawPlane | null {
+export function planeFromSketch(
+  wasmScene: WasmScene,
+  handle: bigint,
+  instance: bigint | null = null,
+): DrawPlane | null {
   const plane = wasmScene.sketch_plane(handle)
   if (plane === undefined) return null
-  const [px, py, pz, nx, ny, nz] = plane
+  let [px, py, pz, nx, ny, nz] = plane
+  if (instance !== null) {
+    const pose = wasmScene.instance_pose(instance)
+    if (pose === undefined) return null
+    ;[px, py, pz] = applyAffine3x4(pose, [px, py, pz])
+    const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
+    const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
+    const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
+    const len = Math.hypot(rnx, rny, rnz)
+    if (len <= 1e-12) return null
+    ;[nx, ny, nz] = [rnx / len, rny / len, rnz / len]
+  }
   const origin: V3 = [px, py, pz]
   const normal: V3 = [nx, ny, nz]
   if (isGroundPlane(origin, normal)) return groundDrawPlane()
@@ -283,12 +313,23 @@ function distSqToSegment(p: V3, a: V3, b: V3): number {
  * plane the question is about; scaling it by distance keeps the gate
  * screen-sized, matching how the cone itself behaves. A ray parallel to the
  * plane (no pierce point) never lands on it.
+ *
+ * `instance`, when set, means `sketch` is DEFINITION-owned and `plane` has
+ * already been posed forward into WORLD space (`planeFromSketch`'s
+ * `instance` param) — `sketch_lines` itself still answers in DEFINITION-
+ * local coordinates (no `_in_instance` sibling exists), so each segment
+ * endpoint is mapped through the SAME pose before being measured against
+ * `hit`, which is already a real WORLD point (`pointOnPlane` against the
+ * now-WORLD `plane`). Without this, every segment would be compared in the
+ * wrong frame — exactly the bug this function's `instance` param exists to
+ * close (component-edit-parity.md phase A2).
  */
 export function rayLandsOnSketch(
   wasmScene: WasmScene,
   sketch: bigint,
   plane: DrawPlane,
   ray: Ray,
+  instance: bigint | null = null,
 ): boolean {
   const hit = pointOnPlane(ray, plane)
   if (hit === null) return false
@@ -301,6 +342,9 @@ export function rayLandsOnSketch(
   }
   if (lines.length < 6) return false
 
+  const pose = instance !== null ? wasmScene.instance_pose(instance) : undefined
+  if (instance !== null && pose === undefined) return false // stale instance — nothing to land on
+
   const dx = hit[0] - ray.origin[0]
   const dy = hit[1] - ray.origin[1]
   const dz = hit[2] - ray.origin[2]
@@ -308,9 +352,34 @@ export function rayLandsOnSketch(
   const toleranceSq = (SKETCH_PICK_APERTURE * alongRay) ** 2
 
   for (let i = 0; i + 5 < lines.length; i += 6) {
-    const a: V3 = [lines[i], lines[i + 1], lines[i + 2]]
-    const b: V3 = [lines[i + 3], lines[i + 4], lines[i + 5]]
+    let a: V3 = [lines[i], lines[i + 1], lines[i + 2]]
+    let b: V3 = [lines[i + 3], lines[i + 4], lines[i + 5]]
+    if (pose !== undefined) {
+      a = applyAffine3x4(pose, a)
+      b = applyAffine3x4(pose, b)
+    }
     if (distSqToSegment(hit, a, b) <= toleranceSq) return true
+  }
+  return false
+}
+
+/** The instance handle to mint/adopt def-owned sketches through, or `null`
+ *  for ordinary world-space drawing — `null` for every `EditContext` except
+ *  `'instance'` (component-edit-parity.md phase A2: an object/group context
+ *  has no def-owned-sketch concept of its own; only a component instance's
+ *  shared definition does). */
+function instanceOf(editContext: EditContext): bigint | null {
+  return editContext.kind === 'instance' ? editContext.id : null
+}
+
+/** Whether `sketch` is a live member sketch of `component` — the gate for
+ *  adopting a hovered sketch (SKETCH MODE) while inside an instance context:
+ *  a world sketch merely visible nearby must not become the target (that
+ *  would draw INTO the world, escaping the definition being edited — the
+ *  mirror image of the axis-lock symptom this design fixes). */
+function isDefMemberSketch(wasmScene: WasmScene, component: bigint, sketch: bigint): boolean {
+  for (const s of wasmScene.component_member_sketches(component)) {
+    if (s === sketch) return true
   }
   return false
 }
@@ -324,23 +393,62 @@ export function rayLandsOnSketch(
  * (SKETCH MODE) — but only if the ray really lands on it (`rayLandsOnSketch`,
  * which see); otherwise the ground plane (PLANE MODE, the default). Callers
  * reach this only once face mode has been ruled out (face mode takes
- * priority), so there is no `activeContext` re-check here.
+ * priority), so there is no `activeContext` re-check here for an object/group
+ * context.
+ *
+ * Inside an INSTANCE context (`editContext.kind === 'instance'`,
+ * component-edit-parity.md phase A2): a hovered sketch adopts only when it is
+ * a member of the entered definition (`isDefMemberSketch`); otherwise — and
+ * for the empty-space PLANE MODE default — the target carries the instance
+ * handle, so `runSketchGesture` mints/uses a DEFINITION-owned sketch
+ * (`begin_sketch_on_plane_in_instance`) instead of a world one. This is the
+ * fix for the "arrow-key idle lock ends up drawing in the world" symptom:
+ * without it, plane mode always lands in `begin_ground_sketch()` regardless
+ * of context.
+ *
+ * `isDefMemberSketch` is checked BEFORE the geometry below, not just as an
+ * adoption gate: it is also what decides which FRAME that geometry is in. A
+ * member sketch's `sketch_plane`/`sketch_lines` answer in DEFINITION-LOCAL
+ * space and must be posed forward through `instance` before being compared
+ * against the real WORLD-space `ray` (`planeFromSketch`/`rayLandsOnSketch`'s
+ * own `instance` param, mirroring `sketchGesture.ts`'s `isStillOnPlane`) —
+ * a plain world sketch needs no such mapping. Getting this backwards (map
+ * unconditionally, or not at all) either corrupts a world sketch's plane or
+ * leaves a member sketch's plane in the wrong frame, silently missing every
+ * hover on a posed instance's own sketch and falling through to a fresh
+ * ground-plane sketch instead.
  */
 export function resolveIdleDrawTarget(
   wasmScene: WasmScene,
   sketchPickCache: SketchPickCache,
   ray: Ray,
+  editContext: EditContext,
 ): { plane: DrawPlane; target: SketchTarget } {
+  const instance = instanceOf(editContext)
   return sketchPickCache.targetFor(ray, () => {
     const sketchHandle = sketchPickCache.pickFor(wasmScene, ray)
     if (sketchHandle !== null) {
-      const plane = planeFromSketch(wasmScene, sketchHandle)
-      if (plane !== null && !plane.ground && rayLandsOnSketch(wasmScene, sketchHandle, plane, ray)) {
-        return { plane, target: { kind: 'existing', handle: sketchHandle } }
+      const isEligible =
+        instance === null ||
+        (editContext.kind === 'instance' &&
+          isDefMemberSketch(wasmScene, editContext.component, sketchHandle))
+      if (isEligible) {
+        // `instance` is exactly the right mapping frame here: null at top
+        // level (no mapping — `sketchHandle` is a world sketch), or the
+        // entered instance when `sketchHandle` was just confirmed to be one
+        // of ITS definition's own members.
+        const plane = planeFromSketch(wasmScene, sketchHandle, instance)
+        if (
+          plane !== null &&
+          !plane.ground &&
+          rayLandsOnSketch(wasmScene, sketchHandle, plane, ray, instance)
+        ) {
+          return { plane, target: { kind: 'existing', handle: sketchHandle, instance } }
+        }
       }
     }
     const plane = groundDrawPlane()
-    return { plane, target: { kind: 'plane', plane } }
+    return { plane, target: { kind: 'plane', plane, instance } }
   })
 }
 
@@ -354,7 +462,8 @@ export function resolveIdleDrawTarget(
  * starts a vertical sketch at that corner. Falls back to
  * `resolveIdleDrawTarget` (sketch/ground) when no lock is active. Returns
  * `null` only when a lock is active but there is no snap point yet (nothing
- * to click through).
+ * to click through). Carries the instance handle through to the locked-plane
+ * target too, same as `resolveIdleDrawTarget`'s plane-mode default.
  */
 export function resolveClickDrawTarget(
   wasmScene: WasmScene,
@@ -362,12 +471,13 @@ export function resolveClickDrawTarget(
   idlePlaneLock: 0 | 1 | 2 | null,
   snap: Snap | null,
   ray: Ray,
+  editContext: EditContext,
 ): { plane: DrawPlane; target: SketchTarget } | null {
   if (idlePlaneLock !== null) {
     if (snap === null) return null
     const clickedPoint: V3 = [snap.x, snap.y, snap.z]
     const plane = axisDrawPlane(idlePlaneLock, clickedPoint)
-    return { plane, target: { kind: 'plane', plane } }
+    return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
   }
-  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray)
+  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext)
 }

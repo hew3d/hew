@@ -486,6 +486,23 @@ export interface HewTestHarness {
   /** Every visible instance of a definition, as decimal handle strings. */
   getInstancesOf(component: string): string[]
 
+  /**
+   * A component definition's live member OBJECTS, as decimal handle
+   * strings (component-edit-parity.md) — the ground truth for "did this
+   * edit land in the shared definition (seen by every instance) or
+   * escape into the world?" `component_member_objects`.
+   */
+  getComponentMemberObjects(component: string): string[]
+
+  /**
+   * A component definition's live, not-yet-extruded member SKETCHES, as
+   * decimal handle strings (component-edit-parity.md phase K1) —
+   * `component_member_sketches`. The ground truth for "did a plane-mode
+   * draw inside this instance mint a DEFINITION-owned sketch, or did it
+   * escape to a world one?"
+   */
+  getComponentMemberSketches(component: string): string[]
+
   /** Replace the selection with arbitrary nodes (kind + handle string). */
   selectNodes(nodes: { kind: string; id: string }[]): void
   // -------- follow me --------
@@ -1424,6 +1441,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     getInstancesOf: (component) =>
       query((s) => Array.from(s.instances_of(BigInt(component))).map(String)),
+
+    getComponentMemberObjects: (component) =>
+      query((s) => Array.from(s.component_member_objects(BigInt(component))).map(String)),
+
+    getComponentMemberSketches: (component) =>
+      query((s) => Array.from(s.component_member_sketches(BigInt(component))).map(String)),
 
     selectNodes: (nodes) =>
       deps.setSelection(

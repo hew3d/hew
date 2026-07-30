@@ -78,6 +78,19 @@ describe('WelcomeScreen', () => {
     expect(props.onClose).toHaveBeenCalledTimes(2)
   })
 
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
+    const props = makeProps()
+    render(<WelcomeScreen {...props} />)
+    const windowKeyDown = vi.fn()
+    window.addEventListener('keydown', windowKeyDown)
+    try {
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(windowKeyDown).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', windowKeyDown)
+    }
+  })
+
   it('the units dropdown lists every format flat and reports a choice', () => {
     const props = makeProps()
     render(<WelcomeScreen {...props} />)

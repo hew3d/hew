@@ -41,6 +41,19 @@ function makeScene(opts: FakeOpts = {}) {
     transform_selection: vi.fn((...args: unknown[]) => {
       calls.push({ name: 'transform_selection', args })
     }),
+    transform_def_member: vi.fn((...args: unknown[]) => {
+      calls.push({ name: 'transform_def_member', args })
+    }),
+    can_transform_def_sketch_island: vi.fn(() => opts.canTransformIsland ?? true),
+    transform_def_sketch_island: vi.fn((...args: unknown[]) => {
+      calls.push({ name: 'transform_def_sketch_island', args })
+    }),
+    transform_def_sketch: vi.fn((...args: unknown[]) => {
+      calls.push({ name: 'transform_def_sketch', args })
+    }),
+    transform_def_selection: vi.fn((...args: unknown[]) => {
+      calls.push({ name: 'transform_def_selection', args })
+    }),
   }
   return { scene: scene as unknown as WasmScene, raw: scene, calls }
 }
@@ -168,6 +181,66 @@ describe('commitSelectionTransform', () => {
     commitSelectionTransform(scene, [{ kind: 'sketch-edge', id: 99n, sketch: 3n }], AFFINE)
     expect(raw.transform_sketch_island).not.toHaveBeenCalled()
     expect(raw.transform_selection).not.toHaveBeenCalled()
+  })
+
+  // component-edit-parity.md phase A2: an active instance context routes
+  // every selected 'object' node through transform_def_member instead of the
+  // world transform_selection — the world gesture affine passed straight
+  // through, since the kernel conjugates it through the instance's pose.
+  describe('with an active instance context (component-edit-parity.md phase A2)', () => {
+    const INSTANCE = 42n
+
+    it('routes selected members through one atomic definition-selection call', () => {
+      const { scene, raw } = makeScene()
+      commitSelectionTransform(
+        scene,
+        [{ kind: 'object', id: 7n }, { kind: 'object', id: 8n }],
+        AFFINE,
+        INSTANCE,
+      )
+      expect(raw.transform_def_selection).toHaveBeenCalledTimes(1)
+      expect([...(raw.transform_def_selection.mock.calls[0][1] as BigUint64Array)])
+        .toEqual([7n, 8n])
+      expect(raw.transform_selection).not.toHaveBeenCalled()
+      expect(raw.transform_sketch_island).not.toHaveBeenCalled()
+    })
+
+    it('routes a definition-owned sketch through the instance-aware sketch path', () => {
+      const { scene, raw } = makeScene({ islands: { '3': [40n] } })
+      commitSelectionTransform(
+        scene,
+        [{ kind: 'group', id: 1n }, { kind: 'sketch-island', id: 40n, sketch: 3n }],
+        AFFINE,
+        INSTANCE,
+      )
+      expect(raw.transform_def_member).not.toHaveBeenCalled()
+      expect([...(raw.transform_def_selection.mock.calls[0][2] as BigUint64Array)])
+        .toEqual([3n])
+      expect(raw.transform_selection).not.toHaveBeenCalled()
+      expect(raw.transform_sketch_island).not.toHaveBeenCalled()
+    })
+
+    it('validates and transforms a strict-subset definition sketch island', () => {
+      const { scene, raw } = makeScene({ islands: { '3': [40n, 41n] } })
+      commitSelectionTransform(
+        scene,
+        [{ kind: 'sketch-island', id: 40n, sketch: 3n }],
+        AFFINE,
+        INSTANCE,
+      )
+      expect([...(raw.transform_def_selection.mock.calls[0][3] as BigUint64Array)])
+        .toEqual([3n])
+      expect([...(raw.transform_def_selection.mock.calls[0][4] as BigUint64Array)])
+        .toEqual([40n])
+      expect(raw.transform_selection).not.toHaveBeenCalled()
+    })
+
+    it('a null/omitted instance falls back to the ordinary world path (unchanged)', () => {
+      const { scene, raw } = makeScene()
+      commitSelectionTransform(scene, [{ kind: 'object', id: 7n }], AFFINE, null)
+      expect(raw.transform_def_member).not.toHaveBeenCalled()
+      expect(raw.transform_selection).toHaveBeenCalledTimes(1)
+    })
   })
 })
 

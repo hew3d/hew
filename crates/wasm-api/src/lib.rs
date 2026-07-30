@@ -33,8 +33,8 @@ use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
     BooleanOp, ComponentId, DocChange, Document, DocumentError, EdgeId, FaceId, GroupId, Guide,
     GuideId, ImageFormat, InstanceId, KernelOp, KernelOpError, KernelOpReport, LoadError, Material,
-    MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchEdgeId, SketchId,
-    SketchRegionId, Texture, Transform, WatertightState,
+    MaterialId, NodeId, Object, ObjectId, Plane, Point3, Rgba8, SketchCurveRim, SketchEdgeId,
+    SketchId, SketchRegionId, Texture, Transform, WatertightState,
 };
 use slotmap::{Key, KeyData, SecondaryMap};
 use tessellate::{RenderMesh, tessellate};
@@ -48,6 +48,25 @@ use wasm_bindgen::prelude::*;
 /// inference test suite (e.g. `aperture: 0.05`), forgiving enough for a
 /// deliberate click without competing with nearby solid geometry.
 const SKETCH_PICK_APERTURE: f64 = 0.02;
+
+fn segment_ray_depth(origin: Point3, direction: kernel::Vec3, a: Point3, b: Point3) -> f64 {
+    let dir = direction.normalized().unwrap_or(direction);
+    let seg = b - a;
+    let seg_len_sq = seg.length_squared();
+    let s = if seg_len_sq <= kernel::tol::NORMALIZE_MIN_LENGTH.powi(2) {
+        0.0
+    } else {
+        let w = origin - a;
+        let ray_seg = dir.dot(seg);
+        let denom = seg_len_sq - ray_seg * ray_seg;
+        if denom.abs() < kernel::tol::NORMALIZE_MIN_LENGTH {
+            0.0
+        } else {
+            ((seg.dot(w) - ray_seg * dir.dot(w)) / denom).clamp(0.0, 1.0)
+        }
+    };
+    ((a + seg * s) - origin).dot(dir)
+}
 
 // Persist a panic message where the UI can read it after the wasm instance is
 // poisoned. `console_error_panic_hook` writes through a web-sys console binding
@@ -884,6 +903,7 @@ impl SketchVertexPickJs {
 pub struct SketchRegionPickJs {
     sketch: u64,
     region: u64,
+    depth: f64,
 }
 
 #[wasm_bindgen]
@@ -897,6 +917,11 @@ impl SketchRegionPickJs {
     pub fn region(&self) -> u64 {
         self.region
     }
+
+    /// Radial distance along the normalized pick ray.
+    pub fn depth(&self) -> f64 {
+        self.depth
+    }
 }
 
 /// A picked sketch edge: the owning sketch plus the edge itself (see
@@ -905,6 +930,7 @@ impl SketchRegionPickJs {
 pub struct SketchEdgePickJs {
     sketch: u64,
     edge: u64,
+    depth: f64,
 }
 
 #[wasm_bindgen]
@@ -917,6 +943,11 @@ impl SketchEdgePickJs {
     /// Handle of the picked edge within that sketch.
     pub fn edge(&self) -> u64 {
         self.edge
+    }
+
+    /// Radial distance along the normalized pick ray.
+    pub fn depth(&self) -> f64 {
+        self.depth
     }
 }
 
@@ -1102,6 +1133,11 @@ pub struct Scene {
     /// (not persisted); the kernel's own `hidden` flag is the undo tombstone.
     hidden_objects: std::collections::HashSet<ObjectId>,
     hidden_instances: std::collections::HashSet<InstanceId>,
+    /// Definition sketches registered at the active edit instance's WORLD
+    /// pose. Only one component placement is editable at a time; keeping this
+    /// scoped avoids duplicate/ghost inference at sibling placements.
+    active_inference_instance: Option<InstanceId>,
+    active_inference_sketches: Vec<SketchId>,
 }
 
 impl Default for Scene {
@@ -1168,7 +1204,15 @@ impl Scene {
         }
         // Sketches (Phase B): re-register each touched sketch's live segments.
         for &sid in &change.sketches_touched {
-            self.register_sketch(sid);
+            if self.doc.sketch_owner_component(sid).is_some() {
+                // Definition sketches have no single world placement. They
+                // are picked through the active instance's posed, scoped
+                // picker; registering local coordinates globally creates a
+                // phantom sketch at the definition origin.
+                self.inference.remove_sketch(sid);
+            } else {
+                self.register_sketch(sid);
+            }
         }
         // Guides: re-register if still live, else unregister.
         // Guides have no session-only hidden-set (unlike objects/instances) —
@@ -1179,6 +1223,7 @@ impl Scene {
                 None => self.inference.remove_guide(gid),
             }
         }
+        self.refresh_active_definition_inference();
 
         // Stamp the post-op canonical state_hash on the log stream. This
         // fires once per committed mutation (the universal post-mutation hook),
@@ -1265,6 +1310,14 @@ impl Scene {
     /// the sketch at the call site instead (see those methods).
     fn register_sketch(&mut self, id: SketchId) {
         self.inference.remove_sketch(id);
+        if self.doc.sketch_owner_component(id).is_some() {
+            // A definition sketch has no world position of its own. Direct
+            // mutation call sites use this helper without a DocChange, so
+            // refresh the active instance's posed registration instead of
+            // leaking definition-local candidates at the origin.
+            self.refresh_active_definition_inference();
+            return;
+        }
         if let Some(segments) = Self::live_sketch_segments(&self.doc, id) {
             self.inference.add_sketch_edges(id, &segments);
         }
@@ -1289,6 +1342,102 @@ impl Scene {
                 .add_sketch_polygon_centers(id, &s.polygon_centers());
             self.inference
                 .add_sketch_faces(id, &Self::live_sketch_faces(s));
+        }
+    }
+
+    fn refresh_active_definition_inference(&mut self) {
+        for sid in self.active_inference_sketches.drain(..) {
+            self.inference.remove_sketch(sid);
+        }
+        let Some(instance) = self.active_inference_instance else {
+            return;
+        };
+        if self.hidden_instances.contains(&instance) {
+            return;
+        }
+        let (Some(component), Some(pose)) = (
+            self.doc.instance_def(instance),
+            self.doc.instance_pose(instance),
+        ) else {
+            self.active_inference_instance = None;
+            return;
+        };
+        for sid in self.doc.def_member_sketches(component).unwrap_or_default() {
+            let Some(source) = self.doc.sketch(sid) else {
+                continue;
+            };
+            let segments: Vec<_> = source
+                .edges()
+                .iter()
+                .map(|(eid, edge)| {
+                    (
+                        eid,
+                        edge.curve,
+                        pose.apply_point(source.vertices()[edge.from].position),
+                        pose.apply_point(source.vertices()[edge.to].position),
+                    )
+                })
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut vertices = Vec::new();
+            for edge in source.edges().values() {
+                for vid in [edge.from, edge.to] {
+                    if seen.insert(vid) {
+                        vertices.push((vid, pose.apply_point(source.vertices()[vid].position)));
+                    }
+                }
+            }
+            self.inference.add_sketch_edges(sid, &segments);
+            self.inference.add_sketch_vertices(sid, &vertices);
+            if let Some(scale) = pose.similarity_scale() {
+                let rims: Vec<SketchCurveRim> = source
+                    .curve_rims()
+                    .into_iter()
+                    .filter_map(|rim| {
+                        Some(SketchCurveRim {
+                            curve: rim.curve,
+                            center: pose.apply_point(rim.center),
+                            axis: pose.apply_plane(&source.plane()).ok()?.normal(),
+                            radius: rim.radius * scale,
+                            basis_u: pose.apply_vector(rim.basis_u).normalized().ok()?,
+                            basis_v: pose.apply_vector(rim.basis_v).normalized().ok()?,
+                            coverage: rim.coverage,
+                        })
+                    })
+                    .collect();
+                self.inference.add_sketch_curves(sid, &rims);
+            }
+            let polygon_centers: Vec<_> = source
+                .polygon_centers()
+                .into_iter()
+                .map(|(curve, center)| (curve, pose.apply_point(center)))
+                .collect();
+            self.inference
+                .add_sketch_polygon_centers(sid, &polygon_centers);
+            let Some(plane) = pose.apply_plane(&source.plane()).ok() else {
+                continue;
+            };
+            let faces: Vec<SketchRegionFace> = source
+                .regions()
+                .iter()
+                .map(|(region, loops)| {
+                    let point = |vid: &kernel::SketchVertexId| {
+                        pose.apply_point(source.vertices()[*vid].position)
+                    };
+                    SketchRegionFace {
+                        region,
+                        plane,
+                        boundary: loops.outer.iter().map(point).collect(),
+                        holes: loops
+                            .holes
+                            .iter()
+                            .map(|hole| hole.iter().map(point).collect())
+                            .collect(),
+                    }
+                })
+                .collect();
+            self.inference.add_sketch_faces(sid, &faces);
+            self.active_inference_sketches.push(sid);
         }
     }
 
@@ -1382,7 +1531,16 @@ impl Scene {
             mesh_cache: SecondaryMap::new(),
             hidden_objects: std::collections::HashSet::new(),
             hidden_instances: std::collections::HashSet::new(),
+            active_inference_instance: None,
+            active_inference_sketches: Vec::new(),
         }
+    }
+
+    /// Scope definition-sketch inference to the component instance currently
+    /// being edited. `None` removes those posed candidates immediately.
+    pub fn set_active_inference_instance(&mut self, instance: Option<u64>) {
+        self.active_inference_instance = instance.map(instance_id);
+        self.refresh_active_definition_inference();
     }
 
     // ------------------------------------------------------------ sketching
@@ -1429,6 +1587,53 @@ impl Scene {
             nz,
         });
         Ok(handle)
+    }
+
+    /// [`Scene::begin_sketch_on_plane`] for drawing INSIDE a component
+    /// (component-edit-parity.md phase K1): `(px,py,pz,nx,ny,nz)` is the
+    /// plane in WORLD space (wherever the user clicked/locked through the
+    /// instance's rendered pose); the kernel maps it into `instance`'s
+    /// definition-local space via the pose⁻¹ itself
+    /// ([`kernel::Document::begin_sketch_on_plane_in_instance`]). The new
+    /// sketch is shared: its regions extrude under every instance of that
+    /// definition, not just this one.
+    ///
+    /// # Errors
+    /// - `UnknownInstance` — `instance` is stale/hidden.
+    /// - `DegenerateVector` — `(nx,ny,nz)` is shorter than the kernel's
+    ///   minimum normalize length.
+    /// - `Singular` — the instance's pose (or the mapped plane) failed to
+    ///   invert; unreachable for a live instance in practice (see the kernel
+    ///   doc comment).
+    // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_sketch_on_plane_in_instance(
+        &mut self,
+        instance: u64,
+        px: f64,
+        py: f64,
+        pz: f64,
+        nx: f64,
+        ny: f64,
+        nz: f64,
+    ) -> Result<u64, ApiError> {
+        let point = Point3::new(px, py, pz);
+        let normal = kernel::Vec3::new(nx, ny, nz);
+        let plane = Plane::from_point_normal(point, normal).map_err(|e| api_err(&e, &e))?;
+        let (sid, _change) = self
+            .doc
+            .begin_sketch_on_plane_in_instance(instance_id(instance), plane)
+            .map_err(doc_err)?;
+        recording::record(recording::RecordedCall::BeginSketchOnPlaneInInstance {
+            instance,
+            px,
+            py,
+            pz,
+            nx,
+            ny,
+            nz,
+        });
+        Ok(sid.data().as_ffi())
     }
 
     /// Opens a drawing gesture on `sketch`: everything drawn until
@@ -2027,6 +2232,47 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// [`Scene::extrude_region`] for a sketch owned by `instance`'s
+    /// definition (component-edit-parity.md phase K1): births the solid as a
+    /// member of the definition (seen by every instance at once) instead of
+    /// a world Object. `distance` is a WORLD-space length, mapped through
+    /// the instance pose's uniform scale — see
+    /// [`kernel::Document::extrude_region_in_instance`] for the exact rule
+    /// and its typed refusal under non-uniform scale.
+    ///
+    /// # Errors
+    /// - `UnknownInstance` — `instance` is stale/hidden.
+    /// - `UnknownSketch` — `sketch` is stale/hidden or not owned by
+    ///   `instance`'s own definition.
+    /// - `AmbiguousInstanceScale` — the instance's pose is not a similarity
+    ///   (non-uniform scale); the typed `distance` cannot map unambiguously.
+    pub fn extrude_region_in_instance(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        distance: f64,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let (id, change) = self
+            .doc
+            .extrude_region_in_instance(
+                instance_id(instance),
+                sketch_id(sketch),
+                region_id,
+                distance,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ExtrudeRegionInInstance {
+            instance,
+            sketch,
+            region,
+            distance,
+        });
+        Ok(id.data().as_ffi())
+    }
+
     /// Follow Me along a chain of sketch edges (the follow-me design):
     /// sweeps the closed profile `region` of `sketch` along the path the
     /// `path_edges` of `path_sketch` form (a single connected chain, open or
@@ -2276,6 +2522,221 @@ impl Scene {
             sketch,
             region,
             instance,
+            path_object,
+            path_face,
+            stop_len,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    // ------------------------------------------------ follow me — in a component
+
+    /// [`Scene::follow_me_along_edges`] inside `instance`'s definition
+    /// (component-edit-parity.md phase K2): sweeps the closed profile
+    /// `region` of a def-owned `sketch` along the chain `path_edges` of
+    /// `path_sketch` — both must belong to `instance`'s OWN definition, or
+    /// the kernel refuses typed (see
+    /// [`kernel::Document::follow_me_in_instance`]). The swept solid is born
+    /// as a new member of the definition; every instance sees it at once.
+    /// `stop_len` is the same partial-sweep stop as the world variant, in
+    /// WORLD units, mapped through the instance's pose.
+    pub fn follow_me_along_edges_in_instance(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let edges: Vec<SketchEdgeId> = path_edges
+            .iter()
+            .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
+            .collect();
+        let path = kernel::FollowMePath::SketchEdges {
+            sketch: sketch_id(path_sketch),
+            edges,
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_in_instance(
+                instance_id(instance),
+                sketch_id(sketch),
+                region_id,
+                &path,
+                stop_len,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeAlongEdgesInInstance {
+            instance,
+            sketch,
+            region,
+            path_sketch,
+            path_edges,
+            stop_len,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::follow_me_around_face`] inside `instance`'s definition: the
+    /// path is a member face's outer boundary loop — `path_object` must be a
+    /// member of the SAME definition as `sketch` (see
+    /// [`kernel::Document::follow_me_in_instance`]).
+    pub fn follow_me_around_face_in_instance(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let path = kernel::FollowMePath::FaceLoop {
+            object: object_id(path_object),
+            face: FaceId::from(KeyData::from_ffi(path_face)),
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_in_instance(
+                instance_id(instance),
+                sketch_id(sketch),
+                region_id,
+                &path,
+                stop_len,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeAroundFaceInInstance {
+            instance,
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::follow_me_merged_around_face`] inside `instance`'s
+    /// definition (see [`kernel::Document::follow_me_merged_in_instance`]):
+    /// `path_object` must be a member of the SAME definition, and the swept
+    /// molding merges with it in one gesture/undo step.
+    pub fn follow_me_merged_around_face_in_instance(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let region_id = SketchRegionId::from(KeyData::from_ffi(region));
+        let path = kernel::FollowMePath::FaceLoop {
+            object: object_id(path_object),
+            face: FaceId::from(KeyData::from_ffi(path_face)),
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_merged_in_instance(
+                instance_id(instance),
+                sketch_id(sketch),
+                region_id,
+                &path,
+                stop_len,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(
+            recording::RecordedCall::FollowMeMergedAroundFaceInInstance {
+                instance,
+                sketch,
+                region,
+                path_object,
+                path_face,
+                stop_len,
+            },
+        );
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::follow_me_face_along_edges`] with the profile face on a
+    /// MEMBER of `instance`'s definition (see
+    /// [`kernel::Document::follow_me_face_in_instance`]): `path_sketch` must
+    /// be a def-owned sketch of the SAME definition as `profile_object`.
+    pub fn follow_me_face_along_edges_in_instance(
+        &mut self,
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let edges: Vec<SketchEdgeId> = path_edges
+            .iter()
+            .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
+            .collect();
+        let path = kernel::FollowMePath::SketchEdges {
+            sketch: sketch_id(path_sketch),
+            edges,
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_face_in_instance(
+                instance_id(instance),
+                object_id(profile_object),
+                FaceId::from(KeyData::from_ffi(profile_face)),
+                &path,
+                stop_len,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeFaceAlongEdgesInInstance {
+            instance,
+            profile_object,
+            profile_face,
+            path_sketch,
+            path_edges,
+            stop_len,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::follow_me_face_around_face`] with the profile face on a
+    /// MEMBER of `instance`'s definition — `path_object` must be a member of
+    /// the SAME definition; when it is the profile object itself, the sweep
+    /// merges with it exactly like the world variant (design §3b).
+    pub fn follow_me_face_around_face_in_instance(
+        &mut self,
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+    ) -> Result<u64, ApiError> {
+        let path = kernel::FollowMePath::FaceLoop {
+            object: object_id(path_object),
+            face: FaceId::from(KeyData::from_ffi(path_face)),
+        };
+        let (id, change) = self
+            .doc
+            .follow_me_face_in_instance(
+                instance_id(instance),
+                object_id(profile_object),
+                FaceId::from(KeyData::from_ffi(profile_face)),
+                &path,
+                stop_len,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FollowMeFaceAroundFaceInInstance {
+            instance,
+            profile_object,
+            profile_face,
             path_object,
             path_face,
             stop_len,
@@ -3117,15 +3578,46 @@ impl Scene {
         self.doc.object_solid(object_id(id))
     }
 
-    /// The member objects of a definition (definition-local geometry), in order.
-    /// Fetch each one's mesh via [`Scene::object_mesh`] and draw it at the
-    /// instance pose. Empty if the component is stale/hidden.
+    /// The LIVE member objects of a definition (definition-local geometry), in
+    /// order. Fetch each one's mesh via [`Scene::object_mesh`] and draw it at
+    /// the instance pose. Empty if the component is stale/hidden.
+    ///
+    /// [`Document::def_members`] deliberately keeps a hidden (deleted, or
+    /// undone-birth) member's id listed — Group parity, and it simplifies
+    /// undo — so this filters through [`Document::object`] before returning,
+    /// exactly like [`Scene::register_instance`]'s own per-member liveness
+    /// check. Without this filter a hidden member's id would reach
+    /// [`Scene::object_mesh`], which errors for it (stale/hidden), rather
+    /// than simply being absent from the render/pick set.
     pub fn component_member_objects(&self, component: u64) -> Vec<u64> {
         self.doc
             .def_members(component_id(component))
             .unwrap_or_default()
             .iter()
+            .filter(|&&o| self.doc.object(o).is_some())
             .map(|o| o.data().as_ffi())
+            .collect()
+    }
+
+    /// The LIVE member sketches of a definition (component-edit-parity.md
+    /// phase K1), in definition-local coordinates — the sketch analog of
+    /// [`Scene::component_member_objects`]. Empty if the component is
+    /// stale/hidden or has no not-yet-extruded sketches.
+    ///
+    /// Filtered through [`Document::sketch`] for the same reason
+    /// [`Scene::component_member_objects`] filters through [`Document::object`]:
+    /// [`Document::def_member_sketches`] keeps a hidden (deleted, or an
+    /// undone gesture's now-empty fresh sketch) sketch's id listed, and this
+    /// is the render/pick ground truth for "does this sketch still round-trip
+    /// through the document" — mirroring [`Scene::pick_sketch_region_in_instance`],
+    /// which already applies exactly this filter for picking.
+    pub fn component_member_sketches(&self, component: u64) -> Vec<u64> {
+        self.doc
+            .def_member_sketches(component_id(component))
+            .unwrap_or_default()
+            .iter()
+            .filter(|&&s| self.doc.sketch(s).is_some())
+            .map(|s| s.data().as_ffi())
             .collect()
     }
 
@@ -3141,18 +3633,60 @@ impl Scene {
     /// Push/pull a face of a component's shared geometry — editing *inside* a
     /// component. `object` is the definition member (from
     /// [`Scene::component_member_objects`] or a pick's `.object()`); the edit is
-    /// seen by every instance of `component` at once. Like [`Scene::push_pull`],
-    /// a flat imprinted sub-face auto-routes to wall-generating extrude. Routed
-    /// through the kernel's `apply_def_op`, so it cannot touch world objects.
+    /// seen by every instance of `instance`'s definition at once. Like
+    /// [`Scene::push_pull`], a flat imprinted sub-face auto-routes to
+    /// wall-generating extrude. Routed through the kernel's `apply_def_op`, so
+    /// it cannot touch world objects.
+    ///
+    /// `distance` is a WORLD-space length — the ghost preview sweeps the
+    /// world drag distance — mapped through `instance`'s pose via
+    /// [`kernel::Document::map_instance_world_distance`] exactly like
+    /// [`Scene::extrude_region_in_instance`]'s `distance` (see that doc for
+    /// the exact rule and its typed refusal under non-uniform scale): a
+    /// scaled instance's ghost and its committed geometry must agree, and a
+    /// raw (unmapped) distance previously let them diverge.
+    ///
+    /// # Errors
+    /// - `UnknownInstance` — `instance` is stale/hidden.
+    /// - `AmbiguousInstanceScale` — the instance's pose is not a similarity
+    ///   (non-uniform scale); the typed `distance` cannot map unambiguously.
+    /// - `UnknownComponent` / `UnknownObject` — `object` is not a member of
+    ///   `instance`'s definition.
     pub fn push_pull_in_component(
         &mut self,
-        component: u64,
+        instance: u64,
         object: u64,
         face: u64,
         distance: f64,
     ) -> Result<PushPullJs, ApiError> {
+        let iid = instance_id(instance);
+        let (component, local_distance) = self
+            .doc
+            .map_instance_world_distance(iid, distance)
+            .map_err(doc_err)?;
         let oid = object_id(object);
         let face_id = FaceId::from(KeyData::from_ffi(face));
+        if self
+            .doc
+            .object(oid)
+            .is_some_and(|o| o.push_pull_overshoots(face_id, local_distance))
+        {
+            let (results, change) = self
+                .doc
+                .push_pull_through_in_component(component, oid, face_id, local_distance)
+                .map_err(doc_err)?;
+            self.reconcile(&change);
+            recording::record(recording::RecordedCall::PushPullInComponent {
+                instance,
+                object,
+                face,
+                distance,
+            });
+            return Ok(PushPullJs {
+                inner: None,
+                through: results.iter().map(|id| id.data().as_ffi()).collect(),
+            });
+        }
         let is_sub = self
             .doc
             .object(oid)
@@ -3160,23 +3694,20 @@ impl Scene {
         let op = if is_sub {
             KernelOp::ExtrudeSubFace {
                 sub_face: face_id,
-                distance,
+                distance: local_distance,
             }
         } else {
             KernelOp::PushPull {
                 face: face_id,
-                distance,
+                distance: local_distance,
             }
         };
-        let (report, change) = self
-            .doc
-            .apply_def_op(component_id(component), oid, op)
-            .map_err(doc_err)?;
+        let (report, change) = self.doc.apply_def_op(component, oid, op).map_err(doc_err)?;
         self.reconcile(&change);
         match report {
             KernelOpReport::PushPull(inner) | KernelOpReport::ExtrudeSubFace(inner) => {
                 recording::record(recording::RecordedCall::PushPullInComponent {
-                    component,
+                    instance,
                     object,
                     face,
                     distance,
@@ -3191,6 +3722,470 @@ impl Scene {
                 &"unexpected report kind for push_pull_in_component",
             )),
         }
+    }
+
+    /// Cut a member face along a WORLD-space `path` (xyz triples) — face-mode
+    /// drawing inside a component (component-edit-parity.md phase K1).
+    /// `object` is the definition member owning `face` (from
+    /// [`Scene::component_member_objects`] or a pick's `.object()`); the
+    /// kernel maps `path` into definition-local space via `instance`'s
+    /// pose⁻¹ (unlike a scalar distance, a point mapping is unambiguous
+    /// under any invertible pose — rotation, mirror, or non-uniform scale —
+    /// so unlike [`Scene::extrude_region_in_instance`] this never refuses on
+    /// scale) and routes through the kernel's `apply_def_op` with the same
+    /// `SplitFace` op [`Scene::split_face`] uses for world objects — the
+    /// face-cut path already existed; this is the missing instance-aware
+    /// wiring. The edit is seen by every instance of the definition at once.
+    ///
+    /// # Errors
+    /// - `UnknownInstance` — `instance` is stale/hidden.
+    /// - `Singular` — the instance's pose failed to invert; unreachable for
+    ///   a live instance in practice.
+    /// - `UnknownComponent` / `UnknownObject` — `object` is not a member of
+    ///   `instance`'s definition.
+    /// - Whatever [`Scene::split_face`] itself can refuse (a `path` shorter
+    ///   than two points, a cut that doesn't resolve on `face`, …).
+    pub fn split_face_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        path: &[f64],
+    ) -> Result<FaceSplitJs, ApiError> {
+        if !path.len().is_multiple_of(3) || path.len() < 6 {
+            return Err(ApiError(
+                "BadPath: path must be at least two xyz triples".to_string(),
+            ));
+        }
+        let iid = instance_id(instance);
+        let pose = self
+            .doc
+            .instance_pose(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let component = self
+            .doc
+            .instance_def(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let pose_inv = pose.inverse().map_err(|e| api_err(&e, &e))?;
+        let local_points: Vec<Point3> = path
+            .chunks_exact(3)
+            .map(|c| pose_inv.apply_point(Point3::new(c[0], c[1], c[2])))
+            .collect();
+        let op = KernelOp::SplitFace {
+            face: FaceId::from(KeyData::from_ffi(face)),
+            path: local_points,
+            restore: None,
+        };
+        let (report, change) = self
+            .doc
+            .apply_def_op(component, object_id(object), op)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        match report {
+            KernelOpReport::FaceSplit(inner) => {
+                recording::record(recording::RecordedCall::SplitFaceInInstance {
+                    instance,
+                    object,
+                    face,
+                    path: path.to_vec(),
+                });
+                Ok(FaceSplitJs { inner })
+            }
+            other => Err(api_err(
+                &other,
+                &"unexpected report kind for split_face_in_instance",
+            )),
+        }
+    }
+
+    /// Imprint a closed loop strictly inside a member face's WORLD-space
+    /// boundary — the definition-member analog of [`Scene::split_face_inner`]
+    /// (component-edit-parity.md phase A2: Rectangle/Circle/Polygon's
+    /// face-mode draw needs this loop-imprint shape, not the boundary-to-
+    /// boundary cut [`Scene::split_face_in_instance`] covers). `loop_pts` is
+    /// mapped into definition-local space through `instance`'s pose⁻¹, same
+    /// as `split_face_in_instance`'s `path` — a point mapping is unambiguous
+    /// under any invertible pose, so this never refuses on scale. Returns the
+    /// new sub-face handle; push/pull it (`push_pull_in_component`) to
+    /// boss/recess.
+    ///
+    /// # Errors
+    /// Same family as `split_face_in_instance`: `UnknownInstance`, `Singular`,
+    /// `UnknownComponent`/`UnknownObject`, plus whatever
+    /// [`Scene::split_face_inner`] itself refuses.
+    pub fn split_face_inner_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+    ) -> Result<u64, ApiError> {
+        self.split_face_inner_in_instance_impl(instance, object, face, loop_pts, None)
+    }
+
+    /// [`Scene::split_face_inner_in_instance`] carrying a drawn circle's
+    /// analytic identity, mirroring [`Scene::split_face_inner_with_curve`]
+    /// for a definition member (CircleTool's face mode inside a component).
+    /// `center`/`radius` are WORLD-space, exactly like `loop_pts` — both are
+    /// mapped into the instance's definition-local frame (`center` through
+    /// `pose⁻¹`, `radius` through `pose`'s uniform scale) before reaching the
+    /// kernel's curve-claim validator, which checks the claim against
+    /// `loop_pts` in that same local frame.
+    ///
+    /// # Errors
+    /// Same family as `split_face_inner_in_instance`, plus
+    /// `AmbiguousInstanceScale` when `instance`'s pose has a non-uniform
+    /// scale — a world radius has no single local-frame equivalent then, so
+    /// this refuses rather than guess an axis (drag instead of drawing an
+    /// exact-radius circle on such an instance).
+    pub fn split_face_inner_with_curve_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+        center: &[f64],
+        radius: f64,
+    ) -> Result<u64, ApiError> {
+        if center.len() != 3 {
+            return Err(ApiError(
+                "BadCurve: center must be an xyz triple".to_string(),
+            ));
+        }
+        let curve = kernel::CurveGeom {
+            center: Point3::new(center[0], center[1], center[2]),
+            radius,
+        };
+        self.split_face_inner_in_instance_impl(instance, object, face, loop_pts, Some(curve))
+    }
+
+    fn split_face_inner_in_instance_impl(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        loop_pts: &[f64],
+        curve: Option<kernel::CurveGeom>,
+    ) -> Result<u64, ApiError> {
+        if !loop_pts.len().is_multiple_of(3) || loop_pts.len() < 9 {
+            return Err(ApiError(
+                "BadLoop: loop needs at least three xyz triples".to_string(),
+            ));
+        }
+        let iid = instance_id(instance);
+        let pose = self
+            .doc
+            .instance_pose(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let component = self
+            .doc
+            .instance_def(iid)
+            .ok_or_else(|| stale("UnknownInstance", "instance"))?;
+        let pose_inv = pose.inverse().map_err(|e| api_err(&e, &e))?;
+        let local_points: Vec<Point3> = loop_pts
+            .chunks_exact(3)
+            .map(|c| pose_inv.apply_point(Point3::new(c[0], c[1], c[2])))
+            .collect();
+        // `curve` (when present) is the caller's WORLD-space analytic circle
+        // identity — center and radius — exactly like `loop_pts` above. The
+        // kernel's split-face validator (`ops.rs`) checks every loop vertex's
+        // distance to `curve.center` against `curve.radius` in LOCAL space
+        // (the frame `local_points` was just mapped into), so the curve must
+        // be mapped into that same frame or the claim never matches: a point
+        // maps unambiguously under any invertible pose (`pose_inv.apply_point`,
+        // same as the loop), but a scalar radius only maps unambiguously
+        // under a uniform scale — same rule as `Document::
+        // map_world_distance_through_pose`'s typed-distance surfaces — so a
+        // non-uniformly-scaled instance refuses `AmbiguousInstanceScale`
+        // rather than guess an axis.
+        let mapped_curve = curve
+            .map(|c| -> Result<kernel::CurveGeom, ApiError> {
+                let scale = pose
+                    .similarity_scale()
+                    .ok_or_else(|| doc_err(DocumentError::AmbiguousInstanceScale))?;
+                Ok(kernel::CurveGeom {
+                    center: pose_inv.apply_point(c.center),
+                    radius: c.radius / scale,
+                })
+            })
+            .transpose()?;
+        let op = KernelOp::SplitFaceInner {
+            face: FaceId::from(KeyData::from_ffi(face)),
+            loop_path: local_points,
+            restore: None,
+            curve: mapped_curve,
+        };
+        let (report, change) = self
+            .doc
+            .apply_def_op(component, object_id(object), op)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        match report {
+            KernelOpReport::FaceSplitInner(r) => {
+                recording::record(recording::RecordedCall::SplitFaceInnerInInstance {
+                    instance,
+                    object,
+                    face,
+                    loop_pts: loop_pts.to_vec(),
+                    curve: curve.map(|g| [g.center.x, g.center.y, g.center.z, g.radius]),
+                });
+                Ok(r.sub_face.data().as_ffi())
+            }
+            other => Err(api_err(
+                &other,
+                &"unexpected report kind for split_face_inner_in_instance",
+            )),
+        }
+    }
+
+    /// Removes one member Object from a component definition (component-edit-
+    /// parity.md phase K1) — the definition-member analog of
+    /// [`Scene::delete_node`]. `object` is spliced out of view (hidden, never
+    /// erased); refuses typed if it is the definition's last live member
+    /// (see [`kernel::Document::delete_def_member`]).
+    ///
+    /// # Errors
+    /// - `UnknownComponent` — `component` is stale/hidden.
+    /// - `UnknownObject` — `object` is not a live member of `component`.
+    /// - `LastDefinitionMember` — `object` is the definition's only live
+    ///   member; delete its instances instead.
+    pub fn delete_def_member(&mut self, component: u64, object: u64) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .delete_def_member(component_id(component), object_id(object))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteDefMember { component, object });
+        Ok(())
+    }
+
+    /// [`Scene::boolean`] between two members of the SAME component
+    /// definition (component-edit-parity.md phase K2): `op` is 0 = union,
+    /// 1 = subtract (`a - b`), 2 = intersect, exactly like [`Scene::boolean`].
+    /// `a`/`b` must both be members of `component`; the result replaces
+    /// them as a new member, seen by every instance of `component` at once.
+    /// See [`kernel::Document::boolean_in_component`].
+    pub fn boolean_in_component(
+        &mut self,
+        component: u64,
+        op: u8,
+        a: u64,
+        b: u64,
+    ) -> Result<u64, ApiError> {
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        let (id, change) = self
+            .doc
+            .boolean_in_component(component_id(component), object_id(a), object_id(b), bop)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanInComponent {
+            component,
+            op,
+            a,
+            b,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::slice_object`] on a member of `instance`'s definition
+    /// (component-edit-parity.md phase K2): `plane` is 6 floats
+    /// `[px,py,pz,nx,ny,nz]` in WORLD space, mapped into definition-local
+    /// space through the instance's pose⁻¹. `object` must be a live member
+    /// of `instance`'s own definition. Returns `[positive, negative]`;
+    /// both pieces become new members of the same definition. See
+    /// [`kernel::Document::slice_def_member`].
+    pub fn slice_def_member(
+        &mut self,
+        instance: u64,
+        object: u64,
+        plane: &[f64],
+    ) -> Result<Vec<u64>, ApiError> {
+        let p: &[f64; 6] = plane.try_into().map_err(|_| {
+            ApiError("BadPlane: slice plane must be 6 floats [px,py,pz,nx,ny,nz]".to_string())
+        })?;
+        let point = Point3::new(p[0], p[1], p[2]);
+        let normal = kernel::Vec3::new(p[3], p[4], p[5]);
+        let plane = Plane::from_point_normal(point, normal)
+            .map_err(|_| ApiError("DegeneratePlane: slice normal has no direction".to_string()))?;
+        let ((a, b), change) = self
+            .doc
+            .slice_def_member(instance_id(instance), object_id(object), &plane)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SliceDefMember {
+            instance,
+            object,
+            plane: *p,
+        });
+        Ok(vec![a.data().as_ffi(), b.data().as_ffi()])
+    }
+
+    /// [`Scene::transform_object`] on a member of `instance`'s definition
+    /// (component-edit-parity.md phase K2): `affine` is the same row-major
+    /// 3×4 WORLD-space matrix as [`Scene::transform_object`], conjugated
+    /// through the instance's pose into definition-local space before
+    /// baking (see [`kernel::Document::transform_def_member`] for the exact
+    /// mapping and its non-uniform-scale posture — a full affine
+    /// conjugation is never ambiguous, unlike a scalar distance). `object`
+    /// must be a live member of `instance`'s own definition; every instance
+    /// of the definition sees the edit at once.
+    pub fn transform_def_member(
+        &mut self,
+        instance: u64,
+        object: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_def_member(instance_id(instance), object_id(object), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformDefMember {
+            instance,
+            object,
+            affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// Transform a definition-owned sketch through one instance's world pose.
+    pub fn transform_def_sketch(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let change = self
+            .doc
+            .transform_def_sketch(
+                instance_id(instance),
+                sketch_id(sketch),
+                &Transform::from_affine(rows),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformDefSketch {
+            instance,
+            sketch,
+            affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// Validation-only sibling of [`Scene::transform_def_sketch_island`].
+    pub fn can_transform_def_sketch_island(
+        &self,
+        instance: u64,
+        sketch: u64,
+        island: u64,
+        affine: &[f64],
+    ) -> bool {
+        let Ok(rows) = <&[f64; 12]>::try_from(affine) else {
+            return false;
+        };
+        self.doc
+            .validate_transform_def_sketch_island(
+                instance_id(instance),
+                sketch_id(sketch),
+                kernel::SketchIslandId::from(KeyData::from_ffi(island)),
+                &Transform::from_affine(rows),
+            )
+            .is_ok()
+    }
+
+    /// Transform one island of a definition-owned sketch through an instance.
+    pub fn transform_def_sketch_island(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        island: u64,
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let change = self
+            .doc
+            .transform_def_sketch_island(
+                instance_id(instance),
+                sketch_id(sketch),
+                kernel::SketchIslandId::from(KeyData::from_ffi(island)),
+                &Transform::from_affine(rows),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformDefSketchIsland {
+            instance,
+            sketch,
+            island,
+            affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// Atomically transform a mixed selection inside one component definition.
+    pub fn transform_def_selection(
+        &mut self,
+        instance: u64,
+        objects: &[u64],
+        sketches: &[u64],
+        island_sketches: &[u64],
+        islands: &[u64],
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        if island_sketches.len() != islands.len() {
+            return Err(ApiError(
+                "BadSelection: island sketch and island arrays must have equal length".to_string(),
+            ));
+        }
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let object_ids: Vec<_> = objects.iter().copied().map(object_id).collect();
+        let sketch_ids: Vec<_> = sketches.iter().copied().map(sketch_id).collect();
+        let island_ids: Vec<_> = island_sketches
+            .iter()
+            .copied()
+            .zip(islands.iter().copied())
+            .map(|(sketch, island)| {
+                (
+                    sketch_id(sketch),
+                    kernel::SketchIslandId::from(KeyData::from_ffi(island)),
+                )
+            })
+            .collect();
+        let change = self
+            .doc
+            .transform_def_selection(
+                instance_id(instance),
+                &object_ids,
+                &sketch_ids,
+                &island_ids,
+                &Transform::from_affine(rows),
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformDefSelection {
+            instance,
+            objects: objects.to_vec(),
+            sketches: sketches.to_vec(),
+            island_sketches: island_sketches.to_vec(),
+            islands: islands.to_vec(),
+            affine: *rows,
+        });
+        Ok(())
     }
 
     /// Render buffers for one Object (cached until its next mutation).
@@ -3356,13 +4351,47 @@ impl Scene {
     /// `undefined` if the sketch or edge is stale. The sketch-edge
     /// counterpart of `edge_endpoints`, for tools that use a snapped sketch
     /// edge as a reference (Tape Measure parallel guides).
+    ///
+    /// World-op guard (component-edit-parity.md phase K1): a def-owned
+    /// sketch's edges are DEFINITION-local, not world, so this refuses one
+    /// exactly like `edge_endpoints` refuses a definition-member object via
+    /// `is_world_object` — a raw def-local pair handed to `add_guide_line`
+    /// under this function's promised "world endpoints" contract would place
+    /// the guide in the wrong frame. Guides stay world-space-only in v1
+    /// (component-edit-parity.md, "Out of scope").
     pub fn sketch_edge_endpoints(&self, sketch: u64, edge: u64) -> Option<Vec<f64>> {
         let sid = sketch_id(sketch);
+        if self.doc.sketch_owner_component(sid).is_some() {
+            return None;
+        }
         let s = self.doc.sketch(sid)?;
         let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
         let e = s.edges().get(eid)?;
         let a = s.vertices()[e.from].position;
         let b = s.vertices()[e.to].position;
+        Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
+    }
+
+    /// World endpoints of a definition-owned sketch edge as viewed through
+    /// `instance`. Returns `None` for stale handles or cross-definition input.
+    pub fn sketch_edge_endpoints_in_instance(
+        &self,
+        instance: u64,
+        sketch: u64,
+        edge: u64,
+    ) -> Option<Vec<f64>> {
+        let iid = instance_id(instance);
+        let component = self.doc.instance_def(iid)?;
+        let sid = sketch_id(sketch);
+        if self.doc.sketch_owner_component(sid) != Some(component) {
+            return None;
+        }
+        let pose = self.doc.instance_pose(iid)?;
+        let s = self.doc.sketch(sid)?;
+        let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
+        let e = s.edges().get(eid)?;
+        let a = pose.apply_point(s.vertices()[e.from].position);
+        let b = pose.apply_point(s.vertices()[e.to].position);
         Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
     }
 
@@ -3821,9 +4850,16 @@ impl Scene {
         };
         self.inference
             .pick_sketch_edge(&ray, SKETCH_PICK_APERTURE)
-            .map(|(sid, eid)| SketchEdgePickJs {
-                sketch: sid.data().as_ffi(),
-                edge: eid.data().as_ffi(),
+            .and_then(|(sid, eid)| {
+                let sketch = self.doc.sketch(sid)?;
+                let edge = sketch.edges().get(eid)?;
+                let a = sketch.vertices()[edge.from].position;
+                let b = sketch.vertices()[edge.to].position;
+                Some(SketchEdgePickJs {
+                    sketch: sid.data().as_ffi(),
+                    edge: eid.data().as_ffi(),
+                    depth: segment_ray_depth(ray.origin, ray.direction, a, b),
+                })
             })
     }
 
@@ -3851,7 +4887,7 @@ impl Scene {
     ) -> Option<SketchRegionPickJs> {
         let origin = Point3::new(ox, oy, oz);
         let dir = kernel::Vec3::new(dx, dy, dz);
-        let mut best: Option<(f64, SketchId, SketchRegionId)> = None;
+        let mut best: Option<(f64, f64, SketchId, SketchRegionId)> = None;
         for sid in self.doc.sketch_ids() {
             let Some(sketch) = self.doc.sketch(sid) else {
                 continue;
@@ -3873,15 +4909,145 @@ impl Scene {
                     continue;
                 }
                 let area = sketch.region_area(rid).unwrap_or(f64::INFINITY);
-                if best.is_none_or(|(a, _, _)| area < a) {
-                    best = Some((area, sid, rid));
+                if best.is_none_or(|(best_t, best_area, _, _)| {
+                    t < best_t || ((t - best_t).abs() < kernel::tol::PLANE_DIST && area < best_area)
+                }) {
+                    best = Some((t, area, sid, rid));
                 }
             }
         }
-        best.map(|(_, s, r)| SketchRegionPickJs {
+        best.map(|(depth, _, s, r)| SketchRegionPickJs {
             sketch: s.data().as_ffi(),
             region: r.data().as_ffi(),
+            depth,
         })
+    }
+
+    /// [`Scene::pick_sketch_region`], scoped to ONE component INSTANCE's own
+    /// definition-owned sketches (component-edit-parity.md phase A2).
+    /// `pick_sketch_region` walks only `Document::sketch_ids()`, which
+    /// deliberately excludes every definition-owned sketch (the same
+    /// world-tree-only boundary `object_ids()` and `sketch_edge_endpoints`
+    /// enforce) — so a plane-mode region drawn INSIDE a component's own
+    /// definition (`begin_sketch_on_plane_in_instance`) was otherwise
+    /// unreachable by a real click, for push/pull's region-extrude or Follow
+    /// Me's sketch-region profile pick alike. The ray is WORLD-space, mapped
+    /// through the instance's pose⁻¹ before testing; the returned handles are
+    /// DEFINITION-LOCAL, exactly like every other `_in_instance`/
+    /// `component_member_*` accessor. `None` on a miss OR a stale/singular
+    /// instance — a pick never throws.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_sketch_region_in_instance(
+        &self,
+        instance: u64,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<SketchRegionPickJs> {
+        let iid = instance_id(instance);
+        let pose = self.doc.instance_pose(iid)?;
+        let component = self.doc.instance_def(iid)?;
+        let pose_inv = pose.inverse().ok()?;
+        let origin = pose_inv.apply_point(Point3::new(ox, oy, oz));
+        let dir = pose_inv.apply_vector(kernel::Vec3::new(dx, dy, dz));
+
+        let mut best: Option<(f64, f64, SketchId, SketchRegionId)> = None;
+        for sid in self.doc.def_member_sketches(component).unwrap_or_default() {
+            let Some(sketch) = self.doc.sketch(sid) else {
+                continue;
+            };
+            let plane = sketch.plane();
+            let denom = plane.normal().dot(dir);
+            if denom.abs() < kernel::tol::NORMAL_DIRECTION {
+                continue; // ray parallel to (or grazing) this sketch plane
+            }
+            let t = -plane.signed_distance(origin) / denom;
+            if t <= 0.0 {
+                continue; // plane is behind the ray origin
+            }
+            let hit = origin + dir * t;
+            for rid in sketch.regions().keys() {
+                if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
+                    continue;
+                }
+                let area = sketch.region_area(rid).unwrap_or(f64::INFINITY);
+                if best.is_none_or(|(best_t, best_area, _, _)| {
+                    t < best_t || ((t - best_t).abs() < kernel::tol::PLANE_DIST && area < best_area)
+                }) {
+                    best = Some((t, area, sid, rid));
+                }
+            }
+        }
+        best.map(|(local_depth, _, s, r)| SketchRegionPickJs {
+            sketch: s.data().as_ffi(),
+            region: r.data().as_ffi(),
+            depth: local_depth * kernel::Vec3::new(dx, dy, dz).length(),
+        })
+    }
+
+    /// [`Scene::pick_sketch_edge`] scoped to the definition-owned sketches
+    /// visible through one component instance. Sketch segments are mapped
+    /// through the instance pose into world space before applying the same
+    /// cone ranking and aperture as the world-sketch picker. Keeping the cone
+    /// in world space preserves its screen-angle meaning under non-uniform
+    /// instance scale.
+    ///
+    /// This is the selection counterpart of
+    /// [`Scene::pick_sketch_region_in_instance`]. Keeping the query at this
+    /// boundary avoids registering one duplicated set of inference candidates
+    /// per component placement merely to support a click.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_sketch_edge_in_instance(
+        &self,
+        instance: u64,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<SketchEdgePickJs> {
+        let iid = instance_id(instance);
+        let pose = self.doc.instance_pose(iid)?;
+        let component = self.doc.instance_def(iid)?;
+        let ray = PickRay {
+            origin: Point3::new(ox, oy, oz),
+            direction: kernel::Vec3::new(dx, dy, dz),
+        };
+        let mut local = InferenceScene::default();
+        for sid in self.doc.def_member_sketches(component).unwrap_or_default() {
+            let Some(sketch) = self.doc.sketch(sid) else {
+                continue;
+            };
+            let segments: Vec<_> = sketch
+                .edges()
+                .iter()
+                .map(|(eid, edge)| {
+                    (
+                        eid,
+                        pose.apply_point(sketch.vertices()[edge.from].position),
+                        pose.apply_point(sketch.vertices()[edge.to].position),
+                    )
+                })
+                .collect();
+            local.add_sketch(sid, &segments);
+        }
+        local
+            .pick_sketch_edge(&ray, SKETCH_PICK_APERTURE)
+            .and_then(|(sid, eid)| {
+                let sketch = self.doc.sketch(sid)?;
+                let edge = sketch.edges().get(eid)?;
+                let a = pose.apply_point(sketch.vertices()[edge.from].position);
+                let b = pose.apply_point(sketch.vertices()[edge.to].position);
+                Some(SketchEdgePickJs {
+                    sketch: sid.data().as_ffi(),
+                    edge: eid.data().as_ffi(),
+                    depth: segment_ray_depth(ray.origin, ray.direction, a, b),
+                })
+            })
     }
 
     /// Picks the committed sketch vertex nearest the ray (Phase D per-vertex
@@ -3961,6 +5127,7 @@ impl Scene {
                 self.register_instance(iid);
             }
         }
+        self.refresh_active_definition_inference();
     }
 
     // ------------------------------------------------------- materials
@@ -4864,15 +6031,66 @@ impl Scene {
                         self.make_unique(instance)?;
                     }
                     PushPullInComponent {
-                        component,
+                        instance,
                         object,
                         face,
                         distance,
                     } => {
-                        self.push_pull_in_component(component, object, face, distance)?;
+                        self.push_pull_in_component(instance, object, face, distance)?;
                     }
                     SplitFace { object, face, path } => {
                         self.split_face(object, face, &path)?;
+                    }
+                    BeginSketchOnPlaneInInstance {
+                        instance,
+                        px,
+                        py,
+                        pz,
+                        nx,
+                        ny,
+                        nz,
+                    } => {
+                        self.begin_sketch_on_plane_in_instance(instance, px, py, pz, nx, ny, nz)?;
+                    }
+                    ExtrudeRegionInInstance {
+                        instance,
+                        sketch,
+                        region,
+                        distance,
+                    } => {
+                        self.extrude_region_in_instance(instance, sketch, region, distance)?;
+                    }
+                    SplitFaceInInstance {
+                        instance,
+                        object,
+                        face,
+                        path,
+                    } => {
+                        self.split_face_in_instance(instance, object, face, &path)?;
+                    }
+                    SplitFaceInnerInInstance {
+                        instance,
+                        object,
+                        face,
+                        loop_pts,
+                        curve,
+                    } => match curve {
+                        Some(c) => {
+                            self.split_face_inner_with_curve_in_instance(
+                                instance,
+                                object,
+                                face,
+                                &loop_pts,
+                                &c[..3],
+                                c[3],
+                            )?;
+                        }
+                        None => {
+                            self.split_face_inner_in_instance(instance, object, face, &loop_pts)?;
+                        }
+                    },
+                    DeleteDefMember { component, object } => {
+                        self.delete_def_member(component, object)?;
                     }
                     MergeFaces { object, edge } => {
                         self.merge_faces(object, edge)?;
@@ -4968,6 +6186,145 @@ impl Scene {
                     Load { bytes } => {
                         self.load_core(&bytes)?;
                     }
+                    FollowMeAlongEdgesInInstance {
+                        instance,
+                        sketch,
+                        region,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                    } => {
+                        self.follow_me_along_edges_in_instance(
+                            instance,
+                            sketch,
+                            region,
+                            path_sketch,
+                            path_edges,
+                            stop_len,
+                        )?;
+                    }
+                    FollowMeAroundFaceInInstance {
+                        instance,
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    } => {
+                        self.follow_me_around_face_in_instance(
+                            instance,
+                            sketch,
+                            region,
+                            path_object,
+                            path_face,
+                            stop_len,
+                        )?;
+                    }
+                    FollowMeMergedAroundFaceInInstance {
+                        instance,
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    } => {
+                        self.follow_me_merged_around_face_in_instance(
+                            instance,
+                            sketch,
+                            region,
+                            path_object,
+                            path_face,
+                            stop_len,
+                        )?;
+                    }
+                    FollowMeFaceAlongEdgesInInstance {
+                        instance,
+                        profile_object,
+                        profile_face,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                    } => {
+                        self.follow_me_face_along_edges_in_instance(
+                            instance,
+                            profile_object,
+                            profile_face,
+                            path_sketch,
+                            path_edges,
+                            stop_len,
+                        )?;
+                    }
+                    FollowMeFaceAroundFaceInInstance {
+                        instance,
+                        profile_object,
+                        profile_face,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    } => {
+                        self.follow_me_face_around_face_in_instance(
+                            instance,
+                            profile_object,
+                            profile_face,
+                            path_object,
+                            path_face,
+                            stop_len,
+                        )?;
+                    }
+                    BooleanInComponent {
+                        component,
+                        op,
+                        a,
+                        b,
+                    } => {
+                        self.boolean_in_component(component, op, a, b)?;
+                    }
+                    SliceDefMember {
+                        instance,
+                        object,
+                        plane,
+                    } => {
+                        self.slice_def_member(instance, object, &plane)?;
+                    }
+                    TransformDefMember {
+                        instance,
+                        object,
+                        affine,
+                    } => {
+                        self.transform_def_member(instance, object, &affine)?;
+                    }
+                    TransformDefSketch {
+                        instance,
+                        sketch,
+                        affine,
+                    } => {
+                        self.transform_def_sketch(instance, sketch, &affine)?;
+                    }
+                    TransformDefSketchIsland {
+                        instance,
+                        sketch,
+                        island,
+                        affine,
+                    } => {
+                        self.transform_def_sketch_island(instance, sketch, island, &affine)?;
+                    }
+                    TransformDefSelection {
+                        instance,
+                        objects,
+                        sketches,
+                        island_sketches,
+                        islands,
+                        affine,
+                    } => {
+                        self.transform_def_selection(
+                            instance,
+                            &objects,
+                            &sketches,
+                            &island_sketches,
+                            &islands,
+                            &affine,
+                        )?;
+                    }
                 }
             }
             Ok(())
@@ -5010,6 +6367,8 @@ impl Scene {
         // stale id can't keep a fresh object out of inference.
         self.hidden_objects.clear();
         self.hidden_instances.clear();
+        self.active_inference_instance = None;
+        self.active_inference_sketches.clear();
 
         // Register every visible world object.
         for id in self.doc.visible_object_ids() {
@@ -7695,6 +9054,219 @@ mod tests {
         assert_eq!(scene.instance_pose(inst2).unwrap(), affine.to_vec());
     }
 
+    /// `component_member_objects` must filter out a member whose birth was
+    /// undone — `Document::def_members` deliberately keeps the id listed
+    /// (Group parity, simpler undo bookkeeping; see the kernel doc comment),
+    /// so the wasm-api getter is the one place that must turn that into "not
+    /// live" before a renderer ever hands the id to `object_mesh` (which
+    /// errors for a hidden object rather than quietly drawing nothing).
+    #[test]
+    fn component_member_objects_excludes_a_member_whose_birth_was_undone() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o1]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+
+        // Give the definition a second member via a def-owned sketch, so
+        // deleting the first still leaves a live member behind
+        // (`delete_def_member` refuses to delete a definition's last one).
+        let def_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        let mut def_region = None;
+        for (ax, ay, bx, by) in [
+            (3.0, 0.0, 4.0, 0.0),
+            (4.0, 0.0, 4.0, 1.0),
+            (4.0, 1.0, 3.0, 1.0),
+            (3.0, 1.0, 3.0, 0.0),
+        ] {
+            let report = scene
+                .sketch_add_segment(def_sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+            if let Some(&r) = report.inner.regions_created.first() {
+                def_region = Some(r.data().as_ffi());
+            }
+        }
+        let o2 = scene
+            .extrude_region_in_instance(inst, def_sketch, def_region.expect("closed region"), 1.0)
+            .unwrap();
+        assert_eq!(
+            scene.component_member_objects(comp).len(),
+            2,
+            "both members live before the delete"
+        );
+
+        scene.delete_def_member(comp, o1).unwrap();
+        assert_eq!(
+            scene.component_member_objects(comp),
+            vec![o2],
+            "the deleted member's id must not reach a renderer"
+        );
+
+        // Undo restores it — the tombstone-not-erase contract.
+        scene.scene_undo().unwrap();
+        let members = scene.component_member_objects(comp);
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&o1));
+    }
+
+    /// `component_member_sketches` mirrors the same filter for sketches:
+    /// undoing the gesture that created a fresh def-owned sketch hides it
+    /// (`Document::def_member_sketches` keeps its id listed regardless, same
+    /// as the object case above) — the getter used to render/pick a
+    /// definition's sketches must not hand back an id that no longer
+    /// round-trips through the document.
+    #[test]
+    fn component_member_sketches_excludes_a_sketch_whose_creation_was_undone() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+
+        let def_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene.sketch_begin_gesture(def_sketch).unwrap();
+        for (ax, ay, bx, by) in [
+            (2.0, 2.0, 2.5, 2.0),
+            (2.5, 2.0, 2.5, 2.5),
+            (2.5, 2.5, 2.0, 2.5),
+            (2.0, 2.5, 2.0, 2.0),
+        ] {
+            scene
+                .sketch_add_segment(def_sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_gesture(def_sketch).unwrap();
+        assert_eq!(scene.component_member_sketches(comp), vec![def_sketch]);
+
+        // Undo the gesture: it created the sketch, so undoing hides it.
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            scene.component_member_sketches(comp),
+            Vec::<u64>::new(),
+            "an undone def sketch must not reach a renderer or a pick"
+        );
+    }
+
+    #[test]
+    fn active_component_context_registers_definition_sketch_inference_at_its_pose_only() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .transform_instance(
+                inst,
+                &[
+                    1.0, 0.0, 0.0, 5.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.0,
+                ],
+            )
+            .unwrap();
+        scene.set_active_inference_instance(Some(inst));
+        // Direct sketch mutation happens after the instance is posed. This
+        // exercises the mutation-time refresh path, before a gesture commit
+        // can reconcile the scene.
+        scene
+            .sketch_add_segment(sketch, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0)
+            .unwrap();
+
+        let posed = scene
+            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .unwrap()
+            .expect("posed definition endpoint must snap");
+        assert_eq!(posed.kind(), "endpoint");
+        assert!((posed.x() - 7.0).abs() < kernel::tol::POINT_MERGE);
+
+        scene.set_hidden(&[], &[inst]);
+        let hidden = scene
+            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .unwrap();
+        assert_ne!(
+            hidden.as_ref().map(|s| s.kind()).as_deref(),
+            Some("endpoint"),
+            "hiding the active instance removes its posed sketch inference"
+        );
+        scene.set_hidden(&[], &[]);
+        let shown = scene
+            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .unwrap()
+            .expect("showing the active instance restores its posed sketch inference");
+        assert_eq!(shown.kind(), "endpoint");
+
+        scene.set_active_inference_instance(None);
+        let after_exit = scene
+            .snap(7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .unwrap();
+        assert_ne!(
+            after_exit.as_ref().map(|s| s.kind()).as_deref(),
+            Some("endpoint"),
+            "exiting the context removes the posed definition endpoint"
+        );
+        let local = scene
+            .snap(2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .unwrap();
+        assert_ne!(
+            local.as_ref().map(|s| s.kind()).as_deref(),
+            Some("endpoint"),
+            "definition-local coordinates never leak into world inference"
+        );
+    }
+
+    #[test]
+    fn active_component_context_registers_mirrored_definition_sketch_inference() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(sketch, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0)
+            .unwrap();
+        scene
+            .transform_instance(
+                inst,
+                &[
+                    -1.0, 0.0, 0.0, 5.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.0,
+                ],
+            )
+            .unwrap();
+        scene.set_active_inference_instance(Some(inst));
+
+        let mirrored = scene
+            .snap(3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None)
+            .unwrap()
+            .expect("mirrored definition endpoint must snap");
+        assert_eq!(mirrored.kind(), "endpoint");
+        assert!((mirrored.x() - 3.0).abs() < kernel::tol::POINT_MERGE);
+    }
+
+    #[test]
+    fn loading_a_document_clears_active_component_inference_context() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        scene.set_active_inference_instance(Some(inst));
+
+        let replacement = Scene::new().save();
+        scene.load_core(&replacement).unwrap();
+
+        assert_eq!(scene.active_inference_instance, None);
+        assert!(scene.active_inference_sketches.is_empty());
+    }
+
     /// Transform composes into the pose; explode bakes to a world object and
     /// undoes; make_unique detaches a sibling — all across the FFI.
     #[test]
@@ -7732,6 +9304,42 @@ mod tests {
         assert_eq!(scene.instance_def(inst), Some(comp));
     }
 
+    /// `sketch_edge_endpoints` promises WORLD endpoints, but a def-owned
+    /// sketch's edges are DEFINITION-local — a raw answer would hand a
+    /// Tape-Measure-style caller coordinates in the wrong frame (the same bug
+    /// class as an unguarded follow-me path sketch). It must refuse exactly
+    /// like `edge_endpoints` refuses a definition-member object.
+    #[test]
+    fn sketch_edge_endpoints_refuses_a_def_owned_sketch() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+
+        let def_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(def_sketch, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+        let edge = scene
+            .doc
+            .sketch(sketch_id(def_sketch))
+            .unwrap()
+            .edges()
+            .keys()
+            .next()
+            .unwrap()
+            .data()
+            .as_ffi();
+
+        assert_eq!(
+            scene.sketch_edge_endpoints(def_sketch, edge),
+            None,
+            "a def-owned sketch edge must not answer as world endpoints"
+        );
+    }
+
     /// Editing inside a component (push/pull a shared member face) succeeds via
     /// `push_pull_in_component` and is one undoable document action; both
     /// instances keep referencing the definition.
@@ -7766,7 +9374,7 @@ mod tests {
                 .unwrap()
         };
         scene
-            .push_pull_in_component(comp, member, top, 1.0)
+            .push_pull_in_component(inst, member, top, 1.0)
             .unwrap();
 
         // One document action for the edit; undo restores it, both instances live.
@@ -7774,6 +9382,940 @@ mod tests {
         assert_eq!(scene.instance_ids().len(), 2);
         assert_eq!(scene.instance_def(inst), Some(comp));
         assert_eq!(scene.instance_def(inst2), Some(comp));
+    }
+
+    #[test]
+    fn component_push_pull_automatically_routes_an_overshoot_to_through_cut() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+        let loop_pts = [
+            0.2, 0.2, 1.0, //
+            0.8, 0.2, 1.0, //
+            0.8, 0.8, 1.0, //
+            0.2, 0.8, 1.0,
+        ];
+        let sub = scene
+            .split_face_inner_in_instance(inst, member, top, &loop_pts)
+            .unwrap();
+        let before_cut = scene.state_hash();
+        let report = scene
+            .push_pull_in_component(inst, member, sub, -1.5)
+            .expect("overshoot becomes a subtracting hole");
+        assert!(report.is_through());
+        assert_eq!(report.result_objects().len(), 1);
+        assert!(!scene.component_member_objects(comp).contains(&member));
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before_cut);
+        scene.scene_redo().unwrap();
+        assert_eq!(
+            scene.component_member_objects(comp),
+            report.result_objects()
+        );
+    }
+
+    /// The face of `obj` whose outward normal most nearly matches `dir` —
+    /// the wasm-level counterpart of `component_edit_k2_specs.rs`'s
+    /// `face_matching`.
+    fn wasm_face_matching(scene: &Scene, obj: u64, dir: kernel::Vec3) -> u64 {
+        let object = scene.doc.object(object_id(obj)).unwrap();
+        object
+            .faces()
+            .iter()
+            .max_by(|(_, a), (_, b)| {
+                a.plane
+                    .normal()
+                    .dot(dir)
+                    .partial_cmp(&b.plane.normal().dot(dir))
+                    .unwrap()
+            })
+            .map(|(fid, _)| fid.data().as_ffi())
+            .unwrap()
+    }
+
+    /// A full component-edit-parity.md **phase K2** session — every new
+    /// surface's wasm export exercised at least once (Follow Me's three
+    /// in-instance variants, `boolean_in_component`, `slice_def_member`,
+    /// `transform_def_member`), mixed with undo/redo — records and replays
+    /// to the exact same state. The real risk this pins down is the
+    /// `RecordedCall` enum/replay-match wiring itself (the "enum trap"): the
+    /// underlying kernel surfaces already carry their own executable specs
+    /// in `component_edit_k2_specs.rs`, so the shapes here are copied
+    /// verbatim from proven-safe specs there rather than re-derived.
+    #[test]
+    fn component_edit_k2_session_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        // A component with member A (1x1x1 at the origin).
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[a]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+
+        // Member B, offset in x, through the SAME instance
+        // (`extrude_region_in_instance`) — general position for the boolean.
+        let gb = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        let mut rb = None;
+        for (ax, ay, bx, by) in [
+            (2.0, 0.0, 3.0, 0.0),
+            (3.0, 0.0, 3.0, 1.0),
+            (3.0, 1.0, 2.0, 1.0),
+            (2.0, 1.0, 2.0, 0.0),
+        ] {
+            let report = scene
+                .sketch_add_segment(gb, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+            if let Some(&rr) = report.inner.regions_created.first() {
+                rb = Some(rr.data().as_ffi());
+            }
+        }
+        let b = scene
+            .extrude_region_in_instance(inst, gb, rb.unwrap(), 1.0)
+            .unwrap();
+
+        // `boolean_in_component`: union A and B into one member.
+        let unioned = scene.boolean_in_component(comp, 0, a, b).unwrap();
+
+        // `slice_def_member`: cut it at x = 2.5 (a world-space plane through
+        // the instance's — here identity — pose).
+        let pieces = scene
+            .slice_def_member(inst, unioned, &[2.5, 0.5, 0.0, 1.0, 0.0, 0.0])
+            .unwrap();
+        let piece = pieces[0];
+
+        // `transform_def_member`: bake a small world-space translation into it.
+        scene
+            .transform_def_member(
+                inst,
+                piece,
+                &[
+                    1.0, 0.0, 0.0, 0.1, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.2,
+                ],
+            )
+            .unwrap();
+
+        // Member C, a 4x2x1 box far away, dedicated to the Follow Me family
+        // (the `component_edit_k2_specs.rs` `boxed_component` shape, offset
+        // +10 in x).
+        let gc = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        let mut rc = None;
+        for (ax, ay, bx, by) in [
+            (10.0, 0.0, 14.0, 0.0),
+            (14.0, 0.0, 14.0, 2.0),
+            (14.0, 2.0, 10.0, 2.0),
+            (10.0, 2.0, 10.0, 0.0),
+        ] {
+            let report = scene
+                .sketch_add_segment(gc, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+            if let Some(&rr) = report.inner.regions_created.first() {
+                rc = Some(rr.data().as_ffi());
+            }
+        }
+        let c = scene
+            .extrude_region_in_instance(inst, gc, rc.unwrap(), 1.0)
+            .unwrap();
+
+        // `follow_me_along_edges_in_instance`: a small square on a vertical
+        // plane, swept along an L-shaped path — both def-owned sketches,
+        // fully disconnected from every other member (the
+        // `follow_me_commits_like_extrusion...` shape).
+        let path_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 20.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(path_sketch, 20.0, 0.0, 0.0, 22.0, 0.0, 0.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(path_sketch, 22.0, 0.0, 0.0, 22.0, 2.0, 0.0)
+            .unwrap();
+        let path_edges: Vec<u64> = scene
+            .doc
+            .sketch(sketch_id(path_sketch))
+            .unwrap()
+            .edges()
+            .keys()
+            .map(|e| e.data().as_ffi())
+            .collect();
+        let profile_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 20.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+        let mut profile_region = None;
+        for (ay, az, by, bz) in [
+            (-0.3, -0.3, 0.3, -0.3),
+            (0.3, -0.3, 0.3, 0.3),
+            (0.3, 0.3, -0.3, 0.3),
+            (-0.3, 0.3, -0.3, -0.3),
+        ] {
+            let report = scene
+                .sketch_add_segment(profile_sketch, 20.0, ay, az, 20.0, by, bz)
+                .unwrap();
+            if let Some(&rr) = report.inner.regions_created.first() {
+                profile_region = Some(rr.data().as_ffi());
+            }
+        }
+        let d = scene
+            .follow_me_along_edges_in_instance(
+                inst,
+                profile_sketch,
+                profile_region.unwrap(),
+                path_sketch,
+                path_edges,
+                None,
+            )
+            .unwrap();
+
+        // `follow_me_around_face_in_instance`: a small profile straddling
+        // C's top rim, swept around it — C is untouched (non-merging).
+        let top_c = wasm_face_matching(&scene, c, kernel::Vec3::new(0.0, 0.0, 1.0));
+        let molding_profile = |scene: &mut Scene, x: f64| -> u64 {
+            let sk = scene
+                .begin_sketch_on_plane_in_instance(inst, x, 0.0, 0.0, 1.0, 0.0, 0.0)
+                .unwrap();
+            let mut region = None;
+            for (ay, az, by, bz) in [
+                (-0.3, 0.9, -0.05, 0.9),
+                (-0.05, 0.9, -0.05, 1.15),
+                (-0.05, 1.15, -0.3, 1.15),
+                (-0.3, 1.15, -0.3, 0.9),
+            ] {
+                let report = scene.sketch_add_segment(sk, x, ay, az, x, by, bz).unwrap();
+                if let Some(&rr) = report.inner.regions_created.first() {
+                    region = Some(rr.data().as_ffi());
+                }
+            }
+            let _ = region;
+            sk
+        };
+        let ps1 = molding_profile(&mut scene, 10.5);
+        let pr1 = scene
+            .doc
+            .sketch(sketch_id(ps1))
+            .unwrap()
+            .regions()
+            .keys()
+            .next()
+            .unwrap()
+            .data()
+            .as_ffi();
+        let e = scene
+            .follow_me_around_face_in_instance(inst, ps1, pr1, c, top_c, None)
+            .unwrap();
+
+        // `follow_me_merged_around_face_in_instance`: the SAME rim shape,
+        // this time consuming C into the merged result (the
+        // `follow_me_merged_in_instance_carves_the_path_member_in_one_step`
+        // shape).
+        let ps2 = molding_profile(&mut scene, 12.0);
+        let pr2 = scene
+            .doc
+            .sketch(sketch_id(ps2))
+            .unwrap()
+            .regions()
+            .keys()
+            .next()
+            .unwrap()
+            .data()
+            .as_ffi();
+        let merged = scene
+            .follow_me_merged_around_face_in_instance(inst, ps2, pr2, c, top_c, None)
+            .unwrap();
+
+        // `follow_me_face_along_edges_in_instance`: a face of D as the
+        // profile, swept along a fresh path sketch — non-merging.
+        let d_side = wasm_face_matching(&scene, d, kernel::Vec3::new(1.0, 0.0, 0.0));
+        let path2 = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(path2, 30.0, 0.0, 0.0, 32.0, 0.0, 0.0)
+            .unwrap();
+        let path2_edges: Vec<u64> = scene
+            .doc
+            .sketch(sketch_id(path2))
+            .unwrap()
+            .edges()
+            .keys()
+            .map(|e| e.data().as_ffi())
+            .collect();
+        let g = scene
+            .follow_me_face_along_edges_in_instance(inst, d, d_side, path2, path2_edges, None)
+            .unwrap();
+
+        // `follow_me_face_around_face_in_instance`: a face of G swept around
+        // a face of `merged` — non-merging (different objects).
+        let g_face = wasm_face_matching(&scene, g, kernel::Vec3::new(0.0, 0.0, 1.0));
+        let merged_face = wasm_face_matching(&scene, merged, kernel::Vec3::new(0.0, 0.0, -1.0));
+        let _h = scene
+            .follow_me_face_around_face_in_instance(inst, g, g_face, merged, merged_face, None)
+            .unwrap();
+
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+
+        // A definition-owned sketch transform records as one compound call,
+        // exercising the replay arm that keeps object/sketch selections
+        // atomic.
+        let ds = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(ds, 6.0, 0.0, 0.0, 6.5, 0.0, 0.0)
+            .unwrap();
+        let move_sketch = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.5, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        scene
+            .transform_def_selection(inst, &[], &[ds], &[], &[], &move_sketch)
+            .unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying a full K2 session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save());
+        let _ = e;
+    }
+
+    /// `split_face_inner_in_instance` maps a WORLD-space loop through the
+    /// instance's pose⁻¹ before imprinting — proven with a genuinely
+    /// non-identity (translated) pose, unlike `component_edit_k2_session_
+    /// records_and_replays`'s identity-posed instance, where local and world
+    /// coordinates coincide and a mapping bug would go unnoticed. The
+    /// imprinted sub-face's boundary (`face_boundary`, definition-local) must
+    /// equal the loop's LOCAL coordinates, not the world ones passed in.
+    #[test]
+    fn split_face_inner_in_instance_imprints_through_a_translated_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        // Re-place the ONLY instance at a translation so its pose is
+        // genuinely non-identity (make_component's own instance keeps the
+        // object's original, identity placement).
+        scene.delete_node(2, inst).unwrap();
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 2.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let inst = scene.place_instance(comp, &affine).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        // A small square strictly inside the top face, in WORLD coordinates
+        // (the translated instance's placement) — local coordinates would be
+        // (0.2,0.2)-(0.8,0.2)-(0.8,0.8)-(0.2,0.8) at z=1.
+        let world_loop = [
+            5.2, 2.2, 1.0, //
+            5.8, 2.2, 1.0, //
+            5.8, 2.8, 1.0, //
+            5.2, 2.8, 1.0,
+        ];
+        let sub_face = scene
+            .split_face_inner_in_instance(inst, member, top, &world_loop)
+            .unwrap();
+
+        // The imprinted sub-face's boundary is DEFINITION-local — it must
+        // match the loop mapped through pose⁻¹, not the world points given.
+        let boundary = scene.face_boundary(member, sub_face).unwrap();
+        assert_eq!(
+            boundary.len(),
+            12,
+            "a 4-point loop imprints a 4-vertex sub-face"
+        );
+        let mut xs: Vec<f64> = (0..4).map(|i| boundary[i * 3] as f64).collect();
+        let mut ys: Vec<f64> = (0..4).map(|i| boundary[i * 3 + 1] as f64).collect();
+        xs.sort_by(f64::total_cmp);
+        ys.sort_by(f64::total_cmp);
+        assert!((xs[0] - 0.2).abs() < 1e-6 && (xs[3] - 0.8).abs() < 1e-6);
+        assert!((ys[0] - 0.2).abs() < 1e-6 && (ys[3] - 0.8).abs() < 1e-6);
+
+        // Every instance of the definition sees the new sub-face at once.
+        assert_eq!(scene.instances_of(comp), vec![inst]);
+    }
+
+    /// Same imprint, through a ROTATED + uniformly-SCALED pose — a
+    /// translation-only pose leaves local axes parallel to world axes, which
+    /// would hide an inverse-transpose/scale mistake that only shows up once
+    /// the pose actually rotates or scales (the coverage gap the
+    /// `CurveClaimOffLoop` finding traced back to this exact test family
+    /// using only translation/identity poses).
+    #[test]
+    fn split_face_inner_in_instance_imprints_through_a_rotated_and_scaled_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        let pose = kernel::Transform::rotation(
+            kernel::Vec3::new(0.0, 0.0, 1.0),
+            std::f64::consts::FRAC_PI_2,
+        )
+        .unwrap()
+        .then(&kernel::Transform::scale(kernel::Vec3::new(2.0, 2.0, 2.0)))
+        .then(&kernel::Transform::translation(kernel::Vec3::new(
+            5.0, 2.0, 0.0,
+        )));
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        // The same local square as the translated-pose sibling spec, mapped
+        // to WORLD through this rotated+scaled pose — exactly what a real
+        // draw tool sends.
+        let local_corners = [
+            Point3::new(0.2, 0.2, 1.0),
+            Point3::new(0.8, 0.2, 1.0),
+            Point3::new(0.8, 0.8, 1.0),
+            Point3::new(0.2, 0.8, 1.0),
+        ];
+        let world_loop: Vec<f64> = local_corners
+            .iter()
+            .flat_map(|&p| {
+                let w = pose.apply_point(p);
+                [w.x, w.y, w.z]
+            })
+            .collect();
+
+        let sub_face = scene
+            .split_face_inner_in_instance(inst, member, top, &world_loop)
+            .unwrap();
+
+        let boundary = scene.face_boundary(member, sub_face).unwrap();
+        assert_eq!(boundary.len(), 12);
+        let mut xs: Vec<f64> = (0..4).map(|i| boundary[i * 3] as f64).collect();
+        let mut ys: Vec<f64> = (0..4).map(|i| boundary[i * 3 + 1] as f64).collect();
+        xs.sort_by(f64::total_cmp);
+        ys.sort_by(f64::total_cmp);
+        assert!((xs[0] - 0.2).abs() < 1e-6 && (xs[3] - 0.8).abs() < 1e-6);
+        assert!((ys[0] - 0.2).abs() < 1e-6 && (ys[3] - 0.8).abs() < 1e-6);
+    }
+
+    /// Same imprint, through a MIRRORED pose (negative determinant, uniform
+    /// |scale| = 1) — the design doc's own called-out highest-scrutiny case
+    /// ("pose⁻¹ correctness is most visible on mirrors").
+    #[test]
+    fn split_face_inner_in_instance_imprints_through_a_mirrored_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        let pose = kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(7.0, 4.0, 0.0)),
+        );
+        assert!(pose.determinant() < 0.0, "sanity: this pose mirrors");
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        let local_corners = [
+            Point3::new(0.2, 0.2, 1.0),
+            Point3::new(0.8, 0.2, 1.0),
+            Point3::new(0.8, 0.8, 1.0),
+            Point3::new(0.2, 0.8, 1.0),
+        ];
+        let world_loop: Vec<f64> = local_corners
+            .iter()
+            .flat_map(|&p| {
+                let w = pose.apply_point(p);
+                [w.x, w.y, w.z]
+            })
+            .collect();
+
+        let sub_face = scene
+            .split_face_inner_in_instance(inst, member, top, &world_loop)
+            .unwrap();
+
+        let boundary = scene.face_boundary(member, sub_face).unwrap();
+        assert_eq!(boundary.len(), 12);
+        let mut xs: Vec<f64> = (0..4).map(|i| boundary[i * 3] as f64).collect();
+        let mut ys: Vec<f64> = (0..4).map(|i| boundary[i * 3 + 1] as f64).collect();
+        xs.sort_by(f64::total_cmp);
+        ys.sort_by(f64::total_cmp);
+        assert!((xs[0] - 0.2).abs() < 1e-6 && (xs[3] - 0.8).abs() < 1e-6);
+        assert!((ys[0] - 0.2).abs() < 1e-6 && (ys[3] - 0.8).abs() < 1e-6);
+    }
+
+    /// `split_face_inner_with_curve_in_instance` — the curve-carrying sibling
+    /// used by CircleTool's face mode inside a component. Only checks the
+    /// instance-aware plumbing (the call succeeds and produces a face); the
+    /// curve-identity-enables-a-cylinder-wall semantics themselves are
+    /// already proven world-side.
+    #[test]
+    fn split_face_inner_with_curve_in_instance_succeeds() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        // An octagon standing in for a circle of radius 0.3 around (0.5,0.5,1)
+        // — identity-posed instance, so world coordinates are local ones.
+        let mut world_loop = Vec::new();
+        for i in 0..8 {
+            let theta = std::f64::consts::TAU * (i as f64) / 8.0;
+            world_loop.push(0.5 + 0.3 * theta.cos());
+            world_loop.push(0.5 + 0.3 * theta.sin());
+            world_loop.push(1.0);
+        }
+        let sub_face = scene
+            .split_face_inner_with_curve_in_instance(
+                inst,
+                member,
+                top,
+                &world_loop,
+                &[0.5, 0.5, 1.0],
+                0.3,
+            )
+            .unwrap();
+        assert!(scene.face_boundary(member, sub_face).unwrap().len() >= 24);
+    }
+
+    /// The exact `CurveClaimOffLoop` regression this finding traced: the
+    /// identity-posed sibling above coincidentally makes world == local, so
+    /// it cannot catch a curve center/radius that isn't mapped through the
+    /// instance's pose. Here the pose genuinely rotates and uniformly
+    /// scales — before the fix, this failed outright every time with
+    /// `CurveClaimOffLoop` (the curve claim never matching the mapped
+    /// loop); after it, `center` maps through `pose⁻¹` and `radius` divides
+    /// by the pose's uniform scale, exactly like `loop_pts`/the loop-only
+    /// sibling spec.
+    #[test]
+    fn split_face_inner_with_curve_in_instance_maps_the_circle_through_a_rotated_and_scaled_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        let pose = kernel::Transform::rotation(
+            kernel::Vec3::new(0.0, 0.0, 1.0),
+            std::f64::consts::FRAC_PI_2,
+        )
+        .unwrap()
+        .then(&kernel::Transform::scale(kernel::Vec3::new(2.0, 2.0, 2.0)))
+        .then(&kernel::Transform::translation(kernel::Vec3::new(
+            5.0, 2.0, 0.0,
+        )));
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        let local_center = Point3::new(0.5, 0.5, 1.0);
+        let local_radius = 0.3_f64;
+        let mut world_loop = Vec::new();
+        for i in 0..8 {
+            let theta = std::f64::consts::TAU * (i as f64) / 8.0;
+            let local_pt = Point3::new(
+                local_center.x + local_radius * theta.cos(),
+                local_center.y + local_radius * theta.sin(),
+                1.0,
+            );
+            let w = pose.apply_point(local_pt);
+            world_loop.extend([w.x, w.y, w.z]);
+        }
+        let world_center = pose.apply_point(local_center);
+        let world_radius = local_radius * pose.similarity_scale().unwrap();
+
+        let sub_face = scene
+            .split_face_inner_with_curve_in_instance(
+                inst,
+                member,
+                top,
+                &world_loop,
+                &[world_center.x, world_center.y, world_center.z],
+                world_radius,
+            )
+            .expect(
+                "center mapped through pose⁻¹ and radius through the uniform scale must match \
+                 the mapped loop",
+            );
+        assert!(scene.face_boundary(member, sub_face).unwrap().len() >= 24);
+    }
+
+    /// Same, through a MIRRORED pose (negative determinant, uniform
+    /// |scale| = 1) — the design doc's own called-out highest-scrutiny case.
+    #[test]
+    fn split_face_inner_with_curve_in_instance_maps_the_circle_through_a_mirrored_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        let pose = kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(7.0, 4.0, 0.0)),
+        );
+        assert!(pose.determinant() < 0.0, "sanity: this pose mirrors");
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        let local_center = Point3::new(0.5, 0.5, 1.0);
+        let local_radius = 0.3_f64;
+        let mut world_loop = Vec::new();
+        for i in 0..8 {
+            let theta = std::f64::consts::TAU * (i as f64) / 8.0;
+            let local_pt = Point3::new(
+                local_center.x + local_radius * theta.cos(),
+                local_center.y + local_radius * theta.sin(),
+                1.0,
+            );
+            let w = pose.apply_point(local_pt);
+            world_loop.extend([w.x, w.y, w.z]);
+        }
+        let world_center = pose.apply_point(local_center);
+        let world_radius = local_radius * pose.similarity_scale().unwrap();
+
+        let sub_face = scene
+            .split_face_inner_with_curve_in_instance(
+                inst,
+                member,
+                top,
+                &world_loop,
+                &[world_center.x, world_center.y, world_center.z],
+                world_radius,
+            )
+            .expect("a mirrored (still uniform-scale) pose must map the curve claim, not refuse");
+        assert!(scene.face_boundary(member, sub_face).unwrap().len() >= 24);
+    }
+
+    /// A NON-uniformly-scaled instance has no single local-frame radius for
+    /// a world-space scalar length: unlike a point (which always maps
+    /// unambiguously under any invertible affine — the loop-only sibling
+    /// `split_face_inner_in_instance` never needs to refuse), the curve
+    /// claim's `radius` must refuse `AmbiguousInstanceScale` rather than
+    /// guess an axis, matching `Document::map_world_distance_through_pose`'s
+    /// rule for every other typed world-space scalar.
+    #[test]
+    fn split_face_inner_with_curve_in_instance_refuses_a_non_uniformly_scaled_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        // Non-uniform: ×2 in X, ×1 in Y/Z.
+        let pose = kernel::Transform::scale(kernel::Vec3::new(2.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(5.0, 2.0, 0.0)),
+        );
+        assert!(
+            pose.similarity_scale().is_none(),
+            "sanity: this pose is non-uniform"
+        );
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        let world_loop = [
+            pose.apply_point(Point3::new(0.2, 0.2, 1.0)),
+            pose.apply_point(Point3::new(0.8, 0.2, 1.0)),
+            pose.apply_point(Point3::new(0.8, 0.8, 1.0)),
+            pose.apply_point(Point3::new(0.2, 0.8, 1.0)),
+        ]
+        .iter()
+        .flat_map(|p| [p.x, p.y, p.z])
+        .collect::<Vec<f64>>();
+
+        // The loop-only surface still succeeds — a point always maps
+        // unambiguously, regardless of scale uniformity.
+        assert!(
+            scene
+                .split_face_inner_in_instance(inst, member, top, &world_loop)
+                .is_ok(),
+            "a plain loop imprint never needs the scale to be uniform"
+        );
+
+        // But the curve-carrying surface must refuse: its radius has no
+        // single local-frame equivalent under a non-uniform scale.
+        let world_center = pose.apply_point(Point3::new(0.5, 0.5, 1.0));
+        let err = scene
+            .split_face_inner_with_curve_in_instance(
+                inst,
+                member,
+                top,
+                &world_loop,
+                &[world_center.x, world_center.y, world_center.z],
+                0.3,
+            )
+            .expect_err("a non-uniform scale must refuse the curve claim, not guess an axis");
+        assert!(
+            format!("{err:?}").contains("AmbiguousInstanceScale"),
+            "got {err:?}"
+        );
+    }
+
+    /// Delta-review fix on component-edit-parity.md phase A2:
+    /// `push_pull_in_component`'s `distance` is a WORLD-space length — the
+    /// ghost preview sweeps the world drag distance — so it must map
+    /// through the instance's pose exactly like
+    /// `extrude_region_in_instance`'s `distance`, not commit raw (the two
+    /// previously disagreed on a scaled instance: the ghost showed one
+    /// height, the commit landed another). A uniformly 2x-scaled instance:
+    /// pushing the top face by a WORLD 4.0 must move the DEFINITION-local
+    /// face by 2.0 (world effect stays 4.0), not 4.0 raw. This assertion
+    /// fails against the pre-fix behavior (local face lands at z=5.0).
+    #[test]
+    fn push_pull_in_component_maps_world_distance_through_a_uniformly_scaled_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap(); // 1x1x1 box, top face at local z=1
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        // Uniform 2x scale — isolates the scale mapping without a rotation.
+        let pose = kernel::Transform::scale(kernel::Vec3::new(2.0, 2.0, 2.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(5.0, 2.0, 0.0)),
+        );
+        assert!(
+            pose.similarity_scale().is_some(),
+            "sanity: this pose IS uniform"
+        );
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        scene
+            .push_pull_in_component(inst, member, top, 4.0)
+            .expect("a uniformly-scaled instance must map, not refuse");
+
+        let object = scene.doc.object(object_id(member)).unwrap();
+        let max_z = object
+            .vertices()
+            .values()
+            .map(|v| v.position.z)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            (max_z - 3.0).abs() < 1e-9,
+            "world distance 4.0 through a 2x-scaled pose must move the definition-local \
+             face by 2.0 (to local z=3.0, from the box's top at z=1.0) — got local z={max_z}"
+        );
+    }
+
+    /// The typed refusal counterpart: a non-uniformly-scaled instance has no
+    /// single local-frame equivalent for a world-space scalar distance —
+    /// same rule `extrude_region_in_instance` and every other `_in_instance`
+    /// typed scalar already enforce
+    /// (`Document::map_world_distance_through_pose`, reused here through
+    /// `Document::map_instance_world_distance`).
+    #[test]
+    fn push_pull_in_component_refuses_a_non_uniformly_scaled_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        // Non-uniform: ×2 in X, ×1 in Y/Z.
+        let pose = kernel::Transform::scale(kernel::Vec3::new(2.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(5.0, 2.0, 0.0)),
+        );
+        assert!(
+            pose.similarity_scale().is_none(),
+            "sanity: this pose is non-uniform"
+        );
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+        let top = wasm_face_matching(&scene, member, kernel::Vec3::new(0.0, 0.0, 1.0));
+
+        // `PushPullJs` (the `Ok` payload) has no `Debug` impl, so
+        // `expect_err`/`unwrap_err` (which require `T: Debug` to format a
+        // panic message on the non-error branch) don't fit — match instead.
+        let err = match scene.push_pull_in_component(inst, member, top, 4.0) {
+            Err(e) => e,
+            Ok(_) => panic!("a non-uniform scale must refuse rather than guess an axis"),
+        };
+        assert!(
+            format!("{err:?}").contains("AmbiguousInstanceScale"),
+            "got {err:?}"
+        );
+    }
+
+    /// `pick_sketch_region` walks only `Document::sketch_ids()` — a
+    /// definition-owned sketch's region is invisible to it no matter how
+    /// squarely the ray lands, exactly like `sketch_edge_endpoints` refusing
+    /// a def-owned sketch (K1's boundary). `pick_sketch_region_in_instance`
+    /// exists precisely because of this: without it, a plane-mode region
+    /// drawn inside a component's own definition could never be found by a
+    /// real click for push/pull's region-extrude or Follow Me's sketch-
+    /// region profile pick.
+    #[test]
+    fn pick_sketch_region_is_blind_to_a_def_owned_sketch_but_the_in_instance_sibling_finds_it() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+
+        let def_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        for (ax, ay, bx, by) in [
+            (2.0, 2.0, 2.5, 2.0),
+            (2.5, 2.0, 2.5, 2.5),
+            (2.5, 2.5, 2.0, 2.5),
+            (2.0, 2.5, 2.0, 2.0),
+        ] {
+            scene
+                .sketch_add_segment(def_sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+
+        // Straight down through the region's centre — identity-posed
+        // instance, so world and local coordinates coincide.
+        assert!(
+            scene
+                .pick_sketch_region(2.25, 2.25, 5.0, 0.0, 0.0, -1.0)
+                .is_none(),
+            "pick_sketch_region must not see a definition-owned region"
+        );
+        let found = scene
+            .pick_sketch_region_in_instance(inst, 2.25, 2.25, 5.0, 0.0, 0.0, -1.0)
+            .expect("pick_sketch_region_in_instance must find the def-owned region");
+        assert_eq!(found.sketch(), def_sketch);
+
+        // A stale/unknown instance is a miss, never a throw.
+        assert!(
+            scene
+                .pick_sketch_region_in_instance(999_999, 2.25, 2.25, 5.0, 0.0, 0.0, -1.0)
+                .is_none()
+        );
+    }
+
+    /// Same pick, through a genuinely non-identity (translated) instance
+    /// pose — proves the ray is actually mapped through pose⁻¹, not just
+    /// coincidentally correct under an identity placement.
+    #[test]
+    fn pick_sketch_region_in_instance_maps_the_ray_through_a_translated_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 2.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let inst = scene.place_instance(comp, &affine).unwrap();
+
+        // A def-owned sketch region at LOCAL (0.2,0.2)-(0.8,0.8) — WORLD
+        // (5.2,2.2)-(5.8,2.8) through the translated pose.
+        let def_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        for (ax, ay, bx, by) in [
+            (0.2, 0.2, 0.8, 0.2),
+            (0.8, 0.2, 0.8, 0.8),
+            (0.8, 0.8, 0.2, 0.8),
+            (0.2, 0.8, 0.2, 0.2),
+        ] {
+            scene
+                .sketch_add_segment(def_sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+
+        // A ray straight down through the region's WORLD position must find
+        // it; the SAME ray through the region's LOCAL (unmapped) position
+        // must miss — proof the pose is actually applied, not skipped.
+        let found = scene
+            .pick_sketch_region_in_instance(inst, 5.5, 2.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("world ray through the posed region must hit");
+        assert_eq!(found.sketch(), def_sketch);
+        assert!(
+            scene
+                .pick_sketch_region_in_instance(inst, 0.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+                .is_none(),
+            "the region's LOCAL position is not where it sits in WORLD space"
+        );
+    }
+
+    /// Same pick, through a MIRRORED pose (negative determinant) — closes
+    /// the coverage gap this finding traced: every prior `_in_instance` ray/
+    /// point test used only translation/identity poses, the same class of
+    /// gap that let the curve-claim mapping bug go unnoticed.
+    #[test]
+    fn pick_sketch_region_in_instance_maps_the_ray_through_a_mirrored_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene.delete_node(2, inst).unwrap();
+
+        let pose = kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(7.0, 4.0, 0.0)),
+        );
+        assert!(pose.determinant() < 0.0, "sanity: this pose mirrors");
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+
+        let def_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        for (ax, ay, bx, by) in [
+            (0.2, 0.2, 0.8, 0.2),
+            (0.8, 0.2, 0.8, 0.8),
+            (0.8, 0.8, 0.2, 0.8),
+            (0.2, 0.8, 0.2, 0.2),
+        ] {
+            scene
+                .sketch_add_segment(def_sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+
+        let world_center = pose.apply_point(Point3::new(0.5, 0.5, 0.0));
+        let found = scene
+            .pick_sketch_region_in_instance(
+                inst,
+                world_center.x,
+                world_center.y,
+                5.0,
+                0.0,
+                0.0,
+                -1.0,
+            )
+            .expect("world ray through the mirrored region must hit");
+        assert_eq!(found.sketch(), def_sketch);
+        assert!(
+            scene
+                .pick_sketch_region_in_instance(inst, 0.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+                .is_none(),
+            "the region's LOCAL position is not where it sits under the mirrored pose"
+        );
     }
 
     // -------------------------------------------------------------------

@@ -6,6 +6,43 @@
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
 
+/**
+ * The single editing-context channel (component-edit-parity.md phase A1):
+ * replaces the four ad-hoc duck-typed channels this interface used to grow
+ * one at a time (`setActiveContext` — object contexts only, null for an
+ * instance context — `setComponentContext`, `setContextScoped`,
+ * `setActiveGroup`). One value, pushed to every tool through `setEditContext`,
+ * that says exactly what is being edited right now:
+ *
+ * - `'top'` — nothing entered; ordinary top-level editing.
+ * - `'object'` — inside a plain Object's own direct-edit context (double-
+ *   clicked a solid that isn't grouped or instanced).
+ * - `'group'` — inside a Group's editing context.
+ * - `'instance'` — inside a component INSTANCE's shared DEFINITION: `id` is
+ *   the instance handle being viewed through (poses/pose⁻¹ math needs the
+ *   specific placement, not just which definition), `component` is its
+ *   definition (`instance_def(id)`) — the handle every `*_in_instance`/
+ *   `*_in_component` wasm surface keys new geometry to.
+ */
+export type EditContext =
+  | { kind: 'top' }
+  | { kind: 'object'; id: bigint }
+  | { kind: 'group'; id: bigint }
+  | { kind: 'instance'; id: bigint; component: bigint }
+
+/** Structural equality for `EditContext` — tools use this to decide whether
+ *  a `setEditContext` call is a genuine context change (which should abort
+ *  any in-progress gesture, mirroring the old `setActiveContext`'s
+ *  re-assertion guard) or a no-op re-push of the same context. */
+export function editContextEq(a: EditContext, b: EditContext): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'top') return true
+  if (a.kind === 'instance' && b.kind === 'instance') {
+    return a.id === b.id && a.component === b.component
+  }
+  return (a as { id: bigint }).id === (b as { id: bigint }).id
+}
+
 /** Snap result shape — mirrors SnapJs from wasm-api, but pure TypeScript */
 export interface Snap {
   x: number
@@ -82,6 +119,19 @@ export interface Tool {
   capturingInput?(): boolean
 
   /**
+   * (optional) True when the tool has an armed, in-progress gesture that
+   * Escape belongs to (component-edit-parity.md phase A2) — distinct from
+   * `capturingInput`, which for most tools happens to mean the same thing
+   * but for SliceTool does NOT: Slice reports `capturingInput() === true`
+   * unconditionally (so a hovering typed VCB offset never leaks into
+   * tool-switch shortcuts), even though it has no cancelable gesture beyond
+   * its plane LOCK. `toolHasArmedGesture` below checks this first, falling
+   * back to `capturingInput()` for every other tool. Feature-detected with
+   * `'hasArmedGesture' in tool`.
+   */
+  hasArmedGesture?(): boolean
+
+  /**
    * (optional) Per-key refinement of `capturingInput`: whether THIS key
    * belongs to the tool's input capture. Lets a tool capture only the keys
    * its buffer actually needs (e.g. Move's armed ×N / /N window takes
@@ -153,4 +203,45 @@ export interface Tool {
    * Feature-detected with `'statusHint' in tool`.
    */
   statusHint?(): string
+
+  /**
+   * (optional) The current editing context (component-edit-parity.md phase
+   * A1) — see `EditContext`'s doc. Called by the Viewport whenever the
+   * active context path changes, AND once right after a tool is constructed
+   * (switching tools doesn't itself change the context, so a freshly made
+   * tool needs the CURRENT value pushed to it explicitly). Feature-detected
+   * with `'setEditContext' in tool`. Replaces `setActiveContext`/
+   * `setComponentContext`/`setContextScoped`/`setActiveGroup`, which no
+   * tool implements any more.
+   */
+  setEditContext?(ctx: EditContext): void
+}
+
+/**
+ * True when `tool` has an armed, in-progress gesture that Escape belongs to
+ * (a two-click Move/Rotate/Scale/PushPull/Offset drag, a Follow Me sweep
+ * past `pick-path`, a draw tool's anchored chain, Slice's plane lock, …).
+ *
+ * Prefers the tool's own `hasArmedGesture()` when present (SliceTool: its
+ * `capturingInput()` is unconditionally `true` for an unrelated reason — see
+ * that method's doc — so it opts out with a precise `hasArmedGesture` of its
+ * own). Every other armed tool's `capturingInput()` already means exactly
+ * "gesture in flight", so that is the fallback. Tools with neither (e.g.
+ * Select, TapeMeasure) are never "armed" by this definition; their Escape
+ * has no gesture to protect.
+ *
+ * The Viewport consults this BEFORE popping a level off the edit-context
+ * path on Escape (component-edit-parity.md phase A2): without it, Escape
+ * would pop the context out from under an armed gesture, which then gets
+ * the new (shallower) context silently pushed into it via `setEditContext`
+ * — retargeting the gesture's eventual commit instead of the plain cancel
+ * the user asked for. Escape reaching an armed tool routes to `onKey`
+ * instead, which cancels/steps back the gesture; only an UNARMED tool lets
+ * Escape fall through to its traditional context-pop meaning.
+ */
+export function toolHasArmedGesture(tool: Tool): boolean {
+  if ('hasArmedGesture' in tool) {
+    return (tool as { hasArmedGesture(): boolean }).hasArmedGesture()
+  }
+  return 'capturingInput' in tool && (tool as { capturingInput(): boolean }).capturingInput()
 }

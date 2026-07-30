@@ -46,14 +46,24 @@
  * caller (the tool's toast path) untouched.
  */
 
+import type { V3 } from '../viewport/geoHelpers'
+import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
 import type { DrawPlane } from './drawPlane'
 import { planeKey } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
 
-/** Which sketch a draw-tool gesture targets — see the module doc. */
+/**
+ * Which sketch a draw-tool gesture targets — see the module doc. `instance`
+ * is the entered component instance's handle when the target is DEFINITION-
+ * owned (component-edit-parity.md phase A2), or `null` for ordinary
+ * world-space drawing — carried on both variants so `runSketchGesture` knows
+ * whether to mint through `begin_sketch_on_plane_in_instance` and whether
+ * every point handed to `body` needs mapping into definition-local space
+ * first (see `runSketchGesture`'s `toLocal`).
+ */
 export type SketchTarget =
-  | { kind: 'existing'; handle: bigint } // sketch mode: a hover-adopted sketch
-  | { kind: 'plane'; plane: DrawPlane } // plane mode: cached per plane
+  | { kind: 'existing'; handle: bigint; instance: bigint | null } // sketch mode: a hover-adopted sketch
+  | { kind: 'plane'; plane: DrawPlane; instance: bigint | null } // plane mode: cached per plane
 
 /** Get/set/clear access to the cached plane-mode handles, keyed by
  * `planeKey`. One instance is shared by every draw tool of a Viewport, so
@@ -92,11 +102,41 @@ const PLANE_EPS = 1e-9
  * (mirrors `isGroundPlane`'s rationale): a flipped-but-coincident sketch
  * plane still accepts every point plane-mode tools compute. `false` for a
  * stale or hidden handle (`sketch_plane` reads `undefined`).
+ *
+ * `instance`, when set, means `sketch` is DEFINITION-owned: `sketch_plane`
+ * then answers in DEFINITION-local space, not world, so `plane` (always
+ * world-space — see `SketchTarget`'s doc) is compared against the sketch's
+ * plane POSED forward through the instance first. Approximates the proper
+ * normal transform (the linear part of the pose applied directly, then
+ * re-normalized) rather than the exact inverse-transpose a non-uniform-scale
+ * pose would technically need — correct for the common rotation/uniform-
+ * scale/mirror/translation case; a non-uniform-scale instance can at worst
+ * miss a cache hit and mint an extra (still geometrically correct) sketch,
+ * never produce wrong geometry, since every actual commit goes through the
+ * kernel's own exact pose⁻¹ mapping regardless of this check's outcome.
  */
-function isStillOnPlane(wasmScene: WasmScene, sketch: bigint, plane: DrawPlane): boolean {
+function isStillOnPlane(
+  wasmScene: WasmScene,
+  sketch: bigint,
+  plane: DrawPlane,
+  instance: bigint | null,
+): boolean {
   const sketchPlane = wasmScene.sketch_plane(sketch)
   if (sketchPlane === undefined) return false
-  const [px, py, pz, nx, ny, nz] = sketchPlane
+  let [px, py, pz, nx, ny, nz] = sketchPlane
+
+  if (instance !== null) {
+    const pose = wasmScene.instance_pose(instance)
+    if (pose === undefined) return false
+    const worldOrigin = applyAffine3x4(pose, [px, py, pz])
+    const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
+    const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
+    const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
+    const len = Math.hypot(rnx, rny, rnz)
+    if (len <= 1e-12) return false
+    ;[px, py, pz] = worldOrigin
+    ;[nx, ny, nz] = [rnx / len, rny / len, rnz / len]
+  }
 
   // Parallel normals, orientation-free: |cross(sketchNormal, planeNormal)| ~ 0.
   const cx = ny * plane.normal[2] - nz * plane.normal[1]
@@ -122,15 +162,20 @@ function isStillOnPlane(wasmScene: WasmScene, sketch: bigint, plane: DrawPlane):
  *   convention; see `kernelErrors.ts`) instead of drawing into a fresh
  *   ground sketch the user never aimed at.
  * - `plane`: looks up (and lazily creates, via `cache`) the handle cached
- *   for `planeKey(target.plane)`.
+ *   for `planeKey(target.plane)` (namespaced by `target.instance`, so a
+ *   world plane and the SAME plane inside a component's definition never
+ *   collide on one cached handle).
  *   - No cached handle yet, or the cached one is stale/hidden or no longer
  *     on the target plane: retargeted up front — a fresh sketch is minted
  *     BEFORE the gesture opens, so nothing is ever submitted to, or
  *     recorded against, a departed sketch (see the pre-check note above).
- *     `target.plane.ground` mints via `begin_ground_sketch()`; any other
- *     plane mints via `begin_sketch_on_plane` (Phase 3: the idle plane
- *     lock's first click, and only reachable that way — sketch mode targets
- *     an `existing` handle instead).
+ *     `target.instance !== null` mints via `begin_sketch_on_plane_in_instance`
+ *     (component-edit-parity.md phase A2 — the fix for plane-mode drawing
+ *     escaping into the world from inside a component); otherwise
+ *     `target.plane.ground` mints via `begin_ground_sketch()`, any other
+ *     plane via `begin_sketch_on_plane` (Phase 3: the idle plane lock's
+ *     first click, and only reachable that way — sketch mode targets an
+ *     `existing` handle instead).
  * - Errors from `body` — including `PointOffPlane` — are genuine kernel
  *   refusals of this gesture's input and propagate to the caller unchanged.
  * - The gesture is always closed via `sketch_end_gesture` in a `finally`,
@@ -138,15 +183,22 @@ function isStillOnPlane(wasmScene: WasmScene, sketch: bigint, plane: DrawPlane):
  *   safe whether `body` fully succeeded, partially applied edits, or made
  *   none.
  *
- * `body` receives the live sketch handle and performs the actual
- * `sketch_add_segment` calls (and any `onCommit`); its return value is passed
- * through.
+ * `body` receives the live sketch handle AND `toLocal`, a WORLD→sketch-space
+ * point mapper: the identity function for a world-owned target, or the
+ * instance's pose⁻¹ for a definition-owned one. Only `begin_sketch_on_plane_
+ * in_instance` itself maps its OWN (plane) input kernel-side — an ordinary
+ * `sketch_add_segment`/`sketch_begin_curve_with`/etc. call on the sketch it
+ * mints takes points in whatever frame the sketch already lives in
+ * (definition-local for an instance target), with no instance parameter to
+ * map them through — so every point a tool hands to such a call MUST be
+ * routed through `toLocal` first. A world target's `toLocal` is a plain
+ * pass-through, so callers can apply it unconditionally without an `if`.
  */
 export function runSketchGesture<T>(
   wasmScene: WasmScene,
   cache: SketchPlaneCache,
   target: SketchTarget,
-  body: (sketch: bigint) => T,
+  body: (sketch: bigint, toLocal: (p: V3) => V3) => T,
 ): T {
   let handle: bigint
 
@@ -156,27 +208,44 @@ export function runSketchGesture<T>(
     }
     handle = target.handle
   } else {
-    const key = planeKey(target.plane)
+    const key = `${target.instance ?? 'world'}:${planeKey(target.plane)}`
     let cached = cache.get(key)
-    if (cached !== null && !isStillOnPlane(wasmScene, cached, target.plane)) {
+    if (cached !== null && !isStillOnPlane(wasmScene, cached, target.plane, target.instance)) {
       cached = null // stale, hidden, or departed — retarget before opening
     }
     if (cached === null) {
-      const { plane } = target
-      cached = plane.ground
-        ? wasmScene.begin_ground_sketch()
-        : wasmScene.begin_sketch_on_plane(
-            plane.origin[0], plane.origin[1], plane.origin[2],
-            plane.normal[0], plane.normal[1], plane.normal[2],
-          )
+      const { plane, instance } = target
+      if (instance !== null) {
+        cached = wasmScene.begin_sketch_on_plane_in_instance(
+          instance,
+          plane.origin[0], plane.origin[1], plane.origin[2],
+          plane.normal[0], plane.normal[1], plane.normal[2],
+        )
+      } else {
+        cached = plane.ground
+          ? wasmScene.begin_ground_sketch()
+          : wasmScene.begin_sketch_on_plane(
+              plane.origin[0], plane.origin[1], plane.origin[2],
+              plane.normal[0], plane.normal[1], plane.normal[2],
+            )
+      }
       cache.set(key, cached)
     }
     handle = cached
   }
 
+  const instance = target.instance
+  const toLocal = (p: V3): V3 => {
+    if (instance === null) return p
+    const pose = wasmScene.instance_pose(instance)
+    if (pose === undefined) return p // stale instance — the ensuing call surfaces the refusal
+    const inv = invertAffine3x4(pose)
+    return inv === null ? p : applyAffine3x4(inv, p)
+  }
+
   wasmScene.sketch_begin_gesture(handle)
   try {
-    return body(handle)
+    return body(handle, toLocal)
   } finally {
     wasmScene.sketch_end_gesture(handle)
   }

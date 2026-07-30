@@ -31,6 +31,8 @@ const KERNEL_ERROR_CODES = [
   'MixedParents', 'GroupedOperand', 'BooleanOperandHasInstance',
   'BooleanOperandNotSolid', 'BooleanOperandEmpty', 'NothingToUndo',
   'NothingToRedo', 'InverseFailed', 'InverseDiverged',
+  // component-edit-parity.md phase K1/K2 (DocumentError additions)
+  'LastDefinitionMember', 'AmbiguousInstanceScale',
   // SketchError
   'PointOffPlane', 'DegenerateSegment', 'UnknownEdge', 'UnknownVertex',
   'UnknownRegion', 'WouldRetopologize', 'UnknownIsland', 'MalformedRegion',
@@ -65,7 +67,7 @@ const KERNEL_ERROR_CODES = [
   'NotAContainer', 'UnsupportedVersion', 'MalformedManifest',
   'DanglingReference', 'MissingAsset', 'Geometry',
   // wasm-api boundary-minted codes (stale()/inline)
-  'DegenerateFace', 'BadLoop',
+  'DegenerateFace', 'BadLoop', 'BadPath', 'BadCurve', 'BadPlane', 'BadAffine', 'BadOp',
 ]
 
 describe('parseKernelErrorCode', () => {

@@ -101,6 +101,7 @@ export function RecoveryDialog({ listings, onRecover, onDiscard, onDismiss }: Re
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
+        e.stopPropagation()
         onDismiss()
       }
     },

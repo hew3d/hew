@@ -9,8 +9,8 @@ const GROUND = new Float64Array([0, 0, 0, 0, 0, 1])
 /** A sketch stood upright (rotated 90° about X): y = 0 plane, −Y normal. */
 const UPRIGHT = new Float64Array([0, 0, 0, 0, -1, 0])
 
-const GROUND_PLANE: SketchTarget = { kind: 'plane', plane: groundDrawPlane() }
-const GROUND_KEY = planeKey(groundDrawPlane())
+const GROUND_PLANE: SketchTarget = { kind: 'plane', plane: groundDrawPlane(), instance: null }
+const GROUND_KEY = `world:${planeKey(groundDrawPlane())}`
 
 /** A non-ground plane target — the y=0, -Y-normal plane (an idle-locked
  *  plane, Phase 3; reachable only via a draw tool's idle plane lock —
@@ -206,12 +206,12 @@ describe('runSketchGesture — plane targets', () => {
     const cache = makeSketchPlaneCache()
 
     const seen: bigint[] = []
-    runSketchGesture(scene, cache, { kind: 'plane', plane: TILTED_PLANE }, (sketch) => { seen.push(sketch) })
+    runSketchGesture(scene, cache, { kind: 'plane', plane: TILTED_PLANE, instance: null }, (sketch) => { seen.push(sketch) })
 
     expect(scene.begin_sketch_on_plane).toHaveBeenCalledWith(0, 0, 0, 0, -1, 0)
     expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
     expect(seen).toEqual([9n])
-    expect(cache.get(planeKey(TILTED_PLANE))).toBe(9n)
+    expect(cache.get(`world:${planeKey(TILTED_PLANE)}`)).toBe(9n)
     expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(9n)
     expect(scene.sketch_end_gesture).toHaveBeenCalledWith(9n)
   })
@@ -225,9 +225,9 @@ describe('runSketchGesture — plane targets', () => {
       sketch_end_gesture: vi.fn(),
     } as unknown as WasmScene
     const cache = makeSketchPlaneCache()
-    cache.set(planeKey(TILTED_PLANE), 3n)
+    cache.set(`world:${planeKey(TILTED_PLANE)}`, 3n)
 
-    runSketchGesture(scene, cache, { kind: 'plane', plane: TILTED_PLANE }, () => {})
+    runSketchGesture(scene, cache, { kind: 'plane', plane: TILTED_PLANE, instance: null }, () => {})
 
     expect(scene.begin_sketch_on_plane).not.toHaveBeenCalled()
     expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(3n)
@@ -247,8 +247,8 @@ describe('runSketchGesture — plane targets', () => {
     const planeB: DrawPlane = { origin: [5, -3, 0], normal: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0], ground: false }
 
     const seen: bigint[] = []
-    runSketchGesture(scene, cache, { kind: 'plane', plane: planeA }, (s) => seen.push(s))
-    runSketchGesture(scene, cache, { kind: 'plane', plane: planeB }, (s) => seen.push(s))
+    runSketchGesture(scene, cache, { kind: 'plane', plane: planeA, instance: null }, (s) => seen.push(s))
+    runSketchGesture(scene, cache, { kind: 'plane', plane: planeB, instance: null }, (s) => seen.push(s))
 
     expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
     expect(seen).toEqual([1n, 1n])
@@ -265,7 +265,7 @@ describe('runSketchGesture — existing (sketch-mode) targets', () => {
     } as unknown as WasmScene
     const cache = makeSketchPlaneCache()
 
-    const result = runSketchGesture(scene, cache, { kind: 'existing', handle: 42n }, (sketch) => {
+    const result = runSketchGesture(scene, cache, { kind: 'existing', handle: 42n, instance: null }, (sketch) => {
       expect(sketch).toBe(42n)
       return 'ok'
     })
@@ -286,11 +286,130 @@ describe('runSketchGesture — existing (sketch-mode) targets', () => {
     const cache = makeSketchPlaneCache()
 
     expect(() =>
-      runSketchGesture(scene, cache, { kind: 'existing', handle: 42n }, () => {}),
+      runSketchGesture(scene, cache, { kind: 'existing', handle: 42n, instance: null }, () => {}),
     ).toThrow(/^UnknownSketch/)
     expect(scene.sketch_begin_gesture).not.toHaveBeenCalled()
     expect(scene.sketch_end_gesture).not.toHaveBeenCalled()
     expect(scene.begin_ground_sketch).not.toHaveBeenCalled() // never a silent retarget
+  })
+})
+
+describe('runSketchGesture — instance (definition-owned) targets', () => {
+  /** A translated (x+5) instance pose — row-major 3x4, identity rotation. */
+  const TRANSLATED_POSE = new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])
+
+  it('mints via begin_sketch_on_plane_in_instance, never begin_ground_sketch, for an instance target', () => {
+    const scene = {
+      begin_ground_sketch: vi.fn(),
+      begin_sketch_on_plane_in_instance: vi.fn(() => 11n),
+      sketch_plane: vi.fn(() => undefined),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+      instance_pose: vi.fn(() => TRANSLATED_POSE),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+
+    const seen: bigint[] = []
+    runSketchGesture(
+      scene,
+      cache,
+      { kind: 'plane', plane: groundDrawPlane(), instance: 42n },
+      (sketch) => { seen.push(sketch) },
+    )
+
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledWith(42n, 0, 0, 0, 0, 0, 1)
+    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(seen).toEqual([11n])
+  })
+
+  it('an instance target and a world target on the SAME plane never share a cached handle', () => {
+    const scene = {
+      begin_ground_sketch: vi.fn(() => 1n),
+      begin_sketch_on_plane_in_instance: vi.fn(() => 11n),
+      sketch_plane: vi.fn(() => undefined),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+      instance_pose: vi.fn(() => TRANSLATED_POSE),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+
+    const seen: bigint[] = []
+    runSketchGesture(scene, cache, GROUND_PLANE, (s) => seen.push(s))
+    runSketchGesture(
+      scene,
+      cache,
+      { kind: 'plane', plane: groundDrawPlane(), instance: 42n },
+      (s) => seen.push(s),
+    )
+
+    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect(seen).toEqual([1n, 11n])
+  })
+
+  it('toLocal maps a world point through the instance pose⁻¹ (a translated pose)', () => {
+    const scene = {
+      begin_ground_sketch: vi.fn(),
+      begin_sketch_on_plane_in_instance: vi.fn(() => 11n),
+      sketch_plane: vi.fn(() => undefined),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+      instance_pose: vi.fn(() => TRANSLATED_POSE),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+
+    let local: [number, number, number] | null = null
+    runSketchGesture(
+      scene,
+      cache,
+      { kind: 'plane', plane: groundDrawPlane(), instance: 42n },
+      (_sketch, toLocal) => {
+        local = toLocal([6, 1, 0])
+      },
+    )
+
+    expect(local).toEqual([1, 1, 0])
+  })
+
+  it('toLocal is a plain pass-through for a world (instance: null) target', () => {
+    const scene = {
+      begin_ground_sketch: vi.fn(() => 1n),
+      sketch_plane: vi.fn(() => GROUND),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+      instance_pose: vi.fn(),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+
+    let local: [number, number, number] | null = null
+    runSketchGesture(scene, cache, GROUND_PLANE, (_sketch, toLocal) => {
+      local = toLocal([6, 1, 0])
+    })
+
+    expect(local).toEqual([6, 1, 0])
+    expect(scene.instance_pose).not.toHaveBeenCalled()
+  })
+
+  it('an "existing" (sketch-mode) target on a def-owned sketch still maps points via toLocal', () => {
+    const scene = {
+      sketch_plane: vi.fn(() => UPRIGHT),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+      instance_pose: vi.fn(() => TRANSLATED_POSE),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+
+    let local: [number, number, number] | null = null
+    runSketchGesture(
+      scene,
+      cache,
+      { kind: 'existing', handle: 42n, instance: 42n },
+      (_sketch, toLocal) => {
+        local = toLocal([6, 1, 0])
+      },
+    )
+
+    expect(local).toEqual([1, 1, 0])
   })
 })
 
