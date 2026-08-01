@@ -95,7 +95,7 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, nodeRefFromJs, structuralSelection, type NodeRef } from '../panels/treeModel'
+import { collectLeafIds, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef } from '../panels/treeModel'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import {
@@ -308,6 +308,22 @@ interface Props {
   onEnterContext?: (node: NodeRef) => void
   /** Request popping one level off the context path (Esc). */
   onExitContext?: () => void
+  /** Request clearing the WHOLE context path back to the top level — the
+   *  undo/redo reconcile uses this when the kernel reports an explode
+   *  session re-opened by a history step while the app still stands inside
+   *  a K1/K2 context (the session/context mutual-exclusion invariant,
+   *  enforced across history boundaries too). */
+  onExitAllContexts?: () => void
+  /**
+   * Fired whenever the open explode session changes: opened, closed, or
+   * resynced across an undo/redo boundary. `null` when none is open. The
+   * parent uses this for menu gating (Make Group/Make Component/Place Copy/
+   * Import/3D Text/rescale all refuse while a session is open —
+   * `DocumentError::ExplodeSessionScope`) and for the "Editing <name>"
+   * status text; the viewport itself owns scoping/dimming, since those need
+   * no cross-render state the parent has to hold.
+   */
+  onExplodeSessionChange?: (info: { instanceId: bigint; label: string } | null) => void
   /** Fired after any document change so the parent can refresh the tree. */
   onDocumentChanged?: () => void
   /** Fired whenever the section plane's existence/active state actually
@@ -445,6 +461,22 @@ export interface ViewportApi {
   runExplodeInstance: (instanceId: bigint) => bigint[] | null
   /** Detach an instance onto a private copy of its definition. Returns the new component handle. */
   runMakeUnique: (instanceId: bigint) => bigint | null
+  /**
+   * Open an explode session on `instanceId` — bakes its definition's
+   * members into world-owned geometry so the ordinary, unmodified tool set
+   * can edit them. Returns whether it succeeded (a toast already reported a
+   * typed refusal). The ordinary double-click gesture goes through its own
+   * open+fallback path instead (silently falling back to the K1/K2 instance
+   * context on `ExplodeSessionPoseUnsupported`); this is for direct callers
+   * (the test harness) that want the raw open/refuse outcome.
+   */
+  runOpenExplodeSession: (instanceId: bigint) => boolean
+  /** Close the open explode session, folding edits back into the
+   *  definition. A no-op (returns `false`) if none is open. */
+  runCloseExplodeSession: () => boolean
+  /** The instance an open explode session was entered through,
+   *  or `null` if none is open. */
+  explodeSessionInstance: () => bigint | null
   /** Resolve a pending Tape Measure "resize the model?" confirmation
    *  (design tool-parity §3): apply the armed `rescale_document` call and
    *  refresh the whole scene. A no-op if the active tool isn't (still) the
@@ -1155,8 +1187,37 @@ export function buildAncestorChain(wasmScene: WasmScene, objectId: bigint, insta
  * - Inside group G: selectable = direct child of G in the ancestor chain
  *   (may be a group, an instance, or a plain object).
  * - Inside world object O: out-of-scope picks return null.
+ *
+ * `sessionScope`, when non-null, is the live object-id set of an open
+ * explode session (`explode_session_objects()`): a session keeps
+ * `activeContext` empty (component-edit-parity's "explode session" phase —
+ * it edits at the top level, not through a pushed context), so scoping is
+ * layered on top of the ordinary top-level resolution here rather than
+ * threaded through a new `EditContext` kind. Session objects are always
+ * plain top-level objects (grouping/component/instance creation are kernel-
+ * refused while a session is open), so the resolved node must be a plain
+ * 'object' IN the set — any group/instance/other-object result (outside
+ * geometry, or a pre-existing group/instance the session can't contain) is
+ * out of scope. `undefined`/omitted preserves the pre-session behavior
+ * exactly, so every existing caller (and test) that doesn't pass it is
+ * unaffected.
  */
 export function resolvePickToSelectable(
+  wasmScene: WasmScene,
+  pickedObjectId: bigint,
+  activeContext: NodeRef[],
+  pickedInstanceId?: bigint,
+  sessionScope?: Set<bigint> | null,
+): NodeRef | null {
+  const resolved = resolvePickToSelectableUnscoped(
+    wasmScene, pickedObjectId, activeContext, pickedInstanceId,
+  )
+  if (sessionScope == null) return resolved
+  if (resolved === null || resolved.kind !== 'object' || !sessionScope.has(resolved.id)) return null
+  return resolved
+}
+
+function resolvePickToSelectableUnscoped(
   wasmScene: WasmScene,
   pickedObjectId: bigint,
   activeContext: NodeRef[],
@@ -1576,6 +1637,8 @@ export default function Viewport({
   onOpenAnnotationEditor,
   onEnterContext,
   onExitContext,
+  onExitAllContexts,
+  onExplodeSessionChange,
   onDocumentChanged,
   onSectionChanged,
   onHistoryChanged,
@@ -1618,6 +1681,10 @@ export default function Viewport({
   onEnterContextRef.current = onEnterContext
   const onExitContextRef = useRef(onExitContext)
   onExitContextRef.current = onExitContext
+  const onExitAllContextsRef = useRef(onExitAllContexts)
+  onExitAllContextsRef.current = onExitAllContexts
+  const onExplodeSessionChangeRef = useRef(onExplodeSessionChange)
+  onExplodeSessionChangeRef.current = onExplodeSessionChange
   const onDocumentChangedRef = useRef(onDocumentChanged)
   onDocumentChangedRef.current = onDocumentChanged
   const onSectionChangedRef = useRef(onSectionChanged)
@@ -1644,6 +1711,21 @@ export default function Viewport({
   onSampleMaterialRef.current = onSampleMaterial
   // Latest context path, readable inside the stable event closures.
   const activeContextRef = useRef<NodeRef[]>(activeContext)
+  // This component's own belief about the open explode session, resynced
+  // from the kernel's own answer inside `applyHistoryChange` (the undo/redo
+  // choke point) so a session boundary crossed by undo/redo is reconciled
+  // rather than assumed. `null` when no session is believed open.
+  const explodeSessionInstanceRef = useRef<bigint | null>(null)
+  // The live object ids inside the open session (`explode_session_objects()`)
+  // — picking/selection/marquee/draw-eligibility all scope to exactly this
+  // set while a session is open (ARCHITECTURE.md 2.4: inference/snapping is
+  // a read-only query and stays unscoped; only EDIT targets are scoped
+  // here). `null` when no session is open (no filtering).
+  const explodeSessionObjectIdsRef = useRef<Set<bigint> | null>(null)
+  // The last session identity/label pushed to the parent — dedupes the
+  // onExplodeSessionChange callback now that the scope re-derives on every
+  // commit while a session is open, not only at boundaries.
+  const lastPushedSessionRef = useRef<{ instanceId: bigint; label: string } | null>(null)
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
   // Latest current material id for the Paint tool.
@@ -1995,7 +2077,9 @@ export default function Viewport({
         resolveObject: (objectId, instanceId) => {
           if (instanceId !== undefined && hiddenInstanceIdsRef.current.has(instanceId)) return null
           if (hiddenObjectIdsRef.current.has(objectId)) return null
-          return resolvePickToSelectable(wasmScene, objectId, activeContextRef.current, instanceId)
+          return resolvePickToSelectable(
+            wasmScene, objectId, activeContextRef.current, instanceId, explodeSessionObjectIdsRef.current,
+          )
         },
         cameraForward: [cameraForwardV.x, cameraForwardV.y, cameraForwardV.z],
         cameraFar: camera.far,
@@ -2096,9 +2180,16 @@ export default function Viewport({
       leafObjects: bigint[]
       leafInstances: bigint[]
     }[] {
+      // While an explode session is open, Select All / marquee scope to
+      // exactly the session's own objects — outside geometry must not be
+      // marquee-selectable (session objects are always plain top-level
+      // objects with no group parent, so this is a flat id-membership
+      // check, not a tree walk).
+      const sessionScope = explodeSessionObjectIdsRef.current
       const out: { node: NodeRef; leafObjects: bigint[]; leafInstances: bigint[] }[] = []
       for (const nj of wasmScene.top_level_nodes()) {
         const node = nodeRefFromJs(nj)
+        if (sessionScope != null && (node.kind !== 'object' || !sessionScope.has(node.id))) continue
         const leaves = visibleLeaves(node)
         if (leaves === null) continue
         out.push({ node, ...leaves })
@@ -2106,15 +2197,28 @@ export default function Viewport({
       return out
     }
 
-    /** Free-standing sketch refs (the kernel lists visible sketches only). */
+    /** Free-standing sketch refs (the kernel lists visible sketches only).
+     *
+     * Known scoping gap: unlike `visibleTopLevelCandidates`, this is NOT
+     * filtered to the open explode session's own geometry via
+     * `explode_session_sketches()` — the sketch analog of the object
+     * scoping above, so a pre-existing, unrelated top-level sketch is not
+     * selectable while a session is open (a sketch drawn during the
+     * session IS in the set: its creation attributes to the session, and a
+     * fold-in extrude is meant to reach it). */
     function visibleSketchRefs(): NodeRef[] {
-      return Array.from(wasmScene.sketch_ids()).flatMap((id) =>
-        Array.from(wasmScene.sketch_island_ids(id)).map((island) => ({
-          kind: 'sketch-island' as const,
-          id: island,
-          sketch: id,
-        })),
-      )
+      const sessionSketches = wasmScene.explode_session_sketches()
+      const inScope =
+        sessionSketches === undefined ? null : new Set(Array.from(sessionSketches))
+      return Array.from(wasmScene.sketch_ids())
+        .filter((id) => inScope === null || inScope.has(id))
+        .flatMap((id) =>
+          Array.from(wasmScene.sketch_island_ids(id)).map((island) => ({
+            kind: 'sketch-island' as const,
+            id: island,
+            sketch: id,
+          })),
+        )
     }
 
     /**
@@ -2273,6 +2377,13 @@ export default function Viewport({
      *   object itself — i.e. the object is not wrapped by a group or
      *   instance at this level. Groups and Components keep their explicit
      *   double-click editing step.
+     *
+     * An open explode session keeps `activeContext` empty (it edits at the
+     * top level), so the top-level branch below is the one an in-session
+     * draw always takes; scoping it to the session's own objects keeps a
+     * draw tool from starting a fresh sketch on a face OUTSIDE the session
+     * (the kernel would refuse the eventual extrude/fold as
+     * `ExplodeSessionScope` — this keeps the draw from ever starting).
      */
     function faceDrawEligible(objectId: bigint, instanceId: bigint | undefined): boolean {
       const ctx = activeContextRef.current
@@ -2283,7 +2394,9 @@ export default function Viewport({
       if (deepest?.kind === 'instance') {
         return instanceId === deepest.id
       }
-      const resolved = resolvePickToSelectable(wasmScene, objectId, ctx, instanceId)
+      const resolved = resolvePickToSelectable(
+        wasmScene, objectId, ctx, instanceId, explodeSessionObjectIdsRef.current,
+      )
       return resolved !== null && resolved.kind === 'object' && resolved.id === objectId
     }
 
@@ -2942,6 +3055,16 @@ export default function Viewport({
       // need the SAME breadth of coverage guides never did, since guides
       // are never re-anchored).
       sceneRenderer.refreshAnnotations()
+      // While an explode session is open, every commit can grow the
+      // session's scope (drawing a new solid mid-session folds in at close,
+      // so it is session geometry from birth) — re-derive the pick-scope
+      // set and dimming here at the shared commit choke point, not only at
+      // the open/close/undo boundaries (delta-review finding: a solid
+      // drawn mid-session was selectable in the Outliner but invisible to
+      // viewport click/marquee/Select-All until the next boundary).
+      if (explodeSessionInstanceRef.current !== null) {
+        refreshExplodeSessionScope()
+      }
       scheduleRender()
       // Re-poll the sketch hover probe against the cursor's last known
       // position right away so a stationary mouse across the mutation
@@ -3297,6 +3420,138 @@ export default function Viewport({
       }
     }
 
+    // ---------------------------------------------------- explode session
+    // Open/close an explode session: bakes an instance's definition members
+    // into world-owned geometry (same ObjectIds — a move, not a copy) so the
+    // ordinary, unmodified tool set edits them; closing folds everything
+    // back. `explodeSessionInstanceRef`/`explodeSessionObjectIdsRef` are this
+    // component's own belief about session state (which instance, and its
+    // live object scope), resynced from the kernel's own answer in
+    // `applyHistoryChange` — the shared undo/redo choke point — so a session
+    // boundary crossed by undo/redo is reconciled rather than assumed.
+
+    /** Display label for the session status text ("Editing <name>"):
+     *  instance name, falling back to its definition's name, falling back to
+     *  a positional placeholder — the same preference `resolveLabel` (the
+     *  Outliner's own label resolver) applies, at index 0 since a transient
+     *  status chip has no outliner position to match. */
+    function explodeSessionLabel(instanceId: bigint): string {
+      // Resolve the definition through the SESSION, not the instance: the
+      // entered instance is hidden for the session's duration, so
+      // `instance_def(instanceId)` answers undefined and the label fell
+      // back to the positional "Component 1" even for a named definition
+      // (playtest finding).
+      const component = wasmScene.explode_session_component()
+      const defName = component !== undefined ? wasmScene.component_name(component) : undefined
+      return resolveLabel(wasmScene.instance_name(instanceId), defName, 'instance', 0)
+    }
+
+    /** Re-derive `explodeSessionObjectIdsRef` from the kernel's own answer
+     *  and push both the isolation dimming and the parent-facing status
+     *  callback — the ONE place that keeps all three in lockstep, called
+     *  from every point session state can change (open, close, undo/redo
+     *  resync). Isolation dimming reuses the exact mechanism the K1/K2
+     *  editing contexts already use (`SceneRenderer.setActiveContext`); a
+     *  session never pushes `activeContext` (it edits at the top level), so
+     *  this is the session's own, separate call into the same renderer API,
+     *  not a duplicate of the `[activeContext, activeLitSet]` effect below —
+     *  the mutual-exclusion invariant (an explode session cannot coexist
+     *  with a non-empty K1/K2 `activeContext`; see the dblclick/Escape
+     *  handlers) guarantees that effect is holding steady at "no isolation"
+     *  (`activeContext` stays `[]`, so `activeLitSet` stays `null`) the
+     *  entire time a session is open, so the two calls can never fight. */
+    function refreshExplodeSessionScope(): void {
+      const instanceId = explodeSessionInstanceRef.current
+      if (instanceId === null) {
+        explodeSessionObjectIdsRef.current = null
+        sceneRenderer.setActiveContext(null, null)
+        if (lastPushedSessionRef.current !== null) {
+          lastPushedSessionRef.current = null
+          onExplodeSessionChangeRef.current?.(null)
+        }
+        return
+      }
+      const objects = wasmScene.explode_session_objects()
+      const scope = objects !== undefined ? new Set(objects) : new Set<bigint>()
+      explodeSessionObjectIdsRef.current = scope
+      sceneRenderer.setActiveContext(scope, null)
+      // This now also runs on EVERY commit while a session is open (the
+      // handleSceneRefresh scope re-derivation) — only push the parent
+      // callback when the session identity/label actually changed, so a
+      // push/pull doesn't re-render App with an identical session object.
+      const label = explodeSessionLabel(instanceId)
+      const last = lastPushedSessionRef.current
+      if (last === null || last.instanceId !== instanceId || last.label !== label) {
+        lastPushedSessionRef.current = { instanceId, label }
+        onExplodeSessionChangeRef.current?.({ instanceId, label })
+      }
+    }
+
+    /** Open a session on `instanceId`. Returns whether it succeeded (a toast
+     *  already reported a typed refusal). Exposed on `ViewportApi` for
+     *  direct callers (the test harness); the dblclick gesture goes through
+     *  `openExplodeSessionOrFallback` below instead, since IT needs to
+     *  distinguish `ExplodeSessionPoseUnsupported` from every other refusal. */
+    function runOpenExplodeSession(instanceId: bigint): boolean {
+      try {
+        wasmScene.open_explode_session(instanceId)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return false
+      }
+      explodeSessionInstanceRef.current = instanceId
+      handleSceneRefresh()
+      refreshExplodeSessionScope()
+      return true
+    }
+
+    /**
+     * The double-click gesture's own open attempt: a plain double-click on a
+     * component instance opens an explode session; if the kernel gates it —
+     * `ExplodeSessionPoseUnsupported` (non-uniform scale or a mirror) or
+     * `ExplodeSessionGroupedInstance` (a placement of the definition is
+     * nested in a group, which a session's hide-every-placement bake cannot
+     * honor) — fall back SILENTLY to the ordinary "enter this instance's
+     * edit context" gesture (K1/K2), which remains the editing model for
+     * exactly those instances. Any other refusal surfaces as the usual
+     * kernel-error toast and enters neither.
+     */
+    function openExplodeSessionOrFallback(instanceId: bigint, fallback: NodeRef): void {
+      try {
+        wasmScene.open_explode_session(instanceId)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        if (code === 'ExplodeSessionPoseUnsupported' || code === 'ExplodeSessionGroupedInstance') {
+          onEnterContextRef.current?.(fallback)
+          return
+        }
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return
+      }
+      explodeSessionInstanceRef.current = instanceId
+      handleSceneRefresh()
+      refreshExplodeSessionScope()
+    }
+
+    function runCloseExplodeSession(): boolean {
+      if (explodeSessionInstanceRef.current === null) return false
+      try {
+        wasmScene.close_explode_session()
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return false
+      }
+      explodeSessionInstanceRef.current = null
+      handleSceneRefresh()
+      refreshExplodeSessionScope()
+      return true
+    }
+
     // The confirmation modal's Confirm/Cancel resolve into whichever
     // TapeMeasureTool instance is currently active — the overlay blocks
     // further viewport interaction while it's up, so the active tool cannot
@@ -3313,6 +3568,18 @@ export default function Viewport({
     }
 
     function notifyLoaded(): void {
+      // A new/loaded document replaced the Scene — any explode session the
+      // PREVIOUS scene had open is meaningless against this one (`Scene.save()`
+      // always serializes as-if-closed, so a freshly loaded document never
+      // legitimately has one open; "New Document" discarding an open session
+      // in the old one is the other way this can be reached). Same "new
+      // document, clean view state" rationale as the section-plane reset
+      // below — reset the belief directly rather than routing through
+      // `runCloseExplodeSession` (which would try to fold state back into a
+      // Scene that is already gone).
+      explodeSessionInstanceRef.current = null
+      explodeSessionObjectIdsRef.current = null
+      onExplodeSessionChangeRef.current?.(null)
       // A new/loaded document replaced the Scene — every plane's cached
       // sketch handle, and any handle the active tool cached itself, is now
       // stale. Re-selecting the same tool doesn't recreate it, so reset
@@ -3385,6 +3652,25 @@ export default function Viewport({
       if ('onHistoryChanged' in historyChangedTool) {
         (historyChangedTool as { onHistoryChanged(): void }).onHistoryChanged()
       }
+      // Undo/redo can cross an explode session's open/close boundary —
+      // resync this component's belief from the kernel's own answer rather
+      // than assuming it tracks the last runOpen/runClose call, then push
+      // the scoping/dimming/status-text update the same way an explicit
+      // open/close does: undoing past a close visually re-enters the
+      // session, undoing past an open exits it.
+      const sessionNow = wasmSceneRef.current.explode_session_instance() ?? null
+      explodeSessionInstanceRef.current = sessionNow
+      // Mutual exclusion holds across history boundaries too (adversarial-
+      // review finding): an undo can re-open a session recorded earlier
+      // while the user currently stands inside a K1/K2 editing context —
+      // two isolation/scoping owners at once. Adopt the kernel's answer
+      // completely: a re-opened session pops the app context back to the
+      // top level (the same "kernel wins" doctrine the resync above
+      // follows).
+      if (sessionNow !== null && activeContextRef.current.length > 0) {
+        onExitAllContextsRef.current?.()
+      }
+      refreshExplodeSessionScope()
     }
 
     // The shared undo/redo choke point: the Edit menu and command palette
@@ -4101,7 +4387,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -4603,6 +4889,7 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
       )
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
+      tool.setFaceEligibility(faceDrawEligible)
       return tool
     }
 
@@ -6341,10 +6628,44 @@ export default function Viewport({
           // Resolve to the selectable node in the current context, then enter it
           const selectable = resolvePickToSelectable(wasmScene, objectId, activeContextRef.current, instanceId)
           if (selectable !== null) {
-            onEnterContextRef.current?.(selectable)
+            if (explodeSessionInstanceRef.current !== null) {
+              // A session is open. It never pushes a K1/K2 context of its
+              // own (the mutual-exclusion invariant `refreshExplodeSessionScope`
+              // documents: a session and a non-empty `activeContext` never
+              // coexist) — a double-click on a session object here is a
+              // no-op beyond the ordinary click-selection the Select tool's
+              // own pointerdown routing already handled.
+            } else if (activeContextRef.current.length === 0 && selectable.kind === 'instance') {
+              // Top level, no session open: a plain double-click on a
+              // component instance opens an explode session — silently
+              // falling back to the ordinary "enter this instance's edit
+              // context" gesture (K1/K2) when the instance's pose can't
+              // support one (non-uniform scale or a mirror). Entering a
+              // session is deliberately unreachable from INSIDE a K1/K2
+              // context (the `else` branch below still applies there),
+              // mirroring the fact that an explode session, like a K1/K2
+              // instance context, is a top-level-only gesture.
+              openExplodeSessionOrFallback(selectable.id, selectable)
+            } else {
+              onEnterContextRef.current?.(selectable)
+            }
           }
         } finally {
           pick.free()
+        }
+      } else if (explodeSessionInstanceRef.current !== null) {
+        // Double-click on empty space closes an open explode session —
+        // the "double-click outside" half of the design doc's close gesture
+        // (the other half is Escape, in the keyboard handler below). Like
+        // Escape, it must NOT yank the session out from under an armed tool
+        // gesture (adversarial-review finding: Escape routed through
+        // toolHasArmedGesture, this path didn't): the double-click's own
+        // first click already went to the tool, so closing here mid-gesture
+        // would fold the definition back between a gesture's arm and its
+        // commit. An armed tool keeps the double-click; the user cancels or
+        // commits first, then closes.
+        if (!toolHasArmedGesture(toolController.activeTool)) {
+          runCloseExplodeSession()
         }
       }
     }
@@ -6419,6 +6740,23 @@ export default function Viewport({
           return
         }
         onExitContextRef.current?.()
+        return
+      }
+
+      // Escape closes an open explode session — the breadcrumb
+      // `activeContext` never grows for a session (it edits at the top
+      // level, by design — see the mutual-exclusion invariant documented
+      // above the session functions), so this is a separate branch from the
+      // ordinary context-pop above, with the same armed-gesture priority.
+      if (ev.key === 'Escape' && explodeSessionInstanceRef.current !== null) {
+        const activeTool = toolController.activeTool
+        if (toolHasArmedGesture(activeTool)) {
+          activeTool.onKey(ev)
+          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+          scheduleRender()
+          return
+        }
+        runCloseExplodeSession()
         return
       }
 
@@ -6868,7 +7206,18 @@ export default function Viewport({
     // and a group context must light its own member instances too. See
     // `computeLitInstances` for the full rationale.
     const litInstances = computeLitInstances(wasmSceneRef.current, activeContext)
-    sceneRendererRef.current?.setActiveContext(activeLitSet ?? null, litInstances)
+    // While an explode session is open, IT owns the renderer's isolation
+    // fade (refreshExplodeSessionScope): this effect can refire while a
+    // session is open even though the K1/K2 context is empty — App's
+    // session-open state churn is enough to hand `activeContext` a fresh
+    // (still empty) identity — and re-asserting `activeLitSet ?? null` here
+    // clobbered the session's scope back to "nothing dimmed" (verified in a
+    // real-browser trace). Re-assert the session's scope instead, so the
+    // two writers agree instead of racing; the mutual-exclusion invariant
+    // (a session never coexists with a non-empty K1/K2 context) keeps this
+    // unambiguous.
+    const sessionScope = explodeSessionObjectIdsRef.current
+    sceneRendererRef.current?.setActiveContext(sessionScope ?? activeLitSet ?? null, litInstances)
     const tool = toolControllerRef.current?.activeTool
     if (tool !== undefined) {
       // The single editing-context channel (component-edit-parity.md phase

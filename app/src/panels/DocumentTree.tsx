@@ -47,6 +47,16 @@ interface Props {
   hiddenKeys: Set<string>
   /** Toggle hide/show for a node (and its descendants if it's a group). */
   onToggleHidden: (node: NodeRef) => void
+  /** The open explode session (App.tsx), or null when none is open. While a
+   * session is open, its definition's baked-out members are plain top-level
+   * world objects in the kernel (`Document::open_explode_session` sets each
+   * member's owner to `World { parent: None }`) — left alone, they'd render
+   * as loose, unlabeled "Object N" rows with no indication of what they are,
+   * while the instance rows that used to explain them vanish (hidden for the
+   * session's duration). Instead the tree groups them under one synthetic,
+   * non-selectable header row named for the definition, marked with the same
+   * "editing" treatment a context row uses. */
+  explodeSession: { instanceId: bigint; label: string } | null
 }
 
 const ROW_BASE: React.CSSProperties = {
@@ -75,6 +85,7 @@ export function DocumentTree({
   onSetContextDepth,
   hiddenKeys,
   onToggleHidden,
+  explodeSession,
 }: Props) {
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -83,6 +94,30 @@ export function DocumentTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scene, docRev],
   )
+  // The session's live objects, re-derived every render/docRev — mid-session
+  // creations and deletes change this set without changing `explodeSession`'s
+  // identity, so it can't be computed once at session-open time. `null` when
+  // no session is open (distinct from an open session with zero members).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const sessionObjectIds = useMemo(
+    () => (explodeSession === null ? null : Array.from(scene.explode_session_objects() ?? [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scene, docRev, explodeSession],
+  )
+  const sessionObjectIdSet = useMemo(
+    () => (sessionObjectIds === null ? null : new Set(sessionObjectIds)),
+    [sessionObjectIds],
+  )
+  // Top-level array index per object id — the positional-label index a
+  // session member keeps when rendered nested under the definition header
+  // (see the nested NodeRow's `index` prop for why).
+  const topIndexByObjectId = useMemo(() => {
+    const m = new Map<bigint, number>()
+    topNodes.forEach((n, i) => {
+      if (n.kind === 'object') m.set(n.id, i)
+    })
+    return m
+  }, [topNodes])
   // eslint-disable-next-line react-hooks/exhaustive-deps
   // One outliner row per ISLAND (connected shape), numbered across all
   // sketches — the user-facing unit; two shapes drawn apart get two rows.
@@ -238,27 +273,83 @@ export function DocumentTree({
       {/* Unified node tree: top-level nodes first, then free-standing sketches.
           An empty document renders no rows at all — no placeholder text. */}
       <div>
-        {topNodes.map((node, index) => (
-          <NodeRow
-            key={`${node.kind}:${node.id}`}
-            node={node}
-            index={index}
-            depth={0}
-            scene={scene}
-            docRev={docRev}
-            watertightMap={watertightMap}
-            activeContext={activeContext}
-            deepestCtx={deepestCtx}
-            isSelected={isSelected}
-            primaryKey={primaryKey}
-            selectedRowRef={selectedRowRef}
-            ancestorGroupKeys={ancestorGroupKeys}
-            hiddenKeys={hiddenKeys}
-            onToggleHidden={onToggleHidden}
-            onSelect={onSelect}
-            onEnterContext={onEnterContext}
-          />
-        ))}
+        {explodeSession !== null && (
+          <>
+            {/* Synthetic, non-selectable header for the definition being
+                edited — reuses the exact "active context" row treatment
+                (accent tint, bold, inset rail, "editing" chip) so it reads
+                as the same kind of thing as a context-breadcrumb row. No
+                expand chevron (its members are always shown) and no hide
+                toggle (it isn't a real node). */}
+            <Row
+              label={explodeSession.label}
+              icon={<NodeIcon kind="instance" />}
+              selected={false}
+              active
+              dimmed={false}
+              indent={0}
+              onClick={() => {}}
+            />
+            {(sessionObjectIds ?? []).map((id, sessionIndex) => (
+              <NodeRow
+                key={`session-object:${id}`}
+                node={{ kind: 'object', id }}
+                // Positional-label index: an unnamed object's "Object N"
+                // fallback must be the SAME N it carries as a top-level row
+                // (session members are genuinely top-level world objects, so
+                // they are in `topNodes`) — a fresh 0-based sequence here
+                // made a nested member and a surviving top-level row share
+                // one label (delta-review finding), and would also relabel
+                // members across every open/close. Objects born mid-session
+                // that a render races ahead of `topNodes` fall back past
+                // its end rather than colliding.
+                index={topIndexByObjectId.get(id) ?? topNodes.length + sessionIndex}
+                depth={1}
+                scene={scene}
+                docRev={docRev}
+                watertightMap={watertightMap}
+                activeContext={activeContext}
+                deepestCtx={deepestCtx}
+                isSelected={isSelected}
+                primaryKey={primaryKey}
+                selectedRowRef={selectedRowRef}
+                ancestorGroupKeys={ancestorGroupKeys}
+                hiddenKeys={hiddenKeys}
+                onToggleHidden={onToggleHidden}
+                onSelect={onSelect}
+                onEnterContext={onEnterContext}
+              />
+            ))}
+          </>
+        )}
+        {topNodes.map((node, index) => {
+          // Session members are rendered nested under the definition header
+          // above — skip their loose top-level row so they don't appear twice.
+          if (sessionObjectIdSet !== null && node.kind === 'object' && sessionObjectIdSet.has(node.id)) {
+            return null
+          }
+          return (
+            <NodeRow
+              key={`${node.kind}:${node.id}`}
+              node={node}
+              index={index}
+              depth={0}
+              scene={scene}
+              docRev={docRev}
+              watertightMap={watertightMap}
+              activeContext={activeContext}
+              deepestCtx={deepestCtx}
+              isSelected={isSelected}
+              primaryKey={primaryKey}
+              selectedRowRef={selectedRowRef}
+              ancestorGroupKeys={ancestorGroupKeys}
+              hiddenKeys={hiddenKeys}
+              onToggleHidden={onToggleHidden}
+              onSelect={onSelect}
+              onEnterContext={onEnterContext}
+            />
+          )
+        })}
         {sketches.map(({ sketch, island }, index) => {
           const node: NodeRef = { kind: 'sketch-island', id: island, sketch }
           return (

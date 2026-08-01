@@ -373,6 +373,11 @@ pub enum RecordedCall {
     ExplodeInstance { instance: u64 },
     /// `make_unique(instance)`.
     MakeUnique { instance: u64 },
+    /// `open_explode_session(instance)` (docs/design/explode-session-
+    /// prototype.md, a `proto/explode-session` prototype).
+    OpenExplodeSession { instance: u64 },
+    /// `close_explode_session()`.
+    CloseExplodeSession,
     /// `push_pull_in_component(instance, object, face, distance)` —
     /// `instance` (not `component`) since `distance` is a WORLD-space length
     /// mapped through that specific instance's pose (delta-review fix on

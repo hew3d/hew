@@ -127,6 +127,15 @@ export interface MenuBarProps {
     canExplode: boolean
     canMakeUnique: boolean
     canBoolean: boolean
+    /** False while an explode session is open (`ExplodeSessionScope`) —
+     *  importing restructures the document, which a session can't fold
+     *  back cleanly. Defaults to enabled (`true`) when omitted so callers
+     *  that don't yet track session state see the pre-existing behavior. */
+    canImport?: boolean
+    /** False while an explode session is open, for the same reason as
+     *  `canImport` — 3D Text placement is an instance placement. Defaults
+     *  to enabled when omitted. */
+    canDrawText?: boolean
   }
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
@@ -574,7 +583,11 @@ export function MenuBar({
               </SubMenu>
             )}
             <div style={SEPARATOR_STYLE} />
-            <MenuItem label="Import…" onClick={withClose(onImport)} />
+            <MenuItem
+              label="Import…"
+              disabled={editGates?.canImport === false}
+              onClick={withClose(onImport)}
+            />
             <MenuItem label="Export…" onClick={withClose(onExport)} />
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
@@ -751,6 +764,7 @@ export function MenuBar({
             <div style={{ borderTop: '1px solid var(--border-strong)', margin: '4px 0' }} />
             <MenuItem
               label="3D Text…"
+              disabled={editGates?.canDrawText === false}
               onClick={withClose(() => onDrawText?.())}
             />
           </div>

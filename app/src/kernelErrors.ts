@@ -230,6 +230,17 @@ const DESCRIPTIONS: Record<string, string> = {
   AmbiguousInstanceScale:
     "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length.",
 
+  // ---------------------------------------------------------- explode session
+  ExplodeSessionOpen:
+    "Another component is already open for editing. Close it (Escape, or double-click outside) before opening another, or before saving.",
+  ExplodeSessionNotOpen: "No component is currently open for editing.",
+  ExplodeSessionPoseUnsupported:
+    "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.",
+  ExplodeSessionScope:
+    "That isn't available while a component is open for editing. Close it first (Escape, or double-click outside the component), then try again.",
+  ExplodeSessionGroupedInstance:
+    'A placement of this component sits inside a group, so it opens in the in-context editing mode instead.',
+
   // ---------------------------------------------------------- history
   NothingToUndo: 'Nothing to undo.',
   NothingToRedo: 'Nothing to redo.',

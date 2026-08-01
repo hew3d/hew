@@ -166,9 +166,19 @@ below.
   or an axis-locked plane, from bundled fonts or any font loaded from disk —
   letter counters become genuine holes, and each placement folds into one
   component so repeated words stay editable in one place
-- Full modeling-tool parity inside a component definition: sketching,
-  extrusion, Follow Me, booleans, slice, and transforms all work through any
-  instance, with edits propagating to every placement of that definition
+- Component editing via explode session: double-click an instance and its
+  definition's members become ordinary world geometry for the edit — every
+  tool (sketching, extrusion, Follow Me, booleans, slice, transforms) works
+  on them by construction, no component-aware code path needed. Sibling
+  instances hide for the session's duration instead of updating live;
+  closing (Escape, double-click outside) folds the edit back into the
+  definition and every placement shows the result. Requires the instance's
+  pose to be a similarity (uniform scale, no mirror) and every placement of
+  the definition to sit at the top level; a non-uniformly-scaled, mirrored,
+  or group-nested placement falls back to the previous in-context editing
+  model (the component-edit-parity machinery, still fully supported for
+  those cases). Session open/close are ordinary undo steps, and saving — autosave
+  included — works transparently mid-session
 - Movable drawing axes: place and orient a document-level frame that axis
   locks, draw planes, inference snapping, axis colors, and the rendered
   triad all follow, with Reset Axes to return to the world frame

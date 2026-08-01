@@ -2024,7 +2024,11 @@ fn main() {
             let file_open = MenuItemBuilder::with_id("file-open", "Open…")
                 .accelerator("CmdOrCtrl+O")
                 .build(handle)?;
-            let file_import = MenuItemBuilder::with_id("file-import", "Import…").build(handle)?;
+            // Registered as a GATED item: Import refuses while an explode
+            // session is open (ExplodeSessionScope), and the frontend's
+            // sync_menu_state push disables the native item to match the
+            // web MenuBar/palette gating.
+            let file_import = gated_item(handle, &mut gated, "file-import", "Import…", None, None)?;
             // Export… opens the unified Export dialog (format — glTF/GLB or
             // STL — chosen there); there used to be a second "Export STL…"
             // item here, but the design calls for format choice handled in-dialog like
@@ -2283,8 +2287,10 @@ fn main() {
             // plain one-off item (no checked state — see `cam_zoom_extents`
             // above for the same pattern), not `check_item`. Draw placement
             // matches the web MenuBar and command palette (docs/design/3d-text.md).
+            // Registered as a GATED item like Import above: 3D Text refuses
+            // while an explode session is open.
             let draw_3d_text =
-                MenuItemBuilder::with_id("draw-3d-text", "3D Text…").build(handle)?;
+                gated_item(handle, &mut gated, "draw-3d-text", "3D Text…", None, None)?;
 
             let draw_menu = SubmenuBuilder::new(handle, "Draw")
                 .item(&draw_shapes)

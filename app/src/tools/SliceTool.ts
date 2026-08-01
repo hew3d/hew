@@ -79,6 +79,7 @@ import { parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/un
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import type { FaceEligible } from './faceDraw'
 
 export type OnSliceCommitted = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -199,6 +200,19 @@ export class SliceTool implements Tool {
   }
   private get _activeInstance(): bigint | null {
     return this._editContext.kind === 'instance' ? this._editContext.id : null
+  }
+
+  /** Optional richer eligibility, injected by the Viewport (mirrors
+   *  PushPullTool's `setFaceEligibility` — same `FaceEligible` shape, same
+   *  `faceDrawEligible` predicate). Null = the tool-local policy in
+   *  `_pickWorldObject` below, which only knows the entered-instance id, not
+   *  an open explode session's object scope. Slice is one of the ops the
+   *  kernel refuses when fed geometry OUTSIDE an open session
+   *  (`ExplodeSessionScope`) — this hook is what lets a session's scoping
+   *  reach it the same way it already reaches the draw tools/push-pull. */
+  private _faceEligible: FaceEligible | null = null
+  setFaceEligibility(pred: FaceEligible | null): void {
+    this._faceEligible = pred
   }
 
   constructor(
@@ -384,6 +398,10 @@ export class SliceTool implements Tool {
       if (activeInstance !== null) {
         return instance === activeInstance ? { object: pick.object(), isMember: true } : null
       }
+      // An injected predicate (an open explode session's object scope) can
+      // reject a plain top-level object the tool-local policy below would
+      // otherwise accept — outside geometry must not become a slice target.
+      if (this._faceEligible !== null && !this._faceEligible(pick.object(), instance)) return null
       if (instance !== undefined) return null // instanced geometry — out of scope
       return { object: pick.object(), isMember: false }
     } finally {

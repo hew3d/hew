@@ -71,6 +71,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     object_mesh: (_id: bigint) => ({ positions: () => new Float32Array(), free: () => {} }),
     instance_pose: (_id: bigint) => undefined as Float64Array | undefined,
     component_member_objects: (_id: bigint) => new BigUint64Array(),
+    explode_session_objects: () => undefined as BigUint64Array | undefined,
     ...overrides,
   } as unknown as WasmScene
 }
@@ -1590,6 +1591,7 @@ const docTreeBase = {
   onSetContextDepth: vi.fn(),
   hiddenKeys: new Set<string>(),
   onToggleHidden: vi.fn(),
+  explodeSession: null as { instanceId: bigint; label: string } | null,
 }
 
 describe('DocumentTree', () => {
@@ -1862,6 +1864,163 @@ describe('DocumentTree', () => {
     // The selected object lives inside the (default-collapsed) group — its
     // ancestor chain is force-expanded so the selection is visible.
     expect(screen.getByText('Object 1')).toBeInTheDocument()
+  })
+
+  // -------------------------------------------------------------------------
+  // Explode session presentation (playtest: loose "Object N" rows with no
+  // indication of what they belonged to, while the instance rows that used
+  // to explain them vanished). While a session is open, the session's
+  // members must be grouped under one labeled, "editing"-marked header for
+  // the definition instead of appearing as unexplained top-level rows.
+  // -------------------------------------------------------------------------
+
+  describe('explode session', () => {
+    it('groups the session objects under a def header instead of loose top-level rows', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [
+          { kind: 'object', id: 1n },
+          { kind: 'object', id: 2n },
+        ],
+        object_ids: () => new BigUint64Array([1n, 2n]),
+        explode_session_objects: () => new BigUint64Array([1n, 2n]),
+      })
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true], [2n, true]])}
+          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+        />,
+      )
+      // The def header is labeled with the definition name and carries the
+      // same "editing" chip an active context row uses.
+      expect(screen.getByText('Box Def')).toBeInTheDocument()
+      expect(screen.getByText('editing')).toBeInTheDocument()
+      // Members are nested underneath — and appear exactly once each, not
+      // also as loose top-level rows (the playtest's duplicate-row bug).
+      expect(screen.getAllByText('Object 1')).toHaveLength(1)
+      expect(screen.getAllByText('Object 2')).toHaveLength(1)
+    })
+
+    it('keeps positional labels stable and unique across a mixed session/non-session set', () => {
+      // Three unnamed top-level objects; the 1st and 3rd (ids 1, 3) are the
+      // session's members, the 2nd (id 2) is unrelated. Nested members must
+      // keep their TOP-LEVEL positional labels (Object 1 / Object 3) so the
+      // surviving top-level row (Object 2) never shares a label with a
+      // nested one, and no object is relabeled by the session opening
+      // (delta-review finding: a fresh 0-based nested sequence rendered two
+      // different objects both as "Object 2").
+      const scene = makeScene({
+        top_level_nodes: () => [
+          { kind: 'object', id: 1n },
+          { kind: 'object', id: 2n },
+          { kind: 'object', id: 3n },
+        ],
+        object_ids: () => new BigUint64Array([1n, 2n, 3n]),
+        explode_session_objects: () => new BigUint64Array([1n, 3n]),
+      })
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true], [2n, true], [3n, true]])}
+          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+        />,
+      )
+      expect(screen.getAllByText('Object 1')).toHaveLength(1)
+      expect(screen.getAllByText('Object 2')).toHaveLength(1)
+      expect(screen.getAllByText('Object 3')).toHaveLength(1)
+    })
+
+    it('lets a session object row be clicked like any normal object row', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }],
+        object_ids: () => new BigUint64Array([1n]),
+        explode_session_objects: () => new BigUint64Array([1n]),
+        object_name: () => 'Panel',
+      })
+      const onSelect = vi.fn()
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+          onSelect={onSelect}
+        />,
+      )
+      fireEvent.click(screen.getByText('Panel'))
+      expect(onSelect).toHaveBeenCalledWith({ kind: 'object', id: 1n }, false)
+    })
+
+    it('reflects mid-session object creation under the def header (derived per docRev, not once)', () => {
+      const ids: bigint[] = [1n]
+      const sessionIds: bigint[] = [1n]
+      const scene = makeScene({
+        top_level_nodes: () => ids.map((id) => ({ kind: 'object', id })),
+        object_ids: () => new BigUint64Array(ids),
+        explode_session_objects: () => new BigUint64Array(sessionIds),
+      })
+      const { rerender } = render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          docRev={0}
+          watertightMap={new Map([[1n, true]])}
+          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+        />,
+      )
+      expect(screen.getAllByText('Object 1')).toHaveLength(1)
+      expect(screen.queryByText('Object 2')).not.toBeInTheDocument()
+
+      // Simulate a new object created mid-session (e.g. Push/Pull splitting a
+      // face): it joins both the document's top-level nodes AND the session's
+      // live object list.
+      ids.push(2n)
+      sessionIds.push(2n)
+      rerender(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          docRev={1}
+          watertightMap={new Map([[1n, true], [2n, true]])}
+          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+        />,
+      )
+      expect(screen.getAllByText('Object 2')).toHaveLength(1)
+    })
+
+    it('reverts to plain top-level rows once the session closes', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }],
+        object_ids: () => new BigUint64Array([1n]),
+        explode_session_objects: () => new BigUint64Array([1n]),
+      })
+      const { rerender } = render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          docRev={0}
+          watertightMap={new Map([[1n, true]])}
+          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+        />,
+      )
+      expect(screen.getByText('Box Def')).toBeInTheDocument()
+      expect(screen.getByText('editing')).toBeInTheDocument()
+
+      rerender(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          docRev={1}
+          watertightMap={new Map([[1n, true]])}
+          explodeSession={null}
+        />,
+      )
+      expect(screen.queryByText('Box Def')).not.toBeInTheDocument()
+      expect(screen.queryByText('editing')).not.toBeInTheDocument()
+      expect(screen.getAllByText('Object 1')).toHaveLength(1)
+    })
   })
 })
 

@@ -265,6 +265,52 @@ struct PendingSketchGesture {
 /// `(node, tags before, tags after)`.
 type TagListTransition = (NodeId, Vec<Vec<String>>, Vec<Vec<String>>);
 
+/// Transient state for an open **explode session**
+/// (docs/design/explode-session-prototype.md, a `proto/explode-session`
+/// experiment): entering a component instance temporarily BAKES the
+/// instance's pose into the definition's member Objects/sketches and
+/// retargets them to world ownership — the SAME [`ObjectId`]/[`SketchId`]s,
+/// a move rather than [`Document::explode_instance`]'s copy — so the user
+/// edits them with the entirely unmodified plain-object tool set. Closing
+/// the session folds them back (unbakes) into the definition.
+///
+/// NOT serialized — never part of [`Document::save`]/[`Document::save_guarded`]'s
+/// output (see the save guard); a document is never saved mid-session, and
+/// this struct does not survive a save/load round trip. Session-only
+/// bookkeeping, like [`PendingSketchGesture`].
+#[derive(Debug, Clone)]
+struct ExplodeSession {
+    /// The instance the user entered to open this session.
+    instance: InstanceId,
+    /// The definition whose members are on loan to the world tree.
+    component: ComponentId,
+    /// Definition-local → world, captured at open (`instance`'s pose at that
+    /// moment). Guaranteed a similarity with positive determinant (the pose
+    /// gate) — see [`Document::open_explode_session`].
+    pose: Transform,
+    pose_inv: Transform,
+    /// Live members at open time, in `ComponentDef.members` order.
+    members: Vec<ObjectId>,
+    /// Live definition-owned sketches at open time.
+    sketches: Vec<SketchId>,
+    /// Every live instance of `component` at open time (including `instance`
+    /// itself) — all hidden for the session's duration (sibling live
+    /// propagation is deliberately given up; see the design doc).
+    hidden_instances: Vec<InstanceId>,
+    /// Definition-local snapshot of each member `Object`, taken BEFORE
+    /// baking. Used for (a) the exact, no-inverse-transform undo of
+    /// `SessionOpened` and (b) a drift-free close for a member the session
+    /// never touched (restored verbatim instead of round-tripped through
+    /// `pose` then `pose_inv`).
+    pristine_objects: BTreeMap<ObjectId, Object>,
+    pristine_sketches: BTreeMap<SketchId, Sketch>,
+    /// `self.undo.actions.len()` immediately after `SessionOpened` was
+    /// pushed. Everything pushed from this index onward happened DURING the
+    /// session — the dirty-tracking boundary [`Document::close_explode_session`]
+    /// walks from.
+    undo_len_at_open: usize,
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -764,6 +810,80 @@ enum DocAction {
         /// instance round-trips as a no-op either way).
         prev_instance_name: Option<String>,
     },
+    /// `open_explode_session` baked `component`'s live members/sketches into
+    /// world ownership at `pose` and hid every live instance of `component`
+    /// (docs/design/explode-session-prototype.md). Undo is EXACT — no
+    /// inverse-transform — restoring `pristine_objects`/`pristine_sketches`
+    /// verbatim, `Definition` ownership, and unhiding `hidden_instances`;
+    /// this is independent of whatever [`ExplodeSession`] state a later
+    /// [`DocAction::SessionClosed`] undo may have reconstructed, so it
+    /// cannot inherit any drift from that reconstruction. Redo re-bakes:
+    /// [`Document::bake_explode_session`] re-runs the same procedure fresh
+    /// (equivalent, since nothing has touched the members in between in the
+    /// ordinary forward-redo order).
+    SessionOpened {
+        instance: InstanceId,
+        component: ComponentId,
+        pose: Transform,
+        members: Vec<ObjectId>,
+        sketches: Vec<SketchId>,
+        hidden_instances: Vec<InstanceId>,
+        pristine_objects: Vec<(ObjectId, Object)>,
+        pristine_sketches: Vec<(SketchId, Sketch)>,
+    },
+    /// `close_explode_session` folded a session's live members/sketches back
+    /// into `component` (unbaking touched ones via `pose`'s inverse and
+    /// restoring untouched ones from the session's pristine snapshot
+    /// verbatim), folded in anything CREATED during the session, dropped
+    /// anything DELETED during it from `ComponentDef.members` (leaving
+    /// members that were ALREADY tombstoned before the open in place, so an
+    /// older `delete_def_member`'s undo stays valid), and unhid
+    /// `hidden_instances` — unless the close EMPTIED the definition, in
+    /// which case it deleted definition and instances outright (`emptied`).
+    /// Undo re-opens the session ([`Document::bake_explode_session`] over
+    /// the stored `members`/`sketches`/`hidden_instances` lists — see those
+    /// fields for why re-derivation is wrong) after first restoring
+    /// `prev_members` (undoing the fold-in append and the deletion drop in
+    /// one step) and un-baking `folded_objects`/`folded_sketches` back to
+    /// world ownership; `undo_len_at_open` is the ORIGINAL session's
+    /// dirty-tracking boundary, restored verbatim rather than recomputed
+    /// (the undo stack above this point still holds the session's
+    /// intra-session actions, so the depth at undo time does not equal the
+    /// depth at the original open). Redo re-closes:
+    /// [`Document::exit_explode_session`] re-runs the same procedure fresh,
+    /// which reproduces the original result bit-for-bit when reached via a
+    /// full forward redo sequence (rule 9 replay exactness of everything in
+    /// between) — reopening this boundary in isolation and redoing just it,
+    /// without redoing the intra-session actions too, is not exercised and
+    /// may drift (documented in the design doc's findings).
+    SessionClosed {
+        instance: InstanceId,
+        component: ComponentId,
+        pose: Transform,
+        undo_len_at_open: usize,
+        prev_members: Vec<ObjectId>,
+        folded_objects: Vec<ObjectId>,
+        folded_sketches: Vec<SketchId>,
+        /// The ORIGINAL session's member/sketch/instance lists, carried so
+        /// undo reconstructs the session over exactly the set the open
+        /// recorded — NOT re-derived by filtering what happens to be live at
+        /// undo time. Re-derivation loses a member that was deleted
+        /// mid-session and later un-deleted by a deeper undo: it would be
+        /// absent from the reconstructed session, so a subsequent re-close
+        /// would silently drop it from the definition and leave it as loose
+        /// world geometry.
+        members: Vec<ObjectId>,
+        sketches: Vec<SketchId>,
+        hidden_instances: Vec<InstanceId>,
+        /// True when the close found the definition EMPTIED (every member
+        /// deleted mid-session, nothing folded in): the definition and its
+        /// instances were deleted outright (hidden, ids stable), matching
+        /// `delete_def_member`'s documented SketchUp posture for a
+        /// now-empty component. Undo un-hides the definition and re-opens
+        /// the session; the instances stay hidden either way (a session
+        /// hides them, an emptied close keeps them hidden).
+        emptied: bool,
+    },
     /// `paint_face` reassigned a face's material. Non-topological, so it
     /// touches no [`History`]; undo restores `prev` exactly, redo re-applies
     /// `next`. Handle-stable (the `ObjectId`/`FaceId` are untouched).
@@ -1001,6 +1121,256 @@ impl DocAction {
             DocAction::PlaceTextCompound(_) => PendingActionKind::PlaceTextCompound,
             DocAction::CreatedObject { .. } => PendingActionKind::CreatedObject,
             _ => PendingActionKind::Other,
+        }
+    }
+
+    /// The `ObjectId`s this single action may have created or mutated the
+    /// geometry/visibility of — a mechanical enumeration over every variant
+    /// that names one (docs/design/explode-session-prototype.md's
+    /// dirty-tracking walk: [`Document::close_explode_session`] uses this to
+    /// tell a session member that was actually edited from one that stayed
+    /// untouched). `Compound`/`PlaceTextCompound` recurse into their children.
+    /// Exhaustive by construction (no wildcard arm) so a future `DocAction`
+    /// variant that touches an object forces a decision here rather than
+    /// silently falling through.
+    fn touched_objects(&self) -> Vec<ObjectId> {
+        match self {
+            DocAction::Compound { actions } => actions
+                .iter()
+                .flat_map(DocAction::touched_objects)
+                .collect(),
+            DocAction::PlaceTextCompound(actions) => actions
+                .iter()
+                .flat_map(DocAction::touched_objects)
+                .collect(),
+            DocAction::CreatedObject {
+                id, merged_base, ..
+            } => {
+                let mut v = vec![*id];
+                v.extend(*merged_base);
+                v
+            }
+            DocAction::ObjectOp { object } => vec![*object],
+            DocAction::Boolean { result, a, b, .. } => vec![*result, *a, *b],
+            DocAction::BooleanNodes {
+                result_objects,
+                hidden_operands,
+                ..
+            } => {
+                let mut v = result_objects.clone();
+                v.extend(hidden_operands.iter().filter_map(|n| match n {
+                    NodeId::Object(id) => Some(*id),
+                    _ => None,
+                }));
+                v
+            }
+            DocAction::Sliced { source, a, b, .. } => vec![*source, *a, *b],
+            DocAction::PushThrough {
+                source, results, ..
+            } => {
+                let mut v = vec![*source];
+                v.extend(results.iter().copied());
+                v
+            }
+            DocAction::Transform { objects, .. } => objects.clone(),
+            DocAction::TransformSketch { .. }
+            | DocAction::TransformSketchIsland { .. }
+            | DocAction::DetachedSketchIsland { .. }
+            | DocAction::CopiedSketchIslands { .. } => Vec::new(),
+            DocAction::TransformSelection { objects, .. } => objects.clone(),
+            DocAction::Rescale { objects, .. } => objects.iter().map(|&(id, _)| id).collect(),
+            DocAction::SetAxes { .. } | DocAction::MovedSketchVertex { .. } => Vec::new(),
+            DocAction::SketchGesture { .. } => Vec::new(),
+            DocAction::Grouped { .. } | DocAction::Ungrouped { .. } => Vec::new(),
+            DocAction::Deleted {
+                node,
+                hidden_subtree,
+                ..
+            } => {
+                let mut v: Vec<ObjectId> = hidden_subtree
+                    .iter()
+                    .filter_map(|n| match n {
+                        NodeId::Object(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                if let NodeId::Object(id) = node {
+                    v.push(*id);
+                }
+                v
+            }
+            DocAction::MadeComponent {
+                member_prior_parents,
+                ..
+            } => member_prior_parents.iter().map(|&(o, _)| o).collect(),
+            DocAction::PlacedInstance { .. } => Vec::new(),
+            DocAction::Duplicated { objects, .. } => objects.clone(),
+            DocAction::DuplicatedArray { objects, .. } => objects.clone(),
+            DocAction::CreatedGuide { .. }
+            | DocAction::DeletedGuide { .. }
+            | DocAction::DeletedGuides { .. }
+            | DocAction::CreatedAnnotation { .. }
+            | DocAction::DeletedAnnotation { .. }
+            | DocAction::UpdatedAnnotation { .. }
+            | DocAction::DeletedSketch { .. }
+            | DocAction::TransformInstance { .. } => Vec::new(),
+            DocAction::DefObjectOp { object, .. } => vec![*object],
+            DocAction::Exploded { created, .. } => created.clone(),
+            DocAction::MadeUnique { .. } => Vec::new(),
+            DocAction::PaintFace { object, .. } => vec![*object],
+            DocAction::SetObjectMaterial { object, .. } => vec![*object],
+            DocAction::SetFaceUvFrame { object, .. } => vec![*object],
+            DocAction::ReplaceMaterial {
+                faces, defaults, ..
+            } => {
+                let mut v: Vec<ObjectId> = faces.iter().map(|&(o, _)| o).collect();
+                v.extend(defaults.iter().copied());
+                v
+            }
+            DocAction::SetMaterialAlpha { .. } => Vec::new(),
+            DocAction::NodeMetaChanged { node, .. } => match node {
+                NodeId::Object(id) => vec![*id],
+                _ => Vec::new(),
+            },
+            DocAction::ComponentRenamed { .. } => Vec::new(),
+            DocAction::TagDeleted { nodes, .. } => nodes
+                .iter()
+                .filter_map(|(n, ..)| match n {
+                    NodeId::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .collect(),
+            DocAction::FollowMeFace {
+                result,
+                merged_base,
+                ..
+            } => {
+                let mut v = vec![*result];
+                v.extend(*merged_base);
+                v
+            }
+            DocAction::Imported { objects, .. } => objects.clone(),
+            DocAction::DeletedDefMember { object, .. } => vec![*object],
+            DocAction::ConsumedScaffolding { .. } => Vec::new(),
+            DocAction::SessionOpened { .. } | DocAction::SessionClosed { .. } => Vec::new(),
+        }
+    }
+
+    /// The `SketchId`s this single action may have mutated the contents,
+    /// extrudable regions, or visibility of — [`DocAction::touched_objects`]'s
+    /// sketch analog, same dirty-tracking use. Exhaustive for the same
+    /// reason.
+    fn touched_sketches(&self) -> Vec<SketchId> {
+        match self {
+            DocAction::Compound { actions } => actions
+                .iter()
+                .flat_map(DocAction::touched_sketches)
+                .collect(),
+            DocAction::PlaceTextCompound(actions) => actions
+                .iter()
+                .flat_map(DocAction::touched_sketches)
+                .collect(),
+            DocAction::CreatedObject { sketch, .. } => vec![*sketch],
+            DocAction::ObjectOp { .. } => Vec::new(),
+            DocAction::Boolean { .. }
+            | DocAction::BooleanNodes { .. }
+            | DocAction::Sliced { .. }
+            | DocAction::PushThrough { .. }
+            | DocAction::Transform { .. } => Vec::new(),
+            DocAction::TransformSketch { sketch, .. } => vec![*sketch],
+            DocAction::TransformSketchIsland { sketch, .. } => vec![*sketch],
+            DocAction::DetachedSketchIsland {
+                source, detached, ..
+            } => {
+                vec![*source, *detached]
+            }
+            DocAction::CopiedSketchIslands { copy } => vec![*copy],
+            DocAction::TransformSelection { sketches, .. } => sketches.clone(),
+            DocAction::Rescale { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
+            DocAction::SetAxes { .. } => Vec::new(),
+            DocAction::MovedSketchVertex { sketch, .. } => vec![*sketch],
+            DocAction::SketchGesture { sketch, .. } => vec![*sketch],
+            DocAction::Grouped { .. }
+            | DocAction::Ungrouped { .. }
+            | DocAction::Deleted { .. }
+            | DocAction::MadeComponent { .. }
+            | DocAction::PlacedInstance { .. }
+            | DocAction::Duplicated { .. }
+            | DocAction::DuplicatedArray { .. }
+            | DocAction::CreatedGuide { .. }
+            | DocAction::DeletedGuide { .. }
+            | DocAction::DeletedGuides { .. }
+            | DocAction::CreatedAnnotation { .. }
+            | DocAction::DeletedAnnotation { .. }
+            | DocAction::UpdatedAnnotation { .. } => Vec::new(),
+            DocAction::DeletedSketch { sketch } => vec![*sketch],
+            DocAction::TransformInstance { .. } | DocAction::DefObjectOp { .. } => Vec::new(),
+            DocAction::Exploded {
+                created_sketches, ..
+            } => created_sketches.clone(),
+            DocAction::MadeUnique { .. }
+            | DocAction::PaintFace { .. }
+            | DocAction::SetObjectMaterial { .. }
+            | DocAction::SetFaceUvFrame { .. }
+            | DocAction::ReplaceMaterial { .. }
+            | DocAction::SetMaterialAlpha { .. }
+            | DocAction::NodeMetaChanged { .. }
+            | DocAction::ComponentRenamed { .. }
+            | DocAction::TagDeleted { .. }
+            | DocAction::FollowMeFace { .. }
+            | DocAction::Imported { .. }
+            | DocAction::DeletedDefMember { .. } => Vec::new(),
+            DocAction::ConsumedScaffolding { sketch, .. } => vec![*sketch],
+            DocAction::SessionOpened { .. } | DocAction::SessionClosed { .. } => Vec::new(),
+        }
+    }
+
+    /// The `ObjectId`s/`SketchId`s a single action CREATED (a subset of
+    /// [`DocAction::touched_objects`]'s objects, plus any brand-new sketch) —
+    /// [`Document::close_explode_session`]'s fold-in walk uses this to find
+    /// what a user drew/extruded mid-session that has no prior existence to
+    /// fold in the same way an original member does. NOT exhaustive by
+    /// construction (a wildcard arm covers every variant that never
+    /// creates) — only variants that mint a fresh `ObjectId`/`SketchId` are
+    /// named.
+    fn created_objects_and_sketches(&self) -> (Vec<ObjectId>, Vec<SketchId>) {
+        match self {
+            DocAction::Compound { actions } | DocAction::PlaceTextCompound(actions) => {
+                let mut objs = Vec::new();
+                let mut sks = Vec::new();
+                for a in actions {
+                    let (o, s) = a.created_objects_and_sketches();
+                    objs.extend(o);
+                    sks.extend(s);
+                }
+                (objs, sks)
+            }
+            DocAction::CreatedObject { id, .. } => (vec![*id], Vec::new()),
+            DocAction::Boolean { result, .. } => (vec![*result], Vec::new()),
+            DocAction::BooleanNodes { result_objects, .. } => (result_objects.clone(), Vec::new()),
+            DocAction::Sliced { a, b, .. } => (vec![*a, *b], Vec::new()),
+            DocAction::PushThrough { results, .. } => (results.clone(), Vec::new()),
+            DocAction::DetachedSketchIsland { detached, .. } => (Vec::new(), vec![*detached]),
+            DocAction::CopiedSketchIslands { copy } => (Vec::new(), vec![*copy]),
+            DocAction::SketchGesture {
+                sketch, created, ..
+            } => {
+                if *created {
+                    (Vec::new(), vec![*sketch])
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            }
+            DocAction::Duplicated { objects, .. } => (objects.clone(), Vec::new()),
+            DocAction::DuplicatedArray { objects, .. } => (objects.clone(), Vec::new()),
+            DocAction::Exploded {
+                created,
+                created_sketches,
+                ..
+            } => (created.clone(), created_sketches.clone()),
+            DocAction::FollowMeFace { result, .. } => (vec![*result], Vec::new()),
+            DocAction::Imported { objects, .. } => (objects.clone(), Vec::new()),
+            _ => (Vec::new(), Vec::new()),
         }
     }
 }
@@ -1252,6 +1622,47 @@ pub enum DocumentError {
     /// (near-)zero-length gradient, or (near-)parallel `s`/`t` gradients —
     /// see [`UvFrame::is_valid`]. Nothing is silently repaired or clamped.
     DegenerateUvFrame,
+    /// `open_explode_session`/[`Document::save_guarded`] refused because a
+    /// session is already open — one at a time
+    /// (docs/design/explode-session-prototype.md). The same condition backs
+    /// both refusals: a session bakes definition members into world-owned
+    /// objects for its duration, a state the file format never represents,
+    /// so saving mid-session is refused exactly like opening a second one.
+    ExplodeSessionOpen,
+    /// `close_explode_session` was called with no session open.
+    ExplodeSessionNotOpen,
+    /// `open_explode_session` was given an instance whose pose is not a
+    /// similarity with a positive determinant. A similarity is exactly the
+    /// class of maps that keep a circle a circle
+    /// ([`Transform::similarity_scale`]), which is what lets analytic
+    /// curve/surface metadata survive the bake/unbake round trip instead of
+    /// being dropped; a negative determinant (a mirrored pose) would invert
+    /// winding when baked, which [`Object::apply_transform`] refuses
+    /// outright. Refused typed rather than degrading fidelity or baking an
+    /// inside-out solid.
+    ExplodeSessionPoseUnsupported,
+    /// The operation cannot run while an explode session is open — it would
+    /// either restructure the document tree or mutate poses out from under
+    /// the session's captured frame (grouping, component/instance creation,
+    /// import, whole-document rescale), or derive new geometry from an
+    /// OBJECT/SKETCH OUTSIDE the session (booleans, slice, Follow Me,
+    /// extrusion, duplication of non-session geometry): the close folds
+    /// every mid-session creation into the definition, so an outside-fed
+    /// creation would fold foreign geometry into the component. The kernel
+    /// backstop behind the app's own session modality (the app scopes
+    /// picking/selection to session geometry and gates the menus).
+    ExplodeSessionScope,
+    /// `open_explode_session` was given an instance whose definition has a
+    /// group-nested placement — the entered instance itself, or any live
+    /// sibling. A session bakes members to TOP-LEVEL world objects
+    /// (splicing them into a containing group, and holding that consistent
+    /// through group moves and deletion, is not modeled), and it must HIDE
+    /// every placement of the definition, which a grouped sibling cannot
+    /// survive (a group listing a hidden member violates the tree
+    /// invariant). Refused typed; the app falls back to the in-context
+    /// editing model for exactly this case, the same way it does for a
+    /// non-similarity pose.
+    ExplodeSessionGroupedInstance,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -1378,6 +1789,26 @@ impl std::fmt::Display for DocumentError {
                 f,
                 "texture positioning frame is degenerate (non-finite, zero-length, \
                  or parallel gradients)"
+            ),
+            DocumentError::ExplodeSessionOpen => {
+                write!(f, "an explode session is already open")
+            }
+            DocumentError::ExplodeSessionNotOpen => write!(f, "no explode session is open"),
+            DocumentError::ExplodeSessionPoseUnsupported => write!(
+                f,
+                "instance pose is not a similarity with positive determinant \
+                 (non-uniform scale or a mirror), which an explode session requires"
+            ),
+            DocumentError::ExplodeSessionScope => write!(
+                f,
+                "not available while a component is open for editing: the operation \
+                 would restructure the document or reach geometry outside the \
+                 component being edited"
+            ),
+            DocumentError::ExplodeSessionGroupedInstance => write!(
+                f,
+                "a placement of this component is inside a group; it opens in \
+                 the in-context editing mode instead"
             ),
         }
     }
@@ -1526,6 +1957,11 @@ pub struct Document {
     axes: AxesFrame,
     undo: ActionStack,
     redo: ActionStack,
+    /// The open explode session, if any (docs/design/explode-session-
+    /// prototype.md). NOT serialized — see [`Document::save_guarded`], the
+    /// save guard backstopping the app's own "close before saving" rule.
+    /// Session-only, exactly like `pending_sketch_gesture`.
+    explode_session: Option<ExplodeSession>,
     /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
     /// validator runs after **every** op even in release builds (where
     /// `check_invariants` / `debug_assert!` are compiled out), so a flaky op
@@ -2172,6 +2608,9 @@ impl Document {
         scene: ImportScene,
         textures_missing: Vec<String>,
     ) -> Result<(ImportReport, DocChange), DocumentError> {
+        // An import's world-tree creations mid-session would all fold into
+        // the open definition at close — never what an import means.
+        self.refuse_during_explode_session()?;
         use crate::serialize::NO_MATERIAL;
 
         // ── 1. Insert materials → build dense→MaterialId map ──────────────
@@ -4530,6 +4969,7 @@ impl Document {
         distance: f64,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "extrude_region", distance);
+        self.explode_scope_sketch(sketch)?;
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
@@ -4701,6 +5141,8 @@ impl Document {
             }
         }
         info!(target: "kernel::op", op = "follow_me");
+        self.explode_scope_sketch(sketch)?;
+        self.explode_scope_follow_path(path)?;
         if self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
@@ -4747,6 +5189,8 @@ impl Document {
         stop_len: Option<f64>,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_merged");
+        self.explode_scope_sketch(sketch)?;
+        self.explode_scope_follow_path(path)?;
         let FollowMePath::FaceLoop {
             object: base_id, ..
         } = *path
@@ -4821,6 +5265,8 @@ impl Document {
         stop_len: Option<f64>,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_face");
+        self.explode_scope_object(object)?;
+        self.explode_scope_follow_path(path)?;
         let rec = self
             .objects
             .get(object)
@@ -5577,6 +6023,8 @@ impl Document {
         b: ObjectId,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "boolean", boolean_op = ?op);
+        self.explode_scope_object(a)?;
+        self.explode_scope_object(b)?;
         if a == b {
             // A single object cannot be combined with itself (its faces would be
             // fully coincident — a degenerate contact); reject before mutating.
@@ -5797,6 +6245,17 @@ impl Document {
         b: NodeId,
     ) -> Result<(NodeId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "boolean_nodes", boolean_op = ?op);
+        if self.explode_session.is_some() {
+            // While a session is open: object operands must be session
+            // geometry; a group or instance operand is outside the session
+            // by construction (a session holds neither).
+            for n in [a, b] {
+                match n {
+                    NodeId::Object(id) => self.explode_scope_object(id)?,
+                    _ => return Err(DocumentError::ExplodeSessionScope),
+                }
+            }
+        }
         if a == b {
             // A node cannot be combined with itself (fully coincident faces —
             // a degenerate contact); reject before doing any work.
@@ -6000,6 +6459,7 @@ impl Document {
     ) -> Result<((ObjectId, ObjectId), DocChange), DocumentError> {
         let n = plane.normal();
         info!(target: "kernel::op", op = "slice_node", nx = n.x, ny = n.y, nz = n.z);
+        self.explode_scope_object(object)?;
         let rec = self
             .objects
             .get(object)
@@ -6156,6 +6616,7 @@ impl Document {
         distance: f64,
     ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "push_pull_through", distance);
+        self.explode_scope_object(object)?;
         let rec = self
             .objects
             .get(object)
@@ -6881,6 +7342,10 @@ impl Document {
         members: &[NodeId],
     ) -> Result<(GroupId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "group_nodes", members = members.len());
+        // Grouping a session object would hand it a `World { parent }` the
+        // close's `Definition` retarget silently breaks (the group would
+        // keep listing an object that left the world tree).
+        self.refuse_during_explode_session()?;
         if members.is_empty() {
             return Err(DocumentError::EmptyGroup);
         }
@@ -7335,6 +7800,11 @@ impl Document {
     /// (DEVELOPMENT.md rule 4). The document is untouched on error.
     pub fn rescale_document(&mut self, factor: f64) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "rescale_document", factor);
+        // A rescale mutates INSTANCE POSES ("definitions stay at their
+        // authored size, only instance poses scale") — which would silently
+        // invalidate the session's captured pose: the close would unbake
+        // through a frame the instance no longer has.
+        self.refuse_during_explode_session()?;
         if !factor.is_finite() || factor <= 0.0 {
             return Err(DocumentError::InvalidRescaleFactor);
         }
@@ -7491,6 +7961,10 @@ impl Document {
         &mut self,
         members: &[NodeId],
     ) -> Result<(ComponentId, InstanceId, DocChange), DocumentError> {
+        // A component minted mid-session would either nest (definition
+        // inside a definition — unsupported) or steal session members into
+        // a second definition out from under the close.
+        self.refuse_during_explode_session()?;
         if members.is_empty() {
             return Err(DocumentError::EmptyComponent);
         }
@@ -7624,6 +8098,10 @@ impl Document {
         component: ComponentId,
         pose: Transform,
     ) -> Result<(InstanceId, DocChange), DocumentError> {
+        // A new placement mid-session would be a live instance whose
+        // definition's geometry is on loan to the session (out-of-date
+        // render) or a nested placement the close cannot fold.
+        self.refuse_during_explode_session()?;
         if self.components.get(component).is_none_or(|c| c.hidden) {
             return Err(DocumentError::UnknownComponent);
         }
@@ -7718,6 +8196,10 @@ impl Document {
         name: String,
         group: Option<GroupId>,
     ) -> Result<(ComponentId, InstanceId, DocChange), DocumentError> {
+        // 3D Text folds its letters into a fresh component + instance —
+        // both structural creations the close cannot fold (nested
+        // definitions are unsupported).
+        self.refuse_during_explode_session()?;
         if let Some(gid) = group
             && (!self.groups.contains_key(gid) || self.groups[gid].hidden)
         {
@@ -8298,6 +8780,549 @@ impl Document {
         ))
     }
 
+    // ---------------------------------------------------------- explode session
+    // (docs/design/explode-session-prototype.md — a `proto/explode-session`
+    // experiment: see the design doc for the full rationale. Not on the
+    // usual component-edit-parity numbered-phase track.)
+
+    /// The instance an open explode session was entered through, or `None`
+    /// if no session is open — the app's resync query after undo/redo
+    /// crosses a session boundary (the wasm-api surface just wraps this).
+    pub fn explode_session_instance(&self) -> Option<InstanceId> {
+        self.explode_session.as_ref().map(|s| s.instance)
+    }
+
+    /// The definition an open explode session is editing, or `None` if no
+    /// session is open. The app labels the session from THIS ("Editing
+    /// <name>", the Outliner's definition header) rather than resolving
+    /// through the entered instance — that instance is hidden for the
+    /// session's duration, so the ordinary instance→definition queries
+    /// answer `None` for it.
+    pub fn explode_session_component(&self) -> Option<ComponentId> {
+        self.explode_session.as_ref().map(|s| s.component)
+    }
+
+    /// Bakes `pose` into the LIVE entries of the given member Object /
+    /// definition-owned Sketch lists, retargets them to world ownership,
+    /// hides the listed instances, and returns the freshly-built
+    /// [`ExplodeSession`] (its `pristine_*` snapshots taken from the CURRENT
+    /// state, before baking). The mutating core shared by
+    /// [`Document::open_explode_session`] (the one fallible, validating
+    /// caller — it derives the lists from the definition's current state),
+    /// `undo`'s `SessionClosed` arm (re-opening the session over the lists
+    /// the close RECORDED), and `redo`'s `SessionOpened` arm (re-baking over
+    /// the lists the open recorded) — see those call sites for why each is
+    /// safe to treat this as infallible (DEVELOPMENT.md rule 9: a replay
+    /// re-enters a state already accepted once).
+    ///
+    /// The lists are taken as given, NOT re-derived from the definition:
+    /// a replay caller's document may hold members in mid-session states
+    /// (e.g. tombstoned by an intra-session deletion whose geometry is
+    /// still world-baked) that a fresh filter would misclassify. A listed
+    /// member/sketch that is HIDDEN right now is kept in the session's
+    /// lists but neither snapshotted nor baked: its geometry is already in
+    /// the session's world frame (the close that recorded it skipped it for
+    /// the same reason). If a deeper undo later revives it, the undo POPS
+    /// the deletion action — removing its dirty marker with it — so the
+    /// next close cannot rely on the dirty walk alone; it unbakes any
+    /// member with no pristine snapshot (see `exit_explode_session`'s
+    /// no-snapshot rule), which is exactly this revived case.
+    ///
+    /// Does not touch `self.explode_session`, `self.undo`, or `self.redo` —
+    /// callers own recording the action and installing the returned session.
+    fn bake_explode_session(
+        &mut self,
+        instance: InstanceId,
+        component: ComponentId,
+        pose: Transform,
+        members: Vec<ObjectId>,
+        sketches: Vec<SketchId>,
+        hidden_instances: Vec<InstanceId>,
+    ) -> ExplodeSession {
+        let pose_inv = pose
+            .inverse()
+            .expect("explode session pose already validated invertible at open");
+
+        let mut pristine_objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
+        let mut pristine_sketches: BTreeMap<SketchId, Sketch> = BTreeMap::new();
+
+        for &m in &members {
+            if self.objects[m].hidden {
+                continue;
+            }
+            pristine_objects.insert(m, self.objects[m].object.clone());
+            self.objects[m]
+                .object
+                .apply_transform(&pose)
+                .expect("explode session pose validated a similarity at open");
+            self.objects[m].owner = ObjectOwner::World { parent: None };
+        }
+        for &s in &sketches {
+            if self.hidden_sketches.contains(&s) {
+                continue;
+            }
+            pristine_sketches.insert(s, self.sketches[s].clone());
+            self.sketches[s]
+                .apply_transform(&pose)
+                .expect("explode session pose validated a similarity at open");
+            self.def_sketches.remove(&s);
+        }
+        for &i in &hidden_instances {
+            self.instances[i].hidden = true;
+        }
+
+        ExplodeSession {
+            instance,
+            component,
+            pose,
+            pose_inv,
+            members,
+            sketches,
+            hidden_instances,
+            pristine_objects,
+            pristine_sketches,
+            // Set correctly by the caller once `SessionOpened` (a fresh open
+            // or a replay) has been pushed onto `self.undo`; `0` is a
+            // placeholder that never survives past this constructor.
+            undo_len_at_open: 0,
+        }
+    }
+
+    /// Opens an explode session on `instance`: bakes its definition's live
+    /// members/sketches into world-owned geometry at the instance's pose
+    /// and hides every live instance of that definition — see the design
+    /// doc's module-level rationale. Recorded as [`DocAction::SessionOpened`].
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
+    /// - [`DocumentError::ExplodeSessionOpen`] — a session is already open
+    ///   (one at a time).
+    /// - [`DocumentError::ExplodeSessionPoseUnsupported`] — the instance's
+    ///   pose is not a similarity with positive determinant (see the pose
+    ///   gate rationale on that error variant).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn open_explode_session(
+        &mut self,
+        instance: InstanceId,
+    ) -> Result<DocChange, DocumentError> {
+        if self.explode_session.is_some() {
+            return Err(DocumentError::ExplodeSessionOpen);
+        }
+        let (component, pose) = self.instance_component(instance)?;
+        if pose.similarity_scale().is_none() || pose.determinant() <= 0.0 {
+            return Err(DocumentError::ExplodeSessionPoseUnsupported);
+        }
+        // A group-nested placement refuses — the ENTERED instance or ANY
+        // live sibling of the definition (adversarial-review findings: the
+        // bake orphaned members from the entered instance's containing
+        // group for the session's duration, and a mid-session delete of
+        // that group resurrected the instance as an unreachable orphan at
+        // close; and the session must HIDE every placement, which a grouped
+        // sibling cannot survive — a group listing a hidden member violates
+        // the tree invariant `debug_validate_tree` holds). The app falls
+        // back to the in-context editing model, exactly like the pose gate
+        // above.
+        if self
+            .instances_of(component)
+            .iter()
+            .any(|&i| self.instances[i].parent.is_some())
+        {
+            return Err(DocumentError::ExplodeSessionGroupedInstance);
+        }
+
+        // Derive the session's lists from the definition's CURRENT state —
+        // only a fresh open does this; replay arms reuse the recorded lists
+        // (see `bake_explode_session`'s doc for why).
+        let members: Vec<ObjectId> = self.components[component]
+            .members
+            .iter()
+            .copied()
+            .filter(|&m| self.objects.get(m).is_some_and(|r| !r.hidden))
+            .collect();
+        let sketches: Vec<SketchId> = self
+            .def_sketches
+            .iter()
+            .filter(|&(sid, &c)| c == component && !self.hidden_sketches.contains(sid))
+            .map(|(&sid, _)| sid)
+            .collect();
+        let hidden_instances = self.instances_of(component);
+
+        let mut session = self.bake_explode_session(
+            instance,
+            component,
+            pose,
+            members,
+            sketches,
+            hidden_instances,
+        );
+
+        self.undo.push(DocAction::SessionOpened {
+            instance,
+            component,
+            pose,
+            members: session.members.clone(),
+            sketches: session.sketches.clone(),
+            hidden_instances: session.hidden_instances.clone(),
+            pristine_objects: session
+                .pristine_objects
+                .iter()
+                .map(|(&k, v)| (k, v.clone()))
+                .collect(),
+            pristine_sketches: session
+                .pristine_sketches
+                .iter()
+                .map(|(&k, v)| (k, v.clone()))
+                .collect(),
+        });
+        self.redo.clear();
+        session.undo_len_at_open = self.undo.actions.len();
+
+        let change = DocChange {
+            objects_touched: session.members.clone(),
+            sketches_touched: session.sketches.clone(),
+            instances_touched: session.hidden_instances.clone(),
+            components_touched: vec![component],
+            ..Default::default()
+        };
+        self.explode_session = Some(session);
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// The mutating core of [`Document::close_explode_session`], shared with
+    /// `redo`'s `SessionClosed` arm (see that arm for why re-running this on
+    /// replay is safe/exact when reached via a full forward redo sequence).
+    /// Takes and clears `self.explode_session`; panics if none is open (both
+    /// callers guarantee one is).
+    ///
+    /// Returns the change AND the [`DocAction::SessionClosed`] describing it
+    /// — the CALLER owns pushing it (or discarding it): `close_explode_session`
+    /// pushes; `redo`'s arm discards it because redo's shared tail re-pushes
+    /// the ORIGINAL popped action (adversarial-review finding: when this
+    /// core pushed internally, a redo of a close double-pushed — one fresh,
+    /// one original — leaving a phantom stack entry that corrupted the next
+    /// undos); `save_for_persistence`'s clone discards everything.
+    fn exit_explode_session(&mut self) -> (DocChange, DocAction) {
+        let session = self
+            .explode_session
+            .take()
+            .expect("exit_explode_session called with no session open — caller bug");
+
+        // Dirty-tracking walk (docs/design/explode-session-prototype.md):
+        // every ObjectId/SketchId an intra-session action touched, plus
+        // every one CREATED (a strict subset — used only for fold-in),
+        // from the boundary index forward.
+        let mut dirty_objects: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut dirty_sketches: BTreeSet<SketchId> = BTreeSet::new();
+        let mut created_objects: Vec<ObjectId> = Vec::new();
+        let mut created_sketches: Vec<SketchId> = Vec::new();
+        for action in &self.undo.actions[session.undo_len_at_open..] {
+            dirty_objects.extend(action.touched_objects());
+            dirty_sketches.extend(action.touched_sketches());
+            let (co, cs) = action.created_objects_and_sketches();
+            created_objects.extend(co);
+            created_sketches.extend(cs);
+        }
+
+        let prev_members = self.components[session.component].members.clone();
+        let mut folded_objects: Vec<ObjectId> = Vec::new();
+        let mut folded_sketches: Vec<SketchId> = Vec::new();
+
+        // Original members: restore (untouched, verbatim) or unbake (touched),
+        // either way retargeting to `Definition`; a member DELETED (hidden)
+        // mid-session is dropped from membership instead (the tombstoned
+        // ObjectRecord stays, mirroring `delete_def_member`'s posture).
+        for &m in &session.members {
+            if self.objects[m].hidden {
+                continue;
+            }
+            // A member with NO pristine snapshot is one this (reconstructed)
+            // session found hidden at bake time — its geometry has stayed in
+            // the session's world frame since the ORIGINAL bake — and it can
+            // be live here only because a deeper undo revived it, an undo
+            // that also POPPED the deletion off the stack, removing the
+            // dirty marker with it. Snapshot-or-dirty therefore under-counts
+            // exactly this case; the no-snapshot rule closes it: unbake.
+            if dirty_objects.contains(&m) || !session.pristine_objects.contains_key(&m) {
+                self.objects[m]
+                    .object
+                    .apply_transform(&session.pose_inv)
+                    .expect("session pose is invertible by construction");
+            } else {
+                self.objects[m].object = session.pristine_objects[&m].clone();
+            }
+            self.objects[m].owner = ObjectOwner::Definition(session.component);
+        }
+        // Membership rewrite: drop ONLY session members deleted DURING the
+        // session. The list may also hold members tombstoned BEFORE the
+        // open (an older `delete_def_member` — its undo needs its entry to
+        // survive) — those were never part of this session and stay exactly
+        // where they are, in order.
+        let dropped: BTreeSet<ObjectId> = session
+            .members
+            .iter()
+            .copied()
+            .filter(|&m| self.objects[m].hidden)
+            .collect();
+        self.components[session.component]
+            .members
+            .retain(|m| !dropped.contains(m));
+
+        // Original def-owned sketches: same restore-or-unbake choice. A
+        // sketch has no `hidden`-tombstone-vs-membership-list split the way
+        // an object does (a def-owned sketch is not listed anywhere but
+        // `def_sketches`), so a deleted one simply stays out of
+        // `def_sketches` — nothing further to remove.
+        for &s in &session.sketches {
+            if self.hidden_sketches.contains(&s) {
+                continue;
+            }
+            // Same no-snapshot rule as the member loop above.
+            if dirty_sketches.contains(&s) || !session.pristine_sketches.contains_key(&s) {
+                self.sketches[s]
+                    .apply_transform(&session.pose_inv)
+                    .expect("session pose is invertible by construction");
+            } else {
+                self.sketches[s] = session.pristine_sketches[&s].clone();
+            }
+            self.def_sketches.insert(s, session.component);
+        }
+
+        // Fold-ins: anything CREATED during the session that is still live
+        // and world-owned at close (SketchUp's "what you draw while editing
+        // goes into the component" semantics). An object created and
+        // already deleted (hidden) during the session is skipped.
+        for o in created_objects {
+            let is_new_world_member = self
+                .objects
+                .get(o)
+                .is_some_and(|r| !r.hidden && r.is_world());
+            if !is_new_world_member {
+                continue;
+            }
+            self.objects[o]
+                .object
+                .apply_transform(&session.pose_inv)
+                .expect("session pose is invertible by construction");
+            self.objects[o].owner = ObjectOwner::Definition(session.component);
+            self.components[session.component].members.push(o);
+            folded_objects.push(o);
+        }
+        for s in created_sketches {
+            let is_new_world_sketch =
+                !self.hidden_sketches.contains(&s) && !self.def_sketches.contains_key(&s);
+            if !is_new_world_sketch {
+                continue;
+            }
+            self.sketches[s]
+                .apply_transform(&session.pose_inv)
+                .expect("session pose is invertible by construction");
+            self.def_sketches.insert(s, session.component);
+            folded_sketches.push(s);
+        }
+
+        // An EMPTIED definition (every member deleted mid-session, nothing
+        // folded in) does not survive the close: definition and instances
+        // are deleted outright (hidden, ids stable — the tombstone pattern
+        // every deletion here uses), matching `delete_def_member`'s
+        // documented SketchUp posture for a now-empty component. Otherwise,
+        // unhide the instances hidden at open — a definition instance is
+        // never independently deletable mid-session (nothing in this
+        // session touches instances but the open/close bracket itself), so
+        // every entry here is still exactly the tombstone `open` recorded.
+        let emptied = self.components[session.component].members.is_empty();
+        if emptied {
+            self.components[session.component].hidden = true;
+        } else {
+            for &i in &session.hidden_instances {
+                self.instances[i].hidden = false;
+            }
+        }
+
+        let change = DocChange {
+            objects_touched: session
+                .members
+                .iter()
+                .copied()
+                .chain(folded_objects.iter().copied())
+                .collect(),
+            sketches_touched: session
+                .sketches
+                .iter()
+                .copied()
+                .chain(folded_sketches.iter().copied())
+                .collect(),
+            instances_touched: session.hidden_instances.clone(),
+            components_touched: vec![session.component],
+            ..Default::default()
+        };
+
+        let action = DocAction::SessionClosed {
+            instance: session.instance,
+            component: session.component,
+            pose: session.pose,
+            undo_len_at_open: session.undo_len_at_open,
+            prev_members,
+            folded_objects,
+            folded_sketches,
+            members: session.members,
+            sketches: session.sketches,
+            hidden_instances: session.hidden_instances,
+            emptied,
+        };
+
+        (change, action)
+    }
+
+    /// The live `ObjectId`s inside the open explode session — original
+    /// members plus everything created mid-session (the same scope the
+    /// kernel's own guards and the close's fold-in use), filtered to what
+    /// is currently visible. `None` when no session is open. The app reads
+    /// this to scope picking/selection to session geometry.
+    pub fn explode_session_objects(&self) -> Option<Vec<ObjectId>> {
+        let (objects, _) = self.explode_session_scope()?;
+        Some(
+            objects
+                .into_iter()
+                .filter(|&o| self.objects.get(o).is_some_and(|r| !r.hidden))
+                .collect(),
+        )
+    }
+
+    /// [`Document::explode_session_objects`]'s sketch analog: the live
+    /// `SketchId`s inside the open explode session, `None` when no session
+    /// is open. The app reads this to scope free-standing sketch selection
+    /// the same way object picking is scoped.
+    pub fn explode_session_sketches(&self) -> Option<Vec<SketchId>> {
+        let (_, sketches) = self.explode_session_scope()?;
+        Some(
+            sketches
+                .into_iter()
+                .filter(|s| self.sketches.contains_key(*s) && !self.hidden_sketches.contains(s))
+                .collect(),
+        )
+    }
+
+    /// Closes the open explode session, folding its live members/sketches
+    /// back into the definition — see the design doc's module-level
+    /// rationale and [`Document::exit_explode_session`] for the mechanics.
+    /// Recorded as [`DocAction::SessionClosed`].
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionNotOpen`] — no session is open.
+    pub fn close_explode_session(&mut self) -> Result<DocChange, DocumentError> {
+        if self.explode_session.is_none() {
+            return Err(DocumentError::ExplodeSessionNotOpen);
+        }
+        let (change, action) = self.exit_explode_session();
+        self.undo.push(action);
+        self.redo.clear();
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// The set of `ObjectId`s/`SketchId`s "inside" the open explode session:
+    /// the session's own member/sketch lists plus everything CREATED since
+    /// the open (derived from the same undo-stack walk the close's fold-in
+    /// uses, so the two always agree on what belongs to the session).
+    /// `None` when no session is open.
+    fn explode_session_scope(&self) -> Option<(BTreeSet<ObjectId>, BTreeSet<SketchId>)> {
+        let session = self.explode_session.as_ref()?;
+        let mut objects: BTreeSet<ObjectId> = session.members.iter().copied().collect();
+        let mut sketches: BTreeSet<SketchId> = session.sketches.iter().copied().collect();
+        for action in &self.undo.actions[session.undo_len_at_open..] {
+            let (co, cs) = action.created_objects_and_sketches();
+            objects.extend(co);
+            sketches.extend(cs);
+        }
+        // A FRESH sketch (minted, no gesture recorded yet — see
+        // `add_sketch`) has no recorded provenance: its creation is folded
+        // into whichever first gesture eventually records it, which
+        // mid-session is a session action by construction. Scope it in so a
+        // mint-then-draw sequence is not refused between the mint and its
+        // first recorded gesture. (A pre-session fresh sketch is empty by
+        // definition — its content, and therefore its provenance, can only
+        // arrive through that same first gesture.)
+        sketches.extend(self.fresh_sketches.iter().copied());
+        Some((objects, sketches))
+    }
+
+    /// Typed refusal for ops that can never run while an explode session is
+    /// open: they would restructure the tree (grouping, component/instance
+    /// creation, import) or mutate instance poses out from under the
+    /// session's captured frame (whole-document rescale). No-op when no
+    /// session is open.
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionScope`] — a session is open.
+    fn refuse_during_explode_session(&self) -> Result<(), DocumentError> {
+        if self.explode_session.is_some() {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        Ok(())
+    }
+
+    /// While a session is open, `object` must be part of it (an original
+    /// member or a mid-session creation) — see
+    /// [`DocumentError::ExplodeSessionScope`] for why an outside-fed
+    /// creation would corrupt the close's fold-in. No-op when no session is
+    /// open.
+    fn explode_scope_object(&self, object: ObjectId) -> Result<(), DocumentError> {
+        if self
+            .explode_session_scope()
+            .is_some_and(|(objects, _)| !objects.contains(&object))
+        {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        Ok(())
+    }
+
+    /// [`Document::explode_scope_object`]'s sketch analog.
+    fn explode_scope_sketch(&self, sketch: SketchId) -> Result<(), DocumentError> {
+        if self
+            .explode_session_scope()
+            .is_some_and(|(_, sketches)| !sketches.contains(&sketch))
+        {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        Ok(())
+    }
+
+    /// Scope check for a Follow Me path source: its sketch or object must be
+    /// inside the open session (an `InstanceFaceLoop` path never is — every
+    /// instance is hidden for the session's duration). No-op when no session
+    /// is open.
+    fn explode_scope_follow_path(&self, path: &FollowMePath) -> Result<(), DocumentError> {
+        if self.explode_session.is_none() {
+            return Ok(());
+        }
+        match *path {
+            FollowMePath::SketchEdges { sketch, .. } => self.explode_scope_sketch(sketch),
+            FollowMePath::FaceLoop { object, .. } => self.explode_scope_object(object),
+            FollowMePath::InstanceFaceLoop { .. } => Err(DocumentError::ExplodeSessionScope),
+        }
+    }
+
+    /// Serializes the document for a genuine save-to-disk, transparently AS
+    /// IF any open explode session had been closed first — without touching
+    /// the live document (the user's session stays open; no history is
+    /// recorded anywhere). A session bakes definition members into
+    /// world-owned objects for its duration, a state the `.hew` format
+    /// never represents, so the bytes come from a clone on which the
+    /// session's own close procedure has run. Infallible, like
+    /// [`Document::save`] itself — which stays the entry point wherever the
+    /// byte-identical serialization of the CURRENT in-memory state is
+    /// needed for its own sake (state-hash/replay determinism checks).
+    pub fn save_for_persistence(&self) -> Vec<u8> {
+        if self.explode_session.is_none() {
+            return self.save();
+        }
+        let mut closed = self.clone();
+        let _ = closed.exit_explode_session();
+        closed.save()
+    }
+
     /// Deep-clone a node (Object / Group / Instance) and place the copy under the
     /// **same parent** as the source, offset by `placement` — the kernel
     /// half of Move+Option "copy". Returns the new root node (always the **same
@@ -8334,6 +9359,16 @@ impl Document {
         placement: &Transform,
     ) -> Result<(NodeId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "duplicate_node", node = ?node);
+        if self.explode_session.is_some() {
+            // Mid-session, only a session object may be duplicated (the copy
+            // folds into the definition at close); a group/instance copy is
+            // structural and an outside object's copy would fold foreign
+            // geometry in.
+            match node {
+                NodeId::Object(id) => self.explode_scope_object(id)?,
+                _ => return Err(DocumentError::ExplodeSessionScope),
+            }
+        }
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,
@@ -8438,6 +9473,16 @@ impl Document {
         );
         if nodes.is_empty() {
             return Err(DocumentError::EmptySelection);
+        }
+        if self.explode_session.is_some() {
+            // Same rule as `duplicate_node`: mid-session copies must be of
+            // session objects (each copy folds into the definition at close).
+            for &n in nodes {
+                match n {
+                    NodeId::Object(id) => self.explode_scope_object(id)?,
+                    _ => return Err(DocumentError::ExplodeSessionScope),
+                }
+            }
         }
         // Selections are small; a linear repeat scan stays deterministic and
         // avoids requiring Ord on NodeId.
@@ -10252,6 +11297,134 @@ impl Document {
                     ..Default::default()
                 }
             }
+            DocAction::SessionOpened {
+                component,
+                members,
+                sketches,
+                hidden_instances,
+                pristine_objects,
+                pristine_sketches,
+                ..
+            } => {
+                // EXACT undo — no inverse-transform (docs/design/explode-
+                // session-prototype.md): restore each member/sketch's
+                // recorded pre-bake snapshot verbatim and retarget to
+                // `Definition`, independent of whatever `self.explode_session`
+                // (if anything) currently holds.
+                let component = *component;
+                for (id, obj) in pristine_objects {
+                    self.objects[*id].object = obj.clone();
+                    self.objects[*id].owner = ObjectOwner::Definition(component);
+                }
+                for (id, sk) in pristine_sketches {
+                    self.sketches[*id] = sk.clone();
+                    self.def_sketches.insert(*id, component);
+                }
+                for &i in hidden_instances {
+                    self.instances[i].hidden = false;
+                }
+                self.explode_session = None;
+                DocChange {
+                    objects_touched: members.clone(),
+                    sketches_touched: sketches.clone(),
+                    instances_touched: hidden_instances.clone(),
+                    components_touched: vec![component],
+                    ..Default::default()
+                }
+            }
+            &DocAction::SessionClosed {
+                instance,
+                component,
+                pose,
+                undo_len_at_open,
+                ref prev_members,
+                ref folded_objects,
+                ref folded_sketches,
+                ref members,
+                ref sketches,
+                ref hidden_instances,
+                emptied,
+            } => {
+                // Re-opens the session (docs/design/explode-session-
+                // prototype.md): un-delete an emptied definition, undo the
+                // fold-in (each `folded_*` back to world ownership,
+                // re-baked), restore `prev_members` (reverses both the
+                // fold-in append and any mid-session deletion's removal in
+                // one step), then re-bake via `bake_explode_session` over
+                // the RECORDED session lists — not a fresh derivation,
+                // which would lose a mid-session-deleted member (see the
+                // variant's `members` field doc). This is a reconstruction,
+                // not a stored inverse; see the type's doc comment for the
+                // accepted drift this implies.
+                if emptied {
+                    self.components[component].hidden = false;
+                }
+                for &o in folded_objects {
+                    self.objects[o]
+                        .object
+                        .apply_transform(&pose)
+                        .expect("session pose is invertible by construction");
+                    self.objects[o].owner = ObjectOwner::World { parent: None };
+                }
+                for &s in folded_sketches {
+                    self.sketches[s]
+                        .apply_transform(&pose)
+                        .expect("session pose is invertible by construction");
+                    self.def_sketches.remove(&s);
+                }
+                self.components[component].members = prev_members.clone();
+
+                let mut session = self.bake_explode_session(
+                    instance,
+                    component,
+                    pose,
+                    members.clone(),
+                    sketches.clone(),
+                    hidden_instances.clone(),
+                );
+                session.undo_len_at_open = undo_len_at_open;
+                // The reconstructed session must inherit the ORIGINAL open's
+                // pristine snapshots, not the ones `bake_explode_session`
+                // just took from the CURRENT (post-edit) geometry: an edit
+                // undone INSIDE this reconstructed session pops its action
+                // off the stack, so a later fresh close sees a clean dirty
+                // set and takes the pristine path — which must land on the
+                // geometry as it stood at the true open, or the close
+                // silently "restores" the very edit the user undid
+                // (playtest finding). The original snapshots still sit on
+                // the `SessionOpened` action one slot below the boundary.
+                if let Some(DocAction::SessionOpened {
+                    pristine_objects,
+                    pristine_sketches,
+                    ..
+                }) = undo_len_at_open
+                    .checked_sub(1)
+                    .and_then(|i| self.undo.actions.get(i))
+                {
+                    session.pristine_objects = pristine_objects
+                        .iter()
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect();
+                    session.pristine_sketches = pristine_sketches
+                        .iter()
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect();
+                } else {
+                    debug_assert!(
+                        false,
+                        "SessionClosed's boundary does not sit on a SessionOpened — kernel bug"
+                    );
+                }
+                let change = DocChange {
+                    objects_touched: session.members.clone(),
+                    sketches_touched: session.sketches.clone(),
+                    instances_touched: session.hidden_instances.clone(),
+                    components_touched: vec![component],
+                    ..Default::default()
+                };
+                self.explode_session = Some(session);
+                change
+            }
             &DocAction::PaintFace {
                 object, face, prev, ..
             } => {
@@ -11261,6 +12434,52 @@ impl Document {
                     ..Default::default()
                 }
             }
+            DocAction::SessionOpened {
+                instance,
+                component,
+                pose,
+                members,
+                sketches,
+                hidden_instances,
+                ..
+            } => {
+                // Re-bakes via the same core `open` uses, over the lists the
+                // open RECORDED — equivalent to the original open when
+                // reached by a full forward redo (nothing has touched the
+                // members in the meantime), and immune to any transient
+                // membership state a fresh derivation would misread.
+                let mut session = self.bake_explode_session(
+                    *instance,
+                    *component,
+                    *pose,
+                    members.clone(),
+                    sketches.clone(),
+                    hidden_instances.clone(),
+                );
+                session.undo_len_at_open = self.undo.actions.len() + 1; // the push below
+                let change = DocChange {
+                    objects_touched: session.members.clone(),
+                    sketches_touched: session.sketches.clone(),
+                    instances_touched: session.hidden_instances.clone(),
+                    components_touched: vec![*component],
+                    ..Default::default()
+                };
+                self.explode_session = Some(session);
+                change
+            }
+            &DocAction::SessionClosed { .. } => {
+                // Re-closes fresh via the same core `close` uses (re-derives
+                // the dirty set from the undo stack as it currently stands,
+                // reproducing the original close's result bit-for-bit when
+                // reached via a full forward redo sequence — see
+                // `exit_explode_session`'s doc comment). The core's freshly
+                // built action is DISCARDED: redo's shared tail below pushes
+                // the ORIGINAL popped action back onto the undo stack, and
+                // pushing both left a phantom duplicate that corrupted the
+                // next undos (adversarial-review finding).
+                let (change, _fresh_action) = self.exit_explode_session();
+                change
+            }
             &DocAction::PaintFace {
                 object, face, next, ..
             } => {
@@ -11488,13 +12707,24 @@ impl Document {
             );
         }
         // Definitions: each visible component's members are live objects owned
-        // by exactly this definition.
+        // by exactly this definition — EXCEPT the definition currently on
+        // loan to an open explode session (docs/design/explode-session-
+        // prototype.md): its members are deliberately `World`-owned for the
+        // session's duration while `ComponentDef.members` keeps listing
+        // them (the design doc's explicit prototype-scaffolding exemption,
+        // narrowly keyed on THIS component rather than reshuffling
+        // membership to keep the invariant honest for every other
+        // definition).
+        let session_component = self.explode_session.as_ref().map(|s| s.component);
         for (cid, def) in self.components.iter().filter(|(_, c)| !c.hidden) {
             for (i, &m) in def.members.iter().enumerate() {
                 debug_assert!(
                     !def.members[i + 1..].contains(&m),
                     "a definition lists a member twice — kernel bug"
                 );
+                if session_component == Some(cid) {
+                    continue;
+                }
                 debug_assert_eq!(
                     self.objects.get(m).map(|r| r.owner),
                     Some(ObjectOwner::Definition(cid)),

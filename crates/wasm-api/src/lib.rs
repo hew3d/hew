@@ -3693,6 +3693,74 @@ impl Scene {
         Ok(new_def.data().as_ffi())
     }
 
+    /// Opens an explode session on `instance` (docs/design/explode-session-
+    /// prototype.md, a `proto/explode-session` prototype): temporarily bakes
+    /// the instance's definition's live members/sketches into WORLD-owned
+    /// geometry at the instance's pose (SAME ids — a move, not
+    /// `explode_instance`'s copy) and hides every live instance of that
+    /// definition, so the app's ordinary, unmodified tool set can edit them.
+    /// `close_explode_session` folds them back. Refuses typed if a session
+    /// is already open, or if the instance's pose is not a similarity with
+    /// positive determinant.
+    pub fn open_explode_session(&mut self, instance: u64) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .open_explode_session(instance_id(instance))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::OpenExplodeSession { instance });
+        Ok(())
+    }
+
+    /// Closes the open explode session, folding its live members/sketches
+    /// back into the definition. Refuses typed if no session is open.
+    pub fn close_explode_session(&mut self) -> Result<(), ApiError> {
+        let change = self.doc.close_explode_session().map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::CloseExplodeSession);
+        Ok(())
+    }
+
+    /// The instance an open explode session was entered through, or
+    /// `undefined` if no session is open — the app's resync query after
+    /// undo/redo crosses a session boundary.
+    pub fn explode_session_instance(&self) -> Option<u64> {
+        self.doc
+            .explode_session_instance()
+            .map(|i| i.data().as_ffi())
+    }
+
+    /// The definition an open explode session is editing, or `undefined`
+    /// if no session is open — the app labels the session from this (the
+    /// entered instance is hidden for the session's duration, so the
+    /// ordinary instance→definition queries answer `undefined` for it).
+    pub fn explode_session_component(&self) -> Option<u64> {
+        self.doc
+            .explode_session_component()
+            .map(|c| c.data().as_ffi())
+    }
+
+    /// The live objects inside the open explode session (original members
+    /// plus mid-session creations — the same scope the kernel's guards and
+    /// the close's fold-in use), or `undefined` when no session is open.
+    /// The app scopes picking/selection to exactly this set while a
+    /// session is open.
+    pub fn explode_session_objects(&self) -> Option<Vec<u64>> {
+        self.doc
+            .explode_session_objects()
+            .map(|v| v.iter().map(|o| o.data().as_ffi()).collect())
+    }
+
+    /// [`Scene::explode_session_objects`]'s sketch analog: the live
+    /// sketches inside the open explode session, or `undefined` when no
+    /// session is open — the app scopes free-standing sketch selection to
+    /// this set while a session is open.
+    pub fn explode_session_sketches(&self) -> Option<Vec<u64>> {
+        self.doc
+            .explode_session_sketches()
+            .map(|v| v.iter().map(|s| s.data().as_ffi()).collect())
+    }
+
     /// Handles of all currently visible component instances.
     pub fn instance_ids(&self) -> Vec<u64> {
         self.doc
@@ -6767,9 +6835,15 @@ impl Scene {
     /// The returned bytes are a self-contained file — pass them to
     /// [`Scene::load`] to restore the document exactly.
     ///
+    /// While an explode session is open, the bytes are transparently those
+    /// of the document AS IF the session had been closed
+    /// ([`kernel::Document::save_for_persistence`]): the user's session
+    /// stays open, nothing is recorded anywhere, and the app never has to
+    /// interrupt an edit to save — autosave included.
+    ///
     /// wasm-bindgen marshals `Vec<u8>` to a JS `Uint8Array`.
     pub fn save(&self) -> Vec<u8> {
-        self.doc.save()
+        self.doc.save_for_persistence()
     }
 
     /// A canonical, deterministic digest of the document's live state
@@ -7168,6 +7242,12 @@ impl Scene {
                     }
                     MakeUnique { instance } => {
                         self.make_unique(instance)?;
+                    }
+                    OpenExplodeSession { instance } => {
+                        self.open_explode_session(instance)?;
+                    }
+                    CloseExplodeSession => {
+                        self.close_explode_session()?;
                     }
                     PushPullInComponent {
                         instance,

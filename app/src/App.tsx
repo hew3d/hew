@@ -58,7 +58,7 @@ import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { TextDialog, type TextDialogResult } from './panels/TextDialog'
 import { layoutGlyphRun } from './text/glyphRun'
 import { collectNonSolidObjects } from './io/exporters/stlExport'
-import { friendlyErrorText, isErrorLevelCode } from './kernelErrors'
+import { friendlyErrorText, isErrorLevelCode, kernelErrorMessage } from './kernelErrors'
 import { CommandPalette } from './palette/CommandPalette'
 import { toolHint, toolActionId, type PaletteEntry } from './palette/registry'
 import type { TagReveal } from './panels/TagsPanel'
@@ -245,6 +245,14 @@ export default function App() {
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Active context path. Empty = top level. */
   const [activeContext, setActiveContext] = useState<NodeRef[]>([])
+  /** The open explode session, or null. Mirrors the viewport's own belief
+   *  (`ViewportApi.explodeSessionInstance`), pushed up via
+   *  `onExplodeSessionChange` on open, close, and every undo/redo resync —
+   *  drives menu gating (Make Group/Make Component/Place Copy/Import/3D
+   *  Text/rescale all refuse while a session is open) and the "Editing
+   *  <name>" status text. Scoping/dimming stay inside the viewport, which
+   *  owns the renderer and needs no cross-render state to apply them. */
+  const [explodeSession, setExplodeSession] = useState<{ instanceId: bigint; label: string } | null>(null)
   /** Bumped on any document change so the tree re-queries entity lists. */
   const [docRev, setDocRev] = useState(0)
   /** Currently selected material id for the Paint tool. */
@@ -523,6 +531,8 @@ export default function App() {
       const scene = sceneRef.current
       const session = docSessionRef.current
       if (scene === null || !session.dirty || !dirtySinceAutosaveRef.current) return
+      // `Scene.save()` is transparent to an open explode session (it
+      // serializes as-if-closed), so autosave needs no special-casing here.
       // Crash-recovered documents should reopen at the last view too —
       // same posture as an explicit Save (docs/design/camera.md §5).
       pushCameraStateToScene(scene)
@@ -600,10 +610,6 @@ export default function App() {
 
   const handleMeasurement = useCallback((text: string) => {
     setMeasurement(text)
-  }, [])
-
-  const handleRescaleArmed = useCallback((info: RescaleConfirmInfo) => {
-    setPendingRescaleConfirm(info)
   }, [])
 
   const handleInferenceChange = useCallback((info: InferenceInfo | null) => {
@@ -686,9 +692,18 @@ export default function App() {
   }, [])
 
   const handleEnterContext = useCallback((node: NodeRef) => {
+    // Mutual exclusion with an open explode session (Escape/close it first):
+    // this is the ONE choke point every "enter a K1/K2 context" gesture
+    // shares (the viewport's own double-click, the Outliner's double-click,
+    // and the contextual dock's "enter-context" verb) — the viewport's
+    // double-click handler additionally guards its OWN gesture (so it never
+    // even attempts the redundant call), but this is what closes the gap
+    // for the other two, which reach here directly without going through
+    // the viewport's session state at all.
+    if (explodeSession !== null) return
     setActiveContext((prev) => [...prev, node])
     setSelectedIds([node])
-  }, [])
+  }, [explodeSession])
 
   const handleExitContext = useCallback(() => {
     setActiveContext((prev) => prev.slice(0, -1))
@@ -704,6 +719,41 @@ export default function App() {
     setActiveContext((prev) => prev.slice(0, depth))
     setSelectedIds([])
   }, [])
+
+  /** Clear the whole context path — the viewport's undo/redo reconcile
+   *  calls this when a history step re-opens an explode session while a
+   *  K1/K2 context is still active (mutual exclusion across history
+   *  boundaries; the kernel's answer wins). */
+  const handleExitAllContexts = useCallback(() => {
+    setActiveContext([])
+    setSelectedIds([])
+  }, [])
+
+  /**
+   * The viewport's explode-session state changed: opened, closed, or
+   * resynced across an undo/redo boundary (`ViewportApi.explodeSessionInstance`
+   * crossing a boundary the same way `activeContext` can). Clearing the
+   * selection on any actual CHANGE of instance — not just on close — matters
+   * because opening a session on instance B while some OTHER node was
+   * selected (e.g. from before instance B's session opened) would otherwise
+   * leave that stale selection sitting outside the new session's scope,
+   * lighting up commands (Make Unique, Place Copy, boolean's 2-operand gate)
+   * for geometry the app is supposed to treat as unreachable while the
+   * session is open.
+   */
+  const handleExplodeSessionChange = useCallback(
+    (info: { instanceId: bigint; label: string } | null) => {
+      setExplodeSession((prev) => {
+        if ((prev?.instanceId ?? null) !== (info?.instanceId ?? null)) {
+          setSelectedIds([])
+          setSelectedGuide(null)
+          setSelectedAnnotation(null)
+        }
+        return info
+      })
+    },
+    [],
+  )
 
   /** Validate and trim the context path when the document changes. */
   const trimContextPath = useCallback((scene: Scene, path: NodeRef[]): NodeRef[] => {
@@ -840,6 +890,24 @@ export default function App() {
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
+
+  const handleRescaleArmed = useCallback((info: RescaleConfirmInfo) => {
+    // Whole-document rescale is one of the ops the kernel refuses outright
+    // while an explode session is open (`ExplodeSessionScope`) — a session
+    // bakes an instance's pose into world geometry for its duration, and
+    // rescaling the whole document out from under that captured frame would
+    // corrupt the fold-back. The tool has already armed its own
+    // `pendingRescale` stage by the time this fires; decline it exactly the
+    // way the confirmation dialog's own Cancel button does (falls through
+    // to the ordinary guide-point commit) rather than showing a dialog for
+    // an action that's about to refuse.
+    if (explodeSession !== null) {
+      viewportApi.current?.cancelPendingRescale()
+      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
+      return
+    }
+    setPendingRescaleConfirm(info)
+  }, [explodeSession, handleToast])
 
   // Report Bug — assemble the bundle and tell the user what happened.
   // The write is otherwise silent (Tauri saves a file, web downloads), so
@@ -1001,6 +1069,22 @@ export default function App() {
     // Sketch-scoped selections have no kernel NodeId — any in the selection
     // disqualifies the node-level commands.
     const hasSketch = selectedIds.some(isSketchKind)
+    // The kernel refuses grouping, component creation, and instance
+    // placement outright while an explode session is open
+    // (`DocumentError::ExplodeSessionScope` — each would either restructure
+    // the document tree or place a new instance the session can't fold
+    // back cleanly). Selection is already scoped to the session's own
+    // objects (`explodeSession`'s change handler clears any stale selection
+    // on every session-instance change), so these would rarely light up on
+    // their own — this is the explicit, defensive gate the instructions
+    // call for, matching `canMakeComponent`'s existing `activeContext`
+    // guard rather than relying solely on that transitive effect. Boolean/
+    // ungroup/explode/make-unique are deliberately NOT gated here: a
+    // boolean between two session members is exactly the "unmodified tool
+    // set" editing a session is for, and the other three all require an
+    // 'instance' selection, which scoped picking already makes unreachable
+    // while a session is open.
+    const sessionOpen = explodeSession !== null
     return {
       booleanOperands,
       // Same top-level rule the kernel enforces (GroupedOperand): a nested
@@ -1016,17 +1100,17 @@ export default function App() {
               if (componentMemberIds === null) return false
               return canBooleanInComponent(selectedIds, (n) => componentMemberIds.has(n.id))
             })(),
-      canGroup: !hasSketch && canGroupHelper(selectedIds, parentOf),
+      canGroup: !sessionOpen && !hasSketch && canGroupHelper(selectedIds, parentOf),
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
-        activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
-      canPlaceCopy: canPlaceInstance(selectedIds),
+        !sessionOpen && activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
+      canPlaceCopy: !sessionOpen && canPlaceInstance(selectedIds),
       canExplode: canExplodeInstance(selectedIds),
       canMakeUnique: canMakeUnique(selectedIds),
     }
     // docRev: entity lists change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, selectedIds, activeContext, docRev])
+  }, [state, selectedIds, activeContext, docRev, explodeSession])
 
   // Choosing a Draw tool at top level clears the selection: the user is
   // about to create geometry, so a still-selected object/group/component
@@ -1489,6 +1573,17 @@ export default function App() {
   const importDocument = useCallback(async () => {
     const scene = sceneRef.current
     if (scene === null) return
+    // Importing into the current document restructures it (new top-level
+    // nodes at minimum) — refused outright by the kernel while an explode
+    // session is open (`ExplodeSessionScope`). The menu item is disabled
+    // for this reason too (see `editGates.canImport`); this re-check covers
+    // the keyboard shortcut and command-palette dispatch, which bypass a
+    // disabled menu item the same way `handleGroup`/`handleMakeComponent`'s
+    // re-checks do for their own gates.
+    if (explodeSession !== null) {
+      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
+      return
+    }
     // Re-entrancy guard: shared with openDocument (see openInFlightRef) — a
     // second gesture started while this one is mid-flight (e.g. Ctrl+K ▸
     // "import" ▸ Enter behind the units modal) would otherwise orphan it,
@@ -1545,11 +1640,14 @@ export default function App() {
     } finally {
       openInFlightRef.current = false
     }
-  }, [confirmDiscard, handleToast, runImportPick])
+  }, [confirmDiscard, handleToast, runImportPick, explodeSession])
 
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) return
+    // `Scene.save()` is transparent to an open explode session — it
+    // serializes as-if-closed, so saving mid-session needs no special
+    // handling here (the session, and its dimming/scoping, is untouched).
     pushCameraStateToScene(scene)
     const bytes = new Uint8Array(scene.save())
     const ref = docSession.currentRef
@@ -1985,6 +2083,21 @@ export default function App() {
   // the dialog and this handler never touch the kernel directly.
   const [textDialogOpen, setTextDialogOpen] = useState(false)
 
+  // 3D Text placement is one of the ops the kernel refuses outright while an
+  // explode session is open (`ExplodeSessionScope`: placing a component
+  // instance mid-session is exactly the "instance placement" the kernel
+  // guards against). Gating the dialog's OPEN keeps the user from ever
+  // reaching the refusal in normal use; both the MenuBar item (disabled via
+  // `editGates.canDrawText`) and the command-palette/native-menu dispatch
+  // route through this one function.
+  const openTextDialog = useCallback(() => {
+    if (explodeSession !== null) {
+      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
+      return
+    }
+    setTextDialogOpen(true)
+  }, [explodeSession, handleToast])
+
   const handleTextPlace = useCallback((result: TextDialogResult) => {
     setTextDialogOpen(false)
     const { text, font, heightMeters, depthMeters } = result
@@ -2129,7 +2242,7 @@ export default function App() {
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
       case 'export':   setExportDialogOpen(true); break
-      case 'draw-3d-text': setTextDialogOpen(true); break
+      case 'draw-3d-text': openTextDialog(); break
       case 'save':     saveDocumentRef.current(); break
       case 'save-as':  saveAsDocumentRef.current(); break
       case 'undo':     handleUndoRef.current(); break
@@ -2727,6 +2840,12 @@ export default function App() {
       'edit-subtract': menuGates?.canBoolean ?? false,
       'edit-intersect': menuGates?.canBoolean ?? false,
       'view-section-plane': sectionPlaneMenuState.exists,
+      // Import and 3D Text refuse while an explode session is open
+      // (ExplodeSessionScope) — gate the NATIVE items the same way the web
+      // MenuBar/palette already are, so the kernel refusal stays a backstop
+      // rather than a toast a user actually meets.
+      'file-import': explodeSession === null,
+      'draw-3d-text': explodeSession === null,
     }
     import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke('sync_menu_state', { checked, enabled }))
@@ -2748,6 +2867,7 @@ export default function App() {
     menuGates,
     menuFocusTick,
     parallelProjection,
+    explodeSession,
   ])
 
   // ---------------------------------------------------------------- drag-drop open
@@ -3100,7 +3220,7 @@ export default function App() {
         onSaveAs={saveAsDocument}
         onImport={importDocument}
         onExport={() => setExportDialogOpen(true)}
-        onDrawText={() => setTextDialogOpen(true)}
+        onDrawText={openTextDialog}
         onClose={
           isTauri && !isMac
             ? () => {
@@ -3166,6 +3286,8 @@ export default function App() {
           canExplode: canExplode,
           canMakeUnique: canUnique,
           canBoolean,
+          canImport: explodeSession === null,
+          canDrawText: explodeSession === null,
         }}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
@@ -3264,6 +3386,8 @@ export default function App() {
             onOpenAnnotationEditor={handleOpenAnnotationEditor}
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
+            onExitAllContexts={handleExitAllContexts}
+            onExplodeSessionChange={handleExplodeSessionChange}
             onDocumentChanged={handleDocumentChanged}
             onSectionChanged={handleSectionChanged}
             onHistoryChanged={handleHistoryChanged}
@@ -3308,6 +3432,37 @@ export default function App() {
               onOrbit={() => activateTool('Orbit')}
             />
           </div>
+
+          {/* Explode session status: the only other place the app names the
+              current edit target is the Outliner's breadcrumb/"editing" row
+              chip (DocumentTree.tsx) — an explode session doesn't push
+              activeContext, so it never grows that breadcrumb, and needs
+              its own top-of-viewport status text instead. */}
+          {explodeSession !== null && (
+            <div
+              style={{
+                position: 'absolute',
+                top: '16px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '5px 12px',
+                background: 'var(--surface-overlay)',
+                border: '1px solid var(--border-hairline)',
+                borderRadius: '7px',
+                fontFamily: 'var(--font-family-ui)',
+                fontSize: '11.5px',
+                color: 'var(--text-secondary)',
+                whiteSpace: 'nowrap',
+                zIndex: 20,
+                pointerEvents: 'none',
+              }}
+            >
+              Editing {explodeSession.label}
+            </div>
+          )}
 
           {/* Contextual dock — bottom-center, self-hides only when
               there's no curated verb set for the current selection (a
@@ -3469,6 +3624,7 @@ export default function App() {
               onSetContextDepth={handleSetContextDepth}
               hiddenKeys={hiddenKeys}
               onToggleHidden={handleToggleHidden}
+              explodeSession={explodeSession}
             />
           </TraySection>
           <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
@@ -3731,6 +3887,8 @@ export default function App() {
           canExplode: menuGates?.canExplode ?? false,
           canMakeUnique: menuGates?.canMakeUnique ?? false,
           canBoolean: menuGates?.canBoolean ?? false,
+          canImport: explodeSession === null,
+          canDrawText: explodeSession === null,
         }}
       />
 

@@ -612,6 +612,14 @@ export interface HewTestHarness {
   getInstancesOf(component: string): string[]
 
   /**
+   * The instance an open explode session was entered through (decimal
+   * handle string), or `null` when no session is open — lets a spec assert
+   * a double-click genuinely fell back to the K1/K2 context rather than
+   * silently opening a session (`explode_session_instance`).
+   */
+  getExplodeSessionInstance(): string | null
+
+  /**
    * A component definition's live member OBJECTS, as decimal handle
    * strings (component-edit-parity.md) — the ground truth for "did this
    * edit land in the shared definition (seen by every instance) or
@@ -1695,6 +1703,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     getInstancesOf: (component) =>
       query((s) => Array.from(s.instances_of(BigInt(component))).map(String)),
+
+    getExplodeSessionInstance: () =>
+      query((s) => {
+        const i = s.explode_session_instance()
+        return i === undefined ? null : String(i)
+      }),
 
     getComponentMemberObjects: (component) =>
       query((s) => Array.from(s.component_member_objects(BigInt(component))).map(String)),

@@ -122,9 +122,17 @@ document creates or extends a Sketch; drawing after entering an Object
 applies that Object's sticky rules. Selection was considered as the
 triggering signal and rejected: it is a weaker, more modal proxy for "what am
 I editing" than an explicit enter/exit context, and it doesn't generalize
-cleanly to nested Groups and Components. Editing context lives entirely in
-the application layer — it is session state, not part of the persisted
-document model.
+cleanly to nested Groups and Components. The enter/exit gesture itself —
+which node the double-click targeted, the breadcrumb path back out — is
+session state that lives entirely in the application layer, not part of the
+persisted document model. Entering a Group keeps that as the whole story:
+nothing in the kernel changes. Entering a Component instance is the one
+exception, and it does reach the kernel: it opens an **explode session**
+(2.11), transient `Document` state holding the definition's members baked
+into ordinary world geometry for the edit's duration. That state is never
+serialized — a save mid-session transparently writes the document as if the
+session were closed — so the persisted document model is unaffected even
+though the live, in-memory one temporarily is.
 
 ### 2.6 Sketches are first-class, not zero-thickness solids
 
@@ -196,6 +204,11 @@ directly into vertex and plane data. This keeps the kernel's core geometry
 representation pose-free everywhere except Component instances, which is the
 one place a persistent pose earns its complexity.
 
+Editing a definition's members is covered separately in 2.11: because a
+definition's members are already ordinary Objects (just owned by a
+`ComponentId` rather than the world), editing one in place is a matter of
+temporarily changing what owns them, not a distinct editing mode.
+
 ### 2.8 Materials and Tags
 
 Materials are a document-level palette; each face carries an optional
@@ -238,6 +251,68 @@ is designed so that watertightness can never be broken as a side effect:
   through an everyday action, reintroducing the exact failure mode the data
   model exists to prevent. Removing material or punching an opening always
   routes through push-through instead.
+
+### 2.11 The explode-session component-editing model
+
+Editing a Component's shared geometry has to reconcile two things: the
+model's insistence that every instance of a definition is the identical
+geometry (2.7), and the fact that Hew's tool set — push/pull, Follow Me,
+booleans, slice, sketching — is written entirely in terms of ordinary world
+Objects, with no notion of a definition or a pose. Rather than teach every
+tool a second, definition-relative code path, Hew changes what the member
+Objects temporarily ARE, and lets the unmodified tool set do the rest. The
+insight this leans on is structural: a definition's members are already
+real Objects (2.7), merely owned by a `ComponentId` instead of the world —
+so editing one in place is an ownership retarget plus a pose bake, not a
+new mode.
+
+Double-clicking a component instance opens an **explode session**: the
+kernel bakes the instance's pose into the definition's member Objects and
+sketches — the SAME `ObjectId`/`SketchId`s, a move of ownership rather than
+a copy — and retargets them from the definition to the world tree. From
+that point every tool sees ordinary world geometry and behaves exactly as
+it does anywhere else, because that is what it now is. Every other live
+instance of the definition is hidden for the session's duration: there is
+exactly one copy of the geometry, and it is on loan to the world tree, so
+there is nothing left to keep in sync — a deliberate trade of live
+per-instance propagation during the edit for a tool set that needs no
+component-awareness at all. Closing the session (Escape, double-click
+outside) folds the members back: an Object or sketch the session touched
+unbakes through the inverse pose, one it never touched is restored from a
+pristine snapshot taken at open (bit-exact, sidestepping round-trip
+floating-point noise entirely for the common case of a session that only
+touches some members), and anything drawn or created during the session —
+new Objects, new sketches — folds in too, becoming part of the definition
+(SketchUp's "what you draw while editing goes into the component"). Every
+placement of the definition then shows the result.
+
+This works only when the instance's pose is a **similarity with a positive
+determinant** — uniform scale, no mirror (`Transform::similarity_scale`).
+Similarities are exactly the transforms that keep a circle a circle, which
+is what lets analytic curve and surface metadata (2.6) survive the
+bake/unbake round trip intact; baking a mirrored pose directly would invert
+winding and produce an inside-out solid. Group nesting gates a session the
+same way: the bake produces top-level world objects and must hide every
+placement of the definition, neither of which a group-nested placement can
+survive coherently (splicing baked members into a containing group is not
+modeled, and a group may not list a hidden member). An instance that fails
+either gate — a non-uniform scale, a mirror, or any placement of the
+definition nested inside a group — falls back to the previous in-context
+editing model instead: the tool set operates on the definition's members
+directly, through the pose, without baking or retargeting anything. That
+model remains fully supported for exactly these cases; the explode session
+is the default path, not a replacement for it.
+
+A session that deletes every member leaves the definition with nothing to
+fold back into: closing it deletes the definition and every instance of it
+outright, matching SketchUp's posture for an emptied component. Opening and
+closing a session are themselves ordinary, granular undo steps — undoing
+past a close visually reopens the session, and every operation performed
+inside one is individually undoable forever, exactly like any other
+document edit. An open session is transient, in-memory `Document` state
+only: it is never part of what `.hew` serializes, and saving (autosave
+included) while a session is open transparently writes the document as if
+the session had already been closed, without interrupting the edit.
 
 ## 3. Crate and Module Topology
 
@@ -449,8 +524,10 @@ from needing a face-versus-solid case alongside solid-versus-solid.
 
 **Stickiness follows editing context, not selection.** Covered in 2.5.
 Context is an explicit enter/exit model, generalized to a path through
-nested Groups and Components, and lives entirely as application/session
-state rather than as part of the persisted document.
+nested Groups and Components. The enter/exit gesture lives entirely as
+application/session state; entering a Component instance additionally opens
+a transient, kernel-held explode session (2.11) rather than persisted
+document state.
 
 **Booleans resolve coplanar contact exactly, and refuse rather than guess
 at pure tangency.** Shared walls, stacked solids, and coincident faces are

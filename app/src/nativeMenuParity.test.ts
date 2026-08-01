@@ -116,10 +116,14 @@ describe('3D Text one-off action parity (not a TOOL_REGISTRY tool)', () => {
   const id = 'draw-3d-text'
 
   it('is built as a native menu item, attached to a submenu, with a dispatch arm', () => {
+    // Built via `gated_item` (not a bare MenuItemBuilder): 3D Text refuses
+    // while an explode session is open (ExplodeSessionScope), so the native
+    // item registers in the gated map for sync_menu_state to disable —
+    // matching the web MenuBar/palette gating.
     const binding = new RegExp(
-      `let\\s+(\\w+)\\s*=\\s*MenuItemBuilder::with_id\\(\\s*"${id}"`,
+      `let\\s+(\\w+)\\s*=\\s*(?:MenuItemBuilder::with_id\\(\\s*"${id}"|gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}")`,
     ).exec(mainRsSource)
-    expect(binding, `no MenuItemBuilder::with_id binding found for ${id}`).not.toBeNull()
+    expect(binding, `no menu-item binding (with_id or gated_item) found for ${id}`).not.toBeNull()
     const variable = (binding as RegExpExecArray)[1]
     expect(
       mainRsSource.includes(`.item(&${variable})`),
