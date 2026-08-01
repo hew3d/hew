@@ -187,6 +187,11 @@ export default function App() {
   const [precisionSnap, setPrecisionSnap] = useState(false)
   const [snapKind, setSnapKind] = useState<string | null>(null)
   const [measurement, setMeasurement] = useState<string>('')
+  /** True when `measurement` is a finished Tape Measure reading kept on
+   *  screen for reference (tape-measure-rework part 1) rather than a live
+   *  typed buffer — every other tool's callback never passes `frozen`, so
+   *  this stays false for them. */
+  const [measurementFrozen, setMeasurementFrozen] = useState(false)
   /** Live inference-cursor info for the tooltip chip. */
   const [inferenceInfo, setInferenceInfo] = useState<InferenceInfo | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -608,8 +613,9 @@ export default function App() {
     setSnapKind(kind)
   }, [])
 
-  const handleMeasurement = useCallback((text: string) => {
+  const handleMeasurement = useCallback((text: string, frozen = false) => {
     setMeasurement(text)
+    setMeasurementFrozen(frozen)
   }, [])
 
   const handleInferenceChange = useCallback((info: InferenceInfo | null) => {
@@ -3426,7 +3432,7 @@ export default function App() {
               can't see moves into its own children). display:contents keeps
               them out of the layout while still catching the bubbled events. */}
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
-            <MeasurementBox toolName={toolName} value={measurement} />
+            <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} />
             <ViewportHUD
               onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
               onOrbit={() => activateTool('Orbit')}

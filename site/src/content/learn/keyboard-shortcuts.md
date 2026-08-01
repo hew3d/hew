@@ -60,8 +60,9 @@ These keys change what the *current tool operation* does; they're covered in eac
 | `Esc` | Cancel / step back the current gesture; or exit one editing-context level |
 | `Enter` | Commit the typed value |
 | Type a number/length | Exact value for the current gesture (no input box needed) |
-| `Shift` | Lock to the dominant axis (Line, Move) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool, held) |
-| `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice); `↓` clears |
+| `Shift` | Lock to the dominant axis (Line, Move, Tape Measure) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool, held) |
+| `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice, Tape Measure); `↓` clears |
+| `⌘`/`Ctrl` (held) | Measure without dropping a guide (Tape Measure) |
 | `Option`/`Alt` (tap) | Move toggles between moving and copying (stays on until tapped again) |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `3x` or `3/` + `Enter` | Right after a copy commits: multiply it into 3 copies / divide the distance into 3 (Move; `x3` and `/3` work too) |

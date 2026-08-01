@@ -32,4 +32,18 @@ describe('MeasurementBox', () => {
     render(<MeasurementBox toolName="Select" value="something" />)
     expect(screen.getByText('Value')).toBeInTheDocument()
   })
+
+  // tape-measure-rework part 1: the caret's presence means "a typed buffer
+  // is live and Enter will act on it"; its absence on a non-empty value
+  // means "a finished reading, kept on screen for reference".
+  it('shows the blinking caret by default (frozen omitted/false)', () => {
+    const { container } = render(<MeasurementBox toolName="Tape Measure" value="1m" />)
+    expect(container.querySelector('.hew-vcb-caret')).not.toBeNull()
+  })
+
+  it('hides the caret when frozen — a finished reading, not a live buffer', () => {
+    const { container } = render(<MeasurementBox toolName="Tape Measure" value="1m" frozen />)
+    expect(container.querySelector('.hew-vcb-caret')).toBeNull()
+    expect(screen.getByText('1m')).toBeInTheDocument()
+  })
 })

@@ -9,6 +9,14 @@
  * `Viewport`'s `onMeasurement` callback — no new Viewport plumbing. The
  * label is derived from the active tool name (a small local map) since
  * `onMeasurement` only ever carried the formatted value, never a label.
+ *
+ * `frozen` (Tape Measure only, tape-measure-rework part 1): the blinking
+ * caret's PRESENCE now specifically means "a typed buffer is live and Enter
+ * will act on it"; its ABSENCE on a non-empty value means "a finished
+ * reading, kept on screen for reference, not currently editable" — Tape
+ * Measure's readout persists after a commit until the tool switches, rather
+ * than clearing immediately, and the caret says whether typing right now
+ * would do anything.
  */
 const VCB_LABEL: Record<string, string> = {
   'Move': 'Distance',
@@ -28,9 +36,13 @@ const VCB_LABEL: Record<string, string> = {
 export interface MeasurementBoxProps {
   toolName: string
   value: string
+  /** True when `value` is a finished reading kept on screen for reference
+   *  rather than a live typed buffer (Tape Measure only) — hides the caret.
+   *  Defaults to false (every other tool). */
+  frozen?: boolean
 }
 
-export function MeasurementBox({ toolName, value }: MeasurementBoxProps) {
+export function MeasurementBox({ toolName, value, frozen = false }: MeasurementBoxProps) {
   if (value === '') return null
   const label = VCB_LABEL[toolName] ?? 'Value'
 
@@ -63,7 +75,9 @@ export function MeasurementBox({ toolName, value }: MeasurementBoxProps) {
         }}
       >
         {value}
-        <span aria-hidden="true" className="hew-vcb-caret" style={{ color: 'var(--accent-base)' }}>|</span>
+        {!frozen && (
+          <span aria-hidden="true" className="hew-vcb-caret" style={{ color: 'var(--accent-base)' }}>|</span>
+        )}
       </span>
     </div>
   )

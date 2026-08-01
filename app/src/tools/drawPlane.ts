@@ -416,7 +416,7 @@ export function rayLandsOnSketch(
  *  `'instance'` (component-edit-parity.md phase A2: an object/group context
  *  has no def-owned-sketch concept of its own; only a component instance's
  *  shared definition does). */
-function instanceOf(editContext: EditContext): bigint | null {
+export function instanceOf(editContext: EditContext): bigint | null {
   return editContext.kind === 'instance' ? editContext.id : null
 }
 

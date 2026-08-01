@@ -3000,6 +3000,17 @@ impl Document {
         self.def_sketches.get(&id).copied()
     }
 
+    /// The [`ComponentId`] that owns object `id`'s definition-local geometry,
+    /// or `None` if it is world-owned (or stale) — the object-side
+    /// counterpart of [`Document::sketch_owner_component`], mirroring
+    /// [`Document::is_world_object`].
+    pub fn object_owner_component(&self, id: ObjectId) -> Option<ComponentId> {
+        match self.objects.get(id)?.owner {
+            ObjectOwner::Definition(c) => Some(c),
+            ObjectOwner::World { .. } => None,
+        }
+    }
+
     /// The definition-owned sketches of a live component, in unspecified but
     /// stable order, or `None` if the component is stale/hidden — the sketch
     /// analog of [`Document::def_members`]. Each is fetched via

@@ -26,8 +26,10 @@ below.
   or a chord segment (Alt cycles); polygon side count is typed (`Ns`) and
   persists for the session. Editing (select, delete, transform) is
   plane-blind and already worked on a rotated sketch. TapeMeasure and
-  Protractor adopt a hovered sketch's plane too, so a guide/measurement
-  started on a tilted sketch stays in that plane
+  Protractor aren't limited to the ground plane either — a guide or
+  measurement follows a hovered sketch's plane, an idle arrow-key plane
+  lock, or (Tape Measure's parallel guides) the plane a picked face or
+  edge actually lies in
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent
@@ -193,14 +195,43 @@ below.
 - Construction guides — guide lines and points that participate in
   snapping and are saved with the model
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
-  offset — sourced from an edge, a sketch line, a world axis, or another
-  guide line) and Protractor (measure an angle, or drop an angular guide).
-  Typing a length right after measuring between two real points offers to
-  resize the WHOLE model so that distance becomes the typed one (a
-  confirmation dialog shows the scale factor); confirming uniformly rescales
-  every object, sketch, and guide about the world origin in one undo step —
-  component definitions stay at their authored size, only instance poses
-  scale
+  offset — sourced from an edge (a plain object's, a group member's, or a
+  component instance's), a sketch line, a world axis, or another guide
+  line) and Protractor (measure an angle, or drop an angular guide). A
+  guide or measurement isn't confined to the ground plane: it follows a
+  hovered sketch's plane, an idle arrow-key plane lock, or — for a
+  parallel guide whose source edge doesn't lie flat on the ground — the
+  plane a picked face or the frozen plane lock actually implies (a
+  face picked under the first click engages only while the cursor stays
+  over that same face, and releases to the plain sideways offset the
+  instant it moves off — it never locks onto whatever face happens to be
+  under the very first click for the rest of the drag). A guide or
+  measurement started from a frozen plane keeps an off-plane snap
+  (an endpoint or midpoint that doesn't sit exactly in it) reachable —
+  a measurement projects it onto the plane, a parallel guide instead
+  keeps only its component along the guide's own offset direction —
+  flagged as projected in the inference chip either way, rather than
+  dropping the candidate or landing off-plane. Arrow
+  keys lock the parallel guide's offset direction, or the measured
+  distance from a point, to a drawing axis mid-gesture — an axis that
+  runs along the source edge is rejected with a status hint instead of a
+  silent no-op — and Shift momentarily latches the nearest axis for as
+  long as it's held; the measurement preview, and a parallel guide's
+  offset connector, color by whichever drawing axis is locked or
+  inferred. Holding Ctrl/Cmd
+  measures without dropping a guide (SketchUp's measure-only mode);
+  measuring between two empty points drops both a guide point at the
+  second click and an infinite guide line through both points, the same
+  parity SketchUp itself has. The distance readout stays in the corner
+  after a measurement commits, so it's there to refer back to, until a
+  different tool is selected. Typing a length right after measuring
+  between two real points — whether before the second click or, just as
+  well, afterward once the readout is already showing the measured
+  distance — offers to resize the WHOLE model so that distance becomes
+  the typed one (a confirmation dialog shows the scale factor);
+  confirming uniformly rescales every object, sketch, and guide about the
+  world origin in one undo step — component definitions stay at their
+  authored size, only instance poses scale
 - Section Plane: a non-destructive clipping plane for looking inside a
   model (wall thickness, clearance, voids) — click a face to section it
   there, drag its widget to sweep the cut, toggle it on/off, delete it.

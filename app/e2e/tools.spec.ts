@@ -1031,8 +1031,12 @@ test('Guides (Tape Measure): rescale — Cancel keeps the model and drops a guid
     boxId,
   )
   expect(afterCancel.bounds).toEqual(boundsBefore) // Cancel touched nothing
-  expect(afterCancel.guideIds.length).toBe(1)
-  const guideId = afterCancel.guideIds[0]
+  // A guide point drop between two measured points now also drops the guide
+  // LINE through them (tape-measure-rework WP-7 parity with SketchUp), so
+  // this typed-exact commit leaves 2 guides: a 'line' then the 'point'.
+  expect(afterCancel.guideIds.length).toBe(2)
+  const [lineId, guideId] = afterCancel.guideIds
+  expect(await page.evaluate((gid) => window.__hew_test!.getGuideKind(gid), lineId)).toBe('line')
   expect(await page.evaluate((gid) => window.__hew_test!.getGuideKind(gid), guideId)).toBe('point')
   const guideGeom = await page.evaluate(
     (gid) => window.__hew_test!.getGuideGeometry(gid),
@@ -1059,6 +1063,189 @@ test('Guides (Tape Measure): rescale — Cancel keeps the model and drops a guid
   for (let i = 0; i < 6; i++) {
     expect(boundsAfter[i]).toBeCloseTo(boundsBefore[i] * 1.5, 4)
   }
+})
+
+// Explicit guide deletion must invalidate a stale idle recall (a `_recall`
+// can legitimately be anchored to a point resting ON a guide, since
+// `snapOnGeometry` treats an on-guide snap as real geometry) — the same
+// disarm Undo/Redo/an object delete already apply. Deletes the guide via the
+// Edit menu (`deleteAllGuides`) rather than switching tools to select and
+// delete just the one guide, so Tape Measure stays the ACTIVE tool the whole
+// time — `disarmActivePostCommitWindow` only reaches Tape Measure's
+// `forgetRecall` while it IS the active tool.
+test('Guides (Tape Measure): deleting all guides clears an idle recall — the "resize the model?" prompt no longer arms', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [7, -8, 6], target: [1, 1, 1], fovDeg: 45 })
+    h.drawBox([0, 0, 0], [2, 2, 0], 2) // real 2 m top edge to measure
+    h.addGuideLine(0, 0, 0, 0, 1, 0) // an existing guide, present to be deleted
+  })
+  await page.keyboard.press('t') // Tape Measure tool
+  await page.locator('text=Click a point to measure from').first().waitFor({ timeout: 5000 })
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+  const cornerA = await toPage([0, 0, 2])
+  const cornerB = await toPage([2, 0, 2])
+
+  // A real two-click measurement, both ends on real geometry — an eligible
+  // recall (tape-measure-rework part 2).
+  await page.mouse.move(cornerA.x, cornerA.y)
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.mouse.move(cornerB.x, cornerB.y, { steps: 8 })
+  await page.mouse.down()
+  await page.mouse.up()
+
+  // Confirm the recall is armed BEFORE the delete: typing a length + Enter
+  // re-arms the "resize the model?" confirmation from cold idle. Escape
+  // declines it — the recall itself survives a decline unchanged.
+  await page.keyboard.type('3')
+  await page.keyboard.press('Enter')
+  await page.getByRole('dialog', { name: 'Resize the model' }).waitFor({ timeout: 5000 })
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  // Delete the guide via Edit ▸ Delete Guide Lines (`deleteAllGuides`) — the
+  // fix under test: this must disarm the tool's idle recall, the same as
+  // Undo/Redo/an explicit object delete already do (`disarmActivePostCommitWindow`).
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Edit' }).click()
+  await page.getByText('Delete Guide Lines', { exact: true }).click()
+  expect(await page.evaluate(() => window.__hew_test!.getGuideIds())).toHaveLength(0)
+
+  // The recall must now be dead: the same typed length + Enter no longer
+  // arms the confirmation.
+  await page.keyboard.type('3')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(300)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
+// tape-measure-rework WP-7: Ctrl/Cmd measure-only mode and the Shift axis
+// latch, driven with real pointer/keyboard input (no prior E2E coverage).
+
+test('Guides (Tape Measure): Ctrl/Cmd held completes the measurement without creating any guide', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    window.__hew_test!.setCamera({ position: [7, -8, 6], target: [1, 1, 1], fovDeg: 45 })
+  })
+  await page.keyboard.press('t')
+  await page.locator('text=Click a point to measure from').first().waitFor({ timeout: 5000 })
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+
+  const guidesBefore = await page.evaluate(() => window.__hew_test!.getGuideIds().length)
+  expect(guidesBefore).toBe(0)
+
+  const a = await toPage([2, 2, 0])
+  const b = await toPage([3.5, 3, 0])
+
+  await page.keyboard.down('Control')
+  await page.mouse.move(a.x, a.y)
+  await page.mouse.down() // first point
+  await page.mouse.up()
+  await expect(page.getByText('measuring only, no guide will be created', { exact: false })).toBeVisible()
+  await page.mouse.move(b.x, b.y, { steps: 8 }) // hover the second point live
+  await page.mouse.down() // second point — would normally drop a guide point + line
+  await page.mouse.up()
+  await page.keyboard.up('Control')
+
+  const guidesAfter = await page.evaluate(() => window.__hew_test!.getGuideIds().length)
+  expect(guidesAfter).toBe(guidesBefore) // measured, but nothing was created
+
+  // The tool is still usable afterward — an ordinary measure (Ctrl/Cmd
+  // released) drops a guide normally.
+  const c = await toPage([-2, -2, 0])
+  const d = await toPage([-3, -3, 0])
+  await page.mouse.move(c.x, c.y)
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.mouse.move(d.x, d.y, { steps: 8 })
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length > 0)
+})
+
+test('Guides (Tape Measure): Shift latches the nearest axis and holds it through further movement', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.setCamera({ position: [7, -8, 6], target: [1, 1, 1], fovDeg: 45 })
+    h.drawBox([0, 0, 0], [2, 1, 0], 1)
+  })
+  await page.keyboard.press('t')
+  await page.locator('text=Click a point to measure from').first().waitFor({ timeout: 5000 })
+
+  const canvas = await page.locator('canvas').first().boundingBox()
+  if (canvas === null) throw new Error('no canvas')
+  const toPage = async (world: [number, number, number]) => {
+    const p = await page.evaluate(
+      (w) => window.__hew_test!.worldToScreen(w as [number, number, number]),
+      world,
+    )
+    return { x: canvas.x + p.x, y: canvas.y + p.y }
+  }
+
+  // The front-bottom edge's midpoint — enters parallel-guide mode.
+  const edgeMid = await toPage([1, 0, 0])
+  await page.mouse.move(edgeMid.x, edgeMid.y)
+  await page.waitForTimeout(80)
+  await page.mouse.down()
+  await page.mouse.up()
+  await expect(page.getByText('Click to place the parallel guide', { exact: false })).toBeVisible()
+
+  // Pull straight up the box's own front face — a pure-Z offset.
+  const zPull = await toPage([1, 0, 0.3])
+  await page.mouse.move(zPull.x, zPull.y, { steps: 8 })
+  await page.waitForTimeout(80)
+
+  await page.keyboard.down('Shift')
+  await expect(page.getByText('Offset locked to blue while Shift is held', { exact: false })).toBeVisible()
+
+  // Keep moving along that same face while Shift stays held — the latch
+  // should HOLD the blue/Z lock through the further movement, not just
+  // apply once at the moment of the press.
+  const zPullFurther = await toPage([1, 0, 0.6])
+  await page.mouse.move(zPullFurther.x, zPullFurther.y, { steps: 8 })
+  await page.waitForTimeout(80)
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.keyboard.up('Shift')
+
+  const guideIds = await page.evaluate(() => window.__hew_test!.getGuideIds())
+  expect(guideIds.length).toBe(1)
+  const guide = await page.evaluate((id) => {
+    const h = window.__hew_test!
+    return { kind: h.getGuideKind(id), geom: h.getGuideGeometry(id) }
+  }, guideIds[0])
+  expect(guide.kind).toBe('line')
+  // Still runs along the source edge (X).
+  expect(Math.abs(guide.geom![3])).toBeCloseTo(1, 6)
+  expect(Math.abs(guide.geom![4])).toBeLessThan(1e-6)
+  expect(Math.abs(guide.geom![5])).toBeLessThan(1e-6)
+  // Committed at the FURTHER Z position the lock was still holding at —
+  // the offset direction is exactly Z (X pinned to 0, per the lock).
+  expect(Math.abs(guide.geom![1])).toBeLessThan(1e-6)
+  expect(guide.geom![2]).toBeCloseTo(0.6, 1)
 })
 
 test('Guides (Protractor): deleteGuide removes the guide and updates hash', async ({ page }) => {

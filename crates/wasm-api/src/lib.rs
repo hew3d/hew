@@ -4792,7 +4792,9 @@ impl Scene {
     /// `is_world_object` — a raw def-local pair handed to `add_guide_line`
     /// under this function's promised "world endpoints" contract would place
     /// the guide in the wrong frame. Guides stay world-space-only in v1
-    /// (component-edit-parity.md, "Out of scope").
+    /// (component-edit-parity.md, "Out of scope"). For a def-owned sketch
+    /// viewed through a specific instance, see `sketch_edge_endpoints_in_instance`;
+    /// for the object-edge analog, see `edge_endpoints_in_instance`.
     pub fn sketch_edge_endpoints(&self, sketch: u64, edge: u64) -> Option<Vec<f64>> {
         let sid = sketch_id(sketch);
         if self.doc.sketch_owner_component(sid).is_some() {
@@ -4826,6 +4828,32 @@ impl Scene {
         let e = s.edges().get(eid)?;
         let a = pose.apply_point(s.vertices()[e.from].position);
         let b = pose.apply_point(s.vertices()[e.to].position);
+        Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
+    }
+
+    /// World endpoints of a definition-owned Object's edge as viewed through
+    /// `instance` — the object-edge analog of `sketch_edge_endpoints_in_instance`.
+    /// Returns `None` for stale handles, cross-definition input, or a
+    /// world-space object (which has no meaningful "instance" to view it
+    /// through — use `edge_endpoints` instead).
+    pub fn edge_endpoints_in_instance(
+        &self,
+        instance: u64,
+        object: u64,
+        edge: u64,
+    ) -> Option<Vec<f64>> {
+        let iid = instance_id(instance);
+        let component = self.doc.instance_def(iid)?;
+        let oid = object_id(object);
+        if self.doc.object_owner_component(oid) != Some(component) {
+            return None;
+        }
+        let pose = self.doc.instance_pose(iid)?;
+        let object = self.doc.object(oid)?;
+        let eid = EdgeId::from(KeyData::from_ffi(edge));
+        let (a, b) = object.edge_endpoints(eid)?;
+        let a = pose.apply_point(a);
+        let b = pose.apply_point(b);
         Some(vec![a.x, a.y, a.z, b.x, b.y, b.z])
     }
 
@@ -11395,6 +11423,152 @@ mod tests {
             scene.sketch_edge_endpoints(def_sketch, edge),
             None,
             "a def-owned sketch edge must not answer as world endpoints"
+        );
+    }
+
+    /// `edge_endpoints_in_instance` is the object-edge analog of
+    /// `sketch_edge_endpoints_in_instance`: a posed instance's member-object
+    /// edge maps into world space through that instance's pose.
+    #[test]
+    fn edge_endpoints_in_instance_maps_a_posed_member_edge_to_world_space() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+
+        let edge = scene
+            .doc
+            .object(object_id(member))
+            .unwrap()
+            .edges()
+            .keys()
+            .next()
+            .unwrap()
+            .data()
+            .as_ffi();
+        let (local_a, local_b) = scene
+            .doc
+            .object(object_id(member))
+            .unwrap()
+            .edge_endpoints(EdgeId::from(KeyData::from_ffi(edge)))
+            .unwrap();
+
+        let affine = [
+            1.0, 0.0, 0.0, 5.0, //
+            0.0, 1.0, 0.0, 2.0, //
+            0.0, 0.0, 1.0, 3.0,
+        ];
+        scene.transform_instance(inst, &affine).unwrap();
+
+        let got = scene
+            .edge_endpoints_in_instance(inst, member, edge)
+            .expect("a posed member edge resolves to world endpoints");
+        assert_eq!(
+            got,
+            vec![
+                local_a.x + 5.0,
+                local_a.y + 2.0,
+                local_a.z + 3.0,
+                local_b.x + 5.0,
+                local_b.y + 2.0,
+                local_b.z + 3.0,
+            ]
+        );
+    }
+
+    /// A world-space (non-definition) object has no meaningful "instance" to
+    /// view it through, so `edge_endpoints_in_instance` refuses it — the
+    /// caller falls back to `edge_endpoints` for world objects.
+    #[test]
+    fn edge_endpoints_in_instance_refuses_a_world_space_object() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o2]).unwrap();
+
+        let edge = scene
+            .doc
+            .object(object_id(o))
+            .unwrap()
+            .edges()
+            .keys()
+            .next()
+            .unwrap()
+            .data()
+            .as_ffi();
+
+        assert_eq!(
+            scene.edge_endpoints_in_instance(inst, o, edge),
+            None,
+            "a world-space object must not resolve through an unrelated instance"
+        );
+    }
+
+    /// An object owned by a *different* component's definition must not
+    /// resolve through an instance of another definition — the object-side
+    /// analog of `sketch_edge_endpoints_in_instance`'s cross-definition guard.
+    #[test]
+    fn edge_endpoints_in_instance_refuses_a_different_definitions_object() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let inst1 = scene.make_component(&[0], &[o1]).unwrap();
+
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let inst2 = scene.make_component(&[0], &[o2]).unwrap();
+        let comp2 = scene.instance_def(inst2).unwrap();
+        let member2 = scene.component_member_objects(comp2)[0];
+
+        let edge = scene
+            .doc
+            .object(object_id(member2))
+            .unwrap()
+            .edges()
+            .keys()
+            .next()
+            .unwrap()
+            .data()
+            .as_ffi();
+
+        assert_eq!(
+            scene.edge_endpoints_in_instance(inst1, member2, edge),
+            None,
+            "an object owned by a different component's definition must not resolve"
+        );
+    }
+
+    /// A stale/nonexistent instance handle must not resolve, regardless of
+    /// whether `object`/`edge` are otherwise live.
+    #[test]
+    fn edge_endpoints_in_instance_refuses_a_stale_instance_handle() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(comp)[0];
+
+        let edge = scene
+            .doc
+            .object(object_id(member))
+            .unwrap()
+            .edges()
+            .keys()
+            .next()
+            .unwrap()
+            .data()
+            .as_ffi();
+
+        assert_eq!(
+            scene.edge_endpoints_in_instance(u64::MAX, member, edge),
+            None,
+            "a stale instance handle must not resolve"
         );
     }
 

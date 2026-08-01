@@ -706,16 +706,28 @@ pub struct SnapQuery {
     /// off-plane point stays unsnappable, so the see-through protection the
     /// plane filter was introduced for is preserved by the cull alone.
     ///
-    /// Exists for tools that can HONOUR an off-plane point (the 3d-line
-    /// defect): `LineTool`'s plane-mode chain re-homes onto a new sketch
-    /// plane when a committed point leaves the frozen one, so a visible
-    /// vertex in an EARLIER sketch of the same chain — e.g. the chain's own
-    /// origin after axis-locked segments carried it across two re-homes —
-    /// is a legitimate target its frozen plane must not veto. Tools that
-    /// commit into one immutable plane (Rectangle/Circle/Polygon/Arc, and
-    /// Line's face mode) leave this `false`: a snap they would have to
-    /// project back onto the plane afterwards would LIE about its position,
-    /// and a candidate that cannot be honoured must not be offered.
+    /// Exists for tools that can HONOUR an off-plane point, in one of three
+    /// ways. `LineTool`'s plane-mode chain re-homes onto a new sketch plane
+    /// when a committed point leaves the frozen one (the 3d-line defect), so
+    /// a visible vertex in an EARLIER sketch of the same chain — e.g. the
+    /// chain's own origin after axis-locked segments carried it across two
+    /// re-homes — is a legitimate target its frozen plane must not veto.
+    /// `TapeMeasureTool`'s measure mode instead keeps its plane immutable and
+    /// PROJECTS an off-plane candidate onto it, but only while disclosing
+    /// that the landed point is a projection (its `snapProjected()`, surfaced
+    /// as the inference chip's "projected" qualifier) rather than silently
+    /// presenting the projection as the literal snap. `TapeMeasureTool`'s
+    /// PARALLEL-guide stage uses a third pattern: it keeps neither the raw
+    /// point nor a plane-projected point, only the candidate's scalar
+    /// component along the resolved offset direction (the in-plane `u` an
+    /// arrow-locked axis, a frozen gesture plane, or a first-click face
+    /// anchor implies) — but the SAME disclosure obligation applies whenever
+    /// that discards a nonzero off-plane component. Tools that commit into
+    /// one immutable plane with no such disclosure (Rectangle/Circle/Polygon/
+    /// Arc, and Line's face mode) leave this `false`: a snap they would have
+    /// to project back onto the plane afterwards would LIE about its
+    /// position, and an undisclosed candidate that cannot be honoured must
+    /// not be offered.
     ///
     /// Sliding/directional kinds (`OnEdge`, `OnFace`, `OnAxis`, `OnGuide`,
     /// `Tangent`) stay plane-filtered even when this is set: they are not

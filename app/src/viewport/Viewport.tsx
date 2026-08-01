@@ -343,8 +343,11 @@ interface Props {
   onHistoryChanged?: () => void
   /** Populated by the viewport with imperative commands the parent can call. */
   apiRef?: React.MutableRefObject<ViewportApi | null>
-  /** Called with the live measurement text from tools that support VCB entry. */
-  onMeasurement?: (text: string) => void
+  /** Called with the live measurement text from tools that support VCB entry.
+   *  `frozen` (Tape Measure only, tape-measure-rework part 1) is true when
+   *  `text` is a finished reading kept on screen for reference rather than a
+   *  live typed buffer — every other tool's callback never passes it. */
+  onMeasurement?: (text: string, frozen?: boolean) => void
   /** Fired when the Tape Measure tool arms a "resize the model?" confirmation
    *  (design tool-parity §3): the parent renders the confirmation modal and
    *  resolves it via `ViewportApi.confirmPendingRescale` /
@@ -3231,19 +3234,25 @@ export default function Viewport({
     }
 
     /**
-     * Quietly close the active tool's armed ×N / /N window, if any (Move's
-     * or Rotate's). Explicit document commands — delete, undo, redo — are
-     * deliberate and must execute, but they end the refinement: without
-     * this, the window's keyboard capture outlives it (Delete silently
-     * no-ops, bare-letter tool shortcuts feed a stale VCB buffer until Esc).
-     * Only the ambiguous bare Delete/Backspace KEYSTROKE stays guarded
-     * upstream by capturingInput — see MoveTool/RotateTool's
-     * capturingInput / disarmArray.
+     * Quietly close the active tool's post-commit windows, if any: Move's/
+     * Rotate's armed ×N / /N array-copy window, and Tape Measure's idle
+     * retroactive-rescale recall (tape-measure-rework part 2). Explicit
+     * document commands — delete, undo, redo — are deliberate and must
+     * execute, but they end either kind of refinement: without this, the
+     * array window's keyboard capture outlives it (Delete silently no-ops,
+     * bare-letter tool shortcuts feed a stale VCB buffer until Esc), and a
+     * post-mutation recall would keep offering to resize the model against
+     * world points that may no longer describe anything real. Only the
+     * ambiguous bare Delete/Backspace KEYSTROKE stays guarded upstream by
+     * capturingInput — see MoveTool/RotateTool's capturingInput / disarmArray.
      */
-    function disarmActiveArrayWindow(): void {
+    function disarmActivePostCommitWindow(): void {
       const activeTool = toolController.activeTool
       if ('disarmArray' in activeTool) {
         (activeTool as { disarmArray(): void }).disarmArray()
+      }
+      if ('forgetRecall' in activeTool) {
+        (activeTool as { forgetRecall(): void }).forgetRecall()
       }
     }
 
@@ -3251,7 +3260,7 @@ export default function Viewport({
       if (nodes.length === 0) return
       // An explicit delete is deliberate and executes — but first disarm the
       // array window so no hot state points at the deleted copies.
-      disarmActiveArrayWindow()
+      disarmActivePostCommitWindow()
       // kind: 0=object, 1=group, 2=instance; 'sketch' has no NodeId — its own
       // dedicated delete_sketch call, mirroring delete_guide's shape.
       //
@@ -3683,7 +3692,7 @@ export default function Viewport({
         // As explicit as menu delete: the undo executes AND ends the armed
         // array window (the generation guard already prevented any
         // wrong-action harm; this releases the window's keyboard capture).
-        disarmActiveArrayWindow()
+        disarmActivePostCommitWindow()
         try {
           applyHistoryChange(wasmSceneRef.current.scene_undo())
           onHistoryChangedRef.current?.()
@@ -3695,8 +3704,8 @@ export default function Viewport({
 
     function runRedo(): void {
       if (wasmSceneRef.current.can_scene_redo()) {
-        // Mirror runUndo — see disarmActiveArrayWindow.
-        disarmActiveArrayWindow()
+        // Mirror runUndo — see disarmActivePostCommitWindow.
+        disarmActivePostCommitWindow()
         try {
           applyHistoryChange(wasmSceneRef.current.scene_redo())
           onHistoryChangedRef.current?.()
@@ -4185,6 +4194,13 @@ export default function Viewport({
     }
 
     function deleteAllGuides(): void {
+      // Explicit guide deletion is as deliberate as an object/group/instance
+      // delete (`runDelete`) — a `_recall` can legitimately be anchored to an
+      // on-guide point (`snapOnGeometry` treats it as real geometry), so this
+      // must disarm the tool's idle recall/rescale-prompt the same way, or a
+      // stale reading/affordance survives referencing a point that no longer
+      // exists. See `disarmActivePostCommitWindow`.
+      disarmActivePostCommitWindow()
       try {
         wasmScene.delete_all_guides()
       } catch (err) {
@@ -4197,6 +4213,9 @@ export default function Viewport({
     }
 
     function runDeleteGuide(id: bigint): void {
+      // Same reasoning as `deleteAllGuides` above — a single deleted guide
+      // can be the exact point an idle recall is anchored to.
+      disarmActivePostCommitWindow()
       try {
         wasmScene.delete_guide(id)
       } catch (err) {
@@ -4804,7 +4823,12 @@ export default function Viewport({
           scheduleRender()
         },
         handleToast,
-        (text: string) => { onMeasurementRef.current?.(text) },
+        // Tape Measure is the ONLY tool whose readout persists after a
+        // commit (tape-measure-rework part 1) — forward the `frozen` flag
+        // its own `OnMeasurement` type now carries; every other tool below
+        // still passes just `text`, which leaves `frozen` `undefined` (and
+        // so falsy) on their calls, unchanged.
+        (text: string, frozen?: boolean) => { onMeasurementRef.current?.(text, frozen) },
         // Resize-the-model arm (design tool-parity §3): bubble up to the
         // parent, which renders the confirmation modal and resolves it via
         // ViewportApi.confirmPendingRescale/cancelPendingRescale below.
@@ -5582,6 +5606,13 @@ export default function Viewport({
         if ('setShiftHeld' in at) {
           (at as { setShiftHeld(held: boolean): void }).setShiftHeld(false)
         }
+        // Same `reportToolHint()` gap `onAltKeyUp` fixes for its own
+        // modifier (see that handler's comment below): a plain Shift
+        // release has no keydown-driven re-poll of its own, so a tool's
+        // Shift-provenance status hint (e.g. TapeMeasureTool's axis-lock
+        // wording, tape-measure-rework WP-7) would otherwise stay stale
+        // until an unrelated event happened to re-poll it.
+        reportToolHint()
       }
       const releasedCleanly = ev.key === 'Shift' || !ev.shiftKey
       if (shiftFovCursorActive && releasedCleanly) {
@@ -5598,6 +5629,21 @@ export default function Viewport({
     }
     window.addEventListener('keydown', onShiftKeyDown)
     window.addEventListener('keyup', onShiftKeyUp)
+
+    // A blur (Cmd-Tab, devtools, another window) swallows the keyup that
+    // would otherwise release Shift — without this, a tool's Shift-
+    // provenance axis lock (e.g. TapeMeasureTool's `_shiftAxisLock`,
+    // tape-measure-rework WP-7) stays stranded true after the window loses
+    // focus, even though Shift is no longer physically held. Same posture
+    // as `onWindowBlurClearsEyedropper`/`onWindowBlurClearsPrecision` below.
+    function onWindowBlurClearsShiftLock(): void {
+      const at = toolController.activeTool
+      if ('setShiftHeld' in at) {
+        (at as { setShiftHeld(held: boolean): void }).setShiftHeld(false)
+      }
+      reportToolHint()
+    }
+    window.addEventListener('blur', onWindowBlurClearsShiftLock)
 
     // Ctrl toggles the active tool's durable center-anchor (Scale's
     // `toggleCenterAnchor`). Like Shift above, a BARE Control keydown reports
@@ -5677,6 +5723,53 @@ export default function Viewport({
     }
     window.addEventListener('keydown', onPushPullModifierKeyDown)
     window.addEventListener('keyup', onPushPullModifierKeyUp)
+
+    // Ctrl/Cmd HELD during a Tape Measure gesture = measure WITHOUT
+    // creating a guide (SketchUp parity, tape-measure-rework WP-7 item 1) —
+    // a LIVE held-state dispatch, same posture as `onShiftKeyDown`/
+    // `onShiftKeyUp` above, NOT the CLEAN-TAP dispatch `onCtrlKeyDown`/
+    // `onPushPullModifierKeyDown` use just above for Scale's/Push-Pull's own
+    // Ctrl/Cmd bindings — those duck-type a DIFFERENT method
+    // (`toggleCenterAnchor`/`toggleExtrudeAsNew`) that TapeMeasureTool
+    // implements neither of, so a live hold here never reaches them, and
+    // conversely a clean tap while TapeMeasureTool is active never reaches
+    // `setGuideCreationSuppressed` (nothing here is TAP-scoped). Control and
+    // Meta are treated as one logical modifier, same as
+    // `onPushPullModifierKeyDown` just above — Ctrl (Windows/Linux) and Cmd
+    // (macOS) both work, per this codebase's `metaKey || ctrlKey` convention
+    // (see platform.ts).
+    function onGuideSuppressKeyDown(ev: KeyboardEvent): void {
+      if (ev.key !== 'Control' && ev.key !== 'Meta') return
+      const at = toolController.activeTool
+      if ('setGuideCreationSuppressed' in at) {
+        (at as { setGuideCreationSuppressed(held: boolean): void }).setGuideCreationSuppressed(true)
+      }
+    }
+    function onGuideSuppressKeyUp(ev: KeyboardEvent): void {
+      if (ev.key !== 'Control' && ev.key !== 'Meta') return
+      // Still logically held if the OTHER modifier key remains down (a rare
+      // Ctrl+Cmd chord) — the live event's own flags are the authority.
+      if (ev.ctrlKey || ev.metaKey) return
+      const at = toolController.activeTool
+      if ('setGuideCreationSuppressed' in at) {
+        (at as { setGuideCreationSuppressed(held: boolean): void }).setGuideCreationSuppressed(false)
+      }
+      reportToolHint()
+    }
+    window.addEventListener('keydown', onGuideSuppressKeyDown)
+    window.addEventListener('keyup', onGuideSuppressKeyUp)
+
+    // Same blur-swallows-the-keyup gap as `onWindowBlurClearsShiftLock`
+    // above — a Cmd-Tab mid-hold must not strand the suppression on.
+    function onWindowBlurClearsGuideSuppress(): void {
+      const at = toolController.activeTool
+      if ('setGuideCreationSuppressed' in at) {
+        (at as { setGuideCreationSuppressed(held: boolean): void }).setGuideCreationSuppressed(false)
+      }
+      reportToolHint()
+    }
+    window.addEventListener('blur', onWindowBlurClearsGuideSuppress)
+
     // Alt held while Paint is active = EYEDROPPER (paint-tool design §1).
     // Unlike Move's bare-Alt durable copy TOGGLE (no live "held right now"
     // signal to reuse — see the note below), the cursor needs the actual
@@ -5839,12 +5932,19 @@ export default function Viewport({
       // run it while controls actually own the camera.
       const changed = controls.enabled && controls.update()
       if (changed || needsRender) {
-        // Keep guide-line dashes screen-constant too (see updateGuideDashScale).
         // effectiveDistance (not the raw controls distance) so this reacts to
         // an ortho zoom exactly like a perspective dolly would
         // (docs/design/camera.md §1 — CameraRig.effectiveDistance).
         const effDist = rig.effectiveDistance(controls.getDistance())
-        sceneRenderer.updateGuideDashScale(effDist)
+        // `worldPerPixel` callback is projection-agnostic — no
+        // `instanceof PerspectiveCamera` guard needed on either side anymore.
+        // Defined here (rather than just below, by updateDiskScale/
+        // updateGripScale) so the guide-dash update can share it too.
+        const worldPerPixelAt = (dist: number) => rig.worldPerPixel(dist, el.clientHeight)
+        // Keep guide-line dashes screen-constant too, the same
+        // screen-constant-pixel way the origin axes' negative halves are
+        // (see SceneRenderer.updateGuideDashScale and clampOriginAxes above).
+        sceneRenderer.updateGuideDashScale(worldPerPixelAt(effDist))
         // Billboard every annotation text quad + keep annotation colors
         // current for the resolved theme (docs/design/dimensions-text.md).
         // Reads `readAppliedTheme()` — a `dataset.theme` DOM read, NOT the
@@ -5863,10 +5963,8 @@ export default function Viewport({
         // disks are virtual constructs too — keep them screen-constant the
         // same way (see RotateTool/ProtractorTool/SliceTool/
         // SectionPlaneTool.updateDiskScale, all built on
-        // viewport/math.ts's screenConstantWorldHalfFromWorldPerPixel). The
-        // `worldPerPixel` callback is projection-agnostic — no
-        // `instanceof PerspectiveCamera` guard needed on either side anymore.
-        const worldPerPixelAt = (dist: number) => rig.worldPerPixel(dist, el.clientHeight)
+        // viewport/math.ts's screenConstantWorldHalfFromWorldPerPixel).
+        // `worldPerPixelAt` is defined above, alongside the guide-dash update.
         const activeToolForScale = toolController.activeTool
         // Optional CALL (`?.()`), not an `in` check plus a cast. Both hooks are
         // declared optional on `Tool`, so this is fully type-checked against
@@ -7084,10 +7182,14 @@ export default function Viewport({
       if (cameraDragActive) onCameraDragChangeRef.current?.(false)
       window.removeEventListener('keydown', onShiftKeyDown)
       window.removeEventListener('keyup', onShiftKeyUp)
+      window.removeEventListener('blur', onWindowBlurClearsShiftLock)
       window.removeEventListener('keydown', onCtrlKeyDown, true)
       window.removeEventListener('keyup', onCtrlKeyUp)
       window.removeEventListener('keydown', onPushPullModifierKeyDown)
       window.removeEventListener('keyup', onPushPullModifierKeyUp)
+      window.removeEventListener('keydown', onGuideSuppressKeyDown)
+      window.removeEventListener('keyup', onGuideSuppressKeyUp)
+      window.removeEventListener('blur', onWindowBlurClearsGuideSuppress)
       window.removeEventListener('keydown', onAltKeyDown)
       window.removeEventListener('keyup', onAltKeyUp)
       window.removeEventListener('blur', onWindowBlurClearsEyedropper)

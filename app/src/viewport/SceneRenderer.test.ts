@@ -1649,6 +1649,30 @@ describe('SceneRenderer — section plane (DESIGN §3/§4)', () => {
   })
 })
 
+// tape-measure-rework WP-6: GUIDE_COLOR moved to viewport/guideColors.ts as
+// the single source of truth shared with TapeMeasureTool's own preview —
+// this is a one-line regression check that the refactor didn't change the
+// actual rendered value.
+describe('SceneRenderer — committed-guide color (tape-measure-rework WP-6)', () => {
+  it('still renders committed line guides at 0x555555 after the GUIDE_COLOR de-duplication', () => {
+    const scene = makeScene({ objects: {} })
+    ;(scene as unknown as { guide_kind: (id: bigint) => string }).guide_kind = () => 'line'
+    ;(scene as unknown as { guide_geometry: (id: bigint) => Float64Array }).guide_geometry = () =>
+      new Float64Array([0, 0, 0, 1, 0, 0])
+    ;(scene as unknown as { guide_ids: () => BigUint64Array }).guide_ids = () => new BigUint64Array([1n])
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.refreshGuides()
+
+    const guideLine = renderer.guidesGroup.children.find(
+      (c) => c instanceof THREE.LineSegments,
+    ) as THREE.LineSegments
+    expect(guideLine).toBeDefined()
+    const mat = guideLine.material as THREE.LineDashedMaterial
+    expect(mat.color.getHex()).toBe(new THREE.Color(0x555555).getHex())
+  })
+})
+
 // ---------------------------------------------------------------------------
 // D1 (section-plane-polish): the committed widget must always fully
 // surround the model — size AND offset the quad to the visible-scene AABB

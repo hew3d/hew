@@ -4,9 +4,14 @@
  * measuring a real distance between two known points, typing a different
  * length arms this dialog instead of dropping a guide immediately.
  * Confirming uniformly rescales the WHOLE model (`rescale_document`) about
- * the world origin so the measured distance becomes the typed one;
- * cancelling reverts to the ordinary guide-point commit the typed distance
- * would otherwise have produced.
+ * the world origin so the measured distance becomes the typed one. Two ways
+ * to arm this: typing mid-gesture, before the second click (a LIVE arm) — on
+ * that path, cancelling reverts to the ordinary guide-point commit the typed
+ * distance would otherwise have produced — or typing after the fact, once
+ * the gesture has already completed and the widget shows the frozen reading
+ * (a RECALLED arm, tape-measure-rework part 2) — on that path there is no
+ * pending gesture to fall back to, so cancelling just restores the frozen
+ * reading and leaves the recall available to re-arm.
  *
  * Styling follows the StlUnitsDialog family — theme tokens with the same
  * dark fallbacks the rest of the token consumers carry. Escape cancels,
@@ -26,8 +31,11 @@ interface RescaleConfirmDialogProps {
   factor: number
   /** Apply the rescale. */
   onConfirm: () => void
-  /** Decline — falls back to the normal guide-point commit (also triggered
-   *  by Escape). */
+  /** Decline. For a LIVE arm (typed mid-gesture), falls back to the normal
+   *  guide-point commit the typed distance would have produced; for a
+   *  RECALLED arm (typed after the gesture already completed), there is no
+   *  such commit to fall back to — it just restores the frozen reading.
+   *  Also triggered by Escape. */
   onCancel: () => void
 }
 

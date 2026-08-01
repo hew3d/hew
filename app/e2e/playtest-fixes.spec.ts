@@ -80,6 +80,17 @@ async function clickWorld(page: Page, ctx: Ctx, x: number, y: number, z: number)
   await page.mouse.up()
 }
 
+/** Move the pointer to a world point via two moves (defeats event
+ *  coalescing on a fresh position) plus a short settle — for hover-only
+ *  steps that don't need to wait on a specific inference chip (see
+ *  `hoverUntilCue` for that case). */
+async function moveTo(page: Page, ctx: Ctx, x: number, y: number, z: number): Promise<void> {
+  const p = px(ctx, x, y, z)
+  await page.mouse.move(p.x - 3, p.y - 3)
+  await page.mouse.move(p.x, p.y)
+  await page.waitForTimeout(80)
+}
+
 /** Hover `p` until the inference chip shows `label`. Each poll wiggles the
  * pointer one pixel and back so a fresh pointermove resolves against the
  * CURRENT camera — a single move can race the async `setCamera` apply. */
@@ -644,15 +655,263 @@ test('Tape Measure: a guide off the red axis works at meter scale, cm scale (typ
   const farCtx = await pinCamera(page, CAMERA)
   await clickWorld(page, farCtx, -1, 2, 0)
   await clickWorld(page, farCtx, -2, 3, 0)
-  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length === 3)
-  const g3 = await page.evaluate(() => {
+  // A from-point measurement between two empty points now drops BOTH a guide
+  // line through the two points and a guide point at the second click
+  // (SketchUp parity — see the tape-measure-rework WP-7 commit), so the guide
+  // count grows by 2, not 1: a 'line' guide followed by the 'point' guide.
+  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length === 4)
+  const [g3Line, g3Point] = await page.evaluate(() => {
     const h = window.__hew_test!
     const ids = h.getGuideIds()
-    const id = ids[ids.length - 1]
+    const lineId = ids[ids.length - 2]
+    const pointId = ids[ids.length - 1]
+    return [
+      { kind: h.getGuideKind(lineId), geom: h.getGuideGeometry(lineId) },
+      { kind: h.getGuideKind(pointId), geom: h.getGuideGeometry(pointId) },
+    ]
+  })
+  expect(g3Line.kind).toBe('line')
+  // A line's direction has no canonical sign, so check parallelism to
+  // (-1,1,0)/sqrt(2) — the normalized (-1,2,0) -> (-2,3,0) direction —
+  // via the absolute dot product, rather than assuming a component sign.
+  const [dx, dy, dz] = g3Line.geom!.slice(3, 6)
+  const dot = (dx * -Math.SQRT1_2 + dy * Math.SQRT1_2 + dz * 0) as number
+  expect(Math.abs(dot)).toBeCloseTo(1, 1)
+
+  expect(g3Point.kind).toBe('point')
+  // Raw ground clicks carry a pixel of slack (~1 cm at this camera).
+  expect(g3Point.geom![0]).toBeCloseTo(-2, 1)
+  expect(g3Point.geom![1]).toBeCloseTo(3, 1)
+})
+
+// ---------------------------------------------------------------------------
+// tape-measure-rework WP-8 — real-gesture coverage for the finished tool
+// ---------------------------------------------------------------------------
+
+test('Tape Measure: a parallel guide off a COMPONENT-INSTANCE edge lands with the right offset', async ({
+  page,
+}) => {
+  await setup(page)
+
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    // Off the origin — an edge starting AT (0,0,0) would coincide exactly
+    // with a world axis line, and the analytic axis snap (rightly) wins
+    // over the mesh edge snap there (see the world-axis guide test above).
+    const id = h.drawBox([1, 1, 0], [3, 2, 0], 1)
+    h.makeComponent([id])
+  })
+  // The box is now a definition-owned member — object_ids() (world objects
+  // only) no longer counts it, proving this really is a component instance,
+  // not a plain object.
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
+
+  // Low, close-in, off to one side: the front-bottom edge is reachable
+  // without the ray ever crossing the box's own top/front faces first.
+  const instCtx = await pinCamera(page, {
+    position: { x: 2, y: -4, z: 0.3 },
+    target: { x: 2, y: 1.5, z: 0.5 },
+    up: { x: 0, y: 0, z: 1 },
+    fovDeg: 45,
+    near: 0.1,
+    far: 1000,
+  })
+
+  await page.keyboard.press('t')
+  // A non-midpoint point along the instanced edge — its exact midpoint is
+  // its own higher-priority 'Midpoint' snap kind, not a plain on-edge hover.
+  await hoverUntilCue(page, px(instCtx, 1.6, 1, 0), 'On Edge')
+  await page.mouse.down()
+  await page.mouse.up()
+
+  // Pull the guide off the edge, into open ground clear of any axis line.
+  await clickWorld(page, instCtx, 2, -0.5, 0)
+
+  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length === 1)
+  const guide = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const id = h.getGuideIds()[0]
     return { kind: h.getGuideKind(id), geom: h.getGuideGeometry(id) }
   })
-  expect(g3.kind).toBe('point')
-  // Raw ground clicks carry a pixel of slack (~1 cm at this camera).
-  expect(g3.geom![0]).toBeCloseTo(-2, 1)
-  expect(g3.geom![1]).toBeCloseTo(3, 1)
+  expect(guide.kind).toBe('line')
+  // Parallel to the instanced edge (X) — exact, from the kernel's own
+  // edge_endpoints_in_instance geometry, independent of click noise.
+  expect(Math.abs(guide.geom![3])).toBeCloseTo(1, 6)
+  expect(Math.abs(guide.geom![4])).toBeLessThan(1e-6)
+  expect(Math.abs(guide.geom![5])).toBeLessThan(1e-6)
+  // The free 2-D offset keeps the pull point's Y/Z untouched (only the
+  // along-edge X component is discarded) — origin lands at (edge X, pull Y,
+  // pull Z).
+  expect(guide.geom![0]).toBeCloseTo(1.6, 1)
+  expect(guide.geom![1]).toBeCloseTo(-0.5, 1)
+  expect(Math.abs(guide.geom![2])).toBeLessThan(0.05)
+})
+
+test('Tape Measure: an arrow-key axis lock in a non-ground plane matches the locked axis exactly, rejecting a non-viable axis first', async ({
+  page,
+}) => {
+  await setup(page)
+
+  await page.evaluate(() => {
+    // Off the origin, same reasoning as the component-instance test above —
+    // an edge through (0,0,0) would coincide with a world axis line.
+    window.__hew_test!.drawBox([1, 1, 0], [3, 2, 0], 1)
+  })
+
+  // The box's near top corner (max X/Y — closest to this camera), aimed so
+  // its VERTICAL edge (runs along Z — not ground-plane-aligned) is directly
+  // visible and unoccluded by the box's own bulk.
+  const vCtx = await pinCamera(page, {
+    position: { x: 9, y: 7, z: 8 },
+    target: { x: 3, y: 2, z: 0.5 },
+    up: { x: 0, y: 0, z: 1 },
+    fovDeg: 45,
+    near: 0.1,
+    far: 1000,
+  })
+
+  await page.keyboard.press('t')
+  // A non-midpoint point along the edge (its exact midpoint, z=0.5, is its
+  // own higher-priority 'Midpoint' snap kind, not a plain on-edge hover).
+  await hoverUntilCue(page, px(vCtx, 3, 2, 0.3), 'On Edge')
+  await page.mouse.down()
+  await page.mouse.up()
+
+  // ArrowUp == the blue/Z axis, which runs ALONG this edge — must be
+  // rejected (hinted, not silently swallowed), and must NOT touch the lock.
+  await page.keyboard.press('ArrowUp')
+  await expect(page.getByText('runs along this edge', { exact: false })).toBeVisible()
+
+  // ArrowRight == the red/X axis — viable; locks the offset to it exactly.
+  // This pins the offset PLANE to normal-Y (through the edge) — move onto
+  // that plane (y matching the edge's own Y) so the resolved cursor lands
+  // exactly where aimed, rather than wherever an off-plane ray happens to
+  // cross it.
+  await page.keyboard.press('ArrowRight')
+  await expect(page.getByText('Offset locked to red', { exact: false })).toBeVisible()
+  await moveTo(page, vCtx, 6, 2, 0.5)
+
+  await page.mouse.down()
+  await page.mouse.up()
+
+  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length === 1)
+  const guide = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const id = h.getGuideIds()[0]
+    return { kind: h.getGuideKind(id), geom: h.getGuideGeometry(id) }
+  })
+  expect(guide.kind).toBe('line')
+  // The guide still runs along the source edge (Z).
+  expect(Math.abs(guide.geom![5])).toBeCloseTo(1, 6)
+  expect(Math.abs(guide.geom![3])).toBeLessThan(1e-6)
+  expect(Math.abs(guide.geom![4])).toBeLessThan(1e-6)
+  // Offset EXACTLY along the locked red/X axis: the cursor's X (~6) drives
+  // the offset, while Y/Z are pinned to the edge's OWN Y/Z (~2, ~0.3) —
+  // the cursor's OWN Z (0.5) is discarded, proving the lock (not the raw
+  // cursor position) determines the offset direction. A slightly wider
+  // tolerance here: the resolved point stacks TWO live picks (the edge
+  // pick's own Y/Z, then a free-space pick constrained back onto that same
+  // Y), so its slack compounds a bit past a single raw click's ~1 cm.
+  expect(guide.geom![0]).toBeCloseTo(6, 0)
+  expect(guide.geom![1]).toBeCloseTo(2, 0)
+  expect(guide.geom![2]).toBeCloseTo(0.3, 1)
+
+  // The tool is still usable afterward — pulling a second, ordinary parallel
+  // guide off the box's far edge still works. (Empty-ground clicks in this
+  // particular framing risk grazing the long, shallow-angle Y axis line —
+  // the same class of incidental hijack the world-axis guide test above
+  // this one has to dodge — so this stays anchored to real geometry.)
+  await hoverUntilCue(page, px(vCtx, 1.6, 2, 0), 'On Edge')
+  await page.mouse.down()
+  await page.mouse.up()
+  await clickWorld(page, vCtx, 1.6, 2.6, 0)
+  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length === 2)
+})
+
+test('Tape Measure: a free-space drag with a locked idle plane lands ON that plane, not the ground', async ({
+  page,
+}) => {
+  const ctx = await setup(page)
+
+  await page.keyboard.press('t')
+  // Idle plane lock: ArrowRight locks the future plane's normal to red/X.
+  await page.keyboard.press('ArrowRight')
+  await expect(page.getByText('Locked to the red plane', { exact: false })).toBeVisible()
+
+  // First click, in empty space — idle, so unconstrained: lands on the
+  // ground, and freezes the gesture plane (normal X) THROUGH that point.
+  // Reuses the same off-axis ground point the plain guide-point test above
+  // already proved safe with this exact camera.
+  await clickWorld(page, ctx, -2, 3, 0)
+
+  // Second point, also in empty space, but well off the ground (z=1). With
+  // no plane lock this would collapse to the ground (z=0); with the lock,
+  // it should land on the frozen x≈-2 plane instead, at the real z=1 height.
+  await clickWorld(page, ctx, -2, 4, 1)
+
+  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length === 2)
+  const guides = await page.evaluate(() => {
+    const h = window.__hew_test!
+    return h.getGuideIds().map((id) => ({ kind: h.getGuideKind(id), geom: h.getGuideGeometry(id) }))
+  })
+  const point = guides.find((g) => g.kind === 'point')
+  expect(point).toBeDefined()
+  // On the locked plane (x ≈ -2)...
+  expect(point!.geom![0]).toBeCloseTo(-2, 1)
+  // ...and NOT collapsed to the ground: the real z=1 height survived.
+  expect(point!.geom![2]).toBeGreaterThan(0.5)
+})
+
+test('Tape Measure: a plane-locked snap onto an off-plane point lands PROJECTED, with the projected chip shown', async ({
+  page,
+}) => {
+  await setup(page)
+
+  await page.evaluate(() => {
+    window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 2)
+  })
+
+  const jCtx = await pinCamera(page, {
+    position: { x: 6, y: 6, z: 6 },
+    target: { x: 1, y: 1, z: 1 },
+    up: { x: 0, y: 0, z: 1 },
+    fovDeg: 50,
+    near: 0.1,
+    far: 1000,
+  })
+
+  await page.keyboard.press('t')
+  // Idle plane lock: ArrowRight locks the future plane's normal to red/X.
+  await page.keyboard.press('ArrowRight')
+
+  // First click, off in empty space (well clear of the box) — freezes the
+  // gesture plane through it, normal X.
+  await clickWorld(page, jCtx, 5, -1, 0)
+
+  // Hover the box's far top corner (2,2,2) — real geometry, but NOT on the
+  // frozen x≈5 plane. The plane constraint's offPlanePoints keeps it
+  // reachable instead of filtering it out; the endpoint tooltip should show
+  // both the raw kind AND the projected qualifier.
+  await hoverUntilCue(page, px(jCtx, 2, 2, 2), 'Endpoint')
+  await expect(page.getByText('projected', { exact: true })).toBeVisible()
+
+  // Commit a typed-exact distance equal to the (p0 -> PROJECTED corner)
+  // distance — if the measurement were using the raw off-plane corner
+  // instead, this would land somewhere else entirely (a ~3 m difference in
+  // X alone, far outside any click-noise tolerance).
+  await page.keyboard.type('3.605551')
+  await page.keyboard.press('Enter')
+
+  await page.waitForFunction(() => window.__hew_test!.getGuideIds().length >= 1)
+  const guides = await page.evaluate(() => {
+    const h = window.__hew_test!
+    return h.getGuideIds().map((id) => ({ kind: h.getGuideKind(id), geom: h.getGuideGeometry(id) }))
+  })
+  const point = guides.find((g) => g.kind === 'point')
+  expect(point).toBeDefined()
+  // Lands at the PROJECTED point (5, 2, 2) — on the locked plane (x≈5) and
+  // at the corner's own y/z — never at the raw off-plane corner (2, 2, 2).
+  expect(point!.geom![0]).toBeCloseTo(5, 1)
+  expect(point!.geom![1]).toBeCloseTo(2, 1)
+  expect(point!.geom![2]).toBeCloseTo(2, 1)
 })

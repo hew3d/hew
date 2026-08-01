@@ -28,6 +28,8 @@ import { facePlaneBasis, crossV3, normalizeV3, clamp, pushArrowChevron, type V3 
 import type { SectionPlane } from './sectionManager'
 import { getResolvedTheme } from '../settings/theme'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
+import { GUIDE_COLOR } from './guideColors'
+import { axisDashGapWorldFromWorldPerPixel } from './math'
 import { formatLength } from '../settings/units'
 import {
   computeLineLabelLayout,
@@ -114,8 +116,6 @@ const CONTEXT_DIM_OPACITY: Record<'light' | 'dark', number> = {
   light: 0.65,
   dark: 0.55,
 }
-/** Muted grey for construction guides — distinct from edges/axes/sketch lines. */
-const GUIDE_COLOR = 0x555555
 /** Half-length of a rendered line guide (meters) — long enough to read as "infinite" at person scale. */
 const GUIDE_LINE_HALF_LENGTH = 50
 /** Half-size of a point guide's cross marker (meters). */
@@ -208,12 +208,25 @@ const ANNOTATION_LINE_DETACHED_RENDER_ORDER = 0
 const ANNOTATION_HIGHLIGHT_RENDER_ORDER = 1
 const ANNOTATION_TEXT_RENDER_ORDER = 2
 /**
- * Guide-line dash/gap size as a fraction of the camera-to-target distance.
- * For a perspective camera the on-screen size of a world length L is ∝ L /
- * distance, so scaling the dash with distance holds the dash pattern roughly
- * constant in pixels regardless of zoom (screen-constant, like the cursor).
+ * Guide-line dash/gap target sizes, in screen pixels — the same
+ * screen-constant-pixel convention `AXIS_DASH_SCREEN_PX`/`AXIS_GAP_SCREEN_PX`
+ * (Viewport.tsx) use for the origin axes' negative halves, via the same
+ * `axisDashGapWorldFromWorldPerPixel` conversion (see `updateGuideDashScale`).
+ *
+ * This replaces a former flat `cameraDistance * 0.01` heuristic: that formula
+ * scaled with raw camera-to-ORBIT-TARGET distance rather than the guide's own
+ * on-screen extent or a fixed pixel size, and gave dash == gap (a 1:1 ratio),
+ * which read as much longer and more prominent than the axes' tight, dash-
+ * longer-than-gap dashing — the maintainer's "much too long" playtest note.
+ * `GUIDE_GAP_SCREEN_PX` is deliberately shorter than `AXIS_GAP_SCREEN_PX` (5px
+ * vs 7px) so guides read a touch bolder/denser than the axes at the same
+ * dash length, without touching `linewidth` (see the doc comment below).
  */
-const GUIDE_DASH_SCREEN_K = 0.01
+const GUIDE_DASH_SCREEN_PX = 9
+const GUIDE_GAP_SCREEN_PX = 5
+/** Floors both dash and gap so neither collapses toward zero world size when
+ * the camera sits right on top of the guide (mirrors `AXIS_DASH_MIN_WORLD`). */
+const GUIDE_DASH_MIN_WORLD = 1e-5
 
 /**
  * Touched-entity hints for a targeted (incremental) refresh — see
@@ -2539,25 +2552,39 @@ export class SceneRenderer {
   }
 
   /**
-   * Keep the dashed guide lines at a constant on-screen dash size regardless
-   * of zoom (mirrors CueLayer's screen-constant cursor). `cameraDistance` is
-   * the orbit camera-to-target distance. Call once per frame from the render
-   * loop; cheap and a no-op when there are no line guides.
+   * Keep the dashed guide lines at a constant on-screen dash/gap size
+   * regardless of zoom (mirrors CueLayer's screen-constant cursor and the
+   * origin axes' own dashed negative halves — Viewport.tsx's
+   * `clampOriginAxes`). `worldPerPixel` is the active projection's current
+   * world-per-pixel value (`CameraRig.worldPerPixel`), already dispatching
+   * perspective vs. parallel projection on the caller's side — this method
+   * stays projection-agnostic. Call once per frame from the render loop;
+   * cheap and a no-op when there are no line guides.
    */
-  updateGuideDashScale(cameraDistance: number): void {
+  updateGuideDashScale(worldPerPixel: number): void {
     if (this.guideLines === null) return
-    const size = Math.max(cameraDistance, 0.001) * GUIDE_DASH_SCREEN_K
+    const { dashSize, gapSize } = axisDashGapWorldFromWorldPerPixel(
+      GUIDE_DASH_SCREEN_PX,
+      GUIDE_GAP_SCREEN_PX,
+      worldPerPixel,
+      GUIDE_DASH_MIN_WORLD,
+    )
     // Skip sub-1% changes (static camera) so we don't churn the material every
     // frame; on a real change, bump needsUpdate so three.js re-uploads the dash
     // uniforms (a property change alone isn't reliably picked up; the program
-    // cache key is unchanged so this does NOT recompile the shader).
-    if (this.lastGuideDashSize > 0 && Math.abs(size - this.lastGuideDashSize) < this.lastGuideDashSize * 0.01) {
+    // cache key is unchanged so this does NOT recompile the shader). Both
+    // sizes derive from the same `worldPerPixel`, so checking `dashSize` alone
+    // is enough to catch a real change in either.
+    if (
+      this.lastGuideDashSize > 0 &&
+      Math.abs(dashSize - this.lastGuideDashSize) < this.lastGuideDashSize * 0.01
+    ) {
       return
     }
-    this.lastGuideDashSize = size
+    this.lastGuideDashSize = dashSize
     const mat = this.guideLines.material as THREE.LineDashedMaterial
-    mat.dashSize = size
-    mat.gapSize = size
+    mat.dashSize = dashSize
+    mat.gapSize = gapSize
     mat.needsUpdate = true
   }
 

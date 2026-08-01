@@ -83,12 +83,18 @@ export interface Snap {
  * - `constraintPlane`: restrict candidates to a plane (e.g. RectangleTool
  *   in face mode, to avoid snapping to occluded off-plane geometry).
  * - `offPlanePoints`: keep precise POINT candidates (endpoint, midpoint,
- *   center, quadrant, intersection) that lie OFF `constraintPlane`. Only a
- *   tool that can HONOUR an off-plane point may set it — today that is
- *   LineTool's plane-mode chain, whose commit re-homes onto a new sketch
- *   plane through the anchor and the snapped point. A tool that commits
- *   into one frozen plane must leave it unset: it would have to project
- *   the reported point back onto the plane, i.e. lie about the snap.
+ *   center, quadrant, intersection) that lie OFF `constraintPlane`. A tool
+ *   sets this only if it can HONOUR an off-plane point one of three ways:
+ *   re-homing onto a new plane through it (LineTool's plane-mode chain),
+ *   projecting the reported point back onto the frozen plane WHILE
+ *   disclosing that it did so via `Tool.snapProjected` (TapeMeasureTool's
+ *   `measure` stage), or — a third pattern, TapeMeasureTool's `parallel`
+ *   stage — consuming only the candidate's projection along an in-plane
+ *   offset direction rather than the plane itself, with the SAME
+ *   `Tool.snapProjected` disclosure obligation whenever that discards a
+ *   nonzero off-plane component. In every disclosing case, the disclosure is
+ *   what keeps the projection from being a silent lie about the snap. A tool
+ *   that does none of the three must leave `offPlanePoints` unset.
  */
 export interface SnapConstraint {
   anchor?: [number, number, number]
@@ -339,8 +345,8 @@ export interface Tool {
  * that method's doc — so it opts out with a precise `hasArmedGesture` of its
  * own). Every other armed tool's `capturingInput()` already means exactly
  * "gesture in flight", so that is the fallback. Tools with neither (e.g.
- * Select, TapeMeasure) are never "armed" by this definition; their Escape
- * has no gesture to protect.
+ * Select) are never "armed" by this definition; their Escape has no gesture
+ * to protect.
  *
  * The Viewport consults this BEFORE popping a level off the edit-context
  * path on Escape (component-edit-parity.md phase A2): without it, Escape
